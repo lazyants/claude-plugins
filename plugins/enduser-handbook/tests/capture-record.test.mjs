@@ -4173,6 +4173,76 @@ test('openCaptureRun: an output root that EXISTS but cannot be identified is ref
   });
 });
 
+// [round 34, review bot P1 follow-up] The same tolerance one layer down, and the fifteenth round
+// running where the defect was inside the fix that closed the round before. The first version of
+// that guard asked only the SECOND observation whether the root was directly absent. A MIXED pair
+// slips through it: the configured-name read fails as `inspection_failure`, the canonical read then
+// reports plain ENOENT, both halves are `ok: false` so the disagreement arm stays quiet, and the
+// pair is read as an ordinary first capture. Measured before the fix, through the real exported
+// `openCaptureRun` with only storage interposed: `ok: true`, and a tree that came into existence
+// after validation hashed into the opening baseline with no hazard.
+//
+// The two halves must read DIFFERENT strings for the pair to be mixable at all, which is what the
+// symlinked ancestor is for: the configured name goes through `link`, the canonical form through
+// its resolved target, and neither directory exists.
+test('openCaptureRun: a MIXED pair of failed root observations is refused, not read as a first capture', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    const treeA = join(real, 'treeA');
+    const link = join(real, 'link');
+    nodeFs.mkdirSync(treeA, { recursive: true });
+    nodeFs.symlinkSync(treeA, link);
+
+    const rawOutputDir = join(link, 'assets');
+    const canonicalRoot = join(treeA, 'assets');
+    assert.notEqual(rawOutputDir, canonicalRoot, 'the two halves must read different strings, or no pair can be mixed');
+    assert.equal(nodeFs.existsSync(canonicalRoot), false, 'the canonical half must report plain absence');
+
+    const profile = {
+      capture: { output_dir: rawOutputDir, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+    nodeFs.mkdirSync(profile.publish.chapters_dir, { recursive: true });
+
+    let unreadable = 0;
+    let planted = false;
+    const deps = depsWithOverride({
+      // The configured name cannot be inspected at all — a permission on the path, an unreachable
+      // mount. Nothing about the object, and in particular not that there is no object.
+      lstatSync: (p, ...rest) => {
+        if (String(p) !== rawOutputDir) return nodeFs.lstatSync(p, ...rest);
+        unreadable += 1;
+        const err = new Error('EACCES'); err.code = 'EACCES'; throw err;
+      },
+      // What the unfixed module went on to do, kept here as the consequence rather than as the
+      // subject: the root comes into existence populated, with the configured name repointed into
+      // it so containment still passes against the canonical segments recorded at validation.
+      openSync: (p, ...rest) => {
+        if (!planted && String(p).endsWith('/pending.json')) {
+          const inner = join(canonicalRoot, 'inner');
+          nodeFs.mkdirSync(join(inner, 'assets', 'items'), { recursive: true });
+          nodeFs.writeFileSync(join(inner, 'assets', 'items', 'foreign.png'), 'bytes from a tree this handbook does not own');
+          nodeFs.unlinkSync(link);
+          nodeFs.symlinkSync(inner, link);
+          planted = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
+    assert.ok(unreadable > 0, 'the configured name was never read — this fixture cannot reach the condition');
+    assert.equal(opened.ok, false, `a root one half could not inspect must not be tolerated as absent: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+    // The reason belongs to the half that could NOT simply report absence. The tolerated half's word
+    // (`vanished`) would name the one observation that was not the problem.
+    assert.match(opened.halts[0].message, /cannot resolve capture\.output_dir: inspection_failure/,
+      `the halt must carry the unreadable half's reason: ${JSON.stringify(opened.halts)}`);
+    assert.equal(planted, false, 'the refusal must land before the reservation — a run that reserved has already spent something');
+  });
+});
+
 // [round 27] The ancestor climb walks a PATH, so it inherits the release's other recurring defect:
 // the shipped example profile's `output_dir` is RELATIVE (`vault/handbook/assets`), and a climb that
 // prefixes `/` onto relative segments probes an entirely different tree — one where every candidate

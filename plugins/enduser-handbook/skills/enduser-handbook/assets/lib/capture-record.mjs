@@ -1967,6 +1967,16 @@ function containmentRootFor(profileLike, deps) {
   // together there (the tail that does not resolve is the same tail in both), so the bracket stands
   // down rather than reading two absences as a disagreement.
   //
+  // [round 34, review bot P1 follow-up] BOTH halves have to say it, and the first version of this
+  // guard asked only the second — which is this release's own defect class arriving inside the fix
+  // that closed it, one layer down, for the fifteenth round running. When the configured-name read
+  // fails as `inspection_failure` and the canonical read then reports plain ENOENT, both halves are
+  // `ok: false`, so the disagreement arm above stays quiet and a tolerance keyed on the second read
+  // alone reads the pair as an ordinary first capture. Measured through the real exported
+  // `openCaptureRun` before it was fixed: `ok: true`, with a tree that came into existence after
+  // validation hashed into the opening baseline and no hazard recorded. "The root is not there" is
+  // a claim about the root, and one observation that could not see it is enough to unmake it.
+  //
   // [round 34, review bot P1] And ONLY there. `identity.ok ? identity.id : null` collapsed two
   // different failures into that same null: a root that is not there, and a root that is there and
   // could not be identified. The second one disables every later bracket — `outputRootChanged`
@@ -1981,7 +1991,11 @@ function containmentRootFor(profileLike, deps) {
   if (beforeResolution.ok !== identity.ok || (identity.ok && beforeResolution.id !== identity.id)) {
     return { ok: false, reason: 'configured_and_resolved_disagree' };
   }
-  if (!identity.ok && identity.absentDirectly !== true) return { ok: false, reason: identity.reason };
+  if (!identity.ok && !(identity.absentDirectly === true && beforeResolution.absentDirectly === true)) {
+    // The reason of whichever half could not simply report absence — that is the one an operator
+    // has to act on, and on a mixed pair it is never the tolerated half's word.
+    return { ok: false, reason: identity.absentDirectly === true ? beforeResolution.reason : identity.reason };
+  }
   return {
     ok: true,
     root: {
