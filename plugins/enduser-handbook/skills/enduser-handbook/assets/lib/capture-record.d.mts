@@ -1,6 +1,11 @@
 // enduser-handbook capture asset — non-normative reference implementation of the build-provenance
-// disk layer. The normative contract lives in SKILL.md (W1/W2/W5/W6) and row6-generated.md (row
-// 6's state table, signature rows, ledger row and test matrix, generated from ROW6-TRANSITIONS).
+// disk layer. The normative contract lives in SKILL.md (W1/W2/W5/W6), whose W2 section carries row
+// 6's nine-state recovery table and the repair each state names. [round 11] This header used to
+// cite a generated row-6 companion document and the transition source it came from; neither has
+// ever existed in
+// this repository, on any branch — they were planning artifacts that stayed outside it, so the
+// citation sent a downstream reader after a document they could not open. Cite only documents that
+// ship; SKILL.md is the authority that does.
 //
 // capture-record.d.mts — TypeScript declarations for capture-record.mjs so a downstream
 // typechecking project resolves the .ts -> .mjs import. This repo does not compile TypeScript.
@@ -42,7 +47,14 @@ export interface ChapterEntryLike {
 export interface ProfileLike {
   capture: {
     output_dir: string;
-    build_identity?: { command?: string; ui_read?: boolean } | null;
+    // [round 11] NOT `| null`. `assets/profile.schema.json` types this member `"object"` with no null
+    // union, so a profile carrying `build_identity: null` is rejected at step 0 with `expected type
+    // "object"` — measured — while this declaration used to accept it, letting a TypeScript caller
+    // build a ProfileLike production refuses. Absence is the way to say "no provenance", and the
+    // runtime's own `!= null` test treats absence exactly as this contract intends. Same shape as the
+    // `publish.target` correction above: the schema is what makes the rule real, and a declaration
+    // wider than the schema describes a profile that does not exist.
+    build_identity?: { command?: string; ui_read?: boolean };
   };
   publish: {
     chapters_dir: string;

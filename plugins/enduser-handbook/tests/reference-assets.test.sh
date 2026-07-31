@@ -3491,6 +3491,32 @@ if [ "$count_identity_halt_docs" -eq 3 ]; then
 else
   bad "capture-record.d.mts: expected 3 identity_resolution_threw doc sites, found $count_identity_halt_docs"
 fi
+
+# [round 11] A declaration header named a normative companion document that has never existed in this
+# repository on any branch — it was a planning artifact that stayed outside it, so a downstream reader
+# was sent after a file they could not open. Neither codex nor the cross-file reviewer catches that
+# class: both read what IS here. So every path-shaped `.md` a declaration cites must resolve, checked
+# against the skill root the way a reader would resolve it.
+missing_declaration_citations=0
+checked_declaration_citations=0
+for dmts in "$ASSETS"/lib/*.d.mts; do
+  while IFS= read -r cited; do
+    case "$cited" in
+      */*) : ;;                       # a path-shaped citation, resolvable from the skill root
+      SKILL.md) : ;;                  # the one bare filename that is a real sibling
+      *) continue ;;                  # a bare name in prose (a fixture, an example) — not a citation
+    esac
+    checked_declaration_citations=$((checked_declaration_citations + 1))
+    [ -f "$SKILL_DIR/$cited" ] || { missing_declaration_citations=$((missing_declaration_citations + 1)); bad "assets/lib/$(basename "$dmts") cites '$cited', which does not exist"; }
+  done <<EOF
+$(grep -ohE '[A-Za-z0-9_./-]+\.md' "$dmts" | sort -u)
+EOF
+done
+if [ "$missing_declaration_citations" -eq 0 ] && [ "$checked_declaration_citations" -gt 0 ]; then
+  ok "assets/lib/*.d.mts: every document a declaration cites exists ($checked_declaration_citations citations)"
+elif [ "$checked_declaration_citations" -eq 0 ]; then
+  bad "assets/lib/*.d.mts: citation check matched nothing — the extraction is broken, not the citations"
+fi
 has_in_section "SKILL: repairs are idempotent on an already-repaired tree" \
   "$SKILL" '### W2 — Capture screenshots' \
   'calling one again on an already-repaired tree is a no-op'
