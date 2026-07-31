@@ -702,6 +702,24 @@ function unreadableWord(inspection) {
   return inspection.reason ?? inspection.kind;
 }
 
+// [round 21] The same word, for a path that came out of a LISTING of the asset directory. There
+// `absent` cannot mean "never published": the directory read named this file, so a failure to open
+// it is a file that was there a moment ago and is gone now — `vanished`, a hazard, which is what
+// SKILL.md's W5 rules already promise an operator for exactly this observation.
+//
+// Round 20 moved this mapping OUT of `unreadableWord` and into the opening snapshot's callback, on
+// the reasoning that the other three callers read a path with no listing behind it. Half of that
+// was wrong, and codex round 21 measured it: W5's rehash and W6's current-hash resolve their paths
+// through `expectedAssets`, whose candidate set is built from `listRegularFilesRecursive` over that
+// same directory — they are listing-backed too, and were reporting `rehash_failed:<key>:absent` and
+// `unhashable:<key>:absent` for a file the run had just listed. Only `readFileText` reads a path
+// derived with no listing behind it, and it keeps the context-free word. So the split stands and
+// the boundary moved: the context belongs in a function NAMED for its context, not in the
+// context-free one, and not inlined at one of the three sites that share it.
+function unreadableWordAfterListing(inspection) {
+  return inspection.kind === 'absent' ? 'vanished' : unreadableWord(inspection);
+}
+
 /**
  * Every word an asset-tree hazard can be reported under. The walk contributes `symlink`,
  * `non_regular` and `vanished` (a listed entry that was gone before it could be inspected); the
@@ -1111,6 +1129,14 @@ function validateEntriesForCapture(profileLike, entries, deps) {
     readlink: (p) => deps.readlinkSync(p),
   };
   const resolvedEntries = [];
+  // [round 21] Which asset directories this gate OBSERVED to exist. Reported to the caller rather
+  // than discarded, because it is the only thing that distinguishes a root that is legitimately
+  // absent (a first capture) from one that stopped existing while this run was looking at it — a
+  // distinction the snapshot walk cannot draw for itself, and one that decides whether an empty
+  // opening map is a baseline or a fiction. Keyed by chapter key, never by path: this gate derives
+  // the directory through the CANONICAL output root and `openCaptureRun` derives it through the
+  // profile as given, so the two path strings can differ while naming one directory.
+  const assetDirsObserved = new Set();
   for (const entry of entries) {
     const assetDir = chapterAssetDir(canonicalProfileForAssetDir, entry);
     // `resolvePhysicalContainment` treats ANY lstat failure while walking `dir`'s components as
@@ -1132,6 +1158,7 @@ function validateEntriesForCapture(profileLike, entries, deps) {
         return haltResult('provenance_hazard', `cannot inspect asset directory '${assetDir}': ${typeof code === 'string' ? code : describeThrown(err)}`, { assetDir });
       }
     }
+    if (assetDirExists) assetDirsObserved.add(chapterKeyFor(entry));
 
     // A missing LEAF is fine — but skipping gate 3 ENTIRELY throws away the containment check over
     // the whole path, not just the missing tail: a symlinked ANCESTOR (`/safe/assets/admin` ->
@@ -1202,7 +1229,7 @@ function validateEntriesForCapture(profileLike, entries, deps) {
     );
   }
 
-  return { ok: true };
+  return { ok: true, assetDirsObserved };
 }
 
 // Shared by all three identity-resolution call sites below (openCaptureRun's opening step,
@@ -1455,18 +1482,26 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
   // re-throws anything else, and an earlier version of this function had NOTHING catching that,
   // so an unexpected errno (EACCES, EIO, ...) crashed the whole call with an uncaught exception
   // instead of returning a halt (codex, important #6).
+  //
+  // [round 21] `rootMustExist` carries gate 3's own observation forward: for an entry whose asset
+  // directory this call has ALREADY lstat'd, a root that cannot be listed now is not a first
+  // capture, and the walk must not report the empty map that reads as one. The halt names the
+  // chapter, because "the opening snapshot failed" over an arbitrary entry set is not something an
+  // operator can act on.
   const openingAssets = {};
   const openingHazards = {};
+  let snapshotting = null;
   try {
     for (const entry of entries) {
+      snapshotting = chapterKeyFor(entry);
       const assetDir = chapterAssetDir(profileLike, entry);
-      const snapshot = snapshotAssetHashes(assetDir, d);
-      openingAssets[chapterKeyFor(entry)] = snapshot.hashes;
-      openingHazards[chapterKeyFor(entry)] = snapshot.hazards;
+      const snapshot = snapshotAssetHashes(assetDir, d, { rootMustExist: validated.assetDirsObserved.has(snapshotting) });
+      openingAssets[snapshotting] = snapshot.hashes;
+      openingHazards[snapshotting] = snapshot.hazards;
     }
   } catch (err) {
     const releaseWarning = releaseReservation();
-    return haltResult('provenance_hazard', `cannot snapshot the opening asset hashes: ${describeThrownField(err, 'code')}`, { warnings: releaseWarning ? [releaseWarning] : [] });
+    return haltResult('provenance_hazard', `cannot snapshot the opening asset hashes for '${snapshotting}': ${describeThrownField(err, 'code')}`, { warnings: releaseWarning ? [releaseWarning] : [] });
   }
 
   let runState;
@@ -1617,10 +1652,57 @@ function direntType(dirent, absPath, deps) {
   return 'non_regular';
 }
 
-function walkRegularFiles(rootDir, deps, visit, onSkipped) {
+// [round 21] O_NOFOLLOW refuses a symlink at the FINAL path component only — an ancestor directory
+// that is itself a symlink is followed transparently by the kernel regardless of the flag, which is
+// exactly why this module walks and lstat-checks every component of its OWN two namespaces before
+// opening any leaf beneath them (`inspectHierarchyChain` states the rule verbatim). The asset tree
+// is not ours, but it is READ the same way, and the same hole was open here: a dirent from a parent
+// listing says `directory`, the child is replaced by a symlink before its own listing, and the
+// path-based `readdirSync` descends into the replacement — every file under it hashed as this
+// chapter's asset, out of a tree the chapter does not own, with no hazard recorded. At the OPENING
+// point that is the release's recurring consequence: restore the real directory before the close
+// and rule 4 sees opening ≠ closing, rule 5's rehash agrees with closing, and the record is
+// confident and wrong.
+//
+// Checked at BOTH ends of the listing, not once. A check before it — what the ownership walk does —
+// establishes only that the substitution had not landed YET; the check after it is what makes a
+// substitution that is left IN PLACE across the listing observable at all. Neither can see a swap
+// installed and reverted between two checks: path-based directory reads have no fd-relative form in
+// this runtime, so an entirely transient substitution is not detectable from here. What the pair
+// buys is that a substitution which PERSISTS — the only kind that can still be feeding foreign bytes
+// to the leaf opens that follow — can no longer produce a silent, hazard-free snapshot.
+//
+// The ROOT is exempt, for the same reason it is exempt from the ENOENT rule below: gate 3 resolves
+// the asset directory through `resolvePhysicalContainment`, which deliberately PERMITS a symlinked
+// root that stays inside `capture.output_dir`, so refusing one here would refuse a topology this
+// feature documents as supported. Children are already never legitimately symlinks — `direntType`
+// reports one as a hazard instead of descending — so this adds no new class of refusal, only a
+// second observation point for a refusal that was already the rule.
+function assetDirHazardReason(absPath, deps) {
+  const inspected = inspectDirComponent(absPath, deps);
+  if (inspected.kind === 'directory') return null;
+  if (inspected.kind === 'absent') return 'vanished';
+  // `non_directory` is gate 6's word for the namespaces this module owns and is not in the asset
+  // hazard vocabulary; the walk already spells this same observation `inspection_failure` on its
+  // own ENOTDIR branch, and two words for one fact is a distinction an operator would have to look
+  // up to learn is not one.
+  return inspected.reason === 'symlink' ? 'symlink' : 'inspection_failure';
+}
+
+// `rootMustExist` is the caller's knowledge, not the walk's: whether this module has ALREADY
+// observed the root directory. It cannot be derived here — the walk sees only that a listing
+// failed — and it inverts what the failure means (see the ENOENT branch below).
+function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = false } = {}) {
   walk(rootDir, '');
 
   function walk(absDir, relPrefix) {
+    if (relPrefix !== '') {
+      const before = assetDirHazardReason(absDir, deps);
+      if (before !== null) {
+        onSkipped?.(relPrefix, before);
+        return;
+      }
+    }
     let entries;
     try {
       entries = deps.readdirSync(absDir, { withFileTypes: true });
@@ -1633,8 +1715,17 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped) {
       // absent keys are read as "brand-new this run". At the ROOT it is the opposite: an asset
       // directory legitimately does not exist before the first capture, and it is nameable by no
       // relative path, so that case stays silent — which is what ENOENT is here for.
+      // [round 21] The root exemption is right for a first capture and wrong the moment this module
+      // has already SEEN the directory: gate 3 lstats every entry's asset directory before the
+      // reservation is taken, so a root missing a few steps later did not fail to exist — it
+      // stopped existing, while this run was the thing observing it. Read as a first capture, the
+      // opening map is `{}` with no hazards at all, and a stale file restored before the close is
+      // recorded as this build's, because rule 4 skips an asset that has no opening key. Throwing
+      // hands it to the caller's own snapshot catch, which halts the open — strictly more
+      // conservative than a hazard, and the root is nameable by no relative path a hazard could use.
       if (code === 'ENOENT') {
         if (relPrefix !== '') onSkipped?.(relPrefix, 'vanished');
+        else if (rootMustExist) throw err;
         return;
       }
       // [round 18] ENOTDIR used to return here too, silently, and that was the round-17 defect
@@ -1653,6 +1744,7 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped) {
       // per-directory hazard, so it is left as it was.
       if (code === 'ENOTDIR') {
         if (relPrefix !== '') onSkipped?.(relPrefix, 'inspection_failure');
+        else if (rootMustExist) throw err;
         return;
       }
       throw err;
@@ -1672,6 +1764,15 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped) {
       // before anyone could read it. Two spellings of one condition is a distinction an operator
       // would have to look up to learn is not a distinction.
       onSkipped?.(childRel, type);
+    }
+    // The closing half of the bracket (see this function's own comment). Anything already visited
+    // out of this listing stays in the caller's map — deleting it would only turn a substitution
+    // back into an ABSENCE, which is the exact reading this whole class of defect travels on. The
+    // hazard is recorded against the DIRECTORY instead, and W5's containment match (round 17)
+    // refuses every key beneath it, stale hash or not.
+    if (relPrefix !== '') {
+      const after = assetDirHazardReason(absDir, deps);
+      if (after !== null) onSkipped?.(relPrefix, after);
     }
   }
 }
@@ -1702,7 +1803,7 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped) {
 // closing, and attributes the old bytes to the current build. So a hazard is no longer encoded as
 // an absence: it is returned separately, and W5 refuses any asset that was hazardous at either
 // point, because "we could not read this file then" is not evidence that it changed.
-function snapshotAssetHashes(assetDir, deps) {
+function snapshotAssetHashes(assetDir, deps, { rootMustExist = false } = {}) {
   const hashes = Object.create(null);
   const hazards = [];
   walkRegularFiles(
@@ -1720,17 +1821,14 @@ function snapshotAssetHashes(assetDir, deps) {
       // over stale bytes this split was created to prevent, reached through a race instead of
       // through a hazard. A genuinely new file is never listed at open, so it never arrives here
       // and its key is simply missing from the map; that case is untouched.
-      // [round 20] `vanished` is decided HERE, not inside `unreadableWord`. It is true only
-      // because this callback runs solely for entries the walk LISTED; the other three callers read
-      // a path derived from a manifest or an extraction with no listing behind it, and there an
-      // `absent` means the file was never published — reporting a mid-run disappearance would be a
-      // confident, wrong diagnosis. Context-specific meaning does not belong in a context-free
-      // helper, which is what putting it there had made of it.
-      else hazards.push(`${relPath}:${hashed.kind === 'absent' ? 'vanished' : unreadableWord(hashed)}`);
+      // [round 21] Shared with the other two listing-backed sites rather than spelled out here —
+      // see `unreadableWordAfterListing`, which round 20 got half right and this round finished.
+      else hazards.push(`${relPath}:${unreadableWordAfterListing(hashed)}`);
     },
     // A listed entry the walk would not even open is a hazard for the same reason: something is at
     // that path whose bytes this run could not establish.
     (relPath, kind) => hazards.push(`${relPath}:${kind}`),
+    { rootMustExist },
   );
   hazards.sort();
   return { hashes, hazards };
@@ -2379,7 +2477,7 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
       // [round 15] Names the asset, not just the kind. Every hazard used to reduce to
       // `rehash_failed:hazard`, so an operator holding an ineligible chapter with several embeds
       // learned neither which file nor why.
-      return { recorded: false, reason: `rehash_failed:${asset.key}:${unreadableWord(rehash)}` };
+      return { recorded: false, reason: `rehash_failed:${asset.key}:${unreadableWordAfterListing(rehash)}` };
     }
     assetHashes[asset.key] = rehash.digest;
     if (rehash.digest === chapterRunData.closing[asset.key]) continue;
@@ -2718,7 +2816,7 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
         for (const asset of extraction.assets) {
           const hashed = hashFileNoFollow(asset.absPath, d);
           if (hashed.kind === 'present') currentHashes[asset.key] = hashed.digest;
-          else unhashable.push(`${asset.key}:${unreadableWord(hashed)}`);
+          else unhashable.push(`${asset.key}:${unreadableWordAfterListing(hashed)}`);
         }
         if (unhashable.length > 0) {
           recordState = 'stale';

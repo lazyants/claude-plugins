@@ -159,6 +159,11 @@ export interface RunRecord {
   // path, and the assets it hides are keyed beneath it. Anything reading these lists must match by
   // containment (`key === path || key.startsWith(path + '/')`), never by equality — W5 matched by
   // equality for a round, and a symlinked `screens/` therefore never refused `screens/a.png`.
+  // [round 21] A directory is named for one further reason: it is checked immediately before AND
+  // immediately after its own listing, so a subdirectory REPLACED by a symlink mid-walk is refused
+  // as `<dir>:symlink` even though the parent's dirent had truthfully reported a directory. On that
+  // path the map may still hold hashes keyed beneath the refused directory — read through the
+  // containment rule above, they are refused; read by equality, they are silently trusted.
   // [round 17] Each member is VALIDATED, not merely typed: a member with no colon, an empty path, a
   // `.`/`..`/empty segment, or a reason outside the five words above makes the whole record
   // `bad_chapter_hazards:<field>`. That is deliberately fail-closed — an unreadable member was

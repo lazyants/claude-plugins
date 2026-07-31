@@ -1864,6 +1864,196 @@ test('walk: the ROOT asset directory not existing yet is still an ordinary first
   });
 });
 
+// [round 21] The TOCTOU test far above swaps a LEAF, and `hashFileNoFollow`'s O_NOFOLLOW open
+// catches it. This is the ANCESTOR shape, which that flag cannot reach: O_NOFOLLOW refuses a
+// symlink at the FINAL path component only, so a DIRECTORY replaced by a symlink between its
+// parent's listing and its own is followed by the kernel transparently, and every file under the
+// replacement is hashed as this chapter's asset. This module states that exact rule for the two
+// namespaces it OWNS (`inspectHierarchyChain`, "an ancestor directory that is itself a symlink is
+// followed transparently by the kernel regardless of that flag"); the asset tree it merely READS
+// had no equivalent. At the opening observation point the consequence is the release's recurring
+// one: if the real directory is restored before the close, closing hashes the stale bytes, rule 4
+// sees opening ≠ closing, rule 5's rehash agrees with closing, and the record is confident and
+// wrong.
+test('walk: a subdirectory swapped for a symlink after its parent listing is not descended through', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(join(assetDir, 'screens'), { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'screens', 'a.png'), 'the real asset');
+    const outside = join(dir, 'outside');
+    const foreign = 'bytes from a tree this chapter does not own';
+    nodeFs.mkdirSync(outside, { recursive: true });
+    nodeFs.writeFileSync(join(outside, 'a.png'), foreign);
+
+    // The swap lands DURING the parent's own listing, so the dirent handed back still says
+    // `screens` is a directory — which is what the parent readdir truthfully observed a moment
+    // earlier. Nothing here lies; the dirent is simply stale by the time it is acted on.
+    let swapped = false;
+    const deps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        const listed = nodeFs.readdirSync(p, opts);
+        if (p === assetDir && opts?.withFileTypes && !swapped) {
+          nodeFs.renameSync(join(assetDir, 'screens'), join(dir, 'screens-moved-away'));
+          nodeFs.symlinkSync(outside, join(assetDir, 'screens'));
+          swapped = true;
+        }
+        return listed;
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    // The fixture must be in the state this test is named for before anything is concluded from
+    // its behaviour — five tests in this release passed while unable to reach their own condition.
+    assert.equal(swapped, true, 'the parent listing never ran — this fixture cannot reach the condition');
+    assert.equal(
+      nodeFs.lstatSync(join(assetDir, 'screens')).isSymbolicLink(),
+      true,
+      'the subdirectory was never replaced by a symlink — this fixture cannot reach the condition',
+    );
+
+    const foreignDigest = `sha256:${createHash('sha256').update(foreign).digest('hex')}`;
+    assert.equal(
+      Object.values(opened.runState.opening_assets.items).includes(foreignDigest),
+      false,
+      'bytes reached through a swapped ancestor were hashed as this chapter\'s own asset',
+    );
+    assert.deepEqual(
+      opened.runState.opening_asset_hazards.items,
+      ['screens:symlink'],
+      'the substitution must be reported against the DIRECTORY, so W5 refuses everything under it',
+    );
+  });
+});
+
+// [round 21] The test above is caught by the check BEFORE the child's listing, and that check alone
+// would have let this one through: here the substitution lands during the child's OWN listing, so
+// every leaf under it is opened through the replacement and hashed before anything looks again.
+// This is what the second observation point is for, and it is also why the stale hash is left in
+// the map rather than deleted — removing it would convert a substitution back into an absence,
+// which is the reading this entire defect class travels on. The directory hazard is what makes W5
+// refuse, through containment, whatever the map happens to hold.
+test('walk: a subdirectory swapped for a symlink during its OWN listing is still reported as a hazard', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    const screens = join(assetDir, 'screens');
+    nodeFs.mkdirSync(screens, { recursive: true });
+    nodeFs.writeFileSync(join(screens, 'a.png'), 'the real asset');
+    const outside = join(dir, 'outside');
+    nodeFs.mkdirSync(outside, { recursive: true });
+    nodeFs.writeFileSync(join(outside, 'a.png'), 'bytes from a tree this chapter does not own');
+
+    let swapped = false;
+    const deps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        const listed = nodeFs.readdirSync(p, opts);
+        if (p === screens && opts?.withFileTypes && !swapped) {
+          nodeFs.renameSync(screens, join(dir, 'screens-moved-away'));
+          nodeFs.symlinkSync(outside, screens);
+          swapped = true;
+        }
+        return listed;
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.equal(swapped, true, 'the child listing never ran — this fixture cannot reach the condition');
+    assert.equal(
+      nodeFs.lstatSync(screens).isSymbolicLink(),
+      true,
+      'the subdirectory was never replaced by a symlink — this fixture cannot reach the condition',
+    );
+    assert.deepEqual(opened.runState.opening_asset_hazards.items, ['screens:symlink']);
+
+    // And the containment match is what makes that hazard cover the key the map still holds.
+    const held = Object.keys(opened.runState.opening_assets.items);
+    for (const key of held) {
+      assert.equal(
+        key === 'screens' || key.startsWith('screens/'),
+        true,
+        `'${key}' survived under no hazard — the containment argument does not cover it`,
+      );
+    }
+  });
+});
+
+// [round 21] The root exemption directly above is correct for a first capture and wrong the moment
+// this module has ALREADY SEEN the directory: gate 3 lstats every entry's asset directory before
+// the reservation is taken, so a root that is missing at the snapshot a few steps later did not
+// fail to exist — it stopped existing. Read as a first capture, the opening map is `{}` with no
+// hazards, and a stale file restored before the close is recorded as this build's, because rule 4
+// skips an asset with no opening key. The distinction is not observable from inside the walk; it
+// is the caller's knowledge, so the caller supplies it.
+test('openCaptureRun: an asset directory observed at validation and gone at the snapshot is not a first capture', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'stale-from-the-previous-build');
+
+    const deps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        if (p === assetDir) {
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    assert.equal(
+      nodeFs.lstatSync(assetDir).isDirectory(),
+      true,
+      'gate 3 must be able to observe this directory, or the test proves nothing about the ordering',
+    );
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, false, 'a baseline that could not be established must not open as an empty one');
+    assert.equal(opened.halts[0].halt, 'provenance_hazard');
+    assert.match(opened.halts[0].message, /items/);
+    assert.equal(
+      nodeFs.existsSync(tokenPathFor(profile)),
+      false,
+      'the reservation must be released on this exit like every other pre-commit halt',
+    );
+  });
+});
+
+// The sibling errno on the same branch. Round 20's whole finding was this rule applied to one error
+// code and not its neighbour, so the neighbour gets its own case rather than an argument that it
+// must behave the same.
+test('openCaptureRun: an observed asset directory that is a NON-directory at the snapshot is refused too', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+
+    const deps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        if (p === assetDir) {
+          const err = new Error('ENOTDIR'); err.code = 'ENOTDIR'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    assert.equal(nodeFs.lstatSync(assetDir).isDirectory(), true);
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, false, 'a root replaced by a non-directory must not open as an empty baseline');
+    assert.equal(opened.halts[0].halt, 'provenance_hazard');
+    assert.match(opened.halts[0].message, /ENOTDIR/);
+  });
+});
+
 // [round 19] The CLOSING half of the same phase distinction, which is the half that must NOT get
 // stricter. A capture tool that rewrites an asset by unlink-then-create races the closing snapshot,
 // and before `vanished` existed that produced an absent closing key, which rule 3 refuses as
@@ -2218,6 +2408,98 @@ test('recordChapterProvenance: an asset that becomes unreadable after close name
     assert.equal(result.recorded, false, JSON.stringify(result));
     assert.equal(result.reason, 'rehash_failed:a.png:hard_link', JSON.stringify(result));
     assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), false);
+  });
+});
+
+// [round 21] The same rule at its two remaining sites. Round 20 concluded that only the opening
+// snapshot reads a LISTED path, and that W5 and W6 read paths with no listing behind them — half of
+// that was wrong. `expectedAssets` builds its candidate set from `listRegularFilesRecursive` over
+// this very directory, so an `absent` at the rehash is a file this call listed a moment earlier,
+// and reporting it as "never published" is a confident wrong diagnosis of a mid-run disappearance.
+// The verdict is unchanged on both sides of this change — the chapter is refused either way — so
+// what is pinned here is the OPERATOR'S account, which is the entire content of the defect.
+//
+// The extractor is the REAL one. A stubbed `expectedAssets` would assert the listing-backed premise
+// rather than exercise it, which is the shape that let five fixtures in this release pass while
+// unable to reach the condition they were named for.
+test('recordChapterProvenance: an asset listed by the extraction and gone before the rehash is `vanished`, not `absent`', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v2');
+    assert.equal(CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity()).ok, true);
+
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const embed = chapterPathsModule.embedPath(chapterFile, assetDir, 'a.png');
+    nodeFs.writeFileSync(chapterFile, `# items\n\n1. Step\n\n   ![a](${embed})\n`);
+
+    let removed = false;
+    const deps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        const listed = nodeFs.readdirSync(p, opts);
+        if (p === assetDir && !removed) {
+          nodeFs.unlinkSync(join(assetDir, 'a.png'));
+          removed = true;
+        }
+        return listed;
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, deps);
+    assert.equal(removed, true, 'the asset listing never ran — this fixture cannot reach the condition');
+    assert.equal(result.recorded, false, JSON.stringify(result));
+    assert.equal(result.reason, 'rehash_failed:a.png:vanished', JSON.stringify(result));
+    assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), false);
+  });
+});
+
+// The W6 half of the same correction, driven the same way.
+test('buildProvenanceReport: an embed listed by the extraction and gone before the current hash is `vanished`, not `absent`', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v2');
+    assert.equal(CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity()).ok, true);
+
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const embed = chapterPathsModule.embedPath(chapterFile, assetDir, 'a.png');
+    nodeFs.writeFileSync(chapterFile, `# items\n\n1. Step\n\n   ![a](${embed})\n`);
+    assert.equal(
+      CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, stubDepsNoIdentity()).recorded,
+      true,
+      'the record must exist before W6 can be asked anything about it',
+    );
+
+    let removed = false;
+    const w6Deps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        const listed = nodeFs.readdirSync(p, opts);
+        if (p === assetDir && !removed) {
+          nodeFs.unlinkSync(join(assetDir, 'a.png'));
+          removed = true;
+        }
+        return listed;
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const result = CR.buildProvenanceReport(profile, [entry], null, w6Deps);
+    assert.equal(removed, true, 'the asset listing never ran — this fixture cannot reach the condition');
+    assert.equal(result.rows[0].classification_reason, 'record_stale', JSON.stringify(result.rows[0]));
+    assert.equal(result.rows[0].record_detail, 'unhashable:a.png:vanished', JSON.stringify(result.rows[0]));
   });
 });
 
