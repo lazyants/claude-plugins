@@ -1877,14 +1877,23 @@ function exactIdentityPart(value) {
 // Nothing is tolerated on ENOTDIR at all — an object is present there that was not there one syscall
 // earlier, which no first capture can produce.
 // [round 29] The containment root, resolved once per snapshot the way gate 3 resolves it. `depth` is
-// the RAW segment count of the configured `capture.output_dir`: raw and not resolved on purpose,
-// because every asset path is that same string with segments appended, so the two share an exact
-// lexical prefix while a resolved root can differ in segment COUNT (`/tmp` -> `/private/tmp`).
+// a LEXICAL count of the configured `capture.output_dir` rather than a count of its resolved form,
+// because a resolved root can differ in segment COUNT from the configured one (`/tmp` ->
+// `/private/tmp`) and the climb indexes the asset path's own segments.
+//
+// [round 30] Lexical is not the same as RAW, and round 29 used raw. Every asset path is built from
+// this string by the shared path builder, which NORMALIZES — so `..` collapses there and did not
+// collapse here, the root's count came out larger than the whole asset path's, every ancestor
+// classified as "above the root", and the exemption swallowed the identity check and the containment
+// check together. The comment justifying raw said the two "share an exact lexical prefix", which is
+// true of appending and false of normalizing. Measured against the real exported `chapterAssetDir`
+// before it was believed: `/out/vault/handbook/../assets` builds `/out/vault/assets/items`, 4
+// segments against a raw count of 5.
 function containmentRootFor(profileLike, deps) {
   const raw = profileLike?.capture?.output_dir ?? '';
   const resolved = canonicalizeForComparison(raw, deps);
   if (!resolved.ok) return null;
-  return { depth: rawSegments(raw).length, segments: resolved.segments };
+  return { depth: normalizeSegments(rawSegments(raw), isAbsolutePath(raw)).length, segments: resolved.segments };
 }
 
 function segmentsWithin(rootSegs, segs) {

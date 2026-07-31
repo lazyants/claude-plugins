@@ -3168,6 +3168,95 @@ test('the closing snapshot: a dangling capture.output_dir is refused, not read a
   });
 });
 
+// [round 30 BLOCKER] The seventeenth layer, and it is a UNIT mismatch. `containmentRoot.depth` was
+// the RAW segment count of the configured `capture.output_dir`, while every derived asset path is
+// NORMALIZED by the shared path builder. A `..` in the configured root therefore makes the root's
+// count exceed the asset path's own, every ancestor classifies as "above the output root", and the
+// exemption swallows the identity check and the containment check together.
+//
+// Measured against the real exported `chapterAssetDir` before it was believed: output_dir
+// `/out/vault/handbook/../assets` builds the asset dir `/out/vault/assets/items` — 4 segments
+// against a raw root count of 5. The comment justifying the raw count said raw and derived "share an
+// exact lexical prefix", which is true of appending and false of normalizing.
+test('openCaptureRun: a `..` in capture.output_dir does not disable the ancestor containment check', () => {
+  withTempDir((dir) => {
+    // NOT `join(...)`: it normalizes `..` away, and the first version of this test did exactly
+    // that and passed for an unrelated reason. The configured value must literally carry `..`.
+    const outputDir = `${dir}/assets/stale/../real`;
+    const profile = profileFor(dir, { capture: { output_dir: outputDir, build_identity: { ui_read: false } } });
+    const entry = { slug: 'items', group: 'admin' };
+    const resolvedOutput = join(dir, 'assets', 'real');
+    const groupDir = join(resolvedOutput, 'admin');
+    const outside = join(dir, 'outside-admin');
+    nodeFs.mkdirSync(resolvedOutput, { recursive: true });
+    nodeFs.mkdirSync(join(dir, 'assets', 'stale'), { recursive: true });
+    nodeFs.mkdirSync(outside, { recursive: true });
+
+    assert.match(profile.capture.output_dir, /\/\.\.\//, 'the configured root must literally contain `..`, or this test is the round-29 one again');
+
+    let planted = false;
+    const deps = depsWithOverride({
+      openSync: (p, ...rest) => {
+        if (!planted && String(p).endsWith('/pending.json')) {
+          nodeFs.symlinkSync(outside, groupDir);
+          planted = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(planted, true, 'the plant hook never ran — this fixture cannot reach the condition');
+    assert.equal(nodeFs.statSync(groupDir).isDirectory(), true, 'the ancestor must resolve, or this repeats the dangling test');
+    assert.equal(opened.ok, false, `a '..' in the configured root must not disable containment: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+  });
+});
+
+// [round 30] And the arm I called unreachable in round 29, reached. I concluded `containmentRoot ===
+// null` could not happen because every caller sits behind a guard that halts on an unresolvable
+// `capture.output_dir` — true, and not sufficient: the guard and `containmentRootFor` are two
+// SEPARATE resolutions of the same path, so the tree can change between them. A symlink cycle
+// introduced after the guard passes reaches the arm.
+//
+// This is the second round running that I asserted unreachability from the paths I had looked at.
+// The test deleted in round 29 is restored here in the form that actually distinguishes the guard.
+test('the closing snapshot: an output root that becomes unresolvable AFTER its own guard still refuses', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    // The asset root is genuinely gone — the ordinary "produced nothing" shape.
+    nodeFs.rmSync(assetDir, { recursive: true, force: true });
+    // The guard and `containmentRootFor` are two SEPARATE resolutions of the same path, which is
+    // the claim under test: allow the first and fail every later one. If there were only ever one
+    // resolution, `resolutions` would stay at 1 and the assertion below would fail loudly.
+    let resolutions = 0;
+    const closingDeps = depsWithOverride({
+      realpathSync: (p, ...rest) => {
+        if (String(p) === profile.capture.output_dir) {
+          resolutions += 1;
+          if (resolutions > 1) { const err = new Error('ELOOP'); err.code = 'ELOOP'; throw err; }
+        }
+        return nodeFs.realpathSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.ok(resolutions > 1, `the output root was resolved only ${resolutions} time(s) — there is no second resolution, so the arm is unreachable after all`);
+    assert.equal(closed.ok, false, `an output root unresolvable at snapshot time must not certify absence: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+  });
+});
+
 // [round 27] The ancestor climb walks a PATH, so it inherits the release's other recurring defect:
 // the shipped example profile's `output_dir` is RELATIVE (`vault/handbook/assets`), and a climb that
 // prefixes `/` onto relative segments probes an entirely different tree — one where every candidate
