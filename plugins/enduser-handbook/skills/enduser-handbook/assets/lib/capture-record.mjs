@@ -1911,7 +1911,14 @@ function directAbsenceConfirmed(absPath, deps) {
   // climb it to `/`, and report direct absence for a path this walk never looked at.
   const absolute = isAbsolutePath(absPath);
   const segs = rawSegments(absPath);
-  for (let depth = segs.length - 1; depth >= 0; depth -= 1) {
+  // [round 28] The climb starts at the TIP, and the round-27 version started at its parent. That
+  // was a check which did not test the fact it claimed: this runs AFTER the listing has already
+  // failed, so the root can come back — populated — in between, and a helper that only ever looked
+  // at the parent certified "absent" for a directory that was there, with stale bytes in it. Codex
+  // executed exactly that and reported the damning number: probes of the tip after it was
+  // repopulated, zero. It is WIDER than the residual about a swap installed and reverted between
+  // two observations, because here the substitution is still in place while the code decides.
+  for (let depth = segs.length; depth >= 0; depth -= 1) {
     const joined = segs.slice(0, depth).join('/');
     const candidate = depth === 0 ? (absolute ? '/' : '.') : (absolute ? `/${joined}` : joined);
     try {
@@ -1919,17 +1926,22 @@ function directAbsenceConfirmed(absPath, deps) {
     } catch (err) {
       const code = errProp(err, 'code');
       if (code === 'ENOENT' || code === 'ENOTDIR') continue;
-      // An ancestor this module cannot inspect is uncertainty, and uncertainty is never the
+      // A component this module cannot inspect is uncertainty, and uncertainty is never the
       // permissive answer here: it would tolerate exactly the empty snapshot the tip's ENOENT
       // already looks like.
       return false;
     }
+    // The first component that exists, climbing up from the tip. When that IS the tip, there is no
+    // absence left to be direct: the root is present now, whatever the listing said a syscall ago,
+    // and an empty snapshot for a directory that exists is the whole defect class.
+    if (depth === segs.length) return false;
     return assetDirIdentity(candidate, deps, { allowSymlink: true }).ok === true;
   }
-  // Unreachable through any public entrypoint: depth 0 probes `/` (or the working directory for a
-  // relative path), which exists wherever this module runs, so the loop always decides. Reaching
-  // here means `absPath` had no segments at all. Refusing is the fail-safe direction, and no test
-  // can kill a mutant on this line — recorded rather than papered over.
+  // Unreachable: the loop's last iteration probes `/` (or the working directory for a relative
+  // path), which exists wherever this module runs, so it always returns from inside — including for
+  // an `absPath` with no segments at all, which round 27's version could not say. Refusing is the
+  // fail-safe direction, and no test can kill a mutant on this line: recorded rather than papered
+  // over, because an unkillable mutant reported as covered is the same lie as an untested guard.
   return false;
 }
 

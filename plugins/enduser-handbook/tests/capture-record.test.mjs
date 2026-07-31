@@ -2962,6 +2962,96 @@ test('the closing snapshot: a dangling ANCESTOR is refused, not read as a chapte
   });
 });
 
+// [round 28 BLOCKER] The fifteenth layer, and the sharpest one yet: the check did not test the fact
+// it claimed. `directAbsenceConfirmed` climbed from the root's PARENT, and it runs only AFTER the
+// listing has already failed — so between the failed listing and the adjudication the root itself
+// could come back, populated, and the helper would certify "direct absence" having never looked at
+// the tip. Codex executed it through the real exported `openCaptureRun`: `tipProbesAfterPopulation:
+// 0`, `tipExistsAtReturn: true`, `ok: true`, an empty hazard-free opening baseline.
+//
+// This is wider than the documented residual 1 (a swap installed and reverted between two adjacent
+// observations). Here the substitution is STILL IN PLACE at the moment of adjudication and the
+// adjudication does not look.
+test('the closing snapshot: a root that reappears between its failed listing and the adjudication is refused', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    nodeFs.rmSync(assetDir, { recursive: true, force: true });
+    let reappeared = false;
+    const closingDeps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        if (!reappeared && String(p).endsWith('/items')) {
+          // The listing genuinely fails on an absent root, and the root is back — populated with
+          // bytes this run never produced — before the adjudication that the failure triggers.
+          nodeFs.mkdirSync(assetDir, { recursive: true });
+          nodeFs.writeFileSync(join(assetDir, 'a.png'), 'bytes the captured build never produced');
+          reappeared = true;
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(reappeared, true, 'the listing hook never ran — this fixture cannot reach the condition');
+    assert.equal(nodeFs.existsSync(assetDir), true, 'the root must be present at adjudication time, or this test says nothing');
+    assert.equal(closed.ok, false, `a root present at adjudication is not a chapter that produced nothing: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+  });
+});
+
+// [round 28 BLOCKER] Codex's own sequence, at the opening observation point: gate 3 sees an ordinary
+// absent grouped path, a dangling group link appears before the snapshot, the tip's lstat and
+// listing both report ENOENT, and only THEN does the path become a real populated directory.
+test('openCaptureRun: a chapter path populated between its failed listing and the adjudication is refused', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items', group: 'admin' };
+    const groupDir = join(profile.capture.output_dir, 'admin');
+    const assetDir = join(groupDir, 'items');
+    nodeFs.mkdirSync(profile.capture.output_dir, { recursive: true });
+
+    let planted = false;
+    let populated = false;
+    const deps = depsWithOverride({
+      openSync: (p, ...rest) => {
+        if (!planted && String(p).endsWith('/pending.json')) {
+          nodeFs.symlinkSync(join(profile.capture.output_dir, 'admin-target'), groupDir);
+          planted = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+      readdirSync: (p, opts) => {
+        // `planted` gates this so the population cannot land before gate 3 has had its look.
+        if (planted && !populated && String(p).endsWith('/admin/items')) {
+          nodeFs.unlinkSync(groupDir);
+          nodeFs.mkdirSync(assetDir, { recursive: true });
+          nodeFs.writeFileSync(join(assetDir, 'a.png'), 'bytes the captured build never produced');
+          populated = true;
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(planted, true, 'the plant hook never ran — this fixture cannot reach the condition');
+    assert.equal(populated, true, 'the population hook never ran — this fixture cannot reach the condition');
+    assert.equal(nodeFs.existsSync(assetDir), true, 'the chapter path must be populated at adjudication time');
+    assert.equal(opened.ok, false, `an opening baseline may not be empty for a path that exists: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+  });
+});
+
 // [round 27] The ancestor climb walks a PATH, so it inherits the release's other recurring defect:
 // the shipped example profile's `output_dir` is RELATIVE (`vault/handbook/assets`), and a climb that
 // prefixes `/` onto relative segments probes an entirely different tree — one where every candidate
