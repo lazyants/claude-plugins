@@ -213,8 +213,13 @@ export type RunState =
       opening_digest: string;
       opening: BuildIdentity;
       opening_assets: Record<string, Record<string, string>>;
-      // [round 15] Per chapter key, the assets that could NOT be hashed at open, each as
-      // `<relPath>:<kind>`. Separate from `opening_assets` on purpose: dropping them left an
+      // [round 15] Per chapter key, the assets that could NOT be hashed at open, in the same
+      // `<relPath>:<reason>` form the persisted `RunRecord` chapters use — see the note on
+      // `opening_hazards`/`closing_hazards` above for the reason vocabulary, the fact that the path
+      // may name a DIRECTORY, and why matching must be by containment. This comment said `<kind>`
+      // for two rounds, which is the exact field the runtime does NOT put there: a consumer
+      // following it would present the undiscriminating word `hazard` and lose the detail the
+      // hazard exists to carry. Separate from `opening_assets` on purpose: dropping them left an
       // absent key, and W5 reads an absent opening key as "brand-new file this run" and skips the
       // did-it-change check — so a stale asset that merely could not be read at open was recorded
       // as if the captured build had produced it. Authenticated by `opening_digest` along with the

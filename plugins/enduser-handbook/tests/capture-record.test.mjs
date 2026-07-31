@@ -1772,6 +1772,56 @@ test('openCaptureRun: a non-regular dirent in the asset tree is a hazard, spelle
   }
 });
 
+// [round 18 IMPORTANT] The socket test above passes with this completely broken, for the third
+// time in this release: it exercises a KNOWN dirent type, and the defect is in what happens when
+// the type is unknown. libuv reports `UV_DIRENT_UNKNOWN` on filesystems that do not fill in
+// `d_type` — several network and FUSE mounts, and XFS in some configurations — and then EVERY
+// predicate on the dirent is false, including `isFile()`. The walk's final `else` called that
+// `non_regular` and dropped the entry: a plain `a.png` omitted from both the hash snapshot and the
+// filename listing, persisted under an operator-facing reason the code never established. On such
+// a filesystem no chapter can be recorded at all, because extraction halts on the destination it
+// cannot match, and W6 cannot finish either.
+//
+// The fixture is a REAL `fs.Dirent` constructed with type 0 rather than an object with all
+// predicates stubbed false, because "all predicates false" is my model of UV_DIRENT_UNKNOWN and the
+// model is half of what is under test. Verified on this Node: every predicate, including
+// `isSocket()`, returns false.
+test('walk: a dirent of UNKNOWN type is resolved by lstat, not guessed at', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+    nodeFs.mkdirSync(join(assetDir, 'screens'));
+    nodeFs.writeFileSync(join(assetDir, 'screens', 'b.png'), 'v1');
+
+    const realDirents = nodeFs.readdirSync(assetDir, { withFileTypes: true });
+    const Dirent = Object.getPrototypeOf(realDirents[0]).constructor;
+    const unknownTyped = (name, parent) => new Dirent(name, 0, parent);
+    assert.equal(unknownTyped('a.png', assetDir).isFile(), false, 'fixture must model UV_DIRENT_UNKNOWN');
+    assert.equal(unknownTyped('a.png', assetDir).isSocket(), false, 'fixture must model UV_DIRENT_UNKNOWN');
+
+    const deps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        const real = nodeFs.readdirSync(p, opts);
+        if (!opts?.withFileTypes) return real;
+        // The whole tree reports unknown, which is how such a filesystem behaves — the directory
+        // must be walked into as well, or the nested asset is lost for a second reason.
+        return real.map((d) => unknownTyped(d.name, p));
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], [],
+      'a regular file whose dirent type is unknown is not a hazard, and saying so states something the code never established');
+    assert.deepEqual(Object.keys(opened.runState.opening_assets['items']).sort(), ['a.png', 'screens/b.png'],
+      'both the file and the one inside the unknown-typed directory must be hashed');
+  });
+});
+
 // [round 17] The reader now rejects a record carrying an unrecognized hazard word, and that
 // rejection refuses every chapter in the run — so a word a PRODUCER can emit but the reader does
 // not know would turn a legitimate run unreadable, which is a worse failure than the one the

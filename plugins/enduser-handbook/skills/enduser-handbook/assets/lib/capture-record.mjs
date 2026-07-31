@@ -1570,6 +1570,42 @@ function openingPayloadFromRunState(runState) {
 // a plain file with those same stale bytes at close was recorded as this build's. The distinction
 // the previous round drew was right; it was drawn one layer too low. A caller that does not care
 // (the filename listing, which is asking which assets exist, not which could be hashed) omits it.
+/**
+ * What a directory entry actually is: `symlink`, `directory`, `file`, `absent`, `non_regular` or
+ * `inspection_failure`.
+ *
+ * [round 18] A dirent's type can be UNKNOWN. libuv reports `UV_DIRENT_UNKNOWN` on filesystems that
+ * do not fill in `d_type` — several network and FUSE mounts, and XFS in some configurations — and
+ * then EVERY predicate on the dirent is false, `isFile()` included. Treating "not a symlink, not a
+ * directory, not a file" as *therefore* a device node was a confident label for something never
+ * established, and it dropped the entry: on such a filesystem every plain `a.png` disappears from
+ * both the hash snapshot and the filename listing, so extraction halts on a destination it cannot
+ * match and no chapter can be recorded at all. Unknown means the kernel declined to answer from the
+ * directory block, and the answer is to ask — one `lstat`, only on the entries that need it, so a
+ * filesystem that does report types pays nothing. The concrete non-regular types are checked first
+ * for exactly that reason. Every predicate is called optionally: a caller may inject a dirent that
+ * implements only the three this module used to consult, and the fail-safe direction for a missing
+ * predicate is to go and find out rather than to throw.
+ */
+function direntType(dirent, absPath, deps) {
+  if (dirent.isSymbolicLink?.()) return 'symlink';
+  if (dirent.isDirectory?.()) return 'directory';
+  if (dirent.isFile?.()) return 'file';
+  if (dirent.isSocket?.() || dirent.isFIFO?.() || dirent.isCharacterDevice?.() || dirent.isBlockDevice?.()) {
+    return 'non_regular';
+  }
+  let st;
+  try {
+    st = deps.lstatSync(absPath);
+  } catch (err) {
+    return errProp(err, 'code') === 'ENOENT' ? 'absent' : 'inspection_failure';
+  }
+  if (st.isSymbolicLink()) return 'symlink';
+  if (st.isDirectory()) return 'directory';
+  if (st.isFile()) return 'file';
+  return 'non_regular';
+}
+
 function walkRegularFiles(rootDir, deps, visit, onSkipped) {
   walk(rootDir, '');
 
@@ -1585,19 +1621,22 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped) {
     for (const dirent of entries) {
       const childAbs = posixJoin(absDir, dirent.name);
       const childRel = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
-      if (dirent.isSymbolicLink()) { onSkipped?.(childRel, 'symlink'); continue; }
-      if (dirent.isDirectory()) walk(childAbs, childRel);
-      else if (dirent.isFile()) visit(childAbs, childRel);
-      // Neither a symlink, a directory, nor a regular file: a FIFO, socket or device node. Present,
-      // unreadable as an asset, and silently dropped until this line existed — the same shape as
-      // the symlink case and reachable the same way.
-      // `non_regular`, spelled exactly as the leaf inspection spells it. The two layers observe the
-      // same fact at different moments — a dirent that is neither directory nor file here, an
-      // opened fd that is not a regular file there — and until the reason words reached operators
+      const type = direntType(dirent, childAbs, deps);
+      if (type === 'symlink') { onSkipped?.(childRel, 'symlink'); continue; }
+      if (type === 'directory') { walk(childAbs, childRel); continue; }
+      if (type === 'file') { visit(childAbs, childRel); continue; }
+      // The entry vanished between the listing and the check. That is the one condition this
+      // module has always classified as an ABSENCE rather than a hazard — nothing was there to
+      // establish — and the leaf layer would answer the same way if it were visited.
+      if (type === 'absent') continue;
+      // Present, unreadable as an asset, and silently dropped until this branch existed — the same
+      // shape as the symlink case and reachable the same way. `non_regular` and
+      // `inspection_failure` are spelled exactly as the leaf inspection spells them: the two layers
+      // observe the same facts at different moments, and until the reason words reached operators
       // (round 17) the difference was invisible, because the leaf's word was collapsed to `hazard`
       // before anyone could read it. Two spellings of one condition is a distinction an operator
       // would have to look up to learn is not a distinction.
-      else onSkipped?.(childRel, 'non_regular');
+      onSkipped?.(childRel, type);
     }
   }
 }
