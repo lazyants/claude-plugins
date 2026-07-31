@@ -44,6 +44,13 @@ The resolution is to use the real type *constructed in the defective state* wher
 
 Then mutate: change the guard, and check that exactly the intended test fails. Every one of these was caught that way, and a mutant that kills nothing is the same signal as a mutant that kills the wrong test.
 
+**When one guard is applied at SEVERAL call sites, two further vacuity shapes appear, and mutating per site is the only thing that finds either.**
+
+- **An existential assertion over the sites pins none of them.** `assert(calls.some(c => c.askedForX))` passes while any single site still asks, so every per-site mutant survives. Assert the OUTCOME each site is responsible for, or assert per site.
+- **A fixture's shape decides which sites execute, so one fixture structurally cannot cover the others.** Measured on a three-site identity read: with a symlinked directory the first `lstat` is consulted only for `isSymbolicLink()` and its identity fields are never touched, so that fixture cannot reach two of the three sites; with a plain directory the third site — the link-target read — never runs at all. Neither fixture is wrong; neither is sufficient. Parameterize over the shapes that select the branch (`for (const topology of [...]) test(...)`) rather than picking the one that looks most interesting.
+
+**A guard that makes a REQUEST needs a responder that behaves differently when it is not asked, or the request is unobservable.** Passing an option that only improves precision is invisible on any input where the imprecise answer happens to be correct — an inode below 2^53 renders identically whether it arrived as a number or a bigint, so dropping the option changed nothing any test could see. The fixture has to be a seam whose ANSWER DEPENDS ON THE REQUEST (exact when asked, deliberately inexact when not); then a site that stops asking fails immediately. Applies to any opt-in precision, consistency, or isolation flag: `{ bigint: true }`, `FOR UPDATE`, `If-Match`, a strict-mode parser option.
+
 Knowing this at round 1 would have collapsed most of that loop: the fix is the same shape at every layer (keep "could not read it" as its own fact, never as an absence), the layers are enumerable by reading the call chain once, and most of the remaining rounds were spent discovering that the previous round's *test*, not its fix, was the incomplete part.
 
 ## Format / serialization migrations
