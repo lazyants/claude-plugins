@@ -5,6 +5,7 @@ When an adversarial reviewer returns ~1 finding/round that is a new INSTANCE of 
 - [Enumerate the set + state the invariant](#enumerate-the-set--state-the-invariant)
 - [Enumerate the LAYERS too — a set complete at one layer is not the class](#enumerate-the-layers-too)
 - […but enumerate INPUTS, never OUTCOMES of independent conditions](#enumerate-inputs-never-outcomes)
+- [A per-round instance count that GROWS](#a-defect-class-count-that-grows-across-rounds-is-a-structural-cause)
 - [Mutating an unguarded rule: read the SPREAD of the reds](#mutating-an-unguarded-rule-read-the-spread-of-the-reds)
 - [Format / serialization migrations: enumerate by the shared value](#format--serialization-migrations)
 - [Prose-scattered set → a completeness-GREP gate](#prose-scattered-set--a-completeness-grep-gate)
@@ -53,6 +54,18 @@ Then mutate: change the guard, and check that exactly the intended test fails. E
 **A guard that makes a REQUEST needs a responder that behaves differently when it is not asked, or the request is unobservable.** Passing an option that only improves precision is invisible on any input where the imprecise answer happens to be correct — an inode below 2^53 renders identically whether it arrived as a number or a bigint, so dropping the option changed nothing any test could see. The fixture has to be a seam whose ANSWER DEPENDS ON THE REQUEST (exact when asked, deliberately inexact when not); then a site that stops asking fails immediately. Applies to any opt-in precision, consistency, or isolation flag: `{ bigint: true }`, `FOR UPDATE`, `If-Match`, a strict-mode parser option.
 
 Knowing this at round 1 would have collapsed most of that loop: the fix is the same shape at every layer (keep "could not read it" as its own fact, never as an absence), the layers are enumerable by reading the call chain once, and most of the remaining rounds were spent discovering that the previous round's *test*, not its fix, was the incomplete part.
+
+## A defect-class count that GROWS across rounds is a structural cause
+
+**Track how many instances of ONE defect class each review round finds, and read the TREND rather than the round's finding: a count that GROWS across consecutive rounds — instead of shrinking — is itself proof the loop is not converging and that the cause is structural.** The narrowing loop this file opens with is the healthy case: same root cause, fewer and narrower instances each round, and generalizing early only saves time. A rising count is a different animal — each round patches a cited site while the generator keeps producing them, so the reviewer's yield goes UP precisely because you are fixing instances.
+
+Verified 2026-07-26 (literary-translator, `c89db59`): four consecutive review rounds found the same defect class. Round 2 fixed one site, round 3 found three more, round 4 found six more — in SKILL.md, both reference docs, the glossary template, an operator-visible error message, and the race docstring. The generator was banal: one guarantee had been restated in prose at six independent places, each an independent opportunity to drift or overclaim, with nothing keeping them in sync.
+
+**So the fix a rising count calls for is a single canonical statement plus a short-form pointer from every other site, never an (N+1)th patch.** One site owns the property, its qualifiers and the evidence it rests on; every other site states the property in short form and points there instead of re-deriving its own version. Where the duplication genuinely cannot be removed — a term that must appear at every site by definition — the completeness-GREP gate below is the fallback, but it enforces reconciliation rather than removing the N-way drift surface.
+
+**The same structural tell applies to any inline enumeration in prose, which silently becomes an incomplete list the moment an item is added.** It has the same generator (one fact maintained at N places by hand) and the same signature (a reviewer that keeps returning the same category with a longer list each round), so treat a growing count against an enumeration as the instruction to replace it with the rule that generates it.
+
+This is the loop-level half of the diagnostic; the prose-level half — why a fact stated by CENSUS rots, and what to write in its place — is the census rule below, and is not restated here. That section identifies the defective SENTENCE once you are reading it; the round-over-round count identifies the defective SHAPE before you have read any of them. The counts above are dated evidence about a loop that is finished, not a present-tense claim about a file, which is exactly the distinction that section draws.
 
 ## Mutating an unguarded rule: read the SPREAD of the reds
 
