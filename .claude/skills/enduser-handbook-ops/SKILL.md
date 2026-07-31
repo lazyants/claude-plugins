@@ -97,6 +97,33 @@ file over.
 
 **This survived TWO codex-rescue rounds before the `lazy-ants-reviewer` bot caught it** (2026-07-23, PR #316): both rounds were explicitly asked to verify needle uniqueness and load-bearingness against wording mutations, both confirmed uniqueness correctly, and neither one independently thought to test a *relocation* mutation (move the exact text to the wrong section) — uniqueness and section-binding are orthogonal properties, and a review checklist that only asks about one silently assumes the other. **When writing or reviewing a new needle-pinning assertion for a claim that has ONE correct normative location, default to `has_in_section`** — a doc having no other *legitimate* section for the phrase does NOT make plain `has` sufficient, since an illegitimate fenced copy pasted anywhere still satisfies a whole-file grep; `has_in_section`'s heading+fence binding is what actually rules that out, so plain `has` is essentially never the right choice for a single-normative-site claim. When reviewing (self or via codex), add "relocate the needle into a fenced block under a different heading, confirm the check now FAILS (goes red)" as its own mandatory probe alongside the wording-mutation probes — it is not implied by them, and the expected outcome is the opposite of the wording-mutation probes' baseline (there, an unrelated section passing is fine; here, a relocated needle passing IS the bug).
 
+**The direction flips for `hasnt` — scoping a NEGATIVE assertion WEAKENS it.** "More specific =
+stronger" is the default intuition for assertions and it is exactly backwards for absence claims:
+scoping a POSITIVE claim TIGHTENS it (the phrase must now hold under the right heading, not merely
+somewhere in the file), while scoping a NEGATIVE claim LOOSENS it (the forbidden text is now
+permitted everywhere except that one section). The same helper upgrade therefore hardens one family
+and loosens the other. When the section-bounded engine landed, the 24 existing whole-file `hasnt`
+assertions were deliberately left untouched: "section-scoped absence is a strictly weaker claim than
+whole-file absence, so converting them would have loosened those gates while appearing to harden
+them." The failure mode is the silent kind — the diff reads as a uniform hardening pass, the
+assertion COUNT is unchanged, the suite stays green, and 24 gates quietly stop covering the rest of
+the file. Adopt `hasnt_in_section` one genuine caller at a time; never sweep the existing whole-file
+`hasnt` calls into it.
+
+**Corollary: a helper whose call sites are ALL positive has an unguarded boundary.** Measured when
+`has_in_section`'s same-or-shallower heading rule was first guarded: every real call site was a
+positive assertion and all four of its self-tests placed the needle INSIDE the section under test,
+so DELETING the boundary check only WIDENED the scan and every assertion stayed green — confirmed
+by removing it, after which a W6-only phrase was accepted under the W1 heading. That is
+load-bearing because the W1 and W6 pins deliberately share one needle (`` MUST run
+`validateGroups(entries)` ``) and their independence comes ENTIRELY from section termination, so a
+regressed boundary lets W6's copy satisfy the W1 pin with no other gate noticing. The
+positive-reformulation trick that covers the other self-tests cannot rescue this one: "removing the
+boundary check ONLY adds false positives, never removes a true one, so there is no positive fact
+whose presence depends on the boundary holding." That is `hasnt_in_section`'s one legitimate caller
+and the shape to look for before adding a second — the reasoning is spelled out at its definition
+and its self-test block in `reference-assets.test.sh`.
+
 ## 6. A link-emission canon change has multiple write sites — including the manual-recipe prose, not just the machine canon
 
 1.8.0, #294, ped-ant P1. The vault-rel wikilink fix touched the adapter + `revalidation.md`'s "Write-time canon", but `revalidation.md`'s manual group-migration recipe (step 4) still told the operator to WRITE the old bare `[[<slug>]]` form under `wikilinks:true` — a 2nd emission site recreating #294. BOTH codex plan review AND codex working-tree review missed it (a single-tree pass can't see a prose recipe as an emission site); the ped-ant bot caught it.
