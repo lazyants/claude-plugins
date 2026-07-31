@@ -1136,7 +1136,13 @@ function validateEntriesForCapture(profileLike, entries, deps) {
   // opening map is a baseline or a fiction. Keyed by chapter key, never by path: this gate derives
   // the directory through the CANONICAL output root and `openCaptureRun` derives it through the
   // profile as given, so the two path strings can differ while naming one directory.
-  const assetDirsObserved = new Set();
+  // [round 22] A Map, not a Set: WHICH object was observed, not merely that one was. Existence alone
+  // catches only a root that disappeared; a root REPLACED between this gate and the snapshot still
+  // exists, still lists, and hands back a foreign tree. `dev`/`ino` are path-independent, which is
+  // what lets the two call sites' differing path strings be compared at all. A symlinked root is a
+  // supported topology and is identified by the LINK's own inode here and at the snapshot, so it
+  // continues to pass; what it can no longer do is become a different link, or a directory.
+  const assetDirsObserved = new Map();
   for (const entry of entries) {
     const assetDir = chapterAssetDir(canonicalProfileForAssetDir, entry);
     // `resolvePhysicalContainment` treats ANY lstat failure while walking `dir`'s components as
@@ -1148,8 +1154,14 @@ function validateEntriesForCapture(profileLike, entries, deps) {
     // `inspectDirComponent`) that ENOENT-on-a-not-yet-established path is expected, not a hazard,
     // while any OTHER lstat failure still is.
     let assetDirExists = true;
+    let assetDirIdentityId = null;
     try {
-      deps.lstatSync(assetDir);
+      const st = deps.lstatSync(assetDir);
+      // [round 22] The identity, read off the lstat this gate already performs — no extra syscall.
+      // A result that cannot answer leaves it null, and a null identity simply means the snapshot
+      // gets no root pin: this gate's own job (existence, containment, collision) does not depend on
+      // it, so refusing here would turn a declaration shortfall into a halt on a legitimate capture.
+      if (typeof st?.dev === 'number' && typeof st?.ino === 'number') assetDirIdentityId = `${st.dev}:${st.ino}`;
     } catch (err) {
       const code = errProp(err, 'code');
       if (code === 'ENOENT' || code === 'ENOTDIR') {
@@ -1158,7 +1170,7 @@ function validateEntriesForCapture(profileLike, entries, deps) {
         return haltResult('provenance_hazard', `cannot inspect asset directory '${assetDir}': ${typeof code === 'string' ? code : describeThrown(err)}`, { assetDir });
       }
     }
-    if (assetDirExists) assetDirsObserved.add(chapterKeyFor(entry));
+    if (assetDirExists) assetDirsObserved.set(chapterKeyFor(entry), assetDirIdentityId);
 
     // A missing LEAF is fine — but skipping gate 3 ENTIRELY throws away the containment check over
     // the whole path, not just the missing tail: a symlinked ANCESTOR (`/safe/assets/admin` ->
@@ -1495,7 +1507,10 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
     for (const entry of entries) {
       snapshotting = chapterKeyFor(entry);
       const assetDir = chapterAssetDir(profileLike, entry);
-      const snapshot = snapshotAssetHashes(assetDir, d, { rootMustExist: validated.assetDirsObserved.has(snapshotting) });
+      const snapshot = snapshotAssetHashes(assetDir, d, {
+        rootMustExist: validated.assetDirsObserved.has(snapshotting),
+        rootIdentity: validated.assetDirsObserved.get(snapshotting) ?? null,
+      });
       openingAssets[snapshotting] = snapshot.hashes;
       openingHazards[snapshotting] = snapshot.hazards;
     }
@@ -1664,44 +1679,110 @@ function direntType(dirent, absPath, deps) {
 // and rule 4 sees opening ≠ closing, rule 5's rehash agrees with closing, and the record is
 // confident and wrong.
 //
-// Checked at BOTH ends of the listing, not once. A check before it — what the ownership walk does —
-// establishes only that the substitution had not landed YET; the check after it is what makes a
-// substitution that is left IN PLACE across the listing observable at all. Neither can see a swap
-// installed and reverted between two checks: path-based directory reads have no fd-relative form in
-// this runtime, so an entirely transient substitution is not detectable from here. What the pair
-// buys is that a substitution which PERSISTS — the only kind that can still be feeding foreign bytes
-// to the leaf opens that follow — can no longer produce a silent, hazard-free snapshot.
+// [round 22] Checked THREE times per directory — before the listing, immediately after it and
+// before its entries are acted on, and after they have been — and by IDENTITY, not by type. The
+// round-21 version asked only "is this still a directory" at two of those points, and the paragraph
+// that stood here claimed a persistent substitution could no longer pass silently. That was false,
+// and codex produced it as executed evidence: two lstats can both answer "directory" while naming
+// two DIFFERENT directories, so replacing `screens/` with another ordinary directory returned a
+// foreign hash with an empty hazard list. Type-equality was never the property being asserted;
+// identity was. `dev`/`ino` are it.
 //
-// The ROOT is exempt, for the same reason it is exempt from the ENOENT rule below: gate 3 resolves
-// the asset directory through `resolvePhysicalContainment`, which deliberately PERMITS a symlinked
-// root that stays inside `capture.output_dir`, so refusing one here would refuse a topology this
-// feature documents as supported. Children are already never legitimately symlinks — `direntType`
-// reports one as a hazard instead of descending — so this adds no new class of refusal, only a
-// second observation point for a refusal that was already the rule.
-function assetDirHazardReason(absPath, deps) {
-  const inspected = inspectDirComponent(absPath, deps);
-  if (inspected.kind === 'directory') return null;
-  if (inspected.kind === 'absent') return 'vanished';
-  // `non_directory` is gate 6's word for the namespaces this module owns and is not in the asset
-  // hazard vocabulary; the walk already spells this same observation `inspection_failure` on its
-  // own ENOTDIR branch, and two words for one fact is a distinction an operator would have to look
-  // up to learn is not one.
-  return inspected.reason === 'symlink' ? 'symlink' : 'inspection_failure';
+// What each observation point buys: the first establishes the substitution had not landed yet; the
+// second is what makes a swap landing DURING the listing observable before a single foreign byte is
+// hashed; the third catches one that lands while the entries are being processed.
+//
+// TWO residuals remain, and they are stated rather than argued away — the comment that stood here a
+// round ago claimed more than the code did, and that overclaim was itself the finding:
+//
+//  1. A swap installed and reverted entirely BETWEEN two adjacent observations is invisible. Every
+//     check here is a path operation, and path operations cannot be made atomic with respect to
+//     each other without an fd-relative (`openat`) traversal, which this runtime does not offer
+//     through this seam.
+//  2. For a CHILD directory, the window between the parent's listing and the child's own first
+//     observation cannot be closed AT ALL by this seam, for a sharper reason: a `Dirent` carries a
+//     name and a type and no inode, so there is no way to bind the name the parent saw to the
+//     object descended into. The child's identity baseline is therefore its own first `lstat`, and
+//     a directory replaced in that window is baselined as the replacement — consistently, silently,
+//     and with foreign bytes in the opening map. The ROOT does not share this: its identity comes
+//     from gate 3's own observation, which is why it is passed in rather than derived here.
+//
+// Closing residual 2 needs `openat`/`fdopendir` (or a `readdirSync` that reports `d_ino`), which is
+// a seam change, not a logic change. Until then the guard's reach is exactly: a substitution is
+// caught if it is present at, or lands during, the listing of the directory it replaces.
+//
+// The ROOT is not exempt any more, only differently supplied. Gate 3 permits a symlinked asset root
+// that resolves inside `capture.output_dir`, so refusing symlink-ness here would refuse a supported
+// topology; what it may NOT do is become a different object between gate 3 and this walk. Its
+// identity therefore arrives from the caller (`rootIdentity`) rather than being decided here, and a
+// mismatch throws: the root is nameable by no relative path, so it cannot be a hazard member, and
+// halting the run is strictly more conservative than a per-directory refusal.
+// `allowSymlink` is the root/child split, and it is not cosmetic: gate 3 PERMITS an asset root that
+// is a symlink resolving inside `capture.output_dir`, so refusing symlink-ness at the root would
+// refuse a documented topology — the first version of this check did exactly that, and the test
+// pinning that topology is what caught it. A CHILD is never legitimately a symlink (`direntType`
+// refuses one rather than descending), so there the word stands. Either way the identity is the
+// lstat's own `dev`/`ino`: for a symlinked root that is the LINK's inode, compared against the same
+// link's inode recorded by gate 3, so the supported case matches and a swap to a different link
+// does not.
+function assetDirIdentity(absPath, deps, { allowSymlink = false } = {}) {
+  let st;
+  try {
+    st = deps.lstatSync(absPath);
+  } catch (err) {
+    return { ok: false, reason: errProp(err, 'code') === 'ENOENT' ? 'vanished' : 'inspection_failure' };
+  }
+  const isLink = st.isSymbolicLink();
+  if (isLink && !allowSymlink) return { ok: false, reason: 'symlink' };
+  if (!isLink && !st.isDirectory()) return { ok: false, reason: 'inspection_failure' };
+  // Fail closed on a result that cannot answer, exactly as round 19 established for `isFile`: an
+  // identity this module cannot read is uncertainty, and uncertainty is a hazard rather than a
+  // guess. A caller on the pre-round-22 declaration lands here instead of silently comparing
+  // `undefined` to `undefined` — which would compare equal, and pass every substitution.
+  if (typeof st.dev !== 'number' || typeof st.ino !== 'number') return { ok: false, reason: 'inspection_failure' };
+  return { ok: true, id: `${st.dev}:${st.ino}` };
 }
 
-// `rootMustExist` is the caller's knowledge, not the walk's: whether this module has ALREADY
-// observed the root directory. It cannot be derived here — the walk sees only that a listing
-// failed — and it inverts what the failure means (see the ENOENT branch below).
-function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = false } = {}) {
+// `rootMustExist` and `rootIdentity` are both the caller's knowledge, not the walk's: whether this
+// module has ALREADY observed the root directory, and which object it observed. Neither can be
+// derived here — the walk sees only its own listing — and the first inverts what a failed listing
+// means (see the ENOENT branch below).
+function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = false, rootIdentity = null } = {}) {
   walk(rootDir, '');
 
+  // A directory whose identity cannot be re-confirmed: a hazard naming the directory for a child
+  // (containment then refuses everything beneath it), and a throw for the root, which no relative
+  // path can name. Returns true when the caller must stop.
+  function identityBroke(absDir, relPrefix, expectedId) {
+    const now = assetDirIdentity(absDir, deps, { allowSymlink: relPrefix === '' });
+    if (now.ok && now.id === expectedId) return false;
+    // The two failures are different facts and must not share a sentence: one says this module
+    // could not establish what is at that path, the other says it established it and it is not the
+    // object that was there before. Reporting a substitution for a path that was never a usable
+    // directory in the first place is the same confident-wrong-diagnosis shape this release has
+    // been closing all along.
+    const reason = now.ok ? 'inspection_failure' : now.reason;
+    if (relPrefix === '') {
+      throw new Error(now.ok
+        ? 'the asset directory was replaced by a different directory during this run'
+        : `the asset directory could not be confirmed (${reason})`);
+    }
+    onSkipped?.(relPrefix, reason);
+    return true;
+  }
+
   function walk(absDir, relPrefix) {
+    let expectedId = null;
     if (relPrefix !== '') {
-      const before = assetDirHazardReason(absDir, deps);
-      if (before !== null) {
-        onSkipped?.(relPrefix, before);
+      const before = assetDirIdentity(absDir, deps, { allowSymlink: false });
+      if (!before.ok) {
+        onSkipped?.(relPrefix, before.reason);
         return;
       }
+      expectedId = before.id;
+    } else if (rootIdentity !== null) {
+      expectedId = rootIdentity;
+      if (identityBroke(absDir, relPrefix, expectedId)) return;
     }
     let entries;
     try {
@@ -1749,6 +1830,11 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
       }
       throw err;
     }
+    // [round 22] The observation codex asked for and round 21 did not have: between the listing and
+    // any use of it. A swap that lands during the `readdirSync` above is caught here, before a
+    // single entry out of the replacement is hashed — the earlier version could only report it
+    // afterwards, with the foreign hashes already in the map.
+    if (expectedId !== null && identityBroke(absDir, relPrefix, expectedId)) return;
     for (const dirent of entries) {
       const childAbs = posixJoin(absDir, dirent.name);
       const childRel = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
@@ -1765,15 +1851,12 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
       // would have to look up to learn is not a distinction.
       onSkipped?.(childRel, type);
     }
-    // The closing half of the bracket (see this function's own comment). Anything already visited
-    // out of this listing stays in the caller's map — deleting it would only turn a substitution
-    // back into an ABSENCE, which is the exact reading this whole class of defect travels on. The
-    // hazard is recorded against the DIRECTORY instead, and W5's containment match (round 17)
-    // refuses every key beneath it, stale hash or not.
-    if (relPrefix !== '') {
-      const after = assetDirHazardReason(absDir, deps);
-      if (after !== null) onSkipped?.(relPrefix, after);
-    }
+    // The last of the three observation points. Anything already visited out of this listing stays
+    // in the caller's map — deleting it would only turn a substitution back into an ABSENCE, which
+    // is the exact reading this whole class of defect travels on. The hazard is recorded against the
+    // DIRECTORY instead, and W5's containment match (round 17) refuses every key beneath it, stale
+    // hash or not.
+    if (expectedId !== null) identityBroke(absDir, relPrefix, expectedId);
   }
 }
 
@@ -1803,7 +1886,7 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
 // closing, and attributes the old bytes to the current build. So a hazard is no longer encoded as
 // an absence: it is returned separately, and W5 refuses any asset that was hazardous at either
 // point, because "we could not read this file then" is not evidence that it changed.
-function snapshotAssetHashes(assetDir, deps, { rootMustExist = false } = {}) {
+function snapshotAssetHashes(assetDir, deps, { rootMustExist = false, rootIdentity = null } = {}) {
   const hashes = Object.create(null);
   const hazards = [];
   walkRegularFiles(
@@ -1828,7 +1911,7 @@ function snapshotAssetHashes(assetDir, deps, { rootMustExist = false } = {}) {
     // A listed entry the walk would not even open is a hazard for the same reason: something is at
     // that path whose bytes this run could not establish.
     (relPath, kind) => hazards.push(`${relPath}:${kind}`),
-    { rootMustExist },
+    { rootMustExist, rootIdentity },
   );
   hazards.sort();
   return { hashes, hazards };

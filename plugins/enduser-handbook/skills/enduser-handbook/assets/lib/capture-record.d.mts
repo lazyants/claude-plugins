@@ -159,11 +159,17 @@ export interface RunRecord {
   // path, and the assets it hides are keyed beneath it. Anything reading these lists must match by
   // containment (`key === path || key.startsWith(path + '/')`), never by equality — W5 matched by
   // equality for a round, and a symlinked `screens/` therefore never refused `screens/a.png`.
-  // [round 21] A directory is named for one further reason: it is checked immediately before AND
-  // immediately after its own listing, so a subdirectory REPLACED by a symlink mid-walk is refused
-  // as `<dir>:symlink` even though the parent's dirent had truthfully reported a directory. On that
-  // path the map may still hold hashes keyed beneath the refused directory — read through the
-  // containment rule above, they are refused; read by equality, they are silently trusted.
+  // [round 21/22] A directory is named for one further reason: its IDENTITY (`dev`/`ino`) is checked
+  // before its listing, between the listing and any use of it, and after its entries are processed.
+  // A subdirectory replaced mid-walk is refused — `<dir>:symlink` when the replacement is a symlink,
+  // `<dir>:inspection_failure` when it is a different ordinary directory, which a directory-vs-type
+  // check could not see at all. On the third of those paths the map may still hold hashes keyed
+  // beneath the refused directory: they are deliberately retained, and read through the containment
+  // rule above they are refused; read by EQUALITY they are silently trusted.
+  // Stated because a consumer may not assume more than this buys: a substitution that lands between
+  // a parent's listing and the child's own first observation cannot be detected through this seam at
+  // all, since a `Dirent` reports a name and a type and no inode. The asset ROOT is not subject to
+  // that gap — its identity is supplied by the caller from gate 3's own observation.
   // [round 17] Each member is VALIDATED, not merely typed: a member with no colon, an empty path, a
   // `.`/`..`/empty segment, or a reason outside the five words above makes the whole record
   // `bad_chapter_hazards:<field>`. That is deliberately fail-closed — an unreadable member was
@@ -439,6 +445,15 @@ export interface LstatResultLike {
   isSymbolicLink(): boolean;
   isDirectory(): boolean;
   isFile(): boolean;
+  // [round 22] The asset walk compares directory IDENTITY across its own listing, not merely
+  // directory-ness: two `lstat`s that both answer "directory" say nothing about it being the SAME
+  // directory, so a subdirectory replaced by a DIFFERENT ordinary directory passed a type-only
+  // check with a foreign hash and no hazard (codex produced that as executed evidence). `dev`/`ino`
+  // are the identity, and gate 3's observation of an asset root is carried forward as the same
+  // pair. A result that cannot answer with two numbers is a hazard, never a guess — so an
+  // implementation omitting them degrades to a refusal rather than to a silent pass.
+  dev: number;
+  ino: number;
 }
 
 /** The subset of `fs.Stats` `fstatSync`'s result is actually read through — `openLeafNoFollow` (capture-record.mjs, gate 6) calls only `stat.isFile()` and reads `stat.nlink`. The sole call site. */

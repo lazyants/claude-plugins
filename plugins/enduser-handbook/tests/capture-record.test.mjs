@@ -2022,15 +2022,17 @@ test('walk: a subdirectory swapped for a symlink during its OWN listing is still
     );
     assert.deepEqual(opened.runState.opening_asset_hazards.items, ['screens:symlink']);
 
-    // And the containment match is what makes that hazard cover the key the map still holds.
-    const held = Object.keys(opened.runState.opening_assets.items);
-    for (const key of held) {
-      assert.equal(
-        key === 'screens' || key.startsWith('screens/'),
-        true,
-        `'${key}' survived under no hazard — the containment argument does not cover it`,
-      );
-    }
+    // [round 22] The check between the listing and its use means nothing out of the replacement is
+    // ever hashed here — strictly better than reporting it afterwards, which is what round 21 could
+    // do. Pinned as an exact key set: the earlier version of this assertion iterated the retained
+    // keys without ever asserting there were any, so a mutant that emptied the map left the loop
+    // running zero times and the test green (codex round 22, MINOR). A loop that runs zero times
+    // prints exactly what a passing one prints.
+    assert.deepEqual(
+      Object.keys(opened.runState.opening_assets.items),
+      [],
+      'a substitution caught between the listing and its use must contribute NO hash at all',
+    );
   });
 });
 
@@ -2102,13 +2104,286 @@ test('openCaptureRun: an asset root that is a regular FILE is refused, not read 
     const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
     assert.equal(opened.ok, false, 'a root that cannot be listed must not open as an empty baseline');
     assert.equal(opened.halts[0].halt, 'provenance_hazard');
-    assert.match(opened.halts[0].message, /ENOTDIR/);
     assert.match(opened.halts[0].message, /items/);
+    // [round 22] The message must say this path could not be CONFIRMED as the directory gate 3
+    // observed — not that it was replaced. Nothing replaced it; it was a regular file the whole
+    // time, and "replaced" would be a confident wrong diagnosis of the operator's actual situation.
+    assert.match(opened.halts[0].message, /could not be confirmed \(inspection_failure\)/);
+    assert.doesNotMatch(opened.halts[0].message, /replaced/);
     assert.equal(
       nodeFs.existsSync(tokenPathFor(profile)),
       false,
       'the reservation must be released on this exit like every other pre-commit halt',
     );
+  });
+});
+
+// [round 22] The third observation point, and the only window in which a hash is RETAINED under a
+// hazard: the substitution lands while the listing's entries are being processed, so the real bytes
+// are already hashed when it is noticed. They are deliberately kept — deleting them would turn a
+// substitution back into an ABSENCE, which is the reading this whole defect class travels on — and
+// the hazard on the directory is what refuses them, through W5's containment match. Both halves are
+// asserted as exact values, not as an iteration over a list that may be empty.
+test('walk: a subdirectory swapped while its entries are being processed keeps the real hash under a hazard', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    const screens = join(assetDir, 'screens');
+    nodeFs.mkdirSync(screens, { recursive: true });
+    nodeFs.writeFileSync(join(screens, 'a.png'), 'the real asset');
+    const outside = join(dir, 'outside');
+    nodeFs.mkdirSync(outside, { recursive: true });
+    nodeFs.writeFileSync(join(outside, 'a.png'), 'bytes from a tree this chapter does not own');
+
+    // The swap fires from the leaf open itself — after the real descriptor is handed back, so the
+    // bytes hashed are genuinely the real ones, and the directory is a symlink by the time the
+    // walk looks again.
+    let swapped = false;
+    const deps = depsWithOverride({
+      openSync: (p, ...rest) => {
+        const fd = nodeFs.openSync(p, ...rest);
+        if (String(p) === join(screens, 'a.png') && !swapped) {
+          nodeFs.renameSync(screens, join(dir, 'screens-moved-away'));
+          nodeFs.symlinkSync(outside, screens);
+          swapped = true;
+        }
+        return fd;
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.equal(swapped, true, 'the leaf was never opened — this fixture cannot reach the condition');
+    assert.equal(
+      nodeFs.lstatSync(screens).isSymbolicLink(),
+      true,
+      'the subdirectory was never replaced — this fixture cannot reach the condition',
+    );
+
+    assert.deepEqual(opened.runState.opening_asset_hazards.items, ['screens:symlink']);
+    const realDigest = `sha256:${createHash('sha256').update('the real asset').digest('hex')}`;
+    assert.deepEqual(
+      Object.keys(opened.runState.opening_assets.items),
+      ['screens/a.png'],
+      'the hash gathered before the substitution was noticed must be RETAINED — deleting it would turn a substitution back into an absence',
+    );
+    assert.equal(
+      opened.runState.opening_assets.items['screens/a.png'],
+      realDigest,
+      'and it must be the REAL bytes, hashed through the descriptor opened before the swap',
+    );
+    // The retention is only safe because the hazard covers the key by containment.
+    assert.equal('screens/a.png'.startsWith('screens/'), true);
+  });
+});
+
+// [round 22 BLOCKER] The round-21 bracket compared directory-NESS, and codex produced the gap as
+// executed evidence: two `lstat`s can both answer "directory" while naming two DIFFERENT
+// directories. Replacing `screens/` with another ordinary directory therefore returned a foreign
+// hash with an empty hazard list — a silent substitution through a guard written to stop exactly
+// that. Type-equality was never the property being asserted; identity was.
+test('walk: a subdirectory replaced by a DIFFERENT ordinary directory is a hazard, not a silent substitution', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    const screens = join(assetDir, 'screens');
+    nodeFs.mkdirSync(screens, { recursive: true });
+    nodeFs.writeFileSync(join(screens, 'a.png'), 'the real asset');
+    const decoy = join(dir, 'decoy');
+    const foreign = 'bytes from a directory this chapter does not own';
+    nodeFs.mkdirSync(decoy, { recursive: true });
+    nodeFs.writeFileSync(join(decoy, 'a.png'), foreign);
+
+    // A real directory swapped for a real directory — no symlink anywhere, which is precisely why a
+    // type check cannot see it. The swap lands during `screens`'s OWN listing, which is the window
+    // the three observation points cover; see the walk's comment for the one they cannot.
+    let swapped = false;
+    const deps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        const listed = nodeFs.readdirSync(p, opts);
+        if (p === screens && opts?.withFileTypes && !swapped) {
+          nodeFs.renameSync(screens, join(dir, 'screens-moved-away'));
+          nodeFs.renameSync(decoy, screens);
+          swapped = true;
+        }
+        return listed;
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.equal(swapped, true, 'the child listing never ran — this fixture cannot reach the condition');
+    assert.equal(
+      nodeFs.lstatSync(screens).isDirectory(),
+      true,
+      'the replacement must itself be an ordinary DIRECTORY, or a type check would have caught it',
+    );
+    assert.equal(
+      nodeFs.lstatSync(screens).isSymbolicLink(),
+      false,
+      'a symlink here would make this a re-run of the round-21 test, not the identity case',
+    );
+
+    const foreignDigest = `sha256:${createHash('sha256').update(foreign).digest('hex')}`;
+    assert.equal(
+      Object.values(opened.runState.opening_assets.items).includes(foreignDigest),
+      false,
+      'bytes from a substituted directory were hashed as this chapter\'s own asset',
+    );
+    assert.deepEqual(opened.runState.opening_asset_hazards.items, ['screens:inspection_failure']);
+  });
+});
+
+// [round 22] The fail-closed half of the identity rule, which had no test until a mutant that
+// deleted it killed nothing. An `lstat` that cannot answer with two numbers must refuse: without
+// this, a caller on the pre-round-22 declaration compares `undefined` to `undefined` at every
+// observation point, they compare EQUAL, and every substitution passes — a guard that reports
+// success precisely because it learned nothing.
+test('walk: a subdirectory whose lstat cannot report identity is refused, not silently walked', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(join(assetDir, 'screens'), { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'screens', 'a.png'), 'the real asset');
+
+    const deps = depsWithOverride({
+      // Exactly the pre-round-22 declaration: the three predicates, no `dev`, no `ino`.
+      lstatSync: (p) => {
+        const st = nodeFs.lstatSync(p);
+        return {
+          isSymbolicLink: () => st.isSymbolicLink(),
+          isDirectory: () => st.isDirectory(),
+          isFile: () => st.isFile(),
+        };
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(
+      opened.runState.opening_asset_hazards.items,
+      ['screens:inspection_failure'],
+      'an identity this module cannot read is uncertainty, and uncertainty is a hazard rather than a pass',
+    );
+    assert.deepEqual(
+      Object.keys(opened.runState.opening_assets.items),
+      [],
+      'nothing under an unverifiable directory may enter the snapshot',
+    );
+  });
+});
+
+// [round 22 BLOCKER, the same defect at the ROOT] Round 21 exempted the asset root from the bracket,
+// reasoning that gate 3 permits a symlinked root resolving inside `capture.output_dir` — true, and
+// beside the point: gate 3 validated the object that was there THEN. Replace the root after it and
+// the walk follows the replacement, hashes an outside tree, and records it. The identity gate 3
+// observed is carried forward now, so the root may be a symlink but may not become a different one.
+test('openCaptureRun: an asset root replaced by a symlink to an outside tree after validation halts', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'previous-build-bytes');
+    const outside = join(dir, 'outside');
+    nodeFs.mkdirSync(outside, { recursive: true });
+    nodeFs.writeFileSync(join(outside, 'a.png'), 'bytes from a tree this chapter does not own');
+
+    // The substitution lands after gate 3 and before the opening snapshot: gate 3 runs during
+    // `openCaptureRun`, and the first thing the snapshot does is list the root.
+    let swapped = false;
+    const deps = depsWithOverride({
+      lstatSync: (p) => {
+        const st = nodeFs.lstatSync(p);
+        if (p === assetDir && !swapped) {
+          nodeFs.renameSync(assetDir, join(dir, 'items-moved-away'));
+          nodeFs.symlinkSync(outside, assetDir);
+          swapped = true;
+        }
+        return st;
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(swapped, true, 'gate 3 never lstat-ed the asset root — this fixture cannot reach the condition');
+    assert.equal(
+      nodeFs.lstatSync(assetDir).isSymbolicLink(),
+      true,
+      'the root was never replaced by a symlink — this fixture cannot reach the condition',
+    );
+    assert.equal(opened.ok, false, 'a root that became a different object must not be walked');
+    assert.equal(opened.halts[0].halt, 'provenance_hazard');
+    assert.match(opened.halts[0].message, /replaced by a different directory/);
+  });
+});
+
+// The legitimate half of the same rule, which the check above must NOT break: a symlinked asset root
+// that resolves inside `capture.output_dir` is a topology gate 3 deliberately permits, and it is
+// identified by the LINK's own inode at both observation points. It must still capture normally.
+test('openCaptureRun: a legitimately symlinked asset root inside the output dir still snapshots', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const real = join(profile.capture.output_dir, 'real-items');
+    nodeFs.mkdirSync(real, { recursive: true });
+    nodeFs.writeFileSync(join(real, 'a.png'), 'previous-build-bytes');
+    nodeFs.symlinkSync(real, join(profile.capture.output_dir, 'items'));
+
+    assert.equal(
+      nodeFs.lstatSync(join(profile.capture.output_dir, 'items')).isSymbolicLink(),
+      true,
+      'the asset root must really be a symlink, or this test says nothing about the supported topology',
+    );
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(opened.runState.opening_asset_hazards.items, []);
+    assert.deepEqual(Object.keys(opened.runState.opening_assets.items), ['a.png']);
+  });
+});
+
+// [round 22] `rootIdentity` and `rootMustExist` are two fallbacks, not one: a caller whose `lstat`
+// cannot answer with `dev`/`ino` gets no identity pin, and the existence rule must still refuse. The
+// declaration requires both fields now, so this is the degraded-caller path — the same shape round
+// 19 established for `isFile`, and the reason a missing identity must never read as "no substitution
+// detected".
+test('openCaptureRun: an lstat that cannot report identity still refuses a root that vanished', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'stale-from-the-previous-build');
+
+    const deps = depsWithOverride({
+      // Exactly the pre-round-22 declaration: the three predicates and nothing else.
+      lstatSync: (p) => {
+        const st = nodeFs.lstatSync(p);
+        return {
+          isSymbolicLink: () => st.isSymbolicLink(),
+          isDirectory: () => st.isDirectory(),
+          isFile: () => st.isFile(),
+        };
+      },
+      readdirSync: (p, opts) => {
+        if (p === assetDir) {
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, false, 'an unavailable identity must not soften the existence rule');
+    assert.equal(opened.halts[0].halt, 'provenance_hazard');
+    assert.match(opened.halts[0].message, /ENOENT/);
   });
 });
 
