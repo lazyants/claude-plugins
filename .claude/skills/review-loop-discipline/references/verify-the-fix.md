@@ -14,7 +14,7 @@
 - [RED evidence read from a MOVING ref stops being evidence at the commit](#red-evidence-that-reads-its-before-from-a-moving-ref-stops-being-evidence-at-the-commit)
 - [A staged RED gate must be SATISFIABLE by its owner](#a-staged-red-gate-must-be-satisfiable)
 - [A coverage claim needs the same evidence as the thing it covers](#a-coverage-claim-needs-the-same-evidence)
-- [A probe that says the same thing before and after the fix is not measuring the fix](#a-probe-that-says-the-same-thing-before-and-after-the-fix)
+- [A probe that says the same thing before and after the fix is INCONCLUSIVE, not exonerated](#a-probe-that-says-the-same-thing-before-and-after-the-fix)
 - [Revert the whole file — the pins that SURVIVE say it was never guarded](#revert-the-whole-file-and-read-which-pins-survive)
 - [A never-varied argument is an untested argument — instrument, don't re-review](#a-never-varied-argument-is-an-untested-argument)
 - [A pin can CEMENT a wrong claim — pinning is not review](#a-pin-can-cement-a-wrong-claim)
@@ -321,9 +321,20 @@ assertion does not catch this, because the hook DID fire — somewhere else.
 
 **Run the probe against the pre-fix commit AND the post-fix commit before believing either answer.**
 A detached worktree at each, or the module copied out with `git show <sha>:<path>`, is minutes of
-work. Identical verdicts at both mean the probe is not discriminating, whatever it reports; that
-comparison is the only thing that separates "the fix does not work" from "this never reached the
-code under test", and those two conclusions send you in opposite directions.
+work. A verdict that CHANGES across the pair is the probe discriminating, and its reading is worth
+something.
+
+**An identical verdict at both is INCONCLUSIVE, and stopping there is the trap.** A probe that never
+reached the code under test and a fix that genuinely does not work produce the same two readings;
+the comparison cannot tell them apart, and the two conclusions send you in opposite directions.
+Guessing "faulty probe" is how a real failed fix gets dismissed — the more comfortable guess, and
+the one whose cost lands after the release.
+
+What separates them is independent evidence that the staged condition was REACHED: a trace or
+counter of the target call showing the seam fired inside the window that matters — not merely that
+it fired at all — or a positive control, a commit where the defect is known present and this probe
+is known to catch it (usually the fix reverted by hand). Get one of those before naming either
+diagnosis.
 
 The generator is an interposition seam placed by ORDINAL — "the Nth call of `realpathSync` on this
 path", "the first `openSync` of the token" — when an earlier CALLER owns that position. Verified:
@@ -331,8 +342,10 @@ a probe removing a symlink at the first resolution of a configured path had its 
 ownership gate that runs before the function under test, so the sequence it staged never occurred;
 it returned the same ok-with-foreign-bytes result at the two pre-fix commits AND at the commit that
 had just closed the defect. Read alone, that says a just-shipped fix does not work — a false result
-about one's own work, from a probe whose hook fired every time. Re-keyed to the second resolution it
-separated the three commits immediately.
+about one's own work, from a probe whose hook fired every time. The reachability evidence that broke
+the tie was COUNTING the resolutions of that path in one run: there were two, and the ownership gate
+owned the first. Re-keyed to the second, the probe separated the three commits immediately — and
+only that re-keyed run licensed the conclusion, not the three matching verdicts before it.
 
 Its permanent-fixture twin: a seam keyed on the CONFIGURED path string while the module reads the
 RESOLVED one interposes on nothing at all. That fixture passed against the unfixed module because an
