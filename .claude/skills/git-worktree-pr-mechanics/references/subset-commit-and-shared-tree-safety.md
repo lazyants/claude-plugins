@@ -18,6 +18,31 @@ When a file has pending unrelated uncommitted edits (someone else's WIP, a queue
 
 Cleaner than `git add -p` when scripted — interactive git isn't available in this env. Prefer this over `git add -A`; commit only your own files.
 
+## `git commit` commits the whole INDEX — DISJOINT files are not enough, use `git commit -- <pathspec>`
+
+The section above guards a peer staging content on the SAME path. This one needs no path overlap at
+all, so that guard never fires. `git add <my files>` followed by a bare `git commit` commits the
+entire index, including whatever a peer staged in the window between your two commands. Two agents
+editing completely disjoint files still collide, because the index — not just the worktree — is the
+shared surface.
+
+**Fix: `git commit -- <pathspec>`.** With a pathspec, git commits from the WORKING TREE for those
+paths and ignores the rest of the index, so the race is structurally unreachable. Make it the house
+rule for any tree with concurrent agents; `git add` + `git commit` is the unsafe pair.
+
+Verified 2026-07-25 (literary-translator 1.16.0, three agents, one worktree). One agent staged four
+reference docs, confirmed `git diff --cached` showed exactly those four, and its `git commit` took
+five — a teammate had staged a template in between. Nothing in its own pathspec protected it.
+
+**The recovery leaves a second, quieter hazard.** Splitting the commit back out (`git reset --soft`,
+`git restore --staged` the foreign path) is content-safe — verify by sha256 both sides — but it
+returns the peer's work to UNSTAGED, a different state from the one they left it in. That peer was
+mid-verification, read a sha during the window, and reported its work as committed. It was not: the
+work sat uncommitted in the tree while HEAD still carried the stale text it had just corrected, one
+`git checkout` from destruction. So: after any index surgery in a shared tree, TELL the owner what
+state their work is now in — and treat any git state a peer reports from a shared tree as a snapshot
+of a race, re-reading it yourself before acting on it.
+
 ## A failed pathspec-scoped `stash push` leaves the stack unchanged — the next `pop` grabs a foreign entry
 
 Verified 2026-07-20 (literary-translator 1.11.0, three parallel sessions sharing one worktree). A teammate ran `git stash push -- <paths> -m "..."` with a malformed pathspec. It errored and stashed **nothing** — the stack was untouched. The teammate then ran `git stash pop` expecting to restore its own work, and instead popped `stash@{0}` — an unrelated entry from a **different branch and a different session** — producing `UU` merge conflicts in three files it did not own.

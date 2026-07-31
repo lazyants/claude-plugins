@@ -7,6 +7,7 @@
 - [A rebuild can regress what the original got right](#a-rebuild-can-regress)
 - [A measured threshold and its gate must share ONE predicate, as code](#a-measured-threshold-and-its-gate-must-share-one-predicate-as-code)
 - [State what your proof GUARANTEES — check the axis](#state-what-your-proof-guarantees)
+- [A measured count is a property of the SAMPLE — publish the condition](#a-measured-count-is-a-property-of-the-sample--publish-the-condition-not-the-number)
 - [Source-completeness before trusting a rebuild](#source-completeness)
 - [Cross-check your own artifacts](#cross-check-your-own-artifacts)
 - [Reproduce the gate's clean env](#reproduce-the-gates-clean-env)
@@ -81,6 +82,44 @@ manufactures a middle that does not exist. Worked example, with the corrected ba
 ## State what your proof guarantees
 
 A completeness "proof" can validate the WRONG axis. An anchor gate that proves *every emitted backlink resolves to a real heading* (no DANGLING links) does NOT prove *every mention is found* (no MISSING mentions) — these are orthogonal. Before claiming "complete", state in ONE sentence exactly what your check GUARANTEES, and confirm it is the SAME axis as the requirement.
+
+## A measured count is a property of the SAMPLE — publish the condition, not the number
+
+An honest benchmark becomes a false claim the moment it is restated as a rule. The count is
+correct for the inputs it ran on; the rule generalises it to inputs it never saw. The tell is that
+nothing looks wrong — the measurement is real, the `n` is stated, and the prose beside it still
+overclaims.
+
+Verified 2026-07-25 (literary-translator, sentinel gluing). Measured that 15 of 16 characters
+gluing prose to a verdict sentinel defeated a whole-line equality check, and wrote the rule as
+"**any** character glues it". False: the mechanism is `trim()` on each LF-delimited line, so the
+count depends on the fixture SHAPE, not the character. Same function, same 16 characters:
+
+| reply shape | hides the sentinel |
+|---|---|
+| `prose + GLUE + SENTINEL` | 15/16 — prose is on the line regardless, so `trim()` never gets a chance |
+| `GLUE + SENTINEL`, no prose | 7/16 — `trim()` strips 9 of them and those are seen correctly |
+
+The canonical, domain-side write-up of that measurement lives in
+`plugins/literary-translator/skills/literary-translator/references/canon-and-glossary.md` (search
+`15 of 16 over \`GLUE_CHARS\``); this section exists to state the REVIEW rule the measurement
+produced, not to be a second copy of it.
+
+Costs that a condition-first statement would have avoided: the overclaim propagated into a PR body,
+a shipped code comment and two teammate briefs; one brief instructed a fixture design that could not
+have discriminated anything; and two artifacts that were each correct — a comment listing NBSP among
+the defeaters, a doc saying NBSP is trimmed and still matches — read as a contradiction until both
+shapes were executed side by side.
+
+So, before a measured number goes into prose: **state the condition the mechanism actually turns on,
+and name the sample the count came from.** Four different fixture sets in this one round gave 11/12,
+14/16, 15/16 and 16/16 — every one correct, and any two of them quoted without their sets look like
+a defect. If two artifacts must both carry a count, each names its own sample; if only one may, it
+is the pinned test, and prose points at it rather than restating the number.
+
+Corollary for the "obvious" member of a set: **verify membership, do not infer it from the name.**
+JS `trim()` strips U+2028 and U+2029 but NOT U+0085 NEL, which reads exactly like a line break. A
+negative control built on the plausible-looking member silently proves nothing.
 
 ## Source-completeness
 
