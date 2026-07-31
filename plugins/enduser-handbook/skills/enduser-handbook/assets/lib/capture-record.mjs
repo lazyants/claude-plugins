@@ -699,17 +699,15 @@ function hashFileNoFollow(absPath, deps) {
 // function now, so the next site to report an unreadable leaf inherits the correct form rather than
 // re-deriving it. `absent` has no reason and is its own answer, which is what the fallback is for.
 function unreadableWord(inspection) {
-  // [round 19] `absent` has no `reason` and its kind is the word an operator needs — but inside the
-  // asset snapshot it means "listed, then gone", so it is named for what happened rather than for
-  // what was found. Everywhere else `absent` never reaches a hazard list.
-  if (inspection.kind === 'absent') return 'vanished';
   return inspection.reason ?? inspection.kind;
 }
 
 /**
- * Every word an asset-tree hazard can be reported under. The walk contributes `symlink` and
- * `non_regular`; the leaf inspection contributes those two plus `hard_link` and
- * `inspection_failure`. Pinned against the real producers by test rather than by inspection, since
+ * Every word an asset-tree hazard can be reported under. The walk contributes `symlink`,
+ * `non_regular` and `vanished` (a listed entry that was gone before it could be inspected); the
+ * leaf inspection contributes `symlink`, `non_regular`, `hard_link`, `inspection_failure`, and
+ * `vanished` for the same reason one layer down. Pinned against the real producers by test rather
+ * than by inspection, since
  * a word missing from here would make legitimate records unreadable — the reader below rejects a
  * record carrying anything else, and that rejection refuses every chapter in the run.
  */
@@ -1628,8 +1626,17 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped) {
       entries = deps.readdirSync(absDir, { withFileTypes: true });
     } catch (err) {
       const code = errProp(err, 'code');
-      // ENOENT: nothing is there. The one condition this module has always called an absence.
-      if (code === 'ENOENT') return;
+      // [round 20] ENOENT returned unconditionally here while the ENOTDIR branch just below
+      // already drew the distinction — the same rule, applied to one error code and not its
+      // neighbour. A listed SUBDIRECTORY that vanishes before its own listing took everything
+      // under it out of the snapshot with no hazard, and at the opening observation point those
+      // absent keys are read as "brand-new this run". At the ROOT it is the opposite: an asset
+      // directory legitimately does not exist before the first capture, and it is nameable by no
+      // relative path, so that case stays silent — which is what ENOENT is here for.
+      if (code === 'ENOENT') {
+        if (relPrefix !== '') onSkipped?.(relPrefix, 'vanished');
+        return;
+      }
       // [round 18] ENOTDIR used to return here too, silently, and that was the round-17 defect
       // through a different door: a subdirectory that was a directory when its type was decided and
       // a regular file a moment later took everything beneath it out of the snapshot with no
@@ -1713,7 +1720,13 @@ function snapshotAssetHashes(assetDir, deps) {
       // over stale bytes this split was created to prevent, reached through a race instead of
       // through a hazard. A genuinely new file is never listed at open, so it never arrives here
       // and its key is simply missing from the map; that case is untouched.
-      else hazards.push(`${relPath}:${unreadableWord(hashed)}`);
+      // [round 20] `vanished` is decided HERE, not inside `unreadableWord`. It is true only
+      // because this callback runs solely for entries the walk LISTED; the other three callers read
+      // a path derived from a manifest or an extraction with no listing behind it, and there an
+      // `absent` means the file was never published — reporting a mid-run disappearance would be a
+      // confident, wrong diagnosis. Context-specific meaning does not belong in a context-free
+      // helper, which is what putting it there had made of it.
+      else hazards.push(`${relPath}:${hashed.kind === 'absent' ? 'vanished' : unreadableWord(hashed)}`);
     },
     // A listed entry the walk would not even open is a hazard for the same reason: something is at
     // that path whose bytes this run could not establish.

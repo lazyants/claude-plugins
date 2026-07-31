@@ -1820,6 +1820,50 @@ test('the opening snapshot: a listed asset that disappears before it can be read
   });
 });
 
+// [round 20 BLOCKER] Round 18 gave the walk's recursive catch a hazard for ENOTDIR and a relPrefix
+// check to keep the root out of it, and left ENOENT returning unconditionally two lines above — the
+// same distinction, drawn for one error code and not its neighbour. A listed subdirectory that
+// vanishes before its own listing therefore took everything under it out of the snapshot with no
+// hazard, and at the opening observation point those absent keys are read as "brand-new this run".
+test('walk: a listed subdirectory that vanishes before its own listing is a hazard', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(join(assetDir, 'screens'), { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'screens', 'a.png'), 'stale-from-the-previous-build');
+
+    const deps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        if (String(p).endsWith('/screens')) {
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], ['screens:vanished']);
+    assert.deepEqual(Object.keys(opened.runState.opening_assets['items']), []);
+  });
+});
+
+// The root call is the case that ENOENT exists for, and it must stay silent: an asset directory
+// legitimately does not exist before the first capture, and it is nameable by no relative path.
+test('walk: the ROOT asset directory not existing yet is still an ordinary first capture', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], [],
+      'a first capture must not be reported as a mid-run disappearance');
+    assert.deepEqual(Object.keys(opened.runState.opening_assets['items']), []);
+  });
+});
+
 // [round 19] The CLOSING half of the same phase distinction, which is the half that must NOT get
 // stricter. A capture tool that rewrites an asset by unlink-then-create races the closing snapshot,
 // and before `vanished` existed that produced an absent closing key, which rule 3 refuses as
@@ -1897,15 +1941,15 @@ test('the opening snapshot: an UNKNOWN-typed entry that vanishes before its lsta
   });
 });
 
-// [round 19 IMPORTANT] The declaration says an `lstatSync` result need only implement
-// `isSymbolicLink()` and `isDirectory()`. Round 18's fallback called `isFile()` on it
-// unconditionally, so a mock conforming exactly to the shipped contract crashed the snapshot with
-// `st.isFile is not a function`. The unknown-dirent test could not catch it: it uses a real
-// `fs.Stats`, which has every predicate. A caller writing to the declaration is the one caller this
-// module cannot see, so the contract is widened AND the runtime no longer assumes a predicate it
-// did not declare — a missing one is uncertainty, which is a hazard, never a guess and never a
-// throw out of a function whose contract is a returned result.
-test('the opening snapshot: an lstat result implementing only the DECLARED predicates does not crash the run', () => {
+// [round 20 IMPORTANT] Round 19's two seam tests each claimed a declaration-minimal shape and each
+// used something else: the lstat mock omitted `isFile()`, which the declaration now REQUIRES, and
+// the dirent was a real `fs.Dirent`, which carries the four predicates the runtime is supposed to
+// work without. One tested a non-conforming mock while claiming a conforming one; the other could
+// not reach the optional-call path at all. Both directions are separated here — a caller writing to
+// the CURRENT declaration must work, and a caller still on the older, narrower one must degrade
+// rather than crash. Nothing in this repository type-checks these declarations, so these tests are
+// the only thing that makes either statement false when it stops being true.
+test('the opening snapshot: an lstat result implementing exactly the CURRENT declaration resolves the type', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
     const entry = { slug: 'items' };
@@ -1913,15 +1957,38 @@ test('the opening snapshot: an lstat result implementing only the DECLARED predi
     nodeFs.mkdirSync(assetDir, { recursive: true });
     nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
 
-    const realDirents = nodeFs.readdirSync(assetDir, { withFileTypes: true });
-    const Dirent = Object.getPrototypeOf(realDirents[0]).constructor;
     const deps = depsWithOverride({
-      readdirSync: (p, opts) => {
-        const real = nodeFs.readdirSync(p, opts);
-        if (!opts?.withFileTypes) return real;
-        return real.map((d) => new Dirent(d.name, 0, p));
+      readdirSync: unknownDirentReaddir({ minimal: false }),
+      // LstatResultLike, exactly: isSymbolicLink, isDirectory, isFile. Nothing else.
+      lstatSync: (p) => {
+        const real = nodeFs.lstatSync(p);
+        return {
+          isSymbolicLink: () => real.isSymbolicLink(),
+          isDirectory: () => real.isDirectory(),
+          isFile: () => real.isFile(),
+        };
       },
-      // Exactly the shipped declaration, nothing more.
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], [],
+      'a declaration-conforming lstat must resolve an unknown dirent to a real file, not to a hazard');
+    assert.deepEqual(Object.keys(opened.runState.opening_assets['items']), ['a.png']);
+  });
+});
+
+test('the opening snapshot: an lstat result on the OLDER two-predicate contract degrades to a hazard, never a crash', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const deps = depsWithOverride({
+      readdirSync: unknownDirentReaddir({ minimal: false }),
       lstatSync: (p) => {
         const real = nodeFs.lstatSync(p);
         return { isSymbolicLink: () => real.isSymbolicLink(), isDirectory: () => real.isDirectory() };
@@ -1930,9 +1997,29 @@ test('the opening snapshot: an lstat result implementing only the DECLARED predi
     });
 
     const opened = CR.openCaptureRun(profile, [entry], null, deps);
-    assert.equal(opened.ok, true, `a declaration-conforming lstat mock must not halt the run: ${JSON.stringify(opened)}`);
+    assert.equal(opened.ok, true, `a caller on the older contract must not halt the run: ${JSON.stringify(opened)}`);
     assert.deepEqual(opened.runState.opening_asset_hazards['items'], ['a.png:inspection_failure'],
       'an undeterminable type is uncertainty — a hazard — never a guess');
+  });
+});
+
+test('the opening snapshot: a DirentLike carrying only the three REQUIRED predicates never has the optional four called', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const deps = depsWithOverride({
+      readdirSync: unknownDirentReaddir({ minimal: true }),
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, `a minimal DirentLike must not halt the run: ${JSON.stringify(opened)}`);
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], []);
+    assert.deepEqual(Object.keys(opened.runState.opening_assets['items']), ['a.png']);
   });
 });
 
@@ -3770,6 +3857,30 @@ test('buildProvenanceReport (round 5, finding 4): a skipped-profile row carries 
 // (codex DO-NOT-SHIP blocker 4), so every buildProvenanceReport call needs a chapter file on disk
 // and an extractor that does not halt, even when the fixture's whole point is elsewhere.
 const emptyExpectedAssets = () => ({ ok: true, assets: [] });
+
+/**
+ * A `readdirSync` override reporting every entry as UV_DIRENT_UNKNOWN — all type predicates false.
+ * `minimal: true` returns DirentLike's REQUIRED members only, so the runtime cannot reach the four
+ * optional predicates; `minimal: false` returns a real `fs.Dirent` built with type 0, the faithful
+ * model of what such a filesystem actually hands back. [round 20] Round 19's tests used only the
+ * real Dirent while claiming a declaration-minimal shape, so the optional-call path was unreachable.
+ */
+function unknownDirentReaddir({ minimal }) {
+  return (p, opts) => {
+    const real = nodeFs.readdirSync(p, opts);
+    if (!opts?.withFileTypes) return real;
+    if (!minimal) {
+      const Dirent = Object.getPrototypeOf(real[0]).constructor;
+      return real.map((d) => new Dirent(d.name, 0, p));
+    }
+    return real.map((d) => ({
+      name: d.name,
+      isSymbolicLink: () => false,
+      isDirectory: () => false,
+      isFile: () => false,
+    }));
+  };
+}
 
 function writeChapterAt(profileLike, entry, content = '') {
   const chapterFile = join(profileLike.publish.chapters_dir, ...(entry.group !== undefined ? [entry.group] : []), `${entry.slug}.md`);

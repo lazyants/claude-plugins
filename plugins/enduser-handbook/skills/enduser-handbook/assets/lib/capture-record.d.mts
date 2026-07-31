@@ -152,7 +152,7 @@ export interface RunRecord {
   // `inspection_failure` or `vanished` (listed by the directory read, gone before it could be read
   // — uncertainty about something that WAS there, never an absence) — NOT the leaf inspection's
   // `kind`, which is the undiscriminating word
-  // `hazard` for every one of them. W5 splits at the LAST colon so a path containing one is
+  // `hazard` for all five. W5 splits at the LAST colon so a path containing one is
   // unambiguous. This declaration omitted them for a round while the writer persisted them, so a
   // consumer of `readRunRecordText` could neither inspect nor preserve them.
   // [round 17] That path is NOT necessarily an asset key: a refused DIRECTORY is named by its own
@@ -160,7 +160,7 @@ export interface RunRecord {
   // containment (`key === path || key.startsWith(path + '/')`), never by equality — W5 matched by
   // equality for a round, and a symlinked `screens/` therefore never refused `screens/a.png`.
   // [round 17] Each member is VALIDATED, not merely typed: a member with no colon, an empty path, a
-  // `.`/`..`/empty segment, or a reason outside the four words above makes the whole record
+  // `.`/`..`/empty segment, or a reason outside the five words above makes the whole record
   // `bad_chapter_hazards:<field>`. That is deliberately fail-closed — an unreadable member was
   // silently dropped before, and a dropped hazard is indistinguishable from no hazard, which is the
   // false-provenance path these lists exist to close. A hand-written record must satisfy this.
