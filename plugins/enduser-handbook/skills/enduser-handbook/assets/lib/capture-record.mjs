@@ -116,6 +116,28 @@ function isSegmentPrefixOf(a, b) {
   return true;
 }
 
+// Every catch in this module reads a caught value's `.message`/`.code`/`.reason` to build a halt
+// message or drive a control-flow decision (an errno comparison) — an assumption that the thrown
+// value is Error-shaped. JavaScript permits throwing ANY value (`throw null`, `throw 'oops'`,
+// `throw 42`), and every `deps.*` call in this file is a deliberately injectable seam (an
+// operator-supplied identity command, `randomUUID`, or any fs function a caller/test overrides), so
+// a caught value here is never guaranteed to be an object at all, let alone an Error. Before these
+// two helpers, `null.message`/`undefined.code` threw a SECOND, unrelated TypeError from inside the
+// very catch that exists to convert the FIRST throw into a halt (or an errno check) — the guard
+// failing at the one moment it exists for, reproduced by codex through `buildProvenanceReport`
+// (round 10, finding 1). Every property read off a caught `err` anywhere in this file goes through
+// one of these two now, never a raw `err.<name>` access.
+function errProp(err, name) {
+  return err !== null && typeof err === 'object' ? err[name] : undefined;
+}
+
+// The message-building fallback: `err.message` when present (read safely via `errProp`), else a
+// STRING form of whatever was actually thrown. Deliberately `String(err)`, never a template-literal
+// interpolation of `err` itself — `${sym}` throws for a raw `Symbol`, `String(sym)` does not.
+function describeThrown(err) {
+  return errProp(err, 'message') ?? String(err);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The filesystem seam. Every exported function takes `deps` last and defaults to this object; no
 // other place in this module references `node:fs`/`node:crypto`/`node:child_process` directly —
@@ -150,7 +172,7 @@ const defaultDeps = Object.freeze({
       const raw = execSync(command, { encoding: 'utf8' });
       return { ok: true, raw, detail: command };
     } catch (err) {
-      return { ok: false, detail: `${command}: ${err.message ?? String(err)}` };
+      return { ok: false, detail: `${command}: ${describeThrown(err)}` };
     }
   },
 });
@@ -495,7 +517,7 @@ function inspectDirComponent(absPath, deps) {
   try {
     st = deps.lstatSync(absPath);
   } catch (err) {
-    if (err.code === 'ENOENT') return { kind: 'absent' };
+    if (errProp(err, 'code') === 'ENOENT') return { kind: 'absent' };
     return { kind: 'hazard', reason: 'inspection_failure', path: absPath };
   }
   if (st.isSymbolicLink()) return { kind: 'hazard', reason: 'symlink', path: absPath };
@@ -514,7 +536,7 @@ function ensureDirComponent(absPath, deps) {
   try {
     deps.mkdirSync(absPath);
   } catch (err) {
-    if (err.code !== 'EEXIST') {
+    if (errProp(err, 'code') !== 'EEXIST') {
       return { ok: false, hazard: { kind: 'hazard', reason: 'inspection_failure', path: absPath } };
     }
   }
@@ -539,8 +561,8 @@ function openLeafNoFollow(absPath, flags, deps) {
   try {
     fd = deps.openSync(absPath, flags | fs.constants.O_NOFOLLOW);
   } catch (err) {
-    if (err.code === 'ENOENT') return { kind: 'absent' };
-    if (err.code === 'ELOOP') return { kind: 'hazard', reason: 'symlink', path: absPath };
+    if (errProp(err, 'code') === 'ENOENT') return { kind: 'absent' };
+    if (errProp(err, 'code') === 'ELOOP') return { kind: 'hazard', reason: 'symlink', path: absPath };
     return { kind: 'hazard', reason: 'inspection_failure', path: absPath };
   }
   let stat;
@@ -712,14 +734,15 @@ function canonicalizeForComparison(rawPath, deps) {
       const realSegments = normalizeSegments(rawSegments(real), true);
       return { ok: true, segments: realSegments.concat(tail) };
     } catch (err) {
-      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') {
+      const code = errProp(err, 'code');
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
         if (idx === 0) return { ok: true, segments: tail }; // nothing at all resolves; degrade gracefully
         tail = [segments[idx - 1], ...tail];
         idx -= 1;
         continue;
       }
       // ELOOP (a symlink cycle) or any other inspection failure — a hazard, not a value.
-      return { ok: false, reason: err.code === 'ELOOP' ? 'symlink_cycle' : 'inspection_failure', path: candidate };
+      return { ok: false, reason: code === 'ELOOP' ? 'symlink_cycle' : 'inspection_failure', path: candidate };
     }
   }
   return { ok: true, segments: tail };
@@ -816,7 +839,7 @@ function establishHierarchy(profileLike, deps) {
   try {
     deps.mkdirSync(profileLike.publish.chapters_dir, { recursive: true });
   } catch (err) {
-    if (err.code !== 'EEXIST') {
+    if (errProp(err, 'code') !== 'EEXIST') {
       return { ok: false, hazard: { kind: 'hazard', reason: 'inspection_failure', path: profileLike.publish.chapters_dir } };
     }
   }
@@ -874,7 +897,7 @@ function longestExistingAncestor(rootSegs, pathSegs, deps) {
     try {
       deps.lstatSync(candidate);
     } catch (err) {
-      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') break;
+      if (errProp(err, 'code') === 'ENOENT' || errProp(err, 'code') === 'ENOTDIR') break;
       return { ok: false, error: err };
     }
     lastExistingIdx = idx;
@@ -1001,10 +1024,11 @@ function validateEntriesForCapture(profileLike, entries, deps) {
     try {
       deps.lstatSync(assetDir);
     } catch (err) {
-      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') {
+      const code = errProp(err, 'code');
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
         assetDirExists = false;
       } else {
-        return haltResult('provenance_hazard', `cannot inspect asset directory '${assetDir}': ${err.code ?? err.message}`, { assetDir });
+        return haltResult('provenance_hazard', `cannot inspect asset directory '${assetDir}': ${code ?? describeThrown(err)}`, { assetDir });
       }
     }
 
@@ -1023,7 +1047,7 @@ function validateEntriesForCapture(profileLike, entries, deps) {
       if (!ancestor.ok) {
         return haltResult(
           'provenance_hazard',
-          `cannot inspect an ancestor of asset directory '${assetDir}': ${ancestor.error.code ?? ancestor.error.message}`,
+          `cannot inspect an ancestor of asset directory '${assetDir}': ${errProp(ancestor.error, 'code') ?? describeThrown(ancestor.error)}`,
           { assetDir },
         );
       }
@@ -1124,14 +1148,14 @@ function resolveIdentityOrHalt(identityCommandOutcome, buildIdentity, uiObservat
   try {
     commandOutcome = resolveIdentityCommandOutcome(identityCommandOutcome, buildIdentity, d);
   } catch (err) {
-    return { ok: false, halt: 'identity_resolution_threw', message: `cannot resolve the identity command outcome: ${err.message}` };
+    return { ok: false, halt: 'identity_resolution_threw', message: `cannot resolve the identity command outcome: ${describeThrown(err)}` };
   }
   const uiReadEnabled = buildIdentity?.ui_read !== false;
   let identity;
   try {
     identity = resolveBuildIdentity({ commandOutcome, uiReadEnabled, uiObservation });
   } catch (err) {
-    return { ok: false, halt: 'identity_resolution_threw', message: `the UI-read observation is malformed: ${err.message}` };
+    return { ok: false, halt: 'identity_resolution_threw', message: `the UI-read observation is malformed: ${describeThrown(err)}` };
   }
   return { ok: true, commandOutcome, identity };
 }
@@ -1281,10 +1305,10 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
   try {
     fd = d.openSync(tokenPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o644);
   } catch (err) {
-    if (err.code === 'EEXIST') {
+    if (errProp(err, 'code') === 'EEXIST') {
       return haltResult('run_already_open', 'a capture run is already open for this profile — close or abort it before opening a new one.');
     }
-    return haltResult('provenance_hazard', `cannot create the pending token: ${err.code ?? err.message}`, { path: tokenPath });
+    return haltResult('provenance_hazard', `cannot create the pending token: ${errProp(err, 'code') ?? describeThrown(err)}`, { path: tokenPath });
   }
   // Releases the reservation this call just took, and reports whether the token is actually GONE
   // afterward — the operationally significant half of "released" (codex round 9, finding 1b): a
@@ -1334,7 +1358,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
     }
   } catch (err) {
     const releaseWarning = releaseReservation();
-    return haltResult('provenance_hazard', `cannot snapshot the opening asset hashes: ${err.code ?? err.message}`, { warnings: releaseWarning ? [releaseWarning] : [] });
+    return haltResult('provenance_hazard', `cannot snapshot the opening asset hashes: ${errProp(err, 'code') ?? describeThrown(err)}`, { warnings: releaseWarning ? [releaseWarning] : [] });
   }
 
   let runState;
@@ -1353,7 +1377,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
     // reservation as identity resolution above, so an unhandled throw here leaked the fd and the
     // token exactly the same way (codex round 9, finding 1a, the "throwing randomUUID" probe).
     const releaseWarning = releaseReservation();
-    return haltResult('provenance_hazard', `cannot construct the run state: ${err.message}`, { warnings: releaseWarning ? [releaseWarning] : [] });
+    return haltResult('provenance_hazard', `cannot construct the run state: ${describeThrown(err)}`, { warnings: releaseWarning ? [releaseWarning] : [] });
   }
   const digest = runState.opening_digest;
 
@@ -1368,7 +1392,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
     // behind with no caller ever having a chance to clean it up. Best-effort: this closeSync
     // failing must never MASK the write failure we are about to report (codex round 3).
     const releaseWarning = releaseReservation();
-    return haltResult('provenance_hazard', `cannot write the pending token: ${err.reason ?? err.code ?? err.message}`, { path: tokenPath, warnings: releaseWarning ? [releaseWarning] : [] });
+    return haltResult('provenance_hazard', `cannot write the pending token: ${errProp(err, 'reason') ?? errProp(err, 'code') ?? describeThrown(err)}`, { path: tokenPath, warnings: releaseWarning ? [releaseWarning] : [] });
   }
   try {
     d.closeSync(fd);
@@ -1387,7 +1411,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
       : [
           `the pending token '${tokenPath}' could not be removed after being written (the close that failed came after a successful write) — the next openCaptureRun will halt on 'run_already_open' until you run recoverProvenanceState (it will report 'open') and abortCaptureRun to remove it.`,
         ];
-    return haltResult('provenance_hazard', `cannot close the pending token after writing it: ${err.code ?? err.message}`, { path: tokenPath, warnings });
+    return haltResult('provenance_hazard', `cannot close the pending token after writing it: ${errProp(err, 'code') ?? describeThrown(err)}`, { path: tokenPath, warnings });
   }
 
   return { ok: true, runState };
@@ -1430,7 +1454,8 @@ function walkRegularFiles(rootDir, deps, visit) {
     try {
       entries = deps.readdirSync(absDir, { withFileTypes: true });
     } catch (err) {
-      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return;
+      const code = errProp(err, 'code');
+      if (code === 'ENOENT' || code === 'ENOTDIR') return;
       throw err;
     }
     for (const dirent of entries) {
@@ -1491,7 +1516,7 @@ function listMatchingTempsIn(dir, prefix, suffix, deps) {
   try {
     entries = deps.readdirSync(dir);
   } catch (err) {
-    if (err.code === 'ENOENT') return { ok: true, temps: [] };
+    if (errProp(err, 'code') === 'ENOENT') return { ok: true, temps: [] };
     return { ok: false, hazard: { kind: 'hazard', reason: 'inspection_failure', path: dir } };
   }
   const temps = entries.filter((name) => name.startsWith(prefix) && name.endsWith(suffix)).map((name) => posixJoin(dir, name));
@@ -1622,7 +1647,7 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
       closingAssets[chapterKeyFor(entry)] = snapshotAssetHashes(assetDir, d);
     }
   } catch (err) {
-    return haltResult('provenance_hazard', `cannot snapshot the closing asset hashes: ${err.code ?? err.message}`, {});
+    return haltResult('provenance_hazard', `cannot snapshot the closing asset hashes: ${errProp(err, 'code') ?? describeThrown(err)}`, {});
   }
 
   const finalIdentity = resolveClosingIdentity({
@@ -1681,7 +1706,7 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
       unlinkBestEffort(tempPath, d); // a create that succeeded but a write that failed leaves a
       // partial temp on disk — remove it rather than leaving litter for the failure path to answer for.
     }
-    const detail = tempPath === undefined ? `cannot generate the closing temp name: ${err.message}` : `cannot write the closing temp: ${err.code ?? err.message}`;
+    const detail = tempPath === undefined ? `cannot generate the closing temp name: ${describeThrown(err)}` : `cannot write the closing temp: ${errProp(err, 'code') ?? describeThrown(err)}`;
     return haltResult('provenance_hazard', detail, { path: tempPath });
   }
   try {
@@ -1691,7 +1716,7 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
     // name — nothing durable has been committed at this point, so this is an ordinary halt (with
     // best-effort cleanup of the temp), not the post-commit case the cleanup loop below answers to.
     unlinkBestEffort(tempPath, d);
-    return haltResult('provenance_hazard', `cannot close the closing temp after writing it: ${err.code ?? err.message}`, { path: tempPath });
+    return haltResult('provenance_hazard', `cannot close the closing temp after writing it: ${errProp(err, 'code') ?? describeThrown(err)}`, { path: tempPath });
   }
 
   try {
@@ -1699,7 +1724,7 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   } catch (err) {
     unlinkBestEffort(tempPath, d); // the rename itself failed — the fully-written temp is still at
     // its OWN name, never at finalPath, so removing it leaves zero surviving temps on this exit.
-    return haltResult('provenance_hazard', `cannot commit the run record: ${err.code ?? err.message}`, { path: finalPath });
+    return haltResult('provenance_hazard', `cannot commit the run record: ${errProp(err, 'code') ?? describeThrown(err)}`, { path: finalPath });
   }
 
   // A missing, failing, unconfirmed or changed FINAL identity is a warning here, on the
@@ -1945,7 +1970,7 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   try {
     chapterText = readFileText(chapterFile, d);
   } catch (err) {
-    return { recorded: false, reason: `chapter_read_failed:${err.code ?? err.message}` };
+    return { recorded: false, reason: `chapter_read_failed:${errProp(err, 'code') ?? describeThrown(err)}` };
   }
 
   const assetDir = chapterAssetDir(profileLike, entry);
@@ -1953,7 +1978,7 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   try {
     filenames = listRegularFilesRecursive(assetDir, d);
   } catch (err) {
-    return { recorded: false, reason: `asset_listing_failed:${err.code ?? err.message}` };
+    return { recorded: false, reason: `asset_listing_failed:${errProp(err, 'code') ?? describeThrown(err)}` };
   }
 
   const target = profileLike.publish.target;
@@ -1966,7 +1991,7 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   try {
     extraction = extractionFn(profileLike, entry, chapterFile, chapterText, filenames, target);
   } catch (err) {
-    return { recorded: false, reason: `extraction_threw:${err.message}` };
+    return { recorded: false, reason: `extraction_threw:${describeThrown(err)}` };
   }
   if (!extraction.ok) {
     return { recorded: false, reason: `extraction_halt:${extraction.halt.construct}@${extraction.halt.line}` };
@@ -2050,8 +2075,8 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
       closeBestEffort(fd, d);
     }
     if (tempPath !== undefined) unlinkBestEffort(tempPath, d);
-    const reason = tempPath === undefined ? 'temp_name_generation_failed' : (err.reason ?? 'write_failed');
-    return { ok: false, halts: [{ halt: 'provenance_hazard', reason, path: tempPath, detail: err.message }] };
+    const reason = tempPath === undefined ? 'temp_name_generation_failed' : (errProp(err, 'reason') ?? 'write_failed');
+    return { ok: false, halts: [{ halt: 'provenance_hazard', reason, path: tempPath, detail: describeThrown(err) }] };
   }
   try {
     d.closeSync(fd);
@@ -2059,13 +2084,13 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
     // Nothing durable has been committed yet at this point (the rename below hasn't run) — an
     // ordinary halt, with best-effort cleanup of the still-fully-written-but-unclosed temp.
     unlinkBestEffort(tempPath, d);
-    return { ok: false, halts: [{ halt: 'provenance_hazard', reason: 'close_failed', path: tempPath, detail: err.message }] };
+    return { ok: false, halts: [{ halt: 'provenance_hazard', reason: 'close_failed', path: tempPath, detail: describeThrown(err) }] };
   }
   try {
     d.renameSync(tempPath, finalPath);
   } catch (err) {
     unlinkBestEffort(tempPath, d);
-    return { ok: false, halts: [{ halt: 'provenance_hazard', reason: 'rename_failed', path: finalPath, detail: err.message }] };
+    return { ok: false, halts: [{ halt: 'provenance_hazard', reason: 'rename_failed', path: finalPath, detail: describeThrown(err) }] };
   }
 
   return { recorded: true, reason: null };
@@ -2285,21 +2310,21 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
     try {
       chapterText = readFileText(chapterFile, d);
     } catch (err) {
-      return { ok: false, halts: [{ halt: 'chapter_read_failed', message: `cannot read chapter '${chapterFile}': ${err.code ?? err.message}`, key }] };
+      return { ok: false, halts: [{ halt: 'chapter_read_failed', message: `cannot read chapter '${chapterFile}': ${errProp(err, 'code') ?? describeThrown(err)}`, key }] };
     }
     const assetDir = chapterAssetDir(profileLike, entry);
     let filenames;
     try {
       filenames = listRegularFilesRecursive(assetDir, d);
     } catch (err) {
-      return { ok: false, halts: [{ halt: 'asset_listing_failed', message: `cannot list the asset directory for '${key}': ${err.code ?? err.message}`, key }] };
+      return { ok: false, halts: [{ halt: 'asset_listing_failed', message: `cannot list the asset directory for '${key}': ${errProp(err, 'code') ?? describeThrown(err)}`, key }] };
     }
     const extractionFn = deps?.expectedAssets ?? expectedAssets;
     let extraction;
     try {
       extraction = extractionFn(profileLike, entry, chapterFile, chapterText, filenames, profileLike.publish.target);
     } catch (err) {
-      return { ok: false, halts: [{ halt: 'extraction_threw', message: err.message, key }] };
+      return { ok: false, halts: [{ halt: 'extraction_threw', message: describeThrown(err), key }] };
     }
     if (!extraction.ok) {
       return { ok: false, halts: [{ halt: 'extraction_halt', construct: extraction.halt.construct, line: extraction.halt.line, key }] };
@@ -2582,7 +2607,7 @@ function repair(profileLike, expected, deps, calledApi) {
   function mutationFailedHalt(path, removedSoFar, err) {
     const reobserved = inspectTokenAndRecordAndTemps(profileLike, d);
     const currentState = reobserved.hazard ? null : classify(reobserved).state;
-    return { ok: false, halts: [{ halt: 'mutation_failed', path, removed: removedSoFar, detail: err.message, currentState }] };
+    return { ok: false, halts: [{ halt: 'mutation_failed', path, removed: removedSoFar, detail: describeThrown(err), currentState }] };
   }
 
   // Resume the remaining suffix of the mutation order from wherever we are.
@@ -2606,7 +2631,7 @@ function repair(profileLike, expected, deps, calledApi) {
     d.unlinkSync(tokenPath);
     removed.push(tokenPath);
   } catch (err) {
-    if (err.code !== 'ENOENT') {
+    if (errProp(err, 'code') !== 'ENOENT') {
       return mutationFailedHalt(tokenPath, removed, err);
     }
   }

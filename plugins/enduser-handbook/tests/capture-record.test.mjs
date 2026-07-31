@@ -1781,6 +1781,70 @@ test('openCaptureRun (codex round 9, finding 1a): a THROWING identity command ex
   });
 });
 
+test('openCaptureRun (codex round 10, finding 1): the identity-command guard itself must not crash on a NON-ERROR thrown value (null, undefined, a string, a number, an object with no .message)', () => {
+  // The guard at `resolveIdentityOrHalt`'s first catch exists specifically to convert a throw into
+  // an `identity_resolution_threw` halt. JavaScript permits throwing ANY value — `throw null` and
+  // `throw undefined` make a raw `err.message` access throw a SECOND, unrelated TypeError from
+  // INSIDE the guard, which is worse than not guarding at all: it escapes uncaught, and in
+  // `openCaptureRun` specifically the reservation is still held at that point, so the escape is
+  // also the exact fd/token leak finding 1a already closed once, reachable again through a
+  // different door. Every test added for finding 1a threw a real `Error`, which is why the suite
+  // never saw this — codex reproduced it through `buildProvenanceReport` with a `null` throw.
+  // Covered here: `null`, `undefined` (the two that crash a raw `.message`/`.code` access outright),
+  // a plain string and a number (safe from crashing — primitives auto-box — but must still produce
+  // a SENSIBLE message rather than a bare `undefined`), and a plain object with no `.message` field
+  // at all (must fall back to a string form of the object, never `undefined`). Not covered
+  // separately: a thrown `Symbol` — `describeThrown` uses `String(err)` rather than template-literal
+  // interpolation specifically because `${sym}` throws while `String(sym)` does not, so a Symbol is
+  // exercised by the SAME code path as the string/number cases, not a distinct one.
+  const thrownValues = [
+    ['null', null],
+    ['undefined', undefined],
+    ['a plain string', 'boom'],
+    ['a number', 42],
+    ['a plain object with no .message', { code: 'EWEIRD' }],
+  ];
+  for (const [label, thrown] of thrownValues) {
+    withTempDir((dir) => {
+      const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
+      const deps = depsWithOverride({
+        runIdentityCommand: () => {
+          throw thrown;
+        },
+      });
+      assert.doesNotThrow(() => {
+        const result = CR.openCaptureRun(profile, [], null, deps);
+        assert.equal(result.ok, false, `[${label}] expected a halt, got ${JSON.stringify(result)}`);
+        assert.equal(result.halts[0].halt, 'identity_resolution_threw', `[${label}] got ${JSON.stringify(result)}`);
+        assert.equal(typeof result.halts[0].message, 'string', `[${label}] the halt message must be a string, got ${JSON.stringify(result)}`);
+      }, `[${label}] the guard itself must not throw`);
+      assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, `[${label}] a throwing identity command must not leave the reservation token on disk`);
+    });
+  }
+});
+
+test('buildProvenanceReport (codex round 10, finding 1): a THROWING identity command with a null payload must not crash the guard — the exact shape codex reproduced', () => {
+  // codex's own repro, driven through the entrypoint it actually found it in (W6, not
+  // openCaptureRun): `throw null` from the injected identity command executor.
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
+    const entry = { slug: 'items' };
+    writeChapterAt(profile, entry, '# items\n');
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        throw null;
+      },
+      expectedAssets: emptyExpectedAssets,
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.buildProvenanceReport(profile, [entry], null, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'identity_resolution_threw', JSON.stringify(result));
+      assert.equal(typeof result.halts[0].message, 'string', JSON.stringify(result));
+    });
+  });
+});
+
 test('openCaptureRun (codex round 9, finding 1a): a THROWING randomUUID during run-state construction must return a halt with the reservation released, not escape uncaught', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
@@ -1796,6 +1860,26 @@ test('openCaptureRun (codex round 9, finding 1a): a THROWING randomUUID during r
     });
     assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'a throwing randomUUID must not leave the reservation token on disk');
   });
+});
+
+test('openCaptureRun (codex round 10, finding 1): a THROWING randomUUID with a NON-ERROR payload (null, undefined) must not crash the run-state-construction guard', () => {
+  for (const [label, thrown] of [['null', null], ['undefined', undefined]]) {
+    withTempDir((dir) => {
+      const profile = profileFor(dir);
+      const deps = depsWithOverride({
+        randomUUID: () => {
+          throw thrown;
+        },
+      });
+      assert.doesNotThrow(() => {
+        const result = CR.openCaptureRun(profile, [], null, deps);
+        assert.equal(result.ok, false, `[${label}] ${JSON.stringify(result)}`);
+        assert.equal(result.halts[0].halt, 'provenance_hazard', `[${label}] ${JSON.stringify(result)}`);
+        assert.equal(typeof result.halts[0].message, 'string', `[${label}] ${JSON.stringify(result)}`);
+      }, `[${label}] the guard itself must not throw`);
+      assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, `[${label}] a throwing randomUUID must not leave the reservation token on disk`);
+    });
+  }
 });
 
 test('openCaptureRun (codex round 9, finding 1a): a halt taken after the reservation ALSO surfaces a non-empty `warnings` array when the release itself fails', () => {
@@ -2458,6 +2542,12 @@ test('recordChapterProvenance (codex round 9 follow-up, module-wide sweep): a TH
       const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, deps);
       assert.equal(result.ok, false, JSON.stringify(result));
       assert.equal(result.halts[0].halt, 'provenance_hazard', JSON.stringify(result));
+      // codex round 10, finding 3: this used to check only the halt name and that no temp
+      // survived — both would pass unchanged if the runtime reported `reason: 'write_failed'`
+      // (the pre-existing reason for an open/write failure) instead of the distinct
+      // `temp_name_generation_failed` this fix introduced for "the failure happened before a
+      // temp name even existed." Pin the actual distinction, not just a consequence of it.
+      assert.equal(result.halts[0].reason, 'temp_name_generation_failed', JSON.stringify(result));
     });
     // No `<slug>.json.<uuid>.tmp` left behind under this chapter's own record directory.
     const chapterRecordDir = join(CR.chapterRecordPath(profile, entry), '..');
@@ -2466,6 +2556,41 @@ test('recordChapterProvenance (codex round 9 follow-up, module-wide sweep): a TH
       : [];
     assert.deepEqual(leftoverTemps, [], 'a throwing randomUUID must not leave an orphaned chapter-record temp on disk');
   });
+});
+
+test('recordChapterProvenance (codex round 10, finding 1): a THROWING randomUUID with a NON-ERROR payload (null, undefined) must not crash its own temp-naming guard', () => {
+  for (const [label, thrown] of [['null', null], ['undefined', undefined]]) {
+    withTempDir((dir) => {
+      const profile = profileFor(dir);
+      const entry = { slug: 'items' };
+      const assetDir = join(profile.capture.output_dir, 'items');
+      nodeFs.mkdirSync(assetDir, { recursive: true });
+      nodeFs.writeFileSync(join(assetDir, 'overview.png'), 'v1');
+      const chapterFile = join(dir, 'items.md');
+
+      const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+      assert.equal(opened.ok, true);
+      nodeFs.writeFileSync(join(assetDir, 'overview.png'), 'v2');
+      const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+      assert.equal(closed.ok, true);
+
+      const { embedPath } = chapterPathsModule;
+      const embed = embedPath(chapterFile, assetDir, 'overview.png');
+      nodeFs.writeFileSync(chapterFile, `# Items\n\n1. Step\n\n   ![overview](${embed})\n`);
+
+      const deps = depsWithOverride({
+        randomUUID: () => {
+          throw thrown;
+        },
+      });
+      assert.doesNotThrow(() => {
+        const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, deps);
+        assert.equal(result.ok, false, `[${label}] ${JSON.stringify(result)}`);
+        assert.equal(result.halts[0].halt, 'provenance_hazard', `[${label}] ${JSON.stringify(result)}`);
+        assert.equal(typeof result.halts[0].detail, 'string', `[${label}] ${JSON.stringify(result)}`);
+      }, `[${label}] the guard itself must not throw`);
+    });
+  }
 });
 
 test('recordChapterProvenance: happy path writes a record when every rule is satisfied', () => {
@@ -3219,9 +3344,40 @@ test('closeCaptureRun (codex round 9 follow-up, module-wide sweep): a THROWING r
       const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
       assert.equal(result.ok, false, JSON.stringify(result));
       assert.equal(result.halts[0].halt, 'provenance_hazard', JSON.stringify(result));
+      // codex round 10, finding 3: this used to check only the halt name and that no temp
+      // survived — both would pass unchanged if the runtime always reported "cannot write the
+      // closing temp" (the pre-existing message for an open/write failure) instead of the
+      // distinct "cannot generate the closing temp name" this fix introduced. Pin the actual
+      // distinction, not just a consequence of it.
+      assert.match(result.halts[0].message, /cannot generate the closing temp name/, JSON.stringify(result));
     });
     assert.equal(listRunTempsOnDisk(profile).length, 0, 'a throwing randomUUID must not leave an orphaned closing temp on disk');
   });
+});
+
+test('closeCaptureRun (codex round 10, finding 1): a THROWING randomUUID with a NON-ERROR payload (null, undefined) must not crash the closing temp-naming guard', () => {
+  for (const [label, thrown] of [['null', null], ['undefined', undefined]]) {
+    withTempDir((dir) => {
+      const profile = profileFor(dir);
+      const entry = { slug: 'items' };
+      const assetDir = join(profile.capture.output_dir, 'items');
+      nodeFs.mkdirSync(assetDir, { recursive: true });
+      const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+      assert.equal(opened.ok, true, `[${label}] ${JSON.stringify(opened)}`);
+      const deps = depsWithOverride({
+        randomUUID: () => {
+          throw thrown;
+        },
+      });
+      assert.doesNotThrow(() => {
+        const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+        assert.equal(result.ok, false, `[${label}] ${JSON.stringify(result)}`);
+        assert.equal(result.halts[0].halt, 'provenance_hazard', `[${label}] ${JSON.stringify(result)}`);
+        assert.equal(typeof result.halts[0].message, 'string', `[${label}] ${JSON.stringify(result)}`);
+      }, `[${label}] the guard itself must not throw`);
+      assert.equal(listRunTempsOnDisk(profile).length, 0, `[${label}] a throwing randomUUID must not leave an orphaned closing temp on disk`);
+    });
+  }
 });
 
 test('buildProvenanceReport: a UI-read continuation reuses the already-resolved identityCommandOutcome — the identity command is NOT re-invoked (Finding 1)', () => {
