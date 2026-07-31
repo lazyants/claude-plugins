@@ -161,15 +161,21 @@ export interface RunRecord {
   // equality for a round, and a symlinked `screens/` therefore never refused `screens/a.png`.
   // [round 21/22] A directory is named for one further reason: its IDENTITY (`dev`/`ino`) is checked
   // before its listing, between the listing and any use of it, and after its entries are processed.
-  // A subdirectory replaced mid-walk is refused — `<dir>:symlink` when the replacement is a symlink,
+  // A subdirectory replaced mid-walk is refused when the replacement is STILL IN PLACE at one of
+  // those three observations — `<dir>:symlink` when the replacement is a symlink,
   // `<dir>:inspection_failure` when it is a different ordinary directory, which a directory-vs-type
   // check could not see at all. On the third of those paths the map may still hold hashes keyed
   // beneath the refused directory: they are deliberately retained, and read through the containment
   // rule above they are refused; read by EQUALITY they are silently trusted.
-  // Stated because a consumer may not assume more than this buys: a substitution that lands between
-  // a parent's listing and the child's own first observation cannot be detected through this seam at
-  // all, since a `Dirent` reports a name and a type and no inode. The asset ROOT is not subject to
-  // that gap — its identity is supplied by the caller from gate 3's own observation.
+  // Stated because a consumer may not assume more than this buys, and the qualification above is
+  // the first half of it: each observation re-resolves a path rather than holding the object the
+  // previous one saw, so a replacement installed and withdrawn between two adjacent observations
+  // leaves no hazard at all. This seam DETECTS a substitution that persists; it prevents none.
+  // [round 17/23] The second half: a substitution that lands between a parent's listing and the
+  // child's own first observation cannot be detected here at all, since a `Dirent` reports a name
+  // and a type and no inode. The asset ROOT is not subject to that particular gap — its identity is
+  // supplied by the caller from gate 3's own observation, of the resolved target rather than of a
+  // symlink naming it.
   // [round 17] Each member is VALIDATED, not merely typed: a member with no colon, an empty path, a
   // `.`/`..`/empty segment, or a reason outside the five words above makes the whole record
   // `bad_chapter_hazards:<field>`. That is deliberately fail-closed — an unreadable member was

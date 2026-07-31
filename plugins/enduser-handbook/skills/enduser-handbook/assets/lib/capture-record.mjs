@@ -1701,9 +1701,12 @@ function direntType(dirent, absPath, deps) {
 // foreign hash with an empty hazard list. Type-equality was never the property being asserted;
 // identity was. `dev`/`ino` are it.
 //
-// What each observation point buys: the first establishes the substitution had not landed yet; the
-// second is what makes a swap landing DURING the listing observable before a single foreign byte is
-// hashed; the third catches one that lands while the entries are being processed.
+// What each observation point buys, and the verb is DETECTS rather than PREVENTS at all three: the
+// first establishes the substitution had not landed yet; the second reports one that is still in
+// place when the listing returns, before a single foreign byte is hashed; the third reports one
+// still in place after the entries have been processed. A replacement that is installed and
+// withdrawn between two adjacent observations satisfies all three — residual 1 below, which is the
+// whole reason this paragraph says "reports" and not "catches".
 //
 // TWO residuals remain, and they are stated rather than argued away — the comment that stood here a
 // round ago claimed more than the code did, and that overclaim was itself the finding:
@@ -1977,9 +1980,12 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
       throw new Error(`the asset directory could not be confirmed (${rootUnidentified}) before it was listed`);
     }
     // [round 22] The observation codex asked for and round 21 did not have: between the listing and
-    // any use of it. A swap that lands during the `readdirSync` above is caught here, before a
-    // single entry out of the replacement is hashed — the earlier version could only report it
-    // afterwards, with the foreign hashes already in the map.
+    // any use of it. A swap that lands during the `readdirSync` above and is STILL IN PLACE when
+    // this line runs is reported before a single entry out of the replacement is hashed — the
+    // earlier version could only report it afterwards, with the foreign hashes already in the map.
+    // [round 25] One withdrawn before this line runs is not: this observation re-resolves the path
+    // rather than holding the object the listing read, so it narrows the window it reports on and
+    // closes none of them.
     if (expectedId !== null && identityBroke(absDir, relPrefix, expectedId)) return;
     for (const dirent of entries) {
       const childAbs = posixJoin(absDir, dirent.name);
