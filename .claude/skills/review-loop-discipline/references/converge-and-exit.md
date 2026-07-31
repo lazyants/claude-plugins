@@ -120,6 +120,22 @@ function implements" cannot cover it — verified when two survivors turned out 
 deletions (a state reset, a control-flow `next`), invisible to a rules frame no matter how carefully
 each row was measured.
 
+**Those same two mutants are also the ones a first probe most easily declares DEAD: when a mutant
+corrupts STATE rather than an output, the first position where the state is WRONG is not the first
+position where it is OBSERVABLE.** Measured on the deletion of the fence-closer's `is_close = 0`
+reset — "a stale closer flag survives into the next block's FIRST content line, but that line is
+still swallowed by the in_fence branch's unconditional `next`, so a needle there stays hidden under
+the bug too. The needle must sit on the second content line of a second consecutive fence, where
+scanning has already wrongly fallen back to live-prose mode." An earlier probe placed on the first
+line reported a **false negative**, and that is the expensive failure signature: the fixture passes,
+the mutant looks already-guarded, the round moves on, and a live hole is left behind looking exactly
+like a genuine all-clear. **So before concluding a reset/clear/flag deletion is unkillable, trace
+forward to where the corrupted state first CHANGES an emitted decision** — an iteration, a line, or
+a whole block later than where it first goes wrong — and put the fixture THERE, not at the mutation
+site. This generalizes to any state machine, parser, streaming scanner or accumulator; mutants of a
+reset are the ones most likely to be dismissed on a first probe. It is also why the rules table is
+blind to this pair in the first place: "neither is a rule: one is state, one is control flow."
+
 Stop when the axes you can name are covered, and write the boundary INTO the file: what was hardened,
 along which axes, and that this is NOT a claim of mutation-completeness. State the distinction
 explicitly — **"no mutant found yet" and "no mutant exists" are different claims and only the first

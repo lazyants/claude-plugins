@@ -14,6 +14,7 @@
 - [RED evidence read from a MOVING ref stops being evidence at the commit](#red-evidence-that-reads-its-before-from-a-moving-ref-stops-being-evidence-at-the-commit)
 - [A staged RED gate must be SATISFIABLE by its owner](#a-staged-red-gate-must-be-satisfiable)
 - [A coverage claim needs the same evidence as the thing it covers](#a-coverage-claim-needs-the-same-evidence)
+- [A never-varied argument is an untested argument — instrument, don't re-review](#a-never-varied-argument-is-an-untested-argument)
 - [A pin can CEMENT a wrong claim — pinning is not review](#a-pin-can-cement-a-wrong-claim)
 - [Ask which correct behaviours have NO gate at all](#ask-which-correct-behaviours-have-no-gate)
 - [An authoritative fix still needs review](#an-authoritative-fix-still-needs-review)
@@ -51,6 +52,20 @@ your two runs cannot be mistaken for — or mask — your own regression.
 
 Removing a wrong term X can INTRODUCE a new inaccuracy. A blanket replacement can be token-correct yet semantically wrong (universalizing a built-in's internals onto every adapter). Verify the REPLACEMENT is accurate, not merely that X is gone — a regression test that only checks X's ABSENCE false-greens the bad replacement, so add field-specific POSITIVE assertions (the field must NAME the right owning component). Then sweep every restatement (CHANGELOG, the new test's docstring) and fix the whole class.
 
+- **When the reworded document is measurement-bearing, assert the no-new-figure invariant
+  MECHANICALLY — do not diff-read it.** A clarifying reword is precisely the edit that silently
+  introduces or perturbs a figure, and a human reading the diff will not notice a number that
+  merely moved sentences. Two cheap checks, run together: diff the SET of numeric tokens in the
+  file against the previous commit and require it unchanged ("verified mechanically that the set of
+  numeric tokens in the file is unchanged against the previous commit"), and hash the fenced code
+  block the prose quotes (one docs-correction branch held its block at sha256 prefix
+  `f64c801742e6bbc0`, byte-identical across all six of its commits). The pair turns "this round
+  only clarifies wording" from a claim into a checked property. The block hash alone is the weaker
+  half: it says nothing about the prose quoting the block's OUTPUT, which is where the perturbed
+  figure lands. The technique arrived on round 6, after five rounds of number defects — it is not
+  something anyone invents under time pressure, so reach for it at the start of a docs-correction
+  loop rather than at its end.
+
 ## A rebuild can regress
 
 **This fires for replacing a MECHANISM or a documented RECIPE, not just a data-producing artifact.** The trigger is any wholesale swap made to close a review finding — the replacement silently inherits the obligation to handle every input state the original handled, and the states the old mechanism covered for free are the ones you will forget — a state the old one absorbed implicitly will never appear in the finding you are fixing, which is exactly why the every-dimension diff below has to be the thing that catches it. Verified 2026-07-25: a `git stash push`/`pop` recipe was replaced with a `git diff` + `git apply` patch flow to close a foreign-stash hazard. `stash` covers staged *and* unstaged content; `git diff` is the worktree-vs-index delta, so it silently omits the index — a peer's STAGED edit was destroyed by the following `git checkout HEAD --`, and the patch was non-empty, so the recipe sailed past its own emptiness check. The fix traded a loud shared-stack hazard for a silent data-loss one and needed a whole extra review round.
@@ -78,6 +93,29 @@ copy is only kept in step by those vectors. Corollary worth its own reflex: **if
 your documented bands, suspect your predicate before inventing an intermediate band** — a weak predicate
 manufactures a middle that does not exist. Worked example, with the corrected bands and predicates:
 `skill:literary-translator-run` → `references/source-prep.md`.
+
+**Audit the published block itself: a fenced block that IS the gate spec can back only SOME of the
+section's numbers while reading as fully code-backed.** That appearance is exactly why such a gate
+survives round after round — every reviewer treats a section with a Python fence as measured. Two
+mechanical tells, both found in one block: (a) **a helper DEFINED AND NEVER CALLED** — `is_heb_mark`
+was defined and never called, and the `detached` gate it belonged to "had no code at all, only
+prose"; (b) **a pinned vector that contradicts the shown code** — the vector line pinned `ב-`
+(Bet plus a hyphen) as excluded, while the shown code put it in `heb` AND counted it as a
+single-letter fragment. So audit by checking that every counter the prose cites is COMPUTED by a
+line that actually runs, and by EXECUTING the block rather than reading it: extract the fence out
+of the markdown, run it against the real inputs, and republish every number from that execution.
+Pinned vectors only keep two predicates in step once something runs them.
+
+**A published band must be rounded OUTWARD, or it excludes its own data.** Measured instance, in
+that same section: garble was stated as 54-61%, bracketing outward (54.30 floors to 54, 60.87 ceils
+to 61), while clean was stated as 1.9-2.7% with its floor rounded to NEAREST — so the clean band
+excluded its own lowest measured variant, 1.89%. Two rounding conventions in one section, and the
+wrong one is invisible by construction: 1.9 looks like a correct rounding of 1.89. The rule is one
+sentence — "a range presented as bracketing its data should contain it". The half a reviewer will
+get wrong is the SEVERITY: the confirm-pass reviewer classified this as "a rounding display
+artifact rather than a defect", which is defensible in general and wrong here, because the
+section's entire subject is published numbers agreeing with the code that produced them. **The
+document's own thesis sets the severity of a rounding nit, not the size of the discrepancy.**
 
 ## State what your proof guarantees
 
@@ -243,6 +281,39 @@ Closure criterion: a rule counts as guarded ONLY if a mutant was run and a fixtu
 transitive arguments; no "no realistic mutation exists" unless one was attempted and its
 impossibility can be stated. The claim that something is covered is itself a claim.
 
+## A never-varied argument is an untested argument
+
+A parameter that every call site passes the SAME value for is not tested, it is hardcodable:
+inline that value inside the function and the suite stays green, because no fixture ever asked for
+anything else. Measured (enduser-handbook 1.6.0): `chapterHasWikilinkTo`'s `slug` was passed the
+literal `'orders'` at all 24 call sites, so hardcoding it inside the function passed all 30
+assertions — and that predicate gates whether a manual-migration REMOVAL may proceed, so it would
+have been silently broken for every slug except the fixture's.
+
+The same shape hits THRESHOLDS, where the thing that never varies is the distance from the
+boundary: three `> 1` comparisons in that file were only ever exercised at exactly 2. Mutating
+`duplicateSlugHalts`' `count > 1` to `count === 2` left all 158 tests green — under that mutant
+three identical slugs return `[]` for BOTH manifest kinds, restoring the silent overwrite the
+release exists to prevent. The cause was not three careless sites: "Every duplicate fixture in the
+suite used exactly two occurrences, including the round-10 and round-11 companions added earlier;
+a suite-wide blind spot, not three sites." Worst instance was `findContainer`, where three
+ambiguous candidates fall past both the multiple and the single check into `zero`, telling the
+caller to CREATE a section when three already exist.
+
+**Close this class by instrumentation, not by another review round.** The calibration to keep:
+three consecutive adversarial rounds each found ONE instance of this family and under-reported the
+class by seven sites; one mechanical sweep found them in a single pass. The sweep is
+project-agnostic — wrap every export, capture the real argument tuples from an UNMODIFIED suite
+run (a run altered to collect them measures the instrumentation, not the suite), flag every
+parameter whose value never varies, then cross-check each flagged row against literal source
+before reporting. Yield, with its method attached: "all 14 exports wrapped, 219 real call tuples
+captured from an unmodified suite run, every non-VARIED row cross-checked against literal source
+before reporting" — four gaps the three review rounds had not reached, plus three threshold
+boundaries exercised at only one value.
+
+The trigger to stop reviewing and start instrumenting is the same defect FAMILY landing in two
+rounds running. A third round returns a third instance, not the class.
+
 ## A pin can cement a wrong claim
 
 A pin locks in whatever it points at. If the underlying claim is wrong, the pin does not catch
@@ -259,6 +330,18 @@ Corollary for scope: do NOT pin a claim a legitimate future fix would need to ch
 verified negative like "adapter X has no equivalent requirement" when a filed follow-up may add
 one). A pin that opposes a correct future edit is the same failure as one that cements a wrong
 claim — it imposes test-scaffolding cost on work that isn't a regression.
+
+**Stopping rule for the sweep that adds the pins: name the mutation the assertion catches and that
+mutation's real consequence, or do not add it.** A pinning sweep has no natural stopping condition
+— every occurrence looks pinnable, the sweep's own momentum pushes toward pinning all of them, and
+each pin is permanent maintenance plus a future false-red fighting a correct edit. Recorded as the
+reason for a deliberate exclusion inside a sweep that classified 86 raw matches and pinned every
+other load-bearing call in the file: "`README.md`'s `anyGroup`/`relative()` mentions were
+considered and deliberately excluded: that prose is advisory guidance for a future adapter author,
+not an imperative governing this skill's behavior, so no mutation with a real consequence could be
+named for it. A gate whose mutation cannot be named is decoration." In a repo where docs ARE the
+production path, this is also the test that separates normative prose from advisory prose. With
+the two rules above it, the three decide what NOT to assert.
 
 ## Ask which correct behaviours have no gate
 
@@ -277,6 +360,24 @@ the section boundary that made two other pins *independent* was itself unguarded
 the call one pin protected would have left both green.
 
 A manual probe shows the code is correct now; only a permanent fixture shows it stays correct.
+
+**The standing instance of this class in THIS repo is the command examples inside the skills.**
+Every skill under `.claude/skills/` ships copy-pasteable recipes, and the repo's gates — structural
+validation plus the doc-assertion suite — assert on TEXT only: "Neither was covered by the
+structural validation or the doc-assertion suite, which do not execute command examples." A
+documented command can therefore be reproducibly broken and ship through a fully green suite, which
+is why the blind spot reads as coverage: you have to notice an absence, not read an error. Measured
+(n=1 snippet, one branch, so treat the rate as illustrative and the surface as real): ONE ~5-line
+shell snippet — the scratchpad-staging / git-exclude recipe in `skill:codex-runtime-driving` —
+accumulated THREE separate reproducible bugs over three consecutive review rounds ("Third bot
+finding on this snippet, and correct"), final score review-bot 3, test suites 0. The three:
+`tr '\n' ' '` with no following `tr -s '[:space:]' ' '`, so the wrap-tolerant grep recipe
+reproduced the exact false-negative it existed to prevent; an unscoped `git rev-parse` /
+`git status` while the copy targeted `<worktree>`; and `-C` alone not scoping a `>>` redirect.
+Each was reproduced before being fixed — the commit closing the first pair records it plainly,
+"Both reproduced before fixing" — which is the only reason the count is worth anything, and that
+reproduction is also the missing fixture. Until something executes them, the review bot IS the gate
+for every command example in the repo.
 
 ## An authoritative fix still needs review
 
