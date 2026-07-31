@@ -148,8 +148,10 @@ export interface RunRecord {
   // [round 16] `opening_hazards`/`closing_hazards` are REQUIRED, not optional, and the reader
   // rejects a chapter entry missing either — a record written before they existed reads back as
   // "no hazards", which is the one false statement they exist to prevent. Each member is
-  // `<assetDirRelativePath>:<reason>`, where reason is one of `symlink`, `non_regular`, `hard_link`
-  // or `inspection_failure` — NOT the leaf inspection's `kind`, which is the undiscriminating word
+  // `<assetDirRelativePath>:<reason>`, where reason is one of `symlink`, `non_regular`, `hard_link`,
+  // `inspection_failure` or `vanished` (listed by the directory read, gone before it could be read
+  // — uncertainty about something that WAS there, never an absence) — NOT the leaf inspection's
+  // `kind`, which is the undiscriminating word
   // `hazard` for every one of them. W5 splits at the LAST colon so a path containing one is
   // unambiguous. This declaration omitted them for a round while the writer persisted them, so a
   // consumer of `readRunRecordText` could neither inspect nor preserve them.
@@ -427,10 +429,11 @@ export function cleanupCommittedRun(profileLike: ProfileLike, expected: Expected
 // tightened types (verified against these exact declarations via an in-memory `tsc --strict` run
 // assigning wide, node:fs-shaped stand-ins — see this round's report, not re-derived here).
 
-/** The subset of `fs.Stats` `lstatSync`'s result is actually read through — `inspectDirComponent` (capture-record.mjs) calls only `st.isSymbolicLink()` and `st.isDirectory()`. The other three `lstatSync` call sites (gate 3's containment probe, gate 5's `canonicalizeForComparison`, `validateEntriesForCapture`'s existence checks) never read the result at all, so they impose no further requirement here. */
+/** The subset of `fs.Stats` `lstatSync`'s result is actually read through — `inspectDirComponent` (capture-record.mjs) calls `st.isSymbolicLink()` and `st.isDirectory()`; `direntType` calls those two plus `st.isFile()`. The other three `lstatSync` call sites (gate 3's containment probe, gate 5's `canonicalizeForComparison`, `validateEntriesForCapture`'s existence checks) never read the result at all, so they impose no further requirement here. [round 19] `isFile` was added to the runtime one round before it was added here, and a mock conforming exactly to the two-predicate version crashed the opening snapshot with `st.isFile is not a function`. `direntType` calls it optionally and treats a result that cannot answer as a hazard, so a caller still on the old contract degrades rather than throwing — but this declaration is what a new caller writes to, and it says what the runtime needs. */
 export interface LstatResultLike {
   isSymbolicLink(): boolean;
   isDirectory(): boolean;
+  isFile(): boolean;
 }
 
 /** The subset of `fs.Stats` `fstatSync`'s result is actually read through — `openLeafNoFollow` (capture-record.mjs, gate 6) calls only `stat.isFile()` and reads `stat.nlink`. The sole call site. */
@@ -439,12 +442,16 @@ export interface FstatResultLike {
   nlink: number;
 }
 
-/** The subset of `fs.Dirent` a `readdirSync(path, {withFileTypes: true})` result is actually read through — `walkRegularFiles` (capture-record.mjs) reads `dirent.name` and calls `dirent.isSymbolicLink()`, `dirent.isDirectory()`, `dirent.isFile()`; nothing else on the element, and the sole call site of this overload. */
+/** The subset of `fs.Dirent` a `readdirSync(path, {withFileTypes: true})` result is actually read through — `direntType` (capture-record.mjs, for `walkRegularFiles`, the sole call site of this overload) reads `dirent.name` and calls `isSymbolicLink()`, `isDirectory()`, `isFile()`, and then, only when all three answer false, `isSocket()`, `isFIFO()`, `isCharacterDevice()` and `isBlockDevice()`. [round 19] That last group is OPTIONAL and declared so: all-three-false is `UV_DIRENT_UNKNOWN` on filesystems that do not fill in `d_type`, and the runtime resolves that case with an `lstat` rather than by guessing — so an implementation providing only the first three still behaves correctly, at the cost of one extra `lstat` per entry. This comment used to say the runtime reads nothing beyond the first three, which stopped being true a round before it was corrected. */
 export interface DirentLike {
   name: string;
   isSymbolicLink(): boolean;
   isDirectory(): boolean;
   isFile(): boolean;
+  isSocket?(): boolean;
+  isFIFO?(): boolean;
+  isCharacterDevice?(): boolean;
+  isBlockDevice?(): boolean;
 }
 
 /**

@@ -699,6 +699,10 @@ function hashFileNoFollow(absPath, deps) {
 // function now, so the next site to report an unreadable leaf inherits the correct form rather than
 // re-deriving it. `absent` has no reason and is its own answer, which is what the fallback is for.
 function unreadableWord(inspection) {
+  // [round 19] `absent` has no `reason` and its kind is the word an operator needs — but inside the
+  // asset snapshot it means "listed, then gone", so it is named for what happened rather than for
+  // what was found. Everywhere else `absent` never reaches a hazard list.
+  if (inspection.kind === 'absent') return 'vanished';
   return inspection.reason ?? inspection.kind;
 }
 
@@ -709,7 +713,7 @@ function unreadableWord(inspection) {
  * a word missing from here would make legitimate records unreadable — the reader below rejects a
  * record carrying anything else, and that rejection refuses every chapter in the run.
  */
-const ASSET_HAZARD_REASONS = new Set(['symlink', 'non_regular', 'hard_link', 'inspection_failure']);
+const ASSET_HAZARD_REASONS = new Set(['symlink', 'non_regular', 'hard_link', 'inspection_failure', 'vanished']);
 
 /**
  * A persisted hazard member, `<assetDirRelativePath>:<reason>`. The path may name a DIRECTORY (a
@@ -1598,10 +1602,19 @@ function direntType(dirent, absPath, deps) {
   try {
     st = deps.lstatSync(absPath);
   } catch (err) {
-    return errProp(err, 'code') === 'ENOENT' ? 'absent' : 'inspection_failure';
+    // [round 19] ENOENT here used to be `absent`. `readdir` had LISTED this entry, so failing to
+    // inspect it is uncertainty about something that was there, not evidence that nothing was —
+    // and an absence at the opening observation point is read by rule 4 as "brand-new this run".
+    return errProp(err, 'code') === 'ENOENT' ? 'vanished' : 'inspection_failure';
   }
   if (st.isSymbolicLink()) return 'symlink';
   if (st.isDirectory()) return 'directory';
+  // [round 19] `isFile` is called optionally because the shipped declaration promises only
+  // `isSymbolicLink` and `isDirectory`: a mock conforming exactly to it crashed the snapshot with
+  // `st.isFile is not a function`. The declaration is widened to match what this needs, and a
+  // result that still cannot answer is uncertainty — a hazard — rather than a guess or a throw out
+  // of a function whose contract is a returned value.
+  if (typeof st.isFile !== 'function') return 'inspection_failure';
   if (st.isFile()) return 'file';
   return 'non_regular';
 }
@@ -1644,10 +1657,6 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped) {
       if (type === 'symlink') { onSkipped?.(childRel, 'symlink'); continue; }
       if (type === 'directory') { walk(childAbs, childRel); continue; }
       if (type === 'file') { visit(childAbs, childRel); continue; }
-      // The entry vanished between the listing and the check. That is the one condition this
-      // module has always classified as an ABSENCE rather than a hazard — nothing was there to
-      // establish — and the leaf layer would answer the same way if it were visited.
-      if (type === 'absent') continue;
       // Present, unreadable as an asset, and silently dropped until this branch existed — the same
       // shape as the symlink case and reachable the same way. `non_regular` and
       // `inspection_failure` are spelled exactly as the leaf inspection spells them: the two layers
@@ -1695,11 +1704,16 @@ function snapshotAssetHashes(assetDir, deps) {
     (absPath, relPath) => {
       const hashed = hashFileNoFollow(absPath, deps);
       if (hashed.kind === 'present') hashes[relPath] = hashed.digest;
-      // 'absent' (the file vanished between listing and open) stays an absence: nothing was there
-      // to establish, and a file the capture then creates is legitimately brand new. 'hazard' does
-      // not — the file WAS there and we were refused, which is a different fact and must survive
-      // as one.
-      else if (hashed.kind !== 'absent') hazards.push(`${relPath}:${unreadableWord(hashed)}`);
+      // [round 19] `absent` used to stay an absence here, on the reasoning that nothing was there
+      // to establish and a file the capture then creates is legitimately brand new. The second half
+      // is true and the first is not: this callback only ever runs for an entry the WALK LISTED, so
+      // an `absent` means the file was there when the directory was read and gone when it was
+      // opened. That is uncertainty about something that existed, and at the opening observation
+      // point an absent key is read by rule 4 as "brand-new this run" — the same confident record
+      // over stale bytes this split was created to prevent, reached through a race instead of
+      // through a hazard. A genuinely new file is never listed at open, so it never arrives here
+      // and its key is simply missing from the map; that case is untouched.
+      else hazards.push(`${relPath}:${unreadableWord(hashed)}`);
     },
     // A listed entry the walk would not even open is a hazard for the same reason: something is at
     // that path whose bytes this run could not establish.

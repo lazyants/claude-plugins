@@ -1772,6 +1772,127 @@ test('openCaptureRun: a non-regular dirent in the asset tree is a hazard, spelle
   }
 });
 
+// [round 19 BLOCKER] The deepest version of the recurring defect, and it was in the ORIGINAL
+// round-15 code as well as in round 18's new branch. `readdir` LISTED the entry; the attempt to
+// read it then failed with ENOENT. That was encoded as an absence — and an absence at the OPENING
+// observation point is read by rule 4 as "brand-new file this run", which skips the did-it-change
+// check. Once the listing has seen an entry, failing to establish it is UNCERTAINTY, not evidence
+// that nothing was there.
+//
+// The genuine brand-new case is unaffected and is worth stating, because it is why this is safe: a
+// file that does not exist at open is never LISTED, so it never reaches this callback at all and
+// its key is simply missing from the map. Only a file that was there and then was not comes here.
+test('the opening snapshot: a listed asset that disappears before it can be read is a hazard, not an absence', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'stale-from-the-previous-build');
+
+    // Listed by readdir, then gone by the time it is opened; restored, unchanged, before close.
+    const deps = depsWithOverride({
+      openSync: (path, ...rest) => {
+        if (String(path).endsWith('/a.png')) {
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.openSync(path, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(Object.keys(opened.runState.opening_assets['items']), [],
+      'the fixture must actually produce an empty opening map, or this test proves nothing');
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], ['a.png:vanished']);
+
+    // Close sees it again, unchanged — the bytes are the previous build's.
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const w5Deps = { ...stubDepsNoIdentity(), expectedAssets: stubExpectedAssetsFor(assetDir, ['a.png']) };
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, w5Deps);
+    assert.equal(result.recorded, false, JSON.stringify(result));
+    assert.equal(result.reason, 'rule5_opening_unhashable:a.png:vanished', JSON.stringify(result));
+    assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), false);
+  });
+});
+
+// [round 19 BLOCKER, the same phase distinction one layer up] Round 18 mapped the unknown-dirent
+// fallback's own ENOENT to an absence for the same wrong reason, so a file whose type the kernel
+// declined to report and which then vanished before the `lstat` took the identical path.
+test('the opening snapshot: an UNKNOWN-typed entry that vanishes before its lstat is a hazard too', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const realDirents = nodeFs.readdirSync(assetDir, { withFileTypes: true });
+    const Dirent = Object.getPrototypeOf(realDirents[0]).constructor;
+    const deps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        const real = nodeFs.readdirSync(p, opts);
+        if (!opts?.withFileTypes) return real;
+        return real.map((d) => new Dirent(d.name, 0, p));
+      },
+      lstatSync: (p) => {
+        if (String(p).endsWith('/a.png')) {
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.lstatSync(p);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], ['a.png:vanished']);
+  });
+});
+
+// [round 19 IMPORTANT] The declaration says an `lstatSync` result need only implement
+// `isSymbolicLink()` and `isDirectory()`. Round 18's fallback called `isFile()` on it
+// unconditionally, so a mock conforming exactly to the shipped contract crashed the snapshot with
+// `st.isFile is not a function`. The unknown-dirent test could not catch it: it uses a real
+// `fs.Stats`, which has every predicate. A caller writing to the declaration is the one caller this
+// module cannot see, so the contract is widened AND the runtime no longer assumes a predicate it
+// did not declare — a missing one is uncertainty, which is a hazard, never a guess and never a
+// throw out of a function whose contract is a returned result.
+test('the opening snapshot: an lstat result implementing only the DECLARED predicates does not crash the run', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const realDirents = nodeFs.readdirSync(assetDir, { withFileTypes: true });
+    const Dirent = Object.getPrototypeOf(realDirents[0]).constructor;
+    const deps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        const real = nodeFs.readdirSync(p, opts);
+        if (!opts?.withFileTypes) return real;
+        return real.map((d) => new Dirent(d.name, 0, p));
+      },
+      // Exactly the shipped declaration, nothing more.
+      lstatSync: (p) => {
+        const real = nodeFs.lstatSync(p);
+        return { isSymbolicLink: () => real.isSymbolicLink(), isDirectory: () => real.isDirectory() };
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, `a declaration-conforming lstat mock must not halt the run: ${JSON.stringify(opened)}`);
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], ['a.png:inspection_failure'],
+      'an undeterminable type is uncertainty — a hazard — never a guess');
+  });
+});
+
 // [round 18, found while checking whether round 17's fix was complete one layer up] The walk's own
 // error handling had the same hole the hazard split was created for: a nested directory whose
 // listing fails with ENOTDIR — it was a directory when its type was decided and a regular file a
@@ -1894,6 +2015,7 @@ test('every hazard word the real producers emit round-trips through the real rea
     nodeFs.writeFileSync(join(assetDir, 'aliased.png'), 'v1');
     nodeFs.linkSync(join(assetDir, 'aliased.png'), join(dir, 'alias.png'));
     nodeFs.writeFileSync(join(assetDir, 'unopenable.png'), 'v1');
+    nodeFs.writeFileSync(join(assetDir, 'gone.png'), 'v1');
     await new Promise((resolve, reject) => {
       server.once('error', reject);
       server.listen(join(assetDir, 'live.sock'), resolve);
@@ -1906,6 +2028,10 @@ test('every hazard word the real producers emit round-trips through the real rea
         if (String(path).endsWith('unopenable.png')) {
           const err = new Error('EACCES'); err.code = 'EACCES'; throw err;
         }
+        // [round 19] Listed by the directory read, gone by the time it is opened.
+        if (String(path).endsWith('gone.png')) {
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
         return nodeFs.openSync(path, ...rest);
       },
       runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
@@ -1915,8 +2041,8 @@ test('every hazard word the real producers emit round-trips through the real rea
     assert.equal(opened.ok, true, JSON.stringify(opened));
     const produced = opened.runState.opening_asset_hazards['items'];
     const words = produced.map((h) => h.slice(h.lastIndexOf(':') + 1)).sort();
-    assert.deepEqual(words, ['hard_link', 'inspection_failure', 'non_regular', 'symlink'],
-      `all four conditions must be exercised, or this pin measures less than it claims: ${JSON.stringify(produced)}`);
+    assert.deepEqual(words, ['hard_link', 'inspection_failure', 'non_regular', 'symlink', 'vanished'],
+      `all five conditions must be exercised, or this pin measures less than it claims: ${JSON.stringify(produced)}`);
 
     const roundTripped = CR.readRunRecordText(JSON.stringify({
       record_version: 1,
