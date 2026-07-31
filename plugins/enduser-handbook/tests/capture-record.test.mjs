@@ -1772,6 +1772,65 @@ test('openCaptureRun: a non-regular dirent in the asset tree is a hazard, spelle
   }
 });
 
+// [round 17] The reader now rejects a record carrying an unrecognized hazard word, and that
+// rejection refuses every chapter in the run — so a word a PRODUCER can emit but the reader does
+// not know would turn a legitimate run unreadable, which is a worse failure than the one the
+// validation closes. The two sides are derived from genuinely different sources: this drives the
+// real producers over real fixtures, one per condition, and feeds what they actually emit back
+// through the real reader. A word added to the walk or the leaf inspection without being added to
+// the reader fails here rather than in an operator's run.
+test('every hazard word the real producers emit round-trips through the real reader', async () => {
+  const dir = nodeFs.mkdtempSync(join(tmpdir(), 'ehcr-vocab-'));
+  const server = netCreateServer();
+  try {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+
+    nodeFs.symlinkSync(join(dir, 'elsewhere.png'), join(assetDir, 'linked.png'));
+    nodeFs.writeFileSync(join(assetDir, 'aliased.png'), 'v1');
+    nodeFs.linkSync(join(assetDir, 'aliased.png'), join(dir, 'alias.png'));
+    nodeFs.writeFileSync(join(assetDir, 'unopenable.png'), 'v1');
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(join(assetDir, 'live.sock'), resolve);
+    });
+
+    // The one condition with no filesystem fixture: the open itself fails. Scoped to this asset by
+    // name so every other open in the run — including the module's own record writes — is real.
+    const deps = depsWithOverride({
+      openSync: (path, ...rest) => {
+        if (String(path).endsWith('unopenable.png')) {
+          const err = new Error('EACCES'); err.code = 'EACCES'; throw err;
+        }
+        return nodeFs.openSync(path, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const produced = opened.runState.opening_asset_hazards['items'];
+    const words = produced.map((h) => h.slice(h.lastIndexOf(':') + 1)).sort();
+    assert.deepEqual(words, ['hard_link', 'inspection_failure', 'non_regular', 'symlink'],
+      `all four conditions must be exercised, or this pin measures less than it claims: ${JSON.stringify(produced)}`);
+
+    const roundTripped = CR.readRunRecordText(JSON.stringify({
+      record_version: 1,
+      run_id: 'r1',
+      opening_digest: `sha256:${'a'.repeat(64)}`,
+      build_identity: validBuildIdentity(),
+      chapters: { items: { opening: {}, closing: {}, opening_hazards: produced, closing_hazards: produced } },
+    }));
+    assert.equal(roundTripped.ok, true,
+      `the reader rejected a hazard list its own producers emitted — ${JSON.stringify(produced)}: ${JSON.stringify(roundTripped)}`);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    nodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // [round 17] The third site that collapsed the hazard reason, and the only one with no test at all
 // — which is why it was still collapsed after a round that fixed the other two. `rehash_failed` is
 // reached when an asset becomes unreadable BETWEEN close and publish, so neither hazard list can
@@ -1820,13 +1879,38 @@ test('readRunRecordText: a chapter entry without hazard lists is MALFORMED, not 
   assert.equal(rejected.ok, false, JSON.stringify(rejected));
   assert.match(rejected.reason, /^bad_chapter_hazards:opening_hazards$/);
 
-  for (const bad of ['not-an-array', [null], [1], {}]) {
+  // [round 17, found by the repository's cross-file review bot] Validating the JavaScript TYPE was
+  // the whole of this, and a malformed MEMBER re-opened the false-provenance path through the
+  // serialized form: `"a.png"` is a string, so it passed, and `hazardFor` splits at the last colon
+  // — `lastIndexOf` returns -1 and `slice(0, -1)` yields `a.pn`, matching no asset key. The hazard
+  // is then silently ignored, the absent opening hash reads as "brand-new this run", and rule 4 is
+  // skipped over old bytes. Each shape below fails for its own reason, so this is a table rather
+  // than one case: no colon, an empty path, a path that walks out of the asset tree, an empty or
+  // unrecognized reason word, and a `.`/`..` segment.
+  const badShapes = [
+    'not-an-array', [null], [1], {},
+    ['a.png'], [':symlink'], ['a.png:'], ['a.png:hazard'], ['a.png:HARD_LINK'],
+    ['../outside.png:symlink'], ['a/../b.png:symlink'], ['./a.png:symlink'], ['a//b.png:symlink'],
+  ];
+  for (const bad of badShapes) {
     const r = CR.readRunRecordText(JSON.stringify({
       ...base,
       chapters: { items: { opening: {}, closing: {}, opening_hazards: bad, closing_hazards: [] } },
     }));
     assert.equal(r.ok, false, `${JSON.stringify(bad)} was accepted: ${JSON.stringify(r)}`);
     assert.match(r.reason, /^bad_chapter_hazards:/);
+  }
+
+  // The positive controls matter as much: a DIRECTORY path is the round-17 case, and a path
+  // containing a colon is why the split is at the LAST one. Requiring a file-shaped asset key here
+  // would reject both.
+  for (const good of [['screens:symlink'], ['screens/a.png:hard_link'], ['odd:name/a.png:non_regular'],
+    ['deep/nest/ed/a.png:inspection_failure']]) {
+    const r = CR.readRunRecordText(JSON.stringify({
+      ...base,
+      chapters: { items: { opening: {}, closing: {}, opening_hazards: good, closing_hazards: [] } },
+    }));
+    assert.equal(r.ok, true, `${JSON.stringify(good)} was rejected: ${JSON.stringify(r)}`);
   }
 
   const accepted = CR.readRunRecordText(JSON.stringify({

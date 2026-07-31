@@ -702,6 +702,31 @@ function unreadableWord(inspection) {
   return inspection.reason ?? inspection.kind;
 }
 
+/**
+ * Every word an asset-tree hazard can be reported under. The walk contributes `symlink` and
+ * `non_regular`; the leaf inspection contributes those two plus `hard_link` and
+ * `inspection_failure`. Pinned against the real producers by test rather than by inspection, since
+ * a word missing from here would make legitimate records unreadable — the reader below rejects a
+ * record carrying anything else, and that rejection refuses every chapter in the run.
+ */
+const ASSET_HAZARD_REASONS = new Set(['symlink', 'non_regular', 'hard_link', 'inspection_failure']);
+
+/**
+ * A persisted hazard member, `<assetDirRelativePath>:<reason>`. The path may name a DIRECTORY (a
+ * refused directory withholds everything beneath it), so it is validated as a relative path rather
+ * than as an asset key — requiring a file-shaped key here would reject the very case round 17
+ * added. `..` is refused because a hazard is a statement about something inside the asset tree, and
+ * a member that walks out of it describes nothing this run observed.
+ */
+function isWellFormedHazard(member) {
+  if (typeof member !== 'string') return false;
+  const at = member.lastIndexOf(':');
+  if (at <= 0) return false; // no colon at all, or an empty path
+  if (!ASSET_HAZARD_REASONS.has(member.slice(at + 1))) return false;
+  const segments = member.slice(0, at).split('/');
+  return segments.every((s) => s !== '' && s !== '.' && s !== '..');
+}
+
 // ---------------------------------------------------------------------------------------------
 // Path derivations — pure with respect to their INPUTS, but subject to the same gates the asset
 // directory is (a derived pathname is not by itself an ownership boundary): `{slug: "../elsewhere"}`
@@ -2018,7 +2043,15 @@ export function readRunRecordText(text) {
       if (!Array.isArray(list)) return { ok: false, reason: `bad_chapter_hazards:${field}` };
       // Validated element-wise too: a non-string member would reach `.find()`/`.slice()` in W5 and
       // throw out of a function whose contract is a returned reason.
-      if (list.some((h) => typeof h !== 'string')) return { ok: false, reason: `bad_chapter_hazards:${field}` };
+      // [round 17, found by the repository's cross-file review bot] Checking only the JavaScript
+      // TYPE re-opened, through a malformed member, exactly the false-provenance path the hazard
+      // lists exist to close. `"a.png"` with no colon is a string, so it validated; `hazardFor`
+      // splits at the LAST colon, `lastIndexOf` returns -1, and `slice(0, -1)` yields `a.pn` —
+      // which matches no asset key, so the hazard is silently ignored, the missing opening hash
+      // reads as "brand-new this run", and rule 4 is skipped over old bytes. A member that cannot
+      // be interpreted must invalidate the record rather than be dropped: an unverifiable run
+      // record refuses every chapter, which is the fail-closed direction.
+      if (list.some((h) => !isWellFormedHazard(h))) return { ok: false, reason: `bad_chapter_hazards:${field}` };
     }
   }
   return { ok: true, record };
