@@ -3052,6 +3052,122 @@ test('openCaptureRun: a chapter path populated between its failed listing and th
   });
 });
 
+// [round 29 BLOCKER] The sixteenth layer. The climb accepted an ancestor that RESOLVES TO A
+// DIRECTORY, and the comment beside it claimed parity with gate 3 — but gate 3's property is
+// stricter: the ancestor must resolve INSIDE `capture.output_dir`. A post-validation ancestor
+// symlink pointing at an existing directory outside the root satisfied the weaker test, so the
+// opening baseline came back empty and hazard-free and the capture command's later writes landed
+// outside the tree entirely. Codex executed it: `laterWriteResolvesUnder: "/outside/admin-real/
+// items"`, with `ok: true`.
+//
+// The comment was the tell, and it was mine: prose asserting a property the code did not check.
+test('openCaptureRun: an ancestor symlink to an OUTSIDE directory appearing after validation is refused', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items', group: 'admin' };
+    const groupDir = join(profile.capture.output_dir, 'admin');
+    const outside = join(dir, 'outside-admin');
+    nodeFs.mkdirSync(profile.capture.output_dir, { recursive: true });
+    // A real, resolvable directory — just not one this handbook owns.
+    nodeFs.mkdirSync(outside, { recursive: true });
+
+    let planted = false;
+    const deps = depsWithOverride({
+      openSync: (p, ...rest) => {
+        if (!planted && String(p).endsWith('/pending.json')) {
+          nodeFs.symlinkSync(outside, groupDir);
+          planted = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(planted, true, 'the plant hook never ran — this fixture cannot reach the condition');
+    assert.equal(nodeFs.statSync(groupDir).isDirectory(), true, 'the ancestor must RESOLVE, or this test only repeats the dangling one');
+    assert.equal(nodeFs.existsSync(join(groupDir, 'items')), false, 'the leaf must still be absent');
+    assert.equal(opened.ok, false, `an ancestor resolving outside the output dir must not certify absence: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+  });
+});
+
+// [round 29 IMPORTANT] This test exists because a claim of mine was wrong. Round 28 recorded the
+// `absentDirectly`-leak mutant as an EXPECTED SURVIVOR, reasoning that whenever the leak could fire
+// the tip is a symlink whose own `lstat` succeeds, so the tip probe refuses first. Codex found the
+// topology that breaks it: remove the dangling tip symlink before the failed listing returns. The
+// tip probe then gets ENOENT, climbs to an ordinary contained parent, and certifies direct absence —
+// the leak is observable after all, and the survivor was a coverage hole wearing a rationale.
+//
+// Production refuses here because it does not contain the leak. This pins that, so the mutant dies.
+test('the closing snapshot: a dangling root symlink REMOVED before its listing returns is still refused', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    // The root becomes a DANGLING SYMLINK, which is what makes the baseline read `vanished` from
+    // the target's failed realpath rather than from the root's own lstat.
+    nodeFs.renameSync(assetDir, join(dir, 'items-moved-away'));
+    nodeFs.symlinkSync(join(profile.capture.output_dir, 'items-target'), assetDir);
+
+    let removed = false;
+    const closingDeps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        if (!removed && String(p).endsWith('/items')) {
+          // ... and the link is gone by the time anything looks again, so every later probe of the
+          // tip reports plain absence. Nothing downstream can tell this from a first capture except
+          // the baseline observation itself, which is exactly why its reason must stay precise.
+          nodeFs.unlinkSync(assetDir);
+          removed = true;
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(removed, true, 'the removal hook never ran — this fixture cannot reach the condition');
+    assert.equal(nodeFs.existsSync(assetDir), false, 'the tip must be plainly absent at adjudication time');
+    assert.equal(closed.ok, false, `a root observed as a dangling link must not close as an empty chapter: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+  });
+});
+
+// [round 29, from mutation] The climb exempts everything ABOVE the configured output root, because
+// with nothing existing along the path there is nothing that could be a symlink. The boundary is
+// strict for a reason mutation had to find: the output root ITSELF is the deepest existing ancestor
+// whenever nothing under it exists, and it is exactly where a dangling link does the damage. Widening
+// the exemption by one (`<` to `<=`) killed no test until this one existed.
+test('the closing snapshot: a dangling capture.output_dir is refused, not read as a chapter that produced nothing', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    // The OUTPUT ROOT — the boundary itself — becomes a link to nothing.
+    nodeFs.rmSync(profile.capture.output_dir, { recursive: true, force: true });
+    nodeFs.symlinkSync(join(dir, 'assets-target'), profile.capture.output_dir);
+    assert.equal(nodeFs.lstatSync(profile.capture.output_dir).isSymbolicLink(), true, 'the output root must be a present link');
+    assert.throws(() => nodeFs.lstatSync(assetDir), /ENOENT/, 'the asset root must lstat ENOENT');
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false, `a dangling output root must not certify direct absence: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+  });
+});
+
 // [round 27] The ancestor climb walks a PATH, so it inherits the release's other recurring defect:
 // the shipped example profile's `output_dir` is RELATIVE (`vault/handbook/assets`), and a climb that
 // prefixes `/` onto relative segments probes an entirely different tree — one where every candidate

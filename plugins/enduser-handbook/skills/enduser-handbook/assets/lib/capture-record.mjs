@@ -1523,6 +1523,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
       const snapshot = snapshotAssetHashes(assetDir, d, {
         rootMustExist: validated.assetDirsObserved.has(snapshotting),
         rootIdentity: validated.assetDirsObserved.get(snapshotting) ?? null,
+        containmentRoot: containmentRootFor(profileLike, d),
       });
       openingAssets[snapshotting] = snapshot.hashes;
       openingHazards[snapshotting] = snapshot.hazards;
@@ -1875,6 +1876,22 @@ function exactIdentityPart(value) {
 // first capture and must not be tolerated. `absentDirectly` is set at one site and cannot alias.
 // Nothing is tolerated on ENOTDIR at all — an object is present there that was not there one syscall
 // earlier, which no first capture can produce.
+// [round 29] The containment root, resolved once per snapshot the way gate 3 resolves it. `depth` is
+// the RAW segment count of the configured `capture.output_dir`: raw and not resolved on purpose,
+// because every asset path is that same string with segments appended, so the two share an exact
+// lexical prefix while a resolved root can differ in segment COUNT (`/tmp` -> `/private/tmp`).
+function containmentRootFor(profileLike, deps) {
+  const raw = profileLike?.capture?.output_dir ?? '';
+  const resolved = canonicalizeForComparison(raw, deps);
+  if (!resolved.ok) return null;
+  return { depth: rawSegments(raw).length, segments: resolved.segments };
+}
+
+function segmentsWithin(rootSegs, segs) {
+  if (segs.length < rootSegs.length) return false;
+  return rootSegs.every((seg, i) => segs[i] === seg);
+}
+
 function refuseUnadjudicatedRoot(observation, code, tolerateDirectAbsence, absent) {
   if (observation === null) return;
   if (tolerateDirectAbsence && observation.absentDirectly === true && absent()) return;
@@ -1901,10 +1918,26 @@ function refuseUnadjudicatedRoot(observation, code, tolerateDirectAbsence, absen
 // than symlink-freedom: the path to a temporary directory on this platform runs through `/var` ->
 // `/private/var`, which resolves and therefore passes.
 //
-// A RESOLVING symlinked ancestor is accepted for the same reason: gate 3 accepts one too — its own
-// component-wise containment walk halts on a dangling ancestor and passes a resolving one — and this
-// check exists to cover the window gate 3 cannot see, not to impose a stricter policy behind it.
-function directAbsenceConfirmed(absPath, deps) {
+// A RESOLVING symlinked ancestor is accepted, but resolving is NOT the whole of gate 3's property
+// and round 28's version of this comment said it was. Gate 3 requires the longest existing ancestor
+// to resolve INSIDE `capture.output_dir`; a link to an existing directory anywhere else passes the
+// weaker test and fails the real one. Codex executed the gap: a post-validation `admin ->
+// /outside/admin-real`, an empty hazard-free opening baseline, and the capture command's later
+// writes landing under `/outside/admin-real/items`. The prose asserting parity was the tell.
+//
+// `containmentRoot` carries what gate 3 establishes once — the canonical output root's segments,
+// and its RAW depth. Absent it, nothing here can establish the property, so the answer is refusal.
+//
+// That null arm is UNREACHABLE through every public entrypoint, and the way that was established is
+// worth more than the fact: a test written to pin it passed under its own mutant, because all four
+// callers sit behind a guard that already halts when `capture.output_dir` cannot be resolved — gate
+// 3 for the open, W5 and W6, and `closeCaptureRun`'s own resolution for the close. Production and
+// the mutant returned the identical halt, `cannot resolve capture.output_dir`. The test was removed
+// rather than kept: a green that cannot distinguish the fix from its absence is worse than no test,
+// because it reports coverage it does not have. The mutant is recorded as an expected survivor with
+// that measurement beside it.
+function directAbsenceConfirmed(absPath, containmentRoot, deps) {
+  if (containmentRoot === null) return false;
   // Rootedness is preserved the way `canonicalizeForComparison` preserves it. A RELATIVE asset
   // directory is a supported shape — `capture.output_dir` may be relative and every asset path is
   // built from it — and prefixing `/` onto its segments would probe a completely different tree,
@@ -1935,7 +1968,18 @@ function directAbsenceConfirmed(absPath, deps) {
     // absence left to be direct: the root is present now, whatever the listing said a syscall ago,
     // and an empty snapshot for a directory that exists is the whole defect class.
     if (depth === segs.length) return false;
-    return assetDirIdentity(candidate, deps, { allowSymlink: true }).ok === true;
+    // [round 29] Above the configured output root there is nothing left to check, for gate 3's own
+    // reason: it `continue`s when the longest existing ancestor search finds nothing at or below the
+    // root, because with nothing existing along the path there is nothing that could BE a symlink
+    // redirecting it. Reaching this arm means `capture.output_dir` itself does not exist yet, which
+    // is an ordinary first capture and must not halt — bounding the climb here instead of exempting
+    // it was round 27's first attempt, and it refused 21 legitimate cases.
+    if (depth < containmentRoot.depth) return true;
+    if (!assetDirIdentity(candidate, deps, { allowSymlink: true }).ok) return false;
+    // Gate 3's actual property, on the same comparison basis gate 3 built its root with.
+    const resolved = canonicalizeForComparison(candidate, deps);
+    if (!resolved.ok) return false;
+    return segmentsWithin(containmentRoot.segments, resolved.segments);
   }
   // Unreachable: the loop's last iteration probes `/` (or the working directory for a relative
   // path), which exists wherever this module runs, so it always returns from inside — including for
@@ -1957,7 +2001,7 @@ function directAbsenceConfirmed(absPath, deps) {
 // capture. Round 22 justified the pair as "a fallback for a caller whose lstat cannot report
 // identity"; that caller no longer reaches this function, and a guard kept alive by a rationale
 // that has stopped being true is a guard nobody will maintain correctly.
-function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = false, rootIdentity = null } = {}) {
+function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = false, rootIdentity = null, containmentRoot = null } = {}) {
   walk(rootDir, '');
 
   // A directory whose identity cannot be re-confirmed: a hazard naming the directory for a child
@@ -2058,7 +2102,7 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
         // with an empty map. [round 26] And finer than the REASON WORD, which is where round 25 drew
         // it and codex broke it — `vanished` names the first capture and also names a present root
         // symlink whose target is missing, which is not one. `absentDirectly` is the fact.
-        refuseUnadjudicatedRoot(rootUnidentified, code, true, () => directAbsenceConfirmed(absDir, deps));
+        refuseUnadjudicatedRoot(rootUnidentified, code, true, () => directAbsenceConfirmed(absDir, containmentRoot, deps));
         return;
       }
       // [round 18] ENOTDIR used to return here too, silently, and that was the round-17 defect
@@ -2084,7 +2128,7 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
         // object appeared. The failure actually observed here is `inspection_failure`, from a
         // baseline whose own `lstat` succeeded and reported a non-directory, which is the review
         // bot's reproduction.
-        refuseUnadjudicatedRoot(rootUnidentified, code, false, () => directAbsenceConfirmed(absDir, deps));
+        refuseUnadjudicatedRoot(rootUnidentified, code, false, () => directAbsenceConfirmed(absDir, containmentRoot, deps));
         return;
       }
       throw err;
@@ -2156,7 +2200,7 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
 // closing, and attributes the old bytes to the current build. So a hazard is no longer encoded as
 // an absence: it is returned separately, and W5 refuses any asset that was hazardous at either
 // point, because "we could not read this file then" is not evidence that it changed.
-function snapshotAssetHashes(assetDir, deps, { rootMustExist = false, rootIdentity = null } = {}) {
+function snapshotAssetHashes(assetDir, deps, { rootMustExist = false, rootIdentity = null, containmentRoot = null } = {}) {
   const hashes = Object.create(null);
   const hazards = [];
   walkRegularFiles(
@@ -2181,7 +2225,7 @@ function snapshotAssetHashes(assetDir, deps, { rootMustExist = false, rootIdenti
     // A listed entry the walk would not even open is a hazard for the same reason: something is at
     // that path whose bytes this run could not establish.
     (relPath, kind) => hazards.push(`${relPath}:${kind}`),
-    { rootMustExist, rootIdentity },
+    { rootMustExist, rootIdentity, containmentRoot },
   );
   hazards.sort();
   return { hashes, hazards };
@@ -2359,7 +2403,7 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   try {
     for (const entry of runState.entries) {
       const assetDir = chapterAssetDir(profileLike, entry);
-      const snapshot = snapshotAssetHashes(assetDir, d);
+      const snapshot = snapshotAssetHashes(assetDir, d, { containmentRoot: containmentRootFor(profileLike, d) });
       closingAssets[chapterKeyFor(entry)] = snapshot.hashes;
       closingHazards[chapterKeyFor(entry)] = snapshot.hazards;
     }
@@ -2729,6 +2773,7 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
     filenames = listRegularFilesRecursive(assetDir, d, {
       rootMustExist: validated.assetDirsObserved.has(key),
       rootIdentity: validated.assetDirsObserved.get(key) ?? null,
+      containmentRoot: containmentRootFor(profileLike, d),
     });
   } catch (err) {
     return { recorded: false, reason: `asset_listing_failed:${describeThrownField(err, 'code')}` };
@@ -2922,9 +2967,9 @@ function readFileText(path, deps) {
 // in-root directory, the root becomes a symlink to an outside tree holding a byte-copy of the
 // closing asset, the walk self-baselines the replacement, W5 rule 2 canonicalizes root and asset
 // into the same outside tree and passes, and the chapter is recorded as verified.
-function listRegularFilesRecursive(assetDir, deps, { rootMustExist = false, rootIdentity = null } = {}) {
+function listRegularFilesRecursive(assetDir, deps, { rootMustExist = false, rootIdentity = null, containmentRoot = null } = {}) {
   const out = [];
-  walkRegularFiles(assetDir, deps, (_absPath, relPath) => out.push(relPath), undefined, { rootMustExist, rootIdentity });
+  walkRegularFiles(assetDir, deps, (_absPath, relPath) => out.push(relPath), undefined, { rootMustExist, rootIdentity, containmentRoot });
   return out;
 }
 
@@ -3146,6 +3191,7 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
       filenames = listRegularFilesRecursive(assetDir, d, {
         rootMustExist: validated.assetDirsObserved.has(key),
         rootIdentity: validated.assetDirsObserved.get(key) ?? null,
+        containmentRoot: containmentRootFor(profileLike, d),
       });
     } catch (err) {
       return { ok: false, halts: [{ halt: 'asset_listing_failed', message: `cannot list the asset directory for '${key}': ${describeThrownField(err, 'code')}`, key }] };
