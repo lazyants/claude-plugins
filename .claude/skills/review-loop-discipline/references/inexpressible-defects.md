@@ -9,7 +9,8 @@
 - [Treadmill vs convergent — and surface the call](#treadmill-vs-convergent--and-surface-the-call)
 - [When a check RECONSTRUCTS a materialized property: read the output](#when-a-check-reconstructs-a-materialized-property-read-the-output)
 - [Three sharper moves for rung 4](#three-sharper-moves-for-rung-4)
-- [When rung-2 patching is a REGEX, not a table: drop the accidental anchor](#when-rung-2-patching-is-a-regex-not-a-table-drop-the-accidental-anchor)
+- [When rung-2 patching is a MATCHER, not a table: drop the accidental anchor](#when-rung-2-patching-is-a-matcher-not-a-table-drop-the-accidental-anchor)
+- [A skill's normative doc IS the production caller](#a-skills-normative-doc-is-the-production-caller)
 
 Verified across eight codex review rounds (2026-07-19/20, literary-translator 1.11.0). One class —
 *a mechanism is present, but not engaged on the path production actually takes* — appeared **eight
@@ -351,7 +352,7 @@ reached:
   for a gate. The proportionality ceiling still holds: measure it (49 raw `in` occurrences vs 1 in
   code — a non-lexing check is 48:1 noise) before arguing a lock is "too big".
 
-## When rung-2 patching is a REGEX, not a table: drop the accidental anchor
+## When rung-2 patching is a MATCHER, not a table: drop the accidental anchor
 
 2026-07-24, enduser-handbook #258 citation-audit design. A plan-review loop found "one more
 citation form the matcher misses" **three rounds running** (13 → 27 → 32 → 47 counted instances
@@ -378,5 +379,55 @@ unrelated quoted-string-near-"above" false match just lands in a tracked "unreso
 rather than corrupting a result — over-matching into a verified bucket is safer here than
 under-matching via one more special case.)
 
+**Recurred 2026-07-31 in a matcher that was not a regex, which is why this section as written did not
+fire.** A gate added to catch a declaration citing a document that never existed matched only
+PATH-shaped citations (`references/x.md`) and waved every bare filename through — via a `case`
+statement, not a pattern — on the assumption that a bare name in a doc comment is prose. Bare names
+were the dominant citation form: a dozen real files under `references/`. Same accidental anchor,
+different syntax. Read this section as covering any predicate whose scope was inferred from the
+examples that prompted it, `case` lists and `if` chains included.
+
+**And the count a gate reports is what makes its blind spot invisible.** That gate announced "22
+citations checked" and would still have passed a dangling bare citation; the number read as coverage
+precisely because nothing related it to the artifact's real population, which was 34. A `> 0` floor
+does not help — it passes an extraction that has silently degraded to two. When a gate reports how
+much it checked, either assert that count against an independently derived population or name the
+sub-population in the check's own label, so a partial sweep cannot be read as a complete one.
+
 A reviewer's own prescribed fix can carry the very next instance of the class it was meant to
 close — see verify-the-fix.md, "An authoritative fix still needs review".
+
+## A skill's normative doc IS the production caller
+
+For a plugin whose payload is a skill plus assets, the SKILL.md that instructs the model is not
+documentation *about* the production path — it **is** the production path. The model reads the call
+it describes and makes that call. A call spelled out there with the wrong argument order is
+therefore a production defect that no amount of testing the runtime can surface: the suite stays
+green while production is broken.
+
+Verified 2026-07-31 (enduser-handbook 1.12.0, review round 12). The doc told an operator to thread a
+resumption value back "as its next argument"; the runtime puts `deps` before it, and JavaScript has
+no way to skip a positional argument. With default deps — how a real run is made — the value landed
+in the `deps` slot and the operator's shell command silently ran a second time. Measured with a real
+command counting its own invocations into a file: two per continuation pair under the documented
+shape, one under the correct shape. Every test passed throughout, because every fixture supplied an
+injected `deps` before the value and so did by accident what the prose never said.
+
+That release produced **six** instances of the umbrella class — a capability that is real, tested and
+unreachable in production: a seam with no default, a migration fact with zero non-test callers, a
+canonicalization the shipped example profile could not satisfy, an entrypoint SKILL.md never named at
+all, warnings the workflow promised that nothing emitted, and this one. Five were findable by tracing
+the runtime. Only this one was invisible to that, because the runtime was entirely correct.
+
+Ask of every capability at authoring time, not review time: *does the normative doc name it, and does
+the call it spells out match the real signature?* An entrypoint the doc never names is dead code with
+tests.
+
+Then close it mechanically rather than one round at a time. A gate that extracts every `name(a, b, c)`
+the doc spells out and checks the leading argument names against the module's own exported signature
+is about eighty lines and covers the whole class. Give it two properties or it passes vacuously:
+require the known entrypoints to still BE spelled out, so a doc that stops naming one fails rather
+than quietly checking less; and report an over-long argument list as its own failure rather than
+truncating it into agreement. Reference implementation:
+`plugins/enduser-handbook/tests/skill-call-signatures.test.mjs`, which ships with
+enduser-handbook 1.12.0 — if it is not on your checkout, that release has not merged yet.

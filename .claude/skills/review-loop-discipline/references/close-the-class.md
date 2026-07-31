@@ -3,6 +3,7 @@
 When an adversarial reviewer returns ~1 finding/round that is a new INSTANCE of the SAME root cause each time, stop patching locations. The tell: finding scope narrows but the root cause is identical every round. This is still a healthy (narrowing) loop, but generalizing at round 3 instead of round 9 saves the rounds in between.
 
 - [Enumerate the set + state the invariant](#enumerate-the-set--state-the-invariant)
+- [Enumerate the LAYERS too — a set complete at one layer is not the class](#enumerate-the-layers-too)
 - […but enumerate INPUTS, never OUTCOMES of independent conditions](#enumerate-inputs-never-outcomes)
 - [Format / serialization migrations: enumerate by the shared value](#format--serialization-migrations)
 - [Prose-scattered set → a completeness-GREP gate](#prose-scattered-set--a-completeness-grep-gate)
@@ -15,6 +16,26 @@ When an adversarial reviewer returns ~1 finding/round that is a new INSTANCE of 
 ## Enumerate the set + state the invariant
 
 Two moves close a class: (a) ENUMERATE the complete instance set (every fire-and-forget artifact at an unscoped path; every durable commit/consume gate; every validity-gating byte a resume digest must cover), and (b) state the GENERAL PRINCIPLE / invariant IN THE PLAN so the reviewer verifies the CLASS is closed, not just this instance. When enumerating reveals the fix crosses far more surface than a "bugfix" should, splitting it into its own follow-up plan (rather than force-bundling with unrelated small fixes) is the right call — see scope-gating.
+
+## Enumerate the LAYERS too
+
+<a id="enumerate-the-layers-too"></a>
+
+Enumerating the SITES of a pattern closes the class only at the layer you were shown it. When the defect is "an item that could not be processed was silently omitted", the same predicate usually exists at several layers of a pipeline, and each fix looks locally complete because the set really was exhaustive *at that layer*. Ask instead: **at every layer between the source and the consumer, what can drop an item, and does the consumer distinguish "dropped" from "was never there"?**
+
+Verified 2026-07-31 (enduser-handbook 1.12.0), three consecutive review rounds, one defect:
+
+1. The report loop hashed a chapter's images and kept only the `present` results, so an unreadable image vanished from the comparison and a chapter with one good image and one unreadable one reported `unchanged`. Fixed at that loop; the site set was complete there.
+2. The next round found the same predicate in the snapshot that feeds the earlier stage, where a dropped image becomes a *missing key* — and a missing opening key means "brand-new file", which SKIPS the did-it-change check. Same omission, opposite consequence, one layer up.
+3. The round after that found the walk itself refuses symlinks before the snapshot can classify anything, so the layer-2 fix could never see them.
+
+**Two tells worth checking directly, both of which produced the rounds above.**
+
+**A shared helper whose callers disagree about what "missing" means.** One `snapshotAssetHashes` served both the opening and the closing observation, and its comment justified dropping an unreadable file: *"a missing expected image fails completeness (rule 3) and the chapter is reported ineligible, never silently trusted."* True of the closing snapshot, which is what that rule reads. Exactly inverted for the opening one, where missing means brand-new and waives the check. The comment was not wrong so much as written for one of two callers, and it read as a completed safety argument. **When one helper feeds two consumers, verify its "absent" case against EACH consumer's meaning, and say in the comment which caller the argument is about.**
+
+**A regression test that cannot reach the layer the defect moved to.** The layer-2 fix shipped with a test using a hard link; a hard link's dirent is still `isFile()`, so the walk visits it and the hazard is raised one layer *below* where layer 3's defect lives. The test passed with the symlink path entirely broken. **State which layer your regression test exercises, and pick the input kind that reaches the layer you just changed** — here a symlink rather than a hard link, since only a symlink is refused by the walk.
+
+Knowing this at round 1 would have collapsed all three rounds into one: the fix is the same shape at every layer (keep "could not read it" as its own fact, never as an absence), and the layers are enumerable by reading the call chain once.
 
 ## Format / serialization migrations
 

@@ -5,6 +5,17 @@ Agent / `codex-companion.mjs` runtime, and for diagnosing when a job backgrounds
 dies, or goes missing. (WHEN to reach for Codex vs. a parallel-review Workflow is a separate
 standing guardrail — this file is the plumbing only.)
 
+**Before anything else: a `--background` job launched through this CLI is NOT harness-tracked, so
+nothing will re-invoke you when it finishes.** The completion notification you get for a
+`run_in_background` Bash call has no equivalent here — the job is just a JSON file that quietly
+flips to `completed`. Ending your turn after launching one therefore strands the verdict
+indefinitely, and the loop looks stalled from outside while everything is technically healthy. This
+is stated up front rather than in the fan-out driver notes below, because it bites hardest on the
+SIMPLE case: one review, launched, turn ended. Either wait for it inside the same turn (a bounded
+poll on `status`), or wrap the launch in a `run_in_background` Bash call so the harness owns the
+notification. Verified 2026-07-31: a review round completed and sat unread for nearly two hours
+until the user asked why the loop was stuck.
+
 ## Contents
 - [Paths & locating the runtime](#paths--locating-the-runtime)
 - [Fastest verdict recovery: read the job STATE JSON](#fastest-verdict-recovery-read-the-job-state-json)
