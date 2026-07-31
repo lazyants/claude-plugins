@@ -2300,6 +2300,14 @@ function readFileText(path, deps) {
   throw new Error(`cannot read ${path}: ${read.reason ?? read.kind}`);
 }
 
+// Deliberately passes NO `onSkipped`, and that is not an oversight of the same class the snapshot
+// just fixed. This list answers "which files can serve as an asset", and a symlink or a device node
+// cannot; the snapshot answers "what were this asset's bytes at this moment", where being unable to
+// say is itself the fact that matters. The consequence of the omission here is already fail-closed:
+// a chapter embedding a symlinked image finds no candidate to match, so extraction halts with an
+// unmatched destination and the chapter is reported ineligible — it is never recorded on the
+// strength of a file this feature declined to look at. Written down because the walk's two callers
+// have now been the subject of three consecutive review rounds.
 function listRegularFilesRecursive(assetDir, deps) {
   const out = [];
   walkRegularFiles(assetDir, deps, (_absPath, relPath) => out.push(relPath));
