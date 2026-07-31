@@ -2186,7 +2186,18 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   // neither "it changed during capture" (rule 4) nor "it is brand new" can be concluded about it.
   // The reason names the asset and the hazard kind rather than collapsing to one word — an operator
   // reading `hard_link` acts differently than one reading `inspection_failure`.
-  const hazardFor = (list, key) => (list ?? []).find((h) => h.slice(0, h.lastIndexOf(':')) === key);
+  // [round 17] The lookup is CONTAINMENT, not equality, and the difference is a shipped defect: the
+  // walk refuses a symlinked DIRECTORY under that directory's own path (`screens:symlink`), while
+  // the asset it hides is keyed `screens/a.png`. An equality match filed the hazard under a name it
+  // was never looked up by — so the refusal never fired, the opening map had no entry either (the
+  // walk never reached the file), and rule 4 read that absence as "brand-new this run". A hazard is
+  // a statement about a PATH: withholding a directory withholds the bytes of everything beneath it.
+  // The trailing separator is load-bearing — a bare `startsWith` would also swallow `screensaver/`,
+  // whose bytes this run established perfectly well.
+  const hazardFor = (list, key) => (list ?? []).find((h) => {
+    const path = h.slice(0, h.lastIndexOf(':'));
+    return key === path || key.startsWith(`${path}/`);
+  });
   for (const asset of extraction.assets) {
     const openingHazard = hazardFor(chapterRunData.opening_hazards, asset.key);
     if (openingHazard !== undefined) {

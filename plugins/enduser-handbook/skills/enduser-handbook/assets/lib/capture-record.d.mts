@@ -151,6 +151,10 @@ export interface RunRecord {
   // `<assetDirRelativePath>:<kind>`, and W5 splits at the LAST colon so a path containing one is
   // unambiguous. This declaration omitted them for a round while the writer persisted them, so a
   // consumer of `readRunRecordText` could neither inspect nor preserve them.
+  // [round 17] That path is NOT necessarily an asset key: a refused DIRECTORY is named by its own
+  // path, and the assets it hides are keyed beneath it. Anything reading these lists must match by
+  // containment (`key === path || key.startsWith(path + '/')`), never by equality — W5 matched by
+  // equality for a round, and a symlinked `screens/` therefore never refused `screens/a.png`.
   chapters: Record<string, {
     opening: Record<string, string>;
     closing: Record<string, string>;

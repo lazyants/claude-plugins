@@ -1650,6 +1650,90 @@ test('recordChapterProvenance: an asset that was a SYMLINK at open is never reco
   });
 });
 
+// [round 17 BLOCKER] The symlink test above passes with the DIRECTORY case completely broken, for
+// the same reason the hard-link test passed with the symlink case broken: it puts the symlink at a
+// path that IS an asset key, so an exact-match lookup finds it. A symlinked DIRECTORY is refused by
+// the walk under the directory's own path — `screens:symlink` — while the asset it hides is keyed
+// `screens/a.png`, and W5 compared the two for equality. So the hazard was raised, persisted,
+// authenticated, and then looked up under a name it was never filed as: no refusal, no opening
+// entry either (the walk never reached the file), and rule 4 read that absence as "brand-new this
+// run". Old-build bytes, recorded under this run's build identity, with every hazard mechanism the
+// previous two rounds added working exactly as designed.
+//
+// A hazard is a statement about a PATH, and refusing a directory withholds the bytes of everything
+// beneath it — so the lookup is containment, not equality. Measured on the real production path
+// before the fix: `{recorded: true}` and a chapter record on disk. The real extractor is used here
+// rather than a stub, because a stub keyed `screens/a.png` would be my own assumption about what
+// extraction yields for a nested embed, and that key is half of what the defect is about.
+test('recordChapterProvenance: an asset hidden by a symlinked SUBDIRECTORY at open is never recorded — the hazard names the directory, not the asset', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    const stale = join(dir, 'stale-screens');
+    nodeFs.mkdirSync(stale, { recursive: true });
+    nodeFs.writeFileSync(join(stale, 'a.png'), 'stale-from-the-previous-build');
+    nodeFs.symlinkSync(stale, join(assetDir, 'screens'));
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    // The hazard is filed under the DIRECTORY, and the opening hash map is empty — both halves of
+    // the defect, pinned here so a future change that moves either one fails loudly rather than
+    // quietly making this test vacuous.
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], ['screens:symlink']);
+    assert.deepEqual(Object.keys(opened.runState.opening_assets['items']), []);
+
+    // The capture replaces the symlink with a real directory holding the SAME stale bytes.
+    nodeFs.unlinkSync(join(assetDir, 'screens'));
+    nodeFs.mkdirSync(join(assetDir, 'screens'));
+    nodeFs.writeFileSync(join(assetDir, 'screens', 'a.png'), 'stale-from-the-previous-build');
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const embed = chapterPathsModule.embedPath(chapterFile, assetDir, 'screens/a.png');
+    nodeFs.writeFileSync(chapterFile, `# items\n\n1. Step\n\n   ![a](${embed})\n`);
+
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, stubDepsNoIdentity());
+    assert.equal(result.recorded, false, JSON.stringify(result));
+    assert.equal(result.reason, 'rule5_opening_unhashable:screens:symlink', JSON.stringify(result));
+    assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), false);
+  });
+});
+
+// [round 17] The containment rule must not over-reach in the other direction: a hazard on `screens`
+// says nothing about a sibling whose key merely starts with those characters. Without the separator
+// this check is a `startsWith` that swallows `screensaver/`, refusing a chapter whose every asset
+// was hashed cleanly at both observation points — a fail-closed defect is still a defect when the
+// operator has no way to act on it.
+test('recordChapterProvenance: a hazard on `screens` does not refuse an asset under `screensaver`', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(join(assetDir, 'screensaver'), { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'screensaver', 'a.png'), 'v1');
+    nodeFs.symlinkSync(join(dir, 'nowhere'), join(assetDir, 'screens'));
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], ['screens:symlink']);
+
+    nodeFs.writeFileSync(join(assetDir, 'screensaver', 'a.png'), 'v2');
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const embed = chapterPathsModule.embedPath(chapterFile, assetDir, 'screensaver/a.png');
+    nodeFs.writeFileSync(chapterFile, `# items\n\n1. Step\n\n   ![a](${embed})\n`);
+
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, stubDepsNoIdentity());
+    assert.equal(result.recorded, true, JSON.stringify(result));
+  });
+});
+
 // [round 16 BLOCKER] A record written before the hazard/absence split carries no hazard lists, and
 // the reader accepted it under the same `record_version: 1` — so "field absent" read back as "no
 // hazards", the exact false statement the split exists to prevent. Two version-1 shapes cannot both
