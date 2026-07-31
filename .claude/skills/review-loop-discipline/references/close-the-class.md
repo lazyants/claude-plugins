@@ -44,7 +44,7 @@ The resolution is to use the real type *constructed in the defective state* wher
 
 Then mutate: change the guard, and check that exactly the intended test fails. Every one of these was caught that way, and a mutant that kills nothing is the same signal as a mutant that kills the wrong test.
 
-Knowing this at round 1 would have collapsed most of that loop into about two rounds: the fix is the same shape at every layer (keep "could not read it" as its own fact, never as an absence), the layers are enumerable by reading the call chain once, and most of the remaining rounds were spent discovering that the previous round's *test*, not its fix, was the incomplete part.
+Knowing this at round 1 would have collapsed most of that loop: the fix is the same shape at every layer (keep "could not read it" as its own fact, never as an absence), the layers are enumerable by reading the call chain once, and most of the remaining rounds were spent discovering that the previous round's *test*, not its fix, was the incomplete part.
 
 ## Format / serialization migrations
 
