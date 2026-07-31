@@ -23,7 +23,7 @@ Two moves close a class: (a) ENUMERATE the complete instance set (every fire-and
 
 Enumerating the SITES of a pattern closes the class only at the layer you were shown it. When the defect is "an item that could not be processed was silently omitted", the same predicate usually exists at several layers of a pipeline, and each fix looks locally complete because the set really was exhaustive *at that layer*. Ask instead: **at every layer between the source and the consumer, what can drop an item, and does the consumer distinguish "dropped" from "was never there"?**
 
-Verified 2026-07-31 (enduser-handbook 1.12.0), three consecutive review rounds, one defect:
+Verified 2026-07-31 (enduser-handbook 1.12.0): a long unbroken run of review rounds, all of them **one defect** — every round found the previous round's fix incomplete one layer up, and the late ones found it in the error code *next to* the one just guarded, and in a rule the module had already written down for a neighbouring subsystem. (Exact counts live in PR #382, where they are dated and cannot rot; they are deliberately not quoted here — see the census rule below.) Three of the layers:
 
 1. The report loop hashed a chapter's images and kept only the `present` results, so an unreadable image vanished from the comparison and a chapter with one good image and one unreadable one reported `unchanged`. Fixed at that loop; the site set was complete there.
 2. The next round found the same predicate in the snapshot that feeds the earlier stage, where a dropped image becomes a *missing key* — and a missing opening key means "brand-new file", which SKIPS the did-it-change check. Same omission, opposite consequence, one layer up.
@@ -33,9 +33,18 @@ Verified 2026-07-31 (enduser-handbook 1.12.0), three consecutive review rounds, 
 
 **A shared helper whose callers disagree about what "missing" means.** One `snapshotAssetHashes` served both the opening and the closing observation, and its comment justified dropping an unreadable file: *"a missing expected image fails completeness (rule 3) and the chapter is reported ineligible, never silently trusted."* True of the closing snapshot, which is what that rule reads. Exactly inverted for the opening one, where missing means brand-new and waives the check. The comment was not wrong so much as written for one of two callers, and it read as a completed safety argument. **When one helper feeds two consumers, verify its "absent" case against EACH consumer's meaning, and say in the comment which caller the argument is about.**
 
-**A regression test that cannot reach the layer the defect moved to.** The layer-2 fix shipped with a test using a hard link; a hard link's dirent is still `isFile()`, so the walk visits it and the hazard is raised one layer *below* where layer 3's defect lives. The test passed with the symlink path entirely broken. **State which layer your regression test exercises, and pick the input kind that reaches the layer you just changed** — here a symlink rather than a hard link, since only a symlink is refused by the walk.
+**A regression test whose FIXTURE cannot reach the condition its own name claims.** This kept recurring on that branch *after* being written down here as a layer concern — the single most productive question anyone asked of it — which is why it is stated as its own rule now: the question is not only "which layer does this test exercise" but **"can this input physically exhibit the condition I am asserting about?"** A green test and a reachable test look identical.
 
-Knowing this at round 1 would have collapsed all three rounds into one: the fix is the same shape at every layer (keep "could not read it" as its own fact, never as an absence), and the layers are enumerable by reading the call chain once.
+Two mechanisms produced every instance, and they pull in opposite directions:
+
+- **A real object in a NORMAL state cannot model an ABNORMAL one.** A hard link's dirent is still `isFile()`, so it never reaches the branch that refuses symlinks. A leaf symlink's hazard key *is* an asset key, so it never reaches the containment match that a refused *directory* needs. A real `fs.Dirent` always has a type, so it cannot model the untyped one some filesystems return. A real `fs.Stats` has every predicate, so it cannot model a caller implementing only the declared subset. Each test passed with the path it named entirely broken.
+- **A stub built to model the abnormal state encodes MY model of it** — which is half of what is under test. "All predicates false" was my belief about what an untyped dirent looks like; asserting behavior against that proves the code agrees with my belief, not with the platform.
+
+The resolution is to use the real type *constructed in the defective state* wherever the API allows it (`new Dirent(name, 0, path)` — the constructor is reachable off `Object.getPrototypeOf(realDirent).constructor`), and otherwise **to assert the fixture exhibits the condition before asserting any behavior about it**: `assert.equal(fixture.isFile(), false, 'fixture must model X')` costs one line and converts a silently-vacuous test into a failing one. Where a contract has required and optional members, note that a fixture supplying *more* than required cannot prove the optional path — that needs a second fixture supplying exactly the minimum.
+
+Then mutate: change the guard, and check that exactly the intended test fails. Every one of these was caught that way, and a mutant that kills nothing is the same signal as a mutant that kills the wrong test.
+
+Knowing this at round 1 would have collapsed most of that loop: the fix is the same shape at every layer (keep "could not read it" as its own fact, never as an absence), the layers are enumerable by reading the call chain once, and most of the remaining rounds were spent discovering that the previous round's *test*, not its fix, was the incomplete part.
 
 ## Format / serialization migrations
 
