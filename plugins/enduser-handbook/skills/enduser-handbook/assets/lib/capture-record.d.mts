@@ -157,6 +157,11 @@ export interface RunRecord {
   // path, and the assets it hides are keyed beneath it. Anything reading these lists must match by
   // containment (`key === path || key.startsWith(path + '/')`), never by equality — W5 matched by
   // equality for a round, and a symlinked `screens/` therefore never refused `screens/a.png`.
+  // [round 17] Each member is VALIDATED, not merely typed: a member with no colon, an empty path, a
+  // `.`/`..`/empty segment, or a reason outside the four words above makes the whole record
+  // `bad_chapter_hazards:<field>`. That is deliberately fail-closed — an unreadable member was
+  // silently dropped before, and a dropped hazard is indistinguishable from no hazard, which is the
+  // false-provenance path these lists exist to close. A hand-written record must satisfy this.
   chapters: Record<string, {
     opening: Record<string, string>;
     closing: Record<string, string>;
