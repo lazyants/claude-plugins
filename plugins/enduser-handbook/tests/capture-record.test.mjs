@@ -1772,6 +1772,58 @@ test('openCaptureRun: a non-regular dirent in the asset tree is a hazard, spelle
   }
 });
 
+// [round 18, found while checking whether round 17's fix was complete one layer up] The walk's own
+// error handling had the same hole the hazard split was created for: a nested directory whose
+// listing fails with ENOTDIR — it was a directory when its type was decided and a regular file a
+// moment later — returned silently, so everything beneath it left the snapshot with no hazard
+// recorded. At the OPENING observation point that is not a harmless omission: the absent keys read
+// as "brand-new this run", rule 4 is skipped, and old bytes are recorded as the captured build's.
+// Exactly the round-17 failure through a different door.
+//
+// The fail-closed argument that covers the filename listing does NOT cover this, and that is the
+// round-15 lesson restated: the listing halts on a destination it cannot match, but the opening
+// snapshot's missing key is read as good news. The root directory is a separate case and is gated
+// at the call site, which lstats the asset dir and halts on anything but ENOENT/ENOTDIR.
+test('walk: a nested directory that stops being one mid-walk is a hazard, not a silent omission', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(join(assetDir, 'screens'), { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'screens', 'a.png'), 'stale-from-the-previous-build');
+    nodeFs.writeFileSync(join(assetDir, 'top.png'), 'v1');
+
+    // The dirent still says `screens` is a directory; the listing of it fails as it would if the
+    // directory were replaced by a regular file in between.
+    const deps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        if (String(p).endsWith('/screens')) {
+          const err = new Error('ENOTDIR'); err.code = 'ENOTDIR'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], ['screens:inspection_failure'],
+      'a directory whose contents could not be enumerated must survive as a hazard covering them');
+    // The sibling that WAS readable is unaffected — a hazard is a statement about one path.
+    assert.deepEqual(Object.keys(opened.runState.opening_assets['items']), ['top.png']);
+
+    // And the hazard reaches W5 through containment, refusing the asset it hid.
+    nodeFs.writeFileSync(join(assetDir, 'top.png'), 'v2');
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const w5Deps = { ...stubDepsNoIdentity(), expectedAssets: stubExpectedAssetsFor(assetDir, ['screens/a.png']) };
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, w5Deps);
+    assert.equal(result.recorded, false, JSON.stringify(result));
+    assert.equal(result.reason, 'rule5_opening_unhashable:screens:inspection_failure', JSON.stringify(result));
+  });
+});
+
 // [round 18 IMPORTANT] The socket test above passes with this completely broken, for the third
 // time in this release: it exercises a KNOWN dirent type, and the defect is in what happens when
 // the type is unknown. libuv reports `UV_DIRENT_UNKNOWN` on filesystems that do not fill in

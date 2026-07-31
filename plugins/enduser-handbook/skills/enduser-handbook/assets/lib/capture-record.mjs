@@ -1615,7 +1615,26 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped) {
       entries = deps.readdirSync(absDir, { withFileTypes: true });
     } catch (err) {
       const code = errProp(err, 'code');
-      if (code === 'ENOENT' || code === 'ENOTDIR') return;
+      // ENOENT: nothing is there. The one condition this module has always called an absence.
+      if (code === 'ENOENT') return;
+      // [round 18] ENOTDIR used to return here too, silently, and that was the round-17 defect
+      // through a different door: a subdirectory that was a directory when its type was decided and
+      // a regular file a moment later took everything beneath it out of the snapshot with no
+      // hazard recorded. At the OPENING observation point those absent keys read as "brand-new this
+      // run", rule 4 is skipped, and old bytes are recorded as the captured build's. The fail-closed
+      // argument that covers the filename listing does not cover this — the listing halts on a
+      // destination it cannot match, while the opening snapshot reads a missing key as good news.
+      // A hazard on the directory itself now covers every asset under it, which is only expressible
+      // because the W5 match became containment in the same round.
+      //
+      // The ROOT call is a separate case and is NOT nameable as a relative path: it is gated at the
+      // call site, which lstats the asset directory and halts on anything but ENOENT/ENOTDIR.
+      // Any other code still throws, which halts the whole run — strictly more conservative than a
+      // per-directory hazard, so it is left as it was.
+      if (code === 'ENOTDIR') {
+        if (relPrefix !== '') onSkipped?.(relPrefix, 'inspection_failure');
+        return;
+      }
       throw err;
     }
     for (const dirent of entries) {
