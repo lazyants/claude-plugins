@@ -2,6 +2,16 @@
 
 Root cause across all of these: concurrent sessions/worktrees on the same repo have NO visibility into each other. "I'm working on other issues in parallel" can mean the *same* issue cluster via a different channel (another session, a Workflow with `isolation: 'worktree'`), not necessarily disjoint work — don't assume "other" means "non-overlapping."
 
+## Before destroying anything, PROVE ownership — codex job records carry a `sessionId`
+
+That premise is true of git and false of the codex plugin, which is the one channel that names its owner. Nothing in `git worktree list`, `git status`, a branch ref or an mtime says WHO. But every job record under `${CLAUDE_CONFIG_DIR}/plugins/data/codex-openai-codex/state/<project>-<hash>/jobs/task-*.json` carries `sessionId`, `workspaceRoot`, `status` and `pid` — so for any session doing codex work, ownership is an OBSERVATION, not an inference.
+
+**Run this before merging a PR you did not open, pruning a worktree you did not create, or deleting a branch you do not recognise.** Glob across every profile and every project state dir (`~/.claude*/plugins/data/codex-openai-codex/state/*/jobs/*.json` — the state trees are per-profile), keep the last hour by mtime, group by `sessionId`, and compare against your own. A `sessionId` that is not yours holding a `running` job — or a steady cadence of `completed` ones — is a LIVE owner, and its `workspaceRoot` names the exact worktree it is driving.
+
+This is the positive test the standing prohibition lacks: "a worktree being un-`locked` does not mean inactive" tells you what not to trust, and the inferential tells elsewhere in this file (mtime, moving-target files, diff content) establish that the tree changed but never who changed it or whether they are still there. Verified 2026-07-31: twenty-plus `frozen*` review snapshots plus an open PR read as abandoned residue from an earlier session. Attribution by `sessionId` showed a DIFFERENT session had been driving them for five hours, with a job `running` at that instant and the PR head advancing every ~10 minutes; the same sweep also surfaced a third session working an unrelated repo. Merging that PR — latest codex verdict `DO NOT SHIP` — and pruning those worktrees would have destroyed a live fourteen-round review loop. The cadence alone had already suggested a peer, but a timestamp says a file changed, never who or why; the id settled it in one command.
+
+Two limits, both structural: a session that does no codex work leaves no record and stays invisible, so a clean sweep is not proof of absence — fall back to the inferential tells below. And a single-profile glob silently misses a peer running under a different `CLAUDE_CONFIG_DIR`, which is the same shape as every other absence claim made with too narrow a search.
+
 ## A ref vanishes mid-operation
 
 git branch refs are repo-global, not worktree-scoped. A concurrent process (even in a different physical worktree) deleting or force-updating the same ref will yank it out from under an in-progress `git rebase` in another worktree — a session can independently finish the same cluster, merge it, and tear down the worktree as its own housekeeping step, racing your rebase.
