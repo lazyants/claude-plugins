@@ -1103,11 +1103,18 @@ function validateEntriesForCapture(profileLike, entries, deps) {
   // not the per-entry symlink-following walk the plan requires to stay realpath-free — it does not
   // touch the guarantee that requirement protects (an entry-level symlink whose target legitimately
   // stays inside the root is still resolved component-by-component, never via realpath).
-  const outputRootResolved = canonicalizeForComparison(profileLike.capture.output_dir, deps);
-  if (!outputRootResolved.ok) {
-    return haltResult('provenance_hazard', `cannot resolve capture.output_dir: ${outputRootResolved.reason}`, { path: outputRootResolved.path });
+  // [round 32] ONE observation of the configured root, made here and RETURNED — the version that
+  // stood here canonicalized at the top and then built a fresh `containmentRootFor` at the return,
+  // so the two could disagree and the window between them belonged to nobody. Codex repointed the
+  // root inside that window: gate 3 approved the safe target and the snapshot received the foreign
+  // one, `ok: true`, no hazard. A claim that an observation is "carried" is a claim that there is
+  // only one of it.
+  const outputRoot = containmentRootFor(profileLike, deps);
+  if (outputRoot === null) {
+    return haltResult('provenance_hazard', 'cannot resolve capture.output_dir: inspection_failure', { path: profileLike?.capture?.output_dir ?? null });
   }
-  const canonicalOutputRoot = `/${outputRootResolved.segments.join('/')}`;
+  const outputRootResolved = { ok: true, segments: outputRoot.segments };
+  const canonicalOutputRoot = outputRoot.canonical;
   // `resolvePhysicalContainment` requires `rootDir` and `dir` to share ONE rootedness — it treats a
   // mismatch (one absolute, one relative) the same as a genuine escape, halting `escapes-root`
   // unconditionally. `canonicalOutputRoot` above is ALWAYS absolute (canonicalizeForComparison's
@@ -1254,7 +1261,7 @@ function validateEntriesForCapture(profileLike, entries, deps) {
     );
   }
 
-  return { ok: true, assetDirsObserved, outputRoot: containmentRootFor(profileLike, deps) };
+  return { ok: true, assetDirsObserved, outputRoot };
 }
 
 // Shared by all three identity-resolution call sites below (openCaptureRun's opening step,
@@ -1922,7 +1929,22 @@ function containmentRootFor(profileLike, deps) {
 // listing FAILS, and the replacement lists perfectly well. `openCaptureRun` returned ok, hashed
 // another tree's bytes with no hazard, and W5 attributed them to this build.
 //
-// The output root is one object for the whole of a snapshot. This says so.
+// What this buys is narrow and codex named the limit precisely: the root's own `dev:ino` does NOT
+// freeze what paths beneath it resolve to, because its directory entries change independently of the
+// directory. So this detects a REPOINT of the configured path and nothing else — a repoint to
+// another name for the same object is correctly harmless, and a substitution one level down is
+// invisible to it. That level is `rootEscapesOutputRoot`'s job, not this one's.
+// [round 32] Gate 3's containment rule, applied to a root gate 3 could not see because it did not
+// exist yet. `null` containment information cannot establish the property, so it refuses — the same
+// direction every other unestablished fact takes in this module.
+function rootContainmentFailure(absPath, containmentRoot, deps) {
+  if (containmentRoot === null) return 'the capture output root could not be established for a containment check';
+  const resolved = canonicalizeForComparison(absPath, deps);
+  if (!resolved.ok) return `the asset directory could not be resolved for a containment check (${resolved.reason})`;
+  if (!segmentsWithin(containmentRoot.segments, resolved.segments)) return 'the asset directory resolves outside capture.output_dir';
+  return null;
+}
+
 function outputRootChanged(containmentRoot, deps) {
   if (containmentRoot === null || containmentRoot.identity === null) return false;
   const now = assetDirIdentity(containmentRoot.configured, deps, { allowSymlink: true });
@@ -2094,6 +2116,15 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
       if (outputRootChanged(containmentRoot, deps)) {
         throw new Error('the capture output root was replaced between its validation and this snapshot');
       }
+      // [round 32] And the root's own CONTAINMENT, which is the property gate 3 could not establish
+      // for it: gate 3 checks containment only for a chapter directory that already exists, so an
+      // absent one carries no statement at all, and pinning the output root does not help because a
+      // directory's `dev:ino` does not freeze what its entries resolve to. Codex created
+      // `<out>/items -> outside/items` after validation with the output root unchanged, and the
+      // snapshot hashed the outside bytes with an empty hazard list. Re-checking here is gate 3's
+      // own rule applied at the first moment the path exists to apply it to.
+      const containmentFailure = rootContainmentFailure(absDir, containmentRoot, deps);
+      if (containmentFailure !== null) throw new Error(containmentFailure);
       // [round 23] A caller-supplied pin brackets the root across TWO calls (gate 3 to the
       // snapshot). Without one, the root previously got no bracket at all — not even the
       // self-established one every CHILD gets — so a substitution landing during the root's own

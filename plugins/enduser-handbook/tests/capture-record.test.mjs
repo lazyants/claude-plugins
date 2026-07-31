@@ -3258,8 +3258,14 @@ test('the closing snapshot: an output root that becomes unresolvable AFTER its o
     // halts — with `Cannot read properties of null` — so a test asserting only the class passes
     // under a mutant that removed the thing it claims to pin. Fail-closed by crash is not the same
     // fact as fail-closed by adjudication, and only the message tells them apart.
-    assert.match(closed.halts[0].message, /could not be confirmed .* listing then failed/,
-      `the halt must be the adjudicated refusal, not a crash: ${closed.halts[0].message}`);
+    // [round 31/32] The distinction codex drew is crash vs ADJUDICATION, not which adjudication:
+    // round 32's containment check now refuses this input first, and both forms are deliberate
+    // refusals with an operator-actionable sentence. Deleting the null guard still produces
+    // `Cannot read properties of null`, which is what this must keep excluding.
+    assert.doesNotMatch(closed.halts[0].message, /Cannot read propert|is not a function|undefined is not/,
+      `the halt must be adjudicated, not a crash: ${closed.halts[0].message}`);
+    assert.match(closed.halts[0].message, /could not be confirmed|containment check|resolves outside/,
+      `the halt must name what it refused: ${closed.halts[0].message}`);
   });
 });
 
@@ -3352,6 +3358,152 @@ test('openCaptureRun: a repointed OUTPUT ROOT is diagnosed as such, not as a cha
     assert.equal(opened.ok, false, `a repointed output root must not open: ${JSON.stringify(opened)}`);
     assert.match(opened.halts[0].message, /output root was replaced/,
       `the diagnostic must name the output root, not the chapter beneath it: ${opened.halts[0].message}`);
+  });
+});
+
+// [round 32 BLOCKER 1] The nineteenth layer, and it retires the approach that produced the last
+// four. Pinning the output root by `dev:ino` does NOT freeze what paths beneath it resolve to — its
+// directory entries change independently of the directory's own identity. Gate 3 records an identity
+// only for a chapter directory that EXISTS, so an absent one is represented by nothing at all, and
+// the walk self-baselines whatever appears there. Codex created `<out>/items -> outside/items` after
+// validation, with the output root's `1:1301` identity unchanged before and after, and the opening
+// snapshot hashed the outside bytes with an empty hazard list.
+//
+// What was missing is not another identity pin. It is CONTAINMENT, re-checked at the moment an
+// absent path becomes present — gate 3's own property, which gate 3 could not apply to something
+// that did not exist yet.
+test('openCaptureRun: a chapter root that appears as a symlink OUTSIDE the output dir is refused', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    const outside = join(dir, 'outside', 'items');
+    nodeFs.mkdirSync(profile.capture.output_dir, { recursive: true });
+    nodeFs.mkdirSync(outside, { recursive: true });
+    nodeFs.writeFileSync(join(outside, 'a.png'), 'bytes from a tree this handbook does not own');
+    assert.equal(nodeFs.existsSync(assetDir), false, 'gate 3 must see an ordinary first capture');
+
+    const rootIdBefore = nodeFs.lstatSync(profile.capture.output_dir).ino;
+    let planted = false;
+    const deps = depsWithOverride({
+      openSync: (p, ...rest) => {
+        if (!planted && String(p).endsWith('/pending.json')) {
+          nodeFs.symlinkSync(outside, assetDir);
+          planted = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(planted, true, 'the plant hook never ran — this fixture cannot reach the condition');
+    assert.equal(nodeFs.lstatSync(profile.capture.output_dir).ino, rootIdBefore,
+      'the OUTPUT ROOT must be unchanged, or this test is the round-31 one again rather than the layer beneath it');
+    assert.equal(opened.ok, false, `a chapter root resolving outside the output dir must not be snapshotted: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+  });
+});
+
+// [round 32 BLOCKER 1] The close is worse, as codex put it: it runs no gate 3 at all, so nothing
+// upstream has ever checked containment for a root it self-baselines.
+test('the closing snapshot: a chapter root that became a symlink OUTSIDE the output dir is refused', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    const outside = join(dir, 'outside', 'items');
+    nodeFs.mkdirSync(profile.capture.output_dir, { recursive: true });
+    nodeFs.mkdirSync(outside, { recursive: true });
+    nodeFs.writeFileSync(join(outside, 'a.png'), 'bytes from a tree this handbook does not own');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    nodeFs.symlinkSync(outside, assetDir);
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false, `a chapter root resolving outside the output dir must not close: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+  });
+});
+
+// [round 32 BLOCKER 2] "Gate 3's observation is carried into every snapshot" was a claim of mine, and
+// it was false: validation canonicalized the root at its start and then built a FRESH observation at
+// its return, so the two could disagree and the window between them belonged to nobody. The
+// structural fix is to observe once; this pins that structurally rather than by racing it.
+test('validateEntriesForCapture resolves the configured output root exactly once per validation', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    let resolutions = 0;
+    const deps = depsWithOverride({
+      realpathSync: (p, ...rest) => {
+        if (String(p) === profile.capture.output_dir) resolutions += 1;
+        return nodeFs.realpathSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    // Two, and which two is the point: the W1 ownership gate resolves it for its own purpose
+    // (`assertProvenanceOwnership`), and gate 3 resolves it exactly once. Measured, not assumed —
+    // the first version of this assertion said one, counted the whole call, and failed on a gate
+    // that was never in scope. A THIRD would mean validation observed it twice again.
+    assert.equal(resolutions, 2,
+      `the configured output root must be observed once by ownership and once by gate 3, not ${resolutions} times — an extra observation inside validation is a window that belongs to nobody`);
+  });
+});
+
+// [round 32, review bot P1] `containmentRootFor` makes TWO filesystem observations of the same
+// path — `canonicalizeForComparison` for the segments and `assetDirIdentity` for the identity — and
+// a repoint landing between them leaves `segments` describing tree A while `identity` pins tree B.
+// Every later `outputRootChanged` then compares B with B and agrees. The bot reproduced it through
+// the real exported `openCaptureRun` and asked for the exact race as a regression.
+test('openCaptureRun: a root repointed BETWEEN its resolution and its identity read is still refused', () => {
+  withTempDir((dir) => {
+    const treeA = join(dir, 'treeA');
+    const treeB = join(dir, 'treeB');
+    const outputRoot = join(dir, 'out');
+    nodeFs.mkdirSync(treeA, { recursive: true });
+    nodeFs.mkdirSync(join(treeB, 'items'), { recursive: true });
+    nodeFs.writeFileSync(join(treeB, 'items', 'foreign.png'), 'bytes from a tree this handbook does not own');
+    nodeFs.symlinkSync(treeA, outputRoot);
+
+    const profile = profileFor(dir, { capture: { output_dir: outputRoot, build_identity: { ui_read: false } } });
+    const entry = { slug: 'items' };
+    assert.equal(nodeFs.existsSync(join(treeA, 'items')), false, 'gate 3 must see an ordinary first capture');
+
+    // The seam is the boundary between the two observations: repoint the moment the root's segments
+    // have been resolved and before its identity is read.
+    // Resolution 1 of the configured root is the W1 ownership gate; resolution 2 is
+    // `containmentRootFor`'s, and the identity read follows it immediately. Firing on the FIRST one
+    // repoints before the module has observed anything and reproduces a different (unclosable)
+    // window entirely — the first version of this fixture did exactly that and proved nothing.
+    let resolutions = 0;
+    let repointed = false;
+    const deps = depsWithOverride({
+      realpathSync: (p, ...rest) => {
+        const out = nodeFs.realpathSync(p, ...rest);
+        if (String(p) === outputRoot) {
+          resolutions += 1;
+          if (resolutions === 2) {
+            nodeFs.unlinkSync(outputRoot);
+            nodeFs.symlinkSync(treeB, outputRoot);
+            repointed = true;
+          }
+        }
+        return out;
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(repointed, true, 'the repoint hook never ran — this fixture cannot reach the condition');
+    assert.equal(opened.ok, false, `segments from one tree and an identity from another must not certify a snapshot: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
   });
 });
 
