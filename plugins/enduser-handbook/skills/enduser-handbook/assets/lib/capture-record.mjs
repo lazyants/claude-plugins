@@ -1942,12 +1942,21 @@ function containmentRootFor(profileLike, deps) {
   // two disagree and this refuses; one installed and reverted entirely between them leaves no trace,
   // exactly as it does at every other observation point in this module. Detection, not prevention.
   //
-  // It cannot refuse a run that would otherwise have closed cleanly, which is the property that
-  // matters for a check added this late: `outputRootChanged` ALREADY requires the identity read at
-  // the configured name to equal the one pinned at `canonical`, on every snapshot of every entry.
-  // Any topology where the two disagree already halts at the first snapshot. This moves that
+  // For every run that snapshots anything at all, this refuses nothing new — the property that
+  // matters for a check added this late. `outputRootChanged` ALREADY requires the identity read at
+  // the configured name to equal the one pinned at `canonical`, on every snapshot of every entry,
+  // so any topology where the two disagree already halted at the first snapshot. This moves that
   // refusal to validation, before a reservation is written, and lets it be diagnosed for what was
   // observed instead of as a replacement.
+  //
+  // [round 35] "For every run that snapshots anything" is the qualification, and the sentence here
+  // used to assert the universal without it. An EMPTY entry set is validated and then snapshots
+  // nothing — open, close and W6 all iterate the entries — so no `outputRootChanged` ever runs and
+  // a disagreement went unreported. Measured against the pre-bracket module: an empty run on a
+  // statically ambiguous path returned ok, and it refuses here. That is a genuinely new refusal.
+  // It is the conservative direction and it is kept: the root is ambiguous whether or not any
+  // chapter asked about it, and a run that records no chapters still writes a run record naming
+  // that root.
   //
   // Which is why the reason names the OBSERVATION and not a cause. Two different situations reach
   // this line and these two syscalls cannot tell them apart: a substitution landing inside the

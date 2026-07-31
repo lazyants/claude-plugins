@@ -4243,6 +4243,72 @@ test('openCaptureRun: a MIXED pair of failed root observations is refused, not r
   });
 });
 
+// [round 35 BLOCKER] The same mixed pair, reached with no interposed `lstat` at all — codex found it
+// independently of the review bot and by a different route, which is why both fixtures stay. Here
+// the first observation follows a PRESENT dangling root link (`vanished`, and deliberately not
+// `absentDirectly`, which is round 26's distinction), the link is removed while the module is
+// resolving the name, and the post-resolution observation reports plain ENOENT. Two `ok: false`
+// values, one of them a claim about an object that was there.
+//
+// Measured through the real exported `openCaptureRun` at both prior commits: `ok: true`, with the
+// recreated root's `foreign.png` in the opening baseline. The guard that asked only the second
+// observation did NOT close this — it took requiring both.
+test('openCaptureRun: a dangling root link at the first read and plain absence at the second is refused', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    const outputRoot = join(real, 'assets');
+    const profile = {
+      capture: { output_dir: outputRoot, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+    nodeFs.mkdirSync(profile.publish.chapters_dir, { recursive: true });
+    nodeFs.symlinkSync(join(real, 'assets-target'), outputRoot);
+    assert.equal(nodeFs.lstatSync(outputRoot).isSymbolicLink(), true, 'the root must be present as a link');
+    assert.equal(nodeFs.existsSync(outputRoot), false, 'and it must dangle, or the first read reports an identity');
+
+    let resolutions = 0;
+    let removed = false;
+    let recreated = false;
+    const deps = depsWithOverride({
+      realpathSync: (p, ...rest) => {
+        if (String(p) === outputRoot) resolutions += 1;
+        try {
+          return nodeFs.realpathSync(p, ...rest);
+        } finally {
+          // Resolution 1 is the W1 ownership gate; resolution 2 is the bracket's own first read
+          // following this link. Removing it there is what makes that read report a dangling link
+          // while the post-resolution read reports plain absence.
+          if (!removed && resolutions === 2 && String(p) === outputRoot) {
+            nodeFs.unlinkSync(outputRoot);
+            removed = true;
+          }
+        }
+      },
+      // The consequence, kept as documentation rather than as the subject: with the pair tolerated,
+      // a root recreated before the snapshot is hashed into the opening baseline.
+      openSync: (p, ...rest) => {
+        if (removed && !recreated && String(p).endsWith('/pending.json')) {
+          nodeFs.mkdirSync(join(outputRoot, 'items'), { recursive: true });
+          nodeFs.writeFileSync(join(outputRoot, 'items', 'foreign.png'), 'bytes from a tree this handbook does not own');
+          recreated = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, deps);
+    assert.equal(removed, true, 'the link was never removed mid-resolution — this fixture cannot reach the condition');
+    assert.equal(opened.ok, false, `a pair whose first half saw an object must not be tolerated as absence: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+    // `vanished` is the FIRST observation's word — the half that saw something. Reporting the
+    // second half's plain absence would name the observation that was not the problem.
+    assert.match(opened.halts[0].message, /cannot resolve capture\.output_dir: vanished/,
+      `the halt must carry the first observation's reason: ${JSON.stringify(opened.halts)}`);
+    assert.equal(recreated, false, 'the refusal must land before the reservation, so nothing is ever hashed');
+  });
+});
+
 // [round 27] The ancestor climb walks a PATH, so it inherits the release's other recurring defect:
 // the shipped example profile's `output_dir` is RELATIVE (`vault/handbook/assets`), and a climb that
 // prefixes `/` onto relative segments probes an entirely different tree — one where every candidate
