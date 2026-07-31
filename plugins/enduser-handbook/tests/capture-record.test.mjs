@@ -1820,6 +1820,49 @@ test('the opening snapshot: a listed asset that disappears before it can be read
   });
 });
 
+// [round 19] The CLOSING half of the same phase distinction, which is the half that must NOT get
+// stricter. A capture tool that rewrites an asset by unlink-then-create races the closing snapshot,
+// and before `vanished` existed that produced an absent closing key, which rule 3 refuses as
+// "missing from closing". It must still refuse — the run cannot show what those bytes were — and it
+// must not refuse for a NEW reason that an operator has no way to act on. So the outcome is pinned
+// on both sides of the change: still a refusal, and now one that says which of the two things
+// happened. Written because the round-19 fix moved this case from one refusing rule to another, and
+// "the verdict is unchanged" is a claim about behaviour, not something the diff shows.
+test('the closing snapshot: a vanished asset still refuses the chapter, and now says why', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], [],
+      'the OPENING half must be clean, or this test is measuring the other phase');
+
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v2');
+    const closingDeps = depsWithOverride({
+      openSync: (path, ...rest) => {
+        if (String(path).endsWith('/a.png')) {
+          const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+        }
+        return nodeFs.openSync(path, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(closed.ok, true, `a hazard in the closing snapshot must not halt the close: ${JSON.stringify(closed)}`);
+
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const w5Deps = { ...stubDepsNoIdentity(), expectedAssets: stubExpectedAssetsFor(assetDir, ['a.png']) };
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, w5Deps);
+    assert.equal(result.recorded, false, JSON.stringify(result));
+    assert.equal(result.reason, 'rule5_closing_unhashable:a.png:vanished', JSON.stringify(result));
+    assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), false);
+  });
+});
+
 // [round 19 BLOCKER, the same phase distinction one layer up] Round 18 mapped the unknown-dirent
 // fallback's own ENOENT to an absence for the same wrong reason, so a file whose type the kernel
 // declined to report and which then vanished before the `lstat` took the identical path.
