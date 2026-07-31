@@ -1109,10 +1109,11 @@ function validateEntriesForCapture(profileLike, entries, deps) {
   // root inside that window: gate 3 approved the safe target and the snapshot received the foreign
   // one, `ok: true`, no hazard. A claim that an observation is "carried" is a claim that there is
   // only one of it.
-  const outputRoot = containmentRootFor(profileLike, deps);
-  if (outputRoot === null) {
-    return haltResult('provenance_hazard', 'cannot resolve capture.output_dir: inspection_failure', { path: profileLike?.capture?.output_dir ?? null });
+  const outputRootObservation = containmentRootFor(profileLike, deps);
+  if (!outputRootObservation.ok) {
+    return haltResult('provenance_hazard', `cannot resolve capture.output_dir: ${outputRootObservation.reason}`, { path: profileLike?.capture?.output_dir ?? null });
   }
+  const outputRoot = outputRootObservation.root;
   const outputRootResolved = { ok: true, segments: outputRoot.segments };
   const canonicalOutputRoot = outputRoot.canonical;
   // `resolvePhysicalContainment` requires `rootDir` and `dir` to share ONE rootedness — it treats a
@@ -1899,25 +1900,45 @@ function exactIdentityPart(value) {
 function containmentRootFor(profileLike, deps) {
   const raw = profileLike?.capture?.output_dir ?? '';
   const resolved = canonicalizeForComparison(raw, deps);
-  if (!resolved.ok) return null;
+  // The REASON travels, rather than being flattened into a fixed word at the call site. A symlink
+  // cycle on the configured root reported `inspection_failure` to the operator — the one diagnosis
+  // this module already knew to be wrong, since `canonicalizeForComparison` distinguishes the two
+  // and the sibling guard at the ownership gate has always said which it was.
+  if (!resolved.ok) return { ok: false, reason: resolved.reason };
   const canonical = `/${resolved.segments.join('/')}`;
-  // [round 31] The root's own physical identity, observed at the same moment its segments are, and
-  // observed THROUGH THE CONFIGURED PATH rather than through its resolved form. The first version of
-  // this probed `canonical` and the guard could never fire: when the configured root is a symlink,
-  // repointing it leaves the old target untouched, so an identity taken on the target agrees with
-  // itself forever while the name the module actually reads through now names a different tree.
-  // What is being pinned is what `capture.output_dir` RESOLVES TO, so the probe has to start where
-  // the module starts.
+  // [round 31] What is being pinned is what `capture.output_dir` RESOLVES TO, so the LATER probe
+  // has to start where the module starts — see `outputRootChanged`, which reads the configured path
+  // and not this one. That is round 31's fix and it stands.
+  //
+  // [round 33] The BASELINE is the other half, and round 31 got it backwards: it read the identity
+  // through the configured path too, which made this function two INDEPENDENT resolutions of one
+  // name. Codex repointed the root between them to a DESCENDANT of its own resolved target, and
+  // every downstream check then agreed with itself — `segments` described tree A, the identity
+  // pinned tree B, `outputRootChanged` compared B with B, and containment passed because B really
+  // is inside A. `openCaptureRun` returned ok with another tree's bytes hashed and no hazard. The
+  // comments claiming "the same moment" and "ONE observation" were false: one observation means one
+  // object, not two syscalls issued close together.
+  //
+  // Reading it at `canonical` binds the pair by construction. `canonical` is the fully resolved path
+  // observation A just returned, so the identity describes the object those segments name and
+  // cannot describe a different one — whatever the configured name does afterwards is precisely
+  // what `outputRootChanged` exists to catch. This does NOT reintroduce round 31's defect, which was
+  // about the later probe: pinning the target and then RE-READING the target compares an untouched
+  // object with itself forever, while pinning the target and re-reading the configured NAME is what
+  // a repoint has to move past.
   //
   // A root that does not exist yet has no identity, and that is an ordinary first capture rather
   // than a failure — `null` means "nothing to compare", never "compares equal".
-  const identity = assetDirIdentity(raw, deps, { allowSymlink: true });
+  const identity = assetDirIdentity(canonical, deps, { allowSymlink: true });
   return {
-    depth: normalizeSegments(rawSegments(raw), isAbsolutePath(raw)).length,
-    segments: resolved.segments,
-    canonical,
-    configured: raw,
-    identity: identity.ok ? identity.id : null,
+    ok: true,
+    root: {
+      depth: normalizeSegments(rawSegments(raw), isAbsolutePath(raw)).length,
+      segments: resolved.segments,
+      canonical,
+      configured: raw,
+      identity: identity.ok ? identity.id : null,
+    },
   };
 }
 
@@ -2482,14 +2503,35 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   // Same reasoning as the opening sweep: an unexpected errno during the closing sweep must return
   // a halt, not crash — and doing so HERE (before any temp is written) is what keeps the existing
   // "no record written before the closing resolution" guarantee true on this exit too.
+  // [round 33] The close runs the SAME validation the open does, and until this round it ran none of
+  // it: gate 3 was never applied here, gate 4 never at all, and the containment root was rebuilt
+  // fresh inside the loop, once per entry. Codex executed the consequence — two chapter directories
+  // aliasing ONE physical directory closed `ok: true` with the identical hash committed under both
+  // chapter keys. Nothing downstream recovers it: both opening maps were empty and both closing
+  // hashes matched, so W5 hands both chapters a confident record, and replacing the aliases with two
+  // byte-identical real directories before W5 leaves no trace anywhere that the pair was ever one.
+  //
+  // `runState.entries` is safe to re-gate because it is authenticated: the digest recomputed above
+  // is checked against the TOKEN on disk, so these are the entries this run actually opened with.
+  // One validation, and its outputRoot and per-entry identities are carried into the sweep exactly
+  // as `openCaptureRun` carries its own — the per-entry `containmentRootFor` that stood here was
+  // both the missing gate and a fresh observation per iteration.
+  const validatedClosing = validateEntriesForCapture(profileLike, runState.entries, d);
+  if (!validatedClosing.ok) return validatedClosing;
+
   const closingAssets = {};
   const closingHazards = {};
   try {
     for (const entry of runState.entries) {
+      const key = chapterKeyFor(entry);
       const assetDir = chapterAssetDir(profileLike, entry);
-      const snapshot = snapshotAssetHashes(assetDir, d, { containmentRoot: containmentRootFor(profileLike, d) });
-      closingAssets[chapterKeyFor(entry)] = snapshot.hashes;
-      closingHazards[chapterKeyFor(entry)] = snapshot.hazards;
+      const snapshot = snapshotAssetHashes(assetDir, d, {
+        rootMustExist: validatedClosing.assetDirsObserved.has(key),
+        rootIdentity: validatedClosing.assetDirsObserved.get(key) ?? null,
+        containmentRoot: validatedClosing.outputRoot,
+      });
+      closingAssets[key] = snapshot.hashes;
+      closingHazards[key] = snapshot.hazards;
     }
   } catch (err) {
     return haltResult('provenance_hazard', `cannot snapshot the closing asset hashes: ${describeThrownField(err, 'code')}`, {});
