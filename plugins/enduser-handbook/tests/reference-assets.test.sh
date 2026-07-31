@@ -3497,25 +3497,58 @@ fi
 # was sent after a file they could not open. Neither codex nor the cross-file reviewer catches that
 # class: both read what IS here. So every path-shaped `.md` a declaration cites must resolve, checked
 # against the skill root the way a reader would resolve it.
+# [round 12] The first version of this gate checked only PATH-shaped citations and waved through
+# every bare filename, which is the dominant form the declarations actually use — `capture-safety.md`,
+# `page-identity.md` and a dozen more, all real files under `references/`. It reported 22 citations
+# checked and would have passed a bare `never-existed.md`. A gate with a blind spot the size of the
+# common case is worse than none, because its green is read as coverage. Bare names now resolve the
+# way a reader resolves them: the skill root first, then anywhere under `references/`.
+#
+# Two names are prose, not citations, and are listed explicitly rather than silently skipped —
+# `a.md` is a measured return value quoted in a doc comment, `SUMMARY.md` is GitBook's own concept
+# name. The list is itself checked: an entry that starts resolving, or stops appearing, fails, so it
+# cannot quietly become a place where a real dangling citation hides.
+declaration_citation_prose="a.md SUMMARY.md"
 missing_declaration_citations=0
 checked_declaration_citations=0
+prose_seen=""
 for dmts in "$ASSETS"/lib/*.d.mts; do
   while IFS= read -r cited; do
+    [ -n "$cited" ] || continue
+    resolved=""
     case "$cited" in
-      */*) : ;;                       # a path-shaped citation, resolvable from the skill root
-      SKILL.md) : ;;                  # the one bare filename that is a real sibling
-      *) continue ;;                  # a bare name in prose (a fixture, an example) — not a citation
+      */*) [ -f "$SKILL_DIR/$cited" ] && resolved="$cited" ;;
+      *)
+        if [ -f "$SKILL_DIR/$cited" ]; then
+          resolved="$cited"
+        else
+          resolved="$(cd "$SKILL_DIR" && find references -type f -name "$cited" 2>/dev/null | head -1)"
+        fi
+        ;;
+    esac
+    case " $declaration_citation_prose " in
+      *" $cited "*)
+        prose_seen="$prose_seen $cited"
+        [ -z "$resolved" ] || bad "assets/lib/$(basename "$dmts"): '$cited' is on the prose list but now resolves to '$resolved' — remove it from the list so it is checked like a citation"
+        continue
+        ;;
     esac
     checked_declaration_citations=$((checked_declaration_citations + 1))
-    [ -f "$SKILL_DIR/$cited" ] || { missing_declaration_citations=$((missing_declaration_citations + 1)); bad "assets/lib/$(basename "$dmts") cites '$cited', which does not exist"; }
+    [ -n "$resolved" ] || { missing_declaration_citations=$((missing_declaration_citations + 1)); bad "assets/lib/$(basename "$dmts") cites '$cited', which does not exist under the skill root or references/"; }
   done <<EOF
 $(grep -ohE '[A-Za-z0-9_./-]+\.md' "$dmts" | sort -u)
 EOF
 done
-if [ "$missing_declaration_citations" -eq 0 ] && [ "$checked_declaration_citations" -gt 0 ]; then
-  ok "assets/lib/*.d.mts: every document a declaration cites exists ($checked_declaration_citations citations)"
-elif [ "$checked_declaration_citations" -eq 0 ]; then
-  bad "assets/lib/*.d.mts: citation check matched nothing — the extraction is broken, not the citations"
+for prose in $declaration_citation_prose; do
+  case " $prose_seen " in
+    *" $prose "*) : ;;
+    *) bad "citation gate: '$prose' is on the prose list but appears in no declaration — a stale entry hides a real citation" ;;
+  esac
+done
+if [ "$missing_declaration_citations" -eq 0 ] && [ "$checked_declaration_citations" -gt 20 ]; then
+  ok "assets/lib/*.d.mts: every document a declaration cites resolves ($checked_declaration_citations citations, bare and path-shaped)"
+elif [ "$checked_declaration_citations" -le 20 ]; then
+  bad "citation gate: only $checked_declaration_citations citations matched — the extraction is broken, not the citations"
 fi
 has_in_section "SKILL: repairs are idempotent on an already-repaired tree" \
   "$SKILL" '### W2 — Capture screenshots' \
