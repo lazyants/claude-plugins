@@ -2252,14 +2252,21 @@ test('walk: a subdirectory whose lstat cannot report identity is refused, not si
     nodeFs.writeFileSync(join(assetDir, 'screens', 'a.png'), 'the real asset');
 
     const deps = depsWithOverride({
-      // Exactly the pre-round-22 declaration: the three predicates, no `dev`, no `ino`.
+      // The pre-round-22 declaration — the three predicates, no `dev`, no `ino` — for the
+      // SUBDIRECTORY only. [round 23] The asset ROOT must keep its identity, because gate 3 now
+      // halts the whole run on a root it cannot pin; withholding it everywhere would leave this
+      // test silently re-pinning the root rule instead of the child rule it was written for. Keyed
+      // on the trailing segment rather than the full path, because the two call sites derive the
+      // directory through different roots (canonical vs profile-as-given) and a `===` here would
+      // make the fixture's reach depend on the platform's path canonicalization.
       lstatSync: (p) => {
         const st = nodeFs.lstatSync(p);
-        return {
+        const base = {
           isSymbolicLink: () => st.isSymbolicLink(),
           isDirectory: () => st.isDirectory(),
           isFile: () => st.isFile(),
         };
+        return String(p).endsWith('/screens') ? base : { ...base, dev: st.dev, ino: st.ino };
       },
       runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
     });
@@ -2295,24 +2302,31 @@ test('openCaptureRun: an asset root replaced by a symlink to an outside tree aft
     nodeFs.mkdirSync(outside, { recursive: true });
     nodeFs.writeFileSync(join(outside, 'a.png'), 'bytes from a tree this chapter does not own');
 
-    // The substitution lands after gate 3 and before the opening snapshot: gate 3 runs during
-    // `openCaptureRun`, and the first thing the snapshot does is list the root.
+    // The substitution lands after gate 3 and before the opening snapshot, hooked on the pending
+    // token's own `openSync` — which `openCaptureRun` performs between the two.
+    // [round 23 MINOR] It used to be hooked on `p === assetDir` inside `lstatSync`, which made the
+    // PHASE depend on path canonicalization: gate 3 derives the directory through the canonical
+    // output root and the snapshot through the profile as given, so on macOS (`/var` ->
+    // `/private/var`) the strings differ and the swap landed after gate 3, while on a topology where
+    // they are identical it landed INSIDE gate 3 and produced `asset_dir_escapes_output_dir`
+    // instead. One fixture, two different rules exercised, decided by the platform — and the
+    // reachability assertion said "gate 3 never lstat-ed the asset root", which was itself the wrong
+    // diagnosis on the platform it ran on.
     let swapped = false;
     const deps = depsWithOverride({
-      lstatSync: (p) => {
-        const st = nodeFs.lstatSync(p);
-        if (p === assetDir && !swapped) {
+      openSync: (p, ...rest) => {
+        if (!swapped && String(p).endsWith('/pending.json')) {
           nodeFs.renameSync(assetDir, join(dir, 'items-moved-away'));
           nodeFs.symlinkSync(outside, assetDir);
           swapped = true;
         }
-        return st;
+        return nodeFs.openSync(p, ...rest);
       },
       runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
     });
 
     const opened = CR.openCaptureRun(profile, [entry], null, deps);
-    assert.equal(swapped, true, 'gate 3 never lstat-ed the asset root — this fixture cannot reach the condition');
+    assert.equal(swapped, true, 'the swap hook never ran — this fixture cannot reach the condition');
     assert.equal(
       nodeFs.lstatSync(assetDir).isSymbolicLink(),
       true,
@@ -2325,8 +2339,11 @@ test('openCaptureRun: an asset root replaced by a symlink to an outside tree aft
 });
 
 // The legitimate half of the same rule, which the check above must NOT break: a symlinked asset root
-// that resolves inside `capture.output_dir` is a topology gate 3 deliberately permits, and it is
-// identified by the LINK's own inode at both observation points. It must still capture normally.
+// that resolves inside `capture.output_dir` is a topology gate 3 deliberately permits, and it must
+// still capture normally. [round 23] It is identified by the TARGET's inode at both observation
+// points, not the link's — see the swapped-target test below for why that distinction is the whole
+// guard rather than a detail of it. This test is the over-refusal side of that change: resolving
+// through the link must not turn a supported topology into a halt.
 test('openCaptureRun: a legitimately symlinked asset root inside the output dir still snapshots', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
@@ -2348,21 +2365,125 @@ test('openCaptureRun: a legitimately symlinked asset root inside the output dir 
   });
 });
 
-// [round 22] `rootIdentity` and `rootMustExist` are two fallbacks, not one: a caller whose `lstat`
-// cannot answer with `dev`/`ino` gets no identity pin, and the existence rule must still refuse. The
-// declaration requires both fields now, so this is the degraded-caller path — the same shape round
-// 19 established for `isFile`, and the reason a missing identity must never read as "no substitution
-// detected".
-test('openCaptureRun: an lstat that cannot report identity still refuses a root that vanished', () => {
+// [round 23 BLOCKER — the same defect one indirection down] Round 22 pinned the asset root's
+// identity, and this file asserted twice that a symlinked root "is identified by the LINK's own
+// inode at both observation points". True, and the wrong object: `readdirSync` FOLLOWS the link.
+// The link survives every substitution of its TARGET untouched, so all three identity checks
+// compared one inode to itself, `openCaptureRun` returned ok, the foreign tree was hashed into
+// `opening_assets`, and `opening_asset_hazards` came back empty. Codex reproduced exactly that.
+//
+// The swap lands strictly between gate 3 and the opening snapshot, and the hook is the pending
+// token's own `openSync` — which `openCaptureRun` performs between the two — rather than a path
+// string matching the asset root. That is not a stylistic choice: keying on `p === assetDir` makes
+// the PHASE depend on path canonicalization (gate 3 derives the directory through the canonical
+// output root, the snapshot through the profile as given), so the identical fixture lands after
+// gate 3 on macOS and inside it on Linux, where it produces a different halt entirely. A phase
+// boundary this seam can actually name has no such split.
+test('openCaptureRun: a symlinked asset root whose TARGET is swapped after validation halts', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const link = join(profile.capture.output_dir, 'items');
+    const real = join(profile.capture.output_dir, 'real-items');
+    const foreign = join(profile.capture.output_dir, 'foreign-items');
+    nodeFs.mkdirSync(real, { recursive: true });
+    nodeFs.writeFileSync(join(real, 'a.png'), 'previous-build-bytes');
+    nodeFs.mkdirSync(foreign, { recursive: true });
+    nodeFs.writeFileSync(join(foreign, 'a.png'), 'bytes from a tree this chapter does not own');
+    nodeFs.symlinkSync(real, link);
+
+    const linkInodeBefore = nodeFs.lstatSync(link).ino;
+    let swapped = false;
+    const deps = depsWithOverride({
+      openSync: (p, ...rest) => {
+        if (!swapped && String(p).endsWith('/pending.json')) {
+          // Both replacements stay inside `capture.output_dir`, so containment is satisfied before
+          // and after: what this test isolates is IDENTITY, which the round-22 root test conflated
+          // with an escape.
+          nodeFs.renameSync(real, join(dir, 'real-items-moved-away'));
+          nodeFs.renameSync(foreign, real);
+          swapped = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(swapped, true, 'the swap hook never ran — this fixture cannot reach the condition');
+    assert.equal(
+      nodeFs.lstatSync(link).ino,
+      linkInodeBefore,
+      'the link itself must be untouched, or this test says nothing about following it',
+    );
+    assert.equal(
+      nodeFs.readFileSync(join(link, 'a.png'), 'utf8'),
+      'bytes from a tree this chapter does not own',
+      'the link must now resolve to the foreign tree, or the swap did not take',
+    );
+    assert.equal(opened.ok, false, 'a root whose target became a different directory must not be walked');
+    assert.equal(opened.halts[0].halt, 'provenance_hazard');
+    assert.match(opened.halts[0].message, /replaced by a different directory/);
+  });
+});
+
+// [round 23] `identityOfListedObject` refuses a `realpathSync` result that is ITSELF a symlink.
+// Against the real `node:fs` binding that cannot happen — realpath resolves every link on the path
+// by contract — so the guard's mutant killed nothing, which is this release's established signal
+// that a guard has no reader. It is reachable through the `deps` seam, where all of this module's fs
+// access lives and which nothing in this repository type-checks: a caller supplying a `realpathSync`
+// that stops at the first link would otherwise have the LINK's identity recorded as the target's,
+// silently restoring the exact defect this round removed. The rule the module has applied since
+// round 19 governs — a seam result that has not answered is uncertainty, never a guess.
+test('openCaptureRun: a realpathSync that returns a symlink is refused, never trusted as the target', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const link = join(profile.capture.output_dir, 'items');
+    const real = join(profile.capture.output_dir, 'real-items');
+    nodeFs.mkdirSync(real, { recursive: true });
+    nodeFs.writeFileSync(join(real, 'a.png'), 'previous-build-bytes');
+    nodeFs.symlinkSync(real, link);
+
+    let lied = false;
+    const deps = depsWithOverride({
+      // Stops at the first link instead of resolving through it — an out-of-contract seam, not a
+      // filesystem state. `real` ends in `-items`, not `/items`, so only the root is affected.
+      realpathSync: (p, ...rest) => {
+        if (String(p).endsWith('/items')) {
+          lied = true;
+          return p;
+        }
+        return nodeFs.realpathSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(lied, true, 'the identity read never called realpathSync — this fixture cannot reach the condition');
+    assert.equal(opened.ok, false, JSON.stringify(opened));
+    assert.equal(opened.halts[0].halt, 'provenance_hazard');
+    assert.match(opened.halts[0].message, /cannot establish the identity of asset directory/);
+    assert.match(opened.halts[0].message, /inspection_failure/);
+  });
+});
+
+// [round 23 BLOCKER] The fail-open half of the same finding, and the same shape this release has
+// been closing since round 14: gate 3 turned an identity it could not read into `null`, and the
+// walk read `null` as "this caller configured no pin" rather than as "this module could not
+// establish what it observed". Replacing an ordinary root after gate 3 then returned ok, accepted
+// the foreign digest, and reported no hazard — `rootMustExist` covers DISAPPEARANCE only, never
+// replacement. An observation that cannot be pinned is not an observation.
+test('openCaptureRun: an asset root this module observed but cannot identify halts, never pins nothing', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
     const entry = { slug: 'items' };
     const assetDir = join(profile.capture.output_dir, 'items');
     nodeFs.mkdirSync(assetDir, { recursive: true });
-    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'stale-from-the-previous-build');
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'previous-build-bytes');
 
     const deps = depsWithOverride({
-      // Exactly the pre-round-22 declaration: the three predicates and nothing else.
+      // Exactly the pre-round-22 declaration: the three predicates, no `dev`, no `ino`.
       lstatSync: (p) => {
         const st = nodeFs.lstatSync(p);
         return {
@@ -2371,6 +2492,33 @@ test('openCaptureRun: an lstat that cannot report identity still refuses a root 
           isFile: () => st.isFile(),
         };
       },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(opened.ok, false, JSON.stringify(opened));
+    assert.equal(opened.halts[0].halt, 'provenance_hazard');
+    assert.match(opened.halts[0].message, /cannot establish the identity of asset directory/);
+    assert.match(opened.halts[0].message, /items/);
+  });
+});
+
+// [round 22] `rootIdentity` and `rootMustExist` are two guards over two different windows, not one
+// guard twice. [round 23] The round-22 framing — that `rootMustExist` was the fallback for a caller
+// whose `lstat` cannot report identity — is gone with the fail-open it described: gate 3 halts on a
+// root it cannot pin, so that caller never reaches the walk at all. What is left is the window the
+// identity check structurally cannot cover, and this test is the only thing that pins it: the root
+// passes its identity check and is GONE by the time `readdirSync` runs. The empty map that produces
+// would read as a first capture, which is the round-14 defect at the root.
+test('openCaptureRun: a root that vanishes between its identity check and its listing is refused, never read as a first capture', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'stale-from-the-previous-build');
+
+    const deps = depsWithOverride({
       readdirSync: (p, opts) => {
         if (p === assetDir) {
           const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
@@ -2482,13 +2630,21 @@ test('the opening snapshot: an lstat result implementing exactly the CURRENT dec
 
     const deps = depsWithOverride({
       readdirSync: unknownDirentReaddir({ minimal: false }),
-      // LstatResultLike, exactly: isSymbolicLink, isDirectory, isFile. Nothing else.
+      // LstatResultLike, exactly: isSymbolicLink, isDirectory, isFile, dev, ino. Nothing else.
+      // [round 23] `dev`/`ino` were added to the declaration in round 22 and NOT to this fixture,
+      // which went on calling itself "exactly the CURRENT declaration" for a round — the identical
+      // defect round 20 wrote this pair of tests to prevent, in the test written to prevent it.
+      // Nothing here compiles the declarations, so a stale fixture is not merely uninformative: this
+      // one stayed green by exercising the root fail-open that round 23 removed, which is the only
+      // reason it did not fail the moment it stopped conforming.
       lstatSync: (p) => {
         const real = nodeFs.lstatSync(p);
         return {
           isSymbolicLink: () => real.isSymbolicLink(),
           isDirectory: () => real.isDirectory(),
           isFile: () => real.isFile(),
+          dev: real.dev,
+          ino: real.ino,
         };
       },
       runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
@@ -2502,7 +2658,13 @@ test('the opening snapshot: an lstat result implementing exactly the CURRENT dec
   });
 });
 
-test('the opening snapshot: an lstat result on the OLDER two-predicate contract degrades to a hazard, never a crash', () => {
+// [round 23] This test used to withhold `dev`/`ino` as well, and gate 3 now halts on a root whose
+// identity it cannot read — which would have made it a second copy of the identity-halt test above
+// rather than the `isFile` test it was written to be. The two degradations are separate rules and
+// must be reachable separately, so the mock supplies what round 22 requires and withholds only the
+// predicate round 19 added. The halting half is pinned by its own test; this one keeps the half that
+// must NOT harden.
+test('the opening snapshot: an lstat result missing the round-19 isFile predicate degrades to a hazard, never a crash', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
     const entry = { slug: 'items' };
@@ -2514,7 +2676,12 @@ test('the opening snapshot: an lstat result on the OLDER two-predicate contract 
       readdirSync: unknownDirentReaddir({ minimal: false }),
       lstatSync: (p) => {
         const real = nodeFs.lstatSync(p);
-        return { isSymbolicLink: () => real.isSymbolicLink(), isDirectory: () => real.isDirectory() };
+        return {
+          isSymbolicLink: () => real.isSymbolicLink(),
+          isDirectory: () => real.isDirectory(),
+          dev: real.dev,
+          ino: real.ino,
+        };
       },
       runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
     });

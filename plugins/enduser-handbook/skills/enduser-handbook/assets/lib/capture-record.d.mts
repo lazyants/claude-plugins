@@ -440,7 +440,7 @@ export function cleanupCommittedRun(profileLike: ProfileLike, expected: Expected
 // tightened types (verified against these exact declarations via an in-memory `tsc --strict` run
 // assigning wide, node:fs-shaped stand-ins — see this round's report, not re-derived here).
 
-/** The subset of `fs.Stats` `lstatSync`'s result is actually read through — `inspectDirComponent` (capture-record.mjs) calls `st.isSymbolicLink()` and `st.isDirectory()`; `direntType` calls those two plus `st.isFile()`. The other three `lstatSync` call sites (gate 3's containment probe, gate 5's `canonicalizeForComparison`, `validateEntriesForCapture`'s existence checks) never read the result at all, so they impose no further requirement here. [round 19] `isFile` was added to the runtime one round before it was added here, and a mock conforming exactly to the two-predicate version crashed the opening snapshot with `st.isFile is not a function`. `direntType` calls it optionally and treats a result that cannot answer as a hazard, so a caller still on the old contract degrades rather than throwing — but this declaration is what a new caller writes to, and it says what the runtime needs. */
+/** The subset of `fs.Stats` `lstatSync`'s result is actually read through — `inspectDirComponent` (capture-record.mjs) calls `st.isSymbolicLink()` and `st.isDirectory()`; `direntType` calls those two plus `st.isFile()`; `identityOfListedObject` calls `isSymbolicLink()`/`isDirectory()` and reads `dev`/`ino`. [round 23] `validateEntriesForCapture`'s existence check is no longer among the sites that discard their result — it now feeds `identityOfListedObject`, and the sentence claiming otherwise survived a round after that stopped being true. The two remaining sites that genuinely never read the result are gate 3's containment probe and gate 5's `canonicalizeForComparison`. [round 19] `isFile` was added to the runtime one round before it was added here, and a mock conforming exactly to the two-predicate version crashed the opening snapshot with `st.isFile is not a function`. `direntType` calls it optionally and treats a result that cannot answer as a hazard, so a caller still on the old contract degrades rather than throwing — but this declaration is what a new caller writes to, and it says what the runtime needs. */
 export interface LstatResultLike {
   isSymbolicLink(): boolean;
   isDirectory(): boolean;
@@ -452,6 +452,14 @@ export interface LstatResultLike {
   // are the identity, and gate 3's observation of an asset root is carried forward as the same
   // pair. A result that cannot answer with two numbers is a hazard, never a guess — so an
   // implementation omitting them degrades to a refusal rather than to a silent pass.
+  // [round 23] Two things this pair does NOT mean, both of which shipped as round-22 comments.
+  // (1) For a SYMLINK it is the link's identity, and `readdirSync` follows the link — so the walk
+  // reads the identity of what the link RESOLVES to (`realpathSync`, then `lstatSync` of the
+  // result), never the link's own. A link is a stable name for a changing object: pinning it
+  // pinned nothing, and a swapped target passed all three checks with a foreign digest and no
+  // hazard. (2) "Degrades to a refusal" is the whole run for an asset ROOT: gate 3 halts rather
+  // than carrying a null pin forward, because the snapshot could not tell a null pin apart from a
+  // caller that configured none. `rootMustExist` never covered replacement — only disappearance.
   dev: number;
   ino: number;
 }

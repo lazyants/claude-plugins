@@ -1139,9 +1139,11 @@ function validateEntriesForCapture(profileLike, entries, deps) {
   // [round 22] A Map, not a Set: WHICH object was observed, not merely that one was. Existence alone
   // catches only a root that disappeared; a root REPLACED between this gate and the snapshot still
   // exists, still lists, and hands back a foreign tree. `dev`/`ino` are path-independent, which is
-  // what lets the two call sites' differing path strings be compared at all. A symlinked root is a
-  // supported topology and is identified by the LINK's own inode here and at the snapshot, so it
-  // continues to pass; what it can no longer do is become a different link, or a directory.
+  // what lets the two call sites' differing path strings be compared at all. [round 23] For a
+  // symlinked root — a supported topology — the identity is the TARGET's, never the link's: the
+  // link is a stable name for a changing object, and pinning it pinned nothing (see
+  // `identityOfListedObject`). A value is recorded only when it could be read; an identity this
+  // gate cannot establish halts the run rather than being carried forward as null.
   const assetDirsObserved = new Map();
   for (const entry of entries) {
     const assetDir = chapterAssetDir(canonicalProfileForAssetDir, entry);
@@ -1157,11 +1159,22 @@ function validateEntriesForCapture(profileLike, entries, deps) {
     let assetDirIdentityId = null;
     try {
       const st = deps.lstatSync(assetDir);
-      // [round 22] The identity, read off the lstat this gate already performs — no extra syscall.
-      // A result that cannot answer leaves it null, and a null identity simply means the snapshot
-      // gets no root pin: this gate's own job (existence, containment, collision) does not depend on
-      // it, so refusing here would turn a declaration shortfall into a halt on a legitimate capture.
-      if (typeof st?.dev === 'number' && typeof st?.ino === 'number') assetDirIdentityId = `${st.dev}:${st.ino}`;
+      // [round 22] The identity, read off the lstat this gate already performs.
+      // [round 23] Through the shared helper, so that a symlinked root resolves to its target here
+      // exactly as it does at the snapshot: the two sides derive the directory through different
+      // path strings, and only one function computing both ids makes them comparable at all.
+      //
+      // An unreadable identity now HALTS. The comment that stood here argued a null pin was harmless
+      // because "this gate's own job does not depend on it" — true of this gate, and the wrong
+      // scope: the pin belongs to the SNAPSHOT, which read null as "this caller configured no pin"
+      // rather than as "this module could not establish what it observed", and then accepted a
+      // replaced root with a foreign digest and no hazard. `rootMustExist` never covered that — it
+      // catches disappearance only. An observation that cannot be pinned is not an observation.
+      const identity = identityOfListedObject(assetDir, st, deps);
+      if (!identity.ok) {
+        return haltResult('provenance_hazard', `cannot establish the identity of asset directory '${assetDir}': ${identity.reason}`, { assetDir });
+      }
+      assetDirIdentityId = identity.id;
     } catch (err) {
       const code = errProp(err, 'code');
       if (code === 'ENOENT' || code === 'ENOTDIR') {
@@ -1706,6 +1719,12 @@ function direntType(dirent, absPath, deps) {
 //     a directory replaced in that window is baselined as the replacement — consistently, silently,
 //     and with foreign bytes in the opening map. The ROOT does not share this: its identity comes
 //     from gate 3's own observation, which is why it is passed in rather than derived here.
+//     [round 23] That last sentence was half wrong when it was written. The root's identity did
+//     come from gate 3 — of the LINK, for a symlinked root, while `readdirSync` followed it — so
+//     the root had residual 2 in a worse form than a child: not an unclosable window, but a check
+//     that could never fire at all. Reading the resolved target closes it. What the root genuinely
+//     does not share is the STRUCTURAL half: a child's name cannot be bound to an object because a
+//     `Dirent` has no inode, whereas the root is reachable by a path both sides can `lstat`.
 //
 // Closing residual 2 needs `openat`/`fdopendir` (or a `readdirSync` that reports `d_ino`), which is
 // a seam change, not a logic change. Until then the guard's reach is exactly: a substitution is
@@ -1721,10 +1740,15 @@ function direntType(dirent, absPath, deps) {
 // is a symlink resolving inside `capture.output_dir`, so refusing symlink-ness at the root would
 // refuse a documented topology — the first version of this check did exactly that, and the test
 // pinning that topology is what caught it. A CHILD is never legitimately a symlink (`direntType`
-// refuses one rather than descending), so there the word stands. Either way the identity is the
-// lstat's own `dev`/`ino`: for a symlinked root that is the LINK's inode, compared against the same
-// link's inode recorded by gate 3, so the supported case matches and a swap to a different link
-// does not.
+// refuses one rather than descending), so there the word stands.
+//
+// [round 23] WHICH OBJECT the identity is read off was the round-22 defect, and it is a sharper
+// mistake than the one it replaced. The previous version compared the LINK's own inode — and
+// `readdirSync` follows the link. A symlink is a stable name for a changing object: it survives
+// every substitution of its target untouched, so all three observation points compared one inode to
+// itself while the foreign tree underneath was hashed into the opening baseline with an empty hazard
+// list. Round 21 checked the wrong PREDICATE (type, not identity); round 22 checked the right
+// predicate on the wrong OBJECT; both passed every test written for them.
 function assetDirIdentity(absPath, deps, { allowSymlink = false } = {}) {
   let st;
   try {
@@ -1732,21 +1756,68 @@ function assetDirIdentity(absPath, deps, { allowSymlink = false } = {}) {
   } catch (err) {
     return { ok: false, reason: errProp(err, 'code') === 'ENOENT' ? 'vanished' : 'inspection_failure' };
   }
-  const isLink = st.isSymbolicLink();
-  if (isLink && !allowSymlink) return { ok: false, reason: 'symlink' };
-  if (!isLink && !st.isDirectory()) return { ok: false, reason: 'inspection_failure' };
-  // Fail closed on a result that cannot answer, exactly as round 19 established for `isFile`: an
-  // identity this module cannot read is uncertainty, and uncertainty is a hazard rather than a
-  // guess. A caller on the pre-round-22 declaration lands here instead of silently comparing
-  // `undefined` to `undefined` — which would compare equal, and pass every substitution.
-  if (typeof st.dev !== 'number' || typeof st.ino !== 'number') return { ok: false, reason: 'inspection_failure' };
-  return { ok: true, id: `${st.dev}:${st.ino}` };
+  if (st.isSymbolicLink() && !allowSymlink) return { ok: false, reason: 'symlink' };
+  const identity = identityOfListedObject(absPath, st, deps);
+  if (!identity.ok) return identity;
+  // Directory-ness belongs to the LISTED object too, not to the name that reaches it: a root that
+  // is a link to a regular file must refuse here rather than at `readdirSync`'s ENOTDIR.
+  if (!identity.isDirectory) return { ok: false, reason: 'inspection_failure' };
+  return identity;
+}
+
+// The identity of the object a path-based `readdirSync(absPath)` would actually LIST, given an
+// `lstat` of `absPath` the caller has already taken. Gate 3's observation and the walk's three
+// re-checks all route through this one function — that is what stops the two sides from drifting
+// into comparing the identities of different objects, which is exactly how round 22 shipped.
+//
+// `realpathSync` is reached ONLY on the symlink branch. When `absPath` is not itself a link, its own
+// `lstat` and the object `readdirSync` lists are already the same object — a symlinked ANCESTOR
+// changes which path names it, never which object it is — so the ordinary case keeps its single
+// syscall and the extra resolution is paid only by the topology that needs it. That branch is two
+// path operations rather than one, so it widens residual 1 below (a swap installed and reverted
+// between two adjacent observations) for a symlinked root; it does not create a new class.
+function identityOfListedObject(absPath, st, deps) {
+  if (!st.isSymbolicLink()) return identityFromStat(st);
+  let target;
+  try {
+    target = deps.realpathSync(absPath);
+  } catch (err) {
+    return { ok: false, reason: errProp(err, 'code') === 'ENOENT' ? 'vanished' : 'inspection_failure' };
+  }
+  let targetStat;
+  try {
+    targetStat = deps.lstatSync(target);
+  } catch (err) {
+    return { ok: false, reason: errProp(err, 'code') === 'ENOENT' ? 'vanished' : 'inspection_failure' };
+  }
+  // `realpathSync` resolves every link on the path it is handed, so a result that is ITSELF a link
+  // means this seam did not do what its contract says. Uncertainty, not a guess.
+  if (targetStat.isSymbolicLink()) return { ok: false, reason: 'inspection_failure' };
+  return identityFromStat(targetStat);
+}
+
+// Fail closed on a result that cannot answer, exactly as round 19 established for `isFile`: an
+// identity this module cannot read is uncertainty, and uncertainty is a hazard rather than a guess.
+// A caller on the pre-round-22 declaration lands here instead of silently comparing `undefined` to
+// `undefined` — which compares EQUAL, so the guard would report success precisely because it
+// learned nothing.
+function identityFromStat(st) {
+  if (typeof st?.dev !== 'number' || typeof st?.ino !== 'number') return { ok: false, reason: 'inspection_failure' };
+  return { ok: true, id: `${st.dev}:${st.ino}`, isDirectory: st.isDirectory() };
 }
 
 // `rootMustExist` and `rootIdentity` are both the caller's knowledge, not the walk's: whether this
 // module has ALREADY observed the root directory, and which object it observed. Neither can be
 // derived here — the walk sees only its own listing — and the first inverts what a failed listing
 // means (see the ENOENT branch below).
+//
+// [round 23] Gate 3 halts on a root it cannot pin, so the two now arrive together or not at all;
+// they are not redundant, because they cover different WINDOWS rather than different callers. The
+// identity check runs before the listing, and a root that vanishes between the two passes it and
+// then fails to list — which without `rootMustExist` is the empty map that reads as a first
+// capture. Round 22 justified the pair as "a fallback for a caller whose lstat cannot report
+// identity"; that caller no longer reaches this function, and a guard kept alive by a rationale
+// that has stopped being true is a guard nobody will maintain correctly.
 function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = false, rootIdentity = null } = {}) {
   walk(rootDir, '');
 
