@@ -1875,10 +1875,62 @@ function exactIdentityPart(value) {
 // first capture and must not be tolerated. `absentDirectly` is set at one site and cannot alias.
 // Nothing is tolerated on ENOTDIR at all — an object is present there that was not there one syscall
 // earlier, which no first capture can produce.
-function refuseUnadjudicatedRoot(observation, code, tolerateDirectAbsence) {
+function refuseUnadjudicatedRoot(observation, code, tolerateDirectAbsence, absent) {
   if (observation === null) return;
-  if (tolerateDirectAbsence && observation.absentDirectly === true) return;
+  if (tolerateDirectAbsence && observation.absentDirectly === true && absent()) return;
   throw new Error(`the asset directory could not be confirmed (${observation.reason}) and its listing then failed (${code})`);
+}
+
+// [round 27] `absentDirectly` is a claim about ONE `lstat`, and one `lstat` cannot make it. `lstat`
+// does not follow the FINAL component — which is the whole reason it can report a symlink at all —
+// but it follows every ANCESTOR. So `lstat('<out>/group/items')` throws ENOENT when `<out>/group` is
+// a present dangling symlink, exactly as it does when `items` genuinely does not exist yet, and
+// round 26's fix aliased one level further up the path than round 25's. Codex executed it: a
+// dangling ancestor, `opening: {}` with no hazards, the target then populated with previous-build
+// bytes, and W5 counting them as brand-new.
+//
+// Direct absence therefore has to be established over the PATH, not at its tip: walk UP until an
+// ancestor exists, and require that one to RESOLVE to a directory. Only an ancestor that exists can
+// explain the tip's ENOENT by being something other than a directory; a chain that is simply absent
+// contains no symlink to dangle, and a not-yet-created group ancestor is ordinary on a first
+// capture. `/` exists and resolves, so this always terminates with a decision.
+//
+// It deliberately has NO lower bound, and the first attempt at this fix did — stopping at
+// `capture.output_dir`, which refused every legitimate first capture whose output directory the
+// capture command had not created yet. A bound is unnecessary because the test is RESOLUTION rather
+// than symlink-freedom: the path to a temporary directory on this platform runs through `/var` ->
+// `/private/var`, which resolves and therefore passes.
+//
+// A RESOLVING symlinked ancestor is accepted for the same reason: gate 3 accepts one too — its own
+// component-wise containment walk halts on a dangling ancestor and passes a resolving one — and this
+// check exists to cover the window gate 3 cannot see, not to impose a stricter policy behind it.
+function directAbsenceConfirmed(absPath, deps) {
+  // Rootedness is preserved the way `canonicalizeForComparison` preserves it. A RELATIVE asset
+  // directory is a supported shape — `capture.output_dir` may be relative and every asset path is
+  // built from it — and prefixing `/` onto its segments would probe a completely different tree,
+  // climb it to `/`, and report direct absence for a path this walk never looked at.
+  const absolute = isAbsolutePath(absPath);
+  const segs = rawSegments(absPath);
+  for (let depth = segs.length - 1; depth >= 0; depth -= 1) {
+    const joined = segs.slice(0, depth).join('/');
+    const candidate = depth === 0 ? (absolute ? '/' : '.') : (absolute ? `/${joined}` : joined);
+    try {
+      deps.lstatSync(candidate);
+    } catch (err) {
+      const code = errProp(err, 'code');
+      if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+      // An ancestor this module cannot inspect is uncertainty, and uncertainty is never the
+      // permissive answer here: it would tolerate exactly the empty snapshot the tip's ENOENT
+      // already looks like.
+      return false;
+    }
+    return assetDirIdentity(candidate, deps, { allowSymlink: true }).ok === true;
+  }
+  // Unreachable through any public entrypoint: depth 0 probes `/` (or the working directory for a
+  // relative path), which exists wherever this module runs, so the loop always decides. Reaching
+  // here means `absPath` had no segments at all. Refusing is the fail-safe direction, and no test
+  // can kill a mutant on this line — recorded rather than papered over.
+  return false;
 }
 
 // `rootMustExist` and `rootIdentity` are both the caller's knowledge, not the walk's: whether this
@@ -1994,7 +2046,7 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
         // with an empty map. [round 26] And finer than the REASON WORD, which is where round 25 drew
         // it and codex broke it — `vanished` names the first capture and also names a present root
         // symlink whose target is missing, which is not one. `absentDirectly` is the fact.
-        refuseUnadjudicatedRoot(rootUnidentified, code, true);
+        refuseUnadjudicatedRoot(rootUnidentified, code, true, () => directAbsenceConfirmed(absDir, deps));
         return;
       }
       // [round 18] ENOTDIR used to return here too, silently, and that was the round-17 defect
@@ -2020,7 +2072,7 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
         // object appeared. The failure actually observed here is `inspection_failure`, from a
         // baseline whose own `lstat` succeeded and reported a non-directory, which is the review
         // bot's reproduction.
-        refuseUnadjudicatedRoot(rootUnidentified, code, false);
+        refuseUnadjudicatedRoot(rootUnidentified, code, false, () => directAbsenceConfirmed(absDir, deps));
         return;
       }
       throw err;

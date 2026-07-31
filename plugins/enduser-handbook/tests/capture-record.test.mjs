@@ -2856,6 +2856,11 @@ test('openCaptureRun: a dangling root symlink appearing after validation is refu
     // Gate 3 sees a genuinely absent root — a first capture — so it supplies no pin at all.
     assert.equal(nodeFs.existsSync(link), false, 'the fixture must start with no asset root');
 
+    // [round 27, codex MINOR] Stating the seam honestly, because the round-26 framing did not: this
+    // DOES override `openSync`, and the override is a CLOCK, not a filesystem. It delegates to the
+    // real `openSync` and changes no answer any call receives; it only names the moment between
+    // gate 3 and the walk, which is the window under test. Every `lstat`, `realpath` and `readdir`
+    // the module makes about the asset tree is the real one against real objects.
     let planted = false;
     const deps = depsWithOverride({
       openSync: (p, ...rest) => {
@@ -2876,14 +2881,188 @@ test('openCaptureRun: a dangling root symlink appearing after validation is refu
     assert.equal(opened.ok, false, `a present-but-dangling root must not be read as a first capture: ${JSON.stringify(opened)}`);
     assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
 
-    // And the consequence codex traced, closed at its far end: the link's target is populated with
-    // bytes the captured build never produced, and no chapter record may exist to vouch for them.
-    nodeFs.mkdirSync(target, { recursive: true });
-    nodeFs.writeFileSync(join(target, 'a.png'), 'previous-build-bytes');
-    const chapterFile = join(dir, 'items.md');
-    nodeFs.writeFileSync(chapterFile, '# items\n');
-    const w5 = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, 'no-such-run', stubDepsNoIdentity());
-    assert.equal(w5.recorded, false, `no run opened, so no chapter may be recorded: ${JSON.stringify(w5)}`);
+    // [round 27, codex MINOR] What stood here was a W5 call with a run id of `no-such-run`, after
+    // the open had already been asserted to fail. W5 says `recorded: false` for an unverifiable run
+    // whatever this hazard did, so the assertion could not distinguish the fix from its absence —
+    // the far end of codex's trace was decorated, not closed. What CAN be asserted here is the
+    // thing the halt is for: the run never opened, so there is no run record for W5 to read, and
+    // the reservation is not left behind for the next run to trip over.
+    assert.equal(nodeFs.existsSync(join(CR.provenanceRoot(profile), 'run', 'current.json')), false,
+      'a refused open must commit no run record');
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false,
+      'a refused open must not leave its reservation behind');
+  });
+});
+
+// [round 27 BLOCKER] The fourteenth layer, one path component above the thirteenth. `lstat` does not
+// follow the FINAL component — which is the only reason it can report a symlink at all — but it
+// follows every ANCESTOR. So `lstat('<out>/group/items')` throws ENOENT when `<out>/group` is a
+// present dangling symlink, exactly as it does when `items` has simply not been created yet, and
+// round 26's `absentDirectly` marked the first as the second. Codex executed it against the real
+// exports: `opening_assets: {}` with no hazards for a chapter whose path was NOT genuinely absent.
+//
+// A dangling ancestor present at gate 3 already halts there. This is that window again.
+test('openCaptureRun: a dangling ANCESTOR appearing after validation is refused, not read as a first capture', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items', group: 'admin' };
+    const groupDir = join(profile.capture.output_dir, 'admin');
+    const groupTarget = join(profile.capture.output_dir, 'admin-target');
+    nodeFs.mkdirSync(profile.capture.output_dir, { recursive: true });
+
+    // Gate 3 sees the whole chapter path as genuinely absent: an ordinary first capture.
+    assert.equal(nodeFs.existsSync(groupDir), false, 'the fixture must start with no group ancestor');
+
+    let planted = false;
+    const deps = depsWithOverride({
+      // A clock, not a filesystem — see the note in the test above.
+      openSync: (p, ...rest) => {
+        if (!planted && String(p).endsWith('/pending.json')) {
+          nodeFs.symlinkSync(groupTarget, groupDir);
+          planted = true;
+        }
+        return nodeFs.openSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const opened = CR.openCaptureRun(profile, [entry], null, deps);
+    assert.equal(planted, true, 'the plant hook never ran — this fixture cannot reach the condition');
+    assert.equal(nodeFs.lstatSync(groupDir).isSymbolicLink(), true, 'the ancestor must be a present link');
+    assert.equal(nodeFs.existsSync(groupDir), false, 'the ancestor link must dangle');
+    // The tip's own lstat is ENOENT — indistinguishable, at the tip, from a genuine first capture.
+    assert.throws(() => nodeFs.lstatSync(join(groupDir, 'items')), /ENOENT/,
+      'the asset root must lstat ENOENT, or this test is not reproducing the alias');
+    assert.equal(opened.ok, false, `a chapter path made absent by a dangling ancestor must not open: ${JSON.stringify(opened)}`);
+    assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+  });
+});
+
+// [round 27 BLOCKER] The closing half, where nothing upstream refuses it at all.
+test('the closing snapshot: a dangling ANCESTOR is refused, not read as a chapter that produced nothing', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items', group: 'admin' };
+    const groupDir = join(profile.capture.output_dir, 'admin');
+    const assetDir = join(groupDir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    // The GROUP directory — not the asset root — is replaced by a link to nothing.
+    nodeFs.renameSync(groupDir, join(dir, 'admin-moved-away'));
+    nodeFs.symlinkSync(join(profile.capture.output_dir, 'admin-target'), groupDir);
+    assert.throws(() => nodeFs.lstatSync(assetDir), /ENOENT/, 'the asset root must lstat ENOENT');
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false, `a chapter path made absent by a dangling ancestor must not close clean: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+  });
+});
+
+// [round 27] The ancestor climb walks a PATH, so it inherits the release's other recurring defect:
+// the shipped example profile's `output_dir` is RELATIVE (`vault/handbook/assets`), and a climb that
+// prefixes `/` onto relative segments probes an entirely different tree — one where every candidate
+// is absent until `/` itself, which exists and resolves, certifying "direct absence" for a path it
+// never looked at. Mutation found it: the absolute-only form killed nothing until this test existed,
+// and it would have applied to the documented default configuration rather than an edge case.
+test('openCaptureRun: a dangling ancestor under a RELATIVE output_dir is refused, not resolved against the filesystem root', () => {
+  withTempDir((dir) => {
+    withRelativeCwd(dir, () => {
+      const chaptersDir = 'vault/handbook';
+      nodeFs.mkdirSync(join(dir, chaptersDir), { recursive: true });
+      const profile = {
+        capture: { output_dir: 'vault/handbook/assets', build_identity: { ui_read: false } },
+        publish: { chapters_dir: chaptersDir, target: 'static_md' },
+      };
+      const entry = { slug: 'items', group: 'admin' };
+      nodeFs.mkdirSync('vault/handbook/assets', { recursive: true });
+
+      let planted = false;
+      const deps = depsWithOverride({
+        openSync: (p, ...rest) => {
+          if (!planted && String(p).endsWith('/pending.json')) {
+            nodeFs.symlinkSync('vault/handbook/assets/admin-target', 'vault/handbook/assets/admin');
+            planted = true;
+          }
+          return nodeFs.openSync(p, ...rest);
+        },
+        runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+      });
+
+      const opened = CR.openCaptureRun(profile, [entry], null, deps);
+      assert.equal(planted, true, 'the plant hook never ran — this fixture cannot reach the condition');
+      assert.equal(nodeFs.lstatSync('vault/handbook/assets/admin').isSymbolicLink(), true, 'the ancestor must be a present link');
+      assert.equal(nodeFs.existsSync('vault/handbook/assets/admin'), false, 'the ancestor link must dangle');
+      assert.equal(opened.ok, false, `a dangling relative ancestor must not open as a first capture: ${JSON.stringify(opened)}`);
+      assert.equal(opened.halts[0].halt, 'provenance_hazard', JSON.stringify(opened.halts));
+    });
+  });
+});
+
+// [round 27] The ancestor climb has a third answer besides "absent, keep going" and "here it is":
+// an ancestor it cannot inspect at all. Mutation found this branch unprotected — flipping its
+// refusal to a tolerance killed nothing — and it is the release's own defect class, because an
+// unreadable ancestor produces exactly the empty snapshot a genuine first capture produces.
+test('the closing snapshot: an ancestor that cannot be inspected is not read as direct absence', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items', group: 'admin' };
+    const groupDir = join(profile.capture.output_dir, 'admin');
+    const assetDir = join(groupDir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    nodeFs.rmSync(groupDir, { recursive: true, force: true });
+    let refusedAncestor = false;
+    const closingDeps = depsWithOverride({
+      // The tip is genuinely gone, so the tip's own `lstat` really is ENOENT. The GROUP ancestor is
+      // the one that cannot be inspected — EACCES, not absence — so nothing here can establish that
+      // the tip's absence is direct.
+      lstatSync: (p, ...rest) => {
+        if (String(p).endsWith('/admin')) {
+          refusedAncestor = true;
+          const err = new Error('EACCES'); err.code = 'EACCES'; throw err;
+        }
+        return nodeFs.lstatSync(p, ...rest);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(refusedAncestor, true, 'the ancestor was never probed — this fixture cannot reach the condition');
+    assert.equal(closed.ok, false, `an uninspectable ancestor must not certify direct absence: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+  });
+});
+
+// [round 27] The over-refusal control for the two above, and the one that decides the SHAPE of the
+// check. Requiring the ancestor chain to be symlink-FREE would pass both tests above and be wrong:
+// gate 3 accepts an ancestor symlink whose target exists and is contained, so refusing one here
+// would make the walk stricter than the gate it is backstopping. The test is RESOLUTION.
+test('openCaptureRun: a RESOLVING symlinked ancestor with a not-yet-created leaf is still an ordinary first capture', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items', group: 'admin' };
+    const groupDir = join(profile.capture.output_dir, 'admin');
+    const groupTarget = join(profile.capture.output_dir, 'admin-real');
+    nodeFs.mkdirSync(groupTarget, { recursive: true });
+    nodeFs.symlinkSync(groupTarget, groupDir);
+
+    assert.equal(nodeFs.lstatSync(groupDir).isSymbolicLink(), true, 'the ancestor must be a link');
+    assert.equal(nodeFs.statSync(groupDir).isDirectory(), true, 'and it must resolve, or this control tests nothing');
+    assert.equal(nodeFs.existsSync(join(groupDir, 'items')), false, 'the leaf must not exist yet');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, `a resolving ancestor with an absent leaf is an ordinary first capture: ${JSON.stringify(opened)}`);
+    // Null-prototype maps by construction, so compare contents rather than shapes.
+    assert.deepEqual(Object.keys(opened.runState.opening_assets['admin/items']), [], JSON.stringify(opened.runState.opening_assets));
+    assert.deepEqual([...opened.runState.opening_asset_hazards['admin/items']], []);
   });
 });
 
