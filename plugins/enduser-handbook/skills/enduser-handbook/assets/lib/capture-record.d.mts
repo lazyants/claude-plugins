@@ -148,7 +148,9 @@ export interface RunRecord {
   // [round 16] `opening_hazards`/`closing_hazards` are REQUIRED, not optional, and the reader
   // rejects a chapter entry missing either — a record written before they existed reads back as
   // "no hazards", which is the one false statement they exist to prevent. Each member is
-  // `<assetDirRelativePath>:<kind>`, and W5 splits at the LAST colon so a path containing one is
+  // `<assetDirRelativePath>:<reason>`, where reason is one of `symlink`, `non_regular`, `hard_link`
+  // or `inspection_failure` — NOT the leaf inspection's `kind`, which is the undiscriminating word
+  // `hazard` for every one of them. W5 splits at the LAST colon so a path containing one is
   // unambiguous. This declaration omitted them for a round while the writer persisted them, so a
   // consumer of `readRunRecordText` could neither inspect nor preserve them.
   // [round 17] That path is NOT necessarily an asset key: a refused DIRECTORY is named by its own

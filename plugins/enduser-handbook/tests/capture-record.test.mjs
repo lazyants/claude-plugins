@@ -15,6 +15,7 @@ import * as nodeFs from 'node:fs';
 import { createHash, randomUUID as nodeRandomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer as netCreateServer } from 'node:net';
 
 import * as CR from '../skills/enduser-handbook/assets/lib/capture-record.mjs';
 
@@ -1593,7 +1594,13 @@ test('recordChapterProvenance: an asset UNHASHABLE AT OPEN is never recorded, ev
 
     const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
     assert.equal(opened.ok, true, JSON.stringify(opened));
-    assert.deepEqual(opened.runState.opening_asset_hazards['items'], ['a.png:hazard']);
+    // [round 17] This pinned `a.png:hazard` for two rounds. `hashFileNoFollow` reports EVERY
+    // unreadable leaf as kind `hazard` and puts the discriminating fact in `reason`, so persisting
+    // the kind collapsed hard_link, non_regular and inspection_failure into one word — while the
+    // comment beside the W5 refusal claimed an operator reading `hard_link` acts differently from
+    // one reading `inspection_failure`. The test pinned the collapsed form as though it were the
+    // intent, so nothing contradicted the comment.
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], ['a.png:hard_link']);
     assert.equal(Object.hasOwn(opened.runState.opening_assets['items'], 'a.png'), false,
       'the hash itself is still absent — it is the HAZARD that must survive alongside it');
 
@@ -1609,7 +1616,9 @@ test('recordChapterProvenance: an asset UNHASHABLE AT OPEN is never recorded, ev
     const deps = { ...stubDepsNoIdentity(), expectedAssets: stubExpectedAssetsFor(assetDir, ['a.png']) };
     const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, deps);
     assert.equal(result.recorded, false, JSON.stringify(result));
-    assert.match(result.reason, /^rule5_opening_unhashable:a\.png:/, JSON.stringify(result));
+    // An open-ended match on the prefix is what let the collapsed word through: `a.png:hazard` and
+    // `a.png:hard_link` both satisfy it, and only one of them is a word an operator can act on.
+    assert.equal(result.reason, 'rule5_opening_unhashable:a.png:hard_link', JSON.stringify(result));
     assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), false);
   });
 });
@@ -1731,6 +1740,67 @@ test('recordChapterProvenance: a hazard on `screens` does not refuse an asset un
 
     const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, stubDepsNoIdentity());
     assert.equal(result.recorded, true, JSON.stringify(result));
+  });
+});
+
+// [round 17] The walk's OTHER refusal — a dirent that is neither symlink, directory nor regular
+// file — had no test on any path, so nothing measured the word it reports. It reported
+// `not_regular` while the leaf inspection reports `non_regular` for the same fact one layer down;
+// invisible until round 17 sent reason words to operators, and a spelling difference an operator
+// would have to read the source to learn is not a real distinction. A unix socket is the one such
+// dirent Node can create without a native mkfifo.
+test('openCaptureRun: a non-regular dirent in the asset tree is a hazard, spelled as the leaf layer spells it', async () => {
+  const dir = nodeFs.mkdtempSync(join(tmpdir(), 'ehcr-sock-'));
+  const server = netCreateServer();
+  try {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(join(assetDir, 'live.sock'), resolve);
+    });
+    assert.equal(nodeFs.lstatSync(join(assetDir, 'live.sock')).isSocket(), true, 'fixture must actually be a socket');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], ['live.sock:non_regular']);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    nodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// [round 17] The third site that collapsed the hazard reason, and the only one with no test at all
+// — which is why it was still collapsed after a round that fixed the other two. `rehash_failed` is
+// reached when an asset becomes unreadable BETWEEN close and publish, so neither hazard list can
+// name it and this reason string is the operator's only account of what happened.
+test('recordChapterProvenance: an asset that becomes unreadable after close names HOW, not just that it failed', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v2');
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    // Both hazard lists are clean: the run read this asset fine at both observation points.
+    assert.deepEqual(opened.runState.opening_asset_hazards['items'], []);
+
+    // Between close and publish, something else takes a hard link to it.
+    nodeFs.linkSync(join(assetDir, 'a.png'), join(dir, 'alias.png'));
+
+    const chapterFile = writeChapterAt(profile, entry, '# items\n');
+    const deps = { ...stubDepsNoIdentity(), expectedAssets: stubExpectedAssetsFor(assetDir, ['a.png']) };
+    const result = CR.recordChapterProvenance(profile, [entry], entry, chapterFile, opened.runState.run_id, deps);
+    assert.equal(result.recorded, false, JSON.stringify(result));
+    assert.equal(result.reason, 'rehash_failed:a.png:hard_link', JSON.stringify(result));
+    assert.equal(nodeFs.existsSync(CR.chapterRecordPath(profile, entry)), false);
   });
 });
 
@@ -3561,7 +3631,10 @@ test('buildProvenanceReport: the row distinguishes UNREADABLE from CHANGED, thou
     const result = CR.buildProvenanceReport(profile, [unreadable.entry, changed.entry], null, w6Deps);
     assert.equal(result.rows[0].classification_reason, 'record_stale', JSON.stringify(result.rows[0]));
     assert.equal(result.rows[1].classification_reason, 'record_stale', JSON.stringify(result.rows[1]));
-    assert.match(result.rows[0].record_detail, /^unhashable:a\.png:/, JSON.stringify(result.rows[0]));
+    // [round 17] The open-ended prefix passed against `unhashable:a.png:hazard`, which is the one
+    // word that tells an operator nothing: every unreadable leaf carries kind `hazard`. This row
+    // exists to say WHICH way the file was unreadable, so it is pinned to the discriminating word.
+    assert.equal(result.rows[0].record_detail, 'unhashable:a.png:hard_link', JSON.stringify(result.rows[0]));
     assert.match(result.rows[1].record_detail, /^embed_hash_changed/, JSON.stringify(result.rows[1]));
     assert.notEqual(result.rows[0].record_detail, result.rows[1].record_detail);
   });

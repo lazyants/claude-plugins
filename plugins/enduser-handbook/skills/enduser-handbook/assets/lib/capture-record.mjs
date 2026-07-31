@@ -689,6 +689,19 @@ function hashFileNoFollow(absPath, deps) {
   return { kind: 'present', digest: `sha256:${createHash('sha256').update(read.bytes).digest('hex')}` };
 }
 
+// [round 17] The word an operator can act on, for a leaf inspection that is not `present`. EVERY
+// unreadable leaf comes back with kind `hazard` — `hard_link`, `non_regular`, `symlink` and
+// `inspection_failure` are all carried in `reason` — so interpolating `.kind` into an
+// operator-facing string collapses four distinct situations, calling for four distinct actions,
+// into the single word `hazard`. Three sites did exactly that (the opening/closing snapshot, W5's
+// publish-time rehash, W6's current-hash pass) while a fourth, `readFileText`, already spelled the
+// `reason ?? kind` fallback inline and so was right by accident of being written later. It is a
+// function now, so the next site to report an unreadable leaf inherits the correct form rather than
+// re-deriving it. `absent` has no reason and is its own answer, which is what the fallback is for.
+function unreadableWord(inspection) {
+  return inspection.reason ?? inspection.kind;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Path derivations — pure with respect to their INPUTS, but subject to the same gates the asset
 // directory is (a derived pathname is not by itself an ownership boundary): `{slug: "../elsewhere"}`
@@ -1553,7 +1566,13 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped) {
       // Neither a symlink, a directory, nor a regular file: a FIFO, socket or device node. Present,
       // unreadable as an asset, and silently dropped until this line existed — the same shape as
       // the symlink case and reachable the same way.
-      else onSkipped?.(childRel, 'not_regular');
+      // `non_regular`, spelled exactly as the leaf inspection spells it. The two layers observe the
+      // same fact at different moments — a dirent that is neither directory nor file here, an
+      // opened fd that is not a regular file there — and until the reason words reached operators
+      // (round 17) the difference was invisible, because the leaf's word was collapsed to `hazard`
+      // before anyone could read it. Two spellings of one condition is a distinction an operator
+      // would have to look up to learn is not a distinction.
+      else onSkipped?.(childRel, 'non_regular');
     }
   }
 }
@@ -1597,7 +1616,7 @@ function snapshotAssetHashes(assetDir, deps) {
       // to establish, and a file the capture then creates is legitimately brand new. 'hazard' does
       // not — the file WAS there and we were refused, which is a different fact and must survive
       // as one.
-      else if (hashed.kind !== 'absent') hazards.push(`${relPath}:${hashed.kind}`);
+      else if (hashed.kind !== 'absent') hazards.push(`${relPath}:${unreadableWord(hashed)}`);
     },
     // A listed entry the walk would not even open is a hazard for the same reason: something is at
     // that path whose bytes this run could not establish.
@@ -2184,8 +2203,10 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   // [round 15] Rule 3.5, checked FIRST because it decides whether the other rules mean anything: an
   // asset that could not be hashed at open or at close has no established bytes at that point, so
   // neither "it changed during capture" (rule 4) nor "it is brand new" can be concluded about it.
-  // The reason names the asset and the hazard kind rather than collapsing to one word — an operator
-  // reading `hard_link` acts differently than one reading `inspection_failure`.
+  // The reason names the asset and HOW it was unreadable rather than collapsing to one word — an
+  // operator reading `hard_link` acts differently than one reading `inspection_failure`. That
+  // sentence was false for two rounds: the persisted word was the leaf inspection's `kind`, which
+  // is `hazard` for all four of them. See `unreadableWord`.
   // [round 17] The lookup is CONTAINMENT, not equality, and the difference is a shipped defect: the
   // walk refuses a symlinked DIRECTORY under that directory's own path (`screens:symlink`), while
   // the asset it hides is keyed `screens/a.png`. An equality match filed the hazard under a name it
@@ -2240,7 +2261,7 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
       // [round 15] Names the asset, not just the kind. Every hazard used to reduce to
       // `rehash_failed:hazard`, so an operator holding an ineligible chapter with several embeds
       // learned neither which file nor why.
-      return { recorded: false, reason: `rehash_failed:${asset.key}:${rehash.kind}` };
+      return { recorded: false, reason: `rehash_failed:${asset.key}:${unreadableWord(rehash)}` };
     }
     assetHashes[asset.key] = rehash.digest;
     if (rehash.digest === chapterRunData.closing[asset.key]) continue;
@@ -2308,7 +2329,7 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
 function readFileText(path, deps) {
   const read = readLeafText(path, deps);
   if (read.kind === 'present') return read.text;
-  throw new Error(`cannot read ${path}: ${read.reason ?? read.kind}`);
+  throw new Error(`cannot read ${path}: ${unreadableWord(read)}`);
 }
 
 // Deliberately passes NO `onSkipped`, and that is not an oversight of the same class the snapshot
@@ -2579,7 +2600,7 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
         for (const asset of extraction.assets) {
           const hashed = hashFileNoFollow(asset.absPath, d);
           if (hashed.kind === 'present') currentHashes[asset.key] = hashed.digest;
-          else unhashable.push(`${asset.key}:${hashed.kind}`);
+          else unhashable.push(`${asset.key}:${unreadableWord(hashed)}`);
         }
         if (unhashable.length > 0) {
           recordState = 'stale';
