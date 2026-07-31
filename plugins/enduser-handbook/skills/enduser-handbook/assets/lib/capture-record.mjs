@@ -1846,6 +1846,24 @@ function exactIdentityPart(value) {
   return null;
 }
 
+// [round 25] A root's FAILED first observation, adjudicated against a failed listing. Round 24 built
+// the carry (`rootUnidentified`) and then adjudicated it on one outcome only — the listing
+// succeeding. The other two outcomes kept deciding from `expectedId`, which is null on precisely the
+// path a failed observation produces, so the branch a failed observation causes to run was the one
+// branch that could not see it. The bug was inside the fix, one layer down, for the fifth round
+// running.
+//
+// `tolerated` is a WHITELIST of reasons that may still close silently on this outcome, not a
+// severity test, and that direction is the point: this release's defect class is an item that could
+// not be processed being read as good news, so a reason nobody has thought about yet must refuse
+// rather than pass. Today `vanished` is tolerated on ENOENT — it is what a first capture produces,
+// and a chapter that legitimately produced nothing must still close clean — and nothing at all is
+// tolerated on ENOTDIR, where an object is present that was not there one syscall earlier.
+function refuseUnadjudicatedRoot(reason, code, tolerated) {
+  if (reason === null || tolerated.includes(reason)) return;
+  throw new Error(`the asset directory could not be confirmed (${reason}) and its listing then failed (${code})`);
+}
+
 // `rootMustExist` and `rootIdentity` are both the caller's knowledge, not the walk's: whether this
 // module has ALREADY observed the root directory, and which object it observed. Neither can be
 // derived here — the walk sees only its own listing — and the first inverts what a failed listing
@@ -1940,14 +1958,21 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
       // hands it to the caller's own snapshot catch, which halts the open — strictly more
       // conservative than a hazard, and the root is nameable by no relative path a hazard could use.
       if (code === 'ENOENT') {
-        if (relPrefix !== '') onSkipped?.(relPrefix, 'vanished');
+        if (relPrefix !== '') { onSkipped?.(relPrefix, 'vanished'); return; }
         // [round 24] `expectedId` belongs in this condition and was missing from it. A root this
         // walk has just IDENTIFIED, by its own observation, is one that existed a syscall ago —
         // exactly the round-21 argument, which had only been wired to the CALLER's knowledge.
         // `closeCaptureRun` passes `rootMustExist: false` because it never ran gate 3, so a root
         // that vanished between its baseline and its listing returned `{hashes:{}, hazards:[]}` and
         // the close read it as a chapter that produced nothing. Codex executed exactly that.
-        else if (rootMustExist || expectedId !== null) throw err;
+        if (rootMustExist || expectedId !== null) throw err;
+        // [round 25] And a root whose baseline FAILED reaches here with `expectedId` null, which is
+        // how the carried failure was dropped by the very branch a failed observation makes run.
+        // The distinction has to be finer than "the observation failed", because one reason is
+        // legitimate: `vanished` is what a first capture produces, and it must still close silently
+        // with an empty map. Every other reason says the root was there in some form this module
+        // could not identify and is gone by the time it is listed, which no first capture produces.
+        refuseUnadjudicatedRoot(rootUnidentified, code, ['vanished']);
         return;
       }
       // [round 18] ENOTDIR used to return here too, silently, and that was the round-17 defect
@@ -1965,8 +1990,14 @@ function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = fal
       // Any other code still throws, which halts the whole run — strictly more conservative than a
       // per-directory hazard, so it is left as it was.
       if (code === 'ENOTDIR') {
-        if (relPrefix !== '') onSkipped?.(relPrefix, 'inspection_failure');
-        else if (rootMustExist || expectedId !== null) throw err;
+        if (relPrefix !== '') { onSkipped?.(relPrefix, 'inspection_failure'); return; }
+        if (rootMustExist || expectedId !== null) throw err;
+        // [round 25] No reason is tolerated on THIS branch, `vanished` included. ENOTDIR says
+        // something is at that path and it is not a directory; `vanished` says nothing was there
+        // one syscall earlier. A first capture cannot produce that pair — an object appeared. The
+        // reason actually observed here is `inspection_failure`, from a baseline whose own `lstat`
+        // succeeded and reported a non-directory, which is the review bot's reproduction.
+        refuseUnadjudicatedRoot(rootUnidentified, code, []);
         return;
       }
       throw err;

@@ -2737,6 +2737,139 @@ test('the closing snapshot: a root that lists ENOTDIR after its own baseline is 
   });
 });
 
+// [round 25, review bot P2] The twelfth layer, and it is the round-24 fix's own blind spot. Round 24
+// carried a FAILED first observation (`rootUnidentified`) and adjudicated it on exactly one outcome:
+// the listing succeeding. The two FAILING outcomes kept deciding from `expectedId` alone — and
+// `expectedId` is null on precisely the path a failed observation produces, so the carried failure
+// was read, ignored, and dropped by the branch that ran instead.
+//
+// The reproduction needs no mock at all: replace the asset root with an ordinary file between the
+// open and the close. Its own baseline `lstat` SUCCEEDS and reports a non-directory, which is
+// `inspection_failure` — not `vanished` — and the listing then fails with a real ENOTDIR. Both
+// `rootMustExist` and `expectedId` are unset at the close, so the walk returned silently and
+// `closeCaptureRun` committed `closing: {}` with `closing_hazards: []`: an unobserved snapshot
+// recorded as clean, the release's defect class one branch further down.
+test('the closing snapshot: a root that is already a regular file at its own baseline is refused, not read as empty', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    // The real filesystem performs the substitution — no `lstatSync` or `readdirSync` seam is
+    // overridden here, so the condition is reached the way an operator would reach it.
+    nodeFs.rmSync(assetDir, { recursive: true, force: true });
+    nodeFs.writeFileSync(assetDir, 'not a directory');
+    assert.equal(nodeFs.lstatSync(assetDir).isDirectory(), false, 'the fixture did not replace the root');
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false, `a root that is no longer a directory must not close silently: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+    assert.match(closed.halts[0].message, /could not be confirmed \(inspection_failure\)/);
+  });
+});
+
+// [round 25, review bot P2] The ENOENT twin, and the one place the distinction has to be drawn
+// FINER than "the observation failed": `vanished` is the reason a first capture produces, and a
+// first capture must still close silently with an empty map. Every OTHER reason means the root was
+// there, in some form this module could not identify, and is gone by the time it is listed — which
+// no first capture can produce.
+test('the closing snapshot: a root whose baseline failed for a reason other than absence is refused when the listing then reports it gone', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    nodeFs.rmSync(assetDir, { recursive: true, force: true });
+    let baselined = false;
+    const closingDeps = depsWithOverride({
+      lstatSync: (p, opts) => {
+        if (String(p).endsWith('/items')) {
+          baselined = true;
+          const err = new Error('EACCES'); err.code = 'EACCES'; throw err;
+        }
+        return nodeFs.lstatSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(baselined, true, 'the root baseline never ran — this fixture cannot reach the condition');
+    assert.equal(closed.ok, false, `an unidentifiable root that then vanished must not close silently: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+    assert.match(closed.halts[0].message, /could not be confirmed \(inspection_failure\)/);
+  });
+});
+
+// [round 25] The control for the two above, and the reason they test the REASON rather than the
+// failure. Codex's standing question on this release is over-refusal: a chapter that legitimately
+// produced nothing must still close clean. Here the root never existed at all — `vanished` at the
+// baseline, ENOENT at the listing — and the close must stay silent. If a fix to the two tests above
+// is written as "a failed baseline refuses", this test is what fails.
+test('the closing snapshot: a root that never existed still closes clean with an empty map', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    assert.equal(nodeFs.existsSync(assetDir), false, 'the fixture must start with no asset root at all');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.equal(nodeFs.existsSync(assetDir), false, 'nothing may create the asset root between open and close');
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, `a chapter that produced no assets must close clean: ${JSON.stringify(closed)}`);
+  });
+});
+
+// [round 25] The two branches tolerate DIFFERENT reason sets, and this pins the asymmetry — without
+// it, widening ENOTDIR's whitelist to match ENOENT's kills nothing and the distinction is prose.
+// `vanished` is legitimate on ENOENT because a first capture produces exactly that pair. It is not
+// legitimate here: nothing was at that path one syscall ago and something that is not a directory is
+// at it now, which no first capture can produce.
+test('the closing snapshot: a root absent at its baseline and ENOTDIR at its listing is refused, though absence alone would be tolerated', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const assetDir = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(assetDir, { recursive: true });
+    nodeFs.writeFileSync(join(assetDir, 'a.png'), 'v1');
+
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    // The baseline `lstat` is real and really reports ENOENT — only the listing is a seam, standing
+    // in for an object created at that path between the two syscalls.
+    nodeFs.rmSync(assetDir, { recursive: true, force: true });
+    let listed = false;
+    const closingDeps = depsWithOverride({
+      readdirSync: (p, opts) => {
+        if (String(p).endsWith('/items')) {
+          listed = true;
+          const err = new Error('ENOTDIR'); err.code = 'ENOTDIR'; throw err;
+        }
+        return nodeFs.readdirSync(p, opts);
+      },
+      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
+    });
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, closingDeps);
+    assert.equal(listed, true, 'the root was never listed — this fixture cannot reach the condition');
+    assert.equal(closed.ok, false, `an object appearing where the baseline saw nothing must not close silently: ${JSON.stringify(closed)}`);
+    assert.equal(closed.halts[0].halt, 'provenance_hazard', JSON.stringify(closed.halts));
+    assert.match(closed.halts[0].message, /could not be confirmed \(vanished\).*ENOTDIR/);
+  });
+});
+
 // [round 24 IMPORTANT] `dev`/`ino` are 64-bit; a JavaScript number is not. Codex measured inodes
 // 9007199254740992 and 9007199254740993 — two different directories — both rendering the identity
 // `7:9007199254740992`, so on a filesystem exposing identifiers above 2^53 a substitution passes
