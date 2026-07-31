@@ -2261,12 +2261,24 @@ function outputRootDrifted(opened, closing, deps) {
   if (!isPlainObject(opened)) {
     return 'this runState carries no observation of capture.output_dir from when the run opened';
   }
-  if (opened.canonical !== closing.canonical) {
-    return `capture.output_dir resolved to '${opened.canonical}' when this run opened and resolves to '${closing.canonical}' now`;
-  }
+  // [round 38] The IDENTITY is asked first, and it settles the question on its own when there is
+  // one. Round 37 compared the canonical spelling first, which refused a topology that is not drift
+  // at all: `output_dir` pointing at `releases/current`, the very same directory renamed from `v1`
+  // to `v2` and the alias rotated onto it. Same inode, same files, new spelling — and the close
+  // refused before it ever looked at the object. Measured through the real exports. What this run
+  // opened over is a DIRECTORY, not a name for one, so a name that moved while the directory did
+  // not is not a run this module has any reason to distrust.
   if (opened.identity !== null) {
     if (closing.identity === opened.identity) return null;
+    if (opened.canonical !== closing.canonical) {
+      return `capture.output_dir resolved to '${opened.canonical}' when this run opened and resolves to '${closing.canonical}' now, and that is a different directory`;
+    }
     return 'the directory at capture.output_dir is not the one this run opened over — same path, different directory';
+  }
+  // With no identity to compare there is nothing better than the spelling, so it is required. A
+  // root that did not exist at open has no object this run ever observed.
+  if (opened.canonical !== closing.canonical) {
+    return `capture.output_dir resolved to '${opened.canonical}' when this run opened and resolves to '${closing.canonical}' now`;
   }
   // The root did not exist when the run opened, which is the ordinary first capture this module
   // has protected since round 27: the capture command is expected to create it, so the root having
@@ -2651,7 +2663,12 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   // returned `{ok: false, halts}`. It is a `stale_replay` like every other non-matching token.
   // Line 1199 below needs no such guard: it is reachable only once `run_id` compared equal to a
   // string, which a null value cannot do.
-  if (!parsedToken.ok || parsedToken.value?.run_id !== runState.run_id) {
+  // [round 38] Read ONCE, for the same reason the opening payload is materialized below: this
+  // value is compared against the token here and written into the record further down, and an
+  // accessor could answer those two reads differently. `run_id` is not in the digested payload —
+  // the token comparison is its whole authentication — so the single read IS the binding.
+  const runId = runState.run_id;
+  if (!parsedToken.ok || parsedToken.value?.run_id !== runId) {
     return haltResult('stale_replay', 'the token on disk does not match this runState — this run has already moved on; re-derive with recoverProvenanceState.');
   }
   // The digest is RECOMPUTED from runState's actual current content and checked against the
@@ -2673,9 +2690,27 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   // the legitimate path was never the question here, since the whole point of the digest check is
   // the ILLEGITIMATE one. A payload that cannot be canonicalized cannot match the token's digest
   // either, so it takes the same `stale_replay` exit as any other non-matching payload.
+  // [round 38] The digest is computed over ONE materialization of the payload, and everything below
+  // reads that materialization rather than `runState` again. Verifying a value and then re-reading
+  // its source is a check on a different read: `isPlainObject` admits an accessor-backed object, so
+  // an enumerable `output_root` getter can hand the digest the authenticated value and hand
+  // `outputRootDrifted` the replacement's identity one call later. Codex executed it — same digest,
+  // a second read returning a different identity, and the replacement tree committed. Round 37 was
+  // the first field to make the exposure reachable, but it was never specific to that field:
+  // `entries`, `opening_assets` and `opening` were all re-read the same way, so the fix is to stop
+  // re-reading rather than to harden one field.
+  //
+  // `JSON.parse` of the canonical text is exactly the bytes that were hashed, and it yields plain
+  // objects by construction — no accessors, no prototype, nothing left to re-evaluate. Deriving the
+  // digest from that same text (rather than calling `digestOpeningPayload` and canonicalizing a
+  // second time) is what makes "the value I checked" and "the value I use" one object.
   let recomputedDigest;
+  let authenticated;
   try {
-    recomputedDigest = digestOpeningPayload(openingPayloadFromRunState(runState));
+    const canonical = jcsCanonicalize(openingPayloadFromRunState(runState));
+    if (!canonical.ok) throw new Error(`cannot canonicalize opening payload (${canonical.reason})`);
+    recomputedDigest = `sha256:${sha256HexOfCanonical(canonical.canonical)}`;
+    authenticated = JSON.parse(canonical.canonical);
   } catch (err) {
     return haltResult(
       'stale_replay',
@@ -2725,14 +2760,14 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   // One validation, and its outputRoot and per-entry identities are carried into the sweep exactly
   // as `openCaptureRun` carries its own — the per-entry `containmentRootFor` that stood here was
   // both the missing gate and a fresh observation per iteration.
-  const validatedClosing = validateEntriesForCapture(profileLike, runState.entries, d);
+  const validatedClosing = validateEntriesForCapture(profileLike, authenticated.entries, d);
   if (!validatedClosing.ok) return validatedClosing;
 
   // [round 37] The close's own validation says the root is fine NOW; it cannot say it is the same
   // root the open validated, because until this round the two derivations were never compared.
   // Refusing here — before any temp is written — leaves nothing durable behind, exactly like the
   // identity and digest checks above.
-  const rootDrift = outputRootDrifted(runState.output_root, validatedClosing.outputRoot, d);
+  const rootDrift = outputRootDrifted(authenticated.output_root, validatedClosing.outputRoot, d);
   if (rootDrift) {
     return haltResult('provenance_hazard', `capture.output_dir moved while this run was open: ${rootDrift}`, { path: profileLike?.capture?.output_dir ?? null });
   }
@@ -2740,7 +2775,7 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   const closingAssets = {};
   const closingHazards = {};
   try {
-    for (const entry of runState.entries) {
+    for (const entry of authenticated.entries) {
       const key = chapterKeyFor(entry);
       const assetDir = chapterAssetDir(profileLike, entry);
       const snapshot = snapshotAssetHashes(assetDir, d, {
@@ -2756,25 +2791,25 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   }
 
   const finalIdentity = resolveClosingIdentity({
-    opening: runState.opening,
+    opening: authenticated.identity,
     captureOutcome,
     closing,
   });
 
   const chapters = {};
-  for (const entry of runState.entries) {
+  for (const entry of authenticated.entries) {
     const key = chapterKeyFor(entry);
     chapters[key] = {
-      opening: runState.opening_assets[key] ?? {},
+      opening: authenticated.assets[key] ?? {},
       closing: closingAssets[key] ?? {},
-      opening_hazards: runState.opening_asset_hazards?.[key] ?? [],
+      opening_hazards: authenticated.asset_hazards?.[key] ?? [],
       closing_hazards: closingHazards[key] ?? [],
     };
   }
 
   const record = {
     record_version: 1,
-    run_id: runState.run_id,
+    run_id: runId,
     // The RECOMPUTED digest — the value just verified against the on-disk token above — never
     // `runState.opening_digest` directly. `runState` is caller-held data: mutating only its
     // `opening_digest` field (leaving `entries`/`opening`/`opening_assets` untouched) sails straight
@@ -2841,7 +2876,7 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   // `describeBuildIdentityWarning` returns `null` on a clean resolution (`resolution_reason: null`)
   // — nothing pushed in that case.
   const warnings = [];
-  const identityWarning = describeBuildIdentityWarning({ opening: runState.opening, closing, final: finalIdentity, captureOutcome });
+  const identityWarning = describeBuildIdentityWarning({ opening: authenticated.identity, closing, final: finalIdentity, captureOutcome });
   if (identityWarning) warnings.push(identityWarning);
 
   // Cleanup: every leftover matching temp first, the token last — the same order as the row-6

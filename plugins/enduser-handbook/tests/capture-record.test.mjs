@@ -50,6 +50,13 @@ function withTempDir(fn) {
   }
 }
 
+// [round 38] The same `<dev>:<ino>` string the module builds, so a fixture can say "this is the
+// same directory object" rather than "this is the same path".
+function identityOf(path) {
+  const s = nodeFs.lstatSync(path);
+  return `${s.dev}:${s.ino}`;
+}
+
 function profileFor(dir, overrides = {}) {
   // `publish.chapters_dir` is the published docs tree — it already exists by the time W2 runs in
   // any real handbook, so fixtures create it up front (establishment only builds the PROVENANCE
@@ -4491,6 +4498,151 @@ for (const control of [
     });
   });
 }
+
+// [round 38] Verifying a value and then re-reading its source checks a different read. `runState` is
+// caller-held, `isPlainObject` admits an accessor-backed object, and every authenticated field used
+// to be re-read after the digest had already passed — so a getter could answer the digest with the
+// authenticated value and the consumer with something else. The count is the assertion that matters:
+// ONE read is the fix, and a fixture that only checked the halt would still pass if a second read
+// crept back in and merely happened to be refused.
+test('the close reads each authenticated field ONCE: an accessor-backed output_root cannot answer twice', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+    const treeB = join(dir, 'B');
+    nodeFs.mkdirSync(join(treeB, 'items'), { recursive: true });
+    nodeFs.writeFileSync(join(treeB, 'items', 'old.png'), 'bytes from a previous build');
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const authentic = opened.runState.output_root;
+
+    let reads = 0;
+    const tampered = { ...opened.runState };
+    Object.defineProperty(tampered, 'output_root', {
+      enumerable: true,
+      get() {
+        reads += 1;
+        // The authenticated value first, so the digest passes; anything later sees the replacement.
+        return reads === 1 ? authentic : { ...authentic, identity: identityOf(profile.capture.output_dir) };
+      },
+    });
+
+    nodeFs.renameSync(profile.capture.output_dir, join(dir, 'A-moved'));
+    nodeFs.renameSync(treeB, profile.capture.output_dir);
+
+    const closed = CR.closeCaptureRun(profile, tampered, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(reads, 1, `the close must read output_root exactly once, not ${reads} times`);
+    assert.equal(closed.ok, false, `the replacement must be refused: ${JSON.stringify(closed)}`);
+    assert.match(closed.halts[0].message, /is not the one this run opened over/, JSON.stringify(closed.halts));
+  });
+});
+
+// [round 38] The same single-read rule for the other two authenticated values the close consumes.
+// `output_root` is where the exposure was found; it was never where it lived. Each of these fails
+// against a close that re-reads its source, and each names a different consequence.
+test('the close re-gates the entries the DIGEST authenticated, not whatever the object says now', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const authentic = opened.runState.entries;
+
+    let reads = 0;
+    const tampered = { ...opened.runState };
+    Object.defineProperty(tampered, 'entries', {
+      enumerable: true,
+      get() {
+        reads += 1;
+        // A slug gate 1 refuses. A close that re-reads validates THIS and halts; a close that uses
+        // the authenticated payload never sees it.
+        return reads === 1 ? authentic : [{ slug: 'Not A Valid Slug' }];
+      },
+    });
+
+    const closed = CR.closeCaptureRun(profile, tampered, { ok: true }, null, stubDepsNoIdentity());
+    // Not a read COUNT: the returned runState is built by spreading the caller's object, which
+    // touches the accessor again perfectly legitimately, after every decision has been made. What
+    // must hold is that the decisions and the record used the authenticated value.
+    assert.equal(closed.ok, true, `the authenticated entries are the ones that count: ${JSON.stringify(closed)}`);
+    const parsed = CR.readRunRecordText(
+      nodeFs.readFileSync(join(profile.publish.chapters_dir, '.provenance', 'run', 'current.json'), 'utf8'),
+    );
+    assert.equal(parsed.ok, true, JSON.stringify(parsed));
+    assert.deepEqual(Object.keys(parsed.record.chapters), ['items'],
+      `the record must be keyed by the authenticated entries: ${JSON.stringify(Object.keys(parsed.record.chapters))}`);
+  });
+});
+
+test('the run_id written into the record is the one compared against the token, not a later read', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const authentic = opened.runState.run_id;
+    const forged = '00000000-0000-4000-8000-000000000000';
+    assert.notEqual(authentic, forged);
+
+    let reads = 0;
+    const tampered = { ...opened.runState };
+    Object.defineProperty(tampered, 'run_id', {
+      enumerable: true,
+      get() { reads += 1; return reads === 1 ? authentic : forged; },
+    });
+
+    const closed = CR.closeCaptureRun(profile, tampered, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    const parsed = CR.readRunRecordText(
+      nodeFs.readFileSync(join(profile.publish.chapters_dir, '.provenance', 'run', 'current.json'), 'utf8'),
+    );
+    assert.equal(parsed.ok, true, JSON.stringify(parsed));
+    // A forged run_id in the committed record is what W5 binds a chapter to — it would tie the
+    // chapter to a run that never happened, and the token comparison above would still have passed.
+    assert.equal(parsed.record.run_id, authentic,
+      `the record must carry the run_id the token vouched for: ${JSON.stringify(parsed.record.run_id)}`);
+  });
+});
+
+// [round 38] A name that moved while the DIRECTORY did not. `output_dir` pointing at a
+// `releases/current` alias, the same directory renamed underneath it and the alias rotated on — no
+// drift, and round 37 refused it because it compared the spelling before the object. What the run
+// opened over is a directory, not a name for one.
+test('the open -> close seam: a rotated alias over the SAME directory is not drift', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    const releases = join(real, 'releases');
+    const v1 = join(releases, 'v1');
+    nodeFs.mkdirSync(join(v1, 'items'), { recursive: true });
+    nodeFs.writeFileSync(join(v1, 'items', 'a.png'), 'v1');
+    const current = join(releases, 'current');
+    nodeFs.symlinkSync(v1, current);
+    nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+    const profile = {
+      capture: { output_dir: current, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+
+    const before = identityOf(nodeFs.realpathSync(current));
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    const v2 = join(releases, 'v2');
+    nodeFs.renameSync(v1, v2);
+    nodeFs.unlinkSync(current);
+    nodeFs.symlinkSync(v2, current);
+    // The whole point of the fixture: the object is the same one, only its name changed.
+    assert.equal(identityOf(nodeFs.realpathSync(current)), before,
+      'the rotation must preserve the directory — otherwise this pins the replacement case instead');
+    assert.notEqual(nodeFs.realpathSync(current), v1, 'the canonical spelling must actually have changed');
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, `a rotation over the same directory must not be refused: ${JSON.stringify(closed)}`);
+  });
+});
 
 // [round 37] The anchor GONE rather than replaced, which is a different observation and gets a
 // different word. The close's own validation still passes here — the root is still absent, so the
