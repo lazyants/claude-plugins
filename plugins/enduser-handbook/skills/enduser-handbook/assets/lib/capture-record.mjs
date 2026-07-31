@@ -121,21 +121,55 @@ function isSegmentPrefixOf(a, b) {
 // value is Error-shaped. JavaScript permits throwing ANY value (`throw null`, `throw 'oops'`,
 // `throw 42`), and every `deps.*` call in this file is a deliberately injectable seam (an
 // operator-supplied identity command, `randomUUID`, or any fs function a caller/test overrides), so
-// a caught value here is never guaranteed to be an object at all, let alone an Error. Before these
-// two helpers, `null.message`/`undefined.code` threw a SECOND, unrelated TypeError from inside the
-// very catch that exists to convert the FIRST throw into a halt (or an errno check) — the guard
-// failing at the one moment it exists for, reproduced by codex through `buildProvenanceReport`
-// (round 10, finding 1). Every property read off a caught `err` anywhere in this file goes through
-// one of these two now, never a raw `err.<name>` access.
+// a caught value here is never guaranteed to be an object at all, let alone an Error. Every
+// property read off a caught `err` anywhere in this file goes through one of these three now,
+// never a raw `err.<name>` access or an unguarded `String(err)`.
+//
+// `null`/`undefined` are the ONLY two values where a bracket property read (`err[name]`) itself
+// throws — every other value, INCLUDING a thrown function (`typeof === 'function'`, which the
+// previous version of this helper excluded by checking `typeof err === 'object'` — round 11,
+// finding 1c: a thrown function carrying its own `.code` silently lost that field, changing
+// `openCaptureRun`'s `EEXIST` classification to the generic `provenance_hazard`) or a primitive
+// (autoboxed safely) — supports property access with no risk at all. So the check is narrowed to
+// exactly the two values that are actually dangerous, not to a `typeof` guess at which SHAPES are
+// "safe enough to touch."
 function errProp(err, name) {
-  return err !== null && typeof err === 'object' ? err[name] : undefined;
+  return err === null || err === undefined ? undefined : err[name];
 }
 
-// The message-building fallback: `err.message` when present (read safely via `errProp`), else a
-// STRING form of whatever was actually thrown. Deliberately `String(err)`, never a template-literal
-// interpolation of `err` itself — `${sym}` throws for a raw `Symbol`, `String(sym)` does not.
+// The message-building fallback — ALWAYS returns a string, for any thrown value whatsoever.
+// `err.message` (read via `errProp`) wins ONLY when it is ALREADY a string (round 11, finding 1b: a
+// thrown `{message: Symbol(...)}` made the previous `?? ` chain hand back the Symbol itself, which
+// then threw on template-literal interpolation — the guard failing at the one moment it exists
+// for, the second time in as many rounds). Otherwise falls to `String(err)` — but `String()` is
+// not total either (round 11, finding 1a: `Object.create(null)` has no `toString`/
+// `Symbol.toPrimitive` at all, so `String()` throws `Cannot convert object to primitive value`,
+// reached through `openCaptureRun` with the seam trace showing the reservation still held) — so a
+// LAST fallback, `Object.prototype.toString.call(err)`, which the language specifies to never
+// throw for any value whatsoever, catches that. Every branch returns a string; none can throw,
+// for any input.
 function describeThrown(err) {
-  return errProp(err, 'message') ?? String(err);
+  const message = errProp(err, 'message');
+  if (typeof message === 'string') return message;
+  try {
+    return String(err);
+  } catch {
+    return Object.prototype.toString.call(err);
+  }
+}
+
+// Prefer the first NAMED field that is itself a string (`.code`, `.reason`, ...), else
+// `describeThrown(err)` — the same non-string-property risk `describeThrown` guards for
+// `.message` applies symmetrically to every other field this module reads off a caught value: a
+// thrown `{code: Symbol(...)}` would otherwise hand a Symbol straight into a template literal.
+// Every message-building catch in this file that used to chain `errProp(err, 'x') ??
+// errProp(err, 'y') ?? describeThrown(err)` goes through this instead.
+function describeThrownField(err, ...names) {
+  for (const name of names) {
+    const value = errProp(err, name);
+    if (typeof value === 'string') return value;
+  }
+  return describeThrown(err);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1028,7 +1062,7 @@ function validateEntriesForCapture(profileLike, entries, deps) {
       if (code === 'ENOENT' || code === 'ENOTDIR') {
         assetDirExists = false;
       } else {
-        return haltResult('provenance_hazard', `cannot inspect asset directory '${assetDir}': ${code ?? describeThrown(err)}`, { assetDir });
+        return haltResult('provenance_hazard', `cannot inspect asset directory '${assetDir}': ${typeof code === 'string' ? code : describeThrown(err)}`, { assetDir });
       }
     }
 
@@ -1047,7 +1081,7 @@ function validateEntriesForCapture(profileLike, entries, deps) {
       if (!ancestor.ok) {
         return haltResult(
           'provenance_hazard',
-          `cannot inspect an ancestor of asset directory '${assetDir}': ${errProp(ancestor.error, 'code') ?? describeThrown(ancestor.error)}`,
+          `cannot inspect an ancestor of asset directory '${assetDir}': ${describeThrownField(ancestor.error, 'code')}`,
           { assetDir },
         );
       }
@@ -1308,7 +1342,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
     if (errProp(err, 'code') === 'EEXIST') {
       return haltResult('run_already_open', 'a capture run is already open for this profile — close or abort it before opening a new one.');
     }
-    return haltResult('provenance_hazard', `cannot create the pending token: ${errProp(err, 'code') ?? describeThrown(err)}`, { path: tokenPath });
+    return haltResult('provenance_hazard', `cannot create the pending token: ${describeThrownField(err, 'code')}`, { path: tokenPath });
   }
   // Releases the reservation this call just took, and reports whether the token is actually GONE
   // afterward — the operationally significant half of "released" (codex round 9, finding 1b): a
@@ -1358,7 +1392,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
     }
   } catch (err) {
     const releaseWarning = releaseReservation();
-    return haltResult('provenance_hazard', `cannot snapshot the opening asset hashes: ${errProp(err, 'code') ?? describeThrown(err)}`, { warnings: releaseWarning ? [releaseWarning] : [] });
+    return haltResult('provenance_hazard', `cannot snapshot the opening asset hashes: ${describeThrownField(err, 'code')}`, { warnings: releaseWarning ? [releaseWarning] : [] });
   }
 
   let runState;
@@ -1392,7 +1426,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
     // behind with no caller ever having a chance to clean it up. Best-effort: this closeSync
     // failing must never MASK the write failure we are about to report (codex round 3).
     const releaseWarning = releaseReservation();
-    return haltResult('provenance_hazard', `cannot write the pending token: ${errProp(err, 'reason') ?? errProp(err, 'code') ?? describeThrown(err)}`, { path: tokenPath, warnings: releaseWarning ? [releaseWarning] : [] });
+    return haltResult('provenance_hazard', `cannot write the pending token: ${describeThrownField(err, 'reason', 'code')}`, { path: tokenPath, warnings: releaseWarning ? [releaseWarning] : [] });
   }
   try {
     d.closeSync(fd);
@@ -1411,7 +1445,7 @@ export function openCaptureRun(profileLike, entries, openingObservation, deps, i
       : [
           `the pending token '${tokenPath}' could not be removed after being written (the close that failed came after a successful write) — the next openCaptureRun will halt on 'run_already_open' until you run recoverProvenanceState (it will report 'open') and abortCaptureRun to remove it.`,
         ];
-    return haltResult('provenance_hazard', `cannot close the pending token after writing it: ${errProp(err, 'code') ?? describeThrown(err)}`, { path: tokenPath, warnings });
+    return haltResult('provenance_hazard', `cannot close the pending token after writing it: ${describeThrownField(err, 'code')}`, { path: tokenPath, warnings });
   }
 
   return { ok: true, runState };
@@ -1647,7 +1681,7 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
       closingAssets[chapterKeyFor(entry)] = snapshotAssetHashes(assetDir, d);
     }
   } catch (err) {
-    return haltResult('provenance_hazard', `cannot snapshot the closing asset hashes: ${errProp(err, 'code') ?? describeThrown(err)}`, {});
+    return haltResult('provenance_hazard', `cannot snapshot the closing asset hashes: ${describeThrownField(err, 'code')}`, {});
   }
 
   const finalIdentity = resolveClosingIdentity({
@@ -1706,7 +1740,7 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
       unlinkBestEffort(tempPath, d); // a create that succeeded but a write that failed leaves a
       // partial temp on disk — remove it rather than leaving litter for the failure path to answer for.
     }
-    const detail = tempPath === undefined ? `cannot generate the closing temp name: ${describeThrown(err)}` : `cannot write the closing temp: ${errProp(err, 'code') ?? describeThrown(err)}`;
+    const detail = tempPath === undefined ? `cannot generate the closing temp name: ${describeThrown(err)}` : `cannot write the closing temp: ${describeThrownField(err, 'code')}`;
     return haltResult('provenance_hazard', detail, { path: tempPath });
   }
   try {
@@ -1716,7 +1750,7 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
     // name — nothing durable has been committed at this point, so this is an ordinary halt (with
     // best-effort cleanup of the temp), not the post-commit case the cleanup loop below answers to.
     unlinkBestEffort(tempPath, d);
-    return haltResult('provenance_hazard', `cannot close the closing temp after writing it: ${errProp(err, 'code') ?? describeThrown(err)}`, { path: tempPath });
+    return haltResult('provenance_hazard', `cannot close the closing temp after writing it: ${describeThrownField(err, 'code')}`, { path: tempPath });
   }
 
   try {
@@ -1724,7 +1758,7 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   } catch (err) {
     unlinkBestEffort(tempPath, d); // the rename itself failed — the fully-written temp is still at
     // its OWN name, never at finalPath, so removing it leaves zero surviving temps on this exit.
-    return haltResult('provenance_hazard', `cannot commit the run record: ${errProp(err, 'code') ?? describeThrown(err)}`, { path: finalPath });
+    return haltResult('provenance_hazard', `cannot commit the run record: ${describeThrownField(err, 'code')}`, { path: finalPath });
   }
 
   // A missing, failing, unconfirmed or changed FINAL identity is a warning here, on the
@@ -1970,7 +2004,7 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   try {
     chapterText = readFileText(chapterFile, d);
   } catch (err) {
-    return { recorded: false, reason: `chapter_read_failed:${errProp(err, 'code') ?? describeThrown(err)}` };
+    return { recorded: false, reason: `chapter_read_failed:${describeThrownField(err, 'code')}` };
   }
 
   const assetDir = chapterAssetDir(profileLike, entry);
@@ -1978,7 +2012,7 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
   try {
     filenames = listRegularFilesRecursive(assetDir, d);
   } catch (err) {
-    return { recorded: false, reason: `asset_listing_failed:${errProp(err, 'code') ?? describeThrown(err)}` };
+    return { recorded: false, reason: `asset_listing_failed:${describeThrownField(err, 'code')}` };
   }
 
   const target = profileLike.publish.target;
@@ -2075,7 +2109,13 @@ export function recordChapterProvenance(profileLike, acceptedEntries, entry, cha
       closeBestEffort(fd, d);
     }
     if (tempPath !== undefined) unlinkBestEffort(tempPath, d);
-    const reason = tempPath === undefined ? 'temp_name_generation_failed' : (errProp(err, 'reason') ?? 'write_failed');
+    // Assigned into a returned FIELD rather than interpolated, so a non-string `.reason` (a thrown
+    // `{reason: Symbol(...)}`) would not throw here — but it would still put a Symbol into a field
+    // this module's own convention treats as a plain string, silently dropped by a caller's
+    // `JSON.stringify`. Typed-checked the same way as every message-building site now, not just the
+    // ones that would crash outright.
+    const errReason = errProp(err, 'reason');
+    const reason = tempPath === undefined ? 'temp_name_generation_failed' : typeof errReason === 'string' ? errReason : 'write_failed';
     return { ok: false, halts: [{ halt: 'provenance_hazard', reason, path: tempPath, detail: describeThrown(err) }] };
   }
   try {
@@ -2310,14 +2350,14 @@ export function buildProvenanceReport(profileLike, entries, currentObservation, 
     try {
       chapterText = readFileText(chapterFile, d);
     } catch (err) {
-      return { ok: false, halts: [{ halt: 'chapter_read_failed', message: `cannot read chapter '${chapterFile}': ${errProp(err, 'code') ?? describeThrown(err)}`, key }] };
+      return { ok: false, halts: [{ halt: 'chapter_read_failed', message: `cannot read chapter '${chapterFile}': ${describeThrownField(err, 'code')}`, key }] };
     }
     const assetDir = chapterAssetDir(profileLike, entry);
     let filenames;
     try {
       filenames = listRegularFilesRecursive(assetDir, d);
     } catch (err) {
-      return { ok: false, halts: [{ halt: 'asset_listing_failed', message: `cannot list the asset directory for '${key}': ${errProp(err, 'code') ?? describeThrown(err)}`, key }] };
+      return { ok: false, halts: [{ halt: 'asset_listing_failed', message: `cannot list the asset directory for '${key}': ${describeThrownField(err, 'code')}`, key }] };
     }
     const extractionFn = deps?.expectedAssets ?? expectedAssets;
     let extraction;

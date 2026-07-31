@@ -1797,14 +1797,21 @@ test('openCaptureRun (codex round 10, finding 1): the identity-command guard its
   // separately: a thrown `Symbol` — `describeThrown` uses `String(err)` rather than template-literal
   // interpolation specifically because `${sym}` throws while `String(sym)` does not, so a Symbol is
   // exercised by the SAME code path as the string/number cases, not a distinct one.
+  //
+  // codex round 11, finding 2: `typeof message === 'string'` alone is satisfied by
+  // `describeThrown = () => ''`, which would discard the original failure entirely — exactly the
+  // property this test exists to protect. Each case below pins the FRAGMENT `describeThrown` must
+  // actually preserve from that specific thrown value, derived independently from what each
+  // fallback step (`err.message`, then `String(err)`, then `Object.prototype.toString.call(err)`)
+  // is documented to produce for that shape.
   const thrownValues = [
-    ['null', null],
-    ['undefined', undefined],
-    ['a plain string', 'boom'],
-    ['a number', 42],
-    ['a plain object with no .message', { code: 'EWEIRD' }],
+    ['null', null, 'null'],
+    ['undefined', undefined, 'undefined'],
+    ['a plain string', 'boom', 'boom'],
+    ['a number', 42, '42'],
+    ['a plain object with no .message', { code: 'EWEIRD' }, '[object Object]'],
   ];
-  for (const [label, thrown] of thrownValues) {
+  for (const [label, thrown, expectedFragment] of thrownValues) {
     withTempDir((dir) => {
       const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
       const deps = depsWithOverride({
@@ -1817,10 +1824,105 @@ test('openCaptureRun (codex round 10, finding 1): the identity-command guard its
         assert.equal(result.ok, false, `[${label}] expected a halt, got ${JSON.stringify(result)}`);
         assert.equal(result.halts[0].halt, 'identity_resolution_threw', `[${label}] got ${JSON.stringify(result)}`);
         assert.equal(typeof result.halts[0].message, 'string', `[${label}] the halt message must be a string, got ${JSON.stringify(result)}`);
+        assert.ok(
+          result.halts[0].message.includes(expectedFragment),
+          `[${label}] expected the message to preserve '${expectedFragment}', got ${JSON.stringify(result.halts[0].message)}`,
+        );
       }, `[${label}] the guard itself must not throw`);
       assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, `[${label}] a throwing identity command must not leave the reservation token on disk`);
     });
   }
+});
+
+test('openCaptureRun (codex round 11, finding 1a): a thrown value with NO prototype at all (Object.create(null)) must not crash String() inside the guard', () => {
+  // `Object.create(null)` has no `toString`/`Symbol.toPrimitive` at all — `String(err)` on it
+  // throws `Cannot convert object to primitive value`, reached through openCaptureRun with the
+  // seam trace showing only `["open"]`: control escaped the catch BEFORE `releaseReservation`, so
+  // the reservation leaked again — the third round this exact leak has come back through a new
+  // door (round 9's throw, round 10's non-Error throw, now the FORMATTER's own throw).
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        throw Object.create(null);
+      },
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.openCaptureRun(profile, [], null, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'identity_resolution_threw', JSON.stringify(result));
+      assert.equal(typeof result.halts[0].message, 'string', JSON.stringify(result));
+      assert.ok(result.halts[0].message.includes('[object Object]'), `expected the Object.prototype.toString fallback, got ${JSON.stringify(result.halts[0].message)}`);
+    }, 'the guard itself must not throw, even on a value with no prototype');
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'a throwing identity command with no prototype at all must not leave the reservation token on disk');
+  });
+});
+
+test('openCaptureRun (codex round 11, finding 1b): a thrown value whose .message is itself a Symbol must not crash template-literal interpolation inside the guard', () => {
+  // `errProp` returns whatever `.message` holds without checking its TYPE — a `{message:
+  // Symbol('boom')}` throw hands the Symbol itself back, and interpolating a raw Symbol into a
+  // template literal throws `Cannot convert a Symbol value to a string`.
+  withTempDir((dir) => {
+    const profile = profileFor(dir, { capture: { build_identity: { command: 'get-version', ui_read: false } } });
+    const deps = depsWithOverride({
+      runIdentityCommand: () => {
+        throw { message: Symbol('boom') };
+      },
+    });
+    assert.doesNotThrow(() => {
+      const result = CR.openCaptureRun(profile, [], null, deps);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.halts[0].halt, 'identity_resolution_threw', JSON.stringify(result));
+      assert.equal(typeof result.halts[0].message, 'string', JSON.stringify(result));
+      assert.ok(result.halts[0].message.includes('[object Object]'), `expected the String(err) fallback (the .message field is not itself a string), got ${JSON.stringify(result.halts[0].message)}`);
+    }, 'the guard itself must not throw, even when .message is a Symbol');
+    assert.equal(nodeFs.existsSync(tokenPathFor(profile)), false, 'a throwing identity command with a Symbol .message must not leave the reservation token on disk');
+  });
+});
+
+test('openCaptureRun (codex round 11, finding 1c): a thrown FUNCTION carrying its own .code must still classify EEXIST as run_already_open, not fall through to the generic provenance_hazard', () => {
+  // The previous `errProp` excluded functions (`typeof fn === 'object'` is false — functions report
+  // `typeof === 'function'`), so a thrown function carrying `.code = 'EEXIST'` silently lost that
+  // field, and `openCaptureRun` returned `provenance_hazard` where it used to (correctly) return
+  // `run_already_open`. This is a BEHAVIORAL regression the round-10 rewrite introduced, not merely
+  // a formatting one — a message-only assertion cannot show it, only the halt NAME can.
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const thrownFn = () => {};
+    thrownFn.code = 'EEXIST';
+    const deps = depsWithOverride({
+      openSync: () => {
+        throw thrownFn;
+      },
+    });
+    const result = CR.openCaptureRun(profile, [], null, deps);
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'run_already_open', `expected run_already_open (the correct classification for EEXIST), got ${JSON.stringify(result)}`);
+  });
+});
+
+test('closeCaptureRun (codex round 11, finding 1c corroboration): a thrown FUNCTION carrying its own .code must still classify ENOENT as token_missing, not fall through to the generic provenance_hazard', () => {
+  // Same class of regression as finding 1c above, but a DIFFERENT function (`openLeafNoFollow`,
+  // reached via `readLeafText` on the token read) through a DIFFERENT entrypoint — corroborating
+  // that the `errProp` fix generalizes across every comparison site sharing the helper, not just
+  // the one codex happened to name.
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    const entry = { slug: 'items' };
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const thrownFn = () => {};
+    thrownFn.code = 'ENOENT';
+    const deps = depsWithOverride({
+      openSync: (p, flags, mode) => {
+        if (p === tokenPathFor(profile)) throw thrownFn;
+        return nodeFs.openSync(p, flags, mode);
+      },
+    });
+    const result = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, deps);
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.halts[0].halt, 'token_missing', `expected token_missing (the correct classification for ENOENT), got ${JSON.stringify(result)}`);
+  });
 });
 
 test('buildProvenanceReport (codex round 10, finding 1): a THROWING identity command with a null payload must not crash the guard — the exact shape codex reproduced', () => {
