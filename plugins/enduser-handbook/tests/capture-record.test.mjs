@@ -2028,29 +2028,37 @@ test('openCaptureRun: an asset directory observed at validation and gone at the 
 
 // The sibling errno on the same branch. Round 20's whole finding was this rule applied to one error
 // code and not its neighbour, so the neighbour gets its own case rather than an argument that it
-// must behave the same.
-test('openCaptureRun: an observed asset directory that is a NON-directory at the snapshot is refused too', () => {
+// must behave the same. Reported independently by the cross-file review bot, whose scenario this
+// is: the asset root is a regular FILE, gate 3's `lstatSync` succeeds and containment accepts the
+// path, the root listing fails with ENOTDIR — and the empty baseline that produced let the capture
+// replace the file with a directory of stale bytes and be recorded as this build's.
+//
+// Nothing is stubbed. The root really is a regular file on disk, which is what makes this the
+// fixture that can reach the condition: a `readdirSync` override would only demonstrate the errno
+// branch, never that gate 3 lets this shape through to it in the first place.
+test('openCaptureRun: an asset root that is a regular FILE is refused, not read as an empty baseline', () => {
   withTempDir((dir) => {
     const profile = profileFor(dir);
     const entry = { slug: 'items' };
-    const assetDir = join(profile.capture.output_dir, 'items');
-    nodeFs.mkdirSync(assetDir, { recursive: true });
+    const assetRoot = join(profile.capture.output_dir, 'items');
+    nodeFs.mkdirSync(profile.capture.output_dir, { recursive: true });
+    nodeFs.writeFileSync(assetRoot, 'not a directory at all');
 
-    const deps = depsWithOverride({
-      readdirSync: (p, opts) => {
-        if (p === assetDir) {
-          const err = new Error('ENOTDIR'); err.code = 'ENOTDIR'; throw err;
-        }
-        return nodeFs.readdirSync(p, opts);
-      },
-      runIdentityCommand: () => ({ ok: false, detail: 'no command configured in test' }),
-    });
-
-    assert.equal(nodeFs.lstatSync(assetDir).isDirectory(), true);
-    const opened = CR.openCaptureRun(profile, [entry], null, deps);
-    assert.equal(opened.ok, false, 'a root replaced by a non-directory must not open as an empty baseline');
+    assert.equal(
+      nodeFs.lstatSync(assetRoot).isFile(),
+      true,
+      'the asset root must really be a regular file, or this test proves nothing about that shape',
+    );
+    const opened = CR.openCaptureRun(profile, [entry], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, false, 'a root that cannot be listed must not open as an empty baseline');
     assert.equal(opened.halts[0].halt, 'provenance_hazard');
     assert.match(opened.halts[0].message, /ENOTDIR/);
+    assert.match(opened.halts[0].message, /items/);
+    assert.equal(
+      nodeFs.existsSync(tokenPathFor(profile)),
+      false,
+      'the reservation must be released on this exit like every other pre-commit halt',
+    );
   });
 });
 
