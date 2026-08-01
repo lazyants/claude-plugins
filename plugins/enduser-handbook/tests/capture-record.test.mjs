@@ -4563,9 +4563,10 @@ test('the close re-gates the entries the DIGEST authenticated, not whatever the 
     });
 
     const closed = CR.closeCaptureRun(profile, tampered, { ok: true }, null, stubDepsNoIdentity());
-    // Not a read COUNT: the returned runState is built by spreading the caller's object, which
-    // touches the accessor again perfectly legitimately, after every decision has been made. What
-    // must hold is that the decisions and the record used the authenticated value.
+    // Not a read COUNT — a count assertion passes for the wrong reason on any path that halts early
+    // and fails on a benign read on any path that completes. What must hold is that every OUTPUT
+    // used the authenticated value: the decisions, the committed record, and — since round 39
+    // stopped building the result by spreading the caller's object — the returned state too.
     assert.equal(closed.ok, true, `the authenticated entries are the ones that count: ${JSON.stringify(closed)}`);
     const parsed = CR.readRunRecordText(
       nodeFs.readFileSync(join(profile.publish.chapters_dir, '.provenance', 'run', 'current.json'), 'utf8'),
@@ -4573,6 +4574,12 @@ test('the close re-gates the entries the DIGEST authenticated, not whatever the 
     assert.equal(parsed.ok, true, JSON.stringify(parsed));
     assert.deepEqual(Object.keys(parsed.record.chapters), ['items'],
       `the record must be keyed by the authenticated entries: ${JSON.stringify(Object.keys(parsed.record.chapters))}`);
+    assert.deepEqual(closed.runState.entries, authentic,
+      'and the returned state must carry them too — a caller drives W5 off exactly this object');
+    // Scope, so this fixture is not read as more than it proves: it pins WHICH entries the close
+    // acts on, never the entry-validation predicate itself. Neutralize that predicate and this
+    // still passes, because the authenticated entries are valid — the gate-1 invalid-slug fixtures
+    // are what own it (codex round 39, MINOR).
   });
 });
 
@@ -4604,6 +4611,9 @@ test('the run_id written into the record is the one compared against the token, 
     // chapter to a run that never happened, and the token comparison above would still have passed.
     assert.equal(parsed.record.run_id, authentic,
       `the record must carry the run_id the token vouched for: ${JSON.stringify(parsed.record.run_id)}`);
+    // Scope: this pins the one-read BINDING of run_id into the record, not the token comparison
+    // itself — remove that comparison while keeping the local and this still passes. The
+    // wrong-token fixture in the gate section above owns the comparison (codex round 39, MINOR).
   });
 });
 
@@ -4641,6 +4651,266 @@ test('the open -> close seam: a rotated alias over the SAME directory is not dri
 
     const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
     assert.equal(closed.ok, true, `a rotation over the same directory must not be refused: ${JSON.stringify(closed)}`);
+  });
+});
+
+// [round 39] The RETURNED state is an output, not scratch. Round 38 authenticated everything the
+// close DECIDES on and then built its result by spreading the caller's object back out, judging
+// that spread benign because no decision follows it. It is not benign: capture-record.d.mts
+// declares the returned active state to carry the authenticated fields, and a caller drives W5 with
+// the `run_id` it reads off exactly this object — so a second read that answers differently hands
+// W5 a forged id while the committed record is correct, and W5 refuses with `run_id_mismatch`
+// against a run that is in fact intact. Codex round 39 attacked the judgement it was asked to
+// attack and was right.
+test('the close RETURNS the authenticated run_id, not a later read of the caller object', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const authentic = opened.runState.run_id;
+    const forged = '00000000-0000-4000-8000-000000000000';
+    assert.notEqual(authentic, forged);
+
+    let reads = 0;
+    const tampered = { ...opened.runState };
+    Object.defineProperty(tampered, 'run_id', {
+      enumerable: true,
+      get() { reads += 1; return reads === 1 ? authentic : forged; },
+    });
+
+    const closed = CR.closeCaptureRun(profile, tampered, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    assert.equal(closed.runState.run_id, authentic,
+      `the returned state must carry the run_id the token vouched for, not a later read: ${JSON.stringify(closed.runState.run_id)}`);
+    // The record and the returned state must agree — either one alone leaves W5 comparing an
+    // authentic value against a forged one.
+    const parsed = CR.readRunRecordText(
+      nodeFs.readFileSync(join(profile.publish.chapters_dir, '.provenance', 'run', 'current.json'), 'utf8'),
+    );
+    assert.equal(parsed.ok, true, JSON.stringify(parsed));
+    assert.equal(parsed.record.run_id, closed.runState.run_id);
+  });
+});
+
+// [round 39] `opening_digest` is the one authenticated field NOTHING reads during authentication —
+// the digest is recomputed from the payload and compared against the TOKEN, never against this
+// field. So a throwing getter on it cannot reach a single decision, and the only thing left that
+// can touch it is a read taken after the record is already on disk. A throw there turns a
+// successfully committed run into an exception, which is the one shape this module's contract says
+// never happens: every failure is a returned halt.
+test('the close returns its declared result even when a caller field throws on a read after the record is committed', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    const tampered = { ...opened.runState };
+    Object.defineProperty(tampered, 'opening_digest', {
+      enumerable: true,
+      get() { throw new Error('nothing may read this field after the payload is authenticated'); },
+    });
+
+    const closed = CR.closeCaptureRun(profile, tampered, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    assert.equal(closed.runState.opening_digest, opened.runState.opening_digest,
+      'the returned state must carry the authenticated digest rather than re-reading the caller field');
+  });
+});
+
+// [round 39] `skipped` was read before the token and before the digest — the one decision in this
+// function taken on state nothing has authenticated. An active run wrapped in a skipped-looking
+// state closed `ok: true` while committing nothing and leaving the pending token behind, which is
+// this release's defining defect class exactly: an item that could not be processed read as good
+// news.
+test('closeCaptureRun refuses an ACTIVE run wrapped in a skipped-looking state', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    const wrapped = { ...opened.runState, skipped: true };
+    const closed = CR.closeCaptureRun(profile, wrapped, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false,
+      `a skipped-looking wrapper over an active run must not close ok: ${JSON.stringify(closed)}`);
+    assert.equal(nodeFs.existsSync(join(profile.publish.chapters_dir, '.provenance', 'run', 'current.json')), false,
+      'and it must commit nothing');
+  });
+});
+
+// [round 39] The two arms of that refusal MASK each other, and the fixture above cannot tell them
+// apart: the wrapper carries active fields AND leaves a pending token, so neutralizing either arm
+// alone still refuses. Found by mutation — both arms reported killed 0 while the fixture was green,
+// which is the "green for the wrong reason" shape this release keeps producing. Each of the two
+// below removes the other arm's evidence, so exactly one guard can be the thing that refuses.
+test('the skipped branch: an active-shaped state is refused on its SHAPE, with no token left to give it away', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    // Remove the one other thing that could betray the claim, so only the shape can.
+    nodeFs.unlinkSync(join(profile.publish.chapters_dir, '.provenance', 'run', 'pending.json'));
+
+    const closed = CR.closeCaptureRun(profile, { ...opened.runState, skipped: true }, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false,
+      `an active run's fields under a skipped claim must be refused on shape alone: ${JSON.stringify(closed)}`);
+    assert.match(closed.halts[0].message, /carries an active run's fields/);
+  });
+});
+
+test('the skipped branch: a well-formed skipped state is refused because THIS run\'s token is still pending', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.equal(nodeFs.existsSync(join(profile.publish.chapters_dir, '.provenance', 'run', 'pending.json')), true);
+
+    // Shape-perfect: exactly what openCaptureRun returns on its own skipped branch. The only thing
+    // contradicting it is the reservation a skipped run never makes.
+    const closed = CR.closeCaptureRun(profile, { skipped: true }, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false,
+      `a skipped claim must not survive this run's own pending token: ${JSON.stringify(closed)}`);
+    assert.match(closed.halts[0].message, /a pending token is present/);
+  });
+});
+
+// [round 39] The absent-root anchor is re-resolved to re-check containment, and a resolution that
+// FAILS there is not a tolerable unknown: `segmentsWithin` would be handed an undefined segment
+// list and throw past this module's declared result. Reached the only way it can be — the identity
+// read succeeds on the anchor while resolving it fails, which on a real disk is an ancestor that
+// became unreadable between the two calls, and here is that same errno injected.
+test('the open -> close seam: an absent root whose anchor can no longer be RESOLVED is refused, not thrown past', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    const safe = join(real, 'safe');
+    const outputDir = join(safe, 'assets');
+    nodeFs.mkdirSync(safe, { recursive: true });
+    nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+    const profile = {
+      capture: { output_dir: outputDir, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.equal(opened.runState.output_root.identity, null, 'the fixture must open over an ABSENT root');
+    const anchorPath = opened.runState.output_root.anchor.path;
+
+    // The capture creates the root somewhere the close will resolve to a DIFFERENT spelling, so the
+    // containment re-check — and therefore the anchor re-resolution — is actually reached.
+    const moved = join(real, 'moved');
+    nodeFs.mkdirSync(join(moved, 'items'), { recursive: true });
+    nodeFs.symlinkSync(moved, outputDir);
+
+    const failing = {
+      ...stubDepsNoIdentity(),
+      realpathSync: (p, ...rest) => {
+        if (p === anchorPath) {
+          const err = new Error('EACCES: permission denied');
+          err.code = 'EACCES';
+          throw err;
+        }
+        return nodeFs.realpathSync(p, ...rest);
+      },
+    };
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, failing);
+    assert.equal(closed.ok, false,
+      `an anchor that cannot be resolved must be refused: ${JSON.stringify(closed)}`);
+    assert.match(closed.halts[0].message, /can no longer be resolved/);
+  });
+});
+
+// [round 39] The absent-root twin of the rotated-alias fixture above. With no identity to compare,
+// round 38 required the canonical SPELLING to match and refused before it ever looked at the
+// anchor — so the ordinary first capture combined with the supported alias rotation halted, telling
+// the operator the root moved when the directory the absence was established against never did.
+// The halt direction made it a nuisance rather than a bad record, but the message it prints is
+// false, and SKILL.md tells the operator it means the capture wrote into an unvalidated tree.
+test('the open -> close seam: an absent root under a rotated alias is not drift when the ANCHOR is the same directory', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    const releases = join(real, 'releases');
+    const v1 = join(releases, 'v1');
+    nodeFs.mkdirSync(v1, { recursive: true });
+    const current = join(releases, 'current');
+    nodeFs.symlinkSync(v1, current);
+    nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+    const outputDir = join(current, 'assets');
+    const profile = {
+      capture: { output_dir: outputDir, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+    // The ordinary FIRST capture: the root does not exist yet and the capture command creates it.
+    assert.equal(nodeFs.existsSync(outputDir), false, 'the fixture must open over an ABSENT root');
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const anchorBefore = identityOf(nodeFs.realpathSync(current));
+
+    const v2 = join(releases, 'v2');
+    nodeFs.renameSync(v1, v2);
+    nodeFs.unlinkSync(current);
+    nodeFs.symlinkSync(v2, current);
+    assert.equal(identityOf(nodeFs.realpathSync(current)), anchorBefore,
+      'the rotation must preserve the anchor directory — otherwise this pins the replacement case instead');
+
+    nodeFs.mkdirSync(join(outputDir, 'items'), { recursive: true });
+    nodeFs.writeFileSync(join(outputDir, 'items', 'fresh.png'), 'fresh');
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, true,
+      `a root created inside the very anchor its absence was established against must not be refused: ${JSON.stringify(closed)}`);
+  });
+});
+
+// [round 39] ... and the anchor holding is NOT on its own a licence to accept whatever the root
+// now resolves to. Same unchanged anchor, but a link one level down redirects the root out of it:
+// the capture wrote into a tree this run never validated, which is the whole point of the check.
+test('the open -> close seam: an unchanged anchor does NOT excuse a root that now resolves OUTSIDE it', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    const releases = join(real, 'releases');
+    const v1 = join(releases, 'v1');
+    nodeFs.mkdirSync(v1, { recursive: true });
+    const current = join(releases, 'current');
+    nodeFs.symlinkSync(v1, current);
+    nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+    const elsewhere = join(real, 'elsewhere');
+    nodeFs.mkdirSync(join(elsewhere, 'items'), { recursive: true });
+    nodeFs.writeFileSync(join(elsewhere, 'items', 'stale.png'), 'a previous build');
+    const outputDir = join(current, 'assets');
+    const profile = {
+      capture: { output_dir: outputDir, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+    assert.equal(nodeFs.existsSync(outputDir), false, 'the fixture must open over an ABSENT root');
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const anchorBefore = identityOf(nodeFs.realpathSync(current));
+
+    // The anchor is untouched; only the missing root's own name becomes a link out of it.
+    nodeFs.symlinkSync(elsewhere, join(v1, 'assets'));
+    assert.equal(identityOf(nodeFs.realpathSync(current)), anchorBefore,
+      'the anchor must be untouched — this fixture is about the segment BELOW it');
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false,
+      `a root redirected out of its own anchor must be refused: ${JSON.stringify(closed)}`);
+    // The ARM matters, not just the refusal. Before the rotation fix this same fixture was refused
+    // by the canonical-spelling comparison, which is now gone from this branch — so asserting only
+    // `ok: false` would keep passing while the containment check it exists to pin was deleted.
+    assert.match(closed.halts[0].message, /is outside the directory/,
+      `the refusal must come from the containment check, not from some earlier arm: ${closed.halts[0].message}`);
   });
 });
 

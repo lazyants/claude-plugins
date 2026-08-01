@@ -221,8 +221,12 @@ export function assertProvenanceOwnership(profileLike: ProfileLike, deps?: Parti
 // none of those are optional there, because `closeCaptureRun` reads them unconditionally off a non-skipped
 // `runState`, and a caller driving W5 needs `run_id` narrowed to `string` to pass as
 // `recordChapterProvenance`'s `expectedRunId`. `closed` alone stays optional: absent before
-// `closeCaptureRun` runs, `true` on the runState it returns (`{...runState, closed: true}`), and
-// never read back by anything in this module — a caller-facing marker only. Pinned at runtime by
+// `closeCaptureRun` runs, `true` on the runState it returns, and never read back by anything in
+// this module — a caller-facing marker only. [round 39] That returned state is RECONSTRUCTED from
+// the authenticated payload plus the token-verified `run_id` and recomputed `opening_digest`, never
+// spread out of the caller's object: the field types above are a promise to the caller, and a
+// caller-held accessor answering differently on a second read broke it while the committed record
+// stayed correct — W5, driven off the returned `run_id`, then refused an intact run. Pinned at runtime by
 // the "RunState union" tests in capture-record.test.mjs, since nothing in this repository compiles
 // TypeScript and a `.d.mts`-only change is otherwise invisible to the whole suite.
 export type RunState =

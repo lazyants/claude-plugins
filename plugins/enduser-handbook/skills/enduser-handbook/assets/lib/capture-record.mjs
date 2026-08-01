@@ -2253,6 +2253,17 @@ function directAbsenceConfirmed(absPath, containmentRoot, deps) {
 // replacement is still in place while the close decides, so an observation retained from the open
 // is exactly what catches it.
 //
+// [round 39] The limit of what this can be, stated where the comparison is rather than only in
+// SKILL.md: `<dev>:<ino>` is unique among objects that are LIVE AT THE SAME TIME, not across time.
+// A directory renamed away still exists, so its inode is still taken and a replacement necessarily
+// compares different; a directory DELETED and recreated frees its inode for reuse, and a filesystem
+// that hands the same one back makes the two indistinguishable here. So this is reliable against a
+// rename-over and best-effort against a delete-then-recreate. That residue does not close with a
+// longer comparison — no pair of path-based syscalls can bind an object, which is the same reason
+// the concurrent-writer premise above it is a documented precondition rather than a check. It
+// closes with a capability this module does not have: a held handle, or a run-owned staging
+// directory the capture writes into. Do not "strengthen" this by adding a second path-based probe.
+//
 // Returns a message on drift, `null` when the root still holds.
 function outputRootDrifted(opened, closing, deps) {
   // A `runState` reaching the close without this field is not an old shape to tolerate: the digest
@@ -2275,15 +2286,18 @@ function outputRootDrifted(opened, closing, deps) {
     }
     return 'the directory at capture.output_dir is not the one this run opened over — same path, different directory';
   }
-  // With no identity to compare there is nothing better than the spelling, so it is required. A
-  // root that did not exist at open has no object this run ever observed.
-  if (opened.canonical !== closing.canonical) {
-    return `capture.output_dir resolved to '${opened.canonical}' when this run opened and resolves to '${closing.canonical}' now`;
-  }
   // The root did not exist when the run opened, which is the ordinary first capture this module
   // has protected since round 27: the capture command is expected to create it, so the root having
   // an identity NOW is not drift. What has to still hold is the object the absence was established
   // against — that ancestor is the whole basis on which the empty opening baseline was believed.
+  //
+  // [round 39] The ANCHOR is asked first here for the same reason the identity is asked first
+  // above, and round 38 had the same ordering bug one branch down: it required the canonical
+  // SPELLING to match before it ever looked at the anchor, so the ordinary first capture combined
+  // with the supported alias rotation — `output_dir` at `releases/current/assets`, `current`
+  // rotated from `v1` to `v2` while `v1` was merely RENAMED — halted, telling the operator the root
+  // moved when the directory it was created inside never did. Fail-closed, so it cost a re-run
+  // rather than a bad record, but the message was false.
   if (!isPlainObject(opened.anchor)) {
     return 'this runState records capture.output_dir as absent at open without the ancestor that absence was established against';
   }
@@ -2293,6 +2307,20 @@ function outputRootDrifted(opened, closing, deps) {
   }
   if (now.id !== opened.anchor.identity) {
     return `the directory '${opened.anchor.path}' that capture.output_dir's absence was established against has been replaced — same path, different directory`;
+  }
+  if (opened.canonical === closing.canonical) return null;
+  // The spelling moved while the anchor did not. That is not on its own a licence to accept
+  // whatever the root resolves to now: the anchor holding says nothing about the segments BELOW it,
+  // and a link planted on the root's own name redirects the capture out of the very tree the
+  // absence was established inside. What the open actually established is containment — the root,
+  // once created, would be created inside this anchor — so containment is what the close re-checks,
+  // against the anchor's resolution taken NOW rather than against a remembered spelling.
+  const anchorNow = canonicalizeForComparison(opened.anchor.path, deps);
+  if (!anchorNow.ok) {
+    return `the directory '${opened.anchor.path}' that capture.output_dir's absence was established against can no longer be resolved (${anchorNow.reason})`;
+  }
+  if (!segmentsWithin(anchorNow.segments, closing.segments)) {
+    return `capture.output_dir resolved to '${opened.canonical}' when this run opened and resolves to '${closing.canonical}' now, which is outside the directory '${opened.anchor.path}' its absence was established against`;
   }
   return null;
 }
@@ -2644,7 +2672,33 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   if (ownership.skip) return { ok: true, runState: { skipped: true }, warnings: [] };
   if (!ownership.ok) return { ok: false, halts: ownership.halts };
 
-  if (runState.skipped) return { ok: true, runState, warnings: [] };
+  // [round 39] The one decision this function took on state nothing had authenticated. Everything
+  // below the token read is checked — and `skipped` short-circuits above all of it, so an ACTIVE
+  // run wrapped in a skipped-looking state returned `ok: true` having committed nothing and left
+  // the pending token behind: this release's defect class exactly, an item that could not be
+  // processed reading as good news. There is no digest to appeal to here (a skipped run never
+  // opened, so there is no payload and no token to authenticate one against), and the answer is not
+  // a bigger check but the SHAPE: `openCaptureRun` returns exactly `{skipped: true}` on that branch
+  // and nothing else, so anything carrying an active run's fields is not a skipped state whatever
+  // this property says. The pending token is the second half — a genuinely skipped run never
+  // reserved one, so a token on disk contradicts the claim outright.
+  if (runState.skipped) {
+    const keys = Object.keys(runState);
+    if (runState.skipped !== true || keys.length !== 1 || keys[0] !== 'skipped') {
+      return haltResult(
+        'stale_replay',
+        'this runState claims the run was skipped but carries an active run\'s fields — a skipped run carries only `skipped: true`; re-derive with recoverProvenanceState.',
+      );
+    }
+    const strayToken = readLeafText(pendingTokenPath(profileLike), d);
+    if (strayToken.kind !== 'absent') {
+      return haltResult(
+        'stale_replay',
+        `this runState claims the run was skipped, but a pending token is present at '${pendingTokenPath(profileLike)}' — a skipped run never reserves one; re-derive with recoverProvenanceState.`,
+      );
+    }
+    return { ok: true, runState: { skipped: true }, warnings: [] };
+  }
 
   const hierarchyHazard = inspectRunHierarchyComponents(profileLike, d);
   if (hierarchyHazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...hierarchyHazard }] };
@@ -2701,7 +2755,10 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   // re-reading rather than to harden one field.
   //
   // `JSON.parse` of the canonical text is exactly the bytes that were hashed, and it yields plain
-  // objects by construction — no accessors, no prototype, nothing left to re-evaluate. Deriving the
+  // objects by construction — own DATA properties only, no accessors, nothing left to re-evaluate.
+  // (They carry the ordinary `Object.prototype`, not a null one; this comment claimed otherwise for
+  // a round. Every consumer below reads own keys, which is what makes the distinction immaterial
+  // here — it is not a licence for a future `in` test.) Deriving the
   // digest from that same text (rather than calling `digestOpeningPayload` and canonicalizing a
   // second time) is what makes "the value I checked" and "the value I use" one object.
   let recomputedDigest;
@@ -2932,7 +2989,31 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
     );
   }
 
-  return { ok: true, runState: { ...runState, closed: true }, warnings };
+  // [round 39] Reconstructed from the authenticated materialization, never spread out of the
+  // caller's object. Round 38 stopped at "nothing decides anything after this read" and judged the
+  // spread benign. The returned state is itself an OUTPUT: capture-record.d.mts declares an active
+  // returned state to carry the authenticated fields, and a caller drives W5 with the `run_id` it
+  // reads off exactly this object — so a second read answering differently hands W5 a forged id
+  // against a record that is correct, and W5 refuses an intact run with `run_id_mismatch`. A
+  // THROWING field is the other half: it turns a successfully committed run into an exception
+  // rather than the returned result this module's contract promises on every other path. Both were
+  // executed. `run_id` and `opening_digest` come from the locals the token vouched for; the five
+  // payload fields come from the one materialization the digest was taken over.
+  return {
+    ok: true,
+    runState: {
+      skipped: false,
+      run_id: runId,
+      opening_digest: recomputedDigest,
+      opening: authenticated.identity,
+      opening_assets: authenticated.assets,
+      opening_asset_hazards: authenticated.asset_hazards,
+      entries: authenticated.entries,
+      output_root: authenticated.output_root,
+      closed: true,
+    },
+    warnings,
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
