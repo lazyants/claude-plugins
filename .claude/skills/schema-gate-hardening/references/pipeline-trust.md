@@ -71,8 +71,11 @@ with an empty hazard list.
 **Materialize once, verify the materialization, and pass THAT to everything downstream.** Where the
 check already canonicalizes (JCS, sorted-key JSON, a signed byte string), the canonical TEXT is the
 materialization: derive the digest from it and parse it back, and the object every consumer reads is
-by construction the bytes that were hashed — plain, prototype-less, with nothing left to re-evaluate.
-Do not re-derive it by canonicalizing a second time; that is another read.
+by construction the bytes that were hashed — own DATA properties only, with no accessor left to
+re-evaluate. Do not re-derive it by canonicalizing a second time; that is another read. What the
+parse does NOT give you is a prototype-less object: `JSON.parse` yields ordinary objects carrying
+`Object.prototype`, so the guarantee is "no caller-controlled accessors", not "nothing inherited" —
+still enough for own-key reads, not enough for a consumer that reaches for `in`.
 
 Three things this lens gets wrong when applied half-way:
 
