@@ -27,6 +27,25 @@ describes. Closes #362.
   who never asked for provenance gets one warning and a run that proceeds. W6 then reports
   `provenance_unavailable` rather than `record_absent`, because "cannot carry provenance here" and
   "the records were lost" are different problems and only one is worth investigating.
+- **The open and the close are bracketed over `capture.output_dir`, and the bracket's limits are
+  stated rather than implied** — the run state carries what the open observed of that directory,
+  authenticated by the same digest as the rest of the opening payload, and the close refuses
+  (`provenance_hazard`, `capture.output_dir moved while this run was open`) when it no longer holds.
+  The refusal names which observation disagreed. Two things are deliberately **not** drift: a root
+  the capture command creates during the run (the ordinary first capture), and a rename or alias
+  rotation that leaves the same physical directory in place under a new resolved path — for a root
+  that existed at open the directory's identity decides, and for one that did not, containment
+  inside the ancestor its absence was established against. What IS refused is `capture.command`
+  replacing its own output directory. Two limits an adopter is entitled to know rather than
+  discover: the directory is compared by `<dev>:<ino>`, which is unique among objects live at the
+  same time and not across time, so detection is reliable against a rename-over and **best-effort
+  against a delete-then-recreate** whose inode the filesystem happens to reuse; and every regular
+  file both snapshots can see under an accepted entry's asset directory is attributed to this run,
+  because nothing on a filesystem says which process wrote a file. Keep backup, sync and editor
+  tooling off `capture.output_dir` while a run is open. Neither residue closes with a longer
+  path-based comparison — both need a capability this module does not have (a held handle, or a
+  run-owned staging directory the capture writes into), so they are documented preconditions rather
+  than checks that pretend.
 - **Crash recovery as a total function over what is on disk** — the classifier observes
   `(token, record, temps)` *after* gate 6 and returns one of nine states; a path failing gate 6 is a
   halt (`provenance_hazard`), not a state, so totality is over a written-down input domain rather
