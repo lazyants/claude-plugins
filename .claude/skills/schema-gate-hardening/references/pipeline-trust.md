@@ -87,7 +87,17 @@ Three things this lens gets wrong when applied half-way:
 - **A value outside the verified payload needs its own single read.** An id compared against a token
   but not covered by the digest is authenticated by that comparison alone, so the comparison and every
   later use must read one local, not the property twice.
-- **Not every re-read is a decision.** Building a return value by spreading the caller's object
-  touches its accessors again, legitimately, after every decision is made. Assert what the decisions
-  and the durable output USED, not a read count — a count assertion on a path that halts early passes
+- **"After every decision" is not the same as benign — the RETURN VALUE is an output too.** This
+  bullet used to say that building a result by spreading the caller's object touches its accessors
+  again "legitimately, after every decision is made". That was wrong, and it was refuted the same day
+  it was written, by an adversarial round asked to attack exactly that judgement. The returned object
+  is part of the contract: its declared type promises the authenticated fields, and the next stage is
+  driven off what it reads there — so a getter answering differently on that second read handed the
+  next stage a forged id while the committed record stayed correct, and the next stage refused an
+  intact run. A throwing field on the same path is worse: it turns a completed, committed operation
+  into an exception, on a contract whose every other failure is a returned value. Reconstruct the
+  result from the materialization and the verified locals; never spread the caller's object into it.
+  The genuinely benign re-read is the one whose result reaches no decision, no durable state, **and
+  no caller** — which in practice is almost none of them. Assert what the decisions, the durable
+  output and the returned value USED, not a read count — a count assertion on a path that halts early passes
   for the wrong reason, and on a path that completes it fails on a benign read.
