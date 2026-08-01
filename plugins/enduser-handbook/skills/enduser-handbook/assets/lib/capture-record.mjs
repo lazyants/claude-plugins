@@ -817,6 +817,18 @@ function pendingTokenPath(profileLike) {
   return posixJoin(runNamespaceDir(profileLike), PENDING_TOKEN_NAME);
 }
 
+// [round 41] "Is this the state a skipped run actually carries", asked in ONE place because two
+// branches of `closeCaptureRun` need it and a second copy is how they drift. `openCaptureRun`
+// returns exactly `{skipped: true}` on its skipped branch and nothing else, so anything carrying an
+// active run's fields is not a skipped state whatever its `skipped` property says. An accessor
+// cannot hide a sibling key, which is why the own-key list is the thing asked rather than the
+// property alone.
+function isGenuineSkippedState(runState) {
+  if (!isPlainObject(runState)) return false;
+  const keys = Object.keys(runState);
+  return runState.skipped === true && keys.length === 1 && keys[0] === 'skipped';
+}
+
 // [round 40] Whether a pending token is on disk for a profile this module does NOT own provenance
 // for. Separate from the owned-path read because nothing here may halt on a profile whose
 // provenance root cannot even be derived: that is an ordinary adopter who never asked for
@@ -2715,9 +2727,23 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
     // is decided from the profile alone and used to return success without looking at the run at
     // all. A profile edited between open and close — to an overlapping topology with no
     // `build_identity` — therefore reported success for a genuinely open run, committed nothing,
-    // and left its token behind, which is the same "read as good news" shape. A skipped profile
-    // never reserves a token, so a token here contradicts the claim; being unable to look is not
-    // evidence either way, and stays permissive rather than inventing a halt out of ignorance.
+    // and left its token behind, which is the same "read as good news" shape.
+    //
+    // [round 41] The RUNSTATE settles it, and round 40 leaned on the token instead. That was the
+    // same mistake one more time: the token's path is derived from `profileLike`, the very thing
+    // this branch exists because it may have been edited, so moving `publish.chapters_dir` as well
+    // hid the reservation and the false success came straight back. Absence at a path derived from
+    // the edited profile is not evidence that this invocation was skipped. An ACTIVE run is an
+    // active run whatever the profile now says, and that fact needs no disk at all.
+    if (!isGenuineSkippedState(runState)) {
+      return haltResult(
+        'stale_replay',
+        'this profile no longer carries provenance, but the runState handed to this close is an active run\'s — a run that was opened while provenance was owned cannot be closed as skipped; run recoverProvenanceState against the profile it was opened with.',
+      );
+    }
+    // The token stays as a second, independent witness: it catches a caller who hands the exact
+    // skipped shape while a reservation this profile CAN still see is open. Being unable to look is
+    // not evidence either way, so it stays permissive rather than inventing a halt out of ignorance.
     const strayToken = tokenPresenceForSkip(profileLike, d);
     if (strayToken) {
       return haltResult(
@@ -2740,8 +2766,7 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   // this property says. The pending token is the second half — a genuinely skipped run never
   // reserved one, so a token on disk contradicts the claim outright.
   if (runState.skipped) {
-    const keys = Object.keys(runState);
-    if (runState.skipped !== true || keys.length !== 1 || keys[0] !== 'skipped') {
+    if (!isGenuineSkippedState(runState)) {
       return haltResult(
         'stale_replay',
         'this runState claims the run was skipped but carries an active run\'s fields — a skipped run carries only `skipped: true`; re-derive with recoverProvenanceState.',

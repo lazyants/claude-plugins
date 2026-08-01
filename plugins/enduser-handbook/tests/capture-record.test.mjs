@@ -4963,6 +4963,61 @@ test('closeCaptureRun does not report success for an OPEN run just because the p
   });
 });
 
+// [round 41] And the token lookup that caught the case above cannot be the thing relied on, because
+// its path is derived from the very profile that may have been edited. Move the provenance root too
+// and the token becomes invisible: absence at a path derived from the edited profile is not
+// evidence that this invocation was skipped. What settles it without consulting the profile at all
+// is the runState — an ACTIVE run is an active run whatever the profile now says.
+test('closeCaptureRun does not report success for an OPEN run when the profile moves its provenance root as well', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const originalToken = join(profile.publish.chapters_dir, '.provenance', 'run', 'pending.json');
+    assert.equal(nodeFs.existsSync(originalToken), true);
+
+    // Overlapping AND relocated: ownership reports skip, and the token lookup for the new root
+    // finds nothing because the reservation is still sitting under the old one.
+    const moved = join(dir, 'moved-handbook');
+    nodeFs.mkdirSync(moved, { recursive: true });
+    const skipping = { capture: { output_dir: moved }, publish: { chapters_dir: moved } };
+
+    const closed = CR.closeCaptureRun(skipping, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false,
+      `an open run must not be closed as "skipped" when the profile also moved: ${JSON.stringify(closed)}`);
+    assert.equal(nodeFs.existsSync(originalToken), true,
+      'and the original reservation must still be there for recoverProvenanceState to find');
+  });
+});
+
+// [round 41] The skip branch's SECOND arm, which the arm above masks under every fixture that
+// carries an active state — found by the matrix reporting it killed nothing while the suite was
+// green, for the third time in three rounds. Here the state is the exact skipped shape, so only the
+// token can contradict it, and the profile still resolves to the root the reservation sits under.
+test('the skip branch: an exactly-skipped state is still refused when a reservation is visible under this profile', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.equal(nodeFs.existsSync(join(profile.publish.chapters_dir, '.provenance', 'run', 'pending.json')), true);
+
+    // Overlapping so ownership skips, but the SAME chapters_dir — so the token this run reserved is
+    // exactly where this profile would look for one.
+    const skipping = {
+      capture: { output_dir: profile.publish.chapters_dir },
+      publish: { chapters_dir: profile.publish.chapters_dir },
+    };
+    const closed = CR.closeCaptureRun(skipping, { skipped: true }, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false,
+      `a reservation visible under this profile must refuse a skipped claim: ${JSON.stringify(closed)}`);
+    assert.match(closed.halts[0].message, /a pending token is present/);
+  });
+});
+
 // [round 40] The scope note added in round 39 named the wrong owner: the wrong-token fixture
 // replaces the token's run_id AND its digest, so removing the run_id comparison still halts on the
 // digest and that fixture stays green. Nothing pinned the comparison itself. This does: an
