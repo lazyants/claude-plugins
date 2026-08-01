@@ -261,7 +261,11 @@ export type RunState =
       output_root: {
         canonical: string;
         identity: string | null;
-        anchor: { path: string; identity: string } | null;
+        // [round 40] `tail` is the path BELOW the anchor whose absence was established — the raw
+        // segments, re-joined onto the anchor's resolution at close and compared exactly. Without
+        // it the close could only ask whether the root ended up somewhere under the anchor, which a
+        // previous build's tree elsewhere under that same anchor satisfies.
+        anchor: { path: string; identity: string; tail: string[] } | null;
       };
       closed?: boolean;
     };

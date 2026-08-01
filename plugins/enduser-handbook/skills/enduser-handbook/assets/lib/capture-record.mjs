@@ -817,6 +817,26 @@ function pendingTokenPath(profileLike) {
   return posixJoin(runNamespaceDir(profileLike), PENDING_TOKEN_NAME);
 }
 
+// [round 40] Whether a pending token is on disk for a profile this module does NOT own provenance
+// for. Separate from the owned-path read because nothing here may halt on a profile whose
+// provenance root cannot even be derived: that is an ordinary adopter who never asked for
+// provenance, and inventing a refusal out of an unreadable path would break the one flow the skip
+// branch exists to serve. Returns the token's path when one is definitely there, `null` otherwise —
+// unreadable, underivable and absent all answer the same way, on purpose.
+function tokenPresenceForSkip(profileLike, deps) {
+  let path;
+  try {
+    path = pendingTokenPath(profileLike);
+  } catch {
+    return null;
+  }
+  try {
+    return readLeafText(path, deps).kind === 'present' ? path : null;
+  } catch {
+    return null;
+  }
+}
+
 // Canonicalize a possibly-not-yet-existing path for COMPARISON purposes: absolutize, lexically
 // normalize, then canonicalize the LONGEST EXISTING PREFIX via a real `realpath` (resolving any
 // symlink components already on disk, multi-hop, cycle-detected, relative targets resolved
@@ -2220,7 +2240,17 @@ function directAbsenceConfirmed(absPath, containmentRoot, deps) {
     // certified against directory A, the close then walked directory B through the same name, and
     // with nothing retained there was nothing left to disagree with. `openCaptureRun` pins what
     // comes back here; `outputRootDrifted` re-reads it.
-    const anchor = Object.freeze({ path: candidate, identity: anchorIdentity.id });
+    // [round 40] The TAIL travels with the anchor, and round 39 shipped without it. What the open
+    // establishes is not "something is missing somewhere under this object" but a SPECIFIC missing
+    // suffix under it, and a close that re-checks only anchor-plus-containment accepts a different
+    // directory inside the same anchor — a previous build's tree reached through a link planted on
+    // the tail. Two reviewers found that independently, with different topologies (a link at the
+    // root's own name; a redirect one component deeper), which is what marks it as the property
+    // being wrong rather than one topology being missed. These are the RAW segments below the
+    // anchor; the close re-joins them onto the anchor's resolution taken then and normalizes, so a
+    // `..` in the configured path stays supported while a symlink newly planted along the tail can
+    // never match — a resolved path that traversed one does not equal the lexical join.
+    const anchor = Object.freeze({ path: candidate, identity: anchorIdentity.id, tail: Object.freeze(segs.slice(depth)) });
     if (depth < containmentRoot.depth) return { ok: true, anchor };
     // Gate 3's actual property, on the same comparison basis gate 3 built its root with.
     const resolved = canonicalizeForComparison(candidate, deps);
@@ -2319,8 +2349,17 @@ function outputRootDrifted(opened, closing, deps) {
   if (!anchorNow.ok) {
     return `the directory '${opened.anchor.path}' that capture.output_dir's absence was established against can no longer be resolved (${anchorNow.reason})`;
   }
-  if (!segmentsWithin(anchorNow.segments, closing.segments)) {
-    return `capture.output_dir resolved to '${opened.canonical}' when this run opened and resolves to '${closing.canonical}' now, which is outside the directory '${opened.anchor.path}' its absence was established against`;
+  // [round 40] Round 39 asked only whether the root ended up SOMEWHERE below the anchor. That is
+  // not what the open established: it established that a specific suffix was missing under that
+  // object, so a previous build's tree elsewhere under the same anchor satisfied the containment
+  // test and was committed as this run's output. Both reviewers reproduced it. The suffix is
+  // therefore re-joined and compared exactly.
+  if (!Array.isArray(opened.anchor.tail)) {
+    return 'this runState records capture.output_dir as absent at open without the path below the ancestor that absence was established against';
+  }
+  const expected = normalizeSegments([...anchorNow.segments, ...opened.anchor.tail], true);
+  if (expected.length !== closing.segments.length || !expected.every((seg, i) => seg === closing.segments[i])) {
+    return `capture.output_dir resolved to '${opened.canonical}' when this run opened and resolves to '${closing.canonical}' now, which is not '/${expected.join('/')}' — the path whose absence was established under '${opened.anchor.path}'`;
   }
   return null;
 }
@@ -2669,7 +2708,25 @@ export function closeCaptureRun(profileLike, runState, captureOutcome, closingOb
   const d = mergeDeps(deps);
 
   const ownership = assertProvenanceOwnership(profileLike, d);
-  if (ownership.skip) return { ok: true, runState: { skipped: true }, warnings: [] };
+  if (ownership.skip) {
+    // [round 40] The same defect one branch above the one round 39 closed, and the reason it was
+    // missed is that round 39 read "unauthenticated decision" as a property of the runState. It is
+    // a property of every input this branch trusts, and this one trusts the CURRENT profile: skip
+    // is decided from the profile alone and used to return success without looking at the run at
+    // all. A profile edited between open and close — to an overlapping topology with no
+    // `build_identity` — therefore reported success for a genuinely open run, committed nothing,
+    // and left its token behind, which is the same "read as good news" shape. A skipped profile
+    // never reserves a token, so a token here contradicts the claim; being unable to look is not
+    // evidence either way, and stays permissive rather than inventing a halt out of ignorance.
+    const strayToken = tokenPresenceForSkip(profileLike, d);
+    if (strayToken) {
+      return haltResult(
+        'stale_replay',
+        `this profile no longer carries provenance, but a pending token is present at '${strayToken}' from a run that was opened while it did — that run is still open and cannot be closed against this profile; run recoverProvenanceState against the profile it was opened with.`,
+      );
+    }
+    return { ok: true, runState: { skipped: true }, warnings: [] };
+  }
   if (!ownership.ok) return { ok: false, halts: ownership.halts };
 
   // [round 39] The one decision this function took on state nothing had authenticated. Everything

@@ -4612,8 +4612,11 @@ test('the run_id written into the record is the one compared against the token, 
     assert.equal(parsed.record.run_id, authentic,
       `the record must carry the run_id the token vouched for: ${JSON.stringify(parsed.record.run_id)}`);
     // Scope: this pins the one-read BINDING of run_id into the record, not the token comparison
-    // itself — remove that comparison while keeping the local and this still passes. The
-    // wrong-token fixture in the gate section above owns the comparison (codex round 39, MINOR).
+    // itself — remove that comparison while keeping the local and this still passes. Round 39's
+    // note deferred that to the wrong-token fixture in the gate section, which does NOT own it:
+    // that fixture replaces the token's run_id AND its digest, so the digest mismatch refuses first
+    // and the comparison stays unpinned. The authentic-digest/foreign-run_id fixture below is what
+    // owns it (codex round 40).
   });
 });
 
@@ -4872,6 +4875,122 @@ test('the open -> close seam: an absent root under a rotated alias is not drift 
   });
 });
 
+// [round 40] Containment as a segment PREFIX was not enough, and two independent reviewers found it
+// at once with different topologies: the anchor holding plus "somewhere below the anchor" admits a
+// DIFFERENT directory inside that anchor, which is not the one whose absence was established. Both
+// are below. What the open established is a specific missing SUFFIX under a specific object, so the
+// close now requires the root to resolve to exactly the anchor's current resolution plus that
+// recorded tail — which also refuses any symlink newly introduced along the tail, since a resolved
+// path that traversed one cannot equal the lexical join.
+test('the open -> close seam: a link at the absent root\'s own name, pointing INSIDE its anchor, is refused', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    const safe = join(real, 'safe');
+    const outputDir = join(safe, 'assets');
+    nodeFs.mkdirSync(safe, { recursive: true });
+    nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+    const profile = {
+      capture: { output_dir: outputDir, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+    assert.equal(nodeFs.existsSync(outputDir), false, 'the fixture must open over an ABSENT root');
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    // A previous build's output, sitting INSIDE the anchor the absence was established against.
+    nodeFs.mkdirSync(join(safe, 'stale-tree', 'items'), { recursive: true });
+    nodeFs.writeFileSync(join(safe, 'stale-tree', 'items', 'old.png'), 'a previous build');
+    nodeFs.symlinkSync(join(safe, 'stale-tree'), outputDir);
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false,
+      `a root redirected to a different directory inside its own anchor must be refused: ${JSON.stringify(closed)}`);
+    assert.equal(nodeFs.existsSync(join(profile.publish.chapters_dir, '.provenance', 'run', 'current.json')), false,
+      'and a previous build\'s file must not be committed as this run\'s output');
+  });
+});
+
+test('the open -> close seam: a redirect DEEPER along the absent tail, still inside the anchor, is refused', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    const anchor = join(real, 'anchor');
+    nodeFs.mkdirSync(anchor, { recursive: true });
+    nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+    // The whole tail `new/deep/assets` is absent at open, so the anchor is `anchor` itself.
+    const outputDir = join(anchor, 'new', 'deep', 'assets');
+    const profile = {
+      capture: { output_dir: outputDir, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.equal(opened.runState.output_root.anchor.path, anchor);
+
+    nodeFs.mkdirSync(join(anchor, 'old', 'deep', 'assets', 'items'), { recursive: true });
+    nodeFs.writeFileSync(join(anchor, 'old', 'deep', 'assets', 'items', 'stale.png'), 'a previous build');
+    nodeFs.symlinkSync(join(anchor, 'old'), join(anchor, 'new'));
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false,
+      `a tail component redirected inside the anchor must be refused: ${JSON.stringify(closed)}`);
+  });
+});
+
+// [round 40] The same defect class one branch HIGHER than round 39 closed it. `ownership.skip` is
+// decided from the CURRENT profile and returns before the runState or the token is looked at, so a
+// profile edited between open and close — to an overlapping topology with no `build_identity` —
+// reports success for a run that is genuinely open, commits nothing, and leaves its token behind.
+// Round 39 hardened the state-claims-skipped branch and left the profile-claims-skipped one.
+test('closeCaptureRun does not report success for an OPEN run just because the profile now says skip', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    assert.equal(nodeFs.existsSync(join(profile.publish.chapters_dir, '.provenance', 'run', 'pending.json')), true);
+
+    // The profile now overlaps and no longer configures build_identity: the warn-and-skip branch.
+    const skipping = {
+      capture: { output_dir: profile.publish.chapters_dir },
+      publish: { chapters_dir: profile.publish.chapters_dir },
+    };
+    const closed = CR.closeCaptureRun(skipping, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false,
+      `an open run must not be closed as "skipped" because the profile changed: ${JSON.stringify(closed)}`);
+  });
+});
+
+// [round 40] The scope note added in round 39 named the wrong owner: the wrong-token fixture
+// replaces the token's run_id AND its digest, so removing the run_id comparison still halts on the
+// digest and that fixture stays green. Nothing pinned the comparison itself. This does: an
+// AUTHENTIC digest with a foreign run_id, which only the run_id comparison can refuse.
+test('closeCaptureRun refuses a token whose digest is authentic but whose run_id is not this run\'s', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const tokenPath = join(profile.publish.chapters_dir, '.provenance', 'run', 'pending.json');
+    const token = JSON.parse(nodeFs.readFileSync(tokenPath, 'utf8'));
+    assert.equal(token.run_id, opened.runState.run_id);
+
+    // Only the identifier moves; the digest stays exactly the one this payload hashes to, so the
+    // digest comparison cannot be what refuses.
+    nodeFs.writeFileSync(tokenPath, JSON.stringify({
+      run_id: '00000000-0000-4000-8000-000000000000',
+      opening_digest: token.opening_digest,
+    }));
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false,
+      `a token belonging to a different run must be refused on its run_id: ${JSON.stringify(closed)}`);
+  });
+});
+
 // [round 39] ... and the anchor holding is NOT on its own a licence to accept whatever the root
 // now resolves to. Same unchanged anchor, but a link one level down redirects the root out of it:
 // the capture wrote into a tree this run never validated, which is the whole point of the check.
@@ -4906,11 +5025,12 @@ test('the open -> close seam: an unchanged anchor does NOT excuse a root that no
     const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
     assert.equal(closed.ok, false,
       `a root redirected out of its own anchor must be refused: ${JSON.stringify(closed)}`);
-    // The ARM matters, not just the refusal. Before the rotation fix this same fixture was refused
-    // by the canonical-spelling comparison, which is now gone from this branch — so asserting only
-    // `ok: false` would keep passing while the containment check it exists to pin was deleted.
-    assert.match(closed.halts[0].message, /is outside the directory/,
-      `the refusal must come from the containment check, not from some earlier arm: ${closed.halts[0].message}`);
+    // The ARM matters, not just the refusal, and this fixture has now been moved twice: the
+    // canonical-spelling comparison caught it before round 39, segment containment caught it after,
+    // and round 40 replaced containment with an exact re-join of the recorded tail. Asserting only
+    // `ok: false` would let it keep passing while whichever check currently owns it was deleted.
+    assert.match(closed.halts[0].message, /the path whose absence was established under/,
+      `the refusal must come from the tail comparison, not from some earlier arm: ${closed.halts[0].message}`);
   });
 });
 
