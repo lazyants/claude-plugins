@@ -14,6 +14,7 @@
 - [RED evidence read from a MOVING ref stops being evidence at the commit](#red-evidence-that-reads-its-before-from-a-moving-ref-stops-being-evidence-at-the-commit)
 - [A staged RED gate must be SATISFIABLE by its owner](#a-staged-red-gate-must-be-satisfiable)
 - [A coverage claim needs the same evidence as the thing it covers](#a-coverage-claim-needs-the-same-evidence)
+- [Comparing a probe's verdict before and after the fix settles nothing on its own — in EITHER direction](#a-probe-that-says-the-same-thing-before-and-after-the-fix)
 - [Revert the whole file — the pins that SURVIVE say it was never guarded](#revert-the-whole-file-and-read-which-pins-survive)
 - [A never-varied argument is an untested argument — instrument, don't re-review](#a-never-varied-argument-is-an-untested-argument)
 - [A pin can CEMENT a wrong claim — pinning is not review](#a-pin-can-cement-a-wrong-claim)
@@ -311,6 +312,65 @@ wrongly bound.
 Closure criterion: a rule counts as guarded ONLY if a mutant was run and a fixture went red. No
 transitive arguments; no "no realistic mutation exists" unless one was attempted and its
 impossibility can be stated. The claim that something is covered is itself a claim.
+
+## A probe that says the same thing before and after the fix
+
+A scratch probe built to demonstrate a defect, or a fixture built to pin it, can fail to REACH the
+condition it names while reporting a perfectly plausible verdict. Its own "did the hook fire"
+assertion does not catch this, because the hook DID fire — somewhere else.
+
+**Run the probe against the pre-fix commit AND the post-fix commit before believing either answer.**
+A detached worktree at each, or the module copied out with `git show <sha>:<path>`, is minutes of
+work. It is necessary, and on its own it settles nothing in either direction.
+
+**An identical verdict at both is INCONCLUSIVE, and stopping there is the trap.** A probe that never
+reached the code under test and a fix that genuinely does not work produce the same two readings;
+the comparison cannot tell them apart, and the two conclusions send you in opposite directions.
+Guessing "faulty probe" is how a real failed fix gets dismissed — the more comfortable guess, and
+the one whose cost lands after the release.
+
+**A CHANGED verdict is weaker evidence than it looks, too.** It says the probe separates those two
+TREES — not that it reached the target window, and not that the fix is why. Two commits from history
+differ by more than one fix, so an unrelated guard that also moved can flip the outcome while the
+staged sequence never happens; that certifies a mis-keyed probe just as readily as the identical
+case dismisses a real one.
+
+Both directions need the same thing, which is why it is worth getting first: evidence that the
+staged condition was REACHED, or a delta that isolates the fix.
+
+- **Reachability:** a trace or counter of the target call showing the seam fired inside the window
+  that matters — not merely that it fired at all.
+- **An isolated delta:** revert the fix IN PLACE on the post-fix tree rather than reaching for an
+  earlier commit, so the two runs differ by those lines and nothing else. A known-good positive
+  control — a tree where the defect is present and this probe is known to catch it — is the same
+  move.
+
+Anything else is attribution by adjacency.
+
+The generator is an interposition seam placed by ORDINAL — "the Nth call of `realpathSync` on this
+path", "the first `openSync` of the token" — when an earlier CALLER owns that position. Verified:
+a probe removing a symlink at the first resolution of a configured path had its removal land in an
+ownership gate that runs before the function under test, so the sequence it staged never occurred;
+it returned the same ok-with-foreign-bytes result at the two pre-fix commits AND at the commit that
+had just closed the defect. Read alone, that says a just-shipped fix does not work — a false result
+about one's own work, from a probe whose hook fired every time. The reachability evidence that broke
+the tie was COUNTING the resolutions of that path in one run: there were two, and the ownership gate
+owned the first. Re-keyed to the second, the probe separated the three commits immediately — and
+only that re-keyed run licensed the conclusion, not the three matching verdicts before it. Note what
+the three commits could NOT have supplied on their own: they came from history and differed by more
+than the fix, so even the changed verdict would have been attribution by adjacency. The count is
+what carried it.
+
+Its permanent-fixture twin: a seam keyed on the CONFIGURED path string while the module reads the
+RESOLVED one interposes on nothing at all. That fixture passed against the unfixed module because an
+unrelated guard happened to refuse the input — and what exposed it was asserting the halt's MESSAGE;
+a fixture asserting only the halt class would have been committed as coverage of a defect it never
+touched.
+
+So: key a seam on something that identifies the WINDOW — the exact string the module passes, a flag
+an earlier stage sets, the state the seam itself observes — rather than on a position in a call
+sequence. Where a count is unavoidable, measure the sequence once and record in the fixture's own
+comment which caller owns each position, because the next change to any caller silently renumbers it.
 
 ## Revert the whole file and read which pins SURVIVE
 

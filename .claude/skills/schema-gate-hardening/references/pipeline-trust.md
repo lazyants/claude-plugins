@@ -1,6 +1,6 @@
 # Trust & isolation primitives in an agentic pipeline
 
-Three traps when a gate/check has to hold up against a semi-trusted (prompt-injectable) agent that shares the pipeline's filesystem, or when a marker must isolate one span of text from a later matching pass.
+Four traps when a gate/check has to hold up against a semi-trusted (prompt-injectable) agent that shares the pipeline's filesystem, when a marker must isolate one span of text from a later matching pass, or when the state a check verifies is supplied by its own caller.
 
 ## 1. Where the root-of-trust lives (co-located = defeated)
 
@@ -51,3 +51,43 @@ A fixed textual sentinel embedded in shared text, later found-and-restored via s
 **Note the failure DIRECTION explicitly, because it decides severity.** A WIDENED data region is harmless — attacker text still cannot escape the quoting — while a NARROWED one is a hole, since it leaves attacker-authored text outside the span the reader was told to treat as data. Either way it is a wrong instruction inside a security control and gets fixed; the direction is what says whether you are correcting the control's own description or repairing a breach of it.
 
 **How this differs from §2:** there a fixed marker COLLIDES with real content, and the fix is to stop matching content and track the real position. Here the marker is unambiguous and the DEFINITION is what fails — an ordinal evaluated over a body of text that is mostly the prompt's own rules and framing rather than the data it claims to bound. Same instinct applied in prompt space: describe the position structurally instead of asking the reader to find the Nth occurrence of a character the template itself emits everywhere.
+
+## 4. Verify a MATERIALIZATION, then consume that — re-reading the source checks a different read
+
+An integrity check over caller-supplied state (a digest, a signature, a schema pass, a token
+comparison) certifies the values it READ. If the consumer then reads those values off the original
+object again, the two reads are separate events and nothing forces them to agree — so the check
+covers a value that no longer has to be the one acted on.
+
+The enabling detail is that "is this a plain object" checks almost never exclude accessors.
+`value !== null && typeof value === 'object' && !Array.isArray(value)` is true of an object whose
+properties are getters, and a getter may return a different value each call. Measured 2026-07-31
+(`enduser-handbook` run provenance): a digest over the opening payload was recomputed and compared
+against an on-disk token, and passed; a downstream guard then re-read one field of the same
+caller-held object, an enumerable getter returned the authenticated value to the digest and a
+replaced directory's identity to the guard, and a foreign tree was committed as the run's own output
+with an empty hazard list.
+
+**Materialize once, verify the materialization, and pass THAT to everything downstream.** Where the
+check already canonicalizes (JCS, sorted-key JSON, a signed byte string), the canonical TEXT is the
+materialization: derive the digest from it and parse it back, and the object every consumer reads is
+by construction the bytes that were hashed — own DATA properties only, with no accessor left to
+re-evaluate. Do not re-derive it by canonicalizing a second time; that is another read. What the
+parse does NOT give you is a prototype-less object: `JSON.parse` yields ordinary objects carrying
+`Object.prototype`, so the guarantee is "no caller-controlled accessors", not "nothing inherited" —
+still enough for own-key reads, not enough for a consumer that reaches for `in`.
+
+Three things this lens gets wrong when applied half-way:
+
+- **It is a property of the SEAM, not of the field the reviewer found it on.** The instinct is to
+  harden the one field named in the finding. Enumerate every value the consumer reads after the check
+  instead — in the measured case the reported field was one of five, and two of the others (the
+  entries re-gated after validation, and the run id written into the committed record) had no test
+  until the mutation matrix said so, because nobody had thought to attack them.
+- **A value outside the verified payload needs its own single read.** An id compared against a token
+  but not covered by the digest is authenticated by that comparison alone, so the comparison and every
+  later use must read one local, not the property twice.
+- **Not every re-read is a decision.** Building a return value by spreading the caller's object
+  touches its accessors again, legitimately, after every decision is made. Assert what the decisions
+  and the durable output USED, not a read count — a count assertion on a path that halts early passes
+  for the wrong reason, and on a path that completes it fails on a benign read.
