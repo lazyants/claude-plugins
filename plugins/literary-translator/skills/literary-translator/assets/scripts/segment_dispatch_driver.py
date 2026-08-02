@@ -2878,20 +2878,24 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
         # codex round-3 BLOCKER, corrected after an initial fix was itself
         # wrong. The worker subtree below `derive_next_action()` (this
         # loop's own decision step) reaches 13 fatal()/raise sites across
-        # 6 functions, enumerated by reading every callee, not assumed:
-        # call_template_functions() (missing-template-script :1619,
-        # internal-error-unknown-fn :1625, could-not-run-node :1648,
-        # node-exited-nonzero :1651, node-did-not-print-valid-JSON :1659);
-        # _run_gate() (missing-gate-script :1849, could-not-run-script
-        # :1856, called for both draft_ready_script and
-        # validate_draft_script); template_harness_source()
-        # (truncation-marker-not-found :1573); render_template_source()
-        # (internal-error-unknown-token-style :1532, unresolved-{{TOKEN}}
-        # :1535); verse_policy_instruction_block() (unknown-mode :1166,
-        # missing/invalid-threshold_lines :1171); run_one_codex_job()
-        # (round_label-required-for-review :2162, reached before ITS OWN
-        # narrower try/except below, which only wraps dispatch_codex_job()
-        # specifically).
+        # 6 functions, enumerated by reading every callee, not assumed --
+        # named by FUNCTION, deliberately never by line number (a citation
+        # is correct when written and silently false the moment anything
+        # is inserted above it, exactly the drift this comment itself was
+        # caught by once already; a function name survives that insertion,
+        # a line number does not):
+        # call_template_functions() (missing-template-script,
+        # internal-error-unknown-fn, could-not-run-node,
+        # node-exited-nonzero, node-did-not-print-valid-JSON);
+        # _run_gate() (missing-gate-script, could-not-run-script, called
+        # for both draft_ready_script and validate_draft_script);
+        # template_harness_source() (truncation-marker-not-found);
+        # render_template_source() (internal-error-unknown-token-style,
+        # unresolved-{{TOKEN}}); verse_policy_instruction_block()
+        # (unknown-mode, missing/invalid-threshold_lines);
+        # run_one_codex_job() (round_label-required-for-review, reached
+        # before ITS OWN narrower try/except below, which only wraps
+        # dispatch_codex_job() specifically).
         #
         # An EARLIER version of this fix caught only `except DriverError`
         # around derive_next_action() alone, on the theory that the
