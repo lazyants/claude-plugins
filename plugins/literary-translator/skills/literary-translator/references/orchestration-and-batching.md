@@ -484,12 +484,20 @@ value is validated against a **hardened, path-safe allowlist**:
 `^[A-Za-z0-9][A-Za-z0-9._-]*$`, and the whole value must not be `.` or `..`,
 and must not contain a `..` substring anywhere (rejecting directory-escape
 and dot-segment-collapse tricks). The identical value both names the run
-directory (`${durable_root}/runs/workflows/<RUN_ID>/`,
-`${durable_root}/glossary/runs/<RUN_ID>/`) and substitutes `{{RUN_ID}}`
-inside the instantiated template — so a fresh instantiation and a resumed
-one that reuses the same `RUN_ID` produce byte-identical
-tokens/paths throughout. `runs/workflows/` is created by Step 0a. The full
-path is logged in W8's status output.
+directory `resume_setup.py` itself owns (`${durable_root}/runs/<RUN_ID>/`
+for `kind="mass"`, `${durable_root}/glossary/runs/<RUN_ID>/` for
+`kind="glossary"`) and substitutes `{{RUN_ID}}` inside the instantiated
+template — so a fresh instantiation and a resumed one that reuses the
+same `RUN_ID` produce byte-identical tokens/paths throughout.
+(`${durable_root}/runs/workflows/<RUN_ID>/` is a SEPARATE directory —
+confirmed distinct from the above: `resume_setup.py`'s own source contains
+no mention of "workflows" anywhere, and `write_run_dir()` creates
+`runs/<RUN_ID>/` directly under `runs/`, never nested under a `workflows/`
+subdirectory. `runs/workflows/` is part of Step 0a's created skeleton;
+exactly what gets written under `runs/workflows/<RUN_ID>/` and by whom is
+NOT re-derived here — do not assume it without checking the current
+Step 0a/driver source.) The full path resume_setup.py's own run directory
+is logged in W8's status output.
 
 **Whether to resume at all is a separate decision from the `RUN_ID` value
 itself** — gated by the resume-integrity digest below, never by "a
@@ -511,18 +519,43 @@ ever calling `pipeline()`, it computes an `input_digest` and
 ```
 input_digest = sha256(canonical_json({
   kind: "mass" | "glossary",
-  args: <the full ordered args this invocation was given>,
+  args: mass: {}  // LT-409: PINNED — see below, never the invocation's own args
+      | glossary: <the full ordered args this invocation was given>,
   subst: {research_mode, verse_policy, source_lang, target_lang,
           max_fix_rounds, batch_agent_cap, effort,
           citation_content_types},   // resolved profile substitutions
                                      // (#197: effort added; #347: citation_content_types added)
   domain: mass: {seg: <cache_key.py's 15-field composite per seg>}
+                // LT-409: seg ids come from manifest.json's own segments[]
+                // (the FULL candidate set), never from a caller-supplied list
         | glossary: {glossary_rule, canon_hash},
   version: {plugin_bundle_hash: <runs/.plugin_bundle_hash>,
             orchestration_bundle_hash: <runs/.orchestration_bundle_hash>,
             schemas: <sha of the schemas/ dir>},
 }))
 ```
+
+**LT-409, `args` for `kind="mass"`:** pinned to the literal empty object
+`{}`, not the invocation's own CLI-scoping args (`select_segments.py`'s
+`--only-segs`/`--allow-retranslate-converged`/`--allow-empty`). Those
+flags govern Step 1's OWN gating, already enforced before this digest is
+ever computed — they do not change what any already-promoted per-segment
+artifact MEANS, so hashing them here would gate resume on a value that
+narrows every time the operator paces a batch with `--only-segs`, for the
+identical reason `domain`'s own seg-id source was fixed (next paragraph).
+`kind="glossary"` is unaffected — `args` keeps its pre-existing meaning
+there.
+
+**LT-409, `domain` for `kind="mass"`:** the seg-id set comes from
+`manifest.json`'s own `segments[]` array — the full candidate set, which
+does NOT shrink as segments converge — never from the Workflow's own
+emitted `SEGS` (`select_segments.py`'s eligible list, which EXCLUDES
+`reusable` segments and therefore shrinks by one entry every single
+convergence). Hashing the shrinking list forced a fresh, non-resuming
+`RUN_ID` on every convergence, discarding in-flight fix work each time —
+the domain now stays stable across exactly that case, while still
+changing, correctly, when the manifest itself changes or any segment's own
+cache_key does.
 
 **MATCH** the prior run's own recorded digest → resume with
 `resumeFromRunId` — every digest input is byte-identical, so every cached
@@ -545,10 +578,14 @@ per-segment cache key at all, so `subst` is the only place its own
 resume-integrity digest can see an effort change. `model` is deliberately
 **not** added to `subst` — the glossary pass has no model knob, so folding
 it in here would encode a false dependency. `resume_setup.py` (new script, `assets/scripts/`)
-implements this: given the run kind, `args`, resolved substitutions, and the
-per-seg cache keys / glossary candidates, it computes `input_digest`,
-create-or-compares `runs/<RUN_ID>/input.digest`, creates the run
-directory/directories, and (glossary only) atomically writes the manifest
+implements this: given the run kind, resolved substitutions, and (glossary
+only) candidates, it computes `input_digest` — deriving the mass-kind
+domain itself from `manifest.json` (never trusting a caller-supplied seg
+list, LT-409) and each segment's cache_key.py composite fresh — then
+create-or-compares it against every candidate in `resume_from_run_ids`'
+own `runs/<candidate>/input.digest`, in order, returning the first match.
+It creates the run directory/directories, and (glossary only) atomically
+writes the manifest
 files below — aborting (nonzero exit) before any dispatch on any failure.
 It emits the resolved `effectiveRunId` and `resume: true|false` as one JSON
 line. See `references/ledger-and-resumability.md` for the

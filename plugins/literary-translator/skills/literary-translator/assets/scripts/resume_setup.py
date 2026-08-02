@@ -53,7 +53,13 @@ path. Payload shape:
 
     {
       "kind": "mass" | "glossary",              # required
-      "args": <any JSON value>,                  # the full ordered args, hashed verbatim
+      "args": <any JSON value>,                  # required. For kind="mass" this
+                                                  # MUST be the literal empty object
+                                                  # {} -- see the dedicated `args`
+                                                  # paragraph below. For
+                                                  # kind="glossary" it is the full
+                                                  # ordered args this invocation was
+                                                  # given, hashed verbatim (unchanged).
       "subst": {                                 # required; every key required
         "research_mode": "...", "verse_policy": "...",
         "source_lang": "...", "target_lang": "...",
@@ -67,14 +73,121 @@ path. Payload shape:
       },
       "plugin_root": "<absolute path>" | "",     # #412; optional, defaults to "" --
                                                  # see the dedicated paragraph below
-      "resume_from_run_id": "<candidate RUN_ID>" | null,   # optional
-      "segs": ["seg01", "seg02", ...],           # required for kind="mass"
+      "resume_from_run_ids": ["<RUN_ID>", ...],  # NEW, optional -- see the dedicated
+                                                 # paragraph below. Most-recent-first.
+      "resume_from_run_id": "<candidate RUN_ID>" | null,   # DEPRECATED, optional --
+                                                 # kept for one release; see below.
+                                                 # Mutually exclusive with the plural
+                                                 # field above (both present -> error).
+      "segs": ["seg01", "seg02", ...],           # DEPRECATED for kind="mass", IGNORED
+                                                 # entirely -- see the dedicated
+                                                 # paragraph below. Accepted-but-unread
+                                                 # for one release only.
       "glossary_rule": <any JSON value>,         # required for kind="glossary"
       "batches": [                               # required for kind="glossary"
         {"index": 0, "names": ["Alice", "Bob"]},
         {"index": 1, "names": ["Carol"]}
       ]
     }
+
+`args` for kind="mass" -- PINNED, not left to prose (LT-409 post-review
+fix). Before this fix the field's meaning for the mass path was undefined
+in every doc that described it, and the natural reading (this invocation's
+own args) was the eligible-SEGS list the Workflow was launched with --
+which SHRINKS by one entry every time a segment converges, one level up
+from the identical `segs` defect below. Three readings (the shrinking
+SEGS list, `{}`, or the field omitted -- `payload.get("args")` yields
+`None` when omitted, and `null` canonical-JSON-hashes differently from
+`{}`) each hashed differently, so two sessions following the same prose
+could silently compute two different digests for the same batch. This
+script now REJECTS (raises `ResumeSetupError`) any kind="mass" payload
+whose `args` is not the literal empty object `{}` -- closing the class by
+making every other value a hard failure, rather than merely documenting a
+preferred one. `args` governs Step 1's OWN gating
+(`select_segments.py --only-segs`/`--allow-retranslate-converged`/
+`--allow-empty`, already run and already enforced before this script is
+ever invoked) -- those flags do not change what any already-promoted
+per-segment artifact MEANS, so they have no business gating whether this
+run's digest matches a prior one, and `{}` is the value that says so
+structurally. For kind="glossary", `args` keeps its pre-existing meaning
+(the full ordered args this invocation was given, e.g. the candidate
+list) and is hashed verbatim, unchanged by this fix.
+
+`segs` -- DEPRECATED for kind="mass" as of LT-409, and now IGNORED
+entirely: never read, validated, or otherwise inspected, even when
+present. Before this fix the mass-kind digest domain was built directly
+from this caller-supplied list, and two callers disagreed about what to
+pass it: the SHRINKING post-`select_segments.py` eligible list (shrinks by
+one entry every time a segment converges) versus the FULL, stable
+manifest candidate set -- so the two paths computed different digests for
+the same batch, and the shrinking-list path independently re-minted a
+fresh, non-resuming RUN_ID on every single convergence, discarding
+in-flight fix work each time. The domain is now derived HERE instead,
+directly from `manifest.json`'s own `segments[]` array (mirroring
+`select_segments.py`'s own `load_candidate_segments()` shape/validation --
+duplicated, not imported, per this project's "no shared lib between
+self-contained scripts" convention) -- see `_load_manifest_seg_ids()`.
+That set does not shrink as segments converge (a segment's own cache_key
+does not change just because its ledger status did), so the digest stays
+stable across exactly the case the whole resumability story exists to
+survive, while still changing, correctly, when the manifest itself
+changes (a real W2/W3 re-run) or any segment's cache_key does (a real
+profile/source/derivation change). `segs`, when present, is accepted
+purely so an already-deployed caller built against the pre-LT-409 contract
+does not fail outright for one release -- the NEXT release should stop
+sending it, and this script should stop documenting it as accepted. The
+"non-empty array of strings" structural validation this field used to
+carry has NOT vanished -- it now lives in `_load_manifest_seg_ids()`,
+gating the manifest's own `segments[]` instead (and is in fact stricter:
+it also validates each id against the same seg-id-safety allowlist
+`select_segments.py`/`codex_job.py` already enforce).
+
+`resume_from_run_ids` (plural, a JSON array of candidate RUN_IDs,
+most-recent-first) is the NEW preferred field, replacing singular
+`resume_from_run_id` (kept for one release, mutually exclusive with the
+plural field -- supplying both is a hard `ResumeSetupError`, not a
+silently-resolved ambiguity). This script computes `input_digest` EXACTLY
+ONCE per invocation regardless of how many candidates are offered --
+kind="mass"'s per-segment `cache_key.py` shell-outs are the expensive part
+of that computation -- and compares that ONE digest against every
+candidate's own recorded `runs/<candidate>/input.digest`, returning the
+FIRST one that MATCHES. A caller that previously had to invoke this
+script once PER candidate (paying the full per-segment `cache_key.py` cost
+EVERY time -- for a project with N segments and K offered candidates, that
+is N*K subprocess spawns) now pays the N-spawn cost exactly once no matter
+how many candidates it offers. `effectiveRunId` in the result (below)
+already names which candidate matched when `resume` is true -- no separate
+"which one matched" field is needed. Omitting both fields is a
+genuinely-first-ever-run signal, exactly as before.
+
+MIGRATION COST (measured, not assumed) -- both the `args` pin and the
+`segs`->manifest.json domain change above alter what
+`compute_input_digest()` hashes for kind="mass", so every pre-existing
+`runs/<RUN_ID>/input.digest` written before this fix is invalidated for
+resume purposes (the identical inputs, hashed under the OLD formula, will
+never again equal what this script now computes). This was NOT assumed
+zero-cost: `tome1` genuinely has none (`find <durable_root> -name
+input.digest` returns zero across six completed W5 batches -- the resume
+gate has never actually fired there), but `ssk-he-en`'s `vol2/run` carries
+SIX real run directories with recorded digests, five of them kind="mass"
+(`20260714T210207Z`, `20260801T081142Z`, `20260801T090001Z`,
+`20260801T124257Z`, `20260801T132418Z` -- the sixth, `20260801T001211Z`,
+has a `glossary/runs/<id>/` sibling and is kind="glossary", unaffected).
+Each of those five will fail to resume the next time that project's mass
+path is invoked: a fresh RUN_ID mints instead, and only whatever segment
+was genuinely IN-FLIGHT (not yet `converged`) at that moment gets
+re-dispatched under it -- an already-`converged` segment is governed by
+`select_segments.py`'s own cache-key/draft-sha1 classification, which
+never depended on RUN_ID at all, so it is unaffected either way. No
+compatibility shim was built for this: the pre-existing digest is an
+opaque hash with no recorded breakdown of which `args`/`segs` a historical
+caller actually sent, so there is no way to reconstruct a byte-identical
+old-formula comparison to fall back to -- "also try matching the old
+formula" is not implementable without fabricating inputs this script never
+recorded in the first place. The bounded, one-time cost measured above was
+judged cheaper than carrying a compatibility path in this function
+permanently; the CHANGELOG is where this migration is recorded for an
+operator, not a shim here.
 
 `subst` carries the RESOLVED profile-derived substitution values the
 orchestrating session already computed to render the Workflow template --
@@ -121,10 +234,17 @@ ONLY where the cache_key.py SIBLING SCRIPT is resolved from, kind="mass"
 only) -- the two seams are never collapsed, even though an orchestrating
 session will typically pass the SAME underlying value to both.
 
-On success, prints one JSON line:
+On success, prints one JSON line (LT-409: this shape is UNCHANGED by the
+`resume_from_run_ids`/`args`/`segs` contract fixes above -- a caller that
+already parses this result needs no changes on the read side, only on how
+it BUILDS the request):
 
     {"success": true, "effectiveRunId": "...", "resume": true|false,
      "run_dir": "...", "input_digest": "..."}
+
+`effectiveRunId` is the MATCHED candidate's own RUN_ID when `resume` is
+true (this doubles as the answer to "which one of `resume_from_run_ids`
+matched"), or a freshly-minted RUN_ID when it is false.
 
 On failure: {"success": false, "error": "..."}. Exit code 0/1 either way
 -- callers should read stdout, not rely on the exit code alone.
@@ -260,6 +380,33 @@ SUBST_FIELDS = frozenset({
 RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 RUN_ID_RETRY_LIMIT = 5
+
+# LT-409: the canonical segment-id allowlist, kept identical to
+# select_segments.py's/codex_job.py's/segment_dispatch_driver.py's own
+# copies per this project's "no shared lib between self-contained scripts"
+# convention (duplicated, not imported). A seg id is either an ordinary
+# body id (e.g. "seg01") or a translate-decision FRONTBACK:{id} unit (e.g.
+# "FRONTBACK:fm01"). re.fullmatch (NOT re.match + "$") -- in Python "$"
+# also matches just before a trailing newline, so re.match(r"...$",
+# "seg01\n") would WRONGLY pass. Used by _load_manifest_seg_ids() below --
+# the manifest is untrusted input, exactly like select_segments.py's own
+# manifest.json read.
+_SEG_ID_RE = re.compile(r"(?:FRONTBACK:)?[A-Za-z0-9_]+")
+
+
+def validate_seg(seg):
+    """Return an error string if `seg` is not a path/shell-safe segment id,
+    else None. Allows ONLY [A-Za-z0-9_] with an optional literal
+    'FRONTBACK:' prefix -- rejecting empties, path separators, '..', and
+    every shell metacharacter."""
+    if not isinstance(seg, str) or not seg:
+        return "segment id must be a non-empty string."
+    if not _SEG_ID_RE.fullmatch(seg):
+        return (
+            "segment id must match (FRONTBACK:)?[A-Za-z0-9_]+ (no path "
+            f"separators, '..', or shell metacharacters); got {seg!r}."
+        )
+    return None
 
 
 class ResumeSetupError(Exception):
@@ -398,6 +545,49 @@ def _canon_hash(durable_root: Path = DURABLE_ROOT) -> str:
     return hashlib.sha256(canon_path.read_bytes()).hexdigest()
 
 
+def _load_manifest_seg_ids(durable_root: Path) -> list:
+    """LT-409: the FULL candidate segment-id list from manifest.json's own
+    `segments[]` array -- the mass-kind digest DOMAIN source of truth,
+    replacing the caller-supplied (and caller-disputed) `segs` payload
+    field. Mirrors select_segments.py's own load_candidate_segments()
+    shape/validation (duplicated, not imported, per this project's "no
+    shared lib between self-contained scripts" convention) -- manifest.json
+    is untrusted input here exactly as it is there. Does NOT shrink as
+    segments converge (unlike select_segments.py's own emitted SEGS, which
+    excludes already-converged `reusable` segments) -- see the module
+    docstring's `segs` paragraph for why that distinction is the whole
+    point of this function existing."""
+    manifest_path = durable_root / "manifest.json"
+    if not manifest_path.is_file():
+        raise ResumeSetupError(f"manifest.json not found at {manifest_path}")
+    try:
+        raw = manifest_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ResumeSetupError(f"could not read manifest.json at {manifest_path}: {exc}")
+    try:
+        manifest = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ResumeSetupError(f"manifest.json at {manifest_path} is not valid JSON: {exc}")
+    segments = manifest.get("segments") if isinstance(manifest, dict) else None
+    if not isinstance(segments, list) or not segments:
+        raise ResumeSetupError(f"manifest.json at {manifest_path} has no non-empty 'segments' array")
+    ids = []
+    for item in segments:
+        # manifest.schema.json's segments[] entries are REQUIRED to be
+        # objects with (at least) their own `seg` field -- a bare string is
+        # not a valid entry under that schema and must be rejected fatally,
+        # never silently coerced into a candidate id (same rule
+        # select_segments.py's own load_candidate_segments() enforces).
+        if not (isinstance(item, dict) and isinstance(item.get("seg"), str)):
+            raise ResumeSetupError(f"manifest.json: malformed segments[] entry: {item!r}")
+        seg = item["seg"]
+        problem = validate_seg(seg)
+        if problem is not None:
+            raise ResumeSetupError(f"manifest.json: unsafe segment id: {problem}")
+        ids.append(seg)
+    return ids
+
+
 # ---------------------------------------------------------------------------
 # input_digest computation
 # ---------------------------------------------------------------------------
@@ -430,9 +620,23 @@ def compute_input_digest(
         )
 
     if kind == "mass":
-        segs = payload.get("segs")
-        if not isinstance(segs, list) or not segs or not all(isinstance(s, str) for s in segs):
-            raise ResumeSetupError("payload 'segs' must be a non-empty array of strings for kind='mass'")
+        # LT-409: `args` is PINNED to the literal empty object for kind="mass"
+        # (see the module docstring's `args` paragraph for the full
+        # reasoning) -- enforced HERE, before the expensive per-segment
+        # cache_key.py shell-outs below, so a payload built against the old,
+        # ambiguous contract fails fast and loud rather than silently
+        # hashing whatever it happened to pass.
+        mass_args = payload.get("args")
+        if mass_args != {}:
+            raise ResumeSetupError(
+                "payload 'args' must be the literal empty object {} for kind='mass' "
+                f"(it governs Step 1's own gating, not resume-integrity); got {mass_args!r}"
+            )
+        # `segs` (deprecated, LT-409) is deliberately NEVER read here -- see
+        # the module docstring's own `segs` paragraph. The domain now comes
+        # from manifest.json's full candidate set, which does not shrink as
+        # segments converge.
+        segs = _load_manifest_seg_ids(dirs["durable_root"])
         domain = {
             seg: _cache_key_for_seg(
                 seg,
@@ -476,31 +680,71 @@ def compute_input_digest(
 # ---------------------------------------------------------------------------
 
 
+def _resume_from_candidates(payload: dict) -> list:
+    """LT-409: merges payload['resume_from_run_ids'] (new, plural) and
+    payload['resume_from_run_id'] (deprecated, singular, kept for one
+    release) into ONE ordered candidate list -- see the module docstring's
+    own `resume_from_run_ids` paragraph. Supplying BOTH fields is a hard
+    ResumeSetupError, never a silently-resolved ambiguity: there is exactly
+    one new consumer of the plural field, so there is no legacy payload
+    that could ever legitimately carry both. Every candidate is validated
+    against the same RUN_ID allowlist validate_run_id() already enforces,
+    BEFORE it is ever used to build a path. Pure, no I/O -- called before
+    the expensive compute_input_digest() so a malformed candidate list
+    fails fast."""
+    plural = payload.get("resume_from_run_ids")
+    singular = payload.get("resume_from_run_id")
+    if plural is not None and singular is not None:
+        raise ResumeSetupError(
+            "payload must not supply both 'resume_from_run_ids' and "
+            "'resume_from_run_id' -- migrate to the plural field alone"
+        )
+    if plural is not None:
+        if not isinstance(plural, list):
+            raise ResumeSetupError("payload 'resume_from_run_ids' must be an array when present")
+        candidates = plural
+    elif singular is not None:
+        candidates = [singular]
+    else:
+        candidates = []
+
+    validated = []
+    for candidate in candidates:
+        err = validate_run_id(candidate)
+        if err:
+            raise ResumeSetupError(f"payload 'resume_from_run_ids' entry is invalid: {err}")
+        validated.append(candidate)
+    return validated
+
+
 def resolve_run(
     payload: dict, dirs: "dict | None" = None, durable_root_str=None, plugin_root_str=None
 ) -> "tuple[str, bool, str]":
-    """Returns (run_id, resume, input_digest). MATCH against a caller-
-    supplied resume_from_run_id's own recorded digest -> resume with that
-    same id. MISMATCH, absent candidate digest, or no candidate at all ->
-    a fresh RUN_ID, never resumed -- and the candidate's own input.digest
-    (if any) is NEVER overwritten. `dirs` defaults to None, resolved fresh
-    at call time (see write_run_dir()'s own docstring for why)."""
+    """Returns (run_id, resume, input_digest). MATCH against any candidate
+    in payload['resume_from_run_ids'] (or the deprecated singular
+    'resume_from_run_id' -- see _resume_from_candidates()) -> resume with
+    that SAME candidate's own id, trying candidates in the given order and
+    returning the FIRST one whose own recorded runs/<id>/input.digest
+    matches. MISMATCH on every candidate, an absent candidate digest, or no
+    candidate at all -> a fresh RUN_ID, never resumed -- and no candidate's
+    own input.digest (if any) is EVER overwritten. `input_digest` is
+    computed EXACTLY ONCE regardless of how many candidates are offered
+    (LT-409 -- see the module docstring's `resume_from_run_ids` paragraph
+    for the cost this closes). `dirs` defaults to None, resolved fresh at
+    call time (see write_run_dir()'s own docstring for why)."""
     if dirs is None:
         dirs = resolve_dirs(None)
+    candidates = _resume_from_candidates(payload)
     input_digest = compute_input_digest(payload, dirs, durable_root_str, plugin_root_str)
-    resume_from = payload.get("resume_from_run_id")
 
-    if resume_from is not None:
-        err = validate_run_id(resume_from)
-        if err:
-            raise ResumeSetupError(f"payload 'resume_from_run_id' is invalid: {err}")
+    for resume_from in candidates:
         candidate_digest_path = dirs["runs_dir"] / resume_from / "input.digest"
         if candidate_digest_path.is_file():
             prior_digest = candidate_digest_path.read_text(encoding="utf-8").strip()
             if prior_digest == input_digest:
                 return resume_from, True, input_digest
-            # MISMATCH -- never overwrite the old run's digest file; fall
-            # through to a fresh run below.
+            # MISMATCH -- never overwrite the old run's digest file; try
+            # the next candidate.
 
     for _ in range(RUN_ID_RETRY_LIMIT):
         candidate = fresh_run_id()

@@ -1384,13 +1384,24 @@ is called. It:
 
 **1.2.0: the deterministic pre-workflow step, after `SEGS` and before
 `pipeline()`.** With `SEGS` finalized, invoke `resume_setup.py` (kind
-`mass`) before the Workflow tool ever launches: it computes each segment in
-`SEGS`'s current `cache_key.py` composite key, resolves `effectiveRunId` via
-the resume-integrity digest gate (`input_digest` MATCH against a prior
-`runs/<RUN_ID>/input.digest` → resume with `resumeFromRunId`; MISMATCH or
-absent → fresh `RUN_ID`, no `resumeFromRunId`), and creates
-`runs/workflows/<RUN_ID>/` — aborting before any dispatch on failure. Only
-then is `mass-translate-wf.template.js` instantiated (fresh from the
+`mass`) before the Workflow tool ever launches: it derives the resume-
+integrity digest's own segment domain directly from `manifest.json`'s full
+candidate set (LT-409 — NEVER from `SEGS`, which shrinks by one entry every
+time a segment converges, and would otherwise force a fresh, non-resuming
+`RUN_ID` on every single convergence), computing each of THOSE segments'
+current `cache_key.py` composite key. It resolves `effectiveRunId` via the
+resume-integrity digest gate (`input_digest` MATCH against any candidate in
+`resume_from_run_ids`' own `runs/<candidate>/input.digest` → resume with
+that candidate; MISMATCH on every candidate, or none offered → fresh
+`RUN_ID`), and creates `runs/<RUN_ID>/` — aborting before any dispatch on
+failure. The payload's `args` field is PINNED to the literal empty object
+`{}` for `kind="mass"` (`resume_setup.py` rejects any other value) — it is
+NOT `SEGS`, and NOT the driver's own `--only-segs`/`--allow-retranslate-
+converged`/`--allow-empty` scoping flags, since those govern Step 1's own
+gating and must not also gate resume. `segs` is likewise no longer read by
+`resume_setup.py` at all (accepted-but-ignored for one release only). See
+`resume_setup.py`'s own module docstring for the full payload contract.
+Only then is `mass-translate-wf.template.js` instantiated (fresh from the
 plugin's current copy every run — never reuse a stale generated copy),
 substituting the resolved `{{RUN_ID}}` alongside every other token, and
 `pipeline()` launched. **#197:** the same instantiation substitutes

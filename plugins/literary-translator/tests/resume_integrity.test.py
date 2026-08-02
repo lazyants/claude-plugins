@@ -328,7 +328,8 @@ if __name__ == "__main__":
 
 
 def make_resume_setup_root(
-    tmp_path, plugin_bundle_hash="pbh-v1", orchestration_bundle_hash="obh-v1", name="durable_root"
+    tmp_path, plugin_bundle_hash="pbh-v1", orchestration_bundle_hash="obh-v1", name="durable_root",
+    mass_segs=("seg01", "seg02"),
 ):
     root = tmp_path / name
     scripts_dir = root / "scripts"
@@ -348,6 +349,16 @@ def make_resume_setup_root(
     runs_dir.mkdir(parents=True)
     (runs_dir / ".plugin_bundle_hash").write_text(plugin_bundle_hash, encoding="utf-8")
     (runs_dir / ".orchestration_bundle_hash").write_text(orchestration_bundle_hash, encoding="utf-8")
+
+    # LT-409: the mass-kind digest domain now comes from manifest.json's own
+    # segments[] (resume_setup.py's _load_manifest_seg_ids()), never from a
+    # caller-supplied 'segs' payload field -- every mass-kind test in this
+    # file shares the SAME seg01/seg02 pair mass_base_cache_keys() also
+    # uses, matched here by default. `mass_segs=()` (empty) is a genuine
+    # opt-out for a test that wants no manifest.json at all (e.g. the
+    # orphan-copy negative control, which builds its own root by hand).
+    if mass_segs:
+        write_json(root / "manifest.json", {"segments": [{"seg": s} for s in mass_segs]})
     return root
 
 
@@ -403,9 +414,15 @@ def assert_fresh_no_resume(proc, parsed, prior_run_id):
 
 
 def mass_base_payload():
+    """LT-409: `args` is now PINNED to {} for kind="mass" -- resume_setup.py
+    hard-rejects anything else (see its own module docstring's `args`
+    paragraph). `segs` is kept here, unread, purely to prove the
+    DEPRECATED-but-still-accepted field genuinely does nothing -- the
+    digest domain comes from manifest.json instead (written by
+    make_resume_setup_root(), matching this exact seg01/seg02 pair)."""
     return {
         "kind": "mass",
-        "args": {"segments": ["seg01", "seg02"]},
+        "args": {},
         "subst": dict(BASE_SUBST),
         "segs": ["seg01", "seg02"],
     }
@@ -1367,3 +1384,294 @@ def test_payload_plugin_root_absent_and_empty_produce_the_same_digest(tmp_path):
     assert_setup_success(proc_a, parsed_a)
     assert_setup_success(proc_b, parsed_b)
     assert parsed_a["input_digest"] == parsed_b["input_digest"]
+
+
+# ===========================================================================
+# LT-409: the manifest-derived mass digest domain, `args={}` pinning, and
+# the plural `resume_from_run_ids` field. See resume_setup.py's own module
+# docstring for the full contract this section locks down.
+# ===========================================================================
+
+
+def test_mass_args_must_be_empty_object(tmp_path):
+    """`args` is PINNED to {} for kind="mass" -- resume_setup.py rejects
+    anything else outright, rather than silently hashing an ambiguous
+    value (the SEGS list -- what the field used to carry before this fix,
+    and the shape #409's own driver docstring documents as the identical
+    shrinking-domain defect one level up from `segs` itself)."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["args"] = {"segments": ["seg01", "seg02"]}
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+    assert "args" in (parsed.get("error") or ""), (
+        f"error message should name the offending field; got: {parsed}"
+    )
+
+
+@pytest.mark.parametrize("bad_args", [None, [], "seg01", 0, False])
+def test_mass_args_rejects_every_non_empty_dict_shape(tmp_path, bad_args):
+    """Every one of the three previously-plausible readings (omitted ->
+    None, the eligible list, or any other JSON value) is now a hard
+    failure -- only the literal {} is accepted."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    if bad_args is None:
+        del payload["args"]
+    else:
+        payload["args"] = bad_args
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+
+
+def test_mass_args_empty_object_accepted(tmp_path):
+    """Positive control for the two tests above: the ONE legal value, {},
+    is accepted and setup succeeds."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    assert payload["args"] == {}
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert_setup_success(proc, parsed)
+
+
+def test_mass_segs_field_is_ignored_entirely(tmp_path):
+    """The deprecated 'segs' field must not affect input_digest AT ALL --
+    proven by setting it to something the PRE-LT-409 code would have
+    rejected outright (an empty list) in one payload, and confirming setup
+    still succeeds with the exact SAME digest as an ordinary payload whose
+    'segs' matches the manifest."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload_a = mass_base_payload()
+    proc_a, parsed_a = run_resume_setup(root, payload_a)
+    assert_setup_success(proc_a, parsed_a)
+
+    root_b = make_resume_setup_root(tmp_path, name="durable_root_b")
+    write_fixture_cache_keys(root_b, mass_base_cache_keys())
+    payload_b = mass_base_payload()
+    payload_b["segs"] = []  # would have been rejected outright pre-LT-409
+    proc_b, parsed_b = run_resume_setup(root_b, payload_b)
+    assert_setup_success(proc_b, parsed_b)
+
+    assert parsed_a["input_digest"] == parsed_b["input_digest"], (
+        "the deprecated 'segs' field must never affect input_digest"
+    )
+
+
+def test_mass_segs_field_omitted_still_works(tmp_path):
+    """'segs' is optional now -- omitting it entirely behaves identically
+    to supplying it (both backward- and forward-compatible)."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    del payload["segs"]
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert_setup_success(proc, parsed)
+
+
+def test_mass_domain_now_comes_from_manifest_not_segs(tmp_path):
+    """The core LT-409 fix, proven two ways in one test: (a) 'segs' naming
+    a segment absent from cache_key.py's own fixture data does not matter
+    at all -- setup still succeeds against the REAL manifest set; (b)
+    editing manifest.json itself (growing it) DOES change the digest, even
+    with 'segs' held byte-identical throughout."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(
+        root, {**mass_base_cache_keys(), "seg03": make_cache_key_composite("s3")}
+    )
+    payload = mass_base_payload()
+    payload["segs"] = ["this-segment-does-not-exist-in-cache-keys"]  # ignored -> harmless
+    proc0, parsed0 = run_resume_setup(root, payload)
+    assert_setup_success(proc0, parsed0)
+    run_id = parsed0["effectiveRunId"]
+
+    # Resume against the identical manifest -> matches.
+    proc1, parsed1 = run_resume_setup(root, with_resume_from(payload, run_id))
+    assert_resumes(proc1, parsed1, run_id)
+
+    # Grow the manifest (a real W2/W3-shaped change) -> must force fresh,
+    # even though the payload (including the bogus 'segs') is unchanged.
+    write_json(
+        root / "manifest.json",
+        {"segments": [{"seg": "seg01"}, {"seg": "seg02"}, {"seg": "seg03"}]},
+    )
+    proc2, parsed2 = run_resume_setup(root, with_resume_from(payload, run_id))
+    assert_fresh_no_resume(proc2, parsed2, run_id)
+
+
+def test_mass_domain_stable_when_only_segs_shrinks_not_manifest(tmp_path):
+    """The #392 regression this whole fix targets, reproduced directly:
+    'segs' shrinking (simulating select_segments.py's ELIGIBLE list losing
+    a segment the instant it converges) must NOT force a fresh run when
+    manifest.json itself is unchanged -- this is the exact failure mode
+    that used to discard in-flight fix work on every single convergence."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    proc0, parsed0 = run_resume_setup(root, payload)
+    assert_setup_success(proc0, parsed0)
+    run_id = parsed0["effectiveRunId"]
+
+    shrunk = copy.deepcopy(payload)
+    shrunk["segs"] = ["seg01"]  # simulates seg02 having just converged
+    proc1, parsed1 = run_resume_setup(root, with_resume_from(shrunk, run_id))
+    assert_resumes(proc1, parsed1, run_id)
+
+
+def test_mass_manifest_missing_fails_loudly(tmp_path):
+    root = make_resume_setup_root(tmp_path, mass_segs=())  # no manifest.json written
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+
+    proc, parsed = run_resume_setup(root, mass_base_payload())
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+    assert "manifest.json" in (parsed.get("error") or "")
+
+
+def test_mass_manifest_malformed_entry_fails_loudly(tmp_path):
+    """manifest.json's segments[] entries must be objects with their own
+    'seg' string field -- a bare string is rejected, never silently
+    coerced (matching select_segments.py's own load_candidate_segments())."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    write_json(root / "manifest.json", {"segments": ["seg01"]})
+
+    proc, parsed = run_resume_setup(root, mass_base_payload())
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+
+
+def test_resume_from_run_ids_plural_tries_each_in_order_until_match(tmp_path):
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    proc0, parsed0 = run_resume_setup(root, payload)
+    assert_setup_success(proc0, parsed0)
+    run_id = parsed0["effectiveRunId"]
+
+    p = copy.deepcopy(payload)
+    p["resume_from_run_ids"] = ["nonexistent-1", "nonexistent-2", run_id]
+    proc1, parsed1 = run_resume_setup(root, p)
+    assert_resumes(proc1, parsed1, run_id)
+
+
+def test_resume_from_run_ids_no_candidate_matches_mints_fresh(tmp_path):
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["resume_from_run_ids"] = ["nope-1", "nope-2"]
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert_setup_success(proc, parsed)
+    assert parsed.get("resume") is False
+
+
+def test_resume_from_run_ids_empty_list_behaves_like_first_run(tmp_path):
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["resume_from_run_ids"] = []
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert_setup_success(proc, parsed)
+    assert parsed.get("resume") is False
+
+
+def test_resume_from_run_id_and_run_ids_together_rejected(tmp_path):
+    """Supplying BOTH the deprecated singular and the new plural field is a
+    hard error, never a silently-resolved ambiguity."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["resume_from_run_id"] = "some-run-id"
+    payload["resume_from_run_ids"] = ["some-run-id"]
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+
+
+def test_resume_from_run_ids_invalid_entry_rejected(tmp_path):
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["resume_from_run_ids"] = ["../escape"]
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+
+
+def test_resume_from_run_id_singular_still_works_alone(tmp_path):
+    """The deprecated singular field, used alone (no plural field at all),
+    must still work exactly as before -- backward compatibility for one
+    release."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    proc0, parsed0 = run_resume_setup(root, payload)
+    assert_setup_success(proc0, parsed0)
+    run_id = parsed0["effectiveRunId"]
+
+    proc1, parsed1 = run_resume_setup(root, with_resume_from(payload, run_id))
+    assert_resumes(proc1, parsed1, run_id)
+
+
+def test_resume_from_run_ids_computes_domain_exactly_once_regardless_of_candidate_count(tmp_path):
+    """LT-409: the entire point of the plural field. compute_input_digest()
+    -- and therefore each manifest segment's cache_key.py subprocess spawn
+    -- must run EXACTLY ONCE per resume_setup.py invocation, no matter how
+    many candidates are offered in 'resume_from_run_ids'. Proven by
+    counting REAL cache_key.py spawns via a fixture stub that appends one
+    line per invocation: 2 manifest segments x 5 offered (non-matching)
+    candidates would be 10 spawns under the old per-candidate-process
+    design; this asserts exactly 2."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    counting_cache_key = (
+        "#!/usr/bin/env python3\n"
+        "import argparse, json, sys\n"
+        "from pathlib import Path\n"
+        "durable_root = Path(__file__).resolve().parent.parent\n"
+        "with open(durable_root / 'spawn_count.log', 'a', encoding='utf-8') as fh:\n"
+        "    fh.write('x\\n')\n"
+        "p = argparse.ArgumentParser()\n"
+        "p.add_argument('--seg')\n"
+        "p.add_argument('--durable-root', default=None)\n"
+        "a, _ = p.parse_known_args()\n"
+        "data = json.loads((durable_root / 'test_fixture_cache_keys.json').read_text(encoding='utf-8'))\n"
+        "print(json.dumps(data[a.seg]))\n"
+    )
+    (root / "scripts" / "cache_key.py").write_text(counting_cache_key, encoding="utf-8")
+
+    payload = mass_base_payload()
+    payload["resume_from_run_ids"] = ["nope-1", "nope-2", "nope-3", "nope-4", "nope-5"]
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert_setup_success(proc, parsed)
+    spawn_log = root / "spawn_count.log"
+    lines = spawn_log.read_text(encoding="utf-8").splitlines() if spawn_log.is_file() else []
+    assert len(lines) == 2, (
+        f"expected exactly 2 cache_key.py spawns (one per manifest segment, "
+        f"regardless of 5 offered non-matching candidates), got {len(lines)}"
+    )
