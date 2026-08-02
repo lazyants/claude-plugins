@@ -4938,6 +4938,41 @@ test('the open -> close seam: a redirect DEEPER along the absent tail, still ins
   });
 });
 
+// [round 44] A Proxy can forge every reflective answer `isGenuineSkippedState` asks for — `ownKeys`,
+// `getOwnPropertyDescriptor` and `get` are all traps — so the shape witness alone cannot tell a
+// forged skipped state from a real one. Measured, so what actually holds is pinned rather than
+// assumed: the TOKEN witness catches it, because a reservation on disk is not something the caller's
+// object can answer for. The residual — a Proxy AND a relocated provenance root, where the token
+// lookup then reads the wrong place — is recorded on the declaration as a boundary rather than
+// defended, for the reason set out there.
+test('the skip branch: a Proxy-forged skipped state over an active run is still refused by the token', () => {
+  withTempDir((dir) => {
+    const profile = profileFor(dir);
+    nodeFs.mkdirSync(join(profile.capture.output_dir, 'items'), { recursive: true });
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+
+    // Answers every reflective question exactly as `{skipped: true}` would, over a real active run.
+    const forged = new Proxy(opened.runState, {
+      ownKeys: () => ['skipped'],
+      getOwnPropertyDescriptor: () => ({ value: true, enumerable: true, configurable: true }),
+      get: (t, p, r) => (p === 'skipped' ? true : Reflect.get(t, p, r)),
+      has: (t, p) => (p === 'skipped' ? true : Reflect.has(t, p)),
+    });
+    assert.deepEqual(Object.keys(forged), ['skipped'], 'the forgery must actually be convincing');
+    assert.equal(forged.skipped, true);
+
+    const closed = CR.closeCaptureRun(profile, forged, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false,
+      `a forged skipped shape must not close an open run: ${JSON.stringify(closed)}`);
+    assert.match(closed.halts[0].message, /a pending token is present/,
+      'and the TOKEN must be what refuses — the shape witness is forgeable by construction here');
+    assert.equal(nodeFs.existsSync(join(profile.publish.chapters_dir, '.provenance', 'run', 'pending.json')), true,
+      'the reservation stays for recoverProvenanceState, which reports `open`');
+  });
+});
+
 // [round 42] The anchor must be recorded in the SAME representation everything else uses. The climb
 // walked the raw configured path while `canonicalizeForComparison` and `chapterAssetDir` normalize
 // `..` lexically first, so the two disagreed about which directory the anchor was: the kernel reads

@@ -229,6 +229,27 @@ export function assertProvenanceOwnership(profileLike: ProfileLike, deps?: Parti
 // stayed correct — W5, driven off the returned `run_id`, then refused an intact run. Pinned at runtime by
 // the "RunState union" tests in capture-record.test.mjs, since nothing in this repository compiles
 // TypeScript and a `.d.mts`-only change is otherwise invisible to the whole suite.
+// [round 44] The BOUNDARY of what `closeCaptureRun` authenticates, stated once here because it is a
+// property of this type rather than of any one guard. Everything the close RECORDS is authenticated:
+// the opening payload against the pending token's digest, the run id against that token, and the
+// output root against what the open observed — a caller cannot make this module commit a record
+// asserting something it did not observe, which is the whole point of the hardening in rounds 37-43.
+// What is NOT authenticated is a caller's claim that there is nothing to record. A `Proxy` traps
+// `ownKeys`, `getOwnPropertyDescriptor` and `get`, so it can answer every reflective question
+// exactly as `{skipped: true}` would while wrapping a genuinely active run; no by-value shape test
+// can tell the two apart, because the caller supplies both of this function's inputs. The pending
+// token catches the ordinary case and there is a regression test for it — a reservation on disk is
+// not something the caller's object answers for — but a caller that ALSO relocates the profile's
+// provenance root sends that lookup somewhere else, and the close then returns `{skipped: true}`
+// having recorded nothing.
+//
+// That residual is documented rather than defended, deliberately. It produces no false record: the
+// outcome is exactly what calling nothing at all produces — no record written, the reservation left
+// on disk, the next `openCaptureRun` halting on `run_already_open`, and `recoverProvenanceState`
+// reporting `open` with `abortCaptureRun` as the repair (all measured). Closing it needs an
+// unforgeable in-process brand, which would make this type no longer plain data and would refuse a
+// legitimate caller that round-trips a skipped state through JSON — trading a no-op a caller can
+// already obtain by not calling the function for a false refusal of one that is behaving correctly.
 export type RunState =
   | { skipped: true }
   | {
