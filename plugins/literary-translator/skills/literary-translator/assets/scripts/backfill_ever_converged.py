@@ -244,17 +244,50 @@ def ever_converged_path(seg: str, segments_dir: Path) -> Path:
 
 
 def mark_ever_converged(seg: str, segments_dir: Path) -> str:
-    """Byte-identical duplicate of ledger_update.py's own
-    `mark_ever_converged()`: same filename, same content (`b"converged\\n"`),
-    same mode (`0o644`), same idempotent `O_CREAT | O_EXCL | O_WRONLY`
-    create-only semantics -- NEVER deletes or overwrites an existing
-    sentinel.
+    """Duplicate of ledger_update.py's own `mark_ever_converged()` -- same
+    filename, same content (`b"converged\\n"`), same mode (`0o644`), same
+    idempotent `O_CREAT | O_EXCL | O_WRONLY` create-only semantics (never
+    deletes or overwrites an existing sentinel), and, post-review
+    correction, the SAME property that all three OS calls this function
+    makes -- open, write, close -- get a clean, non-raising outcome, never
+    an uncaught OSError escaping past this function's own contract.
 
-    Unlike the original (which is non-fatal-by-design and merely warns on
-    stderr), this returns a string outcome so the caller can build an
-    accurate report: "created" (this call raised it), "already_present" (a
-    sentinel already existed -- a no-op, not an error), or an error message
-    string (the create failed for some other OSError).
+    NO LONGER byte-identical to the sibling, and this docstring says so
+    explicitly rather than leaving the old claim to go stale silently a
+    second time: it was true when written, and became false the moment
+    ledger_update.py's own copy was fixed first, with nothing checking the
+    two had drifted apart -- the review bot caught it by injecting ENOSPC
+    into THIS copy and watching it escape uncaught, the identical shape
+    already fixed in the sibling an hour earlier. The two functions'
+    CONTRACTS differ on purpose, not by accident:
+      - ledger_update.py's copy is non-fatal-by-design: it returns a plain
+        `bool` and prints its own explanation to stderr, because its
+        caller (enrich_converged_fields(), deep inside one ledger write)
+        has no report-building machinery to hand a string outcome to.
+      - THIS copy returns a STRING outcome instead -- "created" (this call
+        raised the sentinel), "already_present" (one already existed, a
+        no-op, not an error), or an `"error: ..."` string (open, write, or
+        close failed) -- because ITS caller (run(), below) builds a
+        per-segment report from exactly these three shapes and prints
+        nothing of its own on this path: a bare `False` would give that
+        report nothing to show the operator, and an uncaught OSError would
+        crash the whole backfill run over one segment's sentinel.
+
+    A write failure still attempts a best-effort close() of the now-broken
+    fd before returning its own "error: ..." string, so a failed write
+    never also leaks a file descriptor -- but a SECONDARY close error
+    during that cleanup is swallowed rather than reported, since the write
+    error is the one actually worth surfacing. A close() that fails on its
+    own (write succeeded; some filesystems, notably NFS, defer reporting a
+    write error until close()) gets the identical "error: ..." treatment.
+
+    No shared message-building helper, unlike the sibling's own fix:
+    ledger_update.py's stderr text is a multi-sentence explanation
+    genuinely at risk of drifting if hand-duplicated three times, which is
+    exactly why it factored one out. This copy's outcome is the single
+    f-string `f"error: {exc}"`, already identical at each of its three call
+    sites below -- nothing for a helper to centralize that repeating it
+    three times does not already give for free.
     """
     path = ever_converged_path(seg, segments_dir)
     try:
@@ -263,12 +296,23 @@ def mark_ever_converged(seg: str, segments_dir: Path) -> str:
         return "already_present"
     except OSError as exc:
         return f"error: {exc}"
+
+    # Content is deliberately fixed, with no timestamp -- see
+    # ledger_update.py's own mark_ever_converged() docstring for why.
     try:
-        # Content is deliberately fixed, with no timestamp -- see
-        # ledger_update.py's own mark_ever_converged() docstring for why.
         os.write(fd, b"converged\n")
-    finally:
+    except OSError as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass  # best-effort cleanup; already reporting the write failure
+        return f"error: {exc}"
+
+    try:
         os.close(fd)
+    except OSError as exc:
+        return f"error: {exc}"
+
     return "created"
 
 

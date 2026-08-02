@@ -711,6 +711,101 @@ def test_sentinel_write_is_byte_identical_to_ledger_update_writer(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 6b. The OSError-escape defect the review bot found: os.write()/os.close()
+# had no `except OSError` at all, so a write or close failure propagated as
+# an uncaught exception instead of this function's documented "created" /
+# "already_present" / "error: ..." string outcome. Adapted from
+# ledger_update.py's own sibling fix (commit 5416d60) for THIS function's
+# different contract -- a returned string, not a bool plus a stderr print --
+# so these assert on the return value alone, not on captured stderr text.
+# ---------------------------------------------------------------------------
+
+def test_write_failure_after_sentinel_create_is_reported_as_a_clean_error_string(tmp_path):
+    """mark_ever_converged()'s O_CREAT|O_EXCL open() publishes the sentinel's
+    NAME in segments/ before the single os.write() that fills it in ever
+    runs. Pre-fix, an OSError from that write was OUTSIDE the try/except
+    producing this function's documented string-outcome contract -- it
+    propagated as an uncaught exception instead, on exactly the failure that
+    contract exists to cover. The caller (run(), under --apply) has no
+    handling for an exception here; only for the three documented outcomes.
+
+    Genuinely only reachable in-process, matching ledger_update.test.py's
+    own reasoning for its sibling test: there is no portable, reliable way
+    to make a real os.write() to a freshly os.open()'d fd fail on a normal
+    filesystem without root/fuse/quota machinery, so a direct in-process
+    call plus a narrow os.write() patch is the faithful way to reach this
+    seam."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_write_failure")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segWriteFail"
+
+    real_write = backfill.os.write
+
+    def failing_write(fd, data):
+        raise OSError(28, "No space left on device")  # ENOSPC
+
+    backfill.os.write = failing_write
+    try:
+        outcome = backfill.mark_ever_converged(seg, segments_dir)
+    finally:
+        backfill.os.write = real_write
+
+    assert outcome not in ("created", "already_present"), (
+        "a write-time OSError must not be reported as a success"
+    )
+    assert outcome.startswith("error: "), (
+        f"a write-time OSError must produce the SAME 'error: ...' string an "
+        f"open-time OSError already does -- not an uncaught exception "
+        f"propagating past this function's own documented contract; got {outcome!r}"
+    )
+    assert "No space left on device" in outcome
+
+    # The write failure must not also leak the file descriptor: the fd is
+    # closed as a best-effort cleanup before the error string is returned.
+    path = backfill.ever_converged_path(seg, segments_dir)
+    assert path.exists(), (
+        "O_CREAT|O_EXCL already published the sentinel's name before the "
+        "write failed -- that is documented as harmless (every consumer "
+        "only calls .exists()), so the name must still be there"
+    )
+
+
+def test_close_failure_after_successful_write_is_reported_as_a_clean_error_string(tmp_path):
+    """Sibling of the write-failure test above, for the OTHER OS call this
+    function makes after a successful write: os.close(). Some filesystems
+    (notably NFS) defer reporting a write error until close() specifically,
+    so this is not a redundant echo of the write-failure case -- it is the
+    one place a write can appear to have succeeded and still turn out to
+    have failed."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_close_failure")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segCloseFail"
+
+    real_close = backfill.os.close
+
+    def failing_close(fd):
+        raise OSError(5, "Input/output error")  # EIO, as e.g. NFS may defer
+
+    backfill.os.close = failing_close
+    try:
+        outcome = backfill.mark_ever_converged(seg, segments_dir)
+    finally:
+        backfill.os.close = real_close
+
+    assert outcome not in ("created", "already_present"), (
+        "a close-time OSError must not be reported as a success"
+    )
+    assert outcome.startswith("error: "), (
+        f"a close-time OSError must produce the SAME 'error: ...' string an "
+        f"open- or write-time OSError already does -- not an uncaught "
+        f"exception; got {outcome!r}"
+    )
+    assert "Input/output error" in outcome
+
+
+# ---------------------------------------------------------------------------
 # 7. --durable-root / --plugin-root: the identical independent-root-override
 # contract select_segments.py/ledger_merge.py already carry. Adapted
 # verbatim from select_segments.test.py's own battery of six tests for the
