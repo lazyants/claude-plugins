@@ -1422,6 +1422,16 @@ is called. It:
   without this gate a routine upgrade would silently re-translate
   finished, paid-for work. Passing the flag authorizes exactly that
   dispatch; it does not delete the sentinel.
+- **#409 Step 3:** a SECOND, independent refusal gate — `select_segments.py`
+  also FATALs if any prior `RUN_ID` this project's own evidence shows
+  (a draft's `dispatch_token`, or a `runs/workflows/` directory) dispatched
+  work without ever getting a `resume_setup.py`-written
+  `runs/<RUN_ID>/input.digest`: that dispatch was never checked against the
+  inputs it actually consumed, and nothing can safely resume it. There is
+  deliberately no flag on `select_segments.py` itself to wave this
+  through — the sanctioned remedy is `backfill_resume_gate_ack.py --apply`,
+  which records, per run id, that it predates the gate (never fabricating a
+  digest). `--classify-only` reads without ever triggering this gate.
 
 **1.2.0: the deterministic pre-workflow step, after `SEGS` and before
 `pipeline()`.** With `SEGS` finalized, invoke `resume_setup.py` (kind
@@ -1516,7 +1526,12 @@ mechanism. `segment_dispatch_driver.py` — copied into
 ALTERNATIVE, not a replacement: it runs the identical per-segment
 translate/review loop as a detached local process instead of inside the
 Workflow tool, eliminating the WAIT-polling chunking apparatus entirely.
-Switching W5 over to it by default is deferred to a later step (the fix step
+Unlike the `pipeline()` path above, where the orchestrating session invokes
+`resume_setup.py` itself as an explicit preflight step before instantiating
+the template, the driver resolves the resume-integrity `RUN_ID` on its own,
+via `resume_setup.py`, every time it runs — there is no separate preflight
+call for a session driving this path to make. Switching W5 over to it by
+default is deferred to a later step (the fix step
 below still needs a Claude turn today, and nothing currently automates the
 hand-off — see below); until then, use it only if you deliberately choose
 to, and never against the same `durable_root` as a concurrent `pipeline()`
