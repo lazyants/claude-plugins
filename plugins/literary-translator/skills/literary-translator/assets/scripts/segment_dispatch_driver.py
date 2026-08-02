@@ -1177,43 +1177,13 @@ def verse_policy_instruction_block(verse_policy: dict) -> str:
 _RUN_ID_DIR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
-def _manifest_seg_ids(durable_root: Path) -> list:
-    """The FULL candidate segment-id list from manifest.json's segments[] --
-    mirrors select_segments.py's own load_candidate_segments() shape/
-    validation (duplicated, not imported, per this project's "no shared lib
-    between self-contained scripts" convention), but this is NOT a second
-    Step 1 gate: it exists ONLY to give resolve_run_id() below a digest
-    domain that does not shrink as segments converge -- see that function's
-    own docstring for why the ELIGIBLE (post-select_segments.py) list is
-    the wrong thing to hash."""
-    manifest_path = durable_root / "manifest.json"
-    if not manifest_path.is_file():
-        fatal(f"manifest.json not found at {manifest_path}", exit_code=2)
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        fatal(f"manifest.json at {manifest_path} is not valid JSON: {exc}", exit_code=2)
-    segments = manifest.get("segments") if isinstance(manifest, dict) else None
-    if not isinstance(segments, list) or not segments:
-        fatal(f"manifest.json at {manifest_path} has no non-empty 'segments' array", exit_code=2)
-    ids = []
-    for item in segments:
-        if not (isinstance(item, dict) and isinstance(item.get("seg"), str)):
-            fatal(f"manifest.json: malformed segments[] entry: {item!r}", exit_code=2)
-        seg = item["seg"]
-        problem = validate_seg(seg)
-        if problem is not None:
-            fatal(f"manifest.json: unsafe segment id: {problem}", exit_code=2)
-        ids.append(seg)
-    return ids
-
-
 _RESUMABLE_CANDIDATE_LIMIT = 5  # mirrors resume_setup.py's own RUN_ID_RETRY_LIMIT bounded-retry shape
 
 
 def _resumable_run_id_candidates(runs_dir: Path, durable_root: Path, limit: int = _RESUMABLE_CANDIDATE_LIMIT) -> list:
-    """Candidate `resume_from_run_id` values for resolve_run_id() below, most
-    recent first: every subdirectory of `runs_dir` that LOOKS like a run id
+    """Candidate `resume_from_run_ids` entries for resolve_run_id() below
+    (all offered together, in the order returned here), most recent first:
+    every subdirectory of `runs_dir` that LOOKS like a run id
     (matches resume_setup.py's own RUN_ID_RE) AND carries an `input.digest`
     file (the one marker that distinguishes a real prior run directory from
     `ledger.d`, `workflows/`, or any other non-run-id entry `runs/` also
@@ -1242,8 +1212,10 @@ def _resumable_run_id_candidates(runs_dir: Path, durable_root: Path, limit: int 
 
     Never invents a run_id itself, never writes anything -- a pure,
     read-only scan. Returns [] if `runs_dir` does not exist or holds no
-    such directory -- resolve_run_id() then omits `resume_from_run_id`
-    entirely, exactly like a genuinely first-ever run."""
+    such directory -- resolve_run_id() then omits `resume_from_run_ids`
+    entirely, exactly like a genuinely first-ever run (resume_setup.py's
+    own module docstring: "Omitting both fields is a genuinely-first-ever-
+    run signal")."""
     if not runs_dir.is_dir():
         return []
     glossary_runs_dir = durable_root / "glossary" / "runs"
@@ -1258,55 +1230,72 @@ def _resumable_run_id_candidates(runs_dir: Path, durable_root: Path, limit: int 
 def resolve_run_id(dirs: dict, *, translate_cfg: dict,
                     plugin_root_str, durable_root_str) -> dict:
     """Builds the exact payload shape resume_setup.py's own module docstring
-    documents (kind="mass", args, subst, plugin_root, segs), writes it to a
-    scratch file, and invokes resume_setup.py --payload-file <path>
-    [--durable-root ...] [--plugin-root ...]. Returns the parsed
-    {"success", "effectiveRunId", "resume", "run_dir", "input_digest"}
-    payload verbatim on success; raises DriverError (never a bare traceback)
-    on any invocation failure or a `success: false` response.
+    documents for a kind="mass" caller (kind, args, subst, plugin_root,
+    resume_from_run_ids), writes it to a scratch file, and invokes
+    resume_setup.py --payload-file <path> [--durable-root ...]
+    [--plugin-root ...] EXACTLY ONCE. Returns the parsed {"success",
+    "effectiveRunId", "resume", "run_dir", "input_digest"} payload verbatim
+    on success; raises DriverError (never a bare traceback) on any
+    invocation failure or a `success: false` response.
 
-    `resume_from_run_id` is tried across EVERY candidate
-    _resumable_run_id_candidates() offers (most recent first), never just
-    the single newest -- see that function's own docstring for why one
-    candidate is not enough (`runs/` mixes mass and glossary run dirs, and
-    the newest entry can be a glossary run that can never match a
+    Deliberately does NOT send `segs` (codex round-2 follow-up, post-
+    8815800): the shipped resume_setup.py derives the input_digest's
+    domain itself, straight from manifest.json's own segments[]
+    (_load_manifest_seg_ids(), resume_setup.py:548) -- never from a
+    caller-supplied list -- and reads a `segs` field literally NOWHERE in
+    its own source; resume_integrity.test.py:test_mass_segs_field_omitted_
+    still_works proves omission is accepted for kind="mass" specifically,
+    not merely inferred from the module docstring. This driver ships in
+    the SAME release as that exact resume_setup.py commit, so it carries
+    no pre-8815800 caller to stay backward-compatible with (the field's
+    one-release acceptance window in resume_setup.py's own docstring
+    exists for OTHER, separately-versioned callers, not this one) --
+    sending it would only reintroduce dead code with nothing on the
+    receiving end to read it.
+
+    The #392 defect this domain choice closes is still worth carrying
+    here, because it is the property the whole resume story depends on:
+    select_segments.py's own eligible list SHRINKS by one entry every time
+    a segment converges (DEFAULT_ELIGIBLE_CATEGORIES excludes `reusable`),
+    so a digest domain built from THAT list mints a fresh RUN_ID on every
+    single convergence -- orphaning every dispatch_token already on disk,
+    including a fix just applied by hand to a DIFFERENT still-in-progress
+    segment. manifest.json's full segments[] does not shrink as segments
+    converge (a segment's own cache_key does not change just because its
+    ledger status did), which is exactly why the authority derives the
+    domain from there rather than from anything this driver -- or any
+    caller -- could pass in.
+
+    codex round-2 follow-up: `resume_from_run_ids` (plural, shipped
+    8815800) carries EVERY candidate _resumable_run_id_candidates() offers
+    (most recent first) in this ONE call, omitted entirely when there are
+    none -- resume_setup.py's own resolve_run() (resume_setup.py:720) now
+    does the try-each-candidate-in-order/first-match-wins loop internally
+    and computes input_digest EXACTLY ONCE regardless of candidate count.
+    This replaces an earlier version of this function that called
+    resume_setup.py once PER candidate with the deprecated singular
+    `resume_from_run_id` field: correct, but for a project with N segments
+    and K offered candidates that cost up to N*K cache_key.py subprocess
+    spawns (up to 5*81=405 on tome1's real candidate/segment counts,
+    resume_setup.py's own module docstring's `resume_from_run_ids`
+    paragraph). The shipped fix moved the candidate loop server-side
+    specifically to close that cost; this function now matches it rather
+    than re-introducing the same multiplication client-side. See
+    _resumable_run_id_candidates()'s own docstring for why more than one
+    candidate must be OFFERED at all (`runs/` mixes mass and glossary run
+    dirs, and the newest entry can be a glossary run that can never match a
     kind="mass" digest even when an older, genuinely resumable mass run
-    sits right behind it). The first candidate resume_setup.py reports
-    resume=True for wins; if none do, the LAST attempt's own fresh-mint
-    result is used (resolve_run() always returns a valid fresh RUN_ID on a
-    mismatch, regardless of which candidate produced it) -- so a project
-    with zero resumable candidates costs exactly one resume_setup.py call,
-    same as before this fix, and only a genuine multi-candidate situation
-    costs more than one.
+    sits right behind it) -- that reasoning is UNCHANGED by the plural
+    switch; only which side iterates over the offered candidates did.
 
-    #392 (codex, round 2): `segs` is now the FULL manifest candidate set
-    (_manifest_seg_ids()), never the currently-ELIGIBLE list
-    select_segments.py returns. compute_input_digest() (resume_setup.py:
-    406-471) hashes its `domain` straight from payload["segs"] -- and
-    select_segments.py's own DEFAULT_ELIGIBLE_CATEGORIES excludes `reusable`
-    (already-converged) segments, so the eligible list SHRINKS by exactly
-    one entry every time a segment converges. Passing that shrinking list
-    here meant every single convergence minted a brand-new digest -> a
-    brand-new RUN_ID -> every dispatch_token already on disk (including a
-    fix JUST applied by hand) stopped matching -> derive_next_action()
-    returned "translate" for everything, discarding the fix and
-    re-translating from scratch, repeating on every subsequent invocation.
-    The full manifest set does not shrink as segments converge (a
-    segment's OWN cache_key does not change just because ITS ledger status
-    did), so the digest now stays stable across exactly the case the whole
-    resumability story exists to survive; it still changes, correctly, if
-    the manifest itself changes (a real W2/W3 re-run) or any segment's
-    cache_key does (a real profile/source/derivation change).
-
-    `args` is now always `{}` for kind="mass" -- for the SAME shrinking-
-    domain reason, one level up: this driver's own CLI scoping flags
-    (--only-segs/--allow-retranslate-converged/--allow-empty) used to be
-    hashed here as payload["args"] (resume_setup.py:466), and an
-    orchestrating session narrowing --only-segs between invocations as
-    segments converge (the natural thing to do) broke resume the identical
-    way, independently of the segs fix above. These flags govern Step 1's
-    OWN gating (select_segments.py, already run and already enforced
-    before resolve_run_id() is ever called) -- they do not change what any
+    `args` is always `{}` for kind="mass" -- resume_setup.py now REJECTS
+    (ResumeSetupError) any other value outright, before its own expensive
+    per-segment cache_key.py shell-outs (compute_input_digest(),
+    resume_setup.py:622-634), for the reason this driver already applies:
+    this driver's own CLI scoping flags (--only-segs/
+    --allow-retranslate-converged/--allow-empty) govern Step 1's OWN
+    gating (select_segments.py, already run and already enforced before
+    resolve_run_id() is ever called) -- they do not change what any
     already-promoted per-segment artifact MEANS, so they have no business
     gating whether this run's digest matches a prior one. Every input that
     genuinely SHOULD invalidate resume (engine config, verse policy,
@@ -1316,7 +1305,7 @@ def resolve_run_id(dirs: dict, *, translate_cfg: dict,
     if not script.is_file():
         fatal(f"resume_setup.py not found at {script}", exit_code=2)
 
-    base_payload = {
+    payload = {
         "kind": "mass",
         "args": {},
         "subst": {
@@ -1331,24 +1320,14 @@ def resolve_run_id(dirs: dict, *, translate_cfg: dict,
             "citation_content_types": translate_cfg["citation_content_types"],
         },
         "plugin_root": plugin_root_str or "",
-        "segs": _manifest_seg_ids(dirs["durable_root"]),
     }
-
-    # candidates is never empty (the "or [None]" fallback guarantees a
-    # first element), and `result` is assigned from that first, guaranteed
-    # element BEFORE the loop over the rest -- never starting as None --
-    # so this function provably always returns a dict, not dict | None.
-    candidates = _resumable_run_id_candidates(dirs["runs_dir"], dirs["durable_root"]) or [None]
-    result = _call_resume_setup(
-        script, dict(base_payload, resume_from_run_id=candidates[0]), dirs, durable_root_str, plugin_root_str,
-    )
-    for candidate in candidates[1:]:
-        if result.get("resume") is True:
-            break
-        result = _call_resume_setup(
-            script, dict(base_payload, resume_from_run_id=candidate), dirs, durable_root_str, plugin_root_str,
-        )
-    return result
+    candidates = _resumable_run_id_candidates(dirs["runs_dir"], dirs["durable_root"])
+    if candidates:
+        # Omitted entirely (never an empty list) when there are none --
+        # resume_setup.py's own module docstring: "Omitting both fields is
+        # a genuinely-first-ever-run signal, exactly as before."
+        payload["resume_from_run_ids"] = candidates
+    return _call_resume_setup(script, payload, dirs, durable_root_str, plugin_root_str)
 
 
 def _call_resume_setup(script: Path, payload: dict, dirs: dict, durable_root_str, plugin_root_str) -> dict:
@@ -1866,6 +1845,11 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
     """Returns exactly one of:
       {"action": "translate"}
       {"action": "review", "round_label": "1".."<max_fix_rounds>"|"final"}
+      {"action": "review", "round_label": ..., "cause": "fabricated_loc"} -- a
+        re-review, same as the row above, but caused SPECIFICALLY by a
+        fabricated (inauthentic) finding rather than a stale/absent
+        review or a round advance -- see process_segment()'s own retry
+        counter, which this marker exists for.
       {"action": "needs_fix", "round_label": ..., "findings": [...]}
       {"action": "cap_reached", "findings": [...]}
       {"action": "already_converged", "round_label": "1".."<max_fix_rounds>"|"final"}
@@ -1940,7 +1924,21 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         # eventually retry -- this driver's own draft is still valid, so
         # only a fresh review at the SAME round label is needed, never a
         # re-translate.
-        return {"action": "review", "round_label": matched_round_label}
+        #
+        # codex round-2 follow-up: `cause: "fabricated_loc"` is a marker
+        # for process_segment()'s OWN retry counter, not a new action type
+        # -- this is still plain "review" as far as dispatch goes. Without
+        # it, process_segment() cannot tell "re-review because the draft
+        # changed" (derive_next_action's OWN "clean but stale" branch,
+        # above) apart from "re-review because the verdict was
+        # fabricated" -- and a reviewer that persistently emits a
+        # colonless holistic loc (the template's own comment above
+        # AUTHENTIC_LOC_RE names this as something a HEALTHY reviewer can
+        # do) would otherwise re-fire this branch every iteration until
+        # process_segment()'s defensive iteration cap, burning a full
+        # codex_jobs_per_segment worth of real, wasted dispatches and
+        # exiting through a reason string that names none of this.
+        return {"action": "review", "round_label": matched_round_label, "cause": "fabricated_loc"}
 
     clean = review_obj.get("clean") is True
     coverage_ok = review_obj.get("coverage_ok") is True
@@ -2207,16 +2205,26 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
     (derive_next_action(), never trusting an in-memory assumption about
     what the last dispatch produced) and either performs exactly one codex
     dispatch and loops again, or reaches a genuine terminal/handoff state
-    and returns:
+    and returns.
 
-      converged=True                      -- ledger recorded, done.
-      converged=False, reason="cap"       -- mandatory final review still
+    Every return carries an explicit `"outcome"` field -- ONE of
+    "converged" / "needs_fix" / "failed" -- and `run()`'s own summary
+    aggregation partitions on THAT field, never on independent predicates
+    over `converged`/`reason`. This is load-bearing, not decoration: see
+    run()'s own totality check, which FATALs on any result missing or
+    carrying an unrecognized `outcome` rather than silently dropping it
+    (codex round-2 follow-up -- a `converged: None` result used to satisfy
+    none of three ad hoc filters and vanish from every summary bucket
+    while still consuming real spend).
+
+      outcome="converged"                 -- ledger recorded, done.
+      outcome="failed", reason="cap"      -- mandatory final review still
                                               not clean; ledger recorded
                                               directly (fully mechanical,
                                               no fix dispatched on the
                                               final round -- matches
                                               runRound's own isFinal branch).
-      converged=False, reason="needs_fix" -- STOPS here: applying findings
+      outcome="needs_fix"                 -- STOPS here: applying findings
                                               to the draft is a real LLM
                                               content-editing turn this
                                               driver cannot perform (see
@@ -2227,7 +2235,7 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               prompt) for whatever performs
                                               that one fix turn, which then
                                               re-invokes this driver.
-      converged=False, stage=...          -- a codex_job.py dispatch itself
+      outcome="failed", stage=...         -- a codex_job.py dispatch itself
                                               failed; `reason`/`error_detail`
                                               are codex_job.py's OWN reported
                                               values, verbatim (#398) -- NO
@@ -2237,13 +2245,57 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               and select_segments.py's
                                               "recoverable" default retries
                                               this segment next invocation.
+      outcome="failed", reason=
+        "review-fabricated-loc"           -- a fabricated (inauthentic)
+                                              finding recurred on the ONE
+                                              retry this driver allows (see
+                                              `fabricated_loc_retries`
+                                              below) -- terminates with the
+                                              template's OWN reason string
+                                              (mass-translate-wf.template.js's
+                                              matchedVerdict()), never an
+                                              invented one, and -- like
+                                              every other transient/infra
+                                              failure above -- writes NO
+                                              terminal ledger entry, so the
+                                              segment is picked back up
+                                              "recoverable" next invocation
+                                              exactly as the template's own
+                                              runRound() leaves it.
+      outcome="failed", reason=
+        "loop-exhausted-without-
+        terminal-state"                   -- the defensive iteration cap
+                                              bound below. NOT purely
+                                              defensive: reachable (without
+                                              the retry bound above) if a
+                                              draft keeps changing out from
+                                              under a clean review every
+                                              single iteration -- see
+                                              derive_next_action()'s own
+                                              "clean but stale" branch,
+                                              which re-reviews at the SAME
+                                              round label with no bound of
+                                              its own. Kept generic on
+                                              purpose: unlike the
+                                              fabricated-loc case, this path
+                                              has no single template-known
+                                              reason to borrow, because it
+                                              is not one specific condition
+                                              -- it is "nothing else
+                                              terminated in time".
 
     The iteration cap (codex_jobs_per_segment(max_fix_rounds) -- one
     translate plus every review round this segment could ever legitimately
-    need) is a defensive bound against a derive_next_action() logic bug
-    looping forever; it is never expected to bind in correct operation.
+    need) bounds the LOOP overall; `fabricated_loc_retries` is a SEPARATE,
+    narrower counter (never reusing the loop's own iteration count) so an
+    expected condition (a reviewer emitting a fabricated finding, which the
+    template's own comment above AUTHENTIC_LOC_RE says a HEALTHY reviewer
+    can do) is bounded and reported on its OWN terms, one retry, rather
+    than silently spending the whole per-segment budget and then being
+    reported as if the defensive backstop itself had fired.
     """
     max_iterations = codex_jobs_per_segment(ctx.translate_cfg["max_fix_rounds"])
+    fabricated_loc_retries = 0
     for _ in range(max_iterations):
         action = derive_next_action(seg, ctx)
 
@@ -2261,8 +2313,9 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
             )
             if not rec.get("success"):
-                return {"seg": seg, "converged": False, "reason": "ledger-write-failed", "detail": rec.get("error")}
-            return {"seg": seg, "converged": True}
+                return {"seg": seg, "converged": False, "outcome": "failed",
+                        "reason": "ledger-write-failed", "detail": rec.get("error")}
+            return {"seg": seg, "converged": True, "outcome": "converged"}
 
         if action["action"] == "cap_reached":
             rec = write_ledger(
@@ -2270,16 +2323,18 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
             )
             if not rec.get("success"):
-                return {"seg": seg, "converged": False, "reason": "ledger-write-failed", "detail": rec.get("error")}
-            return {"seg": seg, "converged": False, "reason": "cap", "lastFindings": action.get("findings")}
+                return {"seg": seg, "converged": False, "outcome": "failed",
+                        "reason": "ledger-write-failed", "detail": rec.get("error")}
+            return {"seg": seg, "converged": False, "outcome": "failed",
+                    "reason": "cap", "lastFindings": action.get("findings")}
 
         if action["action"] == "needs_fix":
             round_label = action["round_label"]
             review_obj = _read_review_obj(ctx, seg, fallback_findings=action.get("findings"))
             fix_prompt = render_fix_prompt(ctx, seg, int(round_label), review_obj)
             return {
-                "seg": seg, "converged": False, "reason": "needs_fix", "round_label": round_label,
-                "findings": action.get("findings"), "fix_prompt": fix_prompt,
+                "seg": seg, "converged": False, "outcome": "needs_fix", "reason": "needs_fix",
+                "round_label": round_label, "findings": action.get("findings"), "fix_prompt": fix_prompt,
             }
 
         if action["action"] == "translate":
@@ -2288,25 +2343,52 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
             )
             if not rec.get("success"):
-                return {"seg": seg, "converged": False, "reason": "ledger-write-failed", "detail": rec.get("error")}
+                return {"seg": seg, "converged": False, "outcome": "failed",
+                        "reason": "ledger-write-failed", "detail": rec.get("error")}
             result = run_one_codex_job(ctx, kind="translate", seg=seg)
             if not result["ok"]:
-                return {"seg": seg, "converged": False, "stage": "translate",
+                return {"seg": seg, "converged": False, "outcome": "failed", "stage": "translate",
                          "reason": result["reason"], "error_detail": result["error_detail"]}
             continue  # re-derive: should now see "review round 1"
 
         if action["action"] == "review":
             round_label = action["round_label"]
+            if action.get("cause") == "fabricated_loc":
+                if fabricated_loc_retries >= 1:
+                    # Already retried once -- the reviewer is persistently
+                    # emitting fabricated locs (within its own documented
+                    # latitude, not a fault of its own). Terminate NOW,
+                    # never dispatch a third time: the template's own
+                    # reason, no ledger write (matches runRound()'s own
+                    # "blocked" -> recoverable-next-run handling).
+                    return {"seg": seg, "converged": False, "outcome": "failed",
+                            "reason": "review-fabricated-loc"}
+                fabricated_loc_retries += 1
             result = run_one_codex_job(ctx, kind="review", seg=seg, round_label=round_label)
             if not result["ok"]:
-                return {"seg": seg, "converged": False, "stage": "review", "round_label": round_label,
+                return {"seg": seg, "converged": False, "outcome": "failed", "stage": "review",
+                         "round_label": round_label,
                          "reason": result["reason"], "error_detail": result["error_detail"]}
             continue  # re-derive from the freshly promoted canonical review
 
-        return {"seg": seg, "converged": None, "reason": f"unknown-action:{action['action']}"}  # pragma: no cover
+        # Still genuinely unreachable: derive_next_action()'s own return
+        # contract (see its docstring) is EXHAUSTIVELY one of the 5 actions
+        # checked above (translate/review/needs_fix/cap_reached/
+        # already_converged) -- nothing in this release added a 6th, so
+        # nothing can reach this line. Unlike the loop-exhaustion fallback
+        # below, this one is not made reachable by anything shipped so far.
+        return {"seg": seg, "converged": None, "outcome": "failed",
+                "reason": f"unknown-action:{action['action']}"}  # pragma: no cover
 
-    return {  # pragma: no cover -- defensive only, see docstring
-        "seg": seg, "converged": None, "reason": "loop-exhausted-without-terminal-state",
+    # Reachable (not purely defensive) -- see this function's own docstring
+    # for the "clean but stale" scenario that can drive it: a draft edited
+    # out-of-band on EVERY iteration never lets a clean review's sha1
+    # catch up, so derive_next_action() keeps returning a same-label
+    # "review" re-dispatch (no cause="fabricated_loc" marker, so the retry
+    # bound above never engages) until this loop's own iteration cap.
+    return {
+        "seg": seg, "converged": False, "outcome": "failed",
+        "reason": "loop-exhausted-without-terminal-state",
     }
 
 
@@ -2566,9 +2648,29 @@ def run(args, dirs: dict) -> dict:
             {"type": "dispatch_loop_started", "segs": segs, "max_concurrent_codex_jobs": args.max_concurrent_codex_jobs},
         )
         segment_results = run_segment_loop(segs, ctx, args.max_concurrent_codex_jobs)
-        converged = [r["seg"] for r in segment_results if r.get("converged") is True]
-        needs_fix = [r for r in segment_results if r.get("reason") == "needs_fix"]
-        failed = [r for r in segment_results if r.get("converged") is False and r.get("reason") != "needs_fix"]
+        # codex round-2 follow-up: partition on the explicit `outcome`
+        # field process_segment() now stamps on every result it returns
+        # (see that function's own docstring), never on independent
+        # predicates over `converged`/`reason` -- three overlapping
+        # filters that happened to be disjoint today is exactly what let
+        # a `converged: None` result vanish from every bucket while still
+        # having consumed real spend. `_KNOWN_OUTCOMES` plus the fatal()
+        # below make that structurally impossible now: a future
+        # process_segment() result shape that forgets to set `outcome` (or
+        # sets one nobody added a bucket for) is refused LOUDLY here,
+        # never silently dropped.
+        _KNOWN_OUTCOMES = ("converged", "needs_fix", "failed")
+        converged = [r for r in segment_results if r.get("outcome") == "converged"]
+        needs_fix = [r for r in segment_results if r.get("outcome") == "needs_fix"]
+        failed = [r for r in segment_results if r.get("outcome") == "failed"]
+        unaccounted = [r for r in segment_results if r.get("outcome") not in _KNOWN_OUTCOMES]
+        if unaccounted:
+            fatal(
+                f"internal error: {len(unaccounted)} segment result(s) carry an unrecognized "
+                f"or missing 'outcome' field and cannot be placed in any summary bucket -- "
+                f"refusing to silently drop them: {unaccounted}",
+                exit_code=2,
+            )
 
         result = {
             "success": True,
@@ -2582,7 +2684,7 @@ def run(args, dirs: dict) -> dict:
             "dispatched": True,
             "results": segment_results,
             "summary": {
-                "converged": converged,
+                "converged": [r["seg"] for r in converged],
                 "needs_fix": [{"seg": r["seg"], "round_label": r.get("round_label")} for r in needs_fix],
                 "failed": [{"seg": r["seg"], "reason": r.get("reason")} for r in failed],
             },

@@ -431,9 +431,20 @@ def main():
     else:
         draft_path = segments_dir / (args.seg + ".draft.json")
         sha1_mod = _load_real_draft_sha1()
+        # "review_*" scenario overrides let a test force EVERY review
+        # dispatch for this seg to carry specific content -- e.g. a
+        # persistently fabricated loc, or a draft_sha1 that never matches
+        # the current draft -- rather than the default always-clean,
+        # always-matching review below. Absent, this reproduces the
+        # pre-existing unconditional shape exactly.
+        review_draft_sha1 = spec.get("review_draft_sha1")
+        if review_draft_sha1 is None:
+            review_draft_sha1 = sha1_mod.draft_content_sha1(draft_path)
         review = {
-            "clean": True, "coverage_ok": True, "findings": [],
-            "draft_sha1": sha1_mod.draft_content_sha1(draft_path), "dispatch_token": args.expect_token,
+            "clean": spec.get("review_clean", True),
+            "coverage_ok": spec.get("review_coverage_ok", True),
+            "findings": spec.get("review_findings", []),
+            "draft_sha1": review_draft_sha1, "dispatch_token": args.expect_token,
         }
         (segments_dir / (args.seg + ".review.json")).write_text(json.dumps(review), encoding="utf-8")
 
@@ -732,10 +743,10 @@ def test_acquire_driver_lock_refuses_when_already_held_by_another_process(tmp_pa
         [sys.executable, str(holder_script), str(lock_path)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
-    # subprocess.Popen's own type stubs declare .stdout/.stderr Optional
-    # unconditionally (they cannot express "non-None because PIPE was
-    # passed to the constructor") -- asserted, not cast/ignored, so both
-    # the type checker and a real runtime check narrow it the same way.
+    # Cannot fail: stdout=PIPE/stderr=PIPE were passed to Popen() above, so
+    # Popen itself guarantees these are real IO objects, never None -- the
+    # stubs just cannot express that. Asserted (real runtime check, narrows
+    # for pyright too), not cast/ignored.
     assert holder.stdout is not None and holder.stderr is not None
     try:
         line = holder.stdout.readline()
@@ -768,10 +779,10 @@ def test_two_drivers_on_one_project_second_refuses_end_to_end(tmp_path):
         [sys.executable, str(holder_script), str(lock_path)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
-    # subprocess.Popen's own type stubs declare .stdout/.stderr Optional
-    # unconditionally (they cannot express "non-None because PIPE was
-    # passed to the constructor") -- asserted, not cast/ignored, so both
-    # the type checker and a real runtime check narrow it the same way.
+    # Cannot fail: stdout=PIPE/stderr=PIPE were passed to Popen() above, so
+    # Popen itself guarantees these are real IO objects, never None -- the
+    # stubs just cannot express that. Asserted (real runtime check, narrows
+    # for pyright too), not cast/ignored.
     assert holder.stdout is not None and holder.stderr is not None
     try:
         line = holder.stdout.readline()
@@ -1371,7 +1382,7 @@ def test_a_segment_converged_on_the_mandatory_final_round_records_a_real_rounds_
     )
 
     result = driver_mod.process_segment("seg01", ctx)
-    assert result == {"seg": "seg01", "converged": True}, result
+    assert result == {"seg": "seg01", "converged": True, "outcome": "converged"}, result
 
     fragment = json.loads((root / "runs" / "ledger.d" / "seg01.json").read_text(encoding="utf-8"))
     assert fragment["status"] == "converged"
@@ -1525,7 +1536,15 @@ def test_one_segments_dispatch_timeout_does_not_discard_the_others(tmp_path):
     write_codex_scenario(root, {"translate:seg02": {"sleep_s": 2}})
 
     driver_mod = _load_fixture_driver(root)
-    driver_mod.CODEX_JOB_WAIT_TIMEOUT_SEC = 0.3  # real, short -- seg02's 2s sleep genuinely overruns it
+    # pyright cannot see this attribute exists (module_from_spec() gives it no
+    # static shape -- it would complain identically whether or not
+    # CODEX_JOB_WAIT_TIMEOUT_SEC were even defined), but this assignment is
+    # not inert: this test's own assertions below (driver-dispatch-error,
+    # "did not terminate within its own deadline", from a REAL 2s-sleeping
+    # child) cannot pass unless it lands on the SAME constant
+    # dispatch_codex_job() reads -- if the patch were a no-op the child
+    # would simply finish in 2s and none of those assertions would hold.
+    driver_mod.CODEX_JOB_WAIT_TIMEOUT_SEC = 0.3  # pyright: ignore[reportAttributeAccessIssue]
     dirs = driver_mod.resolve_dirs(None)
     ctx = driver_mod.DispatchContext(
         dirs=dirs, run_id="20260101T000000Z", translate_cfg=dict(_FIXTURE_TRANSLATE_CFG),
@@ -1591,7 +1610,7 @@ def test_a_clean_review_stale_against_an_edited_draft_re_reviews_instead_of_live
     # the fake codex_job.py writes a review with the CURRENT (matching)
     # sha1, and the segment converges for real on this same call.
     result = driver_mod.process_segment("seg01", ctx)
-    assert result == {"seg": "seg01", "converged": True}, result
+    assert result == {"seg": "seg01", "converged": True, "outcome": "converged"}, result
 
 
 # ===========================================================================
@@ -1729,7 +1748,13 @@ def test_derive_next_action_re_reviews_instead_of_needs_fix_on_a_fabricated_loc(
     "TASK" instead of a real block_id/FN:n/VERSE:vid reference). Without
     the ported findingsAuthentic()/matchedVerdict() gate, this would have
     gone straight to needs_fix and handed an empty finding to
-    render_fix_prompt() -- a real content edit dispatched over nothing."""
+    render_fix_prompt() -- a real content edit dispatched over nothing.
+
+    Also carries "cause": "fabricated_loc" -- process_segment() has no
+    memory of prior iterations, and this is the ONLY thing that lets it
+    tell this re-dispatch apart from the other two shapes that return the
+    same bare {"action": "review", "round_label": ...} (no-review-yet and
+    clean-but-stale), which is what its own retry bound keys off."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     _dna_write_draft(root, driver_mod)
@@ -1737,7 +1762,9 @@ def test_derive_next_action_re_reviews_instead_of_needs_fix_on_a_fabricated_loc(
     fabricated = [{"loc": "TASK", "severity": "major", "issue": "x", "suggest": "y"}]
     _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True,
                        draft_sha1=draft_sha1, findings=fabricated)
-    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "1"}
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "1", "cause": "fabricated_loc",
+    }
 
 
 # ===========================================================================
@@ -2416,6 +2443,377 @@ def test_max_concurrent_codex_jobs_bound_is_real_not_decorative(tmp_path):
         f"serial spread ({serial_spread:.2f}s) must exceed concurrent spread "
         f"({concurrent_spread:.2f}s) -- the knob had no measurable effect"
     )
+
+
+# ===========================================================================
+# codex round-2 follow-up (the two required fixes to the fabricated-loc
+# gate, item 8 above): (Fix 1) the fabricated-loc retry is bounded to
+# exactly one, counted SEPARATELY from process_segment()'s own iteration
+# cap; (Fix 2) run()'s summary partitioning is now structurally total --
+# every result carries an explicit outcome, and an unrecognized/missing
+# one is refused loudly rather than silently dropped. Also: the
+# loop-exhaustion fallback proven genuinely reachable (via the "clean but
+# stale" branch, item 5 above -- NOT via the now-bounded fabricated-loc
+# path), which is why its `# pragma: no cover` was removed while the
+# unknown-action fallback (still genuinely unreachable) keeps its own.
+# ===========================================================================
+
+
+def test_a_persistently_fabricated_loc_terminates_after_exactly_one_retry(tmp_path):
+    """Fix 1: a reviewer emitting a fabricated (colonless) loc on EVERY
+    dispatch -- within its own documented latitude, see
+    AUTHENTIC_LOC_RE's comment in mass-translate-wf.template.js -- must
+    terminate after exactly ONE re-dispatch, with the template's own
+    "review-fabricated-loc" reason, never silently spend the whole
+    per-segment iteration budget and exit through the generic
+    loop-exhaustion reason instead (which names none of this).
+
+    Mutation-proven (manually, not in this test): commenting out
+    process_segment()'s `if fabricated_loc_retries >= 1:` bound turns
+    this exact test red -- the run instead spends the whole per-segment
+    budget and terminates with "loop-exhausted-without-terminal-state" --
+    and reverting restores green."""
+    root = phase2_project(tmp_path, n=1)
+    write_codex_scenario(root, {
+        "review:seg01": {
+            "review_clean": False,
+            "review_findings": [{"loc": "TASK", "severity": "major", "issue": "x", "suggest": "y"}],
+        },
+    })
+    driver_mod, ctx = _fixture_ctx(root, "20260101T000000Z")
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result == {"seg": "seg01", "converged": False, "outcome": "failed",
+                       "reason": "review-fabricated-loc"}, result
+
+    # Exactly 2 review dispatches: the first (round 1, no cause yet) plus
+    # ONE retry -- never a third.
+    argv_log = (root / "test_fixture_argv_log.jsonl").read_text(encoding="utf-8").splitlines()
+    review_dispatches = [json.loads(ln) for ln in argv_log if json.loads(ln)["kind"] == "review"]
+    assert len(review_dispatches) == 2, (
+        f"expected exactly one retry (2 review dispatches total), got {len(review_dispatches)}: "
+        f"{review_dispatches}"
+    )
+
+
+def test_a_persistently_stale_clean_review_exhausts_the_loop_without_terminal_state(tmp_path):
+    """The loop-exhaustion fallback (process_segment()'s own
+    "loop-exhausted-without-terminal-state") is reachable -- NOT purely
+    defensive -- via derive_next_action()'s "clean but stale" branch
+    (item 5 above), which has no bound of its own: a draft edited (here,
+    simulated by a review that always records a draft_sha1 that can never
+    match) out from under a clean review on EVERY iteration keeps
+    re-dispatching a same-round-label review forever, until
+    process_segment()'s own iteration cap. This is the mechanism the
+    `# pragma: no cover` was removed for -- distinct from the (now
+    bounded) fabricated-loc path, which never engages here because these
+    findings are empty and the verdict is authentic.
+
+    Mutation-proven (manually, not in this test): raising max_iterations
+    by one dispatches exactly one more review before this same test's
+    dispatch-count assertion fails, confirming the loop's OWN iteration
+    cap -- and nothing else -- is what bounds this path today."""
+    root = phase2_project(tmp_path, n=1)
+    write_codex_scenario(root, {
+        "review:seg01": {"review_clean": True, "review_coverage_ok": True, "review_draft_sha1": "0" * 40},
+    })
+    driver_mod, ctx = _fixture_ctx(root, "20260101T000000Z")
+    max_iterations = driver_mod.codex_jobs_per_segment(ctx.translate_cfg["max_fix_rounds"])
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result == {"seg": "seg01", "converged": False, "outcome": "failed",
+                       "reason": "loop-exhausted-without-terminal-state"}, result
+
+    argv_log = (root / "test_fixture_argv_log.jsonl").read_text(encoding="utf-8").splitlines()
+    dispatches = [json.loads(ln) for ln in argv_log]
+    assert len(dispatches) == max_iterations, (
+        f"expected the loop to run its full {max_iterations} iterations (1 translate + "
+        f"{max_iterations - 1} same-round-label re-reviews, never terminating early) -- "
+        f"got {len(dispatches)}: {dispatches}"
+    )
+    assert all(d["kind"] == "review" for d in dispatches[1:]), dispatches
+
+
+def test_run_refuses_a_segment_result_with_no_recognized_outcome_rather_than_dropping_it(tmp_path, monkeypatch):
+    """Fix 2 (the more important one): run()'s summary partitioning is
+    structural, not three independent predicates over converged/reason
+    that HAPPEN to be disjoint today -- that is precisely what let a
+    `converged: None` result satisfy none of them and vanish from every
+    summary bucket while still having consumed real spend (see item 8's
+    own diagnosis). Every process_segment() result now carries an
+    explicit "outcome" field, and this constructs a result shape that
+    matches NONE of the three known outcomes ("converged"/"needs_fix"/
+    "failed") -- something no real process_segment() call produces today,
+    which is exactly why the check exists: to catch a FUTURE result
+    shape, not a currently-reachable one.
+
+    This test MUST go red if run()'s own totality check (the
+    `if unaccounted: fatal(...)` block) is removed: mutation-proven
+    manually -- deleting that block makes run() return successfully with
+    the unaccounted result silently absent from every summary bucket
+    (`{"converged": [], "needs_fix": [], "failed": []}`) instead of
+    raising, which turns this test's `pytest.raises(DriverError)` red.
+    Reverting restores green."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    monkeypatch.setattr(
+        driver_mod, "run_segment_loop",
+        lambda segs, ctx, max_concurrent_codex_jobs: [{"seg": "seg01", "converged": None}],
+    )
+    args = driver_mod.build_arg_parser().parse_args([])
+    dirs = driver_mod.resolve_dirs(args.durable_root, args.plugin_root)
+
+    with pytest.raises(driver_mod.DriverError) as excinfo:
+        driver_mod.run(args, dirs)
+    message = str(excinfo.value)
+    assert "unrecognized or missing 'outcome'" in message, message
+    assert "seg01" in message, message
+
+
+# ===========================================================================
+# Integration test (codex round-2, assigned separately from the two fixes
+# above, held until resume_setup.py's own resume_from_run_ids/args/segs
+# contract fixes shipped as commit 8815800): resolve_run_id() driven
+# against the REAL shipped resume_setup.py -- no fake, no stubbed payload.
+# Plus three narrow contract-surface checks on resume_setup.py itself,
+# written against the SHIPPED file rather than adapted to whatever it
+# happens to do -- a disagreement with the described contract is reported
+# as a finding, not silently absorbed into the test.
+# ===========================================================================
+
+
+def run_resume_setup(root, payload, timeout=60):
+    """ONE real resume_setup.py --payload-file subprocess invocation --
+    never stubbed, never a fake sibling. Mirrors run_driver()'s own
+    subprocess-invocation shape."""
+    payload_path = root / "test_fixture_resume_payload.json"
+    payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, str(root / "scripts" / "resume_setup.py"), "--payload-file", str(payload_path)],
+        capture_output=True, text=True, timeout=timeout, cwd=str(root),
+    )
+
+
+def _mass_payload(**overrides):
+    """A hand-built kind="mass" payload matching resume_setup.py's own
+    module docstring shape -- independent of resolve_run_id()'s own
+    payload-building code, since this is testing resume_setup.py's
+    CONTRACT directly, not re-exercising the driver's construction of it."""
+    payload = {
+        "kind": "mass",
+        "args": {},
+        "subst": {
+            "research_mode": _FIXTURE_TRANSLATE_CFG["research_mode"],
+            "verse_policy": _FIXTURE_TRANSLATE_CFG["verse_policy"],
+            "source_lang": _FIXTURE_TRANSLATE_CFG["source_lang"],
+            "target_lang": _FIXTURE_TRANSLATE_CFG["target_lang"],
+            "max_fix_rounds": _FIXTURE_TRANSLATE_CFG["max_fix_rounds"],
+            "batch_agent_cap": _FIXTURE_TRANSLATE_CFG["batch_agent_cap"],
+            "max_codex_jobs_per_batch": _FIXTURE_TRANSLATE_CFG["max_codex_jobs_per_batch"],
+            "effort": _FIXTURE_TRANSLATE_CFG["effort"],
+            "citation_content_types": _FIXTURE_TRANSLATE_CFG["citation_content_types"],
+        },
+        "plugin_root": "",
+        "segs": ["seg01"],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _resume_setup_result(proc):
+    assert proc.stdout.strip(), f"expected one JSON line on stdout, got none. stderr:\n{proc.stderr}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_resolve_run_id_resumes_via_a_plural_candidate_that_is_not_the_newest(tmp_path, monkeypatch):
+    """The property this integration test exists to prove: resolve_run_id()
+    now sends EVERY offered candidate in ONE resume_from_run_ids call --
+    the shipped resume_setup.py's own resolve_run() (resume_setup.py:720)
+    does the try-each-in-order/first-match-wins loop SERVER-side -- not the
+    deprecated one-call-per-candidate CLIENT loop this function used
+    before. Constructs a project with TWO real run directories: an OLDER
+    one whose recorded input.digest genuinely matches this project's
+    current state (obtained from a real prior resolve_run_id() call, never
+    hand-computed), and a NEWER one (sorts first, per
+    _resumable_run_id_candidates()'s own most-recent-first order) whose
+    input.digest does NOT match. Proves the match is found despite not
+    being the newest offered candidate, that it happens in EXACTLY ONE
+    resume_setup.py subprocess call (not two), and that BOTH candidates
+    were genuinely offered together in that one call's own payload."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    translate_cfg = dict(_FIXTURE_TRANSLATE_CFG)
+
+    # A genuinely first-ever run for this project: no candidates offered,
+    # a fresh RUN_ID is minted, and resume_setup.py writes its OWN
+    # input_digest for it -- the one source of truth for what "matches"
+    # means here, never hand-computed in this test.
+    first = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    assert first.get("resume") is False, first
+    run_id_true = first["effectiveRunId"]
+    true_digest = (root / "runs" / run_id_true / "input.digest").read_text(encoding="utf-8").strip()
+    assert true_digest, "resume_setup.py must have written a real input.digest"
+
+    # A lexicographically-GREATER (sorts as "newer") run id -- a real run
+    # directory with a real input.digest, but one that does NOT match this
+    # project's current state, simulating a later invocation whose inputs
+    # genuinely differed.
+    newer_id = run_id_true + "1"
+    wrong_digest = ("0" if true_digest[0] != "0" else "1") + true_digest[1:]
+    assert wrong_digest != true_digest
+    (root / "runs" / newer_id).mkdir()
+    (root / "runs" / newer_id / "input.digest").write_text(wrong_digest + "\n", encoding="utf-8")
+
+    candidates = driver_mod._resumable_run_id_candidates(dirs["runs_dir"], dirs["durable_root"])
+    assert candidates == [newer_id, run_id_true], (
+        f"setup check: both candidates must be discovered, newest first -- got {candidates}"
+    )
+
+    # Observe (never replace) the REAL subprocess.run, to count invocations
+    # and inspect the payload actually sent -- no fake, no stub.
+    resume_setup_calls = []
+    real_subprocess_run = driver_mod.subprocess.run
+
+    def _observing_run(cmd, *args, **kwargs):
+        if len(cmd) > 1 and str(cmd[1]).endswith("resume_setup.py"):
+            payload_file = cmd[cmd.index("--payload-file") + 1]
+            resume_setup_calls.append(json.loads(Path(payload_file).read_text(encoding="utf-8")))
+        return real_subprocess_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(driver_mod.subprocess, "run", _observing_run)
+
+    result = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+
+    assert result.get("resume") is True, result
+    assert result["effectiveRunId"] == run_id_true, (
+        f"expected to resume the OLDER, genuinely-matching run {run_id_true!r} despite the "
+        f"newer non-matching {newer_id!r} sorting first -- got {result['effectiveRunId']!r}"
+    )
+
+    assert len(resume_setup_calls) == 1, (
+        f"expected EXACTLY ONE resume_setup.py invocation (both candidates offered together "
+        f"via the plural field, matching resume_setup.py's own ONE-digest-computation "
+        f"design) -- got {len(resume_setup_calls)}: {resume_setup_calls}"
+    )
+    assert resume_setup_calls[0].get("resume_from_run_ids") == [newer_id, run_id_true], (
+        "the single call must offer BOTH candidates together, newest first -- "
+        f"got {resume_setup_calls[0].get('resume_from_run_ids')!r}"
+    )
+    assert "resume_from_run_id" not in resume_setup_calls[0], (
+        "must not ALSO send the deprecated singular field -- resume_setup.py rejects that "
+        f"combination outright: {resume_setup_calls[0]}"
+    )
+    # codex round-2 follow-up: 'segs' deleted entirely (never sent as an
+    # empty list either) -- the shipped resume_setup.py derives its digest
+    # domain from manifest.json itself and reads this field literally
+    # nowhere in its own source (resolve_run_id()'s own docstring). A
+    # positive absence check, not just "we happened not to add it back":
+    # this line must go red the moment a future edit re-adds the field.
+    assert "segs" not in resume_setup_calls[0], (
+        f"'segs' must not be sent at all -- the shipped resume_setup.py never reads it: "
+        f"{resume_setup_calls[0]}"
+    )
+
+
+def test_resume_setup_ignores_segs_entirely_for_kind_mass(tmp_path):
+    """resume_setup.py's own module docstring: 'segs' is DEPRECATED for
+    kind="mass" and now IGNORED entirely -- never read, validated, or
+    otherwise inspected, even when present. This driver's own
+    resolve_run_id() still SENDS it (see that function's own docstring for
+    why -- backward compatibility for one release), so this contract must
+    actually hold or that reliance is unsafe. Proven two ways: (1) the
+    computed input_digest is IDENTICAL across calls whose 'segs' values
+    genuinely differ; (2) a structurally INVALID 'segs' (not even an
+    array, or null) does not cause a failure -- proving it is not merely
+    ignored in VALUE but never inspected in SHAPE either."""
+    root = phase2_project(tmp_path, n=1)
+
+    result_a = _resume_setup_result(run_resume_setup(root, _mass_payload(segs=["seg01"])))
+    assert result_a.get("success") is True, result_a
+
+    result_b = _resume_setup_result(
+        run_resume_setup(root, _mass_payload(segs=["totally", "different", "values", "here"]))
+    )
+    assert result_b.get("success") is True, result_b
+    assert result_a["input_digest"] == result_b["input_digest"], (
+        "the digest must not move when 'segs' changes -- if it does, this field is NOT "
+        f"actually ignored: {result_a['input_digest']!r} != {result_b['input_digest']!r}"
+    )
+
+    for bad_segs in ("not-an-array-at-all", None, 42, {"not": "a list either"}):
+        result = _resume_setup_result(run_resume_setup(root, _mass_payload(segs=bad_segs)))
+        assert result.get("success") is True, (bad_segs, result)
+        assert result["input_digest"] == result_a["input_digest"], (bad_segs, result)
+
+
+def test_resume_setup_rejects_any_args_other_than_the_literal_empty_object(tmp_path):
+    """resume_setup.py's own module docstring pins payload['args'] to the
+    literal empty object {} for kind="mass", and states it REJECTS
+    (ResumeSetupError) any other value outright. Confirmed here as a REAL
+    rejection (a genuine subprocess exit, success:false, and an error
+    naming 'args'), not merely a documented intention -- proven against
+    the SHIPPED file (8815800), not a description of it. Covers all three
+    readings the module docstring itself names as previously ambiguous:
+    the shrinking SEGS-shaped object, {} spelled wrong (a list/string/etc),
+    and the field omitted entirely."""
+    root = phase2_project(tmp_path, n=1)
+
+    bad_variants = [("explicit " + repr(v), v) for v in ({"only_segs": "seg01"}, [], "seg01", None)]
+    for label, bad_args in bad_variants:
+        payload = _mass_payload(args=bad_args)
+        proc = run_resume_setup(root, payload)
+        result = _resume_setup_result(proc)
+        assert result.get("success") is False, (label, result)
+        assert "args" in result.get("error", ""), (label, result)
+        assert proc.returncode == 1, (label, proc.returncode, result)
+
+    omitted_payload = _mass_payload()
+    del omitted_payload["args"]
+    proc = run_resume_setup(root, omitted_payload)
+    result = _resume_setup_result(proc)
+    assert result.get("success") is False, result
+    assert "args" in result.get("error", ""), result
+    assert proc.returncode == 1, (proc.returncode, result)
+
+    # Negative control: the one value that must NOT be rejected.
+    proc = run_resume_setup(root, _mass_payload(args={}))
+    result = _resume_setup_result(proc)
+    assert result.get("success") is True, result
+
+
+def test_resume_setup_rejects_both_resume_from_run_ids_and_the_singular_field_together(tmp_path):
+    """resume_setup.py's own module docstring: supplying BOTH the plural
+    'resume_from_run_ids' and the deprecated singular 'resume_from_run_id'
+    is a hard ResumeSetupError, never a silently-resolved ambiguity (e.g.
+    "plural wins"). Confirmed here as a real rejection against the SHIPPED
+    file; negative controls confirm either field ALONE is accepted."""
+    root = phase2_project(tmp_path, n=1)
+
+    payload = _mass_payload(
+        resume_from_run_ids=["20260101T000000Z"], resume_from_run_id="20260102T000000Z",
+    )
+    proc = run_resume_setup(root, payload)
+    result = _resume_setup_result(proc)
+    assert result.get("success") is False, result
+    error = result.get("error", "")
+    assert "resume_from_run_ids" in error and "resume_from_run_id" in error, result
+    assert proc.returncode == 1, (proc.returncode, result)
+
+    # Negative controls: either field ALONE (with no matching digest on
+    # disk, so a fresh RUN_ID is expected) must NOT be rejected -- only the
+    # COMBINATION is an error.
+    for kwargs in ({"resume_from_run_ids": ["20260101T000000Z"]}, {"resume_from_run_id": "20260101T000000Z"}):
+        proc = run_resume_setup(root, _mass_payload(**kwargs))
+        result = _resume_setup_result(proc)
+        assert result.get("success") is True, (kwargs, result)
+        assert result.get("resume") is False, (kwargs, result)
 
 
 if __name__ == "__main__":
