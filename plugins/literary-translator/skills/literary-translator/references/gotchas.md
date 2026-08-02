@@ -40,17 +40,21 @@ calibration, not a warning to work around.
    [`ledger-and-resumability.md`](./ledger-and-resumability.md) in full. The
    real project's only ledger-shaped artifact was a single
    human-readable `ledger.json` status report; the per-segment fragment
-   files, the atomic writer, the merge/stale materializer, the 15-field
-   composite cache key, and the derivation-state gate are all new.
+   files, the atomic writer, the merge/stale materializer, the composite
+   cache key (`cache_key.py`'s own `CACHE_KEY_FIELD_ORDER` — see §13 for
+   why that field list shouldn't be hand-counted here either), and the
+   derivation-state gate are all new.
 3. **`engine.batch_agent_cap`'s preflight call-count estimator.** The real
    reference script has no such estimator anywhere — it simply pipelines
    whatever `SEGS` it's given. (1.3.5: W3's glossary-pass template now shares
    this same cap with its own worst-case formula, smaller than
    mass-translate's — and mode-dependent since 1.16.0:
-   `3*BATCHES.length + 2` under `research_mode: offline`, plus the
-   citation-review retry ladder under `live`. See
-   `references/orchestration-and-batching.md`'s **Preflight cost cap** bullet
-   for both branches.)
+   `5*BATCHES.length + 2` under `research_mode: offline` as of 1.16.2/#352
+   (it was `3*BATCHES.length + 2` through 1.16.1 — the chunked wait now
+   costs more agent calls per batch), plus the citation-review retry ladder
+   under `live`. See `references/orchestration-and-batching.md`'s
+   **Preflight cost cap** bullet for both branches and the exact current
+   formula, rather than restating it here.)
 4. **The glossary-pass workflow template.** The real project ran its
    glossary pass as ad hoc `glossary/TASK.md` + codex batches producing
    `glossary/out_*.json` files — not a schema-validated Workflow script. The
@@ -437,8 +441,11 @@ unhandled `ImportError`/raw traceback.
   the full-replace property is still proven from fragment *content*
   (`rounds`, `cache_key`, `style_contract_hash`, `reviewed_draft_sha1`, plus
   a fresh `cache_key` recompute), which loses zero coverage. Unrelated to
-  `canon_adjudication_audit.py` (that gate's own 87 tests are
-  deterministic).
+  `canon_adjudication_audit.py` — that gate's own test suite
+  (`tests/canon_adjudication_audit*.test.py`) is deterministic; no analogous
+  clock-tick flake has been found there. Don't restate a test count here —
+  it has already drifted once; run `pytest --collect-only` on that glob for
+  the current figure.
 - **`basis:"sense_translated"` (1.4.0) structurally forbids `source`** — it is
   not a convention an agent is merely asked to follow; both
   `canon-entry.schema.json` and `canon-batch.schema.json`'s ACCEPTED branch

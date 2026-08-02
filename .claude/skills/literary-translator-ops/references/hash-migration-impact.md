@@ -22,13 +22,13 @@ Editing a member invalidates every converged segment. Members whose BYTES feed i
 - `schema_hash` = `compute_schema_hash`, a sha1 of ONLY **`draft.schema.json` + `review.schema.json` +
   `segpack.schema.json`** (`cache_key.py` ~:351-360). Editing any byte — including a `description` — of
   those three flips it. `manifest.schema.json` / `language-smoke-report.schema.json` are NOT here.
-- `plugin_bundle_hash` = the `PLUGIN_BUNDLE_MEMBERS` tuple (`cache_key.py:103-117` — **verify against this
+- `plugin_bundle_hash` = the `PLUGIN_BUNDLE_MEMBERS` tuple (`cache_key.py:117-132` — **verify against this
   tuple directly, never trust an enumeration copied into a doc**: this exact list drifted once already,
   omitting `codex_job.py`/`canon_senses.py` and under-pricing an edit to either as migration-inert when it
   actually flips `plugin_bundle_hash`, filed as lazyants/claude-plugins#281):
   `validate_draft.py, canon_validate.py, cache_key.py, draft_sha1.py, review_artifact_check.py,
   ledger_update.py, review_ready.py, resume_setup.py, glossary_batch_plan.py, codex_job.py,
-  canon_senses.py`, `mass-translate-wf.template.js`, `glossary-pass-wf.template.js`.
+  canon_senses.py, fetch_citation.py`, `mass-translate-wf.template.js`, `glossary-pass-wf.template.js`.
 - `derivation_bundle_hash` = `DERIVATION_BUNDLE_MEMBERS` = `bootstrap_names.py` + `segpack.py`.
 
 **Within surface 1, members do NOT migrate equally.** `plugin_bundle_hash` and `schema_hash` route a

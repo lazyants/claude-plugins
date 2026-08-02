@@ -161,9 +161,13 @@ Bundle membership stays split exactly as follows: `plugin_bundle_hash` gates
 cache reuse and covers `validate_draft.py`, `canon_validate.py`,
 `cache_key.py`, `draft_sha1.py`, `review_artifact_check.py`,
 `ledger_update.py`, `review_ready.py`, `resume_setup.py`,
-`glossary_batch_plan.py`, `codex_job.py`, plus
-`mass-translate-wf.template.js` and `glossary-pass-wf.template.js` (ten
-scripts + two templates as of 1.4.7).
+`glossary_batch_plan.py`, `codex_job.py`, `canon_senses.py`, and
+`fetch_citation.py`, plus `mass-translate-wf.template.js` and
+`glossary-pass-wf.template.js`. Read `cache_key.py`'s own
+`PLUGIN_BUNDLE_MEMBERS` tuple for the authoritative list rather than
+trusting a restated count here — it has already drifted once (1.4.7's "ten
+scripts + two templates" went stale the moment `canon_senses.py` and
+`fetch_citation.py` joined the tuple).
 `review_ready.py` and `resume_setup.py` (both new in 1.2.0) are correctness-
 determining in the same sense as `review_artifact_check.py`/`ledger_update.py`
 — a bug in either could certify a stale or wrongly-scoped artifact as safe to
