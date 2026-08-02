@@ -138,10 +138,12 @@ file, matching `ledger_merge.test.py`'s established convention, never the
 script actually under test in that case.
 """
 import copy
+import importlib.util
 import json
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -1801,4 +1803,212 @@ def test_resume_from_run_ids_computes_domain_exactly_once_regardless_of_candidat
     assert len(lines) == 2, (
         f"expected exactly 2 cache_key.py spawns (one per manifest segment, "
         f"regardless of 5 offered non-matching candidates), got {len(lines)}"
+    )
+
+
+# ===========================================================================
+# The fresh-RUN_ID mint is a check-then-create split across TWO separate
+# function calls -- resolve_run()'s own existence check, write_run_dir()'s
+# own directory/digest creation -- never one atomic step. Two concurrent
+# resume_setup.py invocations against the SAME durable_root (e.g. one
+# kind="mass", one kind="glossary" -- exactly the shape SKILL.md's own
+# "Optional dispatch path" section warns is unguarded: "never against the
+# same durable_root as a concurrent pipeline() run -- nothing in either path
+# guards against that") can both observe "this candidate id is not yet
+# taken" before EITHER creates anything. codex flagged this mechanism from
+# source without demonstrating it. This section demonstrates it directly,
+# in two parts, then locks down the fix.
+#
+#   Part 1 (test_resolve_run_alone...): resolve_run() creates NOTHING on
+#   disk -- it only reads. So the collision precondition needs NO threading
+#   at all: two plain, sequential calls for two different payloads already
+#   return the identical fresh id whenever fresh_run_id() collides. This
+#   documents an existing, INTENTIONAL non-atomicity (resolve_run() is a
+#   cheap pre-filter, never the authority) -- it stays green before and
+#   after the fix below, because resolve_run() itself is not what changes.
+#
+#   Part 2 (test_concurrent_write_run_dir...): whether the shared id becomes
+#   DANGEROUS depends on how the two callers' write_run_dir() calls
+#   interleave. This file's own case 10 (above) calls a true OS-level
+#   process race "not practically unit-testable" -- but resolve_run()/
+#   write_run_dir() are plain, direct-callable functions (unlike
+#   draft_ready.py/review_ready.py's subprocess-only surface), so the
+#   interleaving CAN be forced deterministically: a barrier inserted at the
+#   exact seam between write_run_dir()'s digest_path.exists() check and its
+#   write forces both threads to have already passed that check (both
+#   independently saw "not yet written") before either is allowed to write
+#   -- without changing what either call actually DOES. This is what a true
+#   OS-level race could produce on an unlucky interleaving; the barrier only
+#   removes the luck.
+# ===========================================================================
+
+
+def _load_module(name, path):
+    """Imports a script as an in-process module -- the established pattern
+    for direct-function-call unit testing elsewhere in this test suite
+    (e.g. orchestration_hash_resume_gating.test.py's own `_load_module`).
+    A deliberate departure from THIS file's otherwise subprocess-only house
+    style (see the section banner above): forcing a genuine two-caller
+    interleaving deterministically needs direct function calls to patch a
+    synchronization point into, which a subprocess boundary would hide."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None, f"could not load spec for {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_resume_setup_module(root):
+    """Imports the copy of resume_setup.py make_resume_setup_root() already
+    placed at {root}/scripts/resume_setup.py -- so the module's own
+    self-anchored CACHE_KEY_SCRIPT constant resolves to THIS fixture's
+    cache_key.py stub, exactly like every subprocess-based test in this file
+    relies on. Importing the ORIGINAL shipped file directly would instead
+    self-anchor to the REAL plugin's own cache_key.py, which this fixture's
+    lightweight stub is standing in for."""
+    return _load_module("resume_setup_under_test_race", root / "scripts" / "resume_setup.py")
+
+
+def _glossary_payload_for_race():
+    return {
+        "kind": "glossary",
+        "args": {"candidates": []},
+        "subst": dict(BASE_SUBST),
+        "glossary_rule": "strict",
+        "batches": [{"index": 0, "names": ["Alice"]}],
+    }
+
+
+def test_resolve_run_alone_never_creates_so_two_calls_can_share_a_fresh_id(tmp_path):
+    """Part 1 -- see section banner above. Zero synchronization: resolve_run()
+    only reads, so two SEQUENTIAL calls for two different payloads (no
+    threading) already return the identical id whenever fresh_run_id()
+    collides."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    resume_setup = _load_resume_setup_module(root)
+
+    resume_setup.fresh_run_id = lambda: "20260802T120000Z"
+    dirs = resume_setup.resolve_dirs(None)
+
+    mass_run_id, mass_resume, mass_digest = resume_setup.resolve_run(mass_base_payload(), dirs)
+    glossary_run_id, glossary_resume, glossary_digest = resume_setup.resolve_run(
+        _glossary_payload_for_race(), dirs
+    )
+
+    assert mass_resume is False
+    assert glossary_resume is False
+    assert mass_run_id == glossary_run_id == "20260802T120000Z", (
+        "resolve_run() creates nothing on disk, so two calls for two "
+        "different payloads -- even called back-to-back with no threading "
+        "at all -- see the SAME 'not yet taken' fresh id whenever "
+        "fresh_run_id() collides; the check-then-create split is not "
+        "atomic by construction, independent of any true OS-level race"
+    )
+    assert mass_digest != glossary_digest  # fixture sanity: genuinely different payloads
+
+
+def test_concurrent_write_run_dir_calls_do_not_silently_clobber_input_digest(tmp_path):
+    """Part 2 -- see section banner above. Forces the dangerous interleaving
+    deterministically via a barrier at write_run_dir()'s own TOCTOU seam,
+    then asserts the SAFE invariant a fix must provide: exactly one of the
+    two concurrent claimants wins, the loser is refused BEFORE it can create
+    any further side effect (specifically its glossary/runs/<id>/ sibling --
+    the exact artifact segment_dispatch_driver.py's own
+    _resumable_run_id_candidates() uses to drop a run id as a mass-resume
+    candidate), and the surviving input.digest is exactly the winner's, never
+    silently replaced by the loser's."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    resume_setup = _load_resume_setup_module(root)
+    resume_setup.fresh_run_id = lambda: "20260802T130000Z"
+    dirs = resume_setup.resolve_dirs(None)
+
+    mass_payload = mass_base_payload()
+    glossary_payload = _glossary_payload_for_race()
+
+    mass_run_id, mass_resume, mass_digest = resume_setup.resolve_run(mass_payload, dirs)
+    glossary_run_id, glossary_resume, glossary_digest = resume_setup.resolve_run(glossary_payload, dirs)
+    assert mass_run_id == glossary_run_id, "fixture sanity: the Part-1 collision must reproduce here too"
+    assert mass_digest != glossary_digest  # fixture sanity: genuinely different payloads
+
+    barrier = threading.Barrier(2, timeout=5)
+    real_atomic_write_text = resume_setup._atomic_write_text
+
+    def synced_atomic_write_text(path, text):
+        if path.name == "input.digest":
+            # Both threads only ever reach here AFTER their own
+            # write_run_dir() has already evaluated digest_path.exists() as
+            # False (that check runs strictly before this call) -- waiting
+            # on the barrier here guarantees BOTH threads passed that check
+            # before EITHER is allowed to actually write, which is exactly
+            # what an unlucky true OS-level interleaving could also produce.
+            barrier.wait()
+        return real_atomic_write_text(path, text)
+
+    resume_setup._atomic_write_text = synced_atomic_write_text
+
+    # _atomic_write_text() names its own tmp file from os.getpid() -- correct
+    # for two real, DISTINCT OS processes, but two THREADS in this one test
+    # process share a single pid, so their tmp files would collide on name
+    # (one thread's os.replace() would then race-delete out from under the
+    # other's, raising a bare FileNotFoundError that has nothing to do with
+    # the digest_path race under test). threading.get_ident() gives each
+    # thread the same kind of per-caller uniqueness a distinct PID would --
+    # patched narrowly for just this race and restored immediately after.
+    real_getpid = resume_setup.os.getpid
+    resume_setup.os.getpid = threading.get_ident
+
+    errors = {}
+    run_dirs = {}
+
+    def call(kind, run_id, resume, digest, payload):
+        try:
+            run_dirs[kind] = resume_setup.write_run_dir(run_id, resume, digest, kind, payload, dirs)
+        except Exception as exc:  # noqa: BLE001 -- captured for the assertions below, not re-raised
+            errors[kind] = exc
+
+    t_mass = threading.Thread(target=call, args=("mass", mass_run_id, mass_resume, mass_digest, mass_payload))
+    t_glossary = threading.Thread(
+        target=call, args=("glossary", glossary_run_id, glossary_resume, glossary_digest, glossary_payload)
+    )
+    try:
+        t_mass.start()
+        t_glossary.start()
+        t_mass.join(timeout=10)
+        t_glossary.join(timeout=10)
+    finally:
+        resume_setup.os.getpid = real_getpid
+
+    assert not t_mass.is_alive() and not t_glossary.is_alive(), "a thread deadlocked on the barrier -- fixture bug"
+
+    assert len(errors) == 1, (
+        f"exactly ONE of the two concurrent claimants must be refused (never "
+        f"zero -- a silent clobber -- and never two) -- got errors={errors!r}, "
+        f"successful={sorted(run_dirs)!r}"
+    )
+    loser_kind = next(iter(errors))
+    winner_kind = "glossary" if loser_kind == "mass" else "mass"
+    assert isinstance(errors[loser_kind], resume_setup.ResumeSetupError), (
+        f"the loser must be refused via the script's own structured "
+        f"ResumeSetupError, not an unrelated crash: {errors[loser_kind]!r}"
+    )
+    assert "input.digest" in str(errors[loser_kind])
+
+    winner_digest = mass_digest if winner_kind == "mass" else glossary_digest
+    final_digest = (dirs["runs_dir"] / mass_run_id / "input.digest").read_text(encoding="utf-8").strip()
+    assert final_digest == winner_digest, (
+        "the surviving input.digest must be exactly the WINNER's -- never "
+        "silently replaced by the loser's, and never a torn/partial write"
+    )
+
+    # The dangerous downstream consequence codex named: a caller refused by
+    # the atomic claim must not go on to create ITS glossary sibling --
+    # that sibling is what makes segment_dispatch_driver.py's own
+    # _resumable_run_id_candidates() drop this run id as a mass-resume
+    # candidate later, orphaning a genuinely-resumable mass run.
+    assert not (root / "glossary" / "runs" / mass_run_id).exists() or winner_kind == "glossary", (
+        "a glossary sibling may only exist if glossary genuinely WON the "
+        "claim -- a refused glossary loser must never reach the point where "
+        "it creates one"
     )

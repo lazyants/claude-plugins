@@ -460,6 +460,56 @@ def _atomic_write_json(path: Path, doc) -> None:
     _atomic_write_text(path, json.dumps(doc, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def _claim_fresh_digest(digest_path: Path, input_digest: str) -> None:
+    """Atomically CLAIMS `digest_path` for a fresh (non-resume) run --
+    post-review correction. resolve_run()'s own fresh-id loop only READS
+    (`if not (dirs["runs_dir"] / candidate).exists(): return candidate, ...`)
+    and creates nothing, so two concurrent resume_setup.py invocations
+    against the SAME durable_root (e.g. a kind="mass" and a kind="glossary"
+    call -- exactly the shape SKILL.md's own "Optional dispatch path"
+    section already warns is unguarded) can both observe the same
+    not-yet-taken candidate before EITHER creates anything, and both land
+    here with the SAME `digest_path`. The pre-existing `if
+    digest_path.exists(): raise` + unconditional _atomic_write_text() pair
+    this replaces was ITSELF just as racy: a genuinely interleaved pair of
+    callers could both pass that check as False and then both proceed to
+    write, and _atomic_write_text()'s own os.replace() lets the LAST writer
+    silently win with no exception on either side -- exactly the silent
+    clobber test_concurrent_write_run_dir_calls_do_not_silently_clobber_
+    input_digest() (resume_integrity.test.py) demonstrates.
+
+    Closes it with a single O_CREAT|O_EXCL-equivalent claim: write the full
+    content to a pid-suffixed tmp file first (so a mid-write crash can never
+    leave a torn/partial digest at the final path), then os.link() the tmp
+    file onto `digest_path` -- os.link() either creates the new name
+    atomically or fails with FileExistsError, NEVER silently overwrites an
+    existing target the way os.replace() does. At most ONE caller can ever
+    win a given digest_path; the loser gets a loud ResumeSetupError instead
+    of a silent clobber. Mirrors ledger_update.py's own
+    mark_ever_converged() -- the SAME os.O_CREAT|os.O_EXCL exclusivity
+    idiom, applied to a hardlink instead of a fresh fd, since the content
+    here must be written before the claim succeeds rather than after.
+    """
+    digest_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = digest_path.parent / f".{digest_path.name}.claim.{os.getpid()}"
+    tmp_path.write_text(input_digest + "\n", encoding="utf-8")
+    try:
+        try:
+            os.link(str(tmp_path), str(digest_path))
+        except FileExistsError:
+            raise ResumeSetupError(
+                f"refusing to overwrite existing input.digest at {digest_path} "
+                f"-- claimed by another concurrent resume_setup.py invocation "
+                f"before this one could (same fresh RUN_ID, different "
+                f"payload). Retry: resolve_run() will pick a fresh RUN_ID."
+            )
+    finally:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+
+
 def _read_marker(path: Path, what: str) -> str:
     if not path.is_file():
         raise ResumeSetupError(
@@ -903,6 +953,10 @@ def write_run_dir(
     if dirs is None:
         dirs = resolve_dirs(None)
     run_dir = dirs["runs_dir"] / run_id
+    # exist_ok=True is LOAD-BEARING for resume: on a MATCH, run_dir already
+    # legitimately exists from the prior run this call is resuming, and this
+    # call must not fail on that. Never make this exclusive -- the resume
+    # path depends on the directory already being there.
     run_dir.mkdir(parents=True, exist_ok=True)
     digest_path = run_dir / "input.digest"
 
@@ -911,15 +965,13 @@ def write_run_dir(
         # (that's how resolve_run() decided to resume) -- never rewritten.
         pass
     else:
-        if digest_path.exists():
-            # Unreachable in practice (resolve_run() only returns a fresh
-            # id for a run_dir whose input.digest didn't already exist) --
-            # refuse to clobber a foreign run's digest rather than silently
-            # overwrite it.
-            raise ResumeSetupError(
-                f"refusing to overwrite existing input.digest at {digest_path}"
-            )
-        _atomic_write_text(digest_path, input_digest + "\n")
+        # Post-review correction: was a check-then-write pair
+        # (`if digest_path.exists(): raise` then an unconditional
+        # _atomic_write_text()) -- itself just as racy as the fresh-id check
+        # it was guarding against. _claim_fresh_digest() closes it with a
+        # single atomic claim; see its own docstring for the exact scenario
+        # and the test that demonstrates it.
+        _claim_fresh_digest(digest_path, input_digest)
 
     if kind == "glossary":
         # write_glossary_manifests() rewrites manifest_{index}.json /

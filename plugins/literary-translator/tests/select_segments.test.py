@@ -1219,6 +1219,145 @@ def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Doubled-path fix. run_ledger_merge()/compute_current_cache_key() run their
+# sibling subprocess with `cwd` set to the ALREADY-RESOLVED durable_root, but
+# used to forward the RAW (possibly relative) --durable-root string as that
+# sibling's own --durable-root. The sibling's own resolve_dirs() does
+# Path(durable_root_str).resolve(), which resolves a relative fragment
+# against ITS cwd -- i.e. the already-resolved value a second time. The
+# identical shape was independently confirmed in resume_setup.py and
+# segment_dispatch_driver.py; --plugin-root had the same class of defect for
+# a related reason (a relative override forwarded raw resolves against the
+# CHILD's cwd, not the ORIGINAL invoker's cwd it was resolved against here).
+# Every existing test above passes an absolute path for both flags, so none
+# of them would have caught this -- these four exercise a genuinely relative
+# override instead.
+# ---------------------------------------------------------------------------
+
+
+def test_relative_durable_root_is_not_doubled_end_to_end(tmp_path):
+    """PROOF, end to end, against the REAL ledger_merge.py (not a probe
+    stub): select_segments.py invoked with a genuinely RELATIVE
+    --durable-root, from a cwd that is its own PARENT directory. Pre-fix,
+    the raw 'durable_root' string was forwarded to ledger_merge.py, whose
+    subprocess cwd is already {tmp_path}/durable_root -- so its own
+    Path('durable_root').resolve() landed on
+    {tmp_path}/durable_root/durable_root, which has no schemas/manifest,
+    and ledger_merge.py failed outright (confirmed against this exact
+    fixture at the parent commit). This drives the real subprocess boundary
+    rather than asserting against source text."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["segRelative"])
+
+    proc = subprocess.run(
+        [sys.executable, str(root / "scripts" / "select_segments.py"), "--durable-root", "durable_root"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=str(tmp_path),
+    )
+
+    assert proc.returncode == 0, (
+        f"a relative --durable-root must resolve to the SAME tree as the "
+        f"equivalent absolute one -- got rc={proc.returncode}\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["segs"] == ["segRelative"]
+    assert payload["durable_root"] == str(root.resolve())
+    assert (root / "runs" / "ledger.json").is_file(), (
+        "ledger_merge.py must have materialized the ledger in the SAME "
+        "tree select_segments.py itself resolved to, not one level deeper"
+    )
+
+
+def test_relative_durable_root_is_not_doubled_for_the_cache_key_sibling_end_to_end(tmp_path):
+    """PROOF for the SECOND, independent call site: compute_current_cache_key()
+    has its own --durable-root forwarding logic, not routed through
+    _root_forward_args() at all (per this project's no-shared-lib
+    convention), so it needed the identical fix applied separately. Only
+    reachable by classifying a CONVERGED segment (the sole path that calls
+    compute_current_cache_key() at all), against the fake cache_key.py stub
+    -- which already mirrors the real script's own
+    Path(durable_root).resolve() behavior, so a doubled path here means it
+    looks for test_fixture_cache_keys.json one level too deep, doesn't find
+    it, and cache_key.py fails -- escalating this segment to
+    human_escalation instead of the reusable it actually is."""
+    root = make_durable_root(tmp_path)
+    seg = "segConvergedRelative"
+    write_manifest(root, [seg])
+    key = make_cache_key("stable")
+    sha1 = write_draft(root, seg, {"text": "stable content"})
+    write_fragment(root, seg, converged_fragment(key, sha1))
+    write_fixture_cache_keys(root, {seg: key})
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "select_segments.py"),
+            "--durable-root",
+            "durable_root",
+            "--allow-empty",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=str(tmp_path),
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["classification"][seg]["category"] == "reusable", (
+        f"pre-fix, the doubled path made cache_key.py look for "
+        f"test_fixture_cache_keys.json one level too deep, fail to find it, "
+        f"and this segment would wrongly escalate to human_escalation "
+        f"instead of classifying reusable. {payload}"
+    )
+
+
+def test_root_forward_args_never_forwards_a_relative_durable_root(tmp_path, monkeypatch):
+    """Unit-level companion to the end-to-end proofs above, pinning
+    _root_forward_args() directly: it must forward the RESOLVED
+    durable_root, never the raw (possibly relative) CLI string."""
+    module = load_select_segments_module()
+    monkeypatch.chdir(tmp_path)
+    dirs = module.resolve_dirs("some/relative/root", None)
+
+    args = module._root_forward_args(dirs, "some/relative/root", None)
+
+    expected = str((tmp_path / "some" / "relative" / "root").resolve())
+    assert args == ["--durable-root", expected], (
+        f"the forwarded value must equal the RESOLVED root exactly once, not "
+        f"the raw relative string (which the sibling would resolve a SECOND "
+        f"time against its own already-resolved cwd). got {args!r}, expected "
+        f"['--durable-root', {expected!r}]"
+    )
+    assert not args[1].endswith(f"{expected}/some/relative/root"), (
+        "the doubled-path shape itself, as a belt-and-suspenders check"
+    )
+
+
+def test_root_forward_args_never_forwards_a_relative_plugin_root(tmp_path, monkeypatch):
+    """Unit-level companion for the --plugin-root half of the same fix: a
+    relative override must be resolved against THIS script's own cwd (the
+    same base resolve_dirs() already used for its own sibling lookup)
+    BEFORE forwarding -- never passed through raw for the child to resolve
+    against ITS OWN, different cwd."""
+    module = load_select_segments_module()
+    (tmp_path / "plugin_dir" / "assets" / "scripts").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    dirs = module.resolve_dirs(None, "plugin_dir")
+
+    args = module._root_forward_args(dirs, None, "plugin_dir")
+
+    assert args[0:2] == ["--durable-root", str(dirs["durable_root"])]
+    expected_plugin_root = str((tmp_path / "plugin_dir").resolve())
+    assert args[2:4] == ["--plugin-root", expected_plugin_root]
+    assert "plugin_dir" != args[3], "must be resolved, not the raw fragment"
+
+
+# ---------------------------------------------------------------------------
 # #409 Step 1 -- the previously-converged re-translate gate.
 #
 # Why this exists: a converged segment becomes dispatch-eligible the moment any

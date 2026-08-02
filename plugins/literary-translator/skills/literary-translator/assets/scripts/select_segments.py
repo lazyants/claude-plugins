@@ -284,14 +284,35 @@ def _root_forward_args(dirs: dict, durable_root_str, plugin_root_str) -> list:
     --durable-root (and is itself self-anchored) -- using the resolved
     dirs["durable_root"] as the value. Omitting BOTH flags never forwards
     anything, preserving today's self-anchored behavior on both sides.
-    """
+
+    Doubled-path fix: both flags are always forwarded as their RESOLVED
+    value, never the raw CLI string. The sibling subprocess runs with `cwd`
+    set to the resolved `dirs["durable_root"]` (see run_ledger_merge()'s own
+    `subprocess.run(..., cwd=...)`), and the sibling's own resolve_dirs()
+    does `Path(durable_root_str).resolve()` -- which resolves a RELATIVE
+    fragment against ITS cwd. Forwarding the raw string when it happened to
+    be relative (e.g. `--durable-root projects/book` run from `/repo`)
+    resolved it a SECOND time against the already-resolved value, landing
+    the sibling on `/repo/projects/book/projects/book` instead of
+    `/repo/projects/book` -- silently: run_ledger_merge()'s own
+    success/failure check only sees whether the subprocess printed valid
+    JSON with `"success": true`, never which tree it actually read. The
+    identical shape was independently confirmed (and fixed) in
+    resume_setup.py and segment_dispatch_driver.py; --plugin-root had the
+    same class of defect for a related reason -- a relative value forwarded
+    raw resolves against the CHILD's cwd (durable_root), not the ORIGINAL
+    invoker's cwd it was resolved against here, so the two processes could
+    silently land on two DIFFERENT plugin roots. Every existing caller
+    already passes an absolute path for both flags (`Path(absolute).resolve()`
+    is a no-op), so this was unreachable until an operator passed a relative
+    override; self-anchored behavior (both flags omitted) is untouched --
+    the condition for forwarding each flag at all is unchanged, only the
+    VALUE forwarded when it is."""
     args = []
-    if durable_root_str is not None:
-        args += ["--durable-root", durable_root_str]
-    elif plugin_root_str is not None:
+    if durable_root_str is not None or plugin_root_str is not None:
         args += ["--durable-root", str(dirs["durable_root"])]
     if plugin_root_str is not None:
-        args += ["--plugin-root", plugin_root_str]
+        args += ["--plugin-root", str(Path(plugin_root_str).resolve())]
     return args
 
 
@@ -861,19 +882,25 @@ def compute_current_cache_key(
     `durable_root` is cache_key.py's DATA root (cwd for the subprocess).
     `durable_root_str`/`plugin_root_str` are THIS script's own CLI values
     (not cache_key.py's -- it has no --plugin-root, being a leaf with no
-    siblings of its own): `durable_root_str` is forwarded verbatim as
-    cache_key.py's own --durable-root when given; when it is NOT given but
-    `plugin_root_str` IS (meaning `cache_key_script` was itself resolved via
-    --plugin-root, so it no longer physically sits under durable_root),
-    `durable_root` is forwarded explicitly anyway -- otherwise cache_key.py's
+    siblings of its own): `--durable-root` is forwarded whenever EITHER was
+    given, as the RESOLVED `durable_root` -- never the raw `durable_root_str`
+    (doubled-path fix, the identical shape and reason as
+    `_root_forward_args()`'s own docstring: the subprocess runs with `cwd`
+    set to this SAME resolved `durable_root`, and cache_key.py's own
+    resolve_dirs() does `Path(durable_root_str).resolve()`, which would
+    resolve a RELATIVE raw string a second time against that already-resolved
+    cwd). When `durable_root_str` is NOT given but `plugin_root_str` IS
+    (meaning `cache_key_script` was itself resolved via --plugin-root, so it
+    no longer physically sits under durable_root), forwarding `durable_root`
+    is exactly as necessary as when it is given -- otherwise cache_key.py's
     own self-anchoring would silently resolve its data from the plugin root
-    instead of the real durable root.
+    instead of the real durable root. Both branches now converge on the same
+    forwarded value; only whether to forward at all still depends on which
+    of the two was given.
     """
     if not cache_key_script.is_file():
         return f"cache_key.py not found at {cache_key_script}"
-    if durable_root_str is not None:
-        cmd_extra = ["--durable-root", durable_root_str]
-    elif plugin_root_str is not None:
+    if durable_root_str is not None or plugin_root_str is not None:
         cmd_extra = ["--durable-root", str(durable_root)]
     else:
         cmd_extra = []
