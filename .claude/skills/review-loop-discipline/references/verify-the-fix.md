@@ -347,6 +347,27 @@ staged condition was REACHED, or a delta that isolates the fix.
 
 Anything else is attribution by adjacency.
 
+**The same trap runs in reverse, and that is the direction this section kept failing to cover.** A
+probe is just as often built to REFUTE a reviewer's reported defect — to show the topology they
+described does not actually reach a bad outcome — and a probe that fails to reach the condition
+answers "refuted" just as plausibly as it answers "unfixed". Read the failure to reproduce as what it
+is: evidence about the topology you BUILT, never about the finding. Before downgrading anyone's
+severity on it, produce the same reachability evidence the fix direction demands — show the decision
+you claim is safe was the one that actually ran, rather than an earlier guard refusing first and
+masking it. Measured: a reported false-accept was probed, an earlier bracket refused, and the finding
+was downgraded to "masked" in a shipped commit message; the real topology needed ONE more directory
+created before that bracket passed and the reported decision decided, at which point a previous
+build's file was committed as the current run's output exactly as reported. One `mkdir` was the whole
+distance between "does not reproduce" and a confirmed BLOCKER.
+
+**A reviewer's own `NOT EXECUTED` marking raises the bar on you rather than lowering it.** The
+instinct is to treat a source-proved-only finding as weaker evidence. It is the opposite: they have
+told you precisely which step they could not perform — a sandbox that denies `mkdtemp`, no network,
+no credentials — so that is the step whose absence their reasoning could not check, and the one your
+reproduction has to get right. Their inability to run it is a map of where to look, not a discount on
+the claim. A reviewer who marks its own limits is more trustworthy, not less; treat an unmarked
+finding with more suspicion than a marked one.
+
 The generator is an interposition seam placed by ORDINAL — "the Nth call of `realpathSync` on this
 path", "the first `openSync` of the token" — when an earlier CALLER owns that position. Verified:
 a probe removing a symlink at the first resolution of a configured path had its removal land in an
