@@ -230,10 +230,15 @@ export function assertProvenanceOwnership(profileLike: ProfileLike, deps?: Parti
 // the "RunState union" tests in capture-record.test.mjs, since nothing in this repository compiles
 // TypeScript and a `.d.mts`-only change is otherwise invisible to the whole suite.
 // [round 44] The BOUNDARY of what `closeCaptureRun` authenticates, stated once here because it is a
-// property of this type rather than of any one guard. Everything the close RECORDS is authenticated:
-// the opening payload against the pending token's digest, the run id against that token, and the
-// output root against what the open observed — a caller cannot make this module commit a record
-// asserting something it did not observe, which is the whole point of the hardening in rounds 37-43.
+// property of this type rather than of any one guard. Everything the close carries forward FROM THIS
+// CALLER-HELD STATE is authenticated: the opening payload against the pending token's digest, the run
+// id against that token, and `output_root` additionally compared with the closing observation — so a
+// caller cannot make this module commit a record whose OPENING half asserts something the open did
+// not observe, which is the whole point of the hardening in rounds 37-43. It is deliberately not the
+// broader claim that every field of the record is authenticated, and this comment made that broader
+// claim for a round: the closing asset hashes are freshly OBSERVED at close (nothing could
+// authenticate a value that did not exist at open), and the recorded build identity also folds in the
+// caller-supplied `captureOutcome` and closing observation, neither of which the token covers.
 // What is NOT authenticated is a caller's claim that there is nothing to record. A `Proxy` traps
 // `ownKeys`, `getOwnPropertyDescriptor` and `get`, so it can answer every reflective question
 // exactly as `{skipped: true}` would while wrapping a genuinely active run; no by-value shape test
