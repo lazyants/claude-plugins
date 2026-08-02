@@ -532,5 +532,123 @@ def test_the_one_sanctioned_call_site_uses_draft_sha1_py():
     )
 
 
+# ---------------------------------------------------------------------------
+# 5. --durable-root PATH (LT-409): an explicit, caller-supplied root that
+#    REPLACES self-anchoring when given, and must be byte-identical to
+#    today's self-anchored behavior when omitted (backward compatibility is
+#    non-negotiable -- real book projects are mid-run against this script).
+# ---------------------------------------------------------------------------
+
+def run_draft_sha1_from(script_path, *args, cwd=None):
+    """Like run_draft_sha1() above, but the script is invoked from an
+    arbitrary on-disk location instead of {root}/scripts/draft_sha1.py --
+    used to prove --durable-root truly REPLACES self-anchoring rather than
+    merely supplementing it: a script copy sitting somewhere with no
+    sibling segments/ dir at all can only succeed via the flag."""
+    return subprocess.run(
+        [sys.executable, str(script_path), *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=str(cwd) if cwd else None,
+    )
+
+
+def test_durable_root_flag_redirects_away_from_self_anchored_location(tmp_path):
+    """The script copy lives in a bare, sibling-less directory (no
+    segments/ next to it at all) -- self-anchoring alone would look for
+    segments/ one level up from THAT location and fail. Passing
+    --durable-root pointing at a SEPARATE, real fixture root must resolve
+    against that root instead, proving durable_root is now an explicit
+    input rather than something inferred from the script's own path."""
+    real_root = make_durable_root(tmp_path)
+    seg = "segRedirect"
+    content = b'{"seg": "segRedirect", "blocks": []}'
+    write_draft(real_root, seg, content)
+
+    # A lone copy of draft_sha1.py with NO segments/ directory anywhere
+    # near it -- self-anchoring (parents[1]/segments) would resolve to a
+    # nonexistent directory.
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "draft_sha1.py"
+    shutil.copy2(DRAFT_SHA1_SRC, orphan_script)
+
+    result = run_draft_sha1_from(orphan_script, seg, "--durable-root", str(real_root))
+
+    assert result.returncode == 0, (
+        f"--durable-root must redirect path resolution to the given root, "
+        f"regardless of the script's own on-disk location -- got rc="
+        f"{result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert result.stdout.strip() == canonical_expected_sha1(json.loads(content))
+
+
+def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
+    """Companion negative control: the SAME orphan copy, invoked WITHOUT
+    --durable-root, must fail via today's self-anchored path resolution
+    (proving the positive test above is passing because of the flag, not
+    because the orphan copy could somehow find segments/ on its own)."""
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "draft_sha1.py"
+    shutil.copy2(DRAFT_SHA1_SRC, orphan_script)
+
+    result = run_draft_sha1_from(orphan_script, "segRedirect")
+
+    assert result.returncode == 1
+    assert "not found" in result.stderr.lower()
+
+
+def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility: a normal in-place copy (segments/ IS a
+    sibling of scripts/, as production always lays it out), invoked with NO
+    --durable-root at all, must behave byte-for-byte as before -- same
+    digest, same exit code, same stdout shape."""
+    root = make_durable_root(tmp_path)
+    seg = "segNoFlag"
+    content = b'{"seg": "segNoFlag", "blocks": []}'
+    write_draft(root, seg, content)
+
+    result = run_draft_sha1(root, seg)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == canonical_expected_sha1(json.loads(content))
+
+
+def test_durable_root_flag_can_appear_before_or_after_seg(tmp_path):
+    """--durable-root PATH is accepted in either argument position relative
+    to the positional seg -- proving the flag is genuinely parsed out of
+    argv rather than assumed to sit in one fixed slot."""
+    real_root = make_durable_root(tmp_path)
+    seg = "segOrder"
+    content = b'{"seg": "segOrder", "blocks": []}'
+    write_draft(real_root, seg, content)
+
+    orphan_dir = tmp_path / "orphan_location2" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "draft_sha1.py"
+    shutil.copy2(DRAFT_SHA1_SRC, orphan_script)
+
+    expected = canonical_expected_sha1(json.loads(content))
+
+    after = run_draft_sha1_from(orphan_script, seg, "--durable-root", str(real_root))
+    before = run_draft_sha1_from(orphan_script, "--durable-root", str(real_root), seg)
+
+    assert after.returncode == 0 and after.stdout.strip() == expected
+    assert before.returncode == 0 and before.stdout.strip() == expected
+
+
+def test_durable_root_missing_value_exits_2(tmp_path):
+    """--durable-root with no following PATH value is a usage error, not a
+    crash or a silent None."""
+    root = make_durable_root(tmp_path)
+    result = run_draft_sha1(root, "someseg", "--durable-root")
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "Usage" in result.stderr
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

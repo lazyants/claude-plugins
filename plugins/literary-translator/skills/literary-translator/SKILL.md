@@ -1398,7 +1398,24 @@ substituting the resolved `{{RUN_ID}}` alongside every other token, and
 empty string when unset) too; the `resume_setup.py` payload's `subst`
 object must carry the resolved `effort` value as well (see the W3
 glossary-pass note above — `compute_input_digest` fails loudly if it's
-missing). **1.4.7:** as part of that same instantiation the
+missing). **#409:** that instantiation also substitutes `{{MAX_CODEX_JOBS_PER_BATCH}}`,
+a DERIVED token called out here rather than left to the generic "every other
+token" rule above, because it cannot be read straight out of `profile.yml`. It
+is a BARE integer: `engine.max_codex_jobs_per_batch` when the profile sets it,
+otherwise `profile.schema.json`'s own documented `default` for that field. The
+profile key is deliberately OPTIONAL (making it `required` would reject every
+profile written before it existed) but the token is NOT, and JSON Schema
+`default` is an annotation no validator injects, so the orchestrator must apply
+the fallback itself. It joins `SUBST_FIELDS`, so the `subst` object must carry
+the resolved `max_codex_jobs_per_batch` exactly as it carries `batch_agent_cap`.
+The refusal message deliberately does NOT report whether the limit was
+configured or defaulted, and no token carries that provenance: the template
+holds no such information, so the message cannot misstate it. That is a
+correctness property, not an omission — do not "improve" it by threading a
+provenance flag through. Leaving the token unsubstituted is a hard JavaScript
+syntax error at instantiation (verified: `node --check` exits 1 on an
+unsubstituted bare token), not a silent fallback — the same fail-loud property
+`{{CITATION_CONTENT_TYPES}}` relies on. **1.4.7:** as part of that same instantiation the
 orchestrator first runs `resolve_codex_companion.py --durable-root
 ${durable_root}` from the plugin's own install path (never a durable-root
 copy — it must glob the plugin's install locations to find the newest

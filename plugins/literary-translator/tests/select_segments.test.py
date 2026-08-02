@@ -100,26 +100,33 @@ CACHE_KEY_FIELDS = [
 # of real profile.yml/canon.json/segpack machinery. Verbatim copy of the
 # stub `ledger_merge.test.py` uses (both ledger_merge.py AND
 # select_segments.py itself shell out to this exact `--seg <id>` interface).
+# Accepts an OPTIONAL --durable-root (LT-409), mirroring the real script's
+# own contract: when given, it locates test_fixture_cache_keys.json under
+# THAT root instead of its own self-anchored location -- so a test can
+# prove select_segments.py/ledger_merge.py actually forward the flag, not
+# merely tolerate an unknown arg.
 FAKE_CACHE_KEY_PY = """#!/usr/bin/env python3
 import argparse
 import json
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-DURABLE_ROOT = HERE.parent
-KEYS_PATH = DURABLE_ROOT / "test_fixture_cache_keys.json"
-
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seg")
     parser.add_argument("--field")
+    parser.add_argument("--durable-root", default=None)
     args = parser.parse_args()
+    if args.durable_root:
+        durable_root = Path(args.durable_root).resolve()
+    else:
+        durable_root = Path(__file__).resolve().parent.parent
+    keys_path = durable_root / "test_fixture_cache_keys.json"
     if not args.seg:
         sys.stderr.write("fake cache_key.py: test stub requires --seg\\n")
         return 1
-    data = json.loads(KEYS_PATH.read_text(encoding="utf-8"))
+    data = json.loads(keys_path.read_text(encoding="utf-8"))
     if args.seg not in data:
         sys.stderr.write(f"fake cache_key.py: no fixture key for {args.seg}\\n")
         return 1
@@ -968,6 +975,199 @@ def test_blocked_regen_gate_nonmapping_generation_hashes_escalates(tmp_path):
     assert "non-object 'generation_hashes'" in classification["detail"]
 
     assert payload["classification"]["seg_reusable_control"] == {"category": "reusable"}
+
+
+# ---------------------------------------------------------------------------
+# --durable-root PATH (LT-409): an explicit, caller-supplied root that
+# REPLACES self-anchoring when given -- including where the ledger_merge.py
+# AND cache_key.py subprocesses this script shells out to are found AND are
+# themselves invoked with the same --durable-root. Byte-identical to
+# today's self-anchored behavior when omitted.
+# ---------------------------------------------------------------------------
+
+def run_select_from(script_path, *extra_args, timeout=30):
+    return subprocess.run(
+        [sys.executable, str(script_path), *extra_args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
+    """Negative control: an orphan copy invoked WITHOUT --durable-root
+    cannot succeed via self-anchoring (no manifest.json to even read)."""
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "select_segments.py"
+    shutil.copy2(SELECT_SCRIPT_SRC, orphan_script)
+
+    proc = run_select_from(orphan_script, "--allow-empty")
+
+    assert proc.returncode == 1
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+
+
+def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility: the ordinary in-place fixture, invoked with
+    no --durable-root/--plugin-root at all, behaves exactly as before."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["segNoFlag"])
+
+    proc = run_select(root)
+
+    assert proc.returncode == 0
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["segs"] == ["segNoFlag"]
+
+
+# ---------------------------------------------------------------------------
+# --plugin-root PATH (LT-409, post-review correction): the SECURITY property
+# this flag exists for. ${durable_root}/scripts/ is a Step-0a copy that the
+# codex process can write to (codex_job.py grants --write over the whole
+# durable root), so a sibling script resolved FROM durable_root could be a
+# tampered copy validating itself. --plugin-root is a SEPARATE, orthogonal
+# input that must NEVER be derived from --durable-root.
+# ---------------------------------------------------------------------------
+
+_TAMPERED_LEDGER_MERGE_SRC = (
+    "#!/usr/bin/env python3\n"
+    "import sys\n"
+    "sys.stderr.write('TAMPERED_LEDGER_MERGE_MUST_NEVER_RUN')\n"
+    "sys.exit(97)\n"
+)
+
+
+def poison_durable_root_ledger_merge(root):
+    """Overwrites the durable-root copy of ledger_merge.py with a stand-in
+    for a codex-tampered script: it always fails loudly and distinctively
+    rather than silently faking success, so a test can tell whether THIS
+    copy ran at all, in either direction."""
+    (root / "scripts" / "ledger_merge.py").write_text(
+        _TAMPERED_LEDGER_MERGE_SRC, encoding="utf-8"
+    )
+
+
+def make_trusted_plugin_root(tmp_path, name="trusted_plugin_install"):
+    """A SEPARATE physical location holding the REAL ledger_merge.py at the
+    {plugin_root}/assets/scripts/ layout SKILL.md documents for the
+    plugin-anchored scripts -- standing in for the plugin's actual install
+    tree, physically apart from any durable_root fixture."""
+    plugin_root = tmp_path / name
+    plugin_scripts_dir = plugin_root / "assets" / "scripts"
+    plugin_scripts_dir.mkdir(parents=True)
+    shutil.copy2(LEDGER_MERGE_SRC, plugin_scripts_dir / "ledger_merge.py")
+    (plugin_scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
+    return plugin_root
+
+
+def test_plugin_root_flag_bypasses_a_tampered_durable_root_sibling(tmp_path):
+    """The core property: select_segments.py runs from its OWN in-place
+    durable-root copy (production's normal invocation shape) whose SIBLING
+    ledger_merge.py has been POISONED. --plugin-root pointing at a separate,
+    untampered location must make it use THAT ledger_merge.py instead --
+    success is possible ONLY if the poisoned durable-root sibling was never
+    executed."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["segOnly"])
+    poison_durable_root_ledger_merge(root)
+    plugin_root = make_trusted_plugin_root(tmp_path)
+
+    proc = run_select(root, "--plugin-root", str(plugin_root))
+
+    assert proc.returncode == 0, (
+        f"--plugin-root pointing at the REAL ledger_merge.py must succeed "
+        f"even though durable_root's own copy is poisoned -- a rc=1 with "
+        f"the tamper sentinel below would mean the poisoned durable-root "
+        f"copy ran instead of the trusted plugin-root one:\n"
+        f"rc={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "TAMPERED" not in proc.stdout and "TAMPERED" not in proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["segs"] == ["segOnly"]
+
+
+def test_plugin_root_flag_absent_uses_the_poisoned_durable_root_sibling(tmp_path):
+    """Negative control, and backward-compat proof in one: the SAME
+    poisoned durable-root ledger_merge.py, invoked WITHOUT --plugin-root, is
+    exactly what today's self-anchored lookup finds -- unchanged. The
+    poisoned script genuinely runs and fails when the flag is omitted,
+    proving the positive test's success above is attributable to
+    --plugin-root specifically, not some other effect."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["segOnly"])
+    poison_durable_root_ledger_merge(root)
+
+    proc = run_select(root)  # no --plugin-root
+
+    assert proc.returncode == 1
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "TAMPERED_LEDGER_MERGE_MUST_NEVER_RUN" in payload["error"]
+
+
+def test_durable_root_and_plugin_root_are_independently_resolved(tmp_path):
+    """Orthogonality, end to end, from a fully orphan copy: --durable-root
+    points at a DATA-only fixture with NO scripts/ directory AT ALL (so
+    self-anchored/durable-root-derived sibling lookup could not possibly
+    succeed), --plugin-root points at a SEPARATE, scripts-only fixture with
+    no data of its own. Success proves the two concerns are genuinely
+    resolved independently, never conflated into one root."""
+    data_root = tmp_path / "data_only"
+    data_root.mkdir()
+    write_manifest(data_root, ["segOnly"])
+    (data_root / "runs" / "ledger.d").mkdir(parents=True)
+    schemas_dir = data_root / "schemas"
+    shutil.copytree(SCHEMAS_SRC, schemas_dir)
+    assert not (data_root / "scripts").exists(), (
+        "fixture bug: data_root must have NO scripts/ dir at all"
+    )
+
+    plugin_root = make_trusted_plugin_root(tmp_path, name="plugin_only")
+
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "select_segments.py"
+    shutil.copy2(SELECT_SCRIPT_SRC, orphan_script)
+
+    proc = run_select_from(
+        orphan_script,
+        "--durable-root", str(data_root),
+        "--plugin-root", str(plugin_root),
+    )
+
+    assert proc.returncode == 0, (
+        f"durable-root (data) and plugin-root (siblings) must resolve "
+        f"independently -- got rc={proc.returncode}\nstdout:\n{proc.stdout}\n"
+        f"stderr:\n{proc.stderr}"
+    )
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["segs"] == ["segOnly"]
+    assert payload["durable_root"] == str(data_root)
+    # ledger_merge.py's own materialized ledger.json must land under the
+    # DATA root, never under plugin_root.
+    assert (data_root / "runs" / "ledger.json").is_file()
+    assert not (plugin_root / "runs").exists()
+
+
+def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility for the split itself: --durable-root alone
+    (no --plugin-root) still resolves siblings self-anchored, exactly as
+    before the split -- an in-place fixture with an UNTAMPERED
+    ledger_merge.py still succeeds via --durable-root alone."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["segNoFlag"])
+
+    proc = run_select(root, "--durable-root", str(root))
+
+    assert proc.returncode == 0
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["segs"] == ["segNoFlag"]
 
 
 if __name__ == "__main__":

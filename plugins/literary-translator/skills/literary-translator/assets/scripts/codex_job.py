@@ -7,12 +7,27 @@ isolated attempt artifact and only then ATOMICALLY PROMOTES it into its canonica
 this driver only launches it, polls to terminal, pre-filters the result, and
 os.replace()s a validated attempt into place. Claude still only drives/polls/fixes.
 
-Design (PLAN-198 §2.1; the 7 steps below map 1:1):
+Design (PLAN-198 §2.1; the 7 steps below map 1:1) -- #409 SANDBOX HARDENING:
   1. Validate args + establish TWO absolute time ceilings (poll window + finalize budget).
      EVERY subprocess.run gets an explicit stdlib timeout= (NO external `timeout` binary).
-  2. Isolate codex output: substitute the single ⟦JOB_OUT⟧ placeholder in the prompt-file
-     with the per-run attempt path, so a zombie codex that OBEYS only ever writes an
-     abandoned attempt file, never the canonical.
+  2. Isolate codex output BY WRITE-CONFINEMENT, not by a checked path: codex is launched
+     with `--cwd` pointed at a FRESH, single-use, per-invocation SANDBOX directory that is
+     verified to sit OUTSIDE any git working tree (see _sandbox_is_confined). codex-companion
+     resolves its own `workspace-write` root via `git rev-parse --show-toplevel` WALKING UP
+     from `--cwd` (lib/workspace.mjs:resolveWorkspaceRoot) -- so `--cwd self.root` (the OLD
+     design) handed codex write access to the WHOLE durable_root repo (scripts/, segments/,
+     the lock, the joblog); `--cwd` a mere SUBDIRECTORY of that same repo is not the fix
+     either, since the git walk-up still finds the SAME outer toplevel. Only a `--cwd` that
+     resolves to ITSELF (no enclosing repo) shrinks the actual OS-level sandbox to that one
+     directory. The sandbox holds nothing but this job's frozen prompt and (once codex writes
+     it) its attempt file. On success, the candidate is copied OUT via a FILE-DESCRIPTOR-
+     pinned, digest-verified copy (_publish_from_sandbox) into the private staging slot in
+     segdir -- never trusted by path, since a path re-checked-then-reused is exactly what a
+     symlink swap defeats. On timeout/failure the sandbox is never read again and is
+     abandoned (rmtree'd); a straggling codex turn that outlives our poll/cancel can then only
+     write into a directory nobody will ever consume from -- isolation, not proof of kill (the
+     detached codex worker runs in its OWN session; codex-companion's own `cancel` is
+     best-effort and does not prove the turn stopped).
   3. Acquire an exclusive per-seg DRIVER lease via a KERNEL fcntl.flock on a never-unlinked
      sentinel `.codex_job.<seg>.lock` (kernel auto-releases on crash -- no stale-break race).
      A lease-loser writes ONLY its own fail sentinel + stdout, NEVER the hygiene joblog.
@@ -48,6 +63,7 @@ stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied 
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -55,6 +71,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from typing import TypeGuard
 
@@ -86,6 +103,9 @@ _ACTIVE = frozenset(("queued", "running"))
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+_COPY_CHUNK = 1 << 20  # 1 MiB read chunk for the sandbox->staging copy
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -133,6 +153,26 @@ def _ok(proc):
     return proc is not None and proc.returncode == 0
 
 
+def _sha256_fd(fd):
+    """Hash the CURRENT contents of an already-open fd (rewinds first). Never opens a
+    path -- callers hold the identity via the fd itself."""
+    h = hashlib.sha256()
+    os.lseek(fd, 0, os.SEEK_SET)
+    while True:
+        chunk = os.read(fd, _COPY_CHUNK)
+        if not chunk:
+            break
+        h.update(chunk)
+    return h.hexdigest()
+
+
+def _silent_unlinkat(dir_fd, name):
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except OSError:
+        pass
+
+
 class CodexJob:
     def __init__(self, kind, seg, tok, disp, root, companion, prompt_text, prompt_file,
                  deadline_sec, poll_sec, effort, node, model=None):
@@ -159,6 +199,10 @@ class CodexJob:
         self.joblog = os.path.join(self.segdir, ".codex_job.%s.json" % seg)
         self.fail_sentinel = os.path.join(self.segdir, ".codex_failed.%s.%s" % (seg, disp))
         self.final_prompt = None
+        # Per-invocation write-isolated sandbox (#409) -- set by _setup_sandbox(), never in
+        # __init__ (creating it is real filesystem I/O, not pure state setup).
+        self.sandbox_dir = None
+        self.sandbox_attempt = None
 
         # Two hard, absolute time ceilings, fixed at construction (step 1).
         now = time.monotonic()
@@ -204,9 +248,46 @@ class CodexJob:
         except (OSError, ValueError):
             return None
 
+    # TWO INDEPENDENT SEAMS (lane A's relayed contract) -- never collapse them, even
+    # though both happen to resolve to the SAME durable_root-derived value today:
+    #   - _durable_root_args(): the DATA root a gate script should read segments/,
+    #     schemas/, canon.json, etc. from -- confirmed contract: `--durable-root PATH`,
+    #     optional, byte-identical to self-anchored behavior when omitted.
+    #   - _trusted_scripts_dir(): the TRUSTED location _gate() itself resolves gate
+    #     EXECUTABLES from. Today this is SCRIPTS_DIR (codex_job.py's own directory),
+    #     which in production IS the durable-root copy Step 0a makes -- i.e. today's
+    #     value is the SAME vulnerability class #409 exists to close, just on the
+    #     driver's own gate-invocation path rather than codex's. Confining codex's
+    #     writes to its sandbox (see _setup_sandbox) already makes that copy
+    #     unreachable to codex, so this is not currently exploitable through codex --
+    #     but the CONCEPT stays distinct from the data root regardless, so lane A's
+    #     real trusted-location mechanism (the plugin's own install path, precedent:
+    #     SKILL.md:111/:120/:525 -- profile_validate.py/validate_extraction.py/
+    #     resolve_codex_companion.py, which are NEVER copied to durable_root for
+    #     exactly this reason) is a one-line change here when it lands, not a
+    #     re-derivation from a data-root variable that was never the right source.
+    _DURABLE_ROOT_CONTRACT_SCRIPTS = frozenset({"review_ready.py"})
+
+    def _durable_root_args(self, script_name):
+        """`--durable-root <resolved self.root>` for scripts confirmed under lane A's
+        contract; [] for everything else (an un-adopted script would error on an
+        unrecognized flag -- never pass it speculatively). self.root is already
+        os.path.realpath()'d at construction, matching the contract's own
+        `Path(PATH).resolve()` expectation."""
+        if script_name in self._DURABLE_ROOT_CONTRACT_SCRIPTS:
+            return ["--durable-root", self.root]
+        return []
+
+    def _trusted_scripts_dir(self):
+        """Where _gate() resolves gate EXECUTABLES from -- see the seam note above.
+        Returns today's byte-identical default; becomes lane A's real mechanism in one
+        line once confirmed."""
+        return SCRIPTS_DIR
+
     def _gate(self, args, timeout):
-        script = os.path.join(SCRIPTS_DIR, args[0])
-        return self._run([sys.executable, script] + list(args[1:]), timeout)
+        script = os.path.join(self._trusted_scripts_dir(), args[0])
+        argv = [sys.executable, script] + list(args[1:]) + self._durable_root_args(args[0])
+        return self._run(argv, timeout)
 
     # ---- shared regular-file / candidate-gate helpers (#213) ----------------
     def _is_regular(self, path):
@@ -254,13 +335,174 @@ class CodexJob:
         return _ok(self._gate(["review_ready.py", self.seg, "--expect-token", self.tok,
                               "--candidate-file", candidate], timeout_fn()))
 
-    # ---- step 2: isolate codex output ---------------------------------------
+    # ---- step 2: write-isolated sandbox (#409) -------------------------------
+    def _sandbox_is_confined(self, path):
+        """True iff `path` resolves to ITSELF under codex-companion's OWN workspace-root
+        algorithm (git top-level walking UP from `path`, else `path` unchanged -- read
+        directly from the installed companion's lib/workspace.mjs:resolveWorkspaceRoot /
+        lib/git.mjs:ensureGitRepository, not assumed). If `path` is reachable from an
+        ENCLOSING git repository -- e.g. it was accidentally created inside the
+        durable_root's own working tree -- codex's `workspace-write` sandbox would resolve
+        to that OUTER repo root instead, silently handing codex write access back to
+        scripts/, segments/, the lock, and the joblog. Absence of `git` on the machine
+        degrades the SAME way the companion's own resolver degrades (falls back to `path`
+        itself), which is its real, verified behavior, not a weaker assumption of ours."""
+        proc = self._run(["git", "-C", path, "rev-parse", "--show-toplevel"],
+                         self.poll_timeout())
+        return not _ok(proc)
+
+    def _setup_sandbox(self):
+        """Create the per-invocation, single-use, write-isolated sandbox and verify it is
+        actually confined before returning True. Real filesystem I/O -- never called from
+        __init__. On any failure (mkdtemp error, or the sandbox turns out to be inside a
+        git working tree after all) the caller MUST refuse to dispatch: an unconfined
+        sandbox is worse than no launch at all (strictness bias)."""
+        ext = "draft" if self.kind == "translate" else "review"
+        try:
+            raw = tempfile.mkdtemp(prefix="ltcj.%s.%s." % (self.seg, self.inv))
+        except OSError:
+            return False
+        # Pin ONE canonical form now -- macOS's /tmp -> /private/tmp symlink otherwise
+        # produces two spellings of the same directory across this run (mkdtemp's raw
+        # return vs. anything realpath'd later, e.g. by the companion's own state-dir
+        # keying), which would silently miss each other.
+        self.sandbox_dir = os.path.realpath(raw)
+        if not self._sandbox_is_confined(self.sandbox_dir):
+            return False
+        self.sandbox_attempt = os.path.join(self.sandbox_dir, "attempt.%s.json" % ext)
+        return True
+
     def _write_final_prompt(self):
-        final = os.path.join(self.segdir, ".codex_prompt.%s.%s.txt" % (self.seg, self.inv))
-        text = self.prompt_text.replace(JOB_OUT_PLACEHOLDER, self.attempt)
+        """Write the frozen prompt INSIDE the sandbox (its only other content besides the
+        attempt file codex will create) and substitute ⟦JOB_OUT⟧ with the SANDBOX attempt
+        path -- never a path outside it, or codex's own write-confinement would simply
+        reject the write and the #198 no-output failure returns."""
+        final = os.path.join(self.sandbox_dir, "prompt.txt")
+        text = self.prompt_text.replace(JOB_OUT_PLACEHOLDER, self.sandbox_attempt)
         with open(final, "w", encoding="utf-8") as fh:
             fh.write(text)
         self.final_prompt = final
+
+    # ---- step 6b: fd-pinned, digest-verified sandbox -> staging copy --------
+    def _publish_from_sandbox(self, src_path, dst_path):
+        """Copy `src_path` (inside the per-job sandbox, NEVER trusted directly) to
+        `dst_path` (the private staging file in segdir) with every step bound to a file
+        descriptor, never re-resolved by path -- a path re-checked-then-reused is exactly
+        what a symlink swapped in between defeats.
+
+          1. Open src_path O_NOFOLLOW: a symlink (even one that, at open time, still
+             points inside the sandbox) is refused outright -- the sandbox is only ever
+             supposed to hold a REGULAR file at this path. A malicious/buggy codex CAN
+             still WRITE a symlink there (write-confinement restricts where writes land,
+             not what a symlink's target string names), so this refusal is load-bearing,
+             not defensive theatre.
+          2. fstat the opened fd (never lstat/stat the path again) and require S_ISREG.
+          3. Read the whole file through that SAME fd and hash it; fstat the SAME fd a
+             second time and require size/ino/dev/mtime unchanged -- catches a writer
+             still mutating the file underneath the read (identity + digest BEFORE).
+          4. Open the destination DIRECTORY once, by fd (O_DIRECTORY), and do every
+             subsequent create/verify/rename relative to that fd -- the directory itself
+             is pinned, not re-resolved by path either.
+          5. Write to an O_EXCL temp name under that dir fd, then re-open + re-hash what
+             actually LANDED on disk and require it match the digest from step 3
+             (identity + digest AFTER) before the final rename (same dir_fd both sides,
+             same device -- atomic, POSIX overwrite semantics).
+
+        Returns True iff every step succeeded and every check passed; never raises --
+        refuse-and-report is the only failure mode (strictness bias: the only tolerable
+        failure is refusing to publish, never publishing something unverified)."""
+        segdir_fd = None
+        src_fd = None
+        tmp_name = ".pub.%s.%s.tmp" % (self.seg, self.inv)
+        try:
+            try:
+                src_fd = os.open(src_path, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC)
+            except OSError:
+                return False
+            try:
+                st1 = os.fstat(src_fd)
+                if not stat.S_ISREG(st1.st_mode):
+                    return False
+                data = bytearray()
+                os.lseek(src_fd, 0, os.SEEK_SET)
+                while True:
+                    chunk = os.read(src_fd, _COPY_CHUNK)
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                st2 = os.fstat(src_fd)
+            except OSError:
+                return False
+            if (st1.st_dev, st1.st_ino, st1.st_size, st1.st_mtime_ns) != \
+               (st2.st_dev, st2.st_ino, st2.st_size, st2.st_mtime_ns):
+                return False   # mutated under us between the two fstats -- refuse
+            digest = hashlib.sha256(bytes(data)).hexdigest()
+
+            dst_dir = os.path.dirname(dst_path)
+            dst_name = os.path.basename(dst_path)
+            try:
+                segdir_fd = os.open(dst_dir, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
+            except OSError:
+                return False
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_CLOEXEC | _O_NOFOLLOW
+            try:
+                tmp_fd = os.open(tmp_name, flags, 0o600, dir_fd=segdir_fd)
+            except OSError:
+                return False
+            try:
+                written = os.write(tmp_fd, bytes(data))
+            finally:
+                os.close(tmp_fd)
+            if written != len(data):
+                _silent_unlinkat(segdir_fd, tmp_name)
+                return False
+            # Re-open what actually LANDED and re-hash it -- proves the bytes on disk
+            # (not just the in-memory buffer) match what was verified above.
+            try:
+                check_fd = os.open(tmp_name, os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC,
+                                   dir_fd=segdir_fd)
+            except OSError:
+                _silent_unlinkat(segdir_fd, tmp_name)
+                return False
+            try:
+                on_disk = _sha256_fd(check_fd)
+            finally:
+                os.close(check_fd)
+            if on_disk != digest:
+                _silent_unlinkat(segdir_fd, tmp_name)
+                return False
+            try:
+                # POSIX os.rename() overwrites an existing dst atomically (same semantics
+                # as os.replace(); os.replace() itself does not accept dir_fd on this
+                # platform, so the fd-pinned form is spelled with rename()).
+                os.rename(tmp_name, dst_name, src_dir_fd=segdir_fd, dst_dir_fd=segdir_fd)
+            except OSError:
+                _silent_unlinkat(segdir_fd, tmp_name)
+                return False
+            return True
+        finally:
+            if src_fd is not None:
+                os.close(src_fd)
+            if segdir_fd is not None:
+                os.close(segdir_fd)
+
+    # ---- preflight: staging and canonical must share a device (#409) --------
+    def _preflight_same_device(self):
+        """The FINAL step of every promote path is os.replace(staging_file, self.canonical)
+        -- a cross-device rename is NOT atomic on POSIX (falls back to copy+unlink, which
+        can observably leave a partial destination on a crash mid-rename). Refuse BEFORE
+        any dispatch if the private staging directory (segdir, where attempt/pending
+        live) is not on the same filesystem as segments/ itself, rather than discovering
+        it at promote time with a real codex turn already spent. Checked fresh every run
+        via real stat() calls, not hardcoded -- segdir/attempt/pending are ONE directory
+        today, so this is a live regression guard against that ever silently changing."""
+        try:
+            seg_dev = os.stat(self.segdir).st_dev
+            staging_dev = os.stat(os.path.dirname(self.attempt)).st_dev
+            pending_dev = os.stat(os.path.dirname(self.pending)).st_dev
+        except OSError:
+            return False
+        return seg_dev == staging_dev == pending_dev
 
     # ---- step 3: per-seg kernel flock lease ---------------------------------
     def _acquire_flock(self, fd):
@@ -275,18 +517,7 @@ class CodexJob:
                     return False
                 time.sleep(min(0.25, rem))
 
-    # ---- step 4: workspace root, hygiene, adoption, launch ------------------
-    def resolve_expected_ws_root(self):
-        """Replicate the companion's resolveWorkspaceRoot(<root>): git top-level of
-        <root> if a repo, else <root> -- so the hygiene guard field matches exactly."""
-        proc = self._run(["git", "-C", self.root, "rev-parse", "--show-toplevel"],
-                         self.poll_timeout())
-        if _ok(proc):
-            out = proc.stdout.strip()
-            if out:
-                return out
-        return self.root
-
+    # ---- step 4: hygiene, adoption, launch -----------------------------------
     def read_joblog(self):
         try:
             with open(self.joblog, "r", encoding="utf-8") as fh:
@@ -312,17 +543,28 @@ class CodexJob:
         except OSError:
             _silent_remove(tmp)
 
-    def hygiene(self, expected_ws):
-        """Cancel a still-active prior job ONLY IF its status.workspaceRoot matches the
-        expected root AND its status is active. The joblog is codex-writable, so a forged
-        jobId is verified (and one naming a different-store job is NOT FOUND -> no cancel)."""
+    def hygiene(self):
+        """Cancel a still-active prior job for this seg/kind. Prior runs each get their
+        OWN unpredictable sandbox path (#409), so the ONLY place to learn where to look is
+        the prior joblog's own recorded `jobCwd` -- status/cancel MUST be queried with that
+        exact --cwd, since codex-companion's job store is keyed by resolveWorkspaceRoot of
+        whatever --cwd it is given (a query against self.root would search a DIFFERENT,
+        unrelated store and simply never find the job). A missing/malformed `jobCwd` (an
+        old-format joblog from before #409, or a truly forged one) is treated as
+        "cannot locate" -> no cancel attempted; a live status check against the recorded
+        cwd is still required before cancelling, both as defense-in-depth and because
+        "launched" alone doesn't mean "still active". Unlike the pre-#409 design, the
+        joblog now lives in segdir OUTSIDE any sandbox codex can reach, so it is no longer
+        codex-writable -- the "forged jobId" threat this guard originally defended against
+        is structurally closed by the sandbox itself, not by this check."""
         prior = self.read_joblog()
         if not prior or prior.get("status") != "launched":
             return
         pj = prior.get("jobId")
-        if not isinstance(pj, str) or not pj:
+        prior_cwd = prior.get("jobCwd")
+        if not isinstance(pj, str) or not pj or not isinstance(prior_cwd, str) or not prior_cwd:
             return
-        proc = self._run([self.node, self.companion, "status", pj, "--json", "--cwd", self.root],
+        proc = self._run([self.node, self.companion, "status", pj, "--json", "--cwd", prior_cwd],
                         self.poll_timeout())
         if not _ok(proc):
             return
@@ -335,8 +577,8 @@ class CodexJob:
         job = obj.get("job")
         job = job if isinstance(job, dict) else {}
         ws = obj.get("workspaceRoot") or job.get("workspaceRoot")
-        if ws == expected_ws and job.get("status") in _ACTIVE:
-            self._run([self.node, self.companion, "cancel", pj, "--cwd", self.root],
+        if ws == prior_cwd and job.get("status") in _ACTIVE:
+            self._run([self.node, self.companion, "cancel", pj, "--cwd", prior_cwd],
                       self.poll_timeout())
 
     def safe_adopt(self):
@@ -387,12 +629,15 @@ class CodexJob:
         # ALWAYS workspace-write (codex MUST write its ⟦JOB_OUT⟧ attempt -- read-only was
         # the #198 no-output failure) and a FRESH per-attempt codex thread. `--effort`
         # defaults to "high" (belt-and-suspenders with the prompt's own effort opener).
+        # `--cwd` is the per-job SANDBOX (#409), never self.root/durable_root -- see
+        # _sandbox_is_confined for why a mere subdirectory of the same repo would NOT
+        # shrink codex-companion's own workspace-write resolution.
         argv = [self.node, self.companion, "task", "--background", "--json", "--write", "--fresh"]
         if self.effort:
             argv += ["--effort", self.effort]
         if self.model:
             argv += ["--model", self.model]
-        argv += ["--cwd", self.root, "--prompt-file", self.final_prompt]
+        argv += ["--cwd", self.sandbox_dir, "--prompt-file", self.final_prompt]
         proc = self._run(argv, self.poll_timeout())
         if not _ok(proc):
             return False
@@ -407,6 +652,7 @@ class CodexJob:
         self._write_joblog({
             "jobId": jid, "kind": self.kind, "seg": self.seg, "token": self.tok,
             "disp": self.disp, "inv": self.inv, "status": "launched",
+            "jobCwd": self.sandbox_dir,
         })
         return True
 
@@ -416,7 +662,7 @@ class CodexJob:
             if self.poll_remaining() <= 0:
                 break
             proc = self._run([self.node, self.companion, "status", self.jobId, "--json",
-                             "--cwd", self.root], self.poll_timeout())
+                             "--cwd", self.sandbox_dir], self.poll_timeout())
             if _ok(proc):
                 try:
                     obj = json.loads(proc.stdout)
@@ -432,13 +678,23 @@ class CodexJob:
                 break
             time.sleep(min(self.poll_sec, rem))
         if self.job_status not in _TERMINAL:
-            # Poll deadline reached while (possibly) active -> cancel, finalize-bounded.
-            self._run([self.node, self.companion, "cancel", self.jobId, "--cwd", self.root],
-                      self.finalize_timeout())
+            # Poll deadline reached while (possibly) active -> best-effort cancel,
+            # finalize-bounded. This does NOT prove the detached codex turn stopped (it
+            # runs in its own session; codex-companion's cancel is best-effort) -- we never
+            # read from the sandbox again on this path (see finalize()), so a straggler
+            # that outlives this call is neutralised by the isolation itself, not by proof
+            # of termination.
+            self._run([self.node, self.companion, "cancel", self.jobId, "--cwd",
+                      self.sandbox_dir], self.finalize_timeout())
             self.timed_out = True
 
     # ---- step 6: validate the attempt (kind-specific candidate gate) --------
     def validate_attempt(self):
+        # #409: PUBLISH first -- codex's raw output never left the sandbox until this
+        # fd-pinned, digest-verified copy lands it in the private staging slot. Only
+        # THEN do the existing candidate gates (unchanged) get to see it.
+        if not self._publish_from_sandbox(self.sandbox_attempt, self.attempt):
+            return False
         if not self._is_regular(self.attempt):
             return False
         return self._validate_candidate(self.attempt, self.finalize_timeout)
@@ -462,7 +718,14 @@ class CodexJob:
         status quo (which discarded EVERY tail-completed attempt). A multi-slot queue would only
         trade this bounded, self-healing residual for unbounded pending-file accumulation (or, if
         capped, the same discard at the cap) for no convergence benefit -- adopt_pending() promotes
-        the first candidate that passes, and a failing one is superseded by the next launch anyway."""
+        the first candidate that passes, and a failing one is superseded by the next launch anyway.
+
+        #409: PUBLISH from the sandbox first (fd-pinned, digest-verified) -- at this point
+        nothing has validated the candidate yet, but the sandbox->staging copy is not itself
+        a trust decision, only a relocation; adopt_pending() on the NEXT run still runs the
+        real candidate gates before anything is promoted."""
+        if not self._publish_from_sandbox(self.sandbox_attempt, self.attempt):
+            return False
         if not self._is_regular(self.attempt):
             return False
         self._clear_nonregular(self.pending)
@@ -492,7 +755,15 @@ class CodexJob:
         # Clean ONLY this invocation's own scratch, by EXACT path (never a wildcard).
         if not self.promoted:
             _silent_remove(self.attempt)  # the os.replace consumed it iff promoted
-        _silent_remove(self.final_prompt)
+        if self.sandbox_dir:
+            # Abandon the WHOLE sandbox unconditionally -- on every path (success,
+            # validate-failure, timeout) we are done reading from it by this point
+            # (validate_attempt/_defer_attempt already PUBLISHED whatever mattered out
+            # via the fd-pinned copy). A straggling codex turn that outlives poll()'s
+            # best-effort cancel can then only write into a directory nobody will ever
+            # consume from again -- this rmtree is the "neutralised by the isolation
+            # itself" half of #409, not a courtesy cleanup.
+            shutil.rmtree(self.sandbox_dir, ignore_errors=True)
         _silent_remove(self.prompt_file)
         # Terminal hygiene joblog ONLY IF we hold the lease (a lease-loser must never clobber
         # the live holder's control state -- HIGH-3 r8).
@@ -518,6 +789,16 @@ class CodexJob:
                 os.makedirs(self.segdir, exist_ok=True)
             except OSError:
                 pass
+            if not self._preflight_same_device():
+                # #409 property 3: staging (segdir) and the canonical segments/ tree must
+                # share a device, or the final promote os.replace() is not atomic. Refuse
+                # BEFORE spending a real codex turn.
+                self.reason = "device-mismatch"
+                return 1
+            if not self._setup_sandbox():
+                # #409 property 4-adjacent: an unconfined sandbox is worse than none.
+                self.reason = "sandbox-not-isolated"
+                return 1
             self._write_final_prompt()
             lock_fd = os.open(self.lock, os.O_CREAT | os.O_RDWR | _O_CLOEXEC, 0o600)
             self.holds_lock = self._acquire_flock(lock_fd)
@@ -525,8 +806,7 @@ class CodexJob:
                 # Lease held past our poll window -> recoverable; re-dispatch on the NEXT W5 run.
                 self.reason = "lease-held"
                 return 1
-            expected_ws = self.resolve_expected_ws_root()
-            self.hygiene(expected_ws)
+            self.hygiene()
             if self.safe_adopt():
                 _silent_remove(self.pending)          # canonical already valid -> any deferred attempt is moot
                 self.adopted = True
