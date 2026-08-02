@@ -1430,6 +1430,31 @@ the full `{{RUN_ID}}` derivation contract and digest definition, and
 `references/ledger-and-resumability.md` for the `dispatch_token`
 commit-gate chain this sets up for translate/review to enforce per segment.
 
+**#412:** that same instantiation ALSO substitutes `{{PLUGIN_ROOT}}` — the
+plugin's own install directory, the SAME value this skill's own
+`{{PLUGIN_ROOT}}` placeholder already resolves to throughout this document
+(Step 0: `${CLAUDE_PLUGIN_ROOT}`), reused here, never redefined. Unlike
+this skill's OTHER `{{PLUGIN_ROOT}}` occurrences — plain prose the reader
+substitutes on the fly when typing an example command (Step 0, W2, W3) —
+THIS one is a literal Workflow-template token: it must be written into the
+instantiated `mass-translate-wf.template.js` file itself, exactly like
+`{{RUN_ID}}`/`{{EFFORT}}`/`{{MODEL}}`/`{{CODEX_COMPANION_PATH_JSON}}`
+above. Thread the SAME value to TWO consumers: `resume_setup.py`'s
+payload, as a new top-level `plugin_root` field (deliberately NOT inside
+`subst` — it is a filesystem path, not a semantic value, so it is never
+folded into `input_digest`; see that script's own module docstring), and
+`codex_job.py`'s own `--plugin-root` flag, appended to both the translate
+and review dispatch commands below alongside `--companion`. Substituting
+it redirects where `codex_job.py` resolves
+`draft_ready.py`/`validate_draft.py`/`review_ready.py` from — the
+plugin's own install tree, which codex cannot write to — instead of
+`${durable_root}/scripts/`, which codex CAN write to (every codex launch
+below grants `--write` over the whole durable root). **Omitting this
+substitution is not a neutral default: it leaves the pre-#412
+vulnerability open** — a codex-tampered copy of any of those three gate
+scripts sitting in `${durable_root}/scripts/` would validate its own bad
+output, and nothing downstream would catch it. Always substitute it.
+
 **W6 Consistency pass** — cross-segment sweep using `consistency_issues.md`
 as a lightweight, hand-maintained tracker after every batch, before the next
 starts. Never the output of an automated script, never read back in or
