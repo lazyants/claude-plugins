@@ -132,18 +132,39 @@ of them drifts. (The regression-lock test counts writer+reader SITES, so its
 review-path site count is larger than the conceptual "readers" list above — that
 is expected, not a contradiction: the test locks every writer site too.)
 
-## 4. Every copied script self-anchors — never assumes cwd, never takes a flag
+## 4. Every copied script self-anchors — never assumes cwd
 
 Every script under `scripts/` derives its own working root via
 `Path(__file__).resolve().parents[1]` (it always lives at
 `${durable_root}/scripts/<name>.py`). Never assume `cwd == durable_root`.
-Never add a `--durable-root` flag — that is not the mechanism.
 
 There are two different halves of the reachability guarantee and they are
 easy to conflate: the `{{DURABLE_ROOT}}` template token is how an *agent*
 finds and invokes the script; `Path(__file__).resolve().parents[1]`
 self-anchoring is how the *script itself* finds everything else once it's
 running. Both are needed; neither substitutes for the other.
+
+**Two optional overrides exist (#409), and they are independent.** On
+`select_segments.py`, `ledger_merge.py`, `resume_setup.py` and
+`review_ready.py`, self-anchoring is the DEFAULT, not the only mechanism:
+
+- `--durable-root PATH` governs **data** — `manifest.json`, `segments/`,
+  `schemas/`, `runs/`, `canon.json`.
+- `--plugin-root PATH` governs **where sibling scripts are resolved from**;
+  a sibling becomes `{plugin_root}/assets/scripts/<name>.py`, and the flag
+  is forwarded verbatim down any further subordinate call.
+
+Omitting both is byte-identical to the old self-anchored behavior, so this
+is a widening, not a breaking change. Earlier revisions of this file said
+"never add a `--durable-root` flag — that is not the mechanism"; that is no
+longer true, and the reason it changed matters:
+
+**`--plugin-root` is deliberately NEVER derived from `--durable-root`.**
+`${durable_root}/scripts/` is a Step-0a copy that the codex process these
+scripts gate can write to. Resolving a checker from inside the tree it
+checks would let a tampered durable-root copy silently pass itself, so the
+trusted-script root must be a separate, independent input. A single root
+cannot serve both roles.
 
 Test discipline: invoke a representative script from a cwd that is neither
 `durable_root` nor the script's own directory, and assert it still correctly

@@ -111,8 +111,15 @@ hardcodes a different path is a bug, not a faithful port.
 - **Script self-anchoring.** Every script copied under `scripts/` derives
   its own working root via `Path(__file__).resolve().parents[1]`, since it
   always lives at `${durable_root}/scripts/<name>.py`. A script never
-  assumes its cwd equals `durable_root`, and never takes a `--durable-root`
-  flag. The `{{DURABLE_ROOT}}` template token (how the calling agent finds
+  assumes its cwd equals `durable_root`. Since #409 four of them
+  (`select_segments.py`, `ledger_merge.py`, `resume_setup.py`,
+  `review_ready.py`) also accept two optional, independent overrides:
+  `--durable-root PATH` for data, and `--plugin-root PATH` for where their
+  sibling scripts resolve from — the latter deliberately never derived from
+  the former, since `${durable_root}/scripts/` is writable by the codex
+  process these scripts gate. Omitting both is byte-identical to plain
+  self-anchoring; see `references/gotchas.md` §4 for the full rationale.
+  The `{{DURABLE_ROOT}}` template token (how the calling agent finds
   and invokes the script) and this `Path(__file__)` self-anchoring (how the
   script finds everything else once it's running) are two different halves
   of the same reachability guarantee — do not conflate them. A test invokes
