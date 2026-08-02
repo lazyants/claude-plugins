@@ -4941,10 +4941,8 @@ test('the open -> close seam: a redirect DEEPER along the absent tail, still ins
 // [round 42] The anchor must be recorded in the SAME representation everything else uses. The climb
 // walked the raw configured path while `canonicalizeForComparison` and `chapterAssetDir` normalize
 // `..` lexically first, so the two disagreed about which directory the anchor was: the kernel reads
-// `a/link/..` as the parent of link's TARGET, lexical normalization reads it as `a`. Nothing bad has
-// been observed to reach a record — the configured-vs-resolved bracket refuses the topologies that
-// would express it — so this asserts the recorded observation itself rather than a halt, which is
-// the honest level for a fix whose consequence is currently masked by another guard.
+// `a/link/..` as the parent of link's TARGET, lexical normalization reads it as `a`. This asserts
+// the recorded observation directly; the fixture below it pins the consequence end to end.
 test('an absent root\'s anchor is recorded lexically, matching the directory the walk actually visits', () => {
   withTempDir((dir) => {
     const real = nodeFs.realpathSync(dir);
@@ -4973,6 +4971,52 @@ test('an absent root\'s anchor is recorded lexically, matching the directory the
       'and specifically not the object the kernel reaches by following the link before the ..');
     assert.equal(opened.runState.output_root.canonical, join(real, 'a', 'assets'),
       'the canonical path is the lexical one, which is the whole reason the anchor must be too');
+  });
+});
+
+// [round 43] And the consequence, end to end, because "another guard catches it" was WRONG. Round
+// 42 built this topology, saw the configured-vs-resolved bracket refuse, and downgraded the finding
+// to a masked inconsistency. It was missing one `mkdir`: with the previously-absent `missing`
+// component CREATED before the rotation, the closing raw path and the closing lexical path land on
+// the same live directory, that bracket passes, and the drift check is what decides. Measured
+// against the raw form: closed `ok: true` with a previous build's `old.png` committed as this run's
+// closing output, under an opening baseline that was empty. A non-reproduction is only ever as good
+// as the topology actually built.
+test('the open -> close seam: a `..` crossing a symlink must not let a previous build\'s tree be recorded as this run\'s', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    nodeFs.mkdirSync(join(real, 'stable', 'leaf'), { recursive: true });
+    nodeFs.mkdirSync(join(real, 'stable', 'assets', 'items'), { recursive: true });
+    nodeFs.writeFileSync(join(real, 'stable', 'assets', 'items', 'old.png'), 'a PREVIOUS build');
+    nodeFs.symlinkSync('leaf', join(real, 'stable', 'pivot'));
+    nodeFs.mkdirSync(join(real, 'v1'), { recursive: true });
+    nodeFs.symlinkSync('../stable/leaf', join(real, 'v1', 'pivot'));
+    nodeFs.symlinkSync('v1', join(real, 'current'));
+    nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+    const profile = {
+      // Concatenated so the `..` survives to the module, as it would from a profile file.
+      capture: { output_dir: `${real}/current/pivot/missing/../../assets`, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    // Keys, not a deep-equal against a literal: the snapshot's per-chapter maps are null-prototype,
+    // so `deepStrictEqual` reports a difference that is about the prototype and not the contents.
+    assert.deepEqual(Object.keys(opened.runState.opening_assets), ['items']);
+    assert.deepEqual(Object.keys(opened.runState.opening_assets.items), [],
+      'the opening baseline must be empty — that is what makes a stale file read as brand-new later');
+
+    // The ingredient that makes both brackets pass at close, so the drift check is the decider.
+    nodeFs.mkdirSync(join(real, 'stable', 'leaf', 'missing'), { recursive: true });
+    nodeFs.unlinkSync(join(real, 'current'));
+    nodeFs.symlinkSync('stable', join(real, 'current'));
+
+    const closed = CR.closeCaptureRun(profile, opened.runState, { ok: true }, null, stubDepsNoIdentity());
+    assert.equal(closed.ok, false,
+      `the rotation moved the run onto a tree it never opened over and must be refused: ${JSON.stringify(closed)}`);
+    assert.equal(nodeFs.existsSync(join(profile.publish.chapters_dir, '.provenance', 'run', 'current.json')), false,
+      'and no record may carry the previous build\'s old.png as this run\'s output');
   });
 });
 

@@ -2200,10 +2200,13 @@ function directAbsenceConfirmed(absPath, containmentRoot, deps) {
   // parent, lexical normalization reads it as `a`, and those are different directories whenever
   // `link` leaves its own parent. Measured: the anchor came back as the base directory while the
   // canonical path resolved under `a`, so open and close disagreed about which object the anchor
-  // even was. Nothing bad has been observed to reach a record — the round-34
-  // configured-vs-resolved bracket refuses the topologies that would express it — but a guard whose
-  // correctness rests on a DIFFERENT guard catching its inputs first is the arrangement this module
-  // has been bitten by repeatedly, and the two representations agreeing costs one call.
+  // even was. It reaches a RECORD: with the tail's own missing component created before an alias
+  // rotation, the closing raw path and the closing lexical path land on the same live directory, the
+  // round-34 configured-vs-resolved bracket therefore passes, and the drift check decides on an
+  // anchor read in the wrong coordinate system — measured against the raw form as `ok: true` with a
+  // previous build's `old.png` committed as this run's closing output under an empty opening
+  // baseline. Round 42 first judged this masked by that bracket, on a probe missing exactly the one
+  // `mkdir` that makes it pass; a non-reproduction is only as good as the topology actually built.
   const segs = normalizeSegments(rawSegments(absPath), absolute);
   // [round 28] The climb starts at the TIP, and the round-27 version started at its parent. That
   // was a check which did not test the fact it claimed: this runs AFTER the listing has already
@@ -2269,10 +2272,11 @@ function directAbsenceConfirmed(absPath, containmentRoot, deps) {
     // directory inside the same anchor — a previous build's tree reached through a link planted on
     // the tail. Two reviewers found that independently, with different topologies (a link at the
     // root's own name; a redirect one component deeper), which is what marks it as the property
-    // being wrong rather than one topology being missed. These are the RAW segments below the
-    // anchor; the close re-joins them onto the anchor's resolution taken then and normalizes, so a
-    // `..` in the configured path stays supported while a symlink newly planted along the tail can
-    // never match — a resolved path that traversed one does not equal the lexical join.
+    // being wrong rather than one topology being missed. These are the LEXICALLY NORMALIZED segments
+    // below the anchor — they said "RAW" for a round, which was true of the code and is the very
+    // thing round 42 fixed — so the close re-joins a suffix that already carries no `..` onto the
+    // anchor's resolution taken then. A symlink newly planted along the tail can never match: a
+    // resolved path that traversed one does not equal the lexical join.
     const anchor = Object.freeze({ path: candidate, identity: anchorIdentity.id, tail: Object.freeze(segs.slice(depth)) });
     if (depth < containmentRoot.depth) return { ok: true, anchor };
     // Gate 3's actual property, on the same comparison basis gate 3 built its root with.
