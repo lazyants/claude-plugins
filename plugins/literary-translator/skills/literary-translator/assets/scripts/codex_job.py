@@ -53,6 +53,7 @@ CLI (canonical path is DERIVED, never caller-supplied):
       --expect-token <RUN_ID:seg|RUN_ID:seg:r<label>> --disp <per-dispatch nonce>
       --deadline-sec <int> [--poll-sec <int default 15>]
       [--write] [--fresh] [--effort high] [--model <model>] [--node <exe default "node">]
+      [--plugin-root <plugin install root, #412>]
 
 Exit codes: 0 = promoted (or adopted) a validated artifact; 1 = launch/run/validate failure
 (recoverable, wrote an empty fail sentinel); 2 = usage/env error.
@@ -153,6 +154,17 @@ def _ok(proc):
     return proc is not None and proc.returncode == 0
 
 
+def _stderr_text(proc):
+    # type: (subprocess.CompletedProcess | None) -> "str | None"
+    """#400: whatever stderr text a companion subprocess produced, or None if there is
+    none to read (proc is None -- a timeout or spawn failure never produced a
+    CompletedProcess at all -- or stderr is empty/whitespace-only). Never raises."""
+    if proc is None:
+        return None
+    text = (getattr(proc, "stderr", None) or "").strip()
+    return text or None
+
+
 def _sha256_fd(fd):
     """Hash the CURRENT contents of an already-open fd (rewinds first). Never opens a
     path -- callers hold the identity via the fd itself."""
@@ -175,7 +187,7 @@ def _silent_unlinkat(dir_fd, name):
 
 class CodexJob:
     def __init__(self, kind, seg, tok, disp, root, companion, prompt_text, prompt_file,
-                 deadline_sec, poll_sec, effort, node, model=None):
+                 deadline_sec, poll_sec, effort, node, model=None, plugin_root=None):
         self.kind = kind
         self.seg = seg
         self.tok = tok
@@ -188,6 +200,30 @@ class CodexJob:
         self.effort = effort
         self.node = node
         self.model = model
+        # #412: the plugin's own install root -- realpath'd at construction
+        # (matching self.root's own treatment) so a symlink cannot be swapped
+        # underneath an already-resolved trust decision. main() now resolves
+        # this exactly once and passes the RESOLVED value here (never the
+        # raw CLI string a second time -- re-resolving would open a TOCTOU
+        # window between main()'s own validation and this call, benign under
+        # this file's threat model since winning that race already requires
+        # write access to the one tree #412 exists to keep out of codex's
+        # reach, but pointless to carry once removing it is this cheap); the
+        # realpath() call here stays for any OTHER caller (tests, a future
+        # caller) that constructs a CodexJob directly with an unresolved
+        # path -- idempotent, so a caller that already resolved it pays
+        # nothing extra. Trust-boundary fix: "given" is tested as `is not
+        # None` here, matching main()'s own definition exactly -- a bare
+        # truthiness test (`if plugin_root`) used to treat an empty string
+        # as "not given" too, silently falling back to SCRIPTS_DIR (the
+        # codex-writable durable-root copy) even though main()'s own
+        # pre-flight check had validated `os.path.realpath("")` (the
+        # CURRENT WORKING DIRECTORY) as a real assets/scripts/ location --
+        # an operator who passed the flag at all believed the redirect was
+        # active. `None` (the flag genuinely omitted) is the only value
+        # that reproduces the pre-#412 default; see _trusted_scripts_dir()'s
+        # own docstring.
+        self.plugin_root = os.path.realpath(plugin_root) if plugin_root is not None else None
 
         self.inv = os.urandom(8).hex()
         self.segdir = os.path.join(self.root, "segments")
@@ -218,6 +254,16 @@ class CodexJob:
         self.jobId = None
         self.job_status = None
         self.reason = None
+        # #398/#400: the ONE piece of free-text diagnostic detail this driver ever
+        # captures, from whichever of two sources actually produced one -- the
+        # companion job store's own `errorMessage` (poll(), set when codex-companion's
+        # tracked-job runner caught an exception -- e.g. an API/quota error -- and
+        # persisted its message) or the `task` LAUNCH subprocess's own stderr
+        # (launch(), set when the launch invocation itself failed to even queue a job).
+        # Never both at once in practice (a launch that never queued a job has nothing
+        # for poll() to later overwrite this with). See poll()/launch() for exactly
+        # when each is set.
+        self.error_detail = None
 
     # ---- time helpers (FLOAT, no floor) -------------------------------------
     def poll_remaining(self):
@@ -249,36 +295,42 @@ class CodexJob:
             return None
 
     # TWO INDEPENDENT SEAMS (lane A's relayed contract) -- never collapse them, even
-    # though both happen to resolve to the SAME durable_root-derived value today:
+    # though both CAN resolve to the SAME durable_root-derived value:
     #   - _durable_root_args(): the DATA root a gate script should read segments/,
     #     schemas/, canon.json, etc. from -- confirmed contract: `--durable-root PATH`,
     #     optional, byte-identical to self-anchored behavior when omitted.
     #   - _trusted_scripts_dir(): the TRUSTED location _gate() itself resolves gate
-    #     EXECUTABLES from. Today this is SCRIPTS_DIR (codex_job.py's own directory),
-    #     which in production IS the durable-root copy Step 0a makes -- i.e. today's
-    #     value is the SAME vulnerability class #409 exists to close, just on the
-    #     driver's own gate-invocation path rather than codex's.
+    #     EXECUTABLES from. WITHOUT --plugin-root this is still SCRIPTS_DIR
+    #     (codex_job.py's own directory), which in production IS the durable-root
+    #     copy Step 0a makes -- the SAME vulnerability class #409 exists to close,
+    #     just on the driver's own gate-invocation path rather than codex's.
     #
-    #     DO NOT read _setup_sandbox() as closing this. The sandbox confines only the
-    #     codex processes THIS driver launches. Other shipped passes still hand codex
-    #     write access over the whole durable root -- the glossary and skeptic passes
-    #     dispatch `agentType: "codex:codex-rescue"` whose job is to WRITE a fragment
-    #     under ${durable_root}/..., and the sanctioned manual W5 drive launches
-    #     codex-companion with `--write` and cwd = durable_root. ${durable_root}/scripts/
-    #     sits inside every one of those write roots, and the glossary pass runs BEFORE
-    #     W5 in the same project, so a gate script tampered with there is exactly what
-    #     _gate() would execute later. This is a LIVE residual, not defense-in-depth.
+    #     DO NOT read _setup_sandbox() as closing this by itself. The sandbox confines
+    #     only the codex processes THIS driver launches. Other shipped passes still
+    #     hand codex write access over the whole durable root -- the glossary and
+    #     skeptic passes dispatch `agentType: "codex:codex-rescue"` whose job is to
+    #     WRITE a fragment under ${durable_root}/..., and the sanctioned manual W5
+    #     drive launches codex-companion with `--write` and cwd = durable_root.
+    #     ${durable_root}/scripts/ sits inside every one of those write roots, and the
+    #     glossary pass runs BEFORE W5 in the same project, so a gate script tampered
+    #     with there is exactly what _gate() would execute later.
     #
-    #     Closing it is NOT a one-line change (an earlier version of this comment said
-    #     it was): there is no {{PLUGIN_ROOT}} substitution token, so a new field has to
-    #     be threaded resume_setup.py -> template -> this driver's argparse. And moving
-    #     this to the plugin install path ALSO requires draft_ready.py and
-    #     validate_draft.py to adopt --durable-root first -- both are __file__-anchored
-    #     at parents[1] and explicitly take no root flag, so they would otherwise start
-    #     looking for segments/ inside the plugin. Precedent for the destination is
-    #     SKILL.md's never-copied plugin-path scripts (profile_validate.py,
-    #     validate_extraction.py, glossary_preflight.py, resolve_codex_companion.py).
-    _DURABLE_ROOT_CONTRACT_SCRIPTS = frozenset({"review_ready.py"})
+    #     #412: CLOSED, but opt-in, not forced. `--plugin-root PATH` (threaded
+    #     resume_setup.py -> the `{{PLUGIN_ROOT}}` template token -> this driver's own
+    #     argparse -- see mass-translate-wf.template.js's header token doc for the
+    #     exact substitution shape) redirects _trusted_scripts_dir() to
+    #     `{plugin_root}/assets/scripts/`, the SAME layout SKILL.md's never-copied
+    #     plugin-path scripts already use (profile_validate.py, validate_extraction.py,
+    #     glossary_preflight.py, resolve_codex_companion.py) -- a location the codex
+    #     process this driver launches cannot write to. Omitting --plugin-root
+    #     reproduces the pre-#412 vulnerability unchanged (byte-identical default);
+    #     closing it for a given dispatch requires the ORCHESTRATING SESSION to
+    #     actually pass the flag, which is outside this file's own scope. Moving the
+    #     redirect destination required draft_ready.py and validate_draft.py to adopt
+    #     --durable-root FIRST (both were __file__-anchored at parents[1] with no root
+    #     flag, so they would otherwise start looking for segments/ inside the plugin
+    #     once resolved from there) -- landed, see _DURABLE_ROOT_CONTRACT_SCRIPTS below.
+    _DURABLE_ROOT_CONTRACT_SCRIPTS = frozenset({"review_ready.py", "draft_ready.py", "validate_draft.py"})
 
     def _durable_root_args(self, script_name):
         """`--durable-root <resolved self.root>` for scripts confirmed under lane A's
@@ -292,10 +344,15 @@ class CodexJob:
 
     def _trusted_scripts_dir(self):
         """Where _gate() resolves gate EXECUTABLES from -- see the seam note above for
-        why this is a LIVE residual and why redirecting it is not a one-line change.
-        Returns today's byte-identical default (SCRIPTS_DIR), never a value derived
-        from self.root: the data root must not be able to decide which executable
-        validates it."""
+        the full rationale. #412: when self.plugin_root is given, returns
+        `{plugin_root}/assets/scripts/` -- a location the codex process this driver
+        launches cannot write to, unlike SCRIPTS_DIR. Falls back to today's
+        byte-identical default (SCRIPTS_DIR, never a value derived from self.root) when
+        self.plugin_root is None -- the data root must not be able to decide which
+        executable validates it, and omitting --plugin-root must reproduce today's
+        exact behavior."""
+        if self.plugin_root:
+            return os.path.join(self.plugin_root, "assets", "scripts")
         return SCRIPTS_DIR
 
     def _gate(self, args, timeout):
@@ -336,18 +393,61 @@ class CodexJob:
         except OSError:
             pass
 
+    # #399: a gate that RAN and REJECTED an attempt currently discards both its
+    # own diagnostic output and the rejected attempt itself (finalize()
+    # _silent_remove()s self.attempt when not promoted) -- so diagnosing WHY a
+    # rejection happened requires re-running the whole translation. Capture the
+    # rejecting gate's own combined stdout+stderr into self.error_detail
+    # (reusing the #400 plumbing) instead.
+    _GATE_OUTPUT_CAP = 4000  # chars; this text lands in the durable joblog, so it must stay bounded
+
+    def _capture_gate_rejection(self, gate_name, proc):
+        """`proc` is the CompletedProcess of a gate call that just REJECTED
+        (returncode != 0) -- never a None proc (a gate that could not even run
+        has nothing to capture; _ok(None) is already False and the caller
+        never reaches here for that case). This plugin's gate scripts are NOT
+        uniform about which stream carries the diagnostic text (see each
+        script's own docstring), so both stdout and stderr are captured
+        rather than guessing one. Truncated to _GATE_OUTPUT_CAP chars with an
+        explicit marker naming the exact bound -- never left unbounded."""
+        out = getattr(proc, "stdout", None) or ""
+        err = getattr(proc, "stderr", None) or ""
+        combined = (out + (("\n" + err) if err else "")).strip()
+        if not combined:
+            return
+        if len(combined) > self._GATE_OUTPUT_CAP:
+            combined = combined[: self._GATE_OUTPUT_CAP] + (
+                "... [truncated at %d chars]" % self._GATE_OUTPUT_CAP
+            )
+        self.error_detail = "%s: %s" % (gate_name, combined)
+
     def _validate_candidate(self, candidate, timeout_fn):
         """Kind-specific candidate-file gate against `candidate`; each gate call is bounded by a
         FRESH timeout_fn() (remaining budget re-read per call). Returns True iff every gate PASSED
-        (an _ok()-True). Used by validate_attempt (attempt path)."""
+        (an _ok()-True). Used by validate_attempt (attempt path). #399: on a REJECTING gate (ran,
+        returned non-zero), captures that gate's own output via _capture_gate_rejection() before
+        returning False -- a gate that could not even run (proc is None) has nothing to capture."""
         if self.kind == "translate":
-            if not _ok(self._gate(["draft_ready.py", self.seg, "--expect-token", self.tok,
-                                   "--candidate-file", candidate], timeout_fn())):
+            proc = self._gate(["draft_ready.py", self.seg, "--expect-token", self.tok,
+                               "--candidate-file", candidate], timeout_fn())
+            if not _ok(proc):
+                if proc is not None:
+                    self._capture_gate_rejection("draft_ready.py", proc)
                 return False
-            return _ok(self._gate(["validate_draft.py", self.seg, "--candidate-file", candidate],
-                                 timeout_fn()))
-        return _ok(self._gate(["review_ready.py", self.seg, "--expect-token", self.tok,
-                              "--candidate-file", candidate], timeout_fn()))
+            proc = self._gate(["validate_draft.py", self.seg, "--candidate-file", candidate],
+                             timeout_fn())
+            if not _ok(proc):
+                if proc is not None:
+                    self._capture_gate_rejection("validate_draft.py", proc)
+                return False
+            return True
+        proc = self._gate(["review_ready.py", self.seg, "--expect-token", self.tok,
+                          "--candidate-file", candidate], timeout_fn())
+        if not _ok(proc):
+            if proc is not None:
+                self._capture_gate_rejection("review_ready.py", proc)
+            return False
+        return True
 
     # ---- step 2: write-isolated sandbox (#409) -------------------------------
     # Outcomes of the enclosing-repository probe. These MUST stay distinct: the generic
@@ -580,7 +680,18 @@ class CodexJob:
             return None
 
     def _write_joblog(self, obj):
-        """Atomic never-torn write via O_EXCL/O_NOFOLLOW tmp + os.replace. Best-effort."""
+        """Atomic never-torn write via O_EXCL/O_NOFOLLOW tmp + os.replace. Best-effort.
+
+        Consistency fix: checks os.write()'s own return value against the
+        payload length before publishing, matching the short-write guard
+        _publish_from_sandbox() already applies to its own tmp-file write
+        (below) -- POSIX write() is permitted to write FEWER bytes than
+        requested. Without this check a short write left a TRUNCATED,
+        invalid-JSON temp file that os.replace() would still publish as the
+        joblog -- jobId/jobCwd are what hygiene()'s cancel-a-stale-prior-job
+        path and a human reading this file after a crash both trust; a
+        corrupt joblog is silently worse than a merely-missing one (which
+        is a value read_joblog() already handles as `None`)."""
         tmp = os.path.join(self.segdir, ".codex_job.%s.%s.tmp" % (self.seg, self.inv))
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_CLOEXEC | _O_NOFOLLOW
         try:
@@ -588,9 +699,13 @@ class CodexJob:
         except OSError:
             return
         try:
-            os.write(fd, json.dumps(obj).encode("utf-8"))
+            data = json.dumps(obj).encode("utf-8")
+            written = os.write(fd, data)
         finally:
             os.close(fd)
+        if written != len(data):
+            _silent_remove(tmp)
+            return
         try:
             os.replace(tmp, self.joblog)
         except OSError:
@@ -673,6 +788,7 @@ class CodexJob:
             if proc is None:
                 return False                       # could not validate -> keep pending, launch fresh
             if proc.returncode != 0:
+                self._capture_gate_rejection(name, proc)  # #399: capture before discarding
                 _silent_remove(self.pending)       # gate ran & rejected -> discard stale/bad, launch fresh
                 return False
         os.replace(self.pending, self.canonical)   # every gate passed
@@ -693,6 +809,13 @@ class CodexJob:
         argv += ["--cwd", self.sandbox_dir, "--prompt-file", self.final_prompt]
         proc = self._run(argv, self.poll_timeout())
         if not _ok(proc):
+            # #400: the launch invocation itself failed (non-zero exit, or _run()
+            # returned None on a timeout/spawn failure) -- capture whatever stderr
+            # the companion printed (its own thrown error, e.g. auth/quota) rather
+            # than silently falling through to run()'s generic "launch-failed"
+            # reason with no detail behind it. proc is None on a timeout/spawn
+            # failure, so there is nothing to read in that case.
+            self.error_detail = _stderr_text(proc)
             return False
         try:
             obj = json.loads(proc.stdout)
@@ -700,6 +823,9 @@ class CodexJob:
             obj = None
         jid = obj.get("jobId") if isinstance(obj, dict) else None
         if not isinstance(jid, str) or not jid:
+            # The companion exited 0 but produced no usable jobId -- capture its
+            # stderr too (usually empty on a clean exit, but never discarded).
+            self.error_detail = _stderr_text(proc)
             return False
         self.jobId = jid
         self._write_joblog({
@@ -722,6 +848,22 @@ class CodexJob:
                     job = obj.get("job") if isinstance(obj, dict) else None
                     if isinstance(job, dict):
                         self.job_status = job.get("status")
+                        # #400: the companion's own job store persists errorMessage
+                        # when its tracked-job runner caught a thrown exception (an
+                        # API/quota/auth error, not a content defect) -- this is
+                        # EXACTLY the "N unrelated per-segment content failures"
+                        # signal #400 reports as missing. Present (a non-empty
+                        # string) once the job reaches a real failure, never before
+                        # -- so plain assignment (not "first/last non-empty wins")
+                        # is fine, but guard the type/emptiness rather than
+                        # overwriting a real capture with an absent/blank one on a
+                        # later poll of the SAME job (polling stops the instant
+                        # job_status goes terminal, so in practice there is no
+                        # "later poll" once errorMessage first appears -- this
+                        # guard is defensive, not load-bearing on that guarantee).
+                        err = job.get("errorMessage")
+                        if isinstance(err, str) and err.strip():
+                            self.error_detail = err.strip()
                 except ValueError:
                     pass
             if self.job_status in _TERMINAL:
@@ -820,16 +962,25 @@ class CodexJob:
         _silent_remove(self.prompt_file)
         # Terminal hygiene joblog ONLY IF we hold the lease (a lease-loser must never clobber
         # the live holder's control state -- HIGH-3 r8).
+        #
+        # #398/#400: `reason` and `error_detail` are BOTH carried into this joblog, not just
+        # the stdout line below -- run() launches this driver DETACHED (`nohup ... >/dev/null
+        # 2>&1 &`, see mass-translate-wf.template.js), so the stdout line's own "reason"/
+        # "error_detail" are thrown away at the shell level on that path; THIS FILE is the
+        # only durable place either ever lands. Previously `reason` (a gate-REJECTED attempt
+        # reported no differently from a genuine timeout) and error_detail's two sources
+        # (poll()'s companion errorMessage, launch()'s stderr) were computed and discarded.
         if self.holds_lock:
             self._write_joblog({
                 "jobId": self.jobId, "kind": self.kind, "seg": self.seg, "token": self.tok,
                 "disp": self.disp, "inv": self.inv, "status": "terminal", "ok": self.ok,
                 "timed_out": self.timed_out, "job_status": self.job_status, "adopted": self.adopted,
+                "reason": self.reason, "error_detail": self.error_detail,
             })
         line = {
             "ok": self.ok, "kind": self.kind, "seg": self.seg, "jobId": self.jobId,
             "job_status": self.job_status, "timed_out": self.timed_out,
-            "adopted": self.adopted, "reason": self.reason,
+            "adopted": self.adopted, "reason": self.reason, "error_detail": self.error_detail,
         }
         sys.stdout.write(json.dumps(line) + "\n")
         sys.stdout.flush()
@@ -923,6 +1074,13 @@ def _build_parser():
     p.add_argument("--effort", default="high")
     p.add_argument("--model", default=None)
     p.add_argument("--node", default="node")
+    # #412: the plugin's own install root -- see _trusted_scripts_dir()'s own
+    # docstring and the seam comment above _DURABLE_ROOT_CONTRACT_SCRIPTS for
+    # why gate EXECUTABLES must be resolvable from somewhere the codex
+    # process this driver launches cannot write to. Optional; omitting it
+    # reproduces today's pre-#412 default (SCRIPTS_DIR) byte-for-byte -- this
+    # is opt-in hardening, not a forced migration.
+    p.add_argument("--plugin-root", default=None, dest="plugin_root")
     return p
 
 
@@ -942,6 +1100,63 @@ def main(argv=None):
     if not os.path.isfile(args.companion):
         print("Error: --companion not found: %s" % args.companion, file=sys.stderr)
         return 2
+    # Resolved exactly ONCE, right here, and reused for both the validation
+    # below and the CodexJob() construction further down -- never re-derived
+    # from the raw `args.plugin_root` string a second time. A second
+    # `os.path.realpath()` call on the raw string would open a TOCTOU window
+    # (a symlink swapped between the two resolutions could make them
+    # disagree, so a caller passing a validated PATH could still end up with
+    # a CodexJob resolving somewhere else); not a live attack in this
+    # threat model (an actor able to swap a symlink INSIDE --plugin-root
+    # already has write access to the one tree #412 exists to keep
+    # write-inaccessible to codex, which is a strictly worse position than
+    # winning this race), but resolving once removes the possibility of the
+    # two ever meaning something different -- the exact "two definitions of
+    # the same value can drift" shape the empty-string bug above was.
+    resolved_plugin_root = None
+    if args.plugin_root is not None:
+        # #412: fail loudly at usage time on a misconfigured --plugin-root
+        # (e.g. a typo, or a plugin layout that predates assets/scripts/)
+        # rather than silently falling through _gate()'s own OSError->None
+        # handling later, which would otherwise be indistinguishable from an
+        # ordinary "gate ran out of budget" case.
+        #
+        # Trust-boundary fix: an EMPTY or whitespace-only --plugin-root
+        # (e.g. a `{{PLUGIN_ROOT}}` template substitution that silently
+        # resolved to nothing) is rejected HERE, explicitly, rather than
+        # being let through to CodexJob.__init__ -- which used to test
+        # `plugin_root` for TRUTHINESS (`if plugin_root else None`), so an
+        # empty string (is-not-None, but falsy) was silently treated as
+        # "not given" and fell back to SCRIPTS_DIR, the self-anchored,
+        # codex-WRITABLE durable-root copy -- defeating this whole redirect
+        # while this very check below still validated (and passed for)
+        # `os.path.realpath("")`, which resolves to the CURRENT WORKING
+        # DIRECTORY, not the empty string the operator actually passed. A
+        # caller who set --plugin-root at all believed the redirect was
+        # active; silently discarding it is exactly the failure mode this
+        # flag exists to close. Confirmed exploitable: with the durable
+        # root's own draft_ready.py poisoned (a stub that accepts anything)
+        # and cwd/assets/scripts present, `--plugin-root ""` passed this
+        # directory check, then silently used the poisoned copy and wrongly
+        # promoted a wrong-token attempt.
+        if not args.plugin_root.strip():
+            print(
+                "Error: --plugin-root was given but is empty/whitespace-only "
+                "-- this usually means a {{PLUGIN_ROOT}} template "
+                "substitution did not happen. Omit the flag entirely for "
+                "today's self-anchored behavior, or pass a real path.",
+                file=sys.stderr,
+            )
+            return 2
+        resolved_plugin_root = os.path.realpath(args.plugin_root)
+        plugin_scripts_dir = os.path.join(resolved_plugin_root, "assets", "scripts")
+        if not os.path.isdir(plugin_scripts_dir):
+            print(
+                "Error: --plugin-root %s does not resolve to a directory containing "
+                "assets/scripts/ (resolved: %s)" % (args.plugin_root, plugin_scripts_dir),
+                file=sys.stderr,
+            )
+            return 2
     try:
         prompt_text = open(args.prompt_file, "r", encoding="utf-8").read()
     except OSError as exc:
@@ -956,7 +1171,7 @@ def main(argv=None):
         kind=args.kind, seg=args.seg, tok=args.expect_token, disp=args.disp, root=args.cwd,
         companion=args.companion, prompt_text=prompt_text, prompt_file=args.prompt_file,
         deadline_sec=args.deadline_sec, poll_sec=poll_sec, effort=args.effort, node=args.node,
-        model=args.model,
+        model=args.model, plugin_root=resolved_plugin_root,
     )
     return job.run()
 

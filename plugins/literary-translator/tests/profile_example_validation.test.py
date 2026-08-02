@@ -316,19 +316,51 @@ def test_fully_filled_fixture_structurally_identical_passes_cleanly(pv, tmp_path
     assert "OK -- Step 0 validation passed" in out, out
 
 
-def test_shipped_example_batch_agent_cap_is_1_3_4_default(pv):
-    """#95 shipped-value lock: profile.example.yml's engine.batch_agent_cap
-    must be the 1.3.5 default (3500), never the stale 1000 that refused any
-    glossary/mass batch over ~26 segments (`1+N*38` at max_fix_rounds:4).
-    Reads the REAL shipped example directly -- this is red against
-    origin/main (which still ships 1000) and green once the example is
-    bumped. Only the shipped DEFAULT moves; already-seeded projects keep
+def test_shipped_example_batch_agent_cap_is_the_409_step2_default(pv):
+    """Shipped-value lock, most recently moved by #409 step 2:
+    profile.example.yml's engine.batch_agent_cap must be 10000, never a
+    stale prior default -- 1000 (pre-1.3.5, refused any glossary/mass batch
+    over ~26 segments at `1+N*38`) or 3500 (1.3.5-through-1.16.2, which the
+    post-#348/#352 `1+N*86` mass-translate formula reduced to admitting only
+    40 segments: `1 + 40*86 = 3441`).
+
+    10000 is a policy CHOICE (an operator-sized cap), not a value derivable
+    from the formula alone -- but its CONSEQUENCE for the binding consumer
+    (mass-translate, the highest per-unit-cost gate this cap protects) is:
+    `1 + 116*86 = 9977 <= 10000` admits a 116-segment book batch, while
+    `1 + 117*86 = 10063 > 10000` refuses a 117-segment one -- the same
+    boundary profile.example.yml's own engine.batch_agent_cap comment
+    states. This test does not re-derive 10000 itself (there is no formula
+    that produces a cap from nothing); it pins the shipped constant and
+    documents, via that boundary arithmetic, what choosing it actually
+    means -- so a future bump has the same obligation to update this
+    comment's own arithmetic, not just the literal.
+
+    Reads the REAL shipped example directly -- this is red against a tree
+    that still ships an older default and green once the example is bumped
+    to match. Only the shipped DEFAULT moves; already-seeded projects keep
     whatever value they filled in, so this touches fresh Step-0a copies
     only."""
     example = yaml.safe_load(EXAMPLE_PATH.read_text(encoding="utf-8"))
-    assert example["engine"]["batch_agent_cap"] == 3500, (
-        "profile.example.yml's engine.batch_agent_cap must be 3500 (the "
-        f"1.3.5 #95 default); found {example['engine']['batch_agent_cap']!r}"
+    shipped_cap = example["engine"]["batch_agent_cap"]
+    assert shipped_cap == 10000, (
+        "profile.example.yml's engine.batch_agent_cap must be 10000 (the "
+        f"#409 step 2 default); found {shipped_cap!r}"
+    )
+    # The boundary this cap draws for mass-translate (86 calls/segment at the
+    # shipped max_fix_rounds:4 -- see profile.example.yml's own derivation).
+    max_fix_rounds = example["engine"]["max_fix_rounds"]
+    wait_calls = 9  # 1.16.1/#348's shipped WAIT_CHUNKS(8) + 1 authoritative re-check
+    per_segment = 8 + 2 * wait_calls + max_fix_rounds * (6 + wait_calls)
+    admitted = (shipped_cap - 1) // per_segment
+    assert 1 + admitted * per_segment <= shipped_cap
+    assert 1 + (admitted + 1) * per_segment > shipped_cap
+    assert admitted == 116, (
+        f"at the shipped max_fix_rounds:{max_fix_rounds} (per-segment cost "
+        f"{per_segment}), batch_agent_cap:{shipped_cap} admits {admitted} "
+        f"mass-translate segments, not the 116 profile.example.yml's own "
+        f"comment documents -- either the cap, max_fix_rounds, or the "
+        f"documented figure has drifted from the other two"
     )
 
 

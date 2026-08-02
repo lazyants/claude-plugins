@@ -420,6 +420,33 @@ def test_full_classification_taxonomy_and_report(tmp_path):
         "ids_by_category",
         "overrides",
         "excluded_only_segs",
+        # #409 Step 1. This exact-key assertion is deliberate: a consumer that
+        # reads `authorizes_dispatch` must be able to trust that the key is
+        # always present, so silently dropping it has to fail here.
+        "authorizes_dispatch",
+        "previously_converged",
+        # #409 Step 3 -- the resume-gate evidence, reported on the SUCCESS
+        # path too and therefore part of this contract. `runs_missing_digest`
+        # in particular must always be present: a consumer (or a test) that
+        # can only assert "the run passed" cannot tell a check that scanned
+        # and found nothing from one that scanned nothing at all, which is
+        # the failure mode the whole gate exists to stop reproducing.
+        # tests/resume_gate_skip_detection.test.py owns the behavior; this
+        # line owns the contract.
+        "runs_missing_digest",
+        "runs_acknowledged_pre_gate",
+        # Security fix: run ids from either evidence half that failed
+        # validate_run_id() -- {run_id: reason}, never fed into a filesystem
+        # path. Reported on the success path for the same reason
+        # runs_missing_digest is: a consumer must be able to see the exact
+        # set, not merely that the run passed.
+        # tests/resume_gate_skip_detection.test.py owns the behavior.
+        "unsafe_run_ids",
+        "dispatching_run_ids",
+        "workflow_run_ids",
+        "run_id_evidence",
+        "drafts_scanned",
+        "drafts_untokened",
     }
     assert payload["success"] is True
     assert payload["durable_root"] == str(root)
@@ -996,7 +1023,18 @@ def run_select_from(script_path, *extra_args, timeout=30):
 
 def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     """Negative control: an orphan copy invoked WITHOUT --durable-root
-    cannot succeed via self-anchoring (no manifest.json to even read)."""
+    cannot succeed via self-anchoring (no manifest.json to even read).
+
+    The assertions name the specific reason rather than stopping at
+    `success is False`, and the path assertion is the load-bearing one. A
+    bare "it failed" control passes for ANY failure -- a syntax error, a
+    missing dependency, or self-anchoring resolving to some entirely
+    different root -- so it would keep this test green while the property it
+    exists to protect quietly stopped holding, leaving the docstring as the
+    only record of what was meant. Pinning that the script looked for
+    manifest.json at the ORPHAN location's own parent is what proves
+    self-anchoring resolved where it should have and simply found nothing
+    there."""
     orphan_dir = tmp_path / "orphan_location" / "scripts"
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "select_segments.py"
@@ -1007,6 +1045,16 @@ def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     assert proc.returncode == 1
     payload = parse_stdout(proc)
     assert payload["success"] is False
+    assert "manifest.json not found" in payload["error"], (
+        f"expected the self-anchored manifest lookup to be what failed, got: "
+        f"{payload['error']!r}"
+    )
+    expected_lookup = orphan_dir.parent / "manifest.json"
+    assert str(expected_lookup) in payload["error"], (
+        f"self-anchoring must have resolved the durable root to the orphan "
+        f"copy's own parent ({expected_lookup}); the failure names a "
+        f"different path: {payload['error']!r}"
+    )
 
 
 def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
@@ -1109,6 +1157,95 @@ def test_plugin_root_flag_absent_uses_the_poisoned_durable_root_sibling(tmp_path
     assert "TAMPERED_LEDGER_MERGE_MUST_NEVER_RUN" in payload["error"]
 
 
+# ---------------------------------------------------------------------------
+# Coverage-gap fix: every --plugin-root test above poisons ledger_merge.py
+# and uses "segOnly" with NO fragment written -- not_started, never
+# converged. classify_converged_segment() (the only caller of
+# compute_current_cache_key()) is never reached from any of them, so
+# compute_current_cache_key()'s OWN plugin_root_str parameter was unpinned:
+# its sibling parameters on the SAME function -- durable_root,
+# durable_root_str, cache_key_script -- are already exercised (the
+# relative-durable-root converged-segment test two sections up), but
+# plugin_root_str never was. Mirrors the ledger_merge.py poisoning pattern
+# exactly, one sibling over, with a CONVERGED segment and --durable-root
+# OMITTED -- exercising compute_current_cache_key()'s own documented
+# "durable_root_str is None but plugin_root_str IS" branch by name.
+# ---------------------------------------------------------------------------
+
+_TAMPERED_CACHE_KEY_SRC = (
+    "#!/usr/bin/env python3\n"
+    "import sys\n"
+    "sys.stderr.write('TAMPERED_CACHE_KEY_MUST_NEVER_RUN')\n"
+    "sys.exit(97)\n"
+)
+
+
+def poison_durable_root_cache_key(root):
+    """Overwrites the durable-root copy of cache_key.py with a stand-in for
+    a codex-tampered script -- mirrors poison_durable_root_ledger_merge()'s
+    own pattern. Leaves ledger_merge.py untouched, so a failure here is
+    attributable to cache_key.py specifically, never conflated with the
+    (already separately covered) ledger_merge.py redirect."""
+    (root / "scripts" / "cache_key.py").write_text(_TAMPERED_CACHE_KEY_SRC, encoding="utf-8")
+
+
+def test_plugin_root_flag_bypasses_a_tampered_cache_key_for_a_converged_segment(tmp_path):
+    """--durable-root OMITTED entirely (self-anchored), --plugin-root
+    pointing at a trusted copy of cache_key.py while durable_root's own
+    copy is poisoned. Success is possible ONLY if
+    compute_current_cache_key() actually resolved and ran the TRUSTED
+    cache_key.py -- which requires it to have forwarded --durable-root to
+    that subprocess despite --durable-root never being given to THIS
+    script at all (see compute_current_cache_key()'s own docstring)."""
+    root = make_durable_root(tmp_path)
+    seg = "segConverged"
+    write_manifest(root, [seg])
+    key = make_cache_key("stable")
+    sha1 = write_draft(root, seg, {"text": "stable content"})
+    write_fragment(root, seg, converged_fragment(key, sha1))
+    write_fixture_cache_keys(root, {seg: key})
+    poison_durable_root_cache_key(root)
+    plugin_root = make_trusted_plugin_root(tmp_path)
+
+    proc = run_select(root, "--allow-empty", "--plugin-root", str(plugin_root))
+
+    assert proc.returncode == 0, (
+        f"--plugin-root pointing at the REAL cache_key.py must succeed even "
+        f"though durable_root's own copy is poisoned -- rc={proc.returncode}\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "TAMPERED" not in proc.stdout and "TAMPERED" not in proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["classification"][seg]["category"] == "reusable", (
+        f"the segment must classify via the TRUSTED plugin-root cache_key.py, "
+        f"not escalate on the poisoned durable-root one. "
+        f"{payload['classification'][seg]}"
+    )
+
+
+def test_plugin_root_flag_absent_uses_the_poisoned_durable_root_cache_key(tmp_path):
+    """Negative control, and backward-compat proof in one: the SAME
+    poisoned durable-root cache_key.py, invoked WITHOUT --plugin-root, is
+    exactly what today's self-anchored lookup finds -- proving the positive
+    test's success above is attributable to --plugin-root specifically."""
+    root = make_durable_root(tmp_path)
+    seg = "segConverged"
+    write_manifest(root, [seg])
+    key = make_cache_key("stable")
+    sha1 = write_draft(root, seg, {"text": "stable content"})
+    write_fragment(root, seg, converged_fragment(key, sha1))
+    write_fixture_cache_keys(root, {seg: key})
+    poison_durable_root_cache_key(root)
+
+    proc = run_select(root, "--allow-empty")  # no --plugin-root
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["classification"][seg]["category"] == "human_escalation"
+    assert "TAMPERED_CACHE_KEY_MUST_NEVER_RUN" in payload["classification"][seg]["detail"]
+
+
 def test_durable_root_and_plugin_root_are_independently_resolved(tmp_path):
     """Orthogonality, end to end, from a fully orphan copy: --durable-root
     points at a DATA-only fixture with NO scripts/ directory AT ALL (so
@@ -1168,6 +1305,334 @@ def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
     payload = parse_stdout(proc)
     assert payload["success"] is True
     assert payload["segs"] == ["segNoFlag"]
+
+
+# ---------------------------------------------------------------------------
+# Doubled-path fix. run_ledger_merge()/compute_current_cache_key() run their
+# sibling subprocess with `cwd` set to the ALREADY-RESOLVED durable_root, but
+# used to forward the RAW (possibly relative) --durable-root string as that
+# sibling's own --durable-root. The sibling's own resolve_dirs() does
+# Path(durable_root_str).resolve(), which resolves a relative fragment
+# against ITS cwd -- i.e. the already-resolved value a second time. The
+# identical shape was independently confirmed in resume_setup.py and
+# segment_dispatch_driver.py; --plugin-root had the same class of defect for
+# a related reason (a relative override forwarded raw resolves against the
+# CHILD's cwd, not the ORIGINAL invoker's cwd it was resolved against here).
+# Every existing test above passes an absolute path for both flags, so none
+# of them would have caught this -- these four exercise a genuinely relative
+# override instead.
+# ---------------------------------------------------------------------------
+
+
+def test_relative_durable_root_is_not_doubled_end_to_end(tmp_path):
+    """PROOF, end to end, against the REAL ledger_merge.py (not a probe
+    stub): select_segments.py invoked with a genuinely RELATIVE
+    --durable-root, from a cwd that is its own PARENT directory. Pre-fix,
+    the raw 'durable_root' string was forwarded to ledger_merge.py, whose
+    subprocess cwd is already {tmp_path}/durable_root -- so its own
+    Path('durable_root').resolve() landed on
+    {tmp_path}/durable_root/durable_root, which has no schemas/manifest,
+    and ledger_merge.py failed outright (confirmed against this exact
+    fixture at the parent commit). This drives the real subprocess boundary
+    rather than asserting against source text."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["segRelative"])
+
+    proc = subprocess.run(
+        [sys.executable, str(root / "scripts" / "select_segments.py"), "--durable-root", "durable_root"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=str(tmp_path),
+    )
+
+    assert proc.returncode == 0, (
+        f"a relative --durable-root must resolve to the SAME tree as the "
+        f"equivalent absolute one -- got rc={proc.returncode}\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["segs"] == ["segRelative"]
+    assert payload["durable_root"] == str(root.resolve())
+    assert (root / "runs" / "ledger.json").is_file(), (
+        "ledger_merge.py must have materialized the ledger in the SAME "
+        "tree select_segments.py itself resolved to, not one level deeper"
+    )
+
+
+def test_relative_durable_root_is_not_doubled_for_the_cache_key_sibling_end_to_end(tmp_path):
+    """PROOF for the SECOND, independent call site: compute_current_cache_key()
+    has its own --durable-root forwarding logic, not routed through
+    _root_forward_args() at all (per this project's no-shared-lib
+    convention), so it needed the identical fix applied separately. Only
+    reachable by classifying a CONVERGED segment (the sole path that calls
+    compute_current_cache_key() at all), against the fake cache_key.py stub
+    -- which already mirrors the real script's own
+    Path(durable_root).resolve() behavior, so a doubled path here means it
+    looks for test_fixture_cache_keys.json one level too deep, doesn't find
+    it, and cache_key.py fails -- escalating this segment to
+    human_escalation instead of the reusable it actually is."""
+    root = make_durable_root(tmp_path)
+    seg = "segConvergedRelative"
+    write_manifest(root, [seg])
+    key = make_cache_key("stable")
+    sha1 = write_draft(root, seg, {"text": "stable content"})
+    write_fragment(root, seg, converged_fragment(key, sha1))
+    write_fixture_cache_keys(root, {seg: key})
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "select_segments.py"),
+            "--durable-root",
+            "durable_root",
+            "--allow-empty",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=str(tmp_path),
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["classification"][seg]["category"] == "reusable", (
+        f"pre-fix, the doubled path made cache_key.py look for "
+        f"test_fixture_cache_keys.json one level too deep, fail to find it, "
+        f"and this segment would wrongly escalate to human_escalation "
+        f"instead of classifying reusable. {payload}"
+    )
+
+
+def test_root_forward_args_never_forwards_a_relative_durable_root(tmp_path, monkeypatch):
+    """Unit-level companion to the end-to-end proofs above, pinning
+    _root_forward_args() directly: it must forward the RESOLVED
+    durable_root, never the raw (possibly relative) CLI string."""
+    module = load_select_segments_module()
+    monkeypatch.chdir(tmp_path)
+    dirs = module.resolve_dirs("some/relative/root", None)
+
+    args = module._root_forward_args(dirs, "some/relative/root", None)
+
+    expected = str((tmp_path / "some" / "relative" / "root").resolve())
+    assert args == ["--durable-root", expected], (
+        f"the forwarded value must equal the RESOLVED root exactly once, not "
+        f"the raw relative string (which the sibling would resolve a SECOND "
+        f"time against its own already-resolved cwd). got {args!r}, expected "
+        f"['--durable-root', {expected!r}]"
+    )
+    assert not args[1].endswith(f"{expected}/some/relative/root"), (
+        "the doubled-path shape itself, as a belt-and-suspenders check"
+    )
+
+
+def test_root_forward_args_never_forwards_a_relative_plugin_root(tmp_path, monkeypatch):
+    """Unit-level companion for the --plugin-root half of the same fix: a
+    relative override must be resolved against THIS script's own cwd (the
+    same base resolve_dirs() already used for its own sibling lookup)
+    BEFORE forwarding -- never passed through raw for the child to resolve
+    against ITS OWN, different cwd."""
+    module = load_select_segments_module()
+    (tmp_path / "plugin_dir" / "assets" / "scripts").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    dirs = module.resolve_dirs(None, "plugin_dir")
+
+    args = module._root_forward_args(dirs, None, "plugin_dir")
+
+    assert args[0:2] == ["--durable-root", str(dirs["durable_root"])]
+    expected_plugin_root = str((tmp_path / "plugin_dir").resolve())
+    assert args[2:4] == ["--plugin-root", expected_plugin_root]
+    assert "plugin_dir" != args[3], "must be resolved, not the raw fragment"
+
+
+# ---------------------------------------------------------------------------
+# #409 Step 1 -- the previously-converged re-translate gate.
+#
+# Why this exists: a converged segment becomes dispatch-eligible the moment any
+# cache-key field moves, and a plugin upgrade moves plugin_bundle_hash for EVERY
+# segment at once. Without this gate the next run silently re-translates
+# finished, paid-for work. Measured at v1.17.0: 147 converged segments across
+# three live projects.
+#
+# The predicate is the DURABLE sentinel, never the ledger status: the status is
+# overwritten with `in_progress` before a re-dispatch, so a status-based guard
+# does not fire on the path it exists to guard.
+# ---------------------------------------------------------------------------
+
+EVER_CONVERGED_SEG = "seg03_stale_cachekey"   # converged, then cache-key stale
+
+
+def _mark_ever_converged(root, seg):
+    """Raise the sentinel the way ledger_update.py does, by filename."""
+    p = root / "segments" / f".ever_converged.{seg}"
+    p.write_text("converged\n", encoding="utf-8")
+    return p
+
+
+def test_gate_refuses_by_default_when_a_previously_converged_segment_is_selected(tmp_path):
+    root = setup_full_project(tmp_path)
+    baseline = run_select(root)
+    assert baseline.returncode == 0
+    assert EVER_CONVERGED_SEG in parse_stdout(baseline)["segs"], (
+        "precondition: the stale-cache-key segment must be dispatch-eligible by "
+        "default, otherwise this test proves nothing"
+    )
+
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+
+    proc = run_select(root)
+    assert proc.returncode != 0, (
+        "a previously-converged segment must NOT be silently re-translated\n"
+        f"stdout={proc.stdout!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert EVER_CONVERGED_SEG in out["error"], "the refusal must name the segment"
+    assert "--allow-retranslate-converged" in out["error"], (
+        "the refusal must name the flag that authorizes it"
+    )
+
+
+def test_the_refusal_names_the_SECOND_loss_the_flag_does_not_ask_about(tmp_path):
+    """#409: `--allow-retranslate-converged` authorizes one thing and costs
+    two. The same cache-key move that made the converged segments stale also
+    moves the resume digest, minting a fresh RUN_ID that orphans the
+    dispatch_token on every NOT-yet-converged draft in the same selection --
+    so those retranslate too, discarding any hand-applied fix. On a live
+    project that was 21 authorized and 21 unmentioned, the silent half
+    exactly the size of the half being asked about.
+
+    Asserted against the specific numbers and the exact id set, not against
+    the refusal firing at all: the refusal already fired before this text
+    existed, so a `returncode != 0` assertion here would be green whether or
+    not the second loss is named. The `not_yet_converged` exact-list
+    assertion is what makes this a red attributable to THIS string."""
+    root = setup_full_project(tmp_path)
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0
+    out = parse_stdout(proc)
+    expected_second = [s for s in parse_stdout(run_select(root, "--allow-retranslate-converged"))["segs"]
+                       if s != EVER_CONVERGED_SEG]
+    assert expected_second, (
+        "precondition: the selection must hold at least one not-yet-converged "
+        "segment, or this test proves nothing"
+    )
+    assert out["not_yet_converged"] == expected_second, out
+    assert str(len(expected_second)) in out["error"], (
+        "the operator must get the second COUNT, not just a caution"
+    )
+    for seg in expected_second:
+        assert seg in out["error"], f"the refusal must name {seg}"
+    # The condition must travel with the claim -- an unconditional warning
+    # overstates (a fresh RUN_ID is not minted when the flag is passed against
+    # an unchanged bundle) and an overstated warning is one people skip.
+    assert "If this dispatch also mints a fresh RUN_ID" in out["error"], (
+        "the second loss must be stated WITH its condition, never as a certainty"
+    )
+
+
+def test_no_second_loss_paragraph_when_nothing_else_is_selected(tmp_path):
+    """FALSE-POSITIVE BOUND (stays green if the paragraph is deleted): when
+    the converged segment is the only thing selected there is no second loss,
+    and claiming one would be the overstatement the wording exists to avoid."""
+    root = setup_full_project(tmp_path)
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+
+    proc = run_select(root, "--only-segs", EVER_CONVERGED_SEG)
+
+    assert proc.returncode != 0
+    out = parse_stdout(proc)
+    assert out["not_yet_converged"] == []
+    assert "THE SECOND NUMBER" not in out["error"]
+
+
+def test_gate_permits_with_the_explicit_authorization_flag(tmp_path):
+    root = setup_full_project(tmp_path)
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+
+    proc = run_select(root, "--allow-retranslate-converged")
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert EVER_CONVERGED_SEG in out["segs"]
+    assert out["authorizes_dispatch"] is True
+    assert out["previously_converged"] == [EVER_CONVERGED_SEG]
+
+
+def test_classify_only_reports_without_authorizing_a_dispatch(tmp_path):
+    """final_audit.py's path: it needs the classification of a finished book --
+    the normal state of which is 'many previously-converged segments' -- and
+    must not be refused, because it never translates anything."""
+    root = setup_full_project(tmp_path)
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+
+    proc = run_select(root, "--classify-only")
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["authorizes_dispatch"] is False, (
+        "a classify-only call must not hand its caller a dispatch authorization"
+    )
+    assert out["previously_converged"] == [], (
+        "classify-only does not evaluate the gate, so it reports no gate result"
+    )
+    assert EVER_CONVERGED_SEG in out["classification"], "the report is still produced"
+
+
+def test_gate_fires_even_though_the_ledger_status_is_no_longer_converged(tmp_path):
+    """THE decisive case, and the reason the predicate is a sentinel file.
+
+    translateStage() writes `in_progress` BEFORE dispatching, and
+    ledger_update.py rebuilds each fragment from scratch, so by the time a
+    re-dispatch is decided the ledger no longer says `converged`. A guard
+    reading the STATUS is therefore green exactly on the path it exists to
+    guard. Here the fragment is overwritten with a non-converged status while
+    the durable sentinel remains -- the refusal must still fire."""
+    root = setup_full_project(tmp_path)
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+
+    write_fragment(root, EVER_CONVERGED_SEG, in_progress_fragment())
+
+    proc = run_select(root)
+    assert proc.returncode != 0, (
+        "the sentinel outlives the status, so the gate must still refuse; a "
+        "status-based predicate would pass here and re-translate the segment\n"
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    err = parse_stdout(proc)["error"]
+    assert EVER_CONVERGED_SEG in err
+    assert "--allow-retranslate-converged" in err, (
+        "must fail through THIS gate, not through some other fatal that happens "
+        "to mention the same segment"
+    )
+
+
+def test_sentinel_filename_matches_the_writer_in_ledger_update(tmp_path):
+    """The convention is spelled in two standalone scripts with no shared
+    import (ledger_update.py WRITES it, select_segments.py READS it). Pin them
+    against each other by name so a rename in one is not a silent no-op in the
+    other -- which would disable the gate while every test above still passes,
+    because they would agree with the reader."""
+    import importlib.util
+
+    def _load(name):
+        path = ASSETS_DIR / "scripts" / name
+        spec = importlib.util.spec_from_file_location(name.replace(".", "_"), str(path))
+        assert spec is not None and spec.loader is not None, f"cannot load {path}"
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    writer = _load("ledger_update.py")
+    reader = _load("select_segments.py")
+    segments_dir = tmp_path / "segments"
+    seg = "segX"
+    assert (
+        writer.ever_converged_path(seg, segments_dir).name
+        == reader.ever_converged_path(seg, segments_dir).name
+    ), "ledger_update.py writes a sentinel select_segments.py would never find"
 
 
 if __name__ == "__main__":

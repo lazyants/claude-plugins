@@ -49,7 +49,10 @@ recordLedgerPrompt's own mandated "never trust the command's own
 fragment_sha1 claim without this independent check" discipline.
 """
 import hashlib
+import importlib.util
+import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -696,7 +699,12 @@ def test_durable_root_flag_redirects_converged_enrich(tmp_path):
 
 def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     """Negative control: the orphan copy, invoked WITHOUT --durable-root,
-    cannot succeed via self-anchoring (no schemas/ dir to load from)."""
+    cannot succeed via self-anchoring. Asserts the SPECIFIC reason -- no
+    schemas/ dir to load ledger-record-base.schema.json from -- not merely
+    that some failure occurred: a bare "it failed" cannot distinguish this
+    correct refusal from an unrelated crash, so a future defect that broke
+    the orphan-copy path for the WRONG reason would pass this test
+    silently."""
     orphan_dir = tmp_path / "orphan_location" / "scripts"
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "ledger_update.py"
@@ -709,6 +717,10 @@ def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     assert result.returncode != 0
     payload = json.loads(result.stdout.strip())
     assert payload["success"] is False
+    assert "schema file not found" in (payload.get("error") or "").lower(), (
+        f"expected the orphan copy to fail specifically on its missing "
+        f"schemas/ directory; got a different reason: {payload}"
+    )
 
 
 def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
@@ -724,6 +736,235 @@ def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
     stdout = json.loads(result.stdout.strip())
     assert stdout["success"] is True
     assert read_fragment(root, seg)["status"] == "in_progress"
+
+
+# ---------------------------------------------------------------------------
+# 10. mark_ever_converged() failure is FATAL to recording convergence
+#     (post-review correction, LT-409).
+# ---------------------------------------------------------------------------
+
+def test_sentinel_write_failure_refuses_to_record_convergence(tmp_path):
+    """When the sentinel write inside mark_ever_converged() fails, the whole
+    'converged' write must be refused -- no ledger fragment written at all --
+    rather than recording convergence anyway. A fragment recorded as
+    'converged' without its sentinel is invisible to the one check that
+    refuses to re-select and retranslate an already-converged segment, so
+    failing OPEN here (the pre-fix behavior) is the dangerous direction. The
+    positive control -- convergence recorded successfully WITH its sentinel
+    -- is test_durable_root_flag_redirects_converged_enrich above.
+
+    ledger_update.py runs as a real subprocess here, so there is no
+    in-process call to monkeypatch (the way an in-process test would patch
+    around an unreliable chmod, per skeptic_ready.test.py's own precedent).
+    The failure is induced at the OS level instead: segments/ is made
+    read-only so os.open()'s O_CREAT cannot create the new sentinel file.
+    Guarded with a runtime write-probe, not just a geteuid()==0 check --
+    some sandboxes/containers ignore permission bits even for a non-root
+    user, and a false negative here would silently degrade this into
+    testing nothing.
+    """
+    root = make_durable_root(tmp_path)
+    seg = "segSentinelFail"
+    write_segpack_fixture(root, seg)
+    draft_sha1_value = write_draft_fixture(root, seg)
+    write_review_fixture(root, seg, draft_sha1_value)
+    payload_path = write_payload(
+        root, "pSentinelFail",
+        {"status": "converged", "cache_key": FULL_CACHE_KEY, "rounds": 1},
+    )
+
+    segments_dir = root / "segments"
+    original_mode = segments_dir.stat().st_mode
+    segments_dir.chmod(0o555)  # read + execute only -- no new entry creatable
+
+    probe_path = segments_dir / ".write_probe"
+    try:
+        probe_path.touch()
+    except PermissionError:
+        blocked = True
+    else:
+        probe_path.unlink()
+        blocked = False
+
+    if not blocked:
+        segments_dir.chmod(original_mode)
+        pytest.skip(
+            "segments/ chmod 0o555 did not actually block file creation -- "
+            "running as root or in a sandbox that ignores permission bits; "
+            "cannot exercise the sentinel-write-failure path this way here"
+        )
+
+    try:
+        result = run_ledger_update(root, seg, payload_path)
+    finally:
+        segments_dir.chmod(original_mode)  # restore for pytest's tmp_path cleanup
+
+    assert result.returncode != 0, (
+        f"a sentinel write failure must refuse the whole write, got rc="
+        f"{result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    stdout = json.loads(result.stdout.strip())
+    assert stdout["success"] is False
+    assert "sentinel" in stdout["error"].lower(), stdout["error"]
+    # Failure shapes never claim a fragment_path/fragment_sha1 that was
+    # never written.
+    assert "fragment_path" not in stdout
+    assert "fragment_sha1" not in stdout
+    assert not (root / "runs" / "ledger.d" / f"{seg}.json").exists(), (
+        "no ledger fragment may be written for a 'converged' status whose "
+        "sentinel could not be created -- recording convergence without its "
+        "sentinel is exactly the unprotected state this fix closes"
+    )
+    assert not (segments_dir / f".ever_converged.{seg}").exists()
+
+    # Post-review correction: the STDERR warning from mark_ever_converged()
+    # itself must describe what NOW happens (refused, nothing lost), never
+    # the pre-correction fail-open story -- an operator reads stderr first,
+    # during the incident, at the moment they're deciding whether anything
+    # needs recovering. The message used to say the opposite of what this
+    # test's own assertions above just proved.
+    stderr_lower = result.stderr.lower()
+    assert "was not recorded" in stderr_lower, result.stderr
+    assert "nothing on disk was lost" in stderr_lower, result.stderr
+    assert "convergence is recorded" not in stderr_lower, (
+        f"stderr must not claim convergence IS recorded -- that was the "
+        f"pre-correction fail-open story this fix exists to prevent, and "
+        f"telling an operator their work is safely recorded when the ledger "
+        f"write was actually refused is worse than saying nothing: "
+        f"{result.stderr!r}"
+    )
+
+
+def _load_module(name, path):
+    """Imports a script as an in-process module -- the established pattern
+    for direct-function-call unit testing elsewhere in this test suite
+    (e.g. resume_integrity.test.py's own `_load_module`, used there for the
+    identical reason: forcing a specific failure deterministically needs a
+    patchable in-process call, which a subprocess boundary would hide)."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None, f"could not load spec for {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_write_failure_after_sentinel_create_is_reported_as_a_clean_refusal(tmp_path):
+    """mark_ever_converged()'s O_CREAT|O_EXCL open() PUBLISHES the sentinel's
+    NAME in segments/ before the single os.write() that fills it in ever
+    runs. Pre-fix, an OSError from that write (or from the os.close() that
+    follows it -- some filesystems, notably NFS, defer reporting a write
+    error until close()) was OUTSIDE the try/except that produces this
+    function's documented "clean False plus stderr explanation" contract --
+    it propagated as an uncaught exception instead, on exactly the failure
+    that contract exists for.
+
+    Genuinely only reachable in-process: there is no portable, reliable way
+    to make a REAL os.write() to a freshly os.open()'d fd fail on a normal
+    filesystem without root/fuse/quota machinery (the write-time analogue of
+    why this codebase's own case-10 TOCTOU tests call a true race "not
+    practically unit-testable"). ledger_update.py is otherwise exercised
+    exclusively via subprocess in this file (matching its own house style),
+    but the one function under test here takes plain seg/segments_dir
+    arguments and has no other side effects worth isolating a subprocess
+    for, so a direct in-process call plus a narrow os.write() patch is the
+    faithful way to reach this specific seam."""
+    ledger_update = _load_module("ledger_update_under_test_write_failure", SCRIPT_SRC)
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segWriteFail"
+
+    real_write = ledger_update.os.write
+    real_stderr = ledger_update.sys.stderr
+
+    def failing_write(fd, data):
+        raise OSError(28, "No space left on device")  # ENOSPC
+
+    captured_stderr = io.StringIO()
+    ledger_update.os.write = failing_write
+    ledger_update.sys.stderr = captured_stderr
+    try:
+        result = ledger_update.mark_ever_converged(seg, segments_dir)
+    finally:
+        ledger_update.os.write = real_write
+        ledger_update.sys.stderr = real_stderr
+
+    assert result is False, (
+        "a write-time OSError must produce the SAME clean False an open-time "
+        "OSError already does -- not an uncaught exception propagating past "
+        "this function's own documented contract"
+    )
+    stderr_lower = captured_stderr.getvalue().lower()
+    assert "could not create the ever-converged sentinel" in stderr_lower
+    assert "was not recorded" in stderr_lower
+    assert "nothing on disk was lost" in stderr_lower
+
+
+def test_close_failure_after_successful_write_is_reported_as_a_clean_refusal(tmp_path):
+    """Sibling of the write-failure test above, for the OTHER OS call this
+    function makes after a successful open(): os.close(). Some filesystems
+    (notably NFS) defer reporting a write error until close() specifically,
+    so this is not a redundant echo of the write-failure case -- it is the
+    one place a write can appear to have succeeded and still turn out to
+    have failed."""
+    ledger_update = _load_module("ledger_update_under_test_close_failure", SCRIPT_SRC)
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segCloseFail"
+
+    real_close = ledger_update.os.close
+    real_stderr = ledger_update.sys.stderr
+
+    def failing_close(fd):
+        raise OSError(5, "Input/output error")  # EIO, as e.g. NFS may defer
+
+    captured_stderr = io.StringIO()
+    ledger_update.os.close = failing_close
+    ledger_update.sys.stderr = captured_stderr
+    try:
+        result = ledger_update.mark_ever_converged(seg, segments_dir)
+    finally:
+        ledger_update.os.close = real_close
+        ledger_update.sys.stderr = real_stderr
+
+    assert result is False, (
+        "a close-time OSError must produce the SAME clean False an open- or "
+        "write-time OSError already does -- not an uncaught exception"
+    )
+    stderr_lower = captured_stderr.getvalue().lower()
+    assert "could not create the ever-converged sentinel" in stderr_lower
+    assert "was not recorded" in stderr_lower
+    assert "nothing on disk was lost" in stderr_lower
+
+
+# ---------------------------------------------------------------------------
+# 11. now_iso8601()'s exact output shape -- the "house format" other scripts'
+#     own copies are named after (e.g. backfill_resume_gate_ack.py), pinned
+#     here since nothing else in this file asserts on the timestamp field's
+#     format at all: a mutation widening timespec to milliseconds would pass
+#     every other test silently (still schema-valid ISO-8601, nothing
+#     downstream refuses it).
+# ---------------------------------------------------------------------------
+
+_ISO8601_WHOLE_SECOND_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+def test_fragment_timestamp_is_whole_second_iso8601_with_bare_z(tmp_path):
+    """Pins now_iso8601()'s exact shape via the real fragment it writes:
+    whole-second precision (timespec='seconds', no fractional digits) and a
+    bare 'Z' suffix (never a '+00:00' offset)."""
+    root = make_durable_root(tmp_path)
+    seg = "segTimestampFormat"
+    payload_path = write_payload(root, "pTimestampFormat", {"status": "in_progress"})
+
+    result = run_ledger_update(root, seg, payload_path)
+
+    assert result.returncode == 0
+    fragment = read_fragment(root, seg)
+    assert _ISO8601_WHOLE_SECOND_Z_RE.match(fragment["timestamp"]), (
+        f"fragment timestamp {fragment['timestamp']!r} must be exactly "
+        f"whole-second ISO-8601 with a bare 'Z' suffix -- the house format "
+        f"other scripts' own now_iso8601() copies are named after"
+    )
 
 
 if __name__ == "__main__":

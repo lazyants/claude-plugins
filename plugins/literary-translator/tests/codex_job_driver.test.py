@@ -82,8 +82,13 @@ p = argparse.ArgumentParser()
 p.add_argument("seg")
 p.add_argument("--expect-token", dest="tok", default=None)
 p.add_argument("--candidate-file", dest="cf", default=None)
+# #412: accept (and use if given) --durable-root -- codex_job.py's _gate() now
+# forwards it to draft_ready.py too (it joined lane A's --durable-root contract
+# alongside review_ready.py); the stub must not choke on an unrecognized flag
+# the same way the real draft_ready.py must not.
+p.add_argument("--durable-root", dest="dr", default=None)
 a = p.parse_args()
-root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+root = os.path.abspath(a.dr) if a.dr else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 path = a.cf if a.cf else os.path.join(root, "segments", a.seg + ".draft.json")
 try:
     d = json.load(open(path, encoding="utf-8"))
@@ -101,8 +106,10 @@ import argparse, json, os, sys
 p = argparse.ArgumentParser()
 p.add_argument("seg")
 p.add_argument("--candidate-file", dest="cf", default=None)
+# #412: same --durable-root adoption as STUB_DRAFT_READY above.
+p.add_argument("--durable-root", dest="dr", default=None)
 a = p.parse_args()
-root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+root = os.path.abspath(a.dr) if a.dr else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 path = a.cf if a.cf else os.path.join(root, "segments", a.seg + ".draft.json")
 try:
     d = json.load(open(path, encoding="utf-8"))
@@ -176,7 +183,10 @@ if sub == "task":
     log({"sub": "task", "cwd": cwd, "prompt_file": opt("--prompt-file"),
          "write": "--write" in rest, "fresh": "--fresh" in rest, "effort": opt("--effort")})
     if state.get("task_returncode", 0):
-        sys.stderr.write("task boom")
+        # #400: task_stderr lets a test simulate the companion's own thrown-error
+        # text (e.g. an auth/quota message) on a launch failure, instead of the
+        # generic "task boom" placeholder.
+        sys.stderr.write(state.get("task_stderr", "task boom"))
         sys.exit(state["task_returncode"])
     seg = state["seg"]; tok = state["tok"]; kind = state["kind"]
     mode = state.get("attempt_mode", "valid")
@@ -250,7 +260,16 @@ if sub == "status":
         f.write(str(n + 1))
     st = seq[min(n, len(seq) - 1)]
     ws = state.get("status_ws", cwd)
-    print(json.dumps({"job": {"status": st, "workspaceRoot": ws}}))
+    job_obj = {"status": st, "workspaceRoot": ws}
+    # #400: status_error_message mimics the companion's own job-store field
+    # (job.errorMessage, persisted when its tracked-job runner catches a thrown
+    # exception -- e.g. quota/auth -- verified directly against the installed
+    # codex-companion.mjs's lib/tracked-jobs.mjs), so a test can simulate a
+    # failure that carries a real cause instead of a bare status string.
+    err = state.get("status_error_message")
+    if err:
+        job_obj["errorMessage"] = err
+    print(json.dumps({"job": job_obj}))
     sys.exit(0)
 
 if sub == "cancel":
@@ -484,20 +503,22 @@ def test_trusted_scripts_dir_defaults_to_module_scripts_dir(tmp_path):
     assert job._trusted_scripts_dir() == codex_job.SCRIPTS_DIR
 
 
-def test_durable_root_args_only_for_contract_scripts(tmp_path):
-    """review_ready.py is confirmed under lane A's --durable-root contract;
-    draft_ready.py/validate_draft.py are NOT (yet) -- passing the flag to a script that
-    never declared it would error on an unrecognized argument, so it must stay [] there."""
+def test_durable_root_args_for_all_three_contract_scripts(tmp_path):
+    """#412: draft_ready.py/validate_draft.py joined review_ready.py under lane A's
+    --durable-root contract (the OTHER agent landed --durable-root support on both,
+    67 tests green) -- this driver adopting the redirect required it: moving
+    _trusted_scripts_dir() to the plugin install path only works if every script it
+    resolves from there can still find the real durable_root's segments/ (see the
+    seam comment above _DURABLE_ROOT_CONTRACT_SCRIPTS). All three now get it."""
     job = _mkjob(tmp_path)
     assert job._durable_root_args("review_ready.py") == ["--durable-root", job.root]
-    assert job._durable_root_args("draft_ready.py") == []
-    assert job._durable_root_args("validate_draft.py") == []
+    assert job._durable_root_args("draft_ready.py") == ["--durable-root", job.root]
+    assert job._durable_root_args("validate_draft.py") == ["--durable-root", job.root]
 
 
-def test_gate_forwards_durable_root_only_to_review_ready(tmp_path, monkeypatch):
+def test_gate_forwards_durable_root_to_all_three_contract_scripts(tmp_path, monkeypatch):
     """End-to-end through _gate() (not the raw helper): the argv actually built for
-    review_ready.py carries --durable-root <job.root>; the argv for draft_ready.py does
-    not carry it at all."""
+    each of the three contract scripts carries --durable-root <job.root>."""
     job = _mkjob(tmp_path)
     captured = {}
 
@@ -506,14 +527,11 @@ def test_gate_forwards_durable_root_only_to_review_ready(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="")
     monkeypatch.setattr(job, "_run", fake_run)
 
-    job._gate(["review_ready.py", job.seg, "--expect-token", job.tok], 10)
-    rr = captured["review_ready.py"]
-    assert "--durable-root" in rr
-    assert rr[rr.index("--durable-root") + 1] == job.root
-
-    job._gate(["draft_ready.py", job.seg, "--expect-token", job.tok], 10)
-    dr = captured["draft_ready.py"]
-    assert "--durable-root" not in dr
+    for script in ("review_ready.py", "draft_ready.py", "validate_draft.py"):
+        job._gate([script, job.seg, "--expect-token", job.tok], 10)
+        argv = captured[script]
+        assert "--durable-root" in argv, f"{script} must carry --durable-root"
+        assert argv[argv.index("--durable-root") + 1] == job.root
 
 
 def test_preflight_same_device_passes_on_real_layout(tmp_path):
@@ -870,6 +888,100 @@ def test_validate_attempt_translate_quality_defect(tmp_path, monkeypatch):
     assert calls == ["draft_ready.py", "validate_draft.py"]
 
 
+# --------------------------------------------------------------------------- #
+# #399: a REJECTING gate's own output must be captured into error_detail
+# (reusing the #400 plumbing) rather than discarded, both from
+# validate_attempt()'s own gate calls and from adopt_pending()'s.
+# --------------------------------------------------------------------------- #
+def _gate_recorder_with_output(results):
+    """Like _gate_recorder, but `results` maps gate name -> (returncode,
+    stdout, stderr) so a test can inspect the CONTENT a rejecting gate
+    printed, not just whether it rejected."""
+    calls = []
+
+    def _gate(args, timeout):
+        calls.append(args[0])
+        rc, out, err = results.get(args[0], (0, "", ""))
+        return SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+    return _gate, calls
+
+
+def test_validate_attempt_captures_rejecting_gate_output(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="translate")
+    _seed_sandbox(tmp_path, job)
+    assert job.error_detail is None   # precondition
+    gate, calls = _gate_recorder_with_output({
+        "draft_ready.py": (0, "", ""),
+        "validate_draft.py": (1, "[c001] FAIL: [FN:1] empty translation", ""),
+    })
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.validate_attempt() is False
+    assert job.error_detail == "validate_draft.py: [c001] FAIL: [FN:1] empty translation", (
+        f"expected the rejecting gate's own name + output captured, got "
+        f"{job.error_detail!r}"
+    )
+
+
+def test_validate_attempt_pass_leaves_error_detail_none(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="translate")
+    _seed_sandbox(tmp_path, job)
+    gate, calls = _gate_recorder_with_output({
+        "draft_ready.py": (0, "", ""),
+        "validate_draft.py": (0, "[c001] OK", ""),
+    })
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.validate_attempt() is True
+    assert job.error_detail is None, "a PASSING gate's output must never be captured"
+
+
+def test_capture_gate_rejection_combines_stdout_and_stderr(tmp_path):
+    job = _mkjob(tmp_path)
+    proc = SimpleNamespace(returncode=1, stdout="stdout line", stderr="stderr line")
+    job._capture_gate_rejection("validate_draft.py", proc)
+    assert job.error_detail == "validate_draft.py: stdout line\nstderr line"
+
+
+def test_capture_gate_rejection_empty_output_leaves_error_detail_none(tmp_path):
+    job = _mkjob(tmp_path)
+    proc = SimpleNamespace(returncode=1, stdout="", stderr="")
+    job._capture_gate_rejection("validate_draft.py", proc)
+    assert job.error_detail is None, "nothing to capture -- must not fabricate a value"
+
+
+def test_capture_gate_rejection_truncates_with_explicit_bound_marker(tmp_path):
+    job = _mkjob(tmp_path)
+    long_output = "X" * (job._GATE_OUTPUT_CAP + 500)
+    proc = SimpleNamespace(returncode=1, stdout=long_output, stderr="")
+    job._capture_gate_rejection("validate_draft.py", proc)
+    assert job.error_detail is not None
+    # The captured value stays a bounded artifact (this lands in the durable
+    # joblog): the raw payload before the "gate_name: " prefix + truncation
+    # marker must not exceed _GATE_OUTPUT_CAP chars.
+    prefix = "validate_draft.py: "
+    assert job.error_detail.startswith(prefix)
+    payload = job.error_detail[len(prefix):]
+    assert len(payload) <= job._GATE_OUTPUT_CAP + len("... [truncated at %d chars]" % job._GATE_OUTPUT_CAP)
+    assert ("... [truncated at %d chars]" % job._GATE_OUTPUT_CAP) in job.error_detail, (
+        "truncation must carry an EXPLICIT marker naming the exact bound, "
+        "never a silent cut"
+    )
+    assert long_output not in job.error_detail, "the full untruncated text must not survive"
+
+
+def test_adopt_pending_captures_rejecting_gate_output(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    assert job.error_detail is None   # precondition
+    gate, calls = _gate_recorder_with_output({
+        "draft_ready.py": (0, "", ""),
+        "validate_draft.py": (1, "[c001] FAIL: dangling FNREF_2", ""),
+    })
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.adopt_pending() is False
+    assert job.error_detail == "validate_draft.py: [c001] FAIL: dangling FNREF_2"
+    assert not os.path.exists(job.pending)   # still discarded, per #213's existing contract
+
+
 def test_validate_attempt_review_uses_review_ready(tmp_path, monkeypatch):
     job = _mkjob(tmp_path, kind="review")
     _seed_sandbox(tmp_path, job)
@@ -955,6 +1067,63 @@ def test_poll_failed_is_terminal_no_cancel(tmp_path, monkeypatch):
     job.poll()
     assert job.job_status == "failed"
     assert job.timed_out is False
+
+
+# --------------------------------------------------------------------------- #
+# #400: poll() must capture the companion's own job.errorMessage rather than
+# discarding it -- verified against the REAL installed codex-companion.mjs's
+# lib/tracked-jobs.mjs: errorMessage is persisted on the job record ONLY when
+# its tracked-job runner catches a thrown exception (auth/quota/etc, not a
+# content defect), which is exactly the "N unrelated per-segment content
+# failures instead of one cause" signal #400 reports as missing.
+# --------------------------------------------------------------------------- #
+def _status_runner_with_error(statuses, error_message, record):
+    """Like _status_runner, but the LAST status in the sequence carries an
+    errorMessage field -- mirroring the real companion, which only ever sets
+    it on the terminal record."""
+    it = iter(statuses)
+    last = {"v": None}
+
+    def _run(argv, timeout):
+        sub = argv[2] if len(argv) > 2 else ""
+        record.append((sub, timeout))
+        if sub == "status":
+            try:
+                last["v"] = next(it)
+            except StopIteration:
+                pass
+            job = {"status": last["v"]}
+            if last["v"] == "failed" and error_message is not None:
+                job["errorMessage"] = error_message
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"job": job}))
+        return SimpleNamespace(returncode=0, stdout="{}")
+    return _run
+
+
+def test_poll_captures_error_message_on_failed_job(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, deadline=100, poll=0)
+    job.jobId = "J"
+    assert job.error_detail is None   # precondition: nothing captured yet
+    rec = []
+    monkeypatch.setattr(job, "_run", _status_runner_with_error(
+        ["queued", "running", "failed"], "quota exceeded: retry after 3600s", rec))
+    job.poll()
+    assert job.job_status == "failed"
+    assert job.error_detail == "quota exceeded: retry after 3600s"
+
+
+def test_poll_leaves_error_detail_none_when_companion_omits_it(tmp_path, monkeypatch):
+    """Fail-safe/no-false-positive companion: a job.errorMessage the companion
+    never set must not be invented -- error_detail stays None, never "None"
+    the string or any other placeholder."""
+    job = _mkjob(tmp_path, deadline=100, poll=0)
+    job.jobId = "J"
+    rec = []
+    monkeypatch.setattr(job, "_run", _status_runner_with_error(
+        ["completed"], None, rec))
+    job.poll()
+    assert job.job_status == "completed"
+    assert job.error_detail is None
 
 
 def test_poll_deadline_cancels_and_times_out(tmp_path, monkeypatch):
@@ -1104,6 +1273,45 @@ def test_launch_no_jobid_returns_false(tmp_path, monkeypatch):
     assert job.launch() is False
 
 
+# --------------------------------------------------------------------------- #
+# #400: launch() must capture the companion's own stderr on a launch failure
+# (non-zero exit, or a proc that exists but yields no usable jobId) rather
+# than silently discarding it -- the other half of #400 alongside poll()'s
+# errorMessage capture above.
+# --------------------------------------------------------------------------- #
+def test_launch_captures_stderr_on_companion_nonzero_exit(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path)
+    job.sandbox_dir = str(tmp_path / "sandbox")
+    assert job.error_detail is None   # precondition
+    monkeypatch.setattr(job, "_run", lambda argv, timeout: SimpleNamespace(
+        returncode=1, stdout="", stderr="Error: rate limit exceeded, retry in 60s"))
+    assert job.launch() is False
+    assert job.error_detail == "Error: rate limit exceeded, retry in 60s"
+
+
+def test_launch_captures_stderr_on_run_returning_none(tmp_path, monkeypatch):
+    """_run() itself returns None on a timeout or spawn failure (see its own
+    docstring) -- launch() must not crash reading .stderr off that None, and
+    must leave error_detail None (nothing to capture)."""
+    job = _mkjob(tmp_path)
+    job.sandbox_dir = str(tmp_path / "sandbox")
+    monkeypatch.setattr(job, "_run", lambda argv, timeout: None)
+    assert job.launch() is False
+    assert job.error_detail is None
+
+
+def test_launch_captures_stderr_when_jobid_missing(tmp_path, monkeypatch):
+    """The companion exits 0 but the JSON carries no jobId -- a distinct
+    failure mode from a non-zero exit, still worth whatever stderr came with
+    it (usually empty on a clean exit, but never silently dropped if not)."""
+    job = _mkjob(tmp_path)
+    job.sandbox_dir = str(tmp_path / "sandbox")
+    monkeypatch.setattr(job, "_run", lambda argv, timeout: SimpleNamespace(
+        returncode=0, stdout="{}", stderr="warning: unexpected response shape"))
+    assert job.launch() is False
+    assert job.error_detail == "warning: unexpected response shape"
+
+
 def test_launch_parses_jobid_and_writes_launched_joblog(tmp_path, monkeypatch):
     job = _mkjob(tmp_path)
     job.sandbox_dir = str(tmp_path / "sandbox")
@@ -1184,6 +1392,38 @@ def test_launch_argv_omits_model_when_unset(tmp_path, monkeypatch):
     assert "--model" not in captured["argv"]
 
 
+def test_launch_argv_passes_through_a_non_default_effort(tmp_path, monkeypatch):
+    """Coverage-gap fix: every OTHER --effort assertion in this file (see
+    test_default_launch_argv_is_write_and_high_effort_with_8_flags_only,
+    _mkjob's own effort="high" default, and every other _mkjob() caller)
+    uses "high" -- CodexJob's own CLI default (_build_parser()'s --effort
+    default="high") -- so none of them can tell self.effort being genuinely
+    FORWARDED apart from --effort "high" being hardcoded regardless of
+    self.effort's actual value. This is the identical "fixture value
+    byte-identical to the parameter's own default" shape already found
+    elsewhere in this branch (node_bin, current_draft_sha1's scripts_dir).
+    Confirmed by mutation: hardcoding launch()'s `argv += ["--effort",
+    self.effort]` to `argv += ["--effort", "high"]` survives every existing
+    effort assertion in this file; only a value that is neither "high" nor
+    None (unlike --model, which already has this exact pair) can catch it."""
+    job = _mkjob(tmp_path)
+    job.effort = "medium"
+    job.final_prompt = str(tmp_path / "fp.txt")
+    job.sandbox_dir = str(tmp_path / "sandbox")
+    captured = {}
+
+    def fake_run(argv, timeout):
+        captured["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"jobId": "j1"}))
+    monkeypatch.setattr(job, "_run", fake_run)
+    assert job.launch() is True
+    argv = captured["argv"]
+    assert argv[argv.index("--effort") + 1] == "medium", (
+        f"self.effort must be forwarded VERBATIM, not hardcoded to the "
+        f"CLI's own default -- argv: {argv}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # SUBPROCESS integration (fake node + stub gates)
 # --------------------------------------------------------------------------- #
@@ -1250,6 +1490,103 @@ def test_failed_job_writes_sentinel_and_terminal_joblog(tmp_path):
     assert sentinel_path(root, seg, "D1").exists()
     jl = json.loads((root / "segments" / ".codex_job.c001.json").read_text())
     assert jl["status"] == "terminal" and jl["ok"] is False
+    # #398: "reason" used to be computed by run() and thrown away at
+    # finalize()'s terminal joblog write -- job_status "failed" (with no
+    # timeout, no completion) falls to run()'s final else branch,
+    # self.reason = "job-%s" % self.job_status.
+    assert jl["reason"] == "job-failed"
+    assert line["reason"] == "job-failed"   # stdout already carried this; unaffected by the fix
+
+
+# --------------------------------------------------------------------------- #
+# #398: end-to-end -- a gate-REJECTED translate attempt (validate_draft.py
+# FAILs on the promoted-but-rejected candidate) must record ITS OWN precise
+# reason ("validate-failed"), not get relabeled generically later. This is
+# the exact "label half of #398" scenario from the issue: before this fix,
+# run() computed "validate-failed" correctly but finalize()'s joblog write
+# dropped it -- the ONLY durable record once the driver is launched detached
+# with stdout redirected to /dev/null (see mass-translate-wf.template.js's
+# nohup dispatch), which run() itself never simulates, so this test asserts
+# directly against the joblog file, the real durable surface.
+# --------------------------------------------------------------------------- #
+def test_terminal_joblog_carries_precise_reason_on_gate_rejection(tmp_path):
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="invalid_quality",
+                                   status_seq=["completed"]))
+    line = parse_line(proc)
+    assert proc.returncode == 1 and line["ok"] is False
+    jl = json.loads((root / "segments" / ".codex_job.c001.json").read_text())
+    assert jl["reason"] == "validate-failed", (
+        "a gate-REJECTED attempt must record its own precise reason in the "
+        "joblog, not fall through to a generic timeout-shaped label"
+    )
+    assert line["reason"] == "validate-failed"
+
+
+# --------------------------------------------------------------------------- #
+# #400: end-to-end -- a job that fails with the companion's own errorMessage
+# (e.g. a quota/auth error) must carry that text into BOTH the stdout line
+# and the terminal joblog, never just be reported as a bare "failed" status
+# indistinguishable from any other cause.
+# --------------------------------------------------------------------------- #
+def test_terminal_joblog_and_line_carry_error_detail_from_companion(tmp_path):
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="none",
+                                   status_seq=["failed"],
+                                   status_error_message="quota exceeded: retry after 3600s"))
+    line = parse_line(proc)
+    assert proc.returncode == 1 and line["ok"] is False
+    assert line["error_detail"] == "quota exceeded: retry after 3600s"
+    jl = json.loads((root / "segments" / ".codex_job.c001.json").read_text())
+    assert jl["error_detail"] == "quota exceeded: retry after 3600s", (
+        "the joblog is the ONLY durable record once the driver runs detached "
+        "with stdout redirected to /dev/null -- the stdout line alone is not enough"
+    )
+
+
+def test_terminal_joblog_and_line_error_detail_absent_when_companion_silent(tmp_path):
+    """Companion control: a plain failure with no errorMessage at all must
+    leave error_detail null/absent everywhere, never a fabricated value."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="none",
+                                   status_seq=["failed"]))
+    line = parse_line(proc)
+    assert line["error_detail"] is None
+    jl = json.loads((root / "segments" / ".codex_job.c001.json").read_text())
+    assert jl["error_detail"] is None
+
+
+# --------------------------------------------------------------------------- #
+# #399: end-to-end -- a REJECTING gate's own output (via the real STUB
+# validate_draft.py, not a hand-typed stand-in) must reach both the stdout
+# line and the terminal joblog, so a rejection can be diagnosed without
+# re-running the whole translation.
+# --------------------------------------------------------------------------- #
+def test_terminal_joblog_and_line_carry_rejecting_gate_output(tmp_path):
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="invalid_quality",
+                                   status_seq=["completed"]))
+    line = parse_line(proc)
+    assert proc.returncode == 1 and line["ok"] is False
+    # STUB_VALIDATE_DRAFT (this file's own gate stub, honoring the real
+    # validate_draft.py candidate-file CLI) prints exactly this on rejection.
+    assert line["error_detail"] == "validate_draft.py: [c001] FAIL (quality)", (
+        f"expected the rejecting gate's own name + printed output; got "
+        f"{line['error_detail']!r}"
+    )
+    jl = json.loads((root / "segments" / ".codex_job.c001.json").read_text())
+    assert jl["error_detail"] == "validate_draft.py: [c001] FAIL (quality)", (
+        "the joblog is the durable sink once the driver runs detached with "
+        "stdout redirected to /dev/null -- must carry this too"
+    )
 
 
 def test_deadline_exceeded_cancels(tmp_path):
@@ -1828,6 +2165,360 @@ def test_probe_reports_git_absent_distinctly(tmp_path, monkeypatch):
     monkeypatch.setattr(codex_job.subprocess, "run", _enoent)
     assert job._probe_enclosing_repo(str(tmp_path)) == codex_job.CodexJob._PROBE_GIT_ABSENT
     assert job._sandbox_is_confined(str(tmp_path)) is True
+
+
+# --------------------------------------------------------------------------- #
+# #412: --plugin-root redirect -- the poisoned-sibling property. The module
+# docstring's own seam comment (above _DURABLE_ROOT_CONTRACT_SCRIPTS) states
+# the vulnerability: ${durable_root}/scripts/ (this fixture's own
+# root/scripts/) is codex-writable (--write over the whole durable root), so
+# a codex-tampered copy of a gate script there could validate its own bad
+# output. This section proves BOTH halves, per the dispatch brief -- neither
+# alone proves anything:
+#   1. --plugin-root pointing at a SEPARATE, trusted location bypasses a
+#      poisoned durable-root sibling entirely (without this half, the
+#      redirect could just be silently ignored).
+#   2. Omitting --plugin-root genuinely falls prey to the poisoned copy
+#      (without this half, "the redirect works" could be true merely
+#      because the poisoned stub itself is broken/inert some other way,
+#      never actually exercised).
+# One test per gate script _gate() invokes, each isolating ONLY that gate's
+# own defect (the other gate in a two-gate check, e.g. draft_ready.py
+# alongside validate_draft.py, is left un-poisoned and passing, so a false
+# pass/fail can only be attributed to the ONE gate under test).
+# --------------------------------------------------------------------------- #
+POISONED_GATE_SRC = '''#!/usr/bin/env python3
+import sys
+print("[POISONED] always OK -- ignores its own --candidate-file content")
+sys.exit(0)
+'''
+
+
+def _poison_durable_root_gate(root, script_name):
+    """Overwrites root/scripts/<script_name> (this fixture's own durable-root
+    COPY -- exactly where the module docstring's seam comment says codex's
+    own --write access reaches) with a stub that ALWAYS exits 0 regardless
+    of its --candidate-file's actual content, simulating a codex-tampered
+    gate designed to validate anything, including its own bad output."""
+    (root / "scripts" / script_name).write_text(POISONED_GATE_SRC, encoding="utf-8")
+
+
+def _make_trusted_plugin_root(tmp_path, name="trusted_plugin_root"):
+    """A SEPARATE physical location holding the REAL (test-stub) gate
+    scripts at the {plugin_root}/assets/scripts/ layout SKILL.md documents
+    for the plugin-anchored scripts -- mirrors
+    tests/resume_integrity.test.py's own make_trusted_plugin_root() for the
+    identical concept, one seam over (that file's redirect protects
+    cache_key.py; this one protects the three candidate-file gates)."""
+    plugin_root = tmp_path / name
+    plugin_scripts_dir = plugin_root / "assets" / "scripts"
+    plugin_scripts_dir.mkdir(parents=True)
+    (plugin_scripts_dir / "draft_ready.py").write_text(STUB_DRAFT_READY, encoding="utf-8")
+    (plugin_scripts_dir / "validate_draft.py").write_text(STUB_VALIDATE_DRAFT, encoding="utf-8")
+    (plugin_scripts_dir / "review_ready.py").write_text(STUB_REVIEW_READY, encoding="utf-8")
+    return plugin_root
+
+
+def test_plugin_root_redirect_bypasses_poisoned_draft_ready(tmp_path):
+    """draft_ready.py half: a WRONG-TOKEN attempt (structure_ok/quality_ok
+    both True -- the ONLY defect is the dispatch_token, which ONLY
+    draft_ready.py checks; validate_draft.py's own stub would pass this
+    candidate regardless, isolating this test to draft_ready.py alone)."""
+    root, companion, node = build_root(tmp_path)
+    _poison_durable_root_gate(root, "draft_ready.py")
+    plugin_root = _make_trusted_plugin_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    state = base_state(seg, tok, "translate", attempt_mode="invalid_token", status_seq=["completed"])
+
+    proc_poisoned = spawn_driver(root, companion, node, seg, tok, "translate", "D1", state)
+    line_poisoned = parse_line(proc_poisoned)
+    proc_trusted = spawn_driver(root, companion, node, seg, tok, "translate", "D2", state,
+                                extra_args=["--plugin-root", str(plugin_root)])
+    line_trusted = parse_line(proc_trusted)
+
+    assert line_poisoned["ok"] is True, (
+        f"FAIL-SAFE CONTROL: without --plugin-root, the poisoned durable-root "
+        f"draft_ready.py must genuinely be consulted and WRONGLY accept a "
+        f"wrong-token attempt -- got {line_poisoned}"
+    )
+    assert line_trusted["ok"] is False, (
+        f"--plugin-root must bypass the poisoned durable-root sibling "
+        f"entirely and use the TRUSTED copy, which correctly REJECTS a "
+        f"wrong-token attempt -- got {line_trusted}"
+    )
+
+
+def test_plugin_root_redirect_bypasses_poisoned_validate_draft(tmp_path):
+    """validate_draft.py half: a quality-defective attempt (structure_ok/
+    token both correct -- the ONLY defect is quality_ok, which ONLY
+    validate_draft.py checks; draft_ready.py's own (un-poisoned, trusted-by-
+    construction here) stub would pass this candidate regardless)."""
+    root, companion, node = build_root(tmp_path)
+    _poison_durable_root_gate(root, "validate_draft.py")
+    plugin_root = _make_trusted_plugin_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    state = base_state(seg, tok, "translate", attempt_mode="invalid_quality", status_seq=["completed"])
+
+    proc_poisoned = spawn_driver(root, companion, node, seg, tok, "translate", "D1", state)
+    line_poisoned = parse_line(proc_poisoned)
+    proc_trusted = spawn_driver(root, companion, node, seg, tok, "translate", "D2", state,
+                                extra_args=["--plugin-root", str(plugin_root)])
+    line_trusted = parse_line(proc_trusted)
+
+    assert line_poisoned["ok"] is True, (
+        f"FAIL-SAFE CONTROL: without --plugin-root, the poisoned durable-root "
+        f"validate_draft.py must genuinely be consulted and WRONGLY accept a "
+        f"quality-defective attempt -- got {line_poisoned}"
+    )
+    assert line_trusted["ok"] is False, (
+        f"--plugin-root must bypass the poisoned durable-root sibling "
+        f"entirely and use the TRUSTED copy, which correctly REJECTS a "
+        f"quality-defective attempt -- got {line_trusted}"
+    )
+
+
+def test_plugin_root_redirect_bypasses_poisoned_review_ready(tmp_path):
+    """review_ready.py half: kind="review"'s own SOLE gate (no second check
+    to isolate against, unlike translate's draft_ready.py+validate_draft.py
+    pair) -- a schema-defective attempt."""
+    root, companion, node = build_root(tmp_path)
+    _poison_durable_root_gate(root, "review_ready.py")
+    plugin_root = _make_trusted_plugin_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    state = base_state(seg, tok, "review", attempt_mode="invalid_schema", status_seq=["completed"])
+
+    proc_poisoned = spawn_driver(root, companion, node, seg, tok, "review", "D1", state)
+    line_poisoned = parse_line(proc_poisoned)
+    proc_trusted = spawn_driver(root, companion, node, seg, tok, "review", "D2", state,
+                                extra_args=["--plugin-root", str(plugin_root)])
+    line_trusted = parse_line(proc_trusted)
+
+    assert line_poisoned["ok"] is True, (
+        f"FAIL-SAFE CONTROL: without --plugin-root, the poisoned durable-root "
+        f"review_ready.py must genuinely be consulted and WRONGLY accept a "
+        f"schema-defective attempt -- got {line_poisoned}"
+    )
+    assert line_trusted["ok"] is False, (
+        f"--plugin-root must bypass the poisoned durable-root sibling "
+        f"entirely and use the TRUSTED copy, which correctly REJECTS a "
+        f"schema-defective attempt -- got {line_trusted}"
+    )
+
+
+def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility for the redirect itself: a driver invoked with
+    NO --plugin-root at all (not even an empty string -- the flag genuinely
+    absent from argv) behaves exactly as before #412, using the CLEAN
+    (un-poisoned) durable-root copy successfully."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="valid",
+                                   status_seq=["completed"]))
+    line = parse_line(proc)
+    assert proc.returncode == 0 and line["ok"] is True
+
+
+def test_plugin_root_misconfigured_fails_loudly_at_usage_time(tmp_path):
+    """A --plugin-root that does not resolve to a directory containing
+    assets/scripts/ must fail LOUDLY at usage time (exit 2, no stdout JSON
+    line at all) rather than silently falling through _gate()'s own
+    OSError->None handling later, which would be indistinguishable from an
+    ordinary 'gate ran out of budget' case."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    bogus_plugin_root = str(tmp_path / "does_not_exist_at_all")
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="valid",
+                                   status_seq=["completed"]),
+                        extra_args=["--plugin-root", bogus_plugin_root])
+    assert proc.returncode == 2, (
+        f"a misconfigured --plugin-root must fail at usage time (exit 2), "
+        f"not silently degrade -- rc={proc.returncode}\nstdout={proc.stdout!r}\n"
+        f"stderr:\n{proc.stderr}"
+    )
+    assert not proc.stdout.strip(), "a usage error must print NO stdout JSON line"
+    # Specifically THIS validation, not merely argparse rejecting an
+    # unrecognized --plugin-root flag on a pre-#412 driver (which would
+    # ALSO exit 2 with no stdout, for a completely different reason --
+    # vacuously satisfying the two asserts above without ever exercising
+    # main()'s own resolved-directory check).
+    assert "assets/scripts" in proc.stderr, (
+        f"expected this driver's OWN --plugin-root resolution error "
+        f"(naming assets/scripts/), not a generic argparse rejection; "
+        f"stderr:\n{proc.stderr}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Trust-boundary fix: an EMPTY --plugin-root used to be silently treated as
+# "not given" (CodexJob.__init__ tested it for TRUTHINESS, `if plugin_root`,
+# so an is-not-None-but-falsy "" fell through to SCRIPTS_DIR -- the
+# self-anchored, codex-WRITABLE durable-root copy), even though main()'s own
+# pre-flight directory check operates on `os.path.realpath("")` (the CURRENT
+# WORKING DIRECTORY, a value distinct from the empty string actually passed)
+# and could pass. The two tests immediately above
+# (test_plugin_root_flag_omitted_preserves_todays_behavior /
+# test_plugin_root_misconfigured_fails_loudly_at_usage_time) do not cover
+# this: the first explicitly excludes "" from its own scope (see its own
+# docstring), and the second uses a NONEXISTENT path, which fails the
+# directory check for an unrelated reason. This is the missing axis.
+# --------------------------------------------------------------------------- #
+
+
+def test_plugin_root_empty_string_fails_loudly_rather_than_silently_using_poisoned_copy(tmp_path):
+    """PROOF, and the adversarial "attack it" case: reproduces the exact
+    exploit -- root's own draft_ready.py POISONED (per
+    test_plugin_root_redirect_bypasses_poisoned_draft_ready's own fixture),
+    root/assets/scripts/ present (so main()'s pre-#412-fix directory check
+    would have passed), --plugin-root passed as "". Confirmed pre-fix (this
+    exact fixture, against the parent commit's copy of the driver): exit 0,
+    ok=true -- the poisoned copy was silently consulted and wrongly accepted
+    a wrong-token attempt, exactly what --plugin-root exists to prevent.
+    Post-fix: exit 2, no stdout JSON, before any gate ever runs."""
+    root, companion, node = build_root(tmp_path)
+    _poison_durable_root_gate(root, "draft_ready.py")
+    (root / "assets" / "scripts").mkdir(parents=True)
+    seg, tok = "c001", "RUN:c001"
+    state = base_state(seg, tok, "translate", attempt_mode="invalid_token", status_seq=["completed"])
+
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1", state,
+                        extra_args=["--plugin-root", ""])
+
+    assert proc.returncode == 2, (
+        f"an empty --plugin-root must fail at usage time (exit 2), not "
+        f"silently fall back to the (here, POISONED) self-anchored copy -- "
+        f"rc={proc.returncode}\nstdout={proc.stdout!r}\nstderr:\n{proc.stderr}"
+    )
+    assert not proc.stdout.strip(), (
+        "a usage error must print NO stdout JSON line -- in particular "
+        "never an ok:true line, which would mean the poisoned gate ran"
+    )
+    assert "empty" in proc.stderr or "whitespace" in proc.stderr, (
+        f"expected the dedicated empty/whitespace error, not the generic "
+        f"'does not resolve to a directory' one (that message would be "
+        f"technically true here too, since main() resolves \"\" to cwd "
+        f"which DOES have assets/scripts/ -- the dedicated message is what "
+        f"proves this exact check fired); stderr:\n{proc.stderr}"
+    )
+
+
+def test_plugin_root_whitespace_only_also_fails_loudly(tmp_path):
+    """The `.strip()` half of the same check: a few spaces are just as
+    silently-falls-back-worthy as a bare empty string, and just as
+    plausible a template-substitution artifact."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="valid",
+                                   status_seq=["completed"]),
+                        extra_args=["--plugin-root", "   "])
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert not proc.stdout.strip()
+    assert "empty" in proc.stderr or "whitespace" in proc.stderr
+
+
+# --------------------------------------------------------------------------- #
+# Consistency fix: _write_joblog()'s os.write() return value used to be
+# discarded, unlike _publish_from_sandbox()'s own identically-shaped
+# temp-file write two functions away, which already checks it. POSIX
+# write() may write fewer bytes than requested; without the check, a short
+# write published a TRUNCATED, invalid-JSON joblog at the trusted final
+# name -- jobId/jobCwd are what hygiene()'s cancel-a-stale-prior-job path
+# (and a human debugging a crash) both read from there.
+# --------------------------------------------------------------------------- #
+
+
+def test_write_joblog_short_write_never_publishes_a_truncated_joblog(tmp_path, monkeypatch):
+    """Simulates a short write (one byte less than requested, the way an
+    interrupted/ENOSPC write would look) by monkeypatching codex_job.os.write.
+    Confirmed pre-fix (this exact fixture, against the parent commit's copy):
+    the joblog ends up on disk containing invalid, truncated JSON. Post-fix:
+    nothing is published at the final name, and the temp scratch file is
+    cleaned up."""
+    job = _mkjob(tmp_path)
+    real_write = codex_job.os.write
+
+    def short_write(fd, data):
+        return real_write(fd, data[:-1]) if len(data) > 1 else real_write(fd, data)
+
+    monkeypatch.setattr(codex_job.os, "write", short_write)
+    job._write_joblog({"jobId": "job-1", "kind": "translate", "seg": "c001", "status": "launched"})
+
+    assert not os.path.exists(job.joblog), (
+        "a short write must never leave anything at the final joblog name "
+        "-- hygiene()'s cancel-a-stale-prior-job path and a human reading "
+        "this file after a crash both trust it"
+    )
+    leftovers = list(Path(job.segdir).glob(".codex_job.*.tmp"))
+    assert leftovers == [], f"temp scratch file(s) left behind: {leftovers}"
+
+
+def test_write_joblog_succeeds_normally_when_the_write_is_not_short(tmp_path):
+    """False-positive bound for the fix above: an ordinary, unpatched write
+    still publishes correctly -- the new length check must not reject a
+    genuinely complete write."""
+    job = _mkjob(tmp_path)
+    job._write_joblog({"jobId": "job-1", "kind": "translate", "seg": "c001", "status": "launched"})
+
+    assert os.path.exists(job.joblog)
+    assert json.loads(Path(job.joblog).read_text(encoding="utf-8"))["jobId"] == "job-1"
+
+
+# --------------------------------------------------------------------------- #
+# Coverage-gap close: main()'s `poll_sec = args.poll_sec if args.poll_sec > 0
+# else 15` clamp was never exercised through the real CLI. Every white-box
+# test using poll=0 (_mkjob(tmp_path, deadline=100, poll=0), several places
+# above) constructs CodexJob directly, bypassing main()'s own argv-parsing
+# clamp entirely -- so args.poll_sec <= 0 was never reached through that
+# path. If this clamp broke, `--poll-sec 0` would make poll()'s
+# `time.sleep(min(self.poll_sec, rem))` sleep zero seconds between
+# iterations: a tight busy-loop hammering the companion's `status`
+# subprocess until the deadline. Not a security bypass -- a self-inflicted
+# resource/DoS-on-yourself concern -- but a real, previously-untested branch
+# on the last unpinned CLI parameter on this file.
+# --------------------------------------------------------------------------- #
+
+
+def test_poll_sec_zero_is_clamped_rather_than_busy_looping(tmp_path):
+    """PROOF, via an OBSERVABLE consequence rather than an assertion on a
+    value (a value-identity assertion can't reach this: poll_sec is never
+    echoed into argv or output, only used as a sleep duration). Drives the
+    REAL driver via subprocess with --poll-sec 0 and a short deadline, the
+    job kept permanently NON-terminal (status_seq=["queued"] -- FAKE_NODE's
+    own counter clamps to the last element of a 1-item sequence, so every
+    poll keeps seeing "queued"), and counts `status` calls in the existing
+    call_log mechanism. Measured directly against both sides before writing
+    this assertion: the clamped/shipped behavior produces exactly 1 status
+    call in a 3-second deadline (poll_sec=15 > any remaining budget that
+    short, so the one sleep runs out the clock); a `poll_sec = args.poll_sec`
+    mutation (dropping the clamp) produces 143 in the SAME window and same
+    fixture -- a two-orders-of-magnitude margin, chosen for headroom, not
+    tuned to the boundary."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    state = base_state(seg, tok, "translate", status_seq=["queued"])
+
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1", state,
+                        deadline=3, poll=0)
+
+    call_log = root / "calls.D1.log"
+    status_calls = 0
+    if call_log.exists():
+        for line in call_log.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                entry = json.loads(line)
+                if entry.get("sub") == "status":
+                    status_calls += 1
+
+    assert status_calls <= 10, (
+        f"--poll-sec 0 must be CLAMPED to a sane default, not passed through "
+        f"literally -- {status_calls} status calls in a 3-second window "
+        f"looks like an unclamped busy-loop (measured: clamped=1, "
+        f"unclamped=143, for this identical fixture)."
+    )
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
 
 
 if __name__ == "__main__":

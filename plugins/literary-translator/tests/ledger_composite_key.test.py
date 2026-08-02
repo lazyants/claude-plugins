@@ -911,8 +911,12 @@ def test_durable_root_flag_redirects_away_from_self_anchored_location(tmp_path):
 
 def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     """Negative control: the same orphan copy, invoked WITHOUT
-    --durable-root, cannot succeed via self-anchoring (no ownership marker,
-    no profile.yml anywhere it could find)."""
+    --durable-root, cannot succeed via self-anchoring. Asserts the SPECIFIC
+    reason -- no `.literary-translator-root.json` ownership marker at the
+    self-anchored location -- not merely that some failure occurred: a bare
+    "it failed" cannot distinguish this correct refusal from an unrelated
+    crash, so a future defect that broke the orphan-copy path for the WRONG
+    reason would pass this test silently."""
     orphan_dir = tmp_path / "orphan_location" / "scripts"
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "cache_key.py"
@@ -920,6 +924,11 @@ def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
 
     proc = run_cache_key_from(orphan_script, ["--seg", "seg01"])
     assert proc.returncode != 0
+    assert "ownership marker not found" in proc.stderr, (
+        f"expected the orphan copy to fail specifically on its missing "
+        f"ownership marker; got a different reason: rc={proc.returncode}\n"
+        f"stdout={proc.stdout!r}\nstderr={proc.stderr!r}"
+    )
 
 
 def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):

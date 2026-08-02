@@ -34,7 +34,24 @@ gap where a stale/straggler draft from a DIFFERENT run (or a pre-1.2.0
 draft with no dispatch_token at all) would otherwise look READY. Omit for
 the pre-1.2.0 behavior (no token check) -- backward compatible.
 
-Usage: python3 draft_ready.py SEG [--expect-token TOK]
+Usage: python3 draft_ready.py SEG [--expect-token TOK] [--durable-root PATH]
+
+Self-anchoring by default: this script always lives at
+${durable_root}/scripts/draft_ready.py and derives durable_root from its own
+path -- it never assumes cwd. #412 prerequisite: an explicit
+`--durable-root PATH` overrides this, REPLACING the self-anchored root
+entirely for DATA (segments/) -- both draft_path()/segpack_path() already
+take `segments_dir` as an explicit parameter, so this only changes what
+main() passes in, never what a given set of on-disk inputs resolves to.
+Omitting the flag reproduces today's self-anchored behavior byte-for-byte.
+
+This script is a LEAF: it shells out to nothing, so there is no
+--plugin-root concern here at all, unlike select_segments.py/ledger_merge.py/
+resume_setup.py/review_ready.py, each of which resolves at least one sibling
+script and so needs that second, independent override. Adding --plugin-root
+here regardless would be a flag accepted and never read -- see
+references/gotchas.md §4 for the full two-flag rationale this script
+deliberately does NOT need.
 """
 import argparse
 import json
@@ -42,11 +59,24 @@ import re
 import sys
 from pathlib import Path
 
-# Self-anchored: this script lives at ${durable_root}/scripts/draft_ready.py,
-# so parents[1] is the durable root. Never assumes cwd, never takes a
-# --durable-root flag.
+# Self-anchored by default: this script always lives at
+# ${durable_root}/scripts/draft_ready.py, so parents[1] is the durable root.
+# Never assumes cwd. These module-level constants are the fallback used
+# whenever --durable-root is omitted (see resolve_dirs() below).
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 SEGMENTS_DIR = DURABLE_ROOT / "segments"
+
+
+def resolve_dirs(durable_root_str):
+    """#412 prerequisite: `durable_root_str` governs DATA (segments/) --
+    rebuilt from that root when given, self-anchored otherwise. This script
+    is a LEAF (see module docstring), so there is only ever the one root to
+    resolve -- no separate --plugin-root concern. `durable_root_str=None`
+    reproduces today's exact self-anchored values."""
+    if durable_root_str is None:
+        return {"durable_root": DURABLE_ROOT, "segments_dir": SEGMENTS_DIR}
+    root = Path(durable_root_str).resolve()
+    return {"durable_root": root, "segments_dir": root / "segments"}
 
 # Canonical segment-id safety contract. A seg id is either an ordinary body
 # id (e.g. "seg01", "seg05_blocked_regen", "segAnchor") or a translate-decision
@@ -73,12 +103,12 @@ def validate_seg(seg):
     return None
 
 
-def draft_path(seg: str) -> Path:
-    return SEGMENTS_DIR / f"{seg}.draft.json"
+def draft_path(seg: str, segments_dir: Path = SEGMENTS_DIR) -> Path:
+    return segments_dir / f"{seg}.draft.json"
 
 
-def segpack_path(seg: str) -> Path:
-    return SEGMENTS_DIR / f"segpack_{seg}.json"
+def segpack_path(seg: str, segments_dir: Path = SEGMENTS_DIR) -> Path:
+    return segments_dir / f"segpack_{seg}.json"
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +231,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "candidate. Omit for today's canonical-path behavior."
         ),
     )
+    parser.add_argument(
+        "--durable-root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "#412 prerequisite: use PATH as the durable root instead of "
+            "this script's own self-anchored location. Optional; omit for "
+            "today's self-anchored behavior. This script is a LEAF (shells "
+            "out to nothing), so there is no companion --plugin-root flag."
+        ),
+    )
     return parser
 
 
@@ -212,7 +253,10 @@ def main() -> None:
         print(f"Error: {_seg_err}", file=sys.stderr)
         sys.exit(2)
 
-    dp = Path(args.candidate_file) if args.candidate_file else draft_path(seg)
+    dirs = resolve_dirs(args.durable_root)
+    segments_dir = dirs["segments_dir"]
+
+    dp = Path(args.candidate_file) if args.candidate_file else draft_path(seg, segments_dir)
     if not dp.exists() or dp.stat().st_size == 0:
         print(f"[{seg}] not ready: draft file absent/empty ({dp})")
         sys.exit(1)
@@ -238,7 +282,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    sp = segpack_path(seg)
+    sp = segpack_path(seg, segments_dir)
     try:
         segpack = json.loads(sp.read_text(encoding="utf-8"))
     except FileNotFoundError:

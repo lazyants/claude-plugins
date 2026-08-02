@@ -176,6 +176,12 @@ def _make_resume_setup_root(tmp_path: Path) -> Path:
         "seg01": {field: f"{field}-s1" for field in CACHE_KEY_FIELDS},
         "seg02": {field: f"{field}-s2" for field in CACHE_KEY_FIELDS},
     })
+
+    # LT-409: the mass-kind digest domain now comes from manifest.json's own
+    # segments[] (resume_setup.py's _load_manifest_seg_ids()), matching this
+    # file's own seg01/seg02 fixture pair -- same shape as
+    # tests/resume_integrity.test.py's make_resume_setup_root().
+    _write_json(root / "manifest.json", {"segments": [{"seg": "seg01"}, {"seg": "seg02"}]})
     return root
 
 
@@ -190,9 +196,13 @@ def _run_resume_setup(root: Path, payload_obj: dict, timeout: int = 30):
 
 
 def _mass_base_payload() -> dict:
+    """LT-409: `args` is PINNED to {} for kind="mass" (resume_setup.py hard-
+    rejects anything else); `segs` is kept, unread, to prove the
+    deprecated-but-accepted field does nothing -- the digest domain now
+    comes from manifest.json (written by _make_resume_setup_root())."""
     return {
         "kind": "mass",
-        "args": {"segments": ["seg01", "seg02"]},
+        "args": {},
         "subst": dict(BASE_SUBST),
         "segs": ["seg01", "seg02"],
     }

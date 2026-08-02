@@ -1779,12 +1779,16 @@ def test_skeptic_preflight_refuses_one_call_over_its_own_ladder(tmp_path):
 # The shipped engine.batch_agent_cap, and what each raised ladder now admits.
 # Derived here, then compared against the operator-facing table in
 # profile.example.yml -- these numbers are the ones an operator sizes a real
-# book batch against, and #352 moved every one of them.
-SHIPPED_BATCH_AGENT_CAP = 3500
+# book batch against. #352 moved every per-batch FORMULA (13N+2/3N+2 ->
+# 19N+2/5N+2); #409 step 2 then moved the shipped CAP itself (3500 -> 10000)
+# without touching either formula, which rescales every max-batch figure by
+# that same factor -- (10000-2)//per_batch, not a copy of what the code
+# happens to print today.
+SHIPPED_BATCH_AGENT_CAP = 10000
 LADDER_MAX_BATCHES = {
-    "glossary live": (19, 184),
-    "glossary offline": (5, 699),
-    "skeptic (both)": (5, 699),
+    "glossary live": (19, 526),      # (10000-2)//19 = 9998//19 = 526
+    "glossary offline": (5, 1999),   # (10000-2)//5  = 9998//5  = 1999
+    "skeptic (both)": (5, 1999),     # same 5N+2 formula as glossary offline
 }
 
 
@@ -1818,8 +1822,9 @@ def test_the_shipped_cap_still_admits_the_documented_batch_count(ladder):
         f"profile.example.yml's ladder table does not carry {per_batch}N+2 for {ladder}"
     )
     assert f"-> {documented_max}" in flat, (
-        f"profile.example.yml's ladder table does not carry the post-1.16.2 "
-        f"max-batch figure {documented_max} for {ladder}"
+        f"profile.example.yml's ladder table does not carry the post-1.16.2-"
+        f"formula, post-#409-step-2-cap max-batch figure {documented_max} "
+        f"for {ladder}"
     )
 
 

@@ -196,9 +196,15 @@ from canon_senses import (
 
 # Self-anchored: this script always lives at
 # ${durable_root}/scripts/canon_validate.py, so parents[1] is the durable
-# root. Never assumes cwd, never takes a --durable-root flag -- see
-# references/ledger-and-resumability.md's "Script self-anchoring" invariant
-# (the same rule applies to every copied script, not just the ledger ones).
+# root. Never assumes cwd, never takes a --durable-root flag of its own --
+# see references/ledger-and-resumability.md's "Script self-anchoring"
+# invariant (the same rule applies to every copied script, not just the
+# ledger ones). #412: an explicit --plugin-root PATH overrides where the
+# SIBLING cache_key.py script is resolved from -- see
+# resolve_cache_key_script() below and references/gotchas.md §4 for the
+# full two-flag convention this override follows (this script itself needs
+# only the --plugin-root half of it, since it has no data root of its own
+# to override).
 _SCRIPT_FILE = Path(__file__).resolve()
 SCRIPTS_DIR = _SCRIPT_FILE.parent
 DURABLE_ROOT = _SCRIPT_FILE.parents[1]
@@ -211,6 +217,28 @@ DEFAULT_CANON_PATH = DURABLE_ROOT / "canon.json"
 # way: DURABLE_ROOT / "canon_senses.json".
 DEFAULT_SENSES_PATH = DURABLE_ROOT / "canon_senses.json"
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
+
+
+def resolve_cache_key_script(plugin_root_str) -> Path:
+    """#412: `plugin_root_str` (this script's own --plugin-root CLI value,
+    or None) governs where the SIBLING cache_key.py script this script
+    shells out to (to STAMP generation_hashes into canon.json) is resolved
+    from -- deliberately NEVER derived from this script's own self-anchored
+    DURABLE_ROOT/SCRIPTS_DIR: ${durable_root}/scripts/ is a Step-0a copy the
+    codex process this stamp gates can write to, so resolving the checker
+    from inside the tree it checks would let a tampered copy validate
+    itself -- the whole defect #412 exists to close. When given, resolves
+    as `{plugin_root}/assets/scripts/cache_key.py`, the SAME layout
+    SKILL.md documents for the plugin-anchored scripts, NOT
+    ${durable_root}/scripts/'s own flattened copy layout.
+    `plugin_root_str=None` reproduces today's self-anchored sibling lookup
+    unchanged. This script has no --durable-root of its own (its OWN data
+    is always self-anchored), so there is only ever this one thing to
+    resolve, unlike select_segments.py/ledger_merge.py/resume_setup.py/
+    review_ready.py, each of which resolves BOTH a data root and a sibling."""
+    if plugin_root_str is None:
+        return CACHE_KEY_SCRIPT
+    return Path(plugin_root_str).resolve() / "assets" / "scripts" / "cache_key.py"
 
 RESEARCH_MODES = ("live", "offline")
 
@@ -393,6 +421,7 @@ NON_MODE_DESTS = frozenset(
         "approve_to",
         "canon_path",
         "senses_path",
+        "plugin_root",
     }
 )
 
@@ -1453,21 +1482,36 @@ def _atomic_write_json(path: Path, doc: dict) -> None:
     os.replace(tmp_path, path)
 
 
-def _stamp_generation_hash(field: str) -> str:
+def _stamp_generation_hash(field: str, plugin_root_str=None) -> str:
     """Shells out to `cache_key.py --field <field>` -- the one shared
     hashing implementation -- and returns its bare stdout value, stripped.
     Never independently recomputed here. A missing/failing cache_key.py, or
     an empty value, is FATAL: canon-file.schema.json only requires the
     generation_hashes KEYS be present strings, it cannot itself catch an
     empty-but-present value, so this script must refuse to write one.
+
+    #412: `plugin_root_str` is this script's own --plugin-root CLI value
+    (or None) -- resolve_cache_key_script() uses it to find the sibling
+    cache_key.py. cache_key.py is a LEAF: it accepts --durable-root but
+    REJECTS --plugin-root entirely (no siblings of its own to resolve), so
+    --plugin-root is never forwarded to it. When it IS given, the sibling no
+    longer physically sits under this script's own DURABLE_ROOT, so
+    cache_key.py's own self-anchoring would otherwise resolve the WRONG
+    tree's data -- an explicit `--durable-root str(DURABLE_ROOT)` is
+    forwarded instead, synthesized from this script's own (always
+    self-anchored) root.
     """
-    if not CACHE_KEY_SCRIPT.is_file():
+    cache_key_script = resolve_cache_key_script(plugin_root_str)
+    if not cache_key_script.is_file():
         raise CanonValidationError(
-            f"cannot stamp generation_hashes.{field}: {CACHE_KEY_SCRIPT} not found"
+            f"cannot stamp generation_hashes.{field}: {cache_key_script} not found"
         )
+    cmd = [sys.executable, str(cache_key_script), "--field", field]
+    if plugin_root_str is not None:
+        cmd += ["--durable-root", str(DURABLE_ROOT)]
     try:
         proc = subprocess.run(
-            [sys.executable, str(CACHE_KEY_SCRIPT), "--field", field],
+            cmd,
             capture_output=True,
             text=True,
             timeout=120,
@@ -1861,7 +1905,8 @@ def _preservable_prior(canon_path: Path) -> "dict | None":
 
 
 def _stamp_write_verify(
-    canon_path: Path, merged: dict, registry: "Registry", force_restamp: bool = False
+    canon_path: Path, merged: dict, registry: "Registry", force_restamp: bool = False,
+    plugin_root_str=None,
 ) -> "tuple[dict, bool]":
     """Shared by every mode that writes canon.json (`run_merge`,
     `run_merge_batches`, `run_init`, `run_restamp_derivation`): resolves
@@ -1896,6 +1941,10 @@ def _stamp_write_verify(
     `--merge-batches <empty-batch.json>` trick issue #193 documents as its
     only, unsanctioned restamp path.
 
+    `plugin_root_str` (#412) is this script's own --plugin-root CLI value
+    (or None), threaded straight through to `_stamp_generation_hash()` --
+    see that function's own docstring for the forwarding rule.
+
     Returns `(freshly re-read on-disk document, restamped)`.
     """
     # This re-reads canon.json from disk even though the caller already holds
@@ -1909,7 +1958,7 @@ def _stamp_write_verify(
     if restamped:
         merged.setdefault("generation_hashes", {})
         for field in GENERATION_HASH_FIELDS:
-            merged["generation_hashes"][field] = _stamp_generation_hash(field)
+            merged["generation_hashes"][field] = _stamp_generation_hash(field, plugin_root_str)
     else:
         # Carry the existing stamp forward verbatim (extra keys included --
         # this function never edits provenance it did not compute).
@@ -1929,7 +1978,9 @@ def _stamp_write_verify(
 # ---------------------------------------------------------------------------
 
 
-def run_init(canon_path: Path, research_mode: str, registry: "Registry") -> dict:
+def run_init(
+    canon_path: Path, research_mode: str, registry: "Registry", plugin_root_str=None
+) -> dict:
     """--init: bootstrap an EMPTY but fully stamped canon.json for a project
     whose glossary pass has nothing to research -- `glossary_batch_plan.py`
     printed `{"no_new_candidates": true, "batches": []}`, so SKILL.md's W3
@@ -1950,6 +2001,9 @@ def run_init(canon_path: Path, research_mode: str, registry: "Registry") -> dict
     VALIDATE-ONLY mode's job, not this one's; keeping --init silent about
     it means the documented SKIP-branch command stays a safe no-op on every
     re-run of an already-bootstrapped project.
+
+    `plugin_root_str` (#412) is this script's own --plugin-root CLI value,
+    threaded through to `_stamp_write_verify`.
     """
     created = not canon_path.is_file()
     restamped = False
@@ -1957,7 +2011,8 @@ def run_init(canon_path: Path, research_mode: str, registry: "Registry") -> dict
         # No prior file, so _stamp_write_verify always stamps fresh here --
         # the #291 conservation path cannot apply to a bootstrap.
         _, restamped = _stamp_write_verify(
-            canon_path, {"entries": {}, "review_queue": []}, registry
+            canon_path, {"entries": {}, "review_queue": []}, registry,
+            plugin_root_str=plugin_root_str,
         )
 
     return {
@@ -1972,7 +2027,9 @@ def run_init(canon_path: Path, research_mode: str, registry: "Registry") -> dict
     }
 
 
-def run_restamp_derivation(canon_path: Path, research_mode: str, registry: "Registry") -> dict:
+def run_restamp_derivation(
+    canon_path: Path, research_mode: str, registry: "Registry", plugin_root_str=None
+) -> dict:
     """--restamp-derivation: re-record the CURRENT particle_config /
     derivation-bundle provenance onto an existing canon.json, leaving its
     content untouched.
@@ -1995,6 +2052,9 @@ def run_restamp_derivation(canon_path: Path, research_mode: str, registry: "Regi
 
     Pass 1 runs over the existing entries first -- provenance should never be
     advanced on a canon.json that is not itself valid.
+
+    `plugin_root_str` (#412) is this script's own --plugin-root CLI value,
+    threaded through to `_stamp_write_verify`.
     """
     if not canon_path.is_file():
         raise CanonValidationError(
@@ -2006,7 +2066,9 @@ def run_restamp_derivation(canon_path: Path, research_mode: str, registry: "Regi
     _validate_existing_entries(canon, registry)
 
     before = dict(canon.get("generation_hashes") or {})
-    on_disk, restamped = _stamp_write_verify(canon_path, canon, registry, force_restamp=True)
+    on_disk, restamped = _stamp_write_verify(
+        canon_path, canon, registry, force_restamp=True, plugin_root_str=plugin_root_str
+    )
     after = on_disk["generation_hashes"]
 
     return {
@@ -2034,10 +2096,14 @@ def run_merge(
     registry: "Registry",
     senses_path: Path,
     allow_absent_senses: bool,
+    plugin_root_str=None,
 ) -> dict:
     """Legacy single-fragment merge path (--batch PATH). Equivalent to
     `run_merge_batches(canon_path, [batch_path], ...)`, kept as its own
     code path because existing tests/callers already invoke it this way.
+
+    `plugin_root_str` (#412) is this script's own --plugin-root CLI value,
+    threaded through to `_stamp_write_verify`.
     """
     batch = _load_batch(batch_path)
     canon = _load_canon(canon_path)
@@ -2048,7 +2114,9 @@ def run_merge(
     _enforce_offline_backstop(batch, research_mode)
     merged = _merge_batch(canon, batch, senses)
 
-    on_disk, restamped = _stamp_write_verify(canon_path, merged, registry)
+    on_disk, restamped = _stamp_write_verify(
+        canon_path, merged, registry, plugin_root_str=plugin_root_str
+    )
 
     n_accepted = sum(1 for item in batch if item.get("disposition") == "accepted")
     n_queued = sum(1 for item in batch if item.get("disposition") == "review_queue")
@@ -2137,12 +2205,16 @@ def run_merge_batches(
     registry: "Registry",
     senses_path: Path,
     allow_absent_senses: bool,
+    plugin_root_str=None,
 ) -> dict:
     """--merge-batches P1 P2 ...: single process, single canon.json load.
     Validates ALL given fragments (Pass 1 + offline backstop) FIRST, before
     merging any of them, then threads `acc = _merge_batch(acc, frag,
     senses)` across every fragment IN THE GIVEN ORDER -- ONE senses load,
-    shared across every fragment in this call."""
+    shared across every fragment in this call.
+
+    `plugin_root_str` (#412) is this script's own --plugin-root CLI value,
+    threaded through to `_stamp_write_verify`."""
     batches = [_load_batch(p) for p in batch_paths]
     for batch in batches:
         _validate_batch_items(batch, registry)
@@ -2155,7 +2227,9 @@ def run_merge_batches(
     for batch in batches:
         acc = _merge_batch(acc, batch, senses)
 
-    on_disk, restamped = _stamp_write_verify(canon_path, acc, registry)
+    on_disk, restamped = _stamp_write_verify(
+        canon_path, acc, registry, plugin_root_str=plugin_root_str
+    )
 
     n_accepted = sum(1 for batch in batches for item in batch if item.get("disposition") == "accepted")
     n_queued = sum(1 for batch in batches for item in batch if item.get("disposition") == "review_queue")
@@ -2411,6 +2485,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
             f"recollapse guard) -- see canon_senses.py::load_senses."
         ),
     )
+    parser.add_argument(
+        "--plugin-root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "#412: use PATH (the plugin's own install root, i.e. "
+            "{{PLUGIN_ROOT}}) to resolve the sibling cache_key.py script "
+            "this script shells out to (to STAMP generation_hashes), as "
+            "{PATH}/assets/scripts/cache_key.py -- deliberately NEVER "
+            "derived from this script's own self-anchored durable root, "
+            "because ${durable_root}/scripts/ is writable by the codex "
+            "process this stamp gates (codex_job.py grants --write over "
+            "the whole durable root), so resolving the checker from inside "
+            "the tree it checks would let a tampered copy validate itself. "
+            "cache_key.py is a LEAF and does not accept --plugin-root at "
+            "all, so it is never forwarded to it; only a synthesized "
+            "--durable-root is. Optional; omit for today's self-anchored "
+            "sibling lookup. Only consulted by the modes that write "
+            "(--init, --restamp-derivation, --merge-batches, legacy "
+            "--batch); ignored otherwise."
+        ),
+    )
     return parser
 
 
@@ -2510,9 +2606,9 @@ def main(argv=None) -> int:
     try:
         registry = _build_schema_registry()
         if args.init:
-            result = run_init(canon_path, args.research_mode, registry)
+            result = run_init(canon_path, args.research_mode, registry, args.plugin_root)
         elif args.restamp_derivation:
-            result = run_restamp_derivation(canon_path, args.research_mode, registry)
+            result = run_restamp_derivation(canon_path, args.research_mode, registry, args.plugin_root)
         elif args.check_batch is not None:
             result = run_check_batch(
                 canon_path,
@@ -2532,6 +2628,7 @@ def main(argv=None) -> int:
                 registry,
                 senses_path,
                 allow_absent_senses,
+                args.plugin_root,
             )
         elif args.verify_merged:
             result = run_verify_merged(
@@ -2545,6 +2642,7 @@ def main(argv=None) -> int:
                 registry,
                 senses_path,
                 allow_absent_senses,
+                args.plugin_root,
             )
         else:
             result = run_validate_only(canon_path, args.research_mode, registry)

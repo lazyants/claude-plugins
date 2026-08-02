@@ -147,6 +147,130 @@ def review_path(seg, segments_dir=SEGMENTS_DIR):
     return segments_dir / f"{seg}.review.json"
 
 
+def ever_converged_path(seg, segments_dir=SEGMENTS_DIR):
+    """#409 Step 1: the DURABLE 'this segment has converged at least once'
+    sentinel. A dotfile, matching the existing `.att.*`/`.att_pending.*`
+    convention in the same directory -- tree walkers here already skip
+    dot-entries (diff_rendered_output.py, render_obsidian.py) and nothing
+    globs this directory wholesale, so it adds no file a consumer must learn
+    to ignore."""
+    return segments_dir / f".ever_converged.{seg}"
+
+
+def _report_sentinel_failure(path, exc):
+    """The one place this message is spelled out -- shared by every OSError
+    exit from mark_ever_converged() below (open, write, and close alike),
+    so a future edit to the wording can't drift into three copies the way
+    the open-only version of this function once left the write/close paths
+    with no message at all (see mark_ever_converged()'s own docstring)."""
+    sys.stderr.write(
+        f"warning: could not create the ever-converged sentinel at {path}: "
+        f"{exc}. Convergence was NOT recorded for this segment -- the "
+        f"ledger write is refused without its protecting sentinel, so "
+        f"the segment stays whatever status it already had. Nothing on "
+        f"disk was lost: the draft and review artifacts both survive "
+        f"untouched; only the ledger's own 'converged' verdict is "
+        f"withheld. Retry once the underlying OS problem (permissions/"
+        f"quota/I/O) is fixed.\n"
+    )
+
+
+def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
+    """Create the sentinel for `seg`, idempotently. Called ONLY from
+    enrich_converged_fields, after every convergence precondition has passed
+    -- that function is the single place in the whole plugin where
+    convergence is recorded.
+
+    Why a separate file rather than reading the ledger status: the status is
+    MUTABLE and is overwritten with `in_progress` BEFORE a re-dispatch, by
+    which time a status-based guard can no longer tell that the segment had
+    ever converged -- so it never fires on the one path it exists to guard.
+    ledger_update.py rebuilds each fragment from scratch; this sentinel is a
+    separate file it only ever creates.
+
+    Never removed by any ledger write. The single sanctioned way to clear it
+    is an explicit, authorized re-translate of that segment.
+
+    Failure to create the sentinel IS FATAL to recording convergence
+    (post-review correction). The original version of this docstring called
+    a failure here non-fatal, reasoning that the convergence was already
+    proven and refusing would discard paid work over a bookkeeping file --
+    that reasoning had the dangerous direction backwards. This sentinel is
+    the ONLY thing that later refuses to re-select and retranslate a segment
+    that has already converged (see the "MUTABLE status" paragraph above): a
+    ledger fragment recorded as 'converged' WITHOUT it is a segment that
+    looks done but carries no protection, and a later re-dispatch will
+    silently retranslate it -- discarding the exact work this call exists to
+    protect. The caller (enrich_converged_fields, below) now checks this
+    return value and refuses to record convergence at all when it is False.
+    Nothing already on disk (the draft/review artifacts) is lost either way
+    -- only the ledger's own 'converged' verdict is withheld until the
+    sentinel can actually be written, on this attempt or a retry. Still
+    reported on stderr in addition to the fatal failure, so the underlying
+    OS problem is visible without having to parse the JSON error.
+
+    ALL THREE OS calls this function makes -- open, write, close -- are
+    covered by that same clean-False-plus-message contract (second post-
+    review correction). The first cut of this fix only wrapped open(): the
+    single os.write() and the os.close() that follow a successful open()
+    were left outside any except OSError, so an ENOSPC/EDQUOT/EIO on the
+    write, or a write error some filesystems (notably NFS) defer reporting
+    until close(), propagated as an uncaught exception instead of the
+    documented refusal -- exactly the failure this promise exists to turn
+    into a clean, actionable message.
+
+    The create-then-fill ORDER is deliberately left unchanged, and this is
+    NOT a temp-file-plus-`os.link()` atomic publish the way
+    backfill_resume_gate_ack.py's write_ack()/_publish_ack() is for
+    `.resume_gate_ack` -- that script needed it because ITS marker's JSON
+    BODY is read later (by a human or a future consumer, per its own
+    docstring), so a torn write there corrupts information someone will
+    parse. This sentinel's body is fixed, decorative, and never parsed by
+    anything -- every consumer (select_segments.py, final_audit.py,
+    backfill_ever_converged.py) checks only `.exists()`. And a torn write
+    here can never represent a FALSE fact: this function only ever runs
+    after every convergence precondition already passed, so any file left
+    at `path` -- complete or torn -- correctly asserts "this segment
+    converged at least once", which is true. A retry's own os.open()
+    O_CREAT|O_EXCL then hits FileExistsError against that leftover file and
+    treats it as already-marked, exactly as if the first attempt had fully
+    succeeded. So the ONLY thing worth guaranteeing here is that this
+    function itself never raises past its own documented contract -- not
+    that the sentinel's bytes are written atomically."""
+    path = ever_converged_path(seg, segments_dir)
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return True          # already marked -- idempotent, nothing to do
+    except OSError as exc:
+        _report_sentinel_failure(path, exc)
+        return False
+
+    # Content is deliberately fixed, with no timestamp: this file sits in
+    # segments/ and a varying body would make an otherwise identical
+    # project directory compare unequal.
+    try:
+        os.write(fd, b"converged\n")
+    except OSError as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass  # best-effort cleanup; already reporting the write failure
+        _report_sentinel_failure(path, exc)
+        return False
+
+    try:
+        os.close(fd)
+    except OSError as exc:
+        # Some filesystems (notably NFS) defer reporting a write error until
+        # close() -- caught here so it gets the SAME clean refusal as a
+        # failure at open() or write() would, never an uncaught exception.
+        _report_sentinel_failure(path, exc)
+        return False
+
+    return True
+
+
 def segpack_path(seg, segments_dir=SEGMENTS_DIR):
     return segments_dir / f"segpack_{seg}.json"
 
@@ -450,6 +574,33 @@ def enrich_converged_fields(seg, fragment, run_token=None, segments_dir=SEGMENTS
         emit_failure("draft changed since review; cannot record convergence")
 
     fragment["reviewed_draft_sha1"] = current_draft_sha1
+
+    # #409 Step 1. This is the single site in the plugin where convergence is
+    # fixed, so it is the only correct place to raise the durable sentinel.
+    # Deliberately AFTER every precondition above: a segment that failed the
+    # token, draft-presence or draft-changed-since-review checks has not
+    # converged and must not be marked as having done so.
+    #
+    # Post-review correction: the sentinel write's own success is now a hard
+    # precondition for recording convergence at all -- checked HERE, before
+    # this function returns, and therefore before write_fragment_atomically()
+    # in main() ever runs. See mark_ever_converged()'s own docstring for why
+    # treating a sentinel failure as non-fatal was the dangerous direction to
+    # fail open in: a fragment written as 'converged' without its sentinel is
+    # invisible to the one check that refuses to re-select and retranslate an
+    # already-converged segment.
+    if not mark_ever_converged(seg, segments_dir):
+        emit_failure(
+            f"Cannot record convergence for segment '{seg}': failed to "
+            f"create the ever-converged sentinel at "
+            f"{ever_converged_path(seg, segments_dir)} (see stderr for the "
+            f"underlying OS error). Refusing to write a 'converged' ledger "
+            f"fragment without its protecting sentinel -- doing so would "
+            f"leave the segment looking done while remaining eligible for "
+            f"silent re-selection and retranslation. The draft/review "
+            f"artifacts are untouched; retry once the underlying filesystem "
+            f"problem (permissions/quota/I/O) is fixed."
+        )
 
 
 def write_fragment_atomically(seg, fragment, ledger_fragment_dir=LEDGER_FRAGMENT_DIR):

@@ -513,8 +513,31 @@ def test_ledger_e2e_acceptance_full_batch_cycle(tmp_path):
 
     # =========================================================================
     # ITEM (4): batch 2's select_segments.py classification pass.
+    #
+    # #409 Step 1: this batch re-translates two segments that ALREADY converged
+    # in batch 1 -- the style-bible edit above moved style_contract_hash, which
+    # is exactly what makes a converged segment stale. That is now an
+    # authorized act rather than a default one, so the flag is passed here.
+    # Editing the style bible IS the operator saying "re-apply this to
+    # everything", so this call site is a true positive for the authorization,
+    # not a workaround for the gate.
+    #
+    # The default (no flag) refusal on this very fixture is asserted below, so
+    # the acceptance still proves the gate fires on a real end-to-end history
+    # rather than only in a unit fixture.
     # =========================================================================
-    rc, batch2_classification = run_select_segments(root)
+    rc_unauthorized, unauthorized = run_select_segments(root)
+    assert rc_unauthorized != 0, (
+        "re-translating batch 1's converged segments must not be the default "
+        "outcome of an ordinary style-bible edit"
+    )
+    assert "--allow-retranslate-converged" in unauthorized["error"]
+    assert sorted(unauthorized["ids_by_category"]["stale"]) == sorted([SEG_ALPHA, SEG_BETA]), (
+        "the refusal must still carry the full classification report -- a "
+        "caller that needs the categories has to be able to read them"
+    )
+
+    rc, batch2_classification = run_select_segments(root, ["--allow-retranslate-converged"])
     assert rc == 0, batch2_classification
     assert batch2_classification["success"] is True
 
@@ -744,6 +767,16 @@ def test_select_segments_reusable_survives_non_canonical_draft_bytes(tmp_path):
     # on-disk file -- sanity-check the fixture before trusting
     # select_segments.py's own separate recomputation below.
     assert fragment["reviewed_draft_sha1"] == draft_sha1
+
+    # #409 Step 3: this fixture's draft carries a dispatch_token, so
+    # select_segments.py now requires that run id to have the input.digest
+    # resume_setup.py writes before any dispatch. Nothing here tests the
+    # resume gate -- record the digest so the fixture represents a
+    # gate-compliant project rather than one that skipped the step.
+    (root / "runs" / "some-run-token").mkdir(parents=True, exist_ok=True)
+    (root / "runs" / "some-run-token" / "input.digest").write_text(
+        "fixture-digest\n", encoding="utf-8"
+    )
 
     # seg_beta/seg_gamma/seg_delta are untouched (not_started), so the
     # emitted SEGS is non-empty on its own -- no --allow-empty needed.

@@ -588,7 +588,12 @@ def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     """Companion negative control: the SAME orphan copy, invoked WITHOUT
     --durable-root, must fail via today's self-anchored path resolution
     (proving the positive test above is passing because of the flag, not
-    because the orphan copy could somehow find segments/ on its own)."""
+    because the orphan copy could somehow find segments/ on its own).
+    Asserts the SPECIFIC reason -- the self-anchored draft path itself is
+    absent, naming the segment -- rather than the generic substring "not
+    found", which is loose enough to also match an unrelated failure (e.g.
+    a ModuleNotFoundError from a broken import) that would still make this
+    "negative control" pass for the wrong reason."""
     orphan_dir = tmp_path / "orphan_location" / "scripts"
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "draft_sha1.py"
@@ -597,7 +602,11 @@ def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     result = run_draft_sha1_from(orphan_script, "segRedirect")
 
     assert result.returncode == 1
-    assert "not found" in result.stderr.lower()
+    assert "draft not found for segment 'segRedirect'" in result.stderr, (
+        f"expected the orphan copy to fail specifically on its missing "
+        f"self-anchored draft file; got a different reason: "
+        f"stdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
 
 
 def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):

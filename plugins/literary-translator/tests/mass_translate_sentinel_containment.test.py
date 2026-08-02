@@ -306,6 +306,9 @@ def instantiate() -> str:
         ("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH)),
         ("{{EFFORT}}", "high"),
         ("{{MODEL}}", ""),
+        # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. This file
+        # exercises sentinel/glue-character containment, not the opt-in.
+        ("{{PLUGIN_ROOT}}", json.dumps("")),
     ):
         text = text.replace(token, value)
     assert "{{" not in text, "fixture instantiation left an unresolved token"

@@ -30,6 +30,14 @@ Covers:
 9. SKILL.md's W7 output-coverage section names the new #202
    within-cohort ratio-outlier lane, its WARN-only contract, and its
    stated structural blind spot (cannot close #202).
+10. SKILL.md's W5 section instructs substituting the NEW `{{PLUGIN_ROOT}}`
+    Workflow-template token (#412), names it as a mechanically DIFFERENT
+    action from this skill's other `{{PLUGIN_ROOT}}` occurrences (plain
+    prose the reader substitutes when typing an example command), states
+    `resume_setup.py`'s payload carries it as a top-level field deliberately
+    excluded from `subst`, and states plainly what omitting it gives up
+    (the pre-#412 vulnerability stays open) rather than describing the
+    omission as merely "the default".
 """
 from __future__ import annotations
 
@@ -131,6 +139,26 @@ def test_w7_output_coverage_ratio_outlier_lane_and_blind_spot_present():
     # The stated structural blind spot -- this lane cannot close #202 --
     # must survive any future edit, not just the lane's happy path.
     assert "structurally cannot close #202" in text
+
+
+def test_plugin_root_412_redirect_substitution_present():
+    # #412. Each fragment below sits fully on one line each as of this
+    # writing, verified with grep (never by eye -- see this file's own
+    # docstring's hard-wrap warning):
+    #   "THIS one is a literal Workflow-template token: it must be written into the"
+    #   "payload, as a new top-level `plugin_root` field (deliberately NOT inside"
+    #   "substitution is not a neutral default: it leaves the pre-#412"
+    text = _skill_text()
+    # The mechanical-distinction note: unlike this skill's OTHER
+    # {{PLUGIN_ROOT}} occurrences (plain prose the reader substitutes when
+    # typing an example command), THIS one is a literal Workflow-template
+    # token that must be written into the instantiated .js file itself.
+    assert "THIS one is a literal Workflow-template token" in text
+    # resume_setup.py's payload carries plugin_root as a top-level field,
+    # deliberately excluded from `subst` (and therefore never hashed).
+    assert "as a new top-level `plugin_root` field (deliberately NOT inside" in text
+    # The omission consequence stated plainly, never as merely "the default".
+    assert "not a neutral default: it leaves the pre-#412" in text
 
 
 def test_operating_constellation_reference_exists_and_has_review_orchestration_content():

@@ -107,6 +107,25 @@
 //                                          newline, so the resulting COMPANION value is always safe
 //                                          to splice into the driver launch below as a SINGLE-QUOTED
 //                                          bash argument (space/unicode paths included).
+//   {{PLUGIN_ROOT}}                       -- #412: the plugin's own install root (NEVER
+//                                          {{DURABLE_ROOT}}/scripts/, the Step-0a COPY the codex
+//                                          process this driver launches can write to), or an EMPTY
+//                                          STRING when this dispatch does not opt into the redirect.
+//                                          Same substitution shape as {{CODEX_COMPANION_PATH_JSON}}
+//                                          immediately above (a strict json.dumps JS STRING LITERAL,
+//                                          WITH its own surrounding quotes, sitting OUTSIDE quotes in
+//                                          `const PLUGIN_ROOT = {{PLUGIN_ROOT}};`) and the SAME safety
+//                                          contract: the orchestrating session is responsible for a
+//                                          value that is always safe to splice as a SINGLE-QUOTED bash
+//                                          argument (no single quote / control char / newline). Threads
+//                                          to the two detached codex_job.py launches below
+//                                          (translate/review) as an optional single-quoted
+//                                          --plugin-root argument, omitted entirely from the launch
+//                                          command when this value is empty (same conditional-omission
+//                                          shape as {{MODEL}}/MODEL_ARG above) -- codex_job.py's own
+//                                          _trusted_scripts_dir() then falls back to its pre-#412
+//                                          default unchanged. Never threaded to the Claude fix step
+//                                          (it launches no codex_job.py of its own).
 //
 // W5 dispatch model (#198 -- codex is no longer fire-and-forget from a
 // Workflow agent turn): every codex translate/review is launched by the
@@ -370,6 +389,33 @@ const VERSE_POLICY_INSTRUCTION_BLOCK = "{{VERSE_POLICY_INSTRUCTION_BLOCK}}";
 // rejects a path with a quote/control/newline, so single-quoting is safe for
 // space/unicode paths and injection-proof).
 const COMPANION = {{CODEX_COMPANION_PATH_JSON}};
+
+// #412 -- the plugin's own install root (see the header comment's
+// {{PLUGIN_ROOT}} entry), or "" when this dispatch does not opt into the
+// redirect. Same JS-string-literal substitution shape as COMPANION above,
+// but unlike COMPANION there is no dedicated resolver script
+// (resolve_codex_companion.py's own counterpart) to lean on, so this file
+// re-checks it itself -- mirroring EFFORT_RE/MODEL_RE above -- before it
+// ever reaches the codex_job.py dispatch SHELL command: empty is valid (the
+// redirect opt-out), a non-empty value must contain no single quote or
+// control character -- the exact class that would break out of the
+// SINGLE-QUOTED bash splice below.
+const PLUGIN_ROOT = {{PLUGIN_ROOT}};
+const PLUGIN_ROOT_UNSAFE_RE = /['\x00-\x1f\x7f]/;
+if (PLUGIN_ROOT !== "" && PLUGIN_ROOT_UNSAFE_RE.test(PLUGIN_ROOT)) {
+  // #412: this message deliberately names the concept ("plugin_root"), never
+  // the literal double-brace token spelling -- writing the token's own
+  // syntax into a runtime string here would make it a SECOND substitution
+  // site, silently corrupted by the very instantiation step this check
+  // exists to guard against (see EFFORT_RE/MODEL_RE above, which name
+  // "engine.effort"/"engine.model" for the identical reason).
+  throw new Error("Unsafe plugin_root value " + JSON.stringify(PLUGIN_ROOT) + ": must not contain a single quote or control character");
+}
+// PLUGIN_ROOT_ARG single-quoted, appended only when truthy -- same
+// conditional-omission shape as MODEL_ARG above; a bare --plugin-root flag
+// with no value is never emitted (codex_job.py's own argparse default,
+// None, is reserved for "flag omitted entirely", not an empty string).
+const PLUGIN_ROOT_ARG = PLUGIN_ROOT ? " --plugin-root '" + PLUGIN_ROOT + "'" : "";
 
 // #198 -- driver/poll timing constants, mirroring codex_job.py's own
 // constants (documented in the header comment's W5 dispatch model). Only the
@@ -925,7 +971,7 @@ function translateDrivePrompt(seg) {
     "cat > \"$TASKFILE\" <<'LT_CODEX_TASK_EOF'\n" +
     codexTask + "\n" +
     "LT_CODEX_TASK_EOF\n" +
-    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind translate --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + " </dev/null >/dev/null 2>&1 &\n" +
+    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind translate --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + PLUGIN_ROOT_ARG + " </dev/null >/dev/null 2>&1 &\n" +
     "echo \"DISPATCHED " + seg + " $DISP\"";
   const lines = [];
   lines.push("Effort: low. You are DISPATCHING a background codex translation job for segment " + seg + " -- you do NOT translate anything yourself, and you do NOT wait for the job to finish.");
@@ -987,7 +1033,7 @@ function reviewDrivePrompt(seg, roundLabel) {
     "cat > \"$TASKFILE\" <<'LT_CODEX_TASK_EOF'\n" +
     codexTask + "\n" +
     "LT_CODEX_TASK_EOF\n" +
-    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind review --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + " </dev/null >/dev/null 2>&1 &\n" +
+    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind review --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + PLUGIN_ROOT_ARG + " </dev/null >/dev/null 2>&1 &\n" +
     "echo \"DISPATCHED " + seg + " $DISP\"";
   const lines = [];
   lines.push("Effort: low. You are DISPATCHING a background codex review job for segment " + seg + " (round " + roundLabel + ") -- you do NOT review anything yourself, and you do NOT wait for the job to finish.");
@@ -1199,6 +1245,35 @@ function waitRecheckPrompt(seg) {
 // even exists, silently dropping it on every fixed segment's first round --
 // which would then always fail ledger_update.py's convergence-time
 // dispatch_token check (references/ledger-and-resumability.md).
+//
+// #409 Step 3: this prompt does NOT ask the fixer to run validate_draft.py
+// and certify its own output. An earlier revision did (via the line just
+// below the draft-rewrite instruction), but that self-report was dead text:
+// runRound's own handling of callFix's return value (`fx`) only ever scans
+// it for the literal DRAFT_MISSING sentinel -- "confirm it prints OK" was
+// never parsed, checked, or acted on by anything downstream, so it read as
+// an assurance this pipeline provides while providing none. A deterministic
+// gate must not be executed by the party it is checking -- and the fixer
+// self-certifying its own edit is exactly that.
+//
+// This is NOT closed by translateAcceptCmd()'s validate_draft.py splice
+// (:1020) -- that gate is the TRANSLATE wait's own ACCEPT command
+// (waitPrompt/waitChunkPrompt), fired exactly once, before this fix step
+// (and the whole round loop) ever runs; it is never invoked again after a
+// fix. Verified directly: reviewAcceptCmd() (the ACCEPT command every round
+// after a fix actually waits on, via getVerifiedReview/reviewWaitPrompt)
+// calls ONLY review_ready.py, and review_ready.py's own docstring lists
+// its exact three checks -- review.schema.json validity, draft_sha1
+// freshness, dispatch_token match -- none of which is validate_draft.py.
+// The only thing that currently determines a post-fix draft's coverage_ok
+// is reviewDispatchPrompt's own instruction to the NEXT round's REVIEWER
+// ("First run the deterministic gate: validate_draft.py ... remember
+// whether it printed OK or FAIL") -- still a self-report, just by a
+// different party (a fresh reviewer turn, not the fixer that made the
+// edit) than the one this comment removes. Deleting the fixer's own
+// self-check is correct regardless (it was unparsed dead text either way);
+// it is not, by itself, a claim that the post-fix draft is independently,
+// deterministically re-validated anywhere in this file today.
 function fixPrompt(seg, round, revObj) {
   const lines = [];
   lines.push("Effort: " + EFFORT + ". You are the Claude editor applying review findings to segment " + seg + ", round " + round + ".");
@@ -1207,7 +1282,7 @@ function fixPrompt(seg, round, revObj) {
   lines.push("Otherwise, read " + ROOT + "/segments/" + seg + ".draft.json and " + ROOT + "/segments/segpack_" + seg + ".json, and carefully apply every finding from " + ROOT + "/segments/" + seg + ".review.json to the draft. Never touch a placeholder sentinel (e.g. ⟦FNREF_...⟧, ⟦VERSE_...⟧) -- copy each one byte for byte in place. Keep the verse policy: " + VERSE_POLICY_INSTRUCTION_BLOCK);
   lines.push("Never change the set of block, footnote, or verse keys -- they must stay exactly 1:1 with the segpack.");
   lines.push("The draft also carries a dispatch_token top-level field -- copy its existing value byte for byte into your rewritten draft, unchanged; never invent, drop, or recompute it.");
-  lines.push("Rewrite " + ROOT + "/segments/" + seg + ".draft.json with your fixes. Then run " + PY + " " + ROOT + "/scripts/validate_draft.py " + seg + " and confirm it prints OK -- if your own edit broke coverage or a placeholder, repair it and rewrite the file again until it prints OK.");
+  lines.push("Rewrite " + ROOT + "/segments/" + seg + ".draft.json with your fixes.");
   lines.push("Return exactly the line: FIXED " + seg + " r" + round);
   return lines.join("\n");
 }
@@ -1779,7 +1854,8 @@ if (estimatedCalls > BATCH_AGENT_CAP) {
 // That estimator sizes Workflow agent() calls, a proxy that does not name
 // the resource an operator actually spends money/time on. This gate sizes
 // the real thing directly: codex dispatches (one detached codex_job.py
-// launch per translate, per review, and per fix round). Must run, and must
+// launch per translate and per review -- NOT per fix; see CODEX_JOBS_PER_SEG
+// below and the comment above it for why). Must run, and must
 // be able to return, BEFORE pipeline() is ever called below -- same
 // placement contract as the estimator directly above, so a refusal from
 // EITHER gate stays "before any work" rather than mid-batch. Issue #402's

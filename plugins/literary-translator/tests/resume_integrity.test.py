@@ -138,10 +138,12 @@ file, matching `ledger_merge.test.py`'s established convention, never the
 script actually under test in that case.
 """
 import copy
+import importlib.util
 import json
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -328,7 +330,8 @@ if __name__ == "__main__":
 
 
 def make_resume_setup_root(
-    tmp_path, plugin_bundle_hash="pbh-v1", orchestration_bundle_hash="obh-v1", name="durable_root"
+    tmp_path, plugin_bundle_hash="pbh-v1", orchestration_bundle_hash="obh-v1", name="durable_root",
+    mass_segs=("seg01", "seg02"),
 ):
     root = tmp_path / name
     scripts_dir = root / "scripts"
@@ -348,6 +351,16 @@ def make_resume_setup_root(
     runs_dir.mkdir(parents=True)
     (runs_dir / ".plugin_bundle_hash").write_text(plugin_bundle_hash, encoding="utf-8")
     (runs_dir / ".orchestration_bundle_hash").write_text(orchestration_bundle_hash, encoding="utf-8")
+
+    # LT-409: the mass-kind digest domain now comes from manifest.json's own
+    # segments[] (resume_setup.py's _load_manifest_seg_ids()), never from a
+    # caller-supplied 'segs' payload field -- every mass-kind test in this
+    # file shares the SAME seg01/seg02 pair mass_base_cache_keys() also
+    # uses, matched here by default. `mass_segs=()` (empty) is a genuine
+    # opt-out for a test that wants no manifest.json at all (e.g. the
+    # orphan-copy negative control, which builds its own root by hand).
+    if mass_segs:
+        write_json(root / "manifest.json", {"segments": [{"seg": s} for s in mass_segs]})
     return root
 
 
@@ -377,15 +390,21 @@ def with_resume_from(payload, run_id):
 
 
 def assert_setup_success(proc, parsed):
+    """Returns `parsed`, narrowed to non-None (pyright cannot see the
+    `assert parsed is not None` below across a function-call boundary, so
+    every caller reassigns its own `parsed` variable to this return value
+    -- `parsedN = assert_setup_success(procN, parsedN)` -- rather than
+    subscripting the pre-call, still-Optional variable)."""
     assert proc.returncode == 0, (
         f"setup should succeed: rc={proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr}"
     )
     assert parsed is not None, f"expected one JSON line on stdout, got: {proc.stdout!r}"
     assert parsed.get("success") is True, f"expected success:true, got: {parsed}"
+    return parsed
 
 
 def assert_resumes(proc, parsed, prior_run_id):
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
     assert parsed.get("resume") is True, f"expected resume:true on a digest MATCH, got {parsed}"
     assert parsed.get("effectiveRunId") == prior_run_id, (
         f"a digest MATCH must reuse the exact prior run id -- got "
@@ -394,7 +413,7 @@ def assert_resumes(proc, parsed, prior_run_id):
 
 
 def assert_fresh_no_resume(proc, parsed, prior_run_id):
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
     assert parsed.get("resume") is False, f"expected resume:false on a digest mismatch, got {parsed}"
     assert parsed.get("effectiveRunId") != prior_run_id, (
         f"a digest MISMATCH must produce a FRESH run id, never reuse the "
@@ -403,9 +422,15 @@ def assert_fresh_no_resume(proc, parsed, prior_run_id):
 
 
 def mass_base_payload():
+    """LT-409: `args` is now PINNED to {} for kind="mass" -- resume_setup.py
+    hard-rejects anything else (see its own module docstring's `args`
+    paragraph). `segs` is kept here, unread, purely to prove the
+    DEPRECATED-but-still-accepted field genuinely does nothing -- the
+    digest domain comes from manifest.json instead (written by
+    make_resume_setup_root(), matching this exact seg01/seg02 pair)."""
     return {
         "kind": "mass",
-        "args": {"segments": ["seg01", "seg02"]},
+        "args": {},
         "subst": dict(BASE_SUBST),
         "segs": ["seg01", "seg02"],
     }
@@ -429,7 +454,7 @@ def test_case1_metadata_only_candidate_change_forces_fresh_run(tmp_path):
         "batches": [{"index": 0, "names": ["Alice Smith"]}],
     }
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     assert parsed0["resume"] is False  # first-ever run, nothing to resume
     run_id = parsed0["effectiveRunId"]
 
@@ -455,7 +480,7 @@ def test_case2_changed_segment_cache_key_composite_forces_fresh_run(tmp_path):
     base_payload = mass_base_payload()
 
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     proc1, parsed1 = run_resume_setup(root, with_resume_from(base_payload, run_id))
@@ -476,7 +501,7 @@ def test_case3_changed_plugin_bundle_hash_forces_fresh_run(tmp_path):
     base_payload = mass_base_payload()
 
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     proc1, parsed1 = run_resume_setup(root, with_resume_from(base_payload, run_id))
@@ -501,7 +526,7 @@ def test_case4_changed_orchestration_bundle_hash_forces_fresh_run(tmp_path):
     base_payload = mass_base_payload()
 
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     proc1, parsed1 = run_resume_setup(root, with_resume_from(base_payload, run_id))
@@ -522,7 +547,7 @@ def test_case5_schema_only_edit_forces_fresh_run(tmp_path):
     base_payload = mass_base_payload()
 
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     proc1, parsed1 = run_resume_setup(root, with_resume_from(base_payload, run_id))
@@ -548,7 +573,7 @@ def test_case6_research_mode_flip_forces_fresh_run_no_byte_change(tmp_path):
     base_payload["subst"]["research_mode"] = "live"
 
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     proc1, parsed1 = run_resume_setup(root, with_resume_from(base_payload, run_id))
@@ -579,7 +604,7 @@ def test_case6b_citation_content_types_change_forces_fresh_run_no_byte_change(tm
     base_payload["subst"]["citation_content_types"] = "text/"
 
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     proc1, parsed1 = run_resume_setup(root, with_resume_from(base_payload, run_id))
@@ -1101,11 +1126,19 @@ def test_case12_stale_token_pair_surfaces_in_missing_segments(tmp_path):
 # self-anchored behavior for both when both flags are omitted.
 # ===========================================================================
 
-def run_resume_setup_from(script_path, payload_obj, tmp_dir, *extra_args, timeout=30):
+def run_resume_setup_from(script_path, payload_obj, tmp_dir, *extra_args, timeout=30, cwd=None):
+    """`cwd=None` (the default) preserves every pre-existing caller's
+    behavior exactly (subprocess.run() with no cwd= inherits the test
+    process's own cwd) -- only a caller that needs to control the SUBPROCESS's
+    own working directory (e.g. to exercise a caller-relative --durable-root
+    end to end) passes one explicitly."""
     payload_path = tmp_dir / "scratch_resume_payload.json"
     write_json(payload_path, payload_obj)
     cmd = [sys.executable, str(script_path), "--payload-file", str(payload_path), *extra_args]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout,
+        cwd=str(cwd) if cwd is not None else None,
+    )
     parsed = None
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
     if len(lines) == 1:
@@ -1118,8 +1151,17 @@ def run_resume_setup_from(script_path, payload_obj, tmp_dir, *extra_args, timeou
 
 def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     """Negative control: an orphan copy invoked WITHOUT --durable-root
-    cannot succeed via self-anchoring (no runs/ dir to even create, no
-    plugin_bundle_hash marker to read)."""
+    cannot succeed via self-anchoring -- it self-anchors to a location with
+    no manifest.json, no runs/ dir, no plugin_bundle_hash marker. Asserts
+    the SPECIFIC reason (manifest.json, the first of those
+    compute_input_digest()'s mass branch reads as of LT-409 -- earlier it
+    was the plugin_bundle_hash marker, moved here when the digest domain
+    moved to manifest.json), not merely that some failure occurred: a bare
+    "it failed" assertion cannot tell a correct self-anchoring refusal
+    apart from an unrelated crash, so a future defect that broke the
+    orphan-copy path for the WRONG reason would pass this test silently.
+    See resume_integrity.test.py's own review history for why this
+    specificity matters here."""
     orphan_dir = tmp_path / "orphan_location" / "scripts"
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "resume_setup.py"
@@ -1129,6 +1171,12 @@ def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
 
     assert proc.returncode != 0
     assert parsed is not None and parsed.get("success") is False
+    assert "manifest.json" in (parsed.get("error") or ""), (
+        f"expected the orphan copy to fail specifically on its missing "
+        f"manifest.json -- got a different reason, which means either the "
+        f"validation order changed (update this assertion to match) or "
+        f"something else broke the orphan-copy path: {parsed}"
+    )
 
 
 def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
@@ -1139,8 +1187,106 @@ def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
 
     proc, parsed = run_resume_setup(root, mass_base_payload())
 
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
     assert parsed.get("resume") is False
+
+
+# ---------------------------------------------------------------------------
+# A RELATIVE --durable-root must be resolved exactly ONCE (LT-409 post-review
+# fix). resolve_dirs() already resolves it correctly against resume_setup.py's
+# OWN cwd -- but _cache_key_for_seg() then runs the cache_key.py subprocess
+# with cwd SET TO that already-resolved root while (pre-fix) forwarding the
+# ORIGINAL, still-relative string as the subprocess's own --durable-root.
+# cache_key.py resolves ITS --durable-root against ITS OWN cwd (the
+# already-resolved root) -- joining the relative fragment onto the root a
+# second time.
+# ---------------------------------------------------------------------------
+
+PATH_PROBE_CACHE_KEY_PY = """#!/usr/bin/env python3
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seg")
+    parser.add_argument("--durable-root", default=None)
+    args, _ = parser.parse_known_args()
+    if args.durable_root:
+        resolved = Path(args.durable_root).resolve()
+    else:
+        resolved = Path(__file__).resolve().parent.parent
+    # Record what THIS invocation resolved --durable-root to. __file__ is
+    # this stub's own FIXED on-disk location, unaffected by any doubling bug
+    # in the --durable-root VALUE it receives, so the probe file's own path
+    # is trustworthy regardless of what is under test.
+    probe_path = Path(__file__).resolve().parent.parent / "cache_key_probe.jsonl"
+    with open(probe_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"seg": args.seg, "resolved_durable_root": str(resolved)}) + "\\n")
+    if not args.seg:
+        sys.stderr.write("path-probe cache_key.py: test stub requires --seg\\n")
+        return 1
+    # Always succeeds with a real-shaped (if fake) composite, regardless of
+    # what it resolved -- decouples "did resume_setup.py notice a problem"
+    # from "did cache_key.py read the RIGHT tree", so the doubled-path defect
+    # is caught by a direct path comparison even in a build where it happens
+    # not to crash (e.g. the doubled directory exists for an unrelated
+    # reason) -- the more dangerous, silent failure mode.
+    print(json.dumps({"probe": True, "seg": args.seg}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
+
+
+def test_relative_durable_root_is_not_double_resolved_for_cache_key_subprocess(tmp_path):
+    """Caller runs from an outer cwd (e.g. `cd /repo`) with a RELATIVE
+    --durable-root (e.g. `projects/book`) -- the exact shape every real
+    caller of this script COULD use, even though every other test in this
+    file happens to pass an absolute one."""
+    outer = tmp_path  # stands in for the caller's own cwd, e.g. "/repo"
+    root = make_resume_setup_root(outer, name="projects/book")
+    (root / "scripts" / "cache_key.py").write_text(PATH_PROBE_CACHE_KEY_PY, encoding="utf-8")
+    probe_path = root / "cache_key_probe.jsonl"
+    assert not probe_path.exists()  # fixture sanity: nothing recorded yet
+
+    proc, parsed = run_resume_setup_from(
+        root / "scripts" / "resume_setup.py",
+        mass_base_payload(),
+        root,
+        "--durable-root", "projects/book",  # RELATIVE, relative to `outer`
+        cwd=outer,
+    )
+
+    assert probe_path.is_file(), (
+        f"the probe stub never ran -- resume_setup.py must have failed "
+        f"before even shelling out to cache_key.py: rc={proc.returncode}\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    probe_lines = [
+        json.loads(ln) for ln in probe_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+    ]
+    assert probe_lines, "probe file exists but recorded no invocations"
+    for entry in probe_lines:
+        assert entry["resolved_durable_root"] == str(root), (
+            f"cache_key.py's own --durable-root resolution must land on the "
+            f"SAME root resume_setup.py itself resolved ({root}) -- got "
+            f"{entry['resolved_durable_root']!r} for seg {entry['seg']!r}. A "
+            f"doubled path here (the relative fragment 'projects/book' "
+            f"joined onto root a second time) means the raw relative "
+            f"string was forwarded verbatim into a subprocess whose cwd is "
+            f"already that resolved root."
+        )
+
+    # The probe stub never fails, so resume_setup.py itself must have
+    # reported success -- proving the wrong-tree read (pre-fix) would have
+    # been entirely SILENT: a caller reading only {"success": true, ...}
+    # would never learn its digest was computed from the wrong directory.
+    parsed = assert_setup_success(proc, parsed)
 
 
 # ---------------------------------------------------------------------------
@@ -1199,8 +1345,8 @@ def test_plugin_root_flag_bypasses_a_tampered_durable_root_sibling(tmp_path):
     proc_poisoned, parsed_poisoned = run_resume_setup(root, payload)  # no --plugin-root
 
     assert proc_trusted.returncode == 0, f"stdout={proc_trusted.stdout}\nstderr={proc_trusted.stderr}"
-    assert_setup_success(proc_trusted, parsed_trusted)
-    assert_setup_success(proc_poisoned, parsed_poisoned)
+    parsed_trusted = assert_setup_success(proc_trusted, parsed_trusted)
+    parsed_poisoned = assert_setup_success(proc_poisoned, parsed_poisoned)
     assert parsed_trusted["input_digest"] != parsed_poisoned["input_digest"], (
         "the trusted plugin-root cache_key.py must have produced a "
         "DIFFERENT digest than the poisoned durable-root sibling -- if "
@@ -1242,7 +1388,7 @@ def test_durable_root_and_plugin_root_are_independently_resolved(tmp_path):
         f"independently -- got rc={proc.returncode}\nstdout:\n{proc.stdout}\n"
         f"stderr:\n{proc.stderr}"
     )
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
     assert (data_root / "runs" / parsed["effectiveRunId"] / "input.digest").is_file()
     assert not (plugin_root / "runs").exists()
 
@@ -1261,5 +1407,608 @@ def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
         "--durable-root", str(root),
     )
 
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
     assert parsed.get("resume") is False
+
+
+# ---------------------------------------------------------------------------
+# payload['plugin_root'] (#412): a TOP-LEVEL, optional field -- the SAME
+# value the orchestrating session substitutes into the Workflow template's
+# own {{PLUGIN_ROOT}} token, recorded here for the producer-side contract but
+# deliberately NEVER folded into input_digest. See the module docstring's
+# payload-shape block and SUBST_FIELDS's own comment for the full reasoning
+# (a filesystem path is not a semantic value, and hashing a raw absolute
+# path would make the digest non-portable across two operators' checkouts).
+# ---------------------------------------------------------------------------
+def test_payload_plugin_root_field_omitted_preserves_todays_behavior(tmp_path):
+    """A payload built before #412 (no 'plugin_root' key at all) must keep
+    working unchanged -- this field is optional, defaulting to ""."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    assert "plugin_root" not in payload  # fixture sanity: genuinely absent
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    parsed = assert_setup_success(proc, parsed)
+
+
+def test_payload_plugin_root_field_accepted_when_present(tmp_path):
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["plugin_root"] = "/some/plugin/install/root"
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    parsed = assert_setup_success(proc, parsed)
+
+
+def test_payload_plugin_root_field_wrong_type_rejected(tmp_path):
+    """Fail loudly (never silently coerced or ignored) on a malformed
+    'plugin_root' -- e.g. a caller that accidentally sends a number or an
+    object instead of a path string."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["plugin_root"] = 12345
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+    assert "plugin_root" in (parsed.get("error") or ""), (
+        f"error message should name the offending field; got: {parsed}"
+    )
+
+
+def test_payload_plugin_root_field_never_changes_input_digest(tmp_path):
+    """The load-bearing property of the SUBST_FIELDS exclusion decision:
+    two payloads, identical in every OTHER respect, differing ONLY in
+    'plugin_root', must produce the EXACT SAME input_digest -- proving this
+    field is genuinely excluded from hashing, not merely undocumented."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload_a = mass_base_payload()
+    payload_a["plugin_root"] = "/path/one/install"
+    payload_b = mass_base_payload()
+    payload_b["plugin_root"] = "/completely/different/path/two"
+
+    proc_a, parsed_a = run_resume_setup(root, payload_a)
+    # A fresh root for the second call -- run_resume_setup's own root already
+    # recorded run_dir/input.digest for payload_a's (matching) digest, and a
+    # SECOND resolve_run against the SAME root with an identical digest would
+    # resume rather than compute a fresh one to compare -- this test wants
+    # two INDEPENDENT digest computations, not a resume decision.
+    root_b = make_resume_setup_root(tmp_path, name="durable_root_b")
+    write_fixture_cache_keys(root_b, mass_base_cache_keys())
+    proc_b, parsed_b = run_resume_setup(root_b, payload_b)
+
+    parsed_a = assert_setup_success(proc_a, parsed_a)
+    parsed_b = assert_setup_success(proc_b, parsed_b)
+    assert parsed_a["input_digest"] == parsed_b["input_digest"], (
+        f"plugin_root must never affect input_digest -- got "
+        f"{parsed_a['input_digest']!r} vs {parsed_b['input_digest']!r}"
+    )
+
+
+def test_payload_plugin_root_absent_and_empty_produce_the_same_digest(tmp_path):
+    """Companion to the above: omitting 'plugin_root' entirely and setting
+    it to "" explicitly (both mean 'no redirect') must ALSO produce
+    identical digests -- the field's absence is not itself a distinct value
+    from its documented default."""
+    root_a = make_resume_setup_root(tmp_path, name="durable_root_omitted")
+    write_fixture_cache_keys(root_a, mass_base_cache_keys())
+    payload_omitted = mass_base_payload()
+    assert "plugin_root" not in payload_omitted
+
+    root_b = make_resume_setup_root(tmp_path, name="durable_root_empty")
+    write_fixture_cache_keys(root_b, mass_base_cache_keys())
+    payload_empty = mass_base_payload()
+    payload_empty["plugin_root"] = ""
+
+    proc_a, parsed_a = run_resume_setup(root_a, payload_omitted)
+    proc_b, parsed_b = run_resume_setup(root_b, payload_empty)
+
+    parsed_a = assert_setup_success(proc_a, parsed_a)
+    parsed_b = assert_setup_success(proc_b, parsed_b)
+    assert parsed_a["input_digest"] == parsed_b["input_digest"]
+
+
+# ===========================================================================
+# LT-409: the manifest-derived mass digest domain, `args={}` pinning, and
+# the plural `resume_from_run_ids` field. See resume_setup.py's own module
+# docstring for the full contract this section locks down.
+# ===========================================================================
+
+
+def test_mass_args_must_be_empty_object(tmp_path):
+    """`args` is PINNED to {} for kind="mass" -- resume_setup.py rejects
+    anything else outright, rather than silently hashing an ambiguous
+    value (the SEGS list -- what the field used to carry before this fix,
+    and the shape #409's own driver docstring documents as the identical
+    shrinking-domain defect one level up from `segs` itself)."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["args"] = {"segments": ["seg01", "seg02"]}
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+    assert "args" in (parsed.get("error") or ""), (
+        f"error message should name the offending field; got: {parsed}"
+    )
+
+
+@pytest.mark.parametrize("bad_args", [None, [], "seg01", 0, False])
+def test_mass_args_rejects_every_non_empty_dict_shape(tmp_path, bad_args):
+    """Every one of the three previously-plausible readings (omitted ->
+    None, the eligible list, or any other JSON value) is now a hard
+    failure -- only the literal {} is accepted."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    if bad_args is None:
+        del payload["args"]
+    else:
+        payload["args"] = bad_args
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+
+
+def test_mass_args_empty_object_accepted(tmp_path):
+    """Positive control for the two tests above: the ONE legal value, {},
+    is accepted and setup succeeds."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    assert payload["args"] == {}
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    parsed = assert_setup_success(proc, parsed)
+
+
+def test_mass_segs_field_is_ignored_entirely(tmp_path):
+    """The deprecated 'segs' field must not affect input_digest AT ALL --
+    proven by setting it to something the PRE-LT-409 code would have
+    rejected outright (an empty list) in one payload, and confirming setup
+    still succeeds with the exact SAME digest as an ordinary payload whose
+    'segs' matches the manifest."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload_a = mass_base_payload()
+    proc_a, parsed_a = run_resume_setup(root, payload_a)
+    parsed_a = assert_setup_success(proc_a, parsed_a)
+
+    root_b = make_resume_setup_root(tmp_path, name="durable_root_b")
+    write_fixture_cache_keys(root_b, mass_base_cache_keys())
+    payload_b = mass_base_payload()
+    payload_b["segs"] = []  # would have been rejected outright pre-LT-409
+    proc_b, parsed_b = run_resume_setup(root_b, payload_b)
+    parsed_b = assert_setup_success(proc_b, parsed_b)
+
+    assert parsed_a["input_digest"] == parsed_b["input_digest"], (
+        "the deprecated 'segs' field must never affect input_digest"
+    )
+
+
+def test_mass_segs_field_omitted_still_works(tmp_path):
+    """'segs' is optional now -- omitting it entirely behaves identically
+    to supplying it (both backward- and forward-compatible)."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    del payload["segs"]
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    parsed = assert_setup_success(proc, parsed)
+
+
+def test_mass_domain_now_comes_from_manifest_not_segs(tmp_path):
+    """The core LT-409 fix, proven two ways in one test: (a) 'segs' naming
+    a segment absent from cache_key.py's own fixture data does not matter
+    at all -- setup still succeeds against the REAL manifest set; (b)
+    editing manifest.json itself (growing it) DOES change the digest, even
+    with 'segs' held byte-identical throughout."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(
+        root, {**mass_base_cache_keys(), "seg03": make_cache_key_composite("s3")}
+    )
+    payload = mass_base_payload()
+    payload["segs"] = ["this-segment-does-not-exist-in-cache-keys"]  # ignored -> harmless
+    proc0, parsed0 = run_resume_setup(root, payload)
+    parsed0 = assert_setup_success(proc0, parsed0)
+    run_id = parsed0["effectiveRunId"]
+
+    # Resume against the identical manifest -> matches.
+    proc1, parsed1 = run_resume_setup(root, with_resume_from(payload, run_id))
+    assert_resumes(proc1, parsed1, run_id)
+
+    # Grow the manifest (a real W2/W3-shaped change) -> must force fresh,
+    # even though the payload (including the bogus 'segs') is unchanged.
+    write_json(
+        root / "manifest.json",
+        {"segments": [{"seg": "seg01"}, {"seg": "seg02"}, {"seg": "seg03"}]},
+    )
+    proc2, parsed2 = run_resume_setup(root, with_resume_from(payload, run_id))
+    assert_fresh_no_resume(proc2, parsed2, run_id)
+
+
+def test_mass_domain_stable_when_only_segs_shrinks_not_manifest(tmp_path):
+    """The #392 regression this whole fix targets, reproduced directly:
+    'segs' shrinking (simulating select_segments.py's ELIGIBLE list losing
+    a segment the instant it converges) must NOT force a fresh run when
+    manifest.json itself is unchanged -- this is the exact failure mode
+    that used to discard in-flight fix work on every single convergence."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    proc0, parsed0 = run_resume_setup(root, payload)
+    parsed0 = assert_setup_success(proc0, parsed0)
+    run_id = parsed0["effectiveRunId"]
+
+    shrunk = copy.deepcopy(payload)
+    shrunk["segs"] = ["seg01"]  # simulates seg02 having just converged
+    proc1, parsed1 = run_resume_setup(root, with_resume_from(shrunk, run_id))
+    assert_resumes(proc1, parsed1, run_id)
+
+
+def test_mass_manifest_missing_fails_loudly(tmp_path):
+    root = make_resume_setup_root(tmp_path, mass_segs=())  # no manifest.json written
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+
+    proc, parsed = run_resume_setup(root, mass_base_payload())
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+    assert "manifest.json" in (parsed.get("error") or "")
+
+
+def test_mass_manifest_malformed_entry_fails_loudly(tmp_path):
+    """manifest.json's segments[] entries must be objects with their own
+    'seg' string field -- a bare string is rejected, never silently
+    coerced (matching select_segments.py's own load_candidate_segments())."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    write_json(root / "manifest.json", {"segments": ["seg01"]})
+
+    proc, parsed = run_resume_setup(root, mass_base_payload())
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+
+
+def test_resume_from_run_ids_plural_tries_each_in_order_until_match(tmp_path):
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    proc0, parsed0 = run_resume_setup(root, payload)
+    parsed0 = assert_setup_success(proc0, parsed0)
+    run_id = parsed0["effectiveRunId"]
+
+    p = copy.deepcopy(payload)
+    p["resume_from_run_ids"] = ["nonexistent-1", "nonexistent-2", run_id]
+    proc1, parsed1 = run_resume_setup(root, p)
+    assert_resumes(proc1, parsed1, run_id)
+
+
+def test_resume_from_run_ids_no_candidate_matches_mints_fresh(tmp_path):
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["resume_from_run_ids"] = ["nope-1", "nope-2"]
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    parsed = assert_setup_success(proc, parsed)
+    assert parsed.get("resume") is False
+
+
+def test_resume_from_run_ids_empty_list_behaves_like_first_run(tmp_path):
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["resume_from_run_ids"] = []
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    parsed = assert_setup_success(proc, parsed)
+    assert parsed.get("resume") is False
+
+
+def test_resume_from_run_id_and_run_ids_together_rejected(tmp_path):
+    """Supplying BOTH the deprecated singular and the new plural field is a
+    hard error, never a silently-resolved ambiguity."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["resume_from_run_id"] = "some-run-id"
+    payload["resume_from_run_ids"] = ["some-run-id"]
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+
+
+def test_resume_from_run_ids_invalid_entry_rejected(tmp_path):
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["resume_from_run_ids"] = ["../escape"]
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+
+
+def test_resume_from_run_id_singular_still_works_alone(tmp_path):
+    """The deprecated singular field, used alone (no plural field at all),
+    must still work exactly as before -- backward compatibility for one
+    release."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    proc0, parsed0 = run_resume_setup(root, payload)
+    parsed0 = assert_setup_success(proc0, parsed0)
+    run_id = parsed0["effectiveRunId"]
+
+    proc1, parsed1 = run_resume_setup(root, with_resume_from(payload, run_id))
+    assert_resumes(proc1, parsed1, run_id)
+
+
+def test_resume_from_run_ids_computes_domain_exactly_once_regardless_of_candidate_count(tmp_path):
+    """LT-409: the entire point of the plural field. compute_input_digest()
+    -- and therefore each manifest segment's cache_key.py subprocess spawn
+    -- must run EXACTLY ONCE per resume_setup.py invocation, no matter how
+    many candidates are offered in 'resume_from_run_ids'. Proven by
+    counting REAL cache_key.py spawns via a fixture stub that appends one
+    line per invocation: 2 manifest segments x 5 offered (non-matching)
+    candidates would be 10 spawns under the old per-candidate-process
+    design; this asserts exactly 2."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    counting_cache_key = (
+        "#!/usr/bin/env python3\n"
+        "import argparse, json, sys\n"
+        "from pathlib import Path\n"
+        "durable_root = Path(__file__).resolve().parent.parent\n"
+        "with open(durable_root / 'spawn_count.log', 'a', encoding='utf-8') as fh:\n"
+        "    fh.write('x\\n')\n"
+        "p = argparse.ArgumentParser()\n"
+        "p.add_argument('--seg')\n"
+        "p.add_argument('--durable-root', default=None)\n"
+        "a, _ = p.parse_known_args()\n"
+        "data = json.loads((durable_root / 'test_fixture_cache_keys.json').read_text(encoding='utf-8'))\n"
+        "print(json.dumps(data[a.seg]))\n"
+    )
+    (root / "scripts" / "cache_key.py").write_text(counting_cache_key, encoding="utf-8")
+
+    payload = mass_base_payload()
+    payload["resume_from_run_ids"] = ["nope-1", "nope-2", "nope-3", "nope-4", "nope-5"]
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    parsed = assert_setup_success(proc, parsed)
+    spawn_log = root / "spawn_count.log"
+    lines = spawn_log.read_text(encoding="utf-8").splitlines() if spawn_log.is_file() else []
+    assert len(lines) == 2, (
+        f"expected exactly 2 cache_key.py spawns (one per manifest segment, "
+        f"regardless of 5 offered non-matching candidates), got {len(lines)}"
+    )
+
+
+# ===========================================================================
+# The fresh-RUN_ID mint is a check-then-create split across TWO separate
+# function calls -- resolve_run()'s own existence check, write_run_dir()'s
+# own directory/digest creation -- never one atomic step. Two concurrent
+# resume_setup.py invocations against the SAME durable_root (e.g. one
+# kind="mass", one kind="glossary" -- exactly the shape SKILL.md's own
+# "Optional dispatch path" section warns is unguarded: "never against the
+# same durable_root as a concurrent pipeline() run -- nothing in either path
+# guards against that") can both observe "this candidate id is not yet
+# taken" before EITHER creates anything. codex flagged this mechanism from
+# source without demonstrating it. This section demonstrates it directly,
+# in two parts, then locks down the fix.
+#
+#   Part 1 (test_resolve_run_alone...): resolve_run() creates NOTHING on
+#   disk -- it only reads. So the collision precondition needs NO threading
+#   at all: two plain, sequential calls for two different payloads already
+#   return the identical fresh id whenever fresh_run_id() collides. This
+#   documents an existing, INTENTIONAL non-atomicity (resolve_run() is a
+#   cheap pre-filter, never the authority) -- it stays green before and
+#   after the fix below, because resolve_run() itself is not what changes.
+#
+#   Part 2 (test_concurrent_write_run_dir...): whether the shared id becomes
+#   DANGEROUS depends on how the two callers' write_run_dir() calls
+#   interleave. This file's own case 10 (above) calls a true OS-level
+#   process race "not practically unit-testable" -- but resolve_run()/
+#   write_run_dir() are plain, direct-callable functions (unlike
+#   draft_ready.py/review_ready.py's subprocess-only surface), so the
+#   interleaving CAN be forced deterministically: a barrier inserted at the
+#   exact seam between write_run_dir()'s digest_path.exists() check and its
+#   write forces both threads to have already passed that check (both
+#   independently saw "not yet written") before either is allowed to write
+#   -- without changing what either call actually DOES. This is what a true
+#   OS-level race could produce on an unlucky interleaving; the barrier only
+#   removes the luck.
+# ===========================================================================
+
+
+def _load_module(name, path):
+    """Imports a script as an in-process module -- the established pattern
+    for direct-function-call unit testing elsewhere in this test suite
+    (e.g. orchestration_hash_resume_gating.test.py's own `_load_module`).
+    A deliberate departure from THIS file's otherwise subprocess-only house
+    style (see the section banner above): forcing a genuine two-caller
+    interleaving deterministically needs direct function calls to patch a
+    synchronization point into, which a subprocess boundary would hide."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None, f"could not load spec for {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_resume_setup_module(root):
+    """Imports the copy of resume_setup.py make_resume_setup_root() already
+    placed at {root}/scripts/resume_setup.py -- so the module's own
+    self-anchored CACHE_KEY_SCRIPT constant resolves to THIS fixture's
+    cache_key.py stub, exactly like every subprocess-based test in this file
+    relies on. Importing the ORIGINAL shipped file directly would instead
+    self-anchor to the REAL plugin's own cache_key.py, which this fixture's
+    lightweight stub is standing in for."""
+    return _load_module("resume_setup_under_test_race", root / "scripts" / "resume_setup.py")
+
+
+def _glossary_payload_for_race():
+    return {
+        "kind": "glossary",
+        "args": {"candidates": []},
+        "subst": dict(BASE_SUBST),
+        "glossary_rule": "strict",
+        "batches": [{"index": 0, "names": ["Alice"]}],
+    }
+
+
+def test_resolve_run_alone_never_creates_so_two_calls_can_share_a_fresh_id(tmp_path):
+    """Part 1 -- see section banner above. Zero synchronization: resolve_run()
+    only reads, so two SEQUENTIAL calls for two different payloads (no
+    threading) already return the identical id whenever fresh_run_id()
+    collides."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    resume_setup = _load_resume_setup_module(root)
+
+    resume_setup.fresh_run_id = lambda: "20260802T120000Z"
+    dirs = resume_setup.resolve_dirs(None)
+
+    mass_run_id, mass_resume, mass_digest = resume_setup.resolve_run(mass_base_payload(), dirs)
+    glossary_run_id, glossary_resume, glossary_digest = resume_setup.resolve_run(
+        _glossary_payload_for_race(), dirs
+    )
+
+    assert mass_resume is False
+    assert glossary_resume is False
+    assert mass_run_id == glossary_run_id == "20260802T120000Z", (
+        "resolve_run() creates nothing on disk, so two calls for two "
+        "different payloads -- even called back-to-back with no threading "
+        "at all -- see the SAME 'not yet taken' fresh id whenever "
+        "fresh_run_id() collides; the check-then-create split is not "
+        "atomic by construction, independent of any true OS-level race"
+    )
+    assert mass_digest != glossary_digest  # fixture sanity: genuinely different payloads
+
+
+def test_concurrent_write_run_dir_calls_do_not_silently_clobber_input_digest(tmp_path):
+    """Part 2 -- see section banner above. Forces the dangerous interleaving
+    deterministically via a barrier at write_run_dir()'s own TOCTOU seam,
+    then asserts the SAFE invariant a fix must provide: exactly one of the
+    two concurrent claimants wins, the loser is refused BEFORE it can create
+    any further side effect (specifically its glossary/runs/<id>/ sibling --
+    the exact artifact segment_dispatch_driver.py's own
+    _resumable_run_id_candidates() uses to drop a run id as a mass-resume
+    candidate), and the surviving input.digest is exactly the winner's, never
+    silently replaced by the loser's."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    resume_setup = _load_resume_setup_module(root)
+    resume_setup.fresh_run_id = lambda: "20260802T130000Z"
+    dirs = resume_setup.resolve_dirs(None)
+
+    mass_payload = mass_base_payload()
+    glossary_payload = _glossary_payload_for_race()
+
+    mass_run_id, mass_resume, mass_digest = resume_setup.resolve_run(mass_payload, dirs)
+    glossary_run_id, glossary_resume, glossary_digest = resume_setup.resolve_run(glossary_payload, dirs)
+    assert mass_run_id == glossary_run_id, "fixture sanity: the Part-1 collision must reproduce here too"
+    assert mass_digest != glossary_digest  # fixture sanity: genuinely different payloads
+
+    barrier = threading.Barrier(2, timeout=5)
+    real_atomic_write_text = resume_setup._atomic_write_text
+
+    def synced_atomic_write_text(path, text):
+        if path.name == "input.digest":
+            # Both threads only ever reach here AFTER their own
+            # write_run_dir() has already evaluated digest_path.exists() as
+            # False (that check runs strictly before this call) -- waiting
+            # on the barrier here guarantees BOTH threads passed that check
+            # before EITHER is allowed to actually write, which is exactly
+            # what an unlucky true OS-level interleaving could also produce.
+            barrier.wait()
+        return real_atomic_write_text(path, text)
+
+    resume_setup._atomic_write_text = synced_atomic_write_text
+
+    # _atomic_write_text() names its own tmp file from os.getpid() -- correct
+    # for two real, DISTINCT OS processes, but two THREADS in this one test
+    # process share a single pid, so their tmp files would collide on name
+    # (one thread's os.replace() would then race-delete out from under the
+    # other's, raising a bare FileNotFoundError that has nothing to do with
+    # the digest_path race under test). threading.get_ident() gives each
+    # thread the same kind of per-caller uniqueness a distinct PID would --
+    # patched narrowly for just this race and restored immediately after.
+    real_getpid = resume_setup.os.getpid
+    resume_setup.os.getpid = threading.get_ident
+
+    errors = {}
+    run_dirs = {}
+
+    def call(kind, run_id, resume, digest, payload):
+        try:
+            run_dirs[kind] = resume_setup.write_run_dir(run_id, resume, digest, kind, payload, dirs)
+        except Exception as exc:  # noqa: BLE001 -- captured for the assertions below, not re-raised
+            errors[kind] = exc
+
+    t_mass = threading.Thread(target=call, args=("mass", mass_run_id, mass_resume, mass_digest, mass_payload))
+    t_glossary = threading.Thread(
+        target=call, args=("glossary", glossary_run_id, glossary_resume, glossary_digest, glossary_payload)
+    )
+    try:
+        t_mass.start()
+        t_glossary.start()
+        t_mass.join(timeout=10)
+        t_glossary.join(timeout=10)
+    finally:
+        resume_setup.os.getpid = real_getpid
+
+    assert not t_mass.is_alive() and not t_glossary.is_alive(), "a thread deadlocked on the barrier -- fixture bug"
+
+    assert len(errors) == 1, (
+        f"exactly ONE of the two concurrent claimants must be refused (never "
+        f"zero -- a silent clobber -- and never two) -- got errors={errors!r}, "
+        f"successful={sorted(run_dirs)!r}"
+    )
+    loser_kind = next(iter(errors))
+    winner_kind = "glossary" if loser_kind == "mass" else "mass"
+    assert isinstance(errors[loser_kind], resume_setup.ResumeSetupError), (
+        f"the loser must be refused via the script's own structured "
+        f"ResumeSetupError, not an unrelated crash: {errors[loser_kind]!r}"
+    )
+    assert "input.digest" in str(errors[loser_kind])
+
+    winner_digest = mass_digest if winner_kind == "mass" else glossary_digest
+    final_digest = (dirs["runs_dir"] / mass_run_id / "input.digest").read_text(encoding="utf-8").strip()
+    assert final_digest == winner_digest, (
+        "the surviving input.digest must be exactly the WINNER's -- never "
+        "silently replaced by the loser's, and never a torn/partial write"
+    )
+
+    # The dangerous downstream consequence codex named: a caller refused by
+    # the atomic claim must not go on to create ITS glossary sibling --
+    # that sibling is what makes segment_dispatch_driver.py's own
+    # _resumable_run_id_candidates() drop this run id as a mass-resume
+    # candidate later, orphaning a genuinely-resumable mass run.
+    assert not (root / "glossary" / "runs" / mass_run_id).exists() or winner_kind == "glossary", (
+        "a glossary sibling may only exist if glossary genuinely WON the "
+        "claim -- a refused glossary loser must never reach the point where "
+        "it creates one"
+    )
