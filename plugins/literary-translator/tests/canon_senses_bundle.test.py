@@ -26,9 +26,12 @@ things, per the plan's own enumeration:
       tests/select_segments.test.py) to confirm a converged segment goes
       straight to `stale` (never `blocked_needs_regeneration` --
       plugin_bundle_hash is not one of the four DERIVATION_STATE_FIELDS).
-  (c) A doc-count guard: references/ledger-and-resumability.md's "eleven
-      scripts" enumeration under the plugin_bundle_hash bullet matches
-      PLUGIN_BUNDLE_MEMBERS's own script filenames (the two workflow
+  (c) A doc-count guard: references/ledger-and-resumability.md's
+      plugin_bundle_hash bullet enumeration matches PLUGIN_BUNDLE_MEMBERS's
+      own script filenames exactly, both in COUNT (the doc's own English
+      number word, parsed generically -- see _english_number_word_to_int
+      below, not a hand-maintained word->int table that must be extended
+      every time a script joins the bundle) and in NAME (the two workflow
       templates are documented separately and excluded from the count).
 
 cache_key.py itself never recomputes plugin_bundle_hash (it reads
@@ -473,10 +476,49 @@ def _parse_ledger_bundle_count_and_enumeration():
     return count_word, names
 
 
-_NUMBER_WORDS = {
-    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
-    "thirteen": 13,
+# Generic English cardinal-word -> int parser (zero..ninety-nine, including
+# hyphenated compounds like "twenty-one"), NOT a hand-maintained dict pinned
+# to whatever the doc's count happened to be when this file was written.
+#
+# WHY: a fixed word->int table is a maintenance trap that fails EXACTLY when
+# it is supposed to catch drift. This guard exists to keep the doc's script
+# count in sync with PLUGIN_BUNDLE_MEMBERS -- but a table capped at "twelve"
+# means the very first time a script joins the bundle and pushes the count
+# to thirteen, the guard doesn't report a doc/code MISMATCH (its actual
+# job); it reports "unrecognized word", an unrelated maintenance failure
+# that masks whatever real drift might also be present. Measured: that is
+# exactly what happened here -- commit 752629c added a 13th member and
+# correctly updated the doc's prose to "thirteen", and this guard broke
+# anyway, on a doc that was already correct. A generic parser has no
+# ceiling to outgrow, so this class of false alarm cannot recur.
+_ONES = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
 }
+_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "seventy": 70, "eighty": 80, "ninety": 90,
+}
+
+
+def _english_number_word_to_int(word: str) -> int | None:
+    """Parses a single English cardinal number word into an int, or returns
+    None if `word` isn't one this parser recognizes. Handles zero..nineteen,
+    the bare tens (twenty, thirty, ...), and hyphenated compounds up to
+    ninety-nine (e.g. "twenty-one") -- comfortably beyond any script count
+    this bundle is plausibly ever going to reach, and requires no edit here
+    when it does."""
+    word = word.lower()
+    if word in _ONES:
+        return _ONES[word]
+    if word in _TENS:
+        return _TENS[word]
+    tens_word, sep, ones_word = word.partition("-")
+    if sep and tens_word in _TENS and ones_word in _ONES:
+        return _TENS[tens_word] + _ONES[ones_word]
+    return None
 
 
 def test_ledger_doc_bundle_count_and_enumeration_match_plugin_bundle_members():
@@ -484,9 +526,10 @@ def test_ledger_doc_bundle_count_and_enumeration_match_plugin_bundle_members():
 
     script_members = tuple(m for m in PLUGIN_BUNDLE_MEMBERS if m.endswith(".py"))
 
-    assert count_word in _NUMBER_WORDS, f"unrecognized count word {count_word!r}"
-    assert _NUMBER_WORDS[count_word] == len(script_members), (
-        f"doc says {count_word!r} ({_NUMBER_WORDS[count_word]}) scripts, "
+    count = _english_number_word_to_int(count_word)
+    assert count is not None, f"unrecognized English number word {count_word!r}"
+    assert count == len(script_members), (
+        f"doc says {count_word!r} ({count}) scripts, "
         f"PLUGIN_BUNDLE_MEMBERS has {len(script_members)} .py members: {script_members}"
     )
     assert set(doc_names) == set(script_members), (
@@ -510,8 +553,10 @@ def test_ledger_doc_summary_bullet_count_also_in_sync():
     assert m, "no 'bytes of the <word> generic scripts' summary phrase found"
     count_word = m.group(1)
     script_members = tuple(mem for mem in PLUGIN_BUNDLE_MEMBERS if mem.endswith(".py"))
-    assert _NUMBER_WORDS[count_word] == len(script_members), (
-        f"summary bullet says {count_word!r} generic scripts, but "
+    count = _english_number_word_to_int(count_word)
+    assert count is not None, f"unrecognized English number word {count_word!r}"
+    assert count == len(script_members), (
+        f"summary bullet says {count_word!r} ({count}) generic scripts, but "
         f"PLUGIN_BUNDLE_MEMBERS has {len(script_members)} .py members"
     )
 
