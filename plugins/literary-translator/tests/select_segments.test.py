@@ -1157,6 +1157,95 @@ def test_plugin_root_flag_absent_uses_the_poisoned_durable_root_sibling(tmp_path
     assert "TAMPERED_LEDGER_MERGE_MUST_NEVER_RUN" in payload["error"]
 
 
+# ---------------------------------------------------------------------------
+# Coverage-gap fix: every --plugin-root test above poisons ledger_merge.py
+# and uses "segOnly" with NO fragment written -- not_started, never
+# converged. classify_converged_segment() (the only caller of
+# compute_current_cache_key()) is never reached from any of them, so
+# compute_current_cache_key()'s OWN plugin_root_str parameter was unpinned:
+# its sibling parameters on the SAME function -- durable_root,
+# durable_root_str, cache_key_script -- are already exercised (the
+# relative-durable-root converged-segment test two sections up), but
+# plugin_root_str never was. Mirrors the ledger_merge.py poisoning pattern
+# exactly, one sibling over, with a CONVERGED segment and --durable-root
+# OMITTED -- exercising compute_current_cache_key()'s own documented
+# "durable_root_str is None but plugin_root_str IS" branch by name.
+# ---------------------------------------------------------------------------
+
+_TAMPERED_CACHE_KEY_SRC = (
+    "#!/usr/bin/env python3\n"
+    "import sys\n"
+    "sys.stderr.write('TAMPERED_CACHE_KEY_MUST_NEVER_RUN')\n"
+    "sys.exit(97)\n"
+)
+
+
+def poison_durable_root_cache_key(root):
+    """Overwrites the durable-root copy of cache_key.py with a stand-in for
+    a codex-tampered script -- mirrors poison_durable_root_ledger_merge()'s
+    own pattern. Leaves ledger_merge.py untouched, so a failure here is
+    attributable to cache_key.py specifically, never conflated with the
+    (already separately covered) ledger_merge.py redirect."""
+    (root / "scripts" / "cache_key.py").write_text(_TAMPERED_CACHE_KEY_SRC, encoding="utf-8")
+
+
+def test_plugin_root_flag_bypasses_a_tampered_cache_key_for_a_converged_segment(tmp_path):
+    """--durable-root OMITTED entirely (self-anchored), --plugin-root
+    pointing at a trusted copy of cache_key.py while durable_root's own
+    copy is poisoned. Success is possible ONLY if
+    compute_current_cache_key() actually resolved and ran the TRUSTED
+    cache_key.py -- which requires it to have forwarded --durable-root to
+    that subprocess despite --durable-root never being given to THIS
+    script at all (see compute_current_cache_key()'s own docstring)."""
+    root = make_durable_root(tmp_path)
+    seg = "segConverged"
+    write_manifest(root, [seg])
+    key = make_cache_key("stable")
+    sha1 = write_draft(root, seg, {"text": "stable content"})
+    write_fragment(root, seg, converged_fragment(key, sha1))
+    write_fixture_cache_keys(root, {seg: key})
+    poison_durable_root_cache_key(root)
+    plugin_root = make_trusted_plugin_root(tmp_path)
+
+    proc = run_select(root, "--allow-empty", "--plugin-root", str(plugin_root))
+
+    assert proc.returncode == 0, (
+        f"--plugin-root pointing at the REAL cache_key.py must succeed even "
+        f"though durable_root's own copy is poisoned -- rc={proc.returncode}\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "TAMPERED" not in proc.stdout and "TAMPERED" not in proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["classification"][seg]["category"] == "reusable", (
+        f"the segment must classify via the TRUSTED plugin-root cache_key.py, "
+        f"not escalate on the poisoned durable-root one. "
+        f"{payload['classification'][seg]}"
+    )
+
+
+def test_plugin_root_flag_absent_uses_the_poisoned_durable_root_cache_key(tmp_path):
+    """Negative control, and backward-compat proof in one: the SAME
+    poisoned durable-root cache_key.py, invoked WITHOUT --plugin-root, is
+    exactly what today's self-anchored lookup finds -- proving the positive
+    test's success above is attributable to --plugin-root specifically."""
+    root = make_durable_root(tmp_path)
+    seg = "segConverged"
+    write_manifest(root, [seg])
+    key = make_cache_key("stable")
+    sha1 = write_draft(root, seg, {"text": "stable content"})
+    write_fragment(root, seg, converged_fragment(key, sha1))
+    write_fixture_cache_keys(root, {seg: key})
+    poison_durable_root_cache_key(root)
+
+    proc = run_select(root, "--allow-empty")  # no --plugin-root
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["classification"][seg]["category"] == "human_escalation"
+    assert "TAMPERED_CACHE_KEY_MUST_NEVER_RUN" in payload["classification"][seg]["detail"]
+
+
 def test_durable_root_and_plugin_root_are_independently_resolved(tmp_path):
     """Orthogonality, end to end, from a fully orphan copy: --durable-root
     points at a DATA-only fixture with NO scripts/ directory AT ALL (so
