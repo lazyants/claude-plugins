@@ -119,8 +119,12 @@ non-existent paths failure above.
 **Wait on the COMPLETION criterion, never on stability.** "All N target files contain X" beats
 "nothing changed for 90s", which is satisfied by any pause.
 
-**Treat every teammate-reported suite number from a shared tree as unusable — INCLUDING a green one.**
-The danger is symmetric; a green taken mid-edit is just a false all-clear nobody investigates.
+**While any other agent is ACTIVE in a shared tree — editing, building, or running a suite it launched
+earlier — treat every teammate-reported suite number from that tree as unusable, INCLUDING a green
+one.** The danger is symmetric; a green taken mid-edit is just a false all-clear nobody investigates.
+The bar is ACTIVITY, never a CONFIRMED concurrent write: a write in flight is not observable (see
+"Scheduling quiet does NOT work" above), so demanding proof of one before distrusting a number
+restores exactly the failure this file exists to prevent.
 
 **Have teammates verify only their OWN files during the work**, and reserve the full pass for one
 self-validated run after everyone stops.
