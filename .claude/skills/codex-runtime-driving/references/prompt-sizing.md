@@ -27,7 +27,7 @@ char count produced the conclusion that the prompt had grown ~40% (nearly re-des
 around a phantom) when the real growth was 3.5%. **Always size with**
 
 ```
-python3 -c "print(len(open(p).read()))"
+python3 -c 'import sys; print(len(open(sys.argv[1], encoding="utf-8").read()))' PATH
 ```
 
 never `wc -c`, when the text is not ASCII. Sibling of [[gotcha-zsh-no-word-splitting]] — same fix

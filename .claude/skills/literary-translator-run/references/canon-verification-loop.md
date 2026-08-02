@@ -175,7 +175,8 @@ scope-leak → 283 → WC-audit R3 (−2 dedup) → 281 → strip mikveh scope-l
     Latin-prose ratio and badly UNDER-counts vocalized Hebrew — a 611K-char whole-corpus prompt
     estimated at "~153K tokens, fits" overflowed a 272K window — and `wc -c` counts BYTES, not
     characters, inflating the same prompt by ~40%. Size with
-    `python3 -c "print(len(open(p).read()))"` and calibrate against a prompt that actually RAN on
+    `python3 -c 'import sys; print(len(open(sys.argv[1], encoding="utf-8").read()))' PATH` and
+    calibrate against a prompt that actually RAN on
     that model. Full trap → `skill:codex-runtime-driving` → `references/prompt-sizing.md`.
 - **Effort — do not restate a tier verdict here.** What this loop actually established is that the
   lever that mattered was whole-corpus context, NOT effort. No effort tier is validated as a winner:
