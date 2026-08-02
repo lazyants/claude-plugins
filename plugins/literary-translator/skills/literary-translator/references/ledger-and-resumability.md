@@ -562,17 +562,16 @@ membership.
   new in 1.4.7, `canon_senses.py`, added for RFC #215's homonym-split
   adjudication gate — it is a dependency of `canon_validate.py` and
   `glossary_batch_plan.py`, both already bundle members, so its own bytes
-  must be registered too, and `segment_dispatch_driver.py`, added in #409
-  Step 4 as the W5 local driver — see below) plus the two
-  workflow templates: `validate_draft.py`,
-  `canon_validate.py`, `cache_key.py`, `draft_sha1.py`,
-  `review_artifact_check.py`, `ledger_update.py`, `review_ready.py`,
-  `resume_setup.py`, `glossary_batch_plan.py`, `codex_job.py`,
-  `canon_senses.py`, `fetch_citation.py`, added in 1.16.1 as the
+  must be registered too, `fetch_citation.py`, added in 1.16.1 as the
   validated retrieval boundary for the W3 citation audit (#347) -- it
   decides which citations may be fetched at all, so its bytes shape review
   content as directly as any validator, and `segment_dispatch_driver.py`,
-  plus
+  added in #409 Step 4 as the W5 local driver — see below) plus the two
+  workflow templates: `validate_draft.py`, `canon_validate.py`,
+  `cache_key.py`, `draft_sha1.py`, `review_artifact_check.py`,
+  `ledger_update.py`, `review_ready.py`, `resume_setup.py`,
+  `glossary_batch_plan.py`, `codex_job.py`, `canon_senses.py`,
+  `fetch_citation.py`, `segment_dispatch_driver.py`, plus
   `mass-translate-wf.template.js`/`glossary-pass-wf.template.js`. These are
   scripts that directly shape extraction/translation/review/validation
   content, or determine whether a convergence verdict was correctly

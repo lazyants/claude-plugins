@@ -484,11 +484,13 @@ value is validated against a **hardened, path-safe allowlist**:
 `^[A-Za-z0-9][A-Za-z0-9._-]*$`, and the whole value must not be `.` or `..`,
 and must not contain a `..` substring anywhere (rejecting directory-escape
 and dot-segment-collapse tricks). The identical value both names the run
-directory `resume_setup.py` itself owns (`${durable_root}/runs/<RUN_ID>/`
-for `kind="mass"`, `${durable_root}/glossary/runs/<RUN_ID>/` for
-`kind="glossary"`) and substitutes `{{RUN_ID}}` inside the instantiated
-template — so a fresh instantiation and a resumed one that reuses the
-same `RUN_ID` produce byte-identical tokens/paths throughout.
+directory `resume_setup.py` itself owns (`${durable_root}/runs/<RUN_ID>/`,
+written unconditionally for every `kind`, with
+`${durable_root}/glossary/runs/<RUN_ID>/` created as an ADDITIONAL
+directory — never a substitute — when `kind="glossary"`) and substitutes
+`{{RUN_ID}}` inside the instantiated template — so a fresh instantiation
+and a resumed one that reuses the same `RUN_ID` produce byte-identical
+tokens/paths throughout.
 (`${durable_root}/runs/workflows/<RUN_ID>/` is a SEPARATE directory —
 confirmed distinct from the above: `resume_setup.py`'s own source contains
 no mention of "workflows" anywhere, and `write_run_dir()` creates
@@ -496,8 +498,8 @@ no mention of "workflows" anywhere, and `write_run_dir()` creates
 subdirectory. `runs/workflows/` is part of Step 0a's created skeleton;
 exactly what gets written under `runs/workflows/<RUN_ID>/` and by whom is
 NOT re-derived here — do not assume it without checking the current
-Step 0a/driver source.) The full path resume_setup.py's own run directory
-is logged in W8's status output.
+Step 0a/driver source.) The full path of resume_setup.py's own run
+directory is logged in W8's status output.
 
 **Whether to resume at all is a separate decision from the `RUN_ID` value
 itself** — gated by the resume-integrity digest below, never by "a
@@ -522,7 +524,7 @@ input_digest = sha256(canonical_json({
   args: mass: {}  // LT-409: PINNED — see below, never the invocation's own args
       | glossary: <the full ordered args this invocation was given>,
   subst: {research_mode, verse_policy, source_lang, target_lang,
-          max_fix_rounds, batch_agent_cap, effort,
+          max_fix_rounds, batch_agent_cap, max_codex_jobs_per_batch, effort,
           citation_content_types},   // resolved profile substitutions
                                      // (#197: effort added; #347: citation_content_types added)
   domain: mass: {seg: <cache_key.py's 15-field composite per seg>}
@@ -556,6 +558,13 @@ convergence). Hashing the shrinking list forced a fresh, non-resuming
 the domain now stays stable across exactly that case, while still
 changing, correctly, when the manifest itself changes or any segment's own
 cache_key does.
+
+**`plugin_root` (#412) is accepted by `resume_setup.py` as a separate
+top-level payload field, never as a `subst` member or any other digest
+input** — it names a filesystem location, not a profile-derived semantic
+value, and `plugin_bundle_hash` (in `version`, above) already covers "did
+the plugin's own content change" without making the digest non-portable
+across operators' checkouts.
 
 **MATCH** the prior run's own recorded digest → resume with
 `resumeFromRunId` — every digest input is byte-identical, so every cached
