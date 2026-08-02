@@ -467,13 +467,47 @@ def _root_forward_args(dirs: dict, durable_root_str, plugin_root_str, *, support
     return []. See that function's own comment for why switching it to
     this helper would be a real behavior change, not a cleanup.
     """
+    # codex round-4 MAJOR: forwards the ALREADY-RESOLVED dirs["durable_root"]
+    # (a Path resolve_dirs() computed FROM this same durable_root_str),
+    # never the raw durable_root_str itself. The raw string used to be
+    # forwarded here whenever it was given -- but run_select_segments()
+    # (this function's own caller at :892-897) runs its subprocess with
+    # `cwd=str(dirs["durable_root"])`, the already-resolved absolute path.
+    # A RELATIVE --durable-root value (a real, supported CLI shape: this
+    # driver's own --durable-root help text says "omit for today's self-
+    # anchored behavior", implying any other value, relative or absolute,
+    # is accepted) would then be resolved by the CHILD a second time
+    # against that already-resolved cwd -- from /repo with
+    # --durable-root projects/book, the parent resolves to
+    # /repo/projects/book, forwards the raw "projects/book" string, and
+    # the child lands on /repo/projects/book/projects/book. Nothing
+    # depended on forwarding the raw string: every sibling script resolves
+    # its own --durable-root via Path(value).resolve(), and
+    # Path(absolute).resolve() is a no-op, so forwarding the already-
+    # resolved absolute path is correct and safe for every caller of this
+    # function, including the ones that do NOT override cwd (they inherit
+    # this driver's own process cwd, against which the raw string would
+    # ALSO have resolved correctly by coincidence -- but relying on that
+    # coincidence, rather than always forwarding the one value that is
+    # correct regardless of the child's cwd, is exactly what let the
+    # run_select_segments() call site diverge). Same fix shape as the
+    # identical defect found (and fixed) in resume_setup.py and twice in
+    # select_segments.py.
     args = []
-    if durable_root_str is not None:
-        args += ["--durable-root", durable_root_str]
-    elif plugin_root_str is not None:
+    if durable_root_str is not None or plugin_root_str is not None:
         args += ["--durable-root", str(dirs["durable_root"])]
     if plugin_root_str is not None and supports_plugin_root:
-        args += ["--plugin-root", plugin_root_str]
+        # Same fix, same reason, for the OTHER root: resolve_dirs() already
+        # resolved plugin_root_str once, against THIS process's own cwd, to
+        # build every plugin-anchored path in `dirs` -- forwarding the raw
+        # string here would let a relative --plugin-root resolve a SECOND
+        # time, against the CHILD's cwd (durable_root, for the one caller
+        # that overrides it), landing parent and child on two DIFFERENT
+        # plugin roots. Path(plugin_root_str).resolve() here reproduces
+        # the identical resolution resolve_dirs() already performed (same
+        # string, same unchanged process cwd), never a second, independent
+        # answer.
+        args += ["--plugin-root", str(Path(plugin_root_str).resolve())]
     return args
 
 
@@ -829,10 +863,15 @@ def load_engine_config(durable_root: Path) -> dict:
     if not isinstance(engine, dict) or "max_fix_rounds" not in engine:
         fatal(f"profile.yml at {profile_path} missing required field: engine.max_fix_rounds", exit_code=2)
     max_fix_rounds = engine["max_fix_rounds"]
-    if not isinstance(max_fix_rounds, int) or isinstance(max_fix_rounds, bool) or max_fix_rounds < 0:
+    # codex round-4 MAJOR: was `< 0` ("non-negative"), accepting 0 despite
+    # profile.schema.json's own `"minimum": 1` -- see load_translate_
+    # config()'s own copy of this same check for the full consequence
+    # (an unmatchable round token, the SAME failure class this file
+    # already closed once for a different cause).
+    if not isinstance(max_fix_rounds, int) or isinstance(max_fix_rounds, bool) or max_fix_rounds < 1:
         fatal(
             f"profile.yml at {profile_path}: engine.max_fix_rounds must be "
-            f"a non-negative integer, got {max_fix_rounds!r}",
+            f"a positive integer (minimum 1, per profile.schema.json), got {max_fix_rounds!r}",
             exit_code=2,
         )
     max_codex_jobs_per_batch = engine.get("max_codex_jobs_per_batch", 400)
@@ -917,14 +956,39 @@ def run_select_segments(
 # ---------------------------------------------------------------------------
 
 
+# Mirrors codex_job.py's own `_ACTIVE = frozenset(("queued", "running"))`
+# (codex_job.py:102) -- duplicated, not imported, per this project's "no
+# shared lib between self-contained scripts" convention. Used ONLY by
+# _attempt_cancel_orphan()'s own live status check below, never a
+# re-derivation of anything hygiene() itself decides differently.
+_ORPHAN_CANCEL_ACTIVE_STATUSES = frozenset(("queued", "running"))
+
+
 def _attempt_cancel_orphan(*, durable_root: Path, seg: str, disp: str, companion_path: str, node_bin: str) -> None:
     """codex round-2 item 10: best-effort orphan cancellation, called ONLY
     from dispatch_codex_job()'s own backstop-timeout path, right after the
     SIGKILL+reap. Mirrors codex_job.py's own `hygiene()` method
-    (codex_job.py:681-717) exactly rather than inventing a new shape: the
-    ONLY place to learn where to query/cancel is the joblog's own recorded
-    `jobCwd` -- codex-companion keys its job store by a hash of the
-    git-toplevel-resolved cwd, and codex_job.py's sandbox is a fresh
+    (codex_job.py:704-740), including its live status check (codex round-4
+    MINOR correction: an earlier version of this function skipped that
+    check and went straight from "joblog says launched" to cancelling --
+    a real, not merely cosmetic, divergence from the claim this docstring
+    already made. The joblog's local "launched" status only means "not
+    yet reaped locally", not "still active remotely": the companion
+    task-worker runs the model turn independently of this backstop's own
+    local process, so a wedged LOCAL wrapper can coexist with an
+    ALREADY-COMPLETED remote job. A blind unconditional cancel would send
+    a cancel command against a job that finished on its own --
+    companion 1.0.6's own handleCancel writes status:"cancelled"
+    UNCONDITIONALLY after a non-blocking attempt, so it would overwrite
+    the job's own completed status with a cancelled one purely because of
+    a local wedge that has nothing to do with the remote job's own
+    outcome. hygiene()'s own live status query, verified `workspaceRoot`
+    match, and `status in _ACTIVE` gate before cancelling are now
+    mirrored here for real, not merely claimed.
+
+    The ONLY place to learn where to query/cancel is the joblog's own
+    recorded `jobCwd` -- codex-companion keys its job store by a hash of
+    the git-toplevel-resolved cwd, and codex_job.py's sandbox is a fresh
     `mkdtemp()` PER INVOCATION, so querying with any other cwd (e.g.
     `durable_root`) hits a DIFFERENT, unrelated store and returns
     "No job found" -- the identical string whether the job never existed
@@ -942,15 +1006,17 @@ def _attempt_cancel_orphan(*, durable_root: Path, seg: str, disp: str, companion
     impossible, and this function silently does nothing in that case,
     which is the correct behavior (there is nothing to act on).
 
-    Cancellation is BEST EFFORT ONLY and proves NEITHER that billing
-    stopped NOR that the process died: companion 1.0.6's own handleCancel
-    writes status:"cancelled" UNCONDITIONALLY after two independent,
-    non-blocking attempts -- an app-server turn/interrupt (gated on live
-    thread/turn ids and a live broker; returns attempted:false when either
-    is missing) and a terminateProcessTree (SIGTERM, not SIGKILL, whose
-    own return value is discarded at its own call site). Never raises --
-    a failed cancel attempt must never turn an already-fatal dispatch into
-    a worse one; this is cleanup on a best-effort path, not a gate."""
+    Cancellation, when it does happen, is still BEST EFFORT ONLY and
+    proves NEITHER that billing stopped NOR that the process died:
+    companion 1.0.6's own handleCancel writes status:"cancelled"
+    UNCONDITIONALLY after two independent, non-blocking attempts -- an
+    app-server turn/interrupt (gated on live thread/turn ids and a live
+    broker; returns attempted:false when either is missing) and a
+    terminateProcessTree (SIGTERM, not SIGKILL, whose own return value is
+    discarded at its own call site). Never raises -- a failed cancel
+    attempt (OR a failed/inconclusive status query, which now ALSO means
+    "do not cancel") must never turn an already-fatal dispatch into a
+    worse one; this is cleanup on a best-effort path, not a gate."""
     joblog_path = durable_root / "segments" / f".codex_job.{seg}.json"
     try:
         joblog = json.loads(joblog_path.read_text(encoding="utf-8"))
@@ -966,6 +1032,33 @@ def _attempt_cancel_orphan(*, durable_root: Path, seg: str, disp: str, companion
     job_id = joblog.get("jobId")
     job_cwd = joblog.get("jobCwd")
     if not isinstance(job_id, str) or not job_id or not isinstance(job_cwd, str) or not job_cwd:
+        return
+    # Live status check, mirroring hygiene()'s own -- see this function's
+    # own docstring for why a blind cancel on the joblog's stale LOCAL
+    # "launched" status alone would be wrong. Any failure to positively
+    # CONFIRM the job is still active means "do not cancel" -- the
+    # inconclusive case defaults to the SAFER, more conservative side
+    # (leave a possibly-still-running job alone) rather than the more
+    # aggressive one (cancel on ambiguous evidence).
+    try:
+        status_proc = subprocess.run(
+            [node_bin, companion_path, "status", job_id, "--json", "--cwd", job_cwd],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if status_proc.returncode != 0:
+        return
+    try:
+        status_obj = json.loads(status_proc.stdout)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(status_obj, dict):
+        return
+    job = status_obj.get("job")
+    job = job if isinstance(job, dict) else {}
+    workspace_root = status_obj.get("workspaceRoot") or job.get("workspaceRoot")
+    if workspace_root != job_cwd or job.get("status") not in _ORPHAN_CANCEL_ACTIVE_STATUSES:
         return
     try:
         subprocess.run(
@@ -1182,10 +1275,24 @@ def load_translate_config(durable_root: Path) -> dict:
         if field not in engine:
             fatal(f"profile.yml at {profile_path} missing required field: engine.{field}", exit_code=2)
     max_fix_rounds = engine["max_fix_rounds"]
-    if not isinstance(max_fix_rounds, int) or isinstance(max_fix_rounds, bool) or max_fix_rounds < 0:
+    # codex round-4 MAJOR: was `< 0` ("non-negative"), accepting 0 despite
+    # profile.schema.json's own `"minimum": 1` (profile.schema.json:494-497)
+    # -- an invalid profile this driver should refuse, not silently accept.
+    # A fresh segment at max_fix_rounds=0 dispatches translate and review
+    # round "1" (derive_next_action()'s own "no review yet" branch always
+    # starts at round_label "1", never "final", regardless of this value),
+    # but round recognition (_matched_review_round_label()'s own `for n in
+    # range(1, max_fix_rounds + 2)` loop) admits ONLY "final" when
+    # max_fix_rounds=0 -- so round "1" can never be matched, every later
+    # invocation treats that review as absent, and the segment re-reviews
+    # forever until the generic loop-exhaustion fallback. The exact
+    # unmatchable-round-token failure class this file already closed once
+    # (the `rNone` defect fixed by review_dispatch_token()'s own explicit
+    # refusal), recreated here through a profile value nothing rejects.
+    if not isinstance(max_fix_rounds, int) or isinstance(max_fix_rounds, bool) or max_fix_rounds < 1:
         fatal(
             f"profile.yml at {profile_path}: engine.max_fix_rounds must be "
-            f"a non-negative integer, got {max_fix_rounds!r}",
+            f"a positive integer (minimum 1, per profile.schema.json), got {max_fix_rounds!r}",
             exit_code=2,
         )
     max_codex_jobs_per_batch = engine.get("max_codex_jobs_per_batch", 400)
@@ -1297,10 +1404,55 @@ def verse_policy_instruction_block(verse_policy: dict) -> str:
 _RUN_ID_DIR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
-_RESUMABLE_CANDIDATE_LIMIT = 5  # mirrors resume_setup.py's own RUN_ID_RETRY_LIMIT bounded-retry shape
+def validate_run_id(name: str) -> "str | None":
+    """Return an error string if `name` is not a safe RUN_ID, else None --
+    same contract as the four siblings this mirrors (resume_setup.py,
+    select_segments.py, skeptic_setup.py, backfill_resume_gate_ack.py, all
+    named `validate_run_id`; `git grep validate_run_id` over the scripts
+    directory finds all five). This one used to be a same-file-only bool
+    predicate named `_looks_like_safe_run_id` -- a fifth spelling with a
+    fifth contract, invisible to that grep and to a drift check built on
+    it, which is exactly the blind spot this rename closes.
+
+    codex round-4 MAJOR: the regex alone is NOT the authority's full
+    contract. resume_setup.py's own validate_run_id() rejects `..`
+    (both the whole value being exactly "." or ".." and any substring
+    occurrence) IN ADDITION TO the shared `_RUN_ID_DIR_RE` pattern -- the
+    regex's character class ([A-Za-z0-9._-]) admits dots freely, so it
+    alone accepts "z..poison", "a..b", "trail..". This driver's own
+    _RUN_ID_DIR_RE-only filter used to offer such a name as a candidate if
+    one ever existed under runs_dir with an input.digest sibling
+    (untrusted directory names -- not something this driver created, but
+    not something it should assume either). The consequence is not that
+    resume_setup.py would be fooled by it: _resume_from_candidates()
+    validates the WHOLE resume_from_run_ids list before matching ANY of
+    them and aborts on the first invalid entry -- so one unsafe-looking
+    name offered ALONGSIDE a perfectly valid candidate would abort the
+    entire resolve, discarding the valid one too, never reaching it.
+    Mirrors the authority's own decision exactly (not a re-derivation of
+    its regex alone) so a name this function offers can never be the one
+    that trips that abort.
+
+    The `isinstance` guard below is NOT decoration copied out of caution
+    -- resume_setup.py's own validate_run_id() has it first, before its
+    regex check, so a non-string probe (the drift check's own adversarial
+    set includes one) hits that sibling's early return rather than its
+    regex line. Without the identical guard here, the same probe reaches
+    `_RUN_ID_DIR_RE.fullmatch(name)` directly and raises TypeError instead
+    of returning an error string -- a crash, not a disagreement, but still
+    not the same DECISION the sibling makes on that input."""
+    if not isinstance(name, str) or not name:
+        return "run id must be a non-empty string."
+    if not _RUN_ID_DIR_RE.fullmatch(name):
+        return f"run id must match {_RUN_ID_DIR_RE.pattern!r}; got {name!r}."
+    if name in (".", ".."):
+        return f"run id must not be '.' or '..'; got {name!r}."
+    if ".." in name:
+        return f"run id must not contain '..'; got {name!r}."
+    return None
 
 
-def _resumable_run_id_candidates(runs_dir: Path, durable_root: Path, limit: int = _RESUMABLE_CANDIDATE_LIMIT) -> list:
+def _resumable_run_id_candidates(runs_dir: Path, durable_root: Path) -> list:
     """Candidate `resume_from_run_ids` entries for resolve_run_id() below
     (all offered together, in the order returned here), most recent first:
     every subdirectory of `runs_dir` that LOOKS like a run id
@@ -1308,7 +1460,31 @@ def _resumable_run_id_candidates(runs_dir: Path, durable_root: Path, limit: int 
     file (the one marker that distinguishes a real prior run directory from
     `ledger.d`, `workflows/`, or any other non-run-id entry `runs/` also
     holds), sorted lexicographically descending (== chronologically, since
-    RUN_ID is the colon-free `YYYYMMDDTHHMMSSZ` form), capped at `limit`.
+    RUN_ID is the colon-free `YYYYMMDDTHHMMSSZ` form).
+
+    codex round-4 MAJOR: NEVER capped. An earlier version capped this list
+    at 5 (`_RESUMABLE_CANDIDATE_LIMIT`, "mirrors resume_setup.py's own
+    RUN_ID_RETRY_LIMIT bounded-retry shape") -- but RUN_ID_RETRY_LIMIT
+    bounds a DIFFERENT quantity entirely (fresh-id collision retries, a
+    write-time concern), and the cap's REAL justification -- capping how
+    many resume_setup.py round-trips a caller pays for -- stopped applying
+    the moment resolve_run_id() switched to the plural `resume_from_run_ids`
+    field (8815800 / this driver's own round-2 follow-up): resume_setup.py
+    now computes input_digest EXACTLY ONCE per call regardless of how many
+    candidates are offered, so a longer candidate list costs a few more
+    cheap file reads and string compares inside that ONE call, never an
+    additional subprocess round-trip. With the cost gone, the cap became
+    pure downside: an interrupted, genuinely matching run behind FIVE OR
+    MORE newer non-matching candidates (any mix of glossary runs without a
+    detectable sibling yet, or mass runs from repeated retries) is dropped
+    before resolve_run() ever sees it, minting a fresh RUN_ID and silently
+    re-doing already-promoted, already-paid-for work -- exactly the #392
+    defect class this whole resumability story exists to prevent. Nothing
+    here recreates a cap on different grounds either: `runs_dir` only ever
+    grows by one entry per non-resuming invocation (a genuine digest
+    mismatch or a first-ever run), which in real operation stays small
+    enough that offering every discovered candidate is unconditionally
+    the right trade.
 
     #392 (codex, round 2): a SINGLE "latest" candidate is not enough.
     `{durable_root}/runs/` mixes mass AND glossary run dirs -- both kinds
@@ -1341,10 +1517,10 @@ def _resumable_run_id_candidates(runs_dir: Path, durable_root: Path, limit: int 
     glossary_runs_dir = durable_root / "glossary" / "runs"
     candidates = [
         p.name for p in runs_dir.iterdir()
-        if p.is_dir() and _RUN_ID_DIR_RE.fullmatch(p.name) and (p / "input.digest").is_file()
+        if p.is_dir() and validate_run_id(p.name) is None and (p / "input.digest").is_file()
         and not (glossary_runs_dir / p.name).is_dir()
     ]
-    return sorted(candidates, reverse=True)[:limit]
+    return sorted(candidates, reverse=True)
 
 
 def resolve_run_id(dirs: dict, *, translate_cfg: dict,
@@ -2561,15 +2737,35 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
 
     The iteration cap (codex_jobs_per_segment(max_fix_rounds) -- one
     translate plus every review round this segment could ever legitimately
-    need) bounds the LOOP overall; `fabricated_loc_retries` is a SEPARATE,
-    narrower counter (never reusing the loop's own iteration count) so an
-    expected condition (a reviewer emitting a fabricated finding, which the
+    need -- PLUS ONE, see the codex round-4 MINOR fix below) bounds the
+    LOOP overall; `fabricated_loc_retries` is a SEPARATE, narrower counter
+    (never reusing the loop's own iteration count) so an expected
+    condition (a reviewer emitting a fabricated finding, which the
     template's own comment above AUTHENTIC_LOC_RE says a HEALTHY reviewer
     can do) is bounded and reported on its OWN terms, one retry, rather
     than silently spending the whole per-segment budget and then being
     reported as if the defensive backstop itself had fired.
+
+    codex round-4 MINOR: the `+1` above is load-bearing, not padding.
+    Recognizing "the one permitted retry ALSO came back fabricated" costs
+    a full extra LOOP ITERATION beyond the raw dispatch count -- the
+    retry's own review must be DISPATCHED (one iteration) before its
+    result can be RE-READ and classified (a SEPARATE, later iteration,
+    even though that one dispatches nothing new). At max_fix_rounds=1,
+    codex_jobs_per_segment() = 3 (translate + review r1 + the one retry),
+    which is exactly enough budget for the three DISPATCHES but leaves no
+    iteration left to make the classification -- the loop hits its raw
+    cap and falls through to the generic "loop-exhausted-without-
+    terminal-state" reason on the SAME iteration that should have
+    produced "review-fabricated-loc" instead. The segment still correctly
+    terminates either way (no data loss, no wrong dispatch) -- only the
+    reported REASON was wrong, silently relabeling an identified,
+    expected condition as the generic defensive backstop. The existing
+    test for this path passed only because its fixture uses
+    max_fix_rounds=2 (budget 4), which happens to leave the needed spare
+    iteration; it never exercised the boundary.
     """
-    max_iterations = codex_jobs_per_segment(ctx.translate_cfg["max_fix_rounds"])
+    max_iterations = codex_jobs_per_segment(ctx.translate_cfg["max_fix_rounds"]) + 1
     fabricated_loc_retries = 0
     for _ in range(max_iterations):
         # codex round-3 BLOCKER, corrected after an initial fix was itself

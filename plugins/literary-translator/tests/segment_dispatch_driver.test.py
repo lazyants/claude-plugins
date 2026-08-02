@@ -628,6 +628,47 @@ def test_only_segs_unknown_id_refused_by_select_segments_itself(tmp_path):
     assert "segNoSuchSeg" in payload["error"]
 
 
+def test_relative_durable_root_does_not_resolve_twice(tmp_path):
+    """codex round-4 MAJOR (found by another lane in resume_setup.py, and
+    twice more in select_segments.py -- the identical shape confirmed
+    here in this file too): _root_forward_args() used to forward the
+    RAW, possibly-relative durable_root_str to sibling scripts, while
+    run_select_segments() (this driver's own Step 1 gate call) runs that
+    subprocess with cwd=str(dirs["durable_root"]) -- the ALREADY-RESOLVED
+    absolute path. A relative --durable-root would then be resolved by
+    the CHILD a second time against that already-resolved cwd: from
+    tmp_path with --durable-root "durable_root", the parent resolves to
+    tmp_path/durable_root, forwards the raw "durable_root" string, and
+    select_segments.py would land on tmp_path/durable_root/durable_root
+    -- a directory that does not exist, so manifest.json is not found
+    there and the gate fatals, loudly, on a project that is otherwise
+    entirely valid. Proven end to end: the driver is launched with cwd
+    set to the PARENT of its own durable root and a RELATIVE
+    --durable-root fragment -- exactly the shape a real invocation from
+    a repo's own root directory would use."""
+    root = phase2_project(tmp_path, n=1)
+    parent_dir = root.parent
+    relative_fragment = root.name
+
+    proc = subprocess.run(
+        [sys.executable, str(root / "scripts" / "segment_dispatch_driver.py"),
+         "--durable-root", relative_fragment],
+        capture_output=True, text=True, timeout=60, cwd=str(parent_dir),
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True, payload
+    assert payload["durable_root"] == str(root), (
+        f"expected the driver's own reported durable_root to be the real tree {str(root)!r}, "
+        f"not a doubled path -- got {payload['durable_root']!r}"
+    )
+    assert payload["summary"]["converged"] == ["seg01"], (
+        "a real end-to-end convergence is only possible if select_segments.py (and every "
+        f"other sibling this driver shells out to) genuinely read the REAL tree: {payload}"
+    )
+
+
 # ===========================================================================
 # Property 7 -- the volume refusal, engine.max_codex_jobs_per_batch.
 # Formula and boundary must match mass-translate-wf.template.js's own
@@ -715,6 +756,91 @@ def test_volume_cap_default_when_profile_omits_the_key(tmp_path):
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     payload = parse_stdout(proc)
     assert payload["engine"]["max_codex_jobs_per_batch"] == 400
+
+
+def test_load_engine_config_refuses_max_fix_rounds_zero(tmp_path):
+    """codex round-4 MAJOR: profile.schema.json pins engine.max_fix_rounds
+    to `"minimum": 1` (profile.schema.json:494-497), but this check used
+    to accept 0 ("must be a non-negative integer"). A fresh segment at
+    max_fix_rounds=0 dispatches translate then review round "1", but round
+    recognition (_matched_review_round_label()'s own `range(1,
+    max_fix_rounds + 2)` loop) admits ONLY "final" when max_fix_rounds=0 --
+    so round "1" can never be matched and the segment re-reviews forever.
+    The exact unmatchable-round-token failure class this file already
+    closed once, recreated through a profile value nothing rejected."""
+    root = make_durable_root(
+        tmp_path, profile_yaml="engine:\n  max_fix_rounds: 0\n  max_codex_jobs_per_batch: 400\n",
+    )
+    driver_mod = _load_fixture_driver(root)
+
+    with pytest.raises(driver_mod.DriverError) as excinfo:
+        driver_mod.load_engine_config(root)
+    # codex round-4: "max_fix_rounds" alone is a WEAK substring here --
+    # pytest's own tmp_path embeds this test's function name
+    # ("test_load_engine_config_refuses_max_fix_rounds_zero"), so ANY
+    # exception message that includes the profile path (this one does)
+    # would trivially satisfy that check regardless of its real content.
+    # Measured directly: it does. "must be a positive integer" cannot be
+    # satisfied by the path, so it is what actually pins the message.
+    assert "engine.max_fix_rounds must be a positive integer" in str(excinfo.value), excinfo.value
+
+
+def test_load_translate_config_refuses_max_fix_rounds_zero(tmp_path):
+    """The second, independent copy of the SAME check (load_translate_
+    config() does not call load_engine_config() -- each profile-consuming
+    function re-validates for itself, per this file's own convention) --
+    proven separately so a fix to one copy cannot leave the other one
+    still accepting 0."""
+    profile_yaml = (
+        "engine:\n"
+        "  max_fix_rounds: 0\n"
+        "  batch_agent_cap: 10000\n"
+        "  effort: high\n"
+        "source:\n  language:\n    code: fr\n"
+        "target:\n  language:\n    code: ru\n"
+        "verse_policy:\n  mode: skip\n  threshold_lines: null\n"
+    )
+    root = make_durable_root(tmp_path, profile_yaml=profile_yaml)
+    driver_mod = _load_fixture_driver(root)
+
+    with pytest.raises(driver_mod.DriverError) as excinfo:
+        driver_mod.load_translate_config(root)
+    # See the sibling test above for why a bare "max_fix_rounds" substring
+    # check would be vacuous (satisfied by tmp_path/this test's own name).
+    assert "engine.max_fix_rounds must be a positive integer" in str(excinfo.value), excinfo.value
+
+
+def test_max_fix_rounds_zero_refused_end_to_end(tmp_path):
+    """The operationally-real path: a project actually launched with an
+    invalid profile.yml refuses cleanly through the real driver subprocess,
+    never reaching a dispatch. load_engine_config() (used for the volume
+    cap check) is reached before load_translate_config() in run()'s own
+    order, so this is what a real invocation actually hits first.
+
+    Uses a COMPLETE, otherwise-valid profile (every other required field
+    present) so max_fix_rounds=0 is the ONLY thing that can make this
+    refuse -- codex round-4: an earlier draft of this test used a
+    minimal profile missing batch_agent_cap/effort/source/target/
+    verse_policy, which genuinely refuses too, but for an UNRELATED
+    "missing required field" reason -- and its assertion (a bare
+    "max_fix_rounds" substring check) could not tell the two apart,
+    because pytest's own tmp_path embeds this test's function name and
+    satisfies that check regardless of which validation actually fired.
+    Measured directly: with the real bound reverted to `< 0`, this exact
+    setup refuses with "missing required field: engine.batch_agent_cap"
+    -- a message a naive substring check would have accepted as evidence
+    the max_fix_rounds fix works, when it says nothing about it at all."""
+    root = make_durable_root(tmp_path, profile_yaml=FULL_PROFILE_YAML.replace(
+        "max_fix_rounds: 2", "max_fix_rounds: 0",
+    ))
+    write_manifest(root, ["seg01"])
+
+    proc = run_driver(root)
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "engine.max_fix_rounds must be a positive integer" in payload["error"], payload
 
 
 # ===========================================================================
@@ -1235,6 +1361,43 @@ def test_plugin_root_flag_bypasses_a_tampered_durable_root_sibling(tmp_path):
     assert payload["segs"] == ["seg01"]
 
 
+def test_relative_plugin_root_reaches_the_trusted_tree_from_a_child_with_a_different_cwd(tmp_path):
+    """codex round-4 MAJOR, the --plugin-root half of the same doubled-
+    path-resolution defect found in --durable-root: _root_forward_args()
+    used to forward the raw plugin_root_str to sibling scripts too.
+    resolve_dirs() (inside THIS driver's own process) resolves a relative
+    --plugin-root against the driver's own invocation cwd -- but
+    run_select_segments()'s subprocess runs with cwd=dirs["durable_root"],
+    a DIFFERENT directory, so a raw relative --plugin-root forwarded to
+    it would resolve against THAT cwd instead, landing parent and child
+    on two DIFFERENT plugin roots. Proven with the SAME poisoned-sibling
+    technique as the test above, but with the driver itself launched from
+    a cwd distinct from durable_root and a RELATIVE --plugin-root
+    fragment computed against THAT cwd -- exactly the shape that diverges
+    under the old bug."""
+    root = phase2_project(tmp_path, n=1)
+    poison_durable_root_select_segments(root)
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    relative_plugin_root = os.path.relpath(plugin_root, tmp_path)
+
+    proc = subprocess.run(
+        [sys.executable, str(root / "scripts" / "segment_dispatch_driver.py"),
+         "--durable-root", str(root), "--plugin-root", relative_plugin_root],
+        capture_output=True, text=True, timeout=60, cwd=str(tmp_path),
+    )
+
+    assert proc.returncode == 0, (
+        f"a relative --plugin-root, resolved against the driver's OWN invocation cwd, must "
+        f"reach the SAME trusted tree in every subprocess this driver shells out to, "
+        f"including Step 1's own (which runs with a DIFFERENT cwd):\n"
+        f"rc={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "TAMPERED" not in proc.stdout and "TAMPERED" not in proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["success"] is True, payload
+    assert payload["summary"]["converged"] == ["seg01"], payload
+
+
 def test_plugin_root_flag_absent_uses_the_poisoned_durable_root_sibling(tmp_path):
     """Negative control, and backward-compat proof in one: the SAME
     poisoned durable-root select_segments.py, invoked WITHOUT
@@ -1562,6 +1725,48 @@ def test_resume_finds_an_older_mass_run_behind_a_newer_glossary_run(tmp_path):
         f"shadow a genuinely resumable mass one"
     )
     assert run_again.get("resume") is True, run_again
+
+
+def test_resumable_run_id_candidates_excludes_a_glossary_sibling_directly(tmp_path):
+    """codex round-4: the sibling test above only checks resolve_run_id()'s
+    FINAL result -- which, since the plural resume_from_run_ids switch,
+    would ALSO pass even if this filter clause were deleted entirely: the
+    shipped resume_setup.py's own resolve_run() already tries every
+    OFFERED candidate in order and skips a non-matching one server-side,
+    so a genuinely mass-matching candidate is still found even if a
+    non-matching glossary one were ALSO offered alongside it. That is
+    exactly why a mutation deleting `and not (glossary_runs_dir /
+    p.name).is_dir()` from _resumable_run_id_candidates()'s own
+    comprehension survived a real mutation battery with zero failures --
+    the ONLY thing that clause still buys, now, is not wasting a doomed
+    resume_setup.py round-trip attempt on a candidate that can never
+    match (see this function's own 25-line docstring paragraph that
+    exists entirely to explain why, from #392). Pinned here directly, by
+    calling _resumable_run_id_candidates() itself and asserting the
+    glossary-tagged id is excluded from its OWN return value -- the only
+    way to observe this clause's effect at all, since the end-to-end
+    result no longer depends on it."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    translate_cfg = dict(_FIXTURE_TRANSLATE_CFG)
+
+    run_mass = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    run_id_mass = run_mass["effectiveRunId"]
+
+    later_run_id = "9" + run_id_mass
+    (root / "runs" / later_run_id).mkdir()
+    (root / "runs" / later_run_id / "input.digest").write_text("deadbeef\n", encoding="utf-8")
+    (root / "glossary" / "runs" / later_run_id).mkdir(parents=True)
+
+    candidates = driver_mod._resumable_run_id_candidates(dirs["runs_dir"], dirs["durable_root"])
+    assert candidates == [run_id_mass], (
+        f"the glossary-tagged {later_run_id!r} must never appear in this function's OWN "
+        f"return value, regardless of whether resolve_run_id()'s end-to-end result would "
+        f"still be correct without this exclusion -- got {candidates}"
+    )
 
 
 def test_dedupe_segs_is_order_preserving_first_occurrence_wins():
@@ -1944,6 +2149,59 @@ def test_derive_next_action_already_converged_round_1_when_clean_and_draft_match
     assert driver_mod.derive_next_action("seg01", ctx) == {"action": "already_converged", "round_label": "1"}
 
 
+def test_derive_next_action_already_converged_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
+    """codex round-4 ("Tests that could not fail"): current_draft_sha1()'s
+    third argument -- dirs["scripts_dir"] -- is what makes this "clean and
+    draft matches" branch (segment_dispatch_driver.py:2321, feeding the
+    already_converged decision at :2338) hash the draft using the TRUSTED
+    plugin tree's draft_sha1.py under --plugin-root, never the durable
+    root's own writable, self-anchored copy (current_draft_sha1()'s own
+    `scripts_dir=SCRIPTS_DIR` default). That default matters because the
+    durable root is exactly what the gated codex process these checks
+    police can write to -- silently falling back to its own copy would
+    defeat the redirect --plugin-root exists for. A mutation dropping
+    this argument (forcing the SCRIPTS_DIR fallback) survived a real
+    mutation battery with zero failures, because every existing
+    --plugin-root fixture stages the REAL, unmodified draft_sha1.py at
+    BOTH locations -- "used the plugin copy" and "fell back to the
+    durable-root copy" compute the identical hash and are
+    indistinguishable to any assertion. Proven here with a plugin root
+    whose draft_sha1.py is POISONED to return an observably different,
+    fixed value while the durable root's own copy stays the real,
+    unmodified script -- so which one ran is visible in the result, not
+    merely inferable."""
+    root = phase2_project(tmp_path, n=1)
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    poisoned_draft_sha1_src = (
+        "def draft_path(seg, segments_dir):\n"
+        "    return segments_dir / f'{seg}.draft.json'\n"
+        "def draft_content_sha1(path):\n"
+        "    return 'POISONED-PLUGIN-DRAFT-SHA1'\n"
+    )
+    (plugin_root / "assets" / "scripts" / "draft_sha1.py").write_text(poisoned_draft_sha1_src, encoding="utf-8")
+
+    driver_mod = _load_fixture_driver(root)
+    ctx = driver_mod.DispatchContext(
+        dirs=driver_mod.resolve_dirs(None, str(plugin_root)), run_id=_DNA_RUN_ID,
+        translate_cfg=dict(_FIXTURE_TRANSLATE_CFG), companion_path=FIXTURE_COMPANION_PATH,
+        durable_root_str=None, plugin_root_str=str(plugin_root),
+        node_bin="node", session_id="test-session",
+    )
+    _dna_write_draft(root, driver_mod)
+    _dna_write_review(root, driver_mod, round_label="1", clean=True, coverage_ok=True,
+                       draft_sha1="POISONED-PLUGIN-DRAFT-SHA1")
+
+    action = driver_mod.derive_next_action("seg01", ctx)
+    assert action == {"action": "already_converged", "round_label": "1"}, (
+        f"the review's recorded draft_sha1 matches ONLY the plugin tree's "
+        f"poisoned draft_sha1.py output, never the durable root's real, "
+        f"unmodified copy -- reaching already_converged here is possible "
+        f"ONLY if derive_next_action() hashed the draft through "
+        f"dirs['scripts_dir'] (the plugin tree), not the module-level "
+        f"SCRIPTS_DIR default (the durable root) -- got {action}"
+    )
+
+
 def test_derive_next_action_needs_fix_when_not_clean_and_draft_unchanged(tmp_path):
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
@@ -1967,6 +2225,41 @@ def test_derive_next_action_advances_to_round_2_when_not_clean_but_fix_already_a
     _dna_write_draft(root, driver_mod)
     _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True, draft_sha1="0" * 40)
     assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "2"}
+
+
+def test_next_round_label_advances_below_the_boundary():
+    assert DRIVER._next_round_label("1", 2) == "2"
+
+
+def test_next_round_label_advances_to_final_at_the_boundary():
+    """codex round-4: the LAST numbered round (round_label ==
+    str(max_fix_rounds)) must advance to "final", never to
+    str(max_fix_rounds + 1) -- a label _matched_review_round_label()'s own
+    loop (range(1, max_fix_rounds + 2)) can never match, permanently
+    orphaning the dispatch token that review is sent under. Untested
+    before this fix: a mutation changing `max_fix_rounds + 1` to `+ 2`
+    inside _next_round_label() survived a real mutation battery with
+    zero test failures -- round advance was pinned only BELOW this
+    boundary (the sibling test above, round "1" -> "2" at
+    max_fix_rounds=2), never AT it."""
+    assert DRIVER._next_round_label("2", 2) == "final"
+
+
+def test_next_round_label_final_stays_final():
+    assert DRIVER._next_round_label("final", 2) == "final"
+
+
+def test_derive_next_action_advances_to_final_when_the_last_numbered_round_is_not_clean(tmp_path):
+    """The end-to-end counterpart of the direct unit test above, through
+    derive_next_action() itself: a not-clean review at the LAST numbered
+    round (round "2" at max_fix_rounds=2) whose fix has already landed
+    (draft_sha1 no longer matches) must advance to a FRESH "final" review,
+    never to a round "3" no later invocation could ever match."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    _dna_write_review(root, driver_mod, round_label="2", clean=False, coverage_ok=True, draft_sha1="0" * 40)
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "final"}
 
 
 def test_derive_next_action_cap_reached_when_final_round_not_clean(tmp_path):
@@ -2045,6 +2338,70 @@ def test_derive_next_action_fabricated_loc_gate_respects_node_bin(tmp_path):
     with pytest.raises(driver_mod.DriverError) as excinfo:
         driver_mod.derive_next_action("seg01", ctx)
     assert "bogus-node-binary-for-this-test" in str(excinfo.value), excinfo.value
+
+
+def test_derive_next_action_invalid_post_fix_draft_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
+    """The invalid_post_fix_draft branch's own current_draft_sha1() call
+    (segment_dispatch_driver.py:2225) is a SECOND call site sharing the
+    identical --plugin-root trust boundary as the already_converged
+    branch's (see the sibling test above) -- untested here for the same
+    reason: every existing --plugin-root fixture stages the REAL,
+    unmodified draft_sha1.py at both the durable root and the plugin
+    tree, so "used the plugin copy" and "fell back to the durable-root
+    default" are indistinguishable. Proven with a plugin root whose
+    draft_sha1.py is POISONED to return a FIXED value regardless of
+    content: a genuine post-fix content edit is then invisible to the
+    correct (plugin) computation -- the fixed value never changes, so
+    the review's recorded draft_sha1 still "matches" and this falls
+    through to plain "translate" -- while the WRONG (durable-root
+    fallback) computation hashes the REAL, changed content and reports a
+    mismatch, wrongly returning invalid_post_fix_draft. The two
+    call sites cannot share one test: this branch requires draft_ok to be
+    False (validate_draft_script failing), the already_converged branch
+    requires it True."""
+    root = phase2_project(tmp_path, n=1)
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    poisoned_draft_sha1_src = (
+        "def draft_path(seg, segments_dir):\n"
+        "    return segments_dir / f'{seg}.draft.json'\n"
+        "def draft_content_sha1(path):\n"
+        "    return 'POISONED-PLUGIN-DRAFT-SHA1'\n"
+    )
+    (plugin_root / "assets" / "scripts" / "draft_sha1.py").write_text(poisoned_draft_sha1_src, encoding="utf-8")
+
+    driver_mod = _load_fixture_driver(root)
+    ctx = driver_mod.DispatchContext(
+        dirs=driver_mod.resolve_dirs(None, str(plugin_root)), run_id=_DNA_RUN_ID,
+        translate_cfg=dict(_FIXTURE_TRANSLATE_CFG), companion_path=FIXTURE_COMPANION_PATH,
+        durable_root_str=None, plugin_root_str=str(plugin_root),
+        node_bin="node", session_id="test-session",
+    )
+
+    pre_fix_draft = _dna_write_draft(root, driver_mod)
+    findings = [{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}]
+    _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True,
+                       draft_sha1="POISONED-PLUGIN-DRAFT-SHA1", findings=findings)
+
+    # A genuine post-fix content edit -- the real draft_sha1.py (whichever
+    # copy is actually used) would see this; the poisoned plugin copy's
+    # FIXED return value would not.
+    post_fix_draft = dict(pre_fix_draft, blocks={"p1": "hola FIXED"})
+    (root / "segments" / "seg01.draft.json").write_text(
+        json.dumps(post_fix_draft, ensure_ascii=False), encoding="utf-8"
+    )
+    write_invalid_validate_draft_segs(root, ["seg01"])
+
+    action = driver_mod.derive_next_action("seg01", ctx)
+    assert action == {"action": "translate"}, (
+        f"the review's recorded draft_sha1 is the plugin tree's poisoned, "
+        f"content-independent constant -- if derive_next_action() hashed "
+        f"the post-fix draft through the PLUGIN copy (the trusted "
+        f"dirs['scripts_dir']), the two values still 'match' (both the "
+        f"same fixed constant) and this must fall through to plain "
+        f"'translate', never invalid_post_fix_draft -- got {action}, which "
+        f"means the real, content-sensitive durable-root copy was used "
+        f"instead"
+    )
 
 
 def test_derive_next_action_invalid_post_fix_draft_terminates_instead_of_retranslating(tmp_path):
@@ -2217,6 +2574,48 @@ def test_verse_policy_instruction_block_refuses_a_missing_mode(tmp_path):
     assert "unknown verse_policy.mode" in str(exc_info.value)
 
 
+_MINIMAL_TEMPLATE_SUBST = {
+    "durable_root": "/fake/root", "run_id": "20260101T000000Z",
+    "source_lang": "fr", "target_lang": "ru", "effort": "high", "model": "",
+    "verse_policy_instruction_block": "skip", "max_fix_rounds": 2,
+    "batch_agent_cap": 10000, "max_codex_jobs_per_batch": 400,
+    "companion_path": "/fake/codex-companion.mjs", "plugin_root": "",
+}
+
+
+def test_render_template_source_refuses_an_unresolved_token():
+    """codex round-4: no fixture ever fed this function a template
+    carrying a token outside `_TEMPLATE_TOKEN_STYLE`'s own known set, so
+    this "fail loudly on template drift" guard had never been observed
+    firing -- a mutation battery measured this directly: removing the
+    check survived with zero test failures. A new, unrecognized
+    {{TOKEN}} is exactly the shape a future template edit could
+    introduce (a new substitution the driver's own table has not been
+    taught yet), and this is the ONLY thing that would catch it -- every
+    known token is substituted independently via .replace(), which is a
+    silent no-op for a token that never appears, so nothing else notices
+    a template shaped differently than this driver expects."""
+    template_text = "const x = 1; // {{FUTURE_TOKEN_NOT_YET_KNOWN}}\n"
+    with pytest.raises(DRIVER.DriverError) as exc_info:
+        DRIVER.render_template_source(template_text, _MINIMAL_TEMPLATE_SUBST)
+    assert "unresolved {{TOKEN}}" in str(exc_info.value)
+
+
+def test_template_harness_source_refuses_a_missing_truncation_marker():
+    """codex round-4: the sibling guard to the test above, same
+    "untested until now" finding from the same mutation battery --
+    removing this check ALSO survived with zero failures. No fixture
+    ever fed this function a template whose truncation marker
+    (`function draftProbePrompt(`) had moved or been renamed -- the
+    shape a future refactor of the real template could introduce, and
+    the only thing standing between that and a silently mis-truncated
+    (or simply empty) harness."""
+    template_text = "// a template that has been refactored and no longer has the marker\n"
+    with pytest.raises(DRIVER.DriverError) as exc_info:
+        DRIVER.template_harness_source(template_text, _MINIMAL_TEMPLATE_SUBST)
+    assert "could not find the truncation marker" in str(exc_info.value)
+
+
 # ===========================================================================
 # codex #392 round-2 item 10: best-effort orphan cancellation on
 # dispatch_codex_job()'s own backstop-timeout path. NOT a state-corruption
@@ -2232,9 +2631,32 @@ import json
 import sys
 from pathlib import Path
 
-record_path = Path(__file__).resolve().parent / "cancel_record.json"
-record_path.write_text(json.dumps({"argv": sys.argv[1:]}), encoding="utf-8")
-sys.exit(0)
+here = Path(__file__).resolve().parent
+argv = sys.argv[1:]
+subcommand = argv[0] if argv else None
+cwd = argv[argv.index("--cwd") + 1] if "--cwd" in argv else None
+
+if subcommand == "status":
+    # codex round-4: mirrors hygiene()'s own live status query -- an
+    # optional scenario file lets a test control whether the job reports
+    # as still ACTIVE (the default, "running") or already finished, and
+    # whether workspaceRoot matches the queried --cwd.
+    scenario_path = here / "status_scenario.json"
+    if scenario_path.is_file():
+        scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    else:
+        scenario = {"status": "running", "workspace_root": cwd}
+    (here / "status_record.json").write_text(json.dumps({"argv": argv}), encoding="utf-8")
+    print(json.dumps({
+        "workspaceRoot": scenario.get("workspace_root", cwd),
+        "job": {"status": scenario.get("status", "running")},
+    }))
+    sys.exit(0)
+elif subcommand == "cancel":
+    (here / "cancel_record.json").write_text(json.dumps({"argv": argv}), encoding="utf-8")
+    sys.exit(0)
+
+sys.exit(1)
 """
 
 
@@ -2242,6 +2664,10 @@ def _write_fake_companion(tmp_path):
     path = tmp_path / "fake_companion.py"
     path.write_text(FAKE_COMPANION_CANCEL_RECORDER, encoding="utf-8")
     return path
+
+
+def _write_status_scenario(tmp_path, **fields):
+    (tmp_path / "status_scenario.json").write_text(json.dumps(fields, ensure_ascii=False), encoding="utf-8")
 
 
 def _write_joblog(root, joblog_seg, **fields):
@@ -2306,6 +2732,59 @@ def test_attempt_cancel_orphan_does_nothing_when_joblog_is_absent(tmp_path):
         companion_path=str(companion), node_bin=sys.executable,
     )
     assert not (tmp_path / "cancel_record.json").is_file()
+
+
+def test_attempt_cancel_orphan_does_not_cancel_a_job_that_already_completed(tmp_path):
+    """codex round-4 MINOR: an earlier version of this function skipped
+    hygiene()'s own live status check entirely and went straight from
+    "joblog says launched" to cancelling -- a real divergence from the
+    "mirrors hygiene() exactly" claim this file already made. The joblog's
+    LOCAL "launched" status only means "not yet reaped locally", not
+    "still active remotely": the companion task-worker runs the model
+    turn independently of this backstop's own local process, so a wedged
+    LOCAL wrapper can coexist with an ALREADY-COMPLETED remote job. If
+    the live status query reports the job is no longer in
+    _ORPHAN_CANCEL_ACTIVE_STATUSES ("queued"/"running"), this must NOT
+    send a cancel -- companion 1.0.6's own handleCancel writes
+    status:"cancelled" UNCONDITIONALLY, which would overwrite a genuinely
+    completed job's own status for no reason."""
+    root = phase2_project(tmp_path, n=1)
+    companion = _write_fake_companion(tmp_path)
+    _write_status_scenario(tmp_path, status="completed", workspace_root="/some/sandbox/path")
+    _write_joblog(root, "seg01", jobId="job-abc123", kind="translate", seg="seg01",
+                  disp="mydisp", status="launched", jobCwd="/some/sandbox/path")
+
+    DRIVER._attempt_cancel_orphan(
+        durable_root=root, seg="seg01", disp="mydisp",
+        companion_path=str(companion), node_bin=sys.executable,
+    )
+
+    assert (tmp_path / "status_record.json").is_file(), "the live status query itself must have been made"
+    assert not (tmp_path / "cancel_record.json").is_file(), (
+        "must NOT cancel a job the live query reports as already completed"
+    )
+
+
+def test_attempt_cancel_orphan_does_not_cancel_on_a_workspace_root_mismatch(tmp_path):
+    """The other half of hygiene()'s own live check: even a job reporting
+    an ACTIVE status must not be cancelled if the queried workspaceRoot
+    does not match the recorded jobCwd -- the identical defense-in-depth
+    hygiene() itself applies (codex_job.py:738, `if ws == prior_cwd and
+    job.get("status") in _ACTIVE:`)."""
+    root = phase2_project(tmp_path, n=1)
+    companion = _write_fake_companion(tmp_path)
+    _write_status_scenario(tmp_path, status="running", workspace_root="/a-different-workspace")
+    _write_joblog(root, "seg01", jobId="job-abc123", kind="translate", seg="seg01",
+                  disp="mydisp", status="launched", jobCwd="/some/sandbox/path")
+
+    DRIVER._attempt_cancel_orphan(
+        durable_root=root, seg="seg01", disp="mydisp",
+        companion_path=str(companion), node_bin=sys.executable,
+    )
+
+    assert not (tmp_path / "cancel_record.json").is_file(), (
+        "must NOT cancel when the queried workspaceRoot does not match the joblog's jobCwd"
+    )
 
 
 def test_dispatch_codex_job_backstop_timeout_attempts_cancel_via_recorded_job_cwd(tmp_path):
@@ -2481,7 +2960,14 @@ def _as_flag_dict(tokens):
     """{flag_name: value} for a flat --flag value ... argv list (every flag
     here takes exactly one value; --write/--fresh style boolean flags are
     not part of codex_job.py's dispatch argv this driver or the template
-    ever emit)."""
+    ever emit). ONLY for the optional-flag PRESENCE checks (--model/
+    --plugin-root) below -- codex round-4 NIT: this shape is NOT what
+    proves byte-equivalence; see _assert_argv_positionally_equivalent()
+    for that. A dict comparison silently erases ORDER and DEDUPLICATES a
+    repeated flag (a later occurrence simply overwrites an earlier one,
+    with no trace either ever existed) -- exactly the two defects a
+    genuinely reordered or duplicated argv would produce, and exactly
+    what a dict-equality check cannot catch."""
     d = {}
     i = 0
     while i < len(tokens):
@@ -2489,6 +2975,46 @@ def _as_flag_dict(tokens):
         d[tokens[i]] = tokens[i + 1]
         i += 2
     return d
+
+
+def _assert_argv_positionally_equivalent(driver_tokens, template_tokens, *, excepted_value_flags):
+    """codex round-4 NIT: the REAL byte-equivalence proof this driver's own
+    docstrings/this branch's PR description claim -- "byte-identical" --
+    which the former dict-based comparison (build a {flag: value} dict
+    from each side, delete the two excepted flags, compare dicts) did NOT
+    actually establish: converting to a dict erases ORDER (a reordered
+    argv compares equal) and silently DEDUPLICATES a repeated flag (a
+    duplicate --flag occurrence at a DIFFERENT position just overwrites
+    itself in the dict, leaving no trace). Compares both --flag value ...
+    sequences POSITION BY POSITION instead: same LENGTH, the same flag
+    NAME at every index (catching reordering AND duplication, since either
+    one shows up as a flag-name mismatch or a length mismatch at some
+    index), and the same VALUE at every index except the flags named in
+    `excepted_value_flags` -- whose VALUES genuinely cannot be compared
+    for the documented reason (see the callers' own comments), but whose
+    flag NAME and POSITION in the sequence still must match exactly, per
+    the caller's own explicit assertion that both sides carry that flag
+    (never silently dropped from the comparison, only its value)."""
+    assert len(driver_tokens) == len(template_tokens), (
+        f"argv length diverges -- driver has {len(driver_tokens)} tokens, template has "
+        f"{len(template_tokens)} (a reordered or duplicated flag changes the count only if "
+        f"it also changes which flags appear, but a genuinely different SHAPE always shows "
+        f"up here first):\ndriver:   {driver_tokens}\ntemplate: {template_tokens}"
+    )
+    for i in range(0, len(driver_tokens), 2):
+        d_flag, d_value = driver_tokens[i], driver_tokens[i + 1]
+        t_flag, t_value = template_tokens[i], template_tokens[i + 1]
+        assert d_flag.startswith("--") and t_flag.startswith("--"), (driver_tokens, template_tokens)
+        assert d_flag == t_flag, (
+            f"argv diverges at position {i}: driver has {d_flag!r}, template has {t_flag!r} "
+            f"-- a reordered or duplicated flag surfaces here, never as a silently-passing "
+            f"dict comparison:\ndriver:   {driver_tokens}\ntemplate: {template_tokens}"
+        )
+        if d_flag not in excepted_value_flags:
+            assert d_value == t_value, (
+                f"argv value for {d_flag!r} at position {i} diverges: driver={d_value!r} "
+                f"template={t_value!r}:\ndriver:   {driver_tokens}\ntemplate: {template_tokens}"
+            )
 
 
 def read_recorded_argv(root, kind, seg):
@@ -2540,8 +3066,10 @@ def test_translate_dispatch_byte_equivalence_to_template(tmp_path, with_plugin_r
     )
     assert written_text == out["text"], "driver's task-file content diverges from translatePrompt(seg)'s own output"
 
-    template_flags = _as_flag_dict(_extract_nohup_argv(out["cmd"], "translate"))
-    driver_flags = _as_flag_dict(read_recorded_argv(root, "translate", "seg01"))
+    template_tokens = _extract_nohup_argv(out["cmd"], "translate")
+    driver_tokens = read_recorded_argv(root, "translate", "seg01")
+    template_flags = _as_flag_dict(template_tokens)
+    driver_flags = _as_flag_dict(driver_tokens)
 
     if model_value:
         assert driver_flags.get("--model") == model_value, driver_flags
@@ -2562,13 +3090,15 @@ def test_translate_dispatch_byte_equivalence_to_template(tmp_path, with_plugin_r
     assert prompt_file_path.is_file(), driver_flags["--prompt-file"]
     assert prompt_file_path == task_files[0], (prompt_file_path, task_files[0])
     assert prompt_file_path.read_text(encoding="utf-8") == out["text"]
-    for flag in ("--disp", "--prompt-file"):
-        del template_flags[flag]
-        del driver_flags[flag]
 
-    assert driver_flags == template_flags, (
-        f"codex_job.py argv diverges from translateDrivePrompt's own dispatch:\n"
-        f"driver:   {driver_flags}\ntemplate: {template_flags}"
+    # codex round-4 NIT: the REAL byte-equivalence proof -- POSITIONAL, not
+    # a dict comparison that would silently pass a reordered or duplicated
+    # argv. --disp/--prompt-file keep their FLAG NAME and POSITION in this
+    # comparison (only their VALUE is excepted, for the reason above,
+    # already independently verified well-formed/on-disk-matching just
+    # above).
+    _assert_argv_positionally_equivalent(
+        driver_tokens, template_tokens, excepted_value_flags=("--disp", "--prompt-file"),
     )
 
 
@@ -2607,8 +3137,10 @@ def test_review_dispatch_byte_equivalence_to_template(tmp_path, with_plugin_root
     )
     assert written_text == out["text"], "driver's task-file content diverges from reviewDispatchPrompt(seg, round)'s own output"
 
-    template_flags = _as_flag_dict(_extract_nohup_argv(out["cmd"], "review"))
-    driver_flags = _as_flag_dict(read_recorded_argv(root, "review", "seg01"))
+    template_tokens = _extract_nohup_argv(out["cmd"], "review")
+    driver_tokens = read_recorded_argv(root, "review", "seg01")
+    template_flags = _as_flag_dict(template_tokens)
+    driver_flags = _as_flag_dict(driver_tokens)
 
     if model_value:
         assert driver_flags.get("--model") == model_value, driver_flags
@@ -2622,13 +3154,11 @@ def test_review_dispatch_byte_equivalence_to_template(tmp_path, with_plugin_root
     assert prompt_file_path.is_file(), driver_flags["--prompt-file"]
     assert prompt_file_path == task_files[0], (prompt_file_path, task_files[0])
     assert prompt_file_path.read_text(encoding="utf-8") == out["text"]
-    for flag in ("--disp", "--prompt-file"):
-        del template_flags[flag]
-        del driver_flags[flag]
 
-    assert driver_flags == template_flags, (
-        f"codex_job.py argv diverges from reviewDrivePrompt's own dispatch:\n"
-        f"driver:   {driver_flags}\ntemplate: {template_flags}"
+    # codex round-4 NIT: see the translate test above for why this is a
+    # POSITIONAL comparison, not a dict one.
+    _assert_argv_positionally_equivalent(
+        driver_tokens, template_tokens, excepted_value_flags=("--disp", "--prompt-file"),
     )
 
 
@@ -2914,6 +3444,42 @@ def test_a_persistently_fabricated_loc_terminates_after_exactly_one_retry(tmp_pa
     )
 
 
+def test_a_persistently_fabricated_loc_terminates_correctly_at_the_max_fix_rounds_one_boundary(tmp_path):
+    """codex round-4 MINOR: at max_fix_rounds=1, codex_jobs_per_segment()
+    is exactly 3 (1 translate + review r1 + the one permitted retry) --
+    the raw dispatch count, with NO spare iteration to re-read the
+    retry's own review and classify it. Before this fix, the loop hit its
+    cap on the SAME iteration that should have recognized "the retry ALSO
+    came back fabricated", so it fell through to the generic
+    "loop-exhausted-without-terminal-state" reason instead of
+    "review-fabricated-loc" -- the segment still correctly terminated
+    (no data loss, no wrong dispatch), but the reported REASON silently
+    mislabeled an identified, expected condition as the defensive
+    backstop. The sibling test above never exercised this boundary: its
+    fixture uses max_fix_rounds=2 (budget 4), which happens to leave the
+    needed spare iteration by coincidence, not by design."""
+    root = phase2_project(tmp_path, n=1)
+    write_codex_scenario(root, {
+        "review:seg01": {
+            "review_clean": False,
+            "review_findings": [{"loc": "TASK", "severity": "major", "issue": "x", "suggest": "y"}],
+        },
+    })
+    driver_mod, ctx = _fixture_ctx(root, "20260101T000000Z", translate_cfg=dict(_FIXTURE_TRANSLATE_CFG, max_fix_rounds=1))
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result == {"seg": "seg01", "converged": False, "outcome": "failed",
+                       "reason": "review-fabricated-loc"}, result
+
+    argv_log = (root / "test_fixture_argv_log.jsonl").read_text(encoding="utf-8").splitlines()
+    review_dispatches = [json.loads(ln) for ln in argv_log if json.loads(ln)["kind"] == "review"]
+    assert len(review_dispatches) == 2, (
+        f"expected exactly one retry (2 review dispatches total) even at this boundary -- "
+        f"got {len(review_dispatches)}: {review_dispatches}"
+    )
+
+
 def test_a_persistently_stale_clean_review_exhausts_the_loop_without_terminal_state(tmp_path):
     """The loop-exhaustion fallback (process_segment()'s own
     "loop-exhausted-without-terminal-state") is reachable -- NOT purely
@@ -2930,13 +3496,23 @@ def test_a_persistently_stale_clean_review_exhausts_the_loop_without_terminal_st
     Mutation-proven (manually, not in this test): raising max_iterations
     by one dispatches exactly one more review before this same test's
     dispatch-count assertion fails, confirming the loop's OWN iteration
-    cap -- and nothing else -- is what bounds this path today."""
+    cap -- and nothing else -- is what bounds this path today.
+
+    codex round-4 MINOR: process_segment()'s own max_iterations is now
+    codex_jobs_per_segment(max_fix_rounds) + 1 -- one spare iteration
+    reserved so the fabricated-loc retry bound can always classify its
+    own boundary case (see process_segment()'s own docstring for why that
+    +1 costs a full loop iteration on its own). This path's own bound
+    (the "clean but stale" branch has none of its own) is therefore ALSO
+    one iteration longer than the raw dispatch-count formula -- updated
+    here to match, not because this test is about the fabricated-loc
+    fix, but because both paths share the same max_iterations value."""
     root = phase2_project(tmp_path, n=1)
     write_codex_scenario(root, {
         "review:seg01": {"review_clean": True, "review_coverage_ok": True, "review_draft_sha1": "0" * 40},
     })
     driver_mod, ctx = _fixture_ctx(root, "20260101T000000Z")
-    max_iterations = driver_mod.codex_jobs_per_segment(ctx.translate_cfg["max_fix_rounds"])
+    max_iterations = driver_mod.codex_jobs_per_segment(ctx.translate_cfg["max_fix_rounds"]) + 1
 
     result = driver_mod.process_segment("seg01", ctx)
 
@@ -3136,6 +3712,104 @@ def test_resolve_run_id_resumes_via_a_plural_candidate_that_is_not_the_newest(tm
     assert "segs" not in resume_setup_calls[0], (
         f"'segs' must not be sent at all -- the shipped resume_setup.py never reads it: "
         f"{resume_setup_calls[0]}"
+    )
+
+
+def test_resolve_run_id_resumes_a_candidate_behind_more_than_five_newer_distractors(tmp_path):
+    """codex round-4 MAJOR: _resumable_run_id_candidates() used to cap its
+    return at 5 (`_RESUMABLE_CANDIDATE_LIMIT`, borrowed from
+    resume_setup.py's own RUN_ID_RETRY_LIMIT -- an unrelated quantity
+    bounding fresh-id COLLISION retries, not candidate-offering). That cap's
+    real justification -- one resume_setup.py round-trip per candidate --
+    stopped applying the moment resolve_run_id() switched to the plural
+    field, which computes input_digest exactly ONCE per call regardless of
+    candidate count. With the cost gone, capping only had downside: SIX
+    newer non-matching run dirs (one more than the old cap) would have
+    pushed a genuinely resumable SEVENTH, older candidate off the list
+    before resolve_run() ever saw it, silently re-doing already-promoted
+    work. Constructs exactly that: six newer distractors plus the one true
+    match, and proves the match still resumes."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    translate_cfg = dict(_FIXTURE_TRANSLATE_CFG)
+
+    first = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    assert first.get("resume") is False, first
+    run_id_true = first["effectiveRunId"]
+    true_digest = (root / "runs" / run_id_true / "input.digest").read_text(encoding="utf-8").strip()
+    assert true_digest, "resume_setup.py must have written a real input.digest"
+    wrong_digest = ("0" if true_digest[0] != "0" else "1") + true_digest[1:]
+    assert wrong_digest != true_digest
+
+    # SIX lexicographically-greater (newer) non-matching run dirs -- one
+    # more than the old cap of 5.
+    newer_ids = [run_id_true + str(n) for n in range(1, 7)]
+    for newer_id in newer_ids:
+        (root / "runs" / newer_id).mkdir()
+        (root / "runs" / newer_id / "input.digest").write_text(wrong_digest + "\n", encoding="utf-8")
+
+    candidates = driver_mod._resumable_run_id_candidates(dirs["runs_dir"], dirs["durable_root"])
+    assert candidates == sorted(newer_ids, reverse=True) + [run_id_true], (
+        f"setup check: ALL seven candidates must be discovered, none capped off -- got {candidates}"
+    )
+
+    result = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    assert result.get("resume") is True, result
+    assert result["effectiveRunId"] == run_id_true, (
+        f"expected to resume {run_id_true!r} despite six newer non-matching candidates -- "
+        f"got {result['effectiveRunId']!r} (a fresh mint means the true candidate was dropped)"
+    )
+
+
+def test_resumable_run_id_candidates_excludes_names_containing_double_dot(tmp_path):
+    """codex round-4 MAJOR: `_RUN_ID_DIR_RE`'s character class
+    ([A-Za-z0-9._-]) admits dots freely, so the regex ALONE accepts names
+    like "z..poison" -- but resume_setup.py's own validate_run_id()
+    additionally rejects any '..' occurrence (and the bare values "."/
+    ".."), and its _resume_from_candidates() validates the WHOLE
+    resume_from_run_ids list before matching ANY of them, aborting on the
+    FIRST invalid entry. One unsafe-looking directory name sitting
+    alongside a genuinely valid candidate would therefore abort the
+    entire resolve before the valid one is ever reached.
+    validate_run_id() mirrors the authority's full decision, not just its
+    regex, so _resumable_run_id_candidates() never offers such a name to
+    begin with. Named and contracted (error string on refusal, None on
+    acceptance) to match the four siblings this mirrors -- see the
+    function's own docstring -- so a drift check built on `git grep
+    validate_run_id` finds this one too, rather than falling back to the
+    bare regex and reporting a disagreement this function already
+    resolved."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+
+    # "." and ".." cannot be real directory names to mkdir (they are
+    # filesystem self/parent references) -- checked directly against the
+    # function instead.
+    assert driver_mod.validate_run_id(".") is not None
+    assert driver_mod.validate_run_id("..") is not None
+
+    safe_id = "20260101T000000Z"
+    (root / "runs" / safe_id).mkdir()
+    (root / "runs" / safe_id / "input.digest").write_text("aaaa\n", encoding="utf-8")
+
+    for unsafe_name in ("z..poison", "a..b", "trail.."):
+        assert driver_mod._RUN_ID_DIR_RE.fullmatch(unsafe_name), (
+            f"setup check: {unsafe_name!r} must match the bare regex (proving the regex "
+            f"alone is NOT what excludes it)"
+        )
+        assert driver_mod.validate_run_id(unsafe_name) is not None, unsafe_name
+        (root / "runs" / unsafe_name).mkdir()
+        (root / "runs" / unsafe_name / "input.digest").write_text("bbbb\n", encoding="utf-8")
+
+    candidates = driver_mod._resumable_run_id_candidates(dirs["runs_dir"], dirs["durable_root"])
+    assert candidates == [safe_id], (
+        f"expected only the safe candidate, no '..'-containing name offered -- got {candidates}"
     )
 
 

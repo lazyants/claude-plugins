@@ -224,6 +224,82 @@ def _load(name: str):
             sys.path.remove(str(SCRIPTS_DIR))
 
 
+# Probes chosen so that agreeing on the PATTERN is not enough to agree on the
+# DECISION. Everything from "z..poison" down passes the shared regex and is
+# still refused by the owner, so a copy carrying only the regex answers
+# differently on exactly these.
+_DECISION_PROBES = (
+    "20260710T143022Z",              # the owner's own generated shape
+    "20260710T143022123456-a1b2c3",  # skeptic's shape, deliberately different
+    "w5-batch1-20260801T0500",       # a real hand-labelled id from tome1
+    "a", "A0", "x.y_z-1",
+    "z..poison",                     # regex-legal, owner-refused
+    "a..b", "..lead", "trail..",
+    "..", ".",                       # regex refuses these two; kept as controls
+    "", "-leading", ".leading",
+    "has:colon", "has/slash", "/absolute", "../traversal",
+    "trailing\n", "\nleading", "sp ace", "tab\there",
+    123, None, True, ["20260710T143022Z"],   # non-strings
+)
+
+
+def _decision(module, varname: str, run_id) -> bool:
+    """Whether `module` ACCEPTS `run_id`, using whatever it actually decides
+    with -- its own `validate_run_id()` when it has one, otherwise the named
+    regex, which IS its whole decision procedure.
+
+    Deliberately not "does it have a validator": the question is what the
+    copy's effective answer is, and a copy whose answer comes from a bare
+    `fullmatch` is exactly the drift being measured."""
+    validator = getattr(module, "validate_run_id", None)
+    if validator is not None:
+        return validator(run_id) is None
+    pattern = getattr(module, varname)
+    if not isinstance(run_id, str):
+        return False   # a regex cannot be applied to a non-string at all
+    return pattern.fullmatch(run_id) is not None
+
+
+@pytest.mark.parametrize("script,varname", sorted(EXPECTED_COPIES - {(OWNER_SCRIPT, OWNER_VARNAME)}))
+def test_every_copy_makes_THE_SAME_DECISION_as_the_owner_not_merely_the_same_pattern(script, varname):
+    """(4) The pattern-equality tests above are necessary and NOT sufficient,
+    and this test exists because that gap was real rather than theoretical.
+
+    `resume_setup.py`'s `validate_run_id()` refuses three things the shared
+    regex does not express: the literal `.`, the literal `..`, and `..`
+    anywhere inside the value. A copy holding a byte-identical regex and no
+    validator therefore ACCEPTS `z..poison` while the owner REFUSES it -- so
+    every assertion above passes while the two disagree about the only
+    question either is asked.
+
+    The consequence is concrete, not stylistic: the driver offers candidate
+    run ids scanned off disk, and `resume_setup.py` validates the WHOLE
+    offered list before matching any of it. One regex-legal, owner-refused
+    directory name in the candidate set aborts the call without ever reaching
+    a perfectly good candidate behind it.
+
+    So the invariant worth pinning is the DECISION, not the pattern. This
+    compares each copy's effective answer -- its validator where it has one,
+    its regex where that is all it has -- against the owner's, over a probe
+    corpus built so the two families of answer come apart."""
+    owner = _load(OWNER_SCRIPT)
+    copy = _load(script)
+    disagreements = [
+        (probe, _decision(owner, OWNER_VARNAME, probe), _decision(copy, varname, probe))
+        for probe in _DECISION_PROBES
+        if _decision(owner, OWNER_VARNAME, probe) != _decision(copy, varname, probe)
+    ]
+    assert not disagreements, (
+        f"{script}::{varname} disagrees with {OWNER_SCRIPT}'s own validate_run_id() "
+        f"on {len(disagreements)} of {len(_DECISION_PROBES)} probes "
+        f"(probe, owner_accepts, copy_accepts):\n"
+        + "\n".join(f"  {p!r}: owner={o}, copy={c}" for p, o, c in disagreements)
+        + f"\n\nA byte-identical regex is not agreement. {OWNER_SCRIPT} refuses "
+        f"'.', '..' and any value CONTAINING '..' beyond what the regex says, "
+        f"and it validates every offered candidate before matching any of them."
+    )
+
+
 @pytest.mark.parametrize("script", ["resume_setup.py", "skeptic_setup.py"])
 def test_every_generator_emits_ids_the_owners_validator_accepts(script):
     """The generators deliberately DIFFER (see this module's docstring), so
@@ -241,6 +317,69 @@ def test_every_generator_emits_ids_the_owners_validator_accepts(script):
             f"{script}'s fresh_run_id() emitted {run_id!r}, which "
             f"{OWNER_SCRIPT}'s own RUN_ID_RE rejects"
         )
+
+
+def test_the_owners_generator_emits_a_LEXICOGRAPHICALLY_SORTABLE_shape():
+    """(5) The validator-acceptance test above is a WEAK oracle and this is
+    the measurement that showed it, not a suspicion.
+
+    A mutation battery reformatted `resume_setup.fresh_run_id()` from
+    `%Y%m%dT%H%M%SZ` to `%d%m%YT%H%M%SZ` -- still a valid RUN_ID, still
+    accepted by `RUN_ID_RE`, no longer sortable -- and NO test in the suite
+    detected it, this file's own generator test included. `RUN_ID_RE` is
+    `[A-Za-z0-9][A-Za-z0-9._-]*`, which accepts virtually anything, so
+    "the owner's validator accepts what the generator emits" is satisfied
+    by an id whose field order has been destroyed.
+
+    Sortability is not cosmetic here. `segment_dispatch_driver.py`'s
+    resumable-candidate scan takes `sorted(candidates, reverse=True)[:limit]`
+    and its own docstring states the dependency outright -- lexicographic
+    descending IS chronological descending, *because* the id is the
+    colon-free `YYYYMMDDTHHMMSSZ` form. Reverse the day and year fields and
+    that equivalence silently stops holding: the scan still returns five
+    candidates, still in a stable order, and the order is now wrong. The
+    resume it then picks is the wrong run, quietly.
+
+    Two assertions, deliberately independent of how the generator is
+    written. The first parses what it emitted against the pinned format and
+    checks it against the wall clock -- an oracle the generator cannot
+    satisfy by agreeing with itself. The second demonstrates the ordering
+    property the driver actually depends on, rather than asserting it in
+    prose."""
+    from datetime import datetime, timedelta, timezone
+
+    owner = _load(OWNER_SCRIPT)
+    run_id = owner.fresh_run_id()
+
+    try:
+        parsed = datetime.strptime(run_id, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError as err:
+        raise AssertionError(
+            f"{OWNER_SCRIPT}'s fresh_run_id() emitted {run_id!r}, which does not "
+            f"parse as the colon-free '%Y%m%dT%H%M%SZ' form that "
+            f"segment_dispatch_driver.py's candidate scan relies on for "
+            f"lexicographic == chronological ordering: {err}"
+        ) from None
+
+    drift = abs(datetime.now(timezone.utc) - parsed)
+    assert drift < timedelta(minutes=10), (
+        f"{OWNER_SCRIPT}'s fresh_run_id() emitted {run_id!r}, which parses under "
+        f"the pinned format but lands {drift} from now -- the field ORDER has "
+        f"changed (a day/year swap parses for some dates and yields a wildly "
+        f"wrong instant), so the id is no longer sortable even though it still "
+        f"satisfies RUN_ID_RE."
+    )
+
+    # The ordering property itself, demonstrated rather than asserted: three
+    # instants an hour apart, rendered through the SAME format this test just
+    # pinned, must sort lexicographically in chronological order.
+    moments = [parsed + timedelta(hours=h) for h in (0, 1, 2)]
+    rendered = [m.strftime("%Y%m%dT%H%M%SZ") for m in moments]
+    assert rendered == sorted(rendered), (
+        f"the pinned format does not sort chronologically: {rendered}. "
+        f"segment_dispatch_driver.py takes sorted(candidates, reverse=True) and "
+        f"treats the result as newest-first."
+    )
 
 
 def test_the_two_run_id_namespaces_are_disjoint_trees():
