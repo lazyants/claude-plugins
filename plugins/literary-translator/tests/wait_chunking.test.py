@@ -120,6 +120,9 @@ def instantiate(*, max_fix_rounds: int, batch_agent_cap: int, max_codex_jobs_per
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH))
     text = text.replace("{{EFFORT}}", effort)
     text = text.replace("{{MODEL}}", model)
+    # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. This file
+    # exercises the wait/chunk machinery, not the opt-in dispatch shape.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(""))
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
 

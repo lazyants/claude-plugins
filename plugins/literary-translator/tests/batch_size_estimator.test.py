@@ -310,6 +310,10 @@ def instantiate_mass_translate(
     # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
     text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
     text = text.replace("{{MODEL}}", "")
+    # #412 -- PLUGIN_ROOT: empty = not opted into the redirect (this file's
+    # call-counting assertions never inspect a dispatch launch line, so the
+    # pre-#412 dispatch shape is exactly what this fixture should reproduce).
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(""))
     assert "{{" not in text, "fixture instantiation left an unresolved token -- fix the fixture, not the assertion below"
     return text
 

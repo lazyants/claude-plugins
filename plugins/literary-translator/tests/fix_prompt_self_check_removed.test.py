@@ -76,6 +76,9 @@ _SUBSTITUTIONS = {
     "{{CODEX_COMPANION_PATH_JSON}}": json.dumps("/fake/codex-companion.mjs"),
     "{{EFFORT}}": "high",
     "{{MODEL}}": "",
+    # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. fixPrompt's
+    # self-check text is unaffected by the opt-in; only needs to resolve.
+    "{{PLUGIN_ROOT}}": json.dumps(""),
 }
 
 

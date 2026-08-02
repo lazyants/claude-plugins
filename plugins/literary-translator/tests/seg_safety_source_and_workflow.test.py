@@ -378,6 +378,10 @@ def instantiate_mass_translate(*, batch_agent_cap: int, max_codex_jobs_per_batch
     # override them with allowlist-violating values to prove the guard throws.
     text = text.replace("{{EFFORT}}", effort)
     text = text.replace("{{MODEL}}", model)
+    # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. This file's
+    # charter is seg-id shell-injection safety, not the opt-in; the
+    # SEG-guard tests below never read this value, only need it to resolve.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(""))
     assert "{{" not in text
     return text
 

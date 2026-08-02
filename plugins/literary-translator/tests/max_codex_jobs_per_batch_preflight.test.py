@@ -10,9 +10,10 @@ one exhaustively).
 This is a SECOND, INDEPENDENT preflight gate. `batch_agent_cap` estimates
 Workflow `agent()` calls; this gate estimates the resource an operator
 actually spends -- real codex dispatches (one detached `codex_job.py`
-launch per translate, per review, and per fix round). Both gates run,
-in sequence, before `pipeline()` is ever called; either one tripping
-refuses the batch before any work starts.
+launch per translate, and one per review; a fix round is a plain Workflow
+`agent()` call, not a codex dispatch -- see the per-segment count derived
+below). Both gates run, in sequence, before `pipeline()` is ever called;
+either one tripping refuses the batch before any work starts.
 
 Formula (derived by enumerating this template's ACTUAL codex_job.py launch
 sites, not from any plan/brief and not from the template's prose comment --
@@ -151,6 +152,9 @@ def instantiate_mass_translate(
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps("/fixture/codex/codex-companion.mjs"))
     text = text.replace("{{EFFORT}}", "high")
     text = text.replace("{{MODEL}}", "")
+    # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. This file
+    # exercises the codex-jobs preflight cap, not the opt-in dispatch shape.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(""))
     assert "{{" not in text, "fixture instantiation left an unresolved token -- fix the fixture, not the assertion below"
     return text
 

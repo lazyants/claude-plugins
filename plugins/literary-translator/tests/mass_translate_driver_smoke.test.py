@@ -81,10 +81,14 @@ FIXTURE_EFFORT = "xhigh"
 # Empty string = engine.model unset -- the mass template's own documented
 # sentinel for "no --model flag threaded to codex_job.py".
 FIXTURE_MODEL = ""
+# #412 -- empty string = not opted into the --plugin-root redirect (the
+# mass template's own documented sentinel, mirroring FIXTURE_MODEL above).
+FIXTURE_PLUGIN_ROOT = ""
 
 
 def instantiate(*, max_fix_rounds: int, batch_agent_cap: int, max_codex_jobs_per_batch: int = 100000,
-                 effort: str = FIXTURE_EFFORT, model: str = FIXTURE_MODEL) -> str:
+                 effort: str = FIXTURE_EFFORT, model: str = FIXTURE_MODEL,
+                 plugin_root: str = FIXTURE_PLUGIN_ROOT) -> str:
     """The exact one-time substitution the template's header documents
     (duplicated, not imported, so this file stays self-contained like every
     sibling). #409 stage 0 -- max_codex_jobs_per_batch defaults generously
@@ -103,6 +107,11 @@ def instantiate(*, max_fix_rounds: int, batch_agent_cap: int, max_codex_jobs_per
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH))
     text = text.replace("{{EFFORT}}", effort)
     text = text.replace("{{MODEL}}", model)
+    # #412 -- PLUGIN_ROOT: same json.dumps JS string literal contract as
+    # CODEX_COMPANION_PATH_JSON above (token sits OUTSIDE quotes in
+    # `const PLUGIN_ROOT = {{PLUGIN_ROOT}};`); empty is the documented
+    # "not opted into the redirect" sentinel.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(plugin_root))
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
 
@@ -221,13 +230,14 @@ function log() {}
 
 def run(*, tmp_path: Path, segs: list, max_fix_rounds: int = 1, batch_agent_cap: int = 100000,
         drive_returns: dict | None = None, overrides: dict | None = None, timeout: int = 30,
-        effort: str = FIXTURE_EFFORT, model: str = FIXTURE_MODEL) -> dict:
+        effort: str = FIXTURE_EFFORT, model: str = FIXTURE_MODEL,
+        plugin_root: str = FIXTURE_PLUGIN_ROOT) -> dict:
     """Returns {ok, out, stderr}. ok=False (with stderr) when the template
     threw before producing stdout (the SEGS-guard throw path)."""
     drive_returns = drive_returns or {}
     dr = {"translate": drive_returns.get("translate"), "review": drive_returns.get("review")}
     src = instantiate(max_fix_rounds=max_fix_rounds, batch_agent_cap=batch_agent_cap,
-                       effort=effort, model=model)
+                       effort=effort, model=model, plugin_root=plugin_root)
     harness = (
         HARNESS.replace("__WRAPPED_SOURCE__", _wrap(src))
         .replace("__SEGS_JSON__", json.dumps(segs))
@@ -321,6 +331,10 @@ def test_drive_prompt_launches_detached_codex_job(tmp_path, drive_label, launch_
     # engine.model is unset by default (FIXTURE_MODEL == "") -- no --model
     # flag on the launch line at all.
     assert "--model" not in launch
+    # #412 -- engine's plugin_root redirect is unset by default
+    # (FIXTURE_PLUGIN_ROOT == "") -- no --plugin-root flag on the launch
+    # line at all (the pre-#412 dispatch shape).
+    assert "--plugin-root" not in launch
 
     # the task-file path carries the runtime DISP.
     assert f'TASKFILE="{FIXTURE_DURABLE_ROOT}/segments/.codex_task.{kind}.seg01.$DISP"' in prompt
@@ -415,6 +429,44 @@ def test_drive_prompt_launch_omits_model_when_unset(tmp_path, drive_label, launc
     prompt = res["out"]["promptByLabel"][drive_label]
     launch = [ln for ln in prompt.splitlines() if launch_needle in ln][0]
     assert "--model" not in launch
+
+
+@pytest.mark.parametrize(
+    "drive_label,launch_needle",
+    [("translate:seg01", "codex_job.py --kind translate"),
+     ("review-dispatch:seg01:r1", "codex_job.py --kind review")],
+)
+def test_drive_prompt_launch_carries_plugin_root_when_opted_in(tmp_path, drive_label, launch_needle):
+    """#412 -- a resolved plugin_root threads to both codex_job.py launches
+    as a single-quoted --plugin-root flag, same convention as --companion/
+    --model. This is the ONLY test in the suite that exercises the template
+    with a non-empty plugin_root and inspects the actual dispatch argv --
+    #412's entire security claim (a tampered durable-root gate copy is
+    caught because codex_job.py is told where the TRUSTED plugin copy
+    lives) rests on this flag actually being emitted, which is exactly what
+    this asserts."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], plugin_root="/opt/claude/plugins/literary-translator")
+    assert res["ok"], res["stderr"]
+    prompt = res["out"]["promptByLabel"][drive_label]
+    launch = [ln for ln in prompt.splitlines() if launch_needle in ln][0]
+    assert "--plugin-root '/opt/claude/plugins/literary-translator'" in launch
+
+
+@pytest.mark.parametrize(
+    "drive_label,launch_needle",
+    [("translate:seg01", "codex_job.py --kind translate"),
+     ("review-dispatch:seg01:r1", "codex_job.py --kind review")],
+)
+def test_drive_prompt_launch_omits_plugin_root_when_not_opted_in(tmp_path, drive_label, launch_needle):
+    """#412 -- positive control paired with the opted-in case above: an
+    empty plugin_root (not opted into the redirect, the pre-#412 dispatch
+    shape) produces NO --plugin-root flag at all on either codex_job.py
+    launch line."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], plugin_root="")
+    assert res["ok"], res["stderr"]
+    prompt = res["out"]["promptByLabel"][drive_label]
+    launch = [ln for ln in prompt.splitlines() if launch_needle in ln][0]
+    assert "--plugin-root" not in launch
 
 
 @pytest.mark.parametrize(

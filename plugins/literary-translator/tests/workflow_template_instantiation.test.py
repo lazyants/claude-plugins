@@ -99,6 +99,12 @@ MASS_TRANSLATE_TOKENS = (
     # threads only to the two codex_job.py launches (empty string when unset).
     "{{EFFORT}}",
     "{{MODEL}}",
+    # #412 -- the plugin's own install root, threaded to codex_job.py's
+    # --plugin-root flag on both dispatch launches. Same json.dumps JS
+    # STRING LITERAL substitution shape as CODEX_COMPANION_PATH_JSON above
+    # (token sits OUTSIDE quotes: `const PLUGIN_ROOT = {{PLUGIN_ROOT}};`);
+    # empty string is the documented "not opted into the redirect" sentinel.
+    "{{PLUGIN_ROOT}}",
 )
 GLOSSARY_PASS_TOKENS = (
     "{{DURABLE_ROOT}}",
@@ -166,6 +172,12 @@ FIXTURE_EFFORT = "xhigh"
 # Empty string = engine.model unset (the common case) -- the mass template's
 # own documented sentinel for "no --model flag threaded to codex_job.py".
 FIXTURE_MODEL = ""
+# #412 -- empty string = not opted into the --plugin-root redirect (the
+# common case, and the template's own documented sentinel, mirroring
+# FIXTURE_MODEL above). test_mass_translate_template_plugin_root_substitutes_
+# a_real_pinned_path below is the companion positive case, mirroring
+# test_mass_translate_template_model_substitutes_a_real_pinned_id.
+FIXTURE_PLUGIN_ROOT = ""
 
 # Deliberately includes a double quote, a backslash, and a real embedded
 # newline -- exactly the characters the template's own header comment warns
@@ -203,6 +215,7 @@ def instantiate_mass_translate(
     companion_path: str = FIXTURE_COMPANION_PATH,
     effort: str = FIXTURE_EFFORT,
     model: str = FIXTURE_MODEL,
+    plugin_root: str = FIXTURE_PLUGIN_ROOT,
 ) -> str:
     text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
 
@@ -243,6 +256,12 @@ def instantiate_mass_translate(
     # (`const COMPANION = {{CODEX_COMPANION_PATH_JSON}};`), so the orchestrator
     # substitutes a full json.dumps JS string LITERAL (quotes included).
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(companion_path))
+
+    # #412 PLUGIN_ROOT -- same json.dumps JS string literal substitution
+    # shape as CODEX_COMPANION_PATH_JSON above (token sits OUTSIDE its
+    # quotes: `const PLUGIN_ROOT = {{PLUGIN_ROOT}};`). Empty string is the
+    # documented "not opted into the redirect" sentinel.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(plugin_root))
 
     return text
 
@@ -379,6 +398,15 @@ def test_mass_translate_template_instantiates_with_zero_unresolved_tokens():
         "string literal (with its own surrounding quotes)"
     )
 
+    # #412 -- PLUGIN_ROOT, same json.dumps JS string literal contract as
+    # COMPANION above. FIXTURE_PLUGIN_ROOT is the empty/unset sentinel here;
+    # test_mass_translate_template_plugin_root_substitutes_a_real_pinned_path
+    # below is the companion positive case with a real, non-empty path.
+    assert f"const PLUGIN_ROOT = {json.dumps(FIXTURE_PLUGIN_ROOT)};" in out, (
+        "PLUGIN_ROOT must substitute to the json.dumps empty string when not "
+        "opted into the --plugin-root redirect"
+    )
+
 
 def test_mass_translate_template_model_substitutes_a_real_pinned_id():
     """Companion positive case for the FIXTURE_MODEL="" (unset) coverage
@@ -397,6 +425,34 @@ def test_mass_translate_template_model_substitutes_a_real_pinned_id():
     )
     _assert_no_double_brace(out, "mass-translate-wf.template.js (model=gpt-5.3-codex)")
     assert 'const MODEL = "gpt-5.3-codex";' in out
+
+
+def test_mass_translate_template_plugin_root_substitutes_a_real_pinned_path():
+    """Companion positive case for the FIXTURE_PLUGIN_ROOT="" (not opted in)
+    coverage above: a real, non-empty plugin_root path also lands correctly
+    in `const PLUGIN_ROOT = {{PLUGIN_ROOT}};`, exercising the json.dumps
+    substitution -- same shape as CODEX_COMPANION_PATH_JSON's own test --
+    with a value the template's own PLUGIN_ROOT_ARG conditional treats as
+    truthy. Deliberately includes a space and a non-ASCII character (both
+    legitimate in a real install path) so the json.dumps escaping is
+    actually exercised, mirroring FIXTURE_COMPANION_PATH's own reasoning."""
+    pinned_plugin_root = "/Users/José García/.claude/plugins/literary-translator"
+    out = instantiate_mass_translate(
+        durable_root=FIXTURE_DURABLE_ROOT,
+        run_id=FIXTURE_RUN_ID,
+        source_lang=FIXTURE_SOURCE_LANG,
+        target_lang=FIXTURE_TARGET_LANG,
+        max_fix_rounds=FIXTURE_MAX_FIX_ROUNDS,
+        batch_agent_cap=FIXTURE_BATCH_AGENT_CAP,
+        verse_policy_instruction_block=FIXTURE_VERSE_POLICY_INSTRUCTION_BLOCK,
+        plugin_root=pinned_plugin_root,
+    )
+    _assert_no_double_brace(out, "mass-translate-wf.template.js (plugin_root pinned)")
+    assert f"const PLUGIN_ROOT = {json.dumps(pinned_plugin_root)};" in out, (
+        "PLUGIN_ROOT must substitute as a strict json.dumps JS string "
+        "literal (with its own surrounding quotes), same contract as "
+        "CODEX_COMPANION_PATH_JSON"
+    )
 
 
 # ---------------------------------------------------------------------------
