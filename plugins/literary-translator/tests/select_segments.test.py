@@ -425,6 +425,21 @@ def test_full_classification_taxonomy_and_report(tmp_path):
         # always present, so silently dropping it has to fail here.
         "authorizes_dispatch",
         "previously_converged",
+        # #409 Step 3 -- the resume-gate evidence, reported on the SUCCESS
+        # path too and therefore part of this contract. `runs_missing_digest`
+        # in particular must always be present: a consumer (or a test) that
+        # can only assert "the run passed" cannot tell a check that scanned
+        # and found nothing from one that scanned nothing at all, which is
+        # the failure mode the whole gate exists to stop reproducing.
+        # tests/resume_gate_skip_detection.test.py owns the behavior; this
+        # line owns the contract.
+        "runs_missing_digest",
+        "runs_acknowledged_pre_gate",
+        "dispatching_run_ids",
+        "workflow_run_ids",
+        "run_id_evidence",
+        "drafts_scanned",
+        "drafts_untokened",
     }
     assert payload["success"] is True
     assert payload["durable_root"] == str(root)
@@ -1001,7 +1016,18 @@ def run_select_from(script_path, *extra_args, timeout=30):
 
 def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     """Negative control: an orphan copy invoked WITHOUT --durable-root
-    cannot succeed via self-anchoring (no manifest.json to even read)."""
+    cannot succeed via self-anchoring (no manifest.json to even read).
+
+    The assertions name the specific reason rather than stopping at
+    `success is False`, and the path assertion is the load-bearing one. A
+    bare "it failed" control passes for ANY failure -- a syntax error, a
+    missing dependency, or self-anchoring resolving to some entirely
+    different root -- so it would keep this test green while the property it
+    exists to protect quietly stopped holding, leaving the docstring as the
+    only record of what was meant. Pinning that the script looked for
+    manifest.json at the ORPHAN location's own parent is what proves
+    self-anchoring resolved where it should have and simply found nothing
+    there."""
     orphan_dir = tmp_path / "orphan_location" / "scripts"
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "select_segments.py"
@@ -1012,6 +1038,16 @@ def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     assert proc.returncode == 1
     payload = parse_stdout(proc)
     assert payload["success"] is False
+    assert "manifest.json not found" in payload["error"], (
+        f"expected the self-anchored manifest lookup to be what failed, got: "
+        f"{payload['error']!r}"
+    )
+    expected_lookup = orphan_dir.parent / "manifest.json"
+    assert str(expected_lookup) in payload["error"], (
+        f"self-anchoring must have resolved the durable root to the orphan "
+        f"copy's own parent ({expected_lookup}); the failure names a "
+        f"different path: {payload['error']!r}"
+    )
 
 
 def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
@@ -1221,6 +1257,62 @@ def test_gate_refuses_by_default_when_a_previously_converged_segment_is_selected
     assert "--allow-retranslate-converged" in out["error"], (
         "the refusal must name the flag that authorizes it"
     )
+
+
+def test_the_refusal_names_the_SECOND_loss_the_flag_does_not_ask_about(tmp_path):
+    """#409: `--allow-retranslate-converged` authorizes one thing and costs
+    two. The same cache-key move that made the converged segments stale also
+    moves the resume digest, minting a fresh RUN_ID that orphans the
+    dispatch_token on every NOT-yet-converged draft in the same selection --
+    so those retranslate too, discarding any hand-applied fix. On a live
+    project that was 21 authorized and 21 unmentioned, the silent half
+    exactly the size of the half being asked about.
+
+    Asserted against the specific numbers and the exact id set, not against
+    the refusal firing at all: the refusal already fired before this text
+    existed, so a `returncode != 0` assertion here would be green whether or
+    not the second loss is named. The `not_yet_converged` exact-list
+    assertion is what makes this a red attributable to THIS string."""
+    root = setup_full_project(tmp_path)
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0
+    out = parse_stdout(proc)
+    expected_second = [s for s in parse_stdout(run_select(root, "--allow-retranslate-converged"))["segs"]
+                       if s != EVER_CONVERGED_SEG]
+    assert expected_second, (
+        "precondition: the selection must hold at least one not-yet-converged "
+        "segment, or this test proves nothing"
+    )
+    assert out["not_yet_converged"] == expected_second, out
+    assert str(len(expected_second)) in out["error"], (
+        "the operator must get the second COUNT, not just a caution"
+    )
+    for seg in expected_second:
+        assert seg in out["error"], f"the refusal must name {seg}"
+    # The condition must travel with the claim -- an unconditional warning
+    # overstates (a fresh RUN_ID is not minted when the flag is passed against
+    # an unchanged bundle) and an overstated warning is one people skip.
+    assert "If this dispatch also mints a fresh RUN_ID" in out["error"], (
+        "the second loss must be stated WITH its condition, never as a certainty"
+    )
+
+
+def test_no_second_loss_paragraph_when_nothing_else_is_selected(tmp_path):
+    """FALSE-POSITIVE BOUND (stays green if the paragraph is deleted): when
+    the converged segment is the only thing selected there is no second loss,
+    and claiming one would be the overstatement the wording exists to avoid."""
+    root = setup_full_project(tmp_path)
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+
+    proc = run_select(root, "--only-segs", EVER_CONVERGED_SEG)
+
+    assert proc.returncode != 0
+    out = parse_stdout(proc)
+    assert out["not_yet_converged"] == []
+    assert "THE SECOND NUMBER" not in out["error"]
 
 
 def test_gate_permits_with_the_explicit_authorization_flag(tmp_path):

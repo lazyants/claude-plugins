@@ -768,6 +768,16 @@ def test_select_segments_reusable_survives_non_canonical_draft_bytes(tmp_path):
     # select_segments.py's own separate recomputation below.
     assert fragment["reviewed_draft_sha1"] == draft_sha1
 
+    # #409 Step 3: this fixture's draft carries a dispatch_token, so
+    # select_segments.py now requires that run id to have the input.digest
+    # resume_setup.py writes before any dispatch. Nothing here tests the
+    # resume gate -- record the digest so the fixture represents a
+    # gate-compliant project rather than one that skipped the step.
+    (root / "runs" / "some-run-token").mkdir(parents=True, exist_ok=True)
+    (root / "runs" / "some-run-token" / "input.digest").write_text(
+        "fixture-digest\n", encoding="utf-8"
+    )
+
     # seg_beta/seg_gamma/seg_delta are untouched (not_started), so the
     # emitted SEGS is non-empty on its own -- no --allow-empty needed.
     rc, classification = run_select_segments(root)

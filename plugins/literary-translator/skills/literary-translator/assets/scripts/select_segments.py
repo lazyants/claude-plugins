@@ -73,6 +73,23 @@ What it does (SKILL.md's W5 "Mass-translate" section, authoritative):
      per-segment classification report. This is the exact list that must
      become `mergeLedgerPrompt`'s `--expected-segs` later -- no drift
      between the dispatch decision and the completeness check.
+  5. #409 Step 3: refuses an AUTHORIZING invocation when a prior RUN_ID
+     used this project without the resume-integrity gate -- i.e. a run id
+     that either appears in some draft's `dispatch_token` OR has a
+     `runs/workflows/<RUN_ID>/` directory, and has no
+     `runs/<RUN_ID>/input.digest`. The two evidence halves are UNIONED
+     because neither subsumes the other: the driver leaves only drafts (it
+     never calls pipeline(), so it creates no workflow directory), while a
+     draft holds only its most RECENT token, so a skipped run whose drafts
+     were later overwritten survives only as a workflow directory. See
+     `scan_workflow_run_ids()` for that, and the gate's own block comment in
+     `run()` for the three states the set difference distinguishes (gate ran
+     / gate skipped / first run ever) and why it is scanned over ALL drafts
+     rather than over `segs`. The evidence (`runs_missing_digest`,
+     `dispatching_run_ids`, `workflow_run_ids`, `run_id_evidence`,
+     `drafts_scanned`, `drafts_untokened`) is reported on the success path
+     too, so a caller can assert the exact set rather than merely that the
+     run passed.
 
 CLI flags:
 
@@ -260,6 +277,164 @@ def ever_converged_path(seg: str, segments_dir: Path) -> Path:
 
 def segpack_path(seg: str, durable_root: Path = DURABLE_ROOT) -> Path:
     return durable_root / "segments" / f"segpack_{seg}.json"
+
+
+def input_digest_path(run_id: str, runs_dir: Path) -> Path:
+    """resume_setup.py's own `runs/<RUN_ID>/input.digest` -- the ONE artifact
+    whose presence proves the resume-integrity gate ran for that RUN_ID.
+    Written exclusively by resume_setup.py's `write_run_dir()`; this script
+    only ever stats it."""
+    return runs_dir / run_id / "input.digest"
+
+
+def resume_gate_ack_path(run_id: str, runs_dir: Path) -> Path:
+    """#409 Step 3: the durable 'this RUN_ID dispatched before the
+    resume-integrity gate was enforced' acknowledgement, written exclusively
+    by `backfill_resume_gate_ack.py` (this script only ever READS it, exactly
+    as it only reads `ever_converged_path()`'s sentinel).
+
+    Deliberately PER-RUN_ID and stored inside that run's own directory, not a
+    project-level list file. A single project-level marker would be one edit
+    away from becoming a blanket off-switch (a `"*"` entry, an `"all": true`
+    key), and a gate with a wildcard escape is the invisible warning this
+    check exists to replace. Per-run makes the wildcard structurally
+    inexpressible: acknowledging a run requires naming it, and the NEXT
+    skipped run has a different name and is therefore still refused. Same
+    shape, and same reason, as `.ever_converged.{seg}` being one marker per
+    protected segment rather than one flag per project.
+
+    It sits beside the `input.digest` that SHOULD have been there, which is
+    also the most legible place for a human reading `runs/` later. Creating
+    `runs/<RUN_ID>/` for a run that has no digest is safe for every existing
+    consumer: both resume_setup.py's `resolve_run()` and the driver's own
+    candidate scan require `input.digest` to be a FILE before they will
+    consider a directory at all, so an ack-only directory is invisible to
+    resume and can never be mistaken for a resumable run."""
+    return runs_dir / run_id / ".resume_gate_ack"
+
+
+def draft_run_id(dispatch_token) -> "str | None":
+    """The RUN_ID out of a draft's `dispatch_token`, or None when the token
+    is absent/malformed.
+
+    The token is `<RUN_ID>:<seg>`, and a RUN_ID can never contain ':'
+    (resume_setup.py's own `validate_run_id()` rejects it explicitly), while
+    a SEG id certainly can -- `FRONTBACK:fm04` is a real, shipped segment id
+    shape. So the split is on the FIRST colon only: partitioning
+    `'20260801T090001Z:FRONTBACK:fm04'` yields the run id, not
+    `'20260801T090001Z:FRONTBACK'`. A naive `rsplit`/`split(':')[-2]` gets
+    this wrong on exactly the frontback segments, which are the ones least
+    likely to appear in a hand-built fixture."""
+    if not isinstance(dispatch_token, str):
+        return None
+    run_id, sep, rest = dispatch_token.partition(":")
+    if not sep or not run_id or not rest:
+        return None
+    return run_id
+
+
+def scan_dispatching_run_ids(segments_dir: Path) -> dict:
+    """Every RUN_ID that has actually DISPATCHED work into this project,
+    read from the canonical drafts' own `dispatch_token` fields.
+
+    Returns `{"by_run_id": {run_id: [seg, ...]}, "drafts_scanned": N,
+    "drafts_untokened": N}` -- the counts are reported in this script's own
+    JSON output on purpose. A scan that silently matched nothing (wrong
+    directory, wrong glob, a durable root that moved) produces an empty
+    `by_run_id` and would make the gate below pass vacuously, looking
+    exactly like a clean project; `drafts_scanned` is what lets a reader --
+    and the test suite -- tell those two apart.
+
+    KNOWN HOLE, and its direction: `draft.schema.json` lists
+    `dispatch_token` in `properties` but NOT in `required` (its own
+    description says "OPTIONAL at the schema level"), so a draft may
+    legitimately carry no token at all. Such a draft is unattributable and
+    contributes nothing here. That can only ever cause a FALSE NEGATIVE (a
+    skipped run this check fails to notice), never a false positive (a
+    compliant run wrongly refused). The same one-way direction applies to a
+    draft whose token was OVERWRITTEN by a later run: a draft holds only the
+    most recent dispatch, so a skipped run whose every draft was later
+    re-dispatched under a compliant run leaves no trace here and is not
+    detected. Both are deliberate: this gate under-detects rather than
+    risking a refusal a compliant project cannot explain."""
+    by_run_id: dict = {}
+    scanned = 0
+    untokened = 0
+    if not segments_dir.is_dir():
+        return {"by_run_id": by_run_id, "drafts_scanned": 0, "drafts_untokened": 0}
+    for path in sorted(segments_dir.glob("*.draft.json")):
+        scanned += 1
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            # An unreadable draft is not this gate's business to adjudicate
+            # (validate_draft.py owns that); it simply cannot be attributed.
+            untokened += 1
+            continue
+        run_id = draft_run_id(doc.get("dispatch_token") if isinstance(doc, dict) else None)
+        if run_id is None:
+            untokened += 1
+            continue
+        seg = doc.get("seg") if isinstance(doc.get("seg"), str) else path.name
+        by_run_id.setdefault(run_id, []).append(seg)
+    for segs in by_run_id.values():
+        segs.sort()
+    return {
+        "by_run_id": by_run_id,
+        "drafts_scanned": scanned,
+        "drafts_untokened": untokened,
+    }
+
+
+# A run-id-shaped directory name. Mirrors resume_setup.py's own RUN_ID_RE
+# (kept as an independent restatement per this project's "no shared lib
+# between self-contained scripts" convention). Used only to skip entries
+# under runs/workflows/ that cannot be run ids at all.
+_RUN_ID_DIR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def scan_workflow_run_ids(runs_dir: Path) -> list:
+    """Every RUN_ID for which a Workflow template was INSTANTIATED, from the
+    `runs/workflows/<RUN_ID>/` directories the orchestrating session writes
+    (see each template's own header comment -- the three *-wf.template.js
+    files are the only writers of that path).
+
+    The second half of the Step 3 evidence, and it exists because the first
+    half has a structural blind spot the other way round. A draft holds only
+    its MOST RECENT dispatch token, so a skipped run whose drafts were all
+    later re-dispatched under some other run leaves no trace in the draft
+    scan at all. Measured on the project that motivated this check: the
+    draft scan sees four run ids, the workflow directories show six.
+
+    Neither signal subsumes the other, which is why the gate unions them:
+
+      drafts only          -- a driver run. The driver never creates a
+                              workflow directory (verified: its sole mention
+                              of `workflows/` is a docstring listing it as a
+                              non-run-id entry to filter OUT, and none of its
+                              three mkdir calls touch that path), because it
+                              never calls pipeline().
+      workflow dir only    -- a manual-path run whose drafts were later
+                              overwritten, or one that instantiated and
+                              dispatched nothing.
+      both                 -- the ordinary manual-path run.
+
+    A workflow directory proves INSTANTIATION, not dispatch -- which is
+    sound for this gate in a way it would not be for a stronger claim: the
+    documented order is resume_setup.py FIRST, then instantiate with the
+    resolved {{RUN_ID}}. So a workflow directory whose run id has no digest
+    means the template was instantiated without the gate having run, whether
+    or not any segment was subsequently dispatched. Verified against the one
+    fully-compliant live project: all six of its workflow directories have
+    digests, so this half contributes zero false positives there."""
+    workflows_dir = runs_dir / "workflows"
+    if not workflows_dir.is_dir():
+        return []
+    return sorted(
+        p.name
+        for p in workflows_dir.iterdir()
+        if p.is_dir() and _RUN_ID_DIR_RE.fullmatch(p.name)
+    )
 
 
 # The authoritative 15-field cache-key list (references/ledger-and-
@@ -919,6 +1094,38 @@ def run(args, dirs: dict) -> dict:
         for seg in previously_converged:
             mismatched = classification.get(seg, {}).get("mismatched_fields") or []
             detail.append(f"{seg} (diverged: {', '.join(mismatched) or 'none recorded'})")
+
+        # #409: the flag authorizes ONE thing and costs TWO. Everything above
+        # is about converged work; but the same cache-key move that made those
+        # segments stale also moves resume_setup.py's input_digest (the digest
+        # domain is built FROM the per-segment cache keys), which mints a fresh
+        # RUN_ID, which orphans the dispatch_token on every not-yet-converged
+        # draft in this same selection -- so those retranslate too, discarding
+        # any fix an operator applied by hand. Measured on a live project: 21
+        # converged authorized, 21 in_progress silently lost, the unmentioned
+        # half exactly the size of the half being asked about.
+        #
+        # Stated WITH its condition rather than as a certainty. The second loss
+        # follows only if this dispatch actually mints a fresh RUN_ID, which it
+        # will whenever a cache-key field moved -- the usual case here, since
+        # that is what made these segments stale -- but NOT when the flag is
+        # passed for an unrelated reason against an unchanged bundle. A warning
+        # that overstates is one operators learn to skip past.
+        not_yet_converged = [seg for seg in segs if seg not in set(previously_converged)]
+        second_loss = ""
+        if not_yet_converged:
+            second_loss = (
+                f" BEFORE AUTHORIZING, THE SECOND NUMBER: this selection also "
+                f"holds {len(not_yet_converged)} not-yet-converged segment(s) "
+                f"({', '.join(not_yet_converged)}). If this dispatch also mints "
+                f"a fresh RUN_ID -- which it will whenever a cache-key field has "
+                f"moved, the same cause that made the segments above stale -- "
+                f"their existing drafts are orphaned by the new dispatch token "
+                f"and they retranslate from scratch as well, discarding any fix "
+                f"already applied by hand. This flag does not ask about those, "
+                f"and nothing else will."
+            )
+
         fatal(
             f"{len(previously_converged)} previously CONVERGED segment(s) would "
             f"be translated again: {'; '.join(detail)}. Refusing. A converged "
@@ -927,10 +1134,107 @@ def run(args, dirs: dict) -> dict:
             f"segment at once), so this would discard finished work without "
             f"anyone asking for it. Pass --allow-retranslate-converged to "
             f"authorize exactly this dispatch, or --classify-only if you only "
-            f"need the classification and will not translate.",
+            f"need the classification and will not translate." + second_loss,
             classification=classification,
             counts=counts,
             ids_by_category=ids_by_category,
+            previously_converged=previously_converged,
+            # Machine-readable counterpart to `second_loss` above, so a caller
+            # (and its test) can assert the exact set rather than grep prose.
+            not_yet_converged=not_yet_converged,
+        )
+
+    # ---- #409 Step 3: refuse when a prior run dispatched WITHOUT the -------
+    # ---- resume-integrity gate ---------------------------------------------
+    # SKILL.md's W5 tells the orchestrating session to run resume_setup.py
+    # before the Workflow launches; the driver's own resolve_run_id() does it
+    # unconditionally. Neither fact was ever CHECKED, and a real project ran
+    # six consecutive batches with the step skipped entirely -- hand-labelled
+    # run ids, not one `input.digest` on disk, and nothing noticed. The defect
+    # this closes is that INVISIBILITY, not the skip.
+    #
+    # The discriminator is a set difference over evidence that already exists:
+    # the RUN_IDs that actually dispatched work (each draft's own
+    # `dispatch_token`) MINUS the RUN_IDs the gate demonstrably ran for (each
+    # `runs/<RUN_ID>/input.digest`). Three states fall out of it without a
+    # special case for any of them:
+    #
+    #   gate ran       -- drafts exist, every one of their run ids has a digest
+    #   gate skipped   -- a run id dispatched drafts and has no digest
+    #   first run ever -- no tokened draft exists, so the left-hand set is
+    #                     empty and the difference is empty. A brand-new
+    #                     project is not a skipped gate, and does not need to
+    #                     be special-cased into not being one.
+    #
+    # Scanned over ALL drafts, never over `segs`. Scoping the scan to the
+    # current selection would make a HISTORY question depend on which segments
+    # happen to be eligible right now -- the exact selection-dependence bug
+    # class that made resume_setup.py's own digest domain unstable (#392).
+    #
+    # The scan runs unconditionally and its result is always reported, but only
+    # an AUTHORIZING invocation refuses: --classify-only must stay a pure read
+    # (final_audit.py's completeness gate calls it and must never start
+    # refusing). Scanning only when authorizing would make `runs_missing_digest`
+    # an empty list under --classify-only -- indistinguishable from a clean
+    # project, which is the "absence and failure print identically" failure
+    # this whole check exists to stop reproducing.
+    runs_dir = dirs["durable_root"] / "runs"
+    dispatch_scan = scan_dispatching_run_ids(dirs["durable_root"] / "segments")
+    workflow_run_ids = scan_workflow_run_ids(runs_dir)
+    # The UNION of both evidence halves -- neither subsumes the other; see
+    # scan_workflow_run_ids()'s own docstring for the three cases and for why
+    # a draft-only scan structurally cannot see a run whose drafts were later
+    # overwritten.
+    evidence: dict = {}
+    for run_id in dispatch_scan["by_run_id"]:
+        evidence.setdefault(run_id, []).append("drafts")
+    for run_id in workflow_run_ids:
+        evidence.setdefault(run_id, []).append("workflow_dir")
+
+    runs_acknowledged_pre_gate = sorted(
+        run_id
+        for run_id in evidence
+        if not input_digest_path(run_id, runs_dir).is_file()
+        and resume_gate_ack_path(run_id, runs_dir).exists()
+    )
+    runs_missing_digest = sorted(
+        run_id
+        for run_id in evidence
+        if not input_digest_path(run_id, runs_dir).is_file()
+        and not resume_gate_ack_path(run_id, runs_dir).exists()
+    )
+
+    if runs_missing_digest and authorizes_dispatch:
+        detail = "; ".join(
+            f"{run_id} ({len(dispatch_scan['by_run_id'].get(run_id, []))} draft(s), "
+            f"evidence: {'+'.join(evidence[run_id])})"
+            for run_id in runs_missing_digest
+        )
+        fatal(
+            f"{len(runs_missing_digest)} prior RUN_ID(s) dispatched work in "
+            f"this project without the resume-integrity gate: {detail}. "
+            f"Refusing. resume_setup.py writes runs/<RUN_ID>/input.digest "
+            f"before any dispatch, and these run ids have no digest -- so the "
+            f"run that produced those drafts was never checked against the "
+            f"inputs it actually consumed, and no later run can safely resume "
+            f"it. There is deliberately NO flag to wave this through: run "
+            f"backfill_resume_gate_ack.py --apply to record, per run id, that "
+            f"these predate the gate (it never fabricates an input.digest -- "
+            f"an honest acknowledgement of a gap, not a forged proof). A run "
+            f"id acknowledged there stops blocking; a NEWLY skipped run has a "
+            f"new id and is refused again.",
+            classification=classification,
+            counts=counts,
+            ids_by_category=ids_by_category,
+            runs_missing_digest=runs_missing_digest,
+            # The same provenance the success path reports. An operator
+            # triaging a refusal needs to know WHICH half fired for each run
+            # id -- and a refusal that reported less than the success path
+            # would make the failing case the harder one to diagnose.
+            run_id_evidence={k: evidence[k] for k in sorted(evidence)},
+            dispatching_run_ids=sorted(dispatch_scan["by_run_id"]),
+            workflow_run_ids=workflow_run_ids,
+            drafts_scanned=dispatch_scan["drafts_scanned"],
         )
 
     return {
@@ -947,6 +1251,26 @@ def run(args, dirs: dict) -> dict:
         # merely descriptive one without re-deriving which flags were passed.
         "authorizes_dispatch": authorizes_dispatch,
         "previously_converged": previously_converged,
+        # #409 Step 3. Machine-readable evidence, deliberately reported even
+        # on the success path: a caller (and a test) must be able to assert the
+        # EXACT set this scan produced, never merely that the run passed. A
+        # check whose scan silently found nothing and one that genuinely found
+        # nothing return the same verdict -- `drafts_scanned` is what separates
+        # them. `runs_missing_digest` is non-empty here only under
+        # --classify-only (an authorizing invocation with a non-empty set has
+        # already refused above).
+        "runs_missing_digest": runs_missing_digest,
+        "runs_acknowledged_pre_gate": runs_acknowledged_pre_gate,
+        "dispatching_run_ids": sorted(dispatch_scan["by_run_id"]),
+        "workflow_run_ids": workflow_run_ids,
+        # Provenance per run id ("drafts", "workflow_dir", or both). An
+        # operator triaging a refusal needs to know which half fired: a
+        # drafts hit is proof work was dispatched, a workflow_dir-only hit
+        # proves the template was instantiated without the gate and the
+        # drafts have since been overwritten (or nothing was dispatched).
+        "run_id_evidence": {k: evidence[k] for k in sorted(evidence)},
+        "drafts_scanned": dispatch_scan["drafts_scanned"],
+        "drafts_untokened": dispatch_scan["drafts_untokened"],
     }
 
 
