@@ -14,10 +14,38 @@ that "helpfully" wrote a digest computed from today's inputs would satisfy
 every other test in this file while silently re-arming the exact failure the
 gate exists to prevent -- a later resume treating a match as authorization to
 reuse results that were never validated against those inputs.
+
+## Three later fixes, and the tests that pin each
+
+  * **Physical-path safety.** `write_ack()` used to resolve `runs_dir /
+    run_id` as a plain path string, which transparently follows a symlink
+    planted at either component -- confirmed to write the marker OUTSIDE
+    the durable root before this fix existed. Now anchored via
+    `os.O_NOFOLLOW`-protected directory file descriptors, one component at
+    a time. See test_write_ack_refuses_a_symlinked_run_directory and
+    test_write_ack_refuses_a_symlinked_runs_parent.
+  * **Atomicity.** The marker used to become visible (`O_CREAT | O_EXCL`)
+    BEFORE the single `os.write()` call that filled it in, with no error
+    handling around that call at all -- confirmed pre-fix to leave a
+    permanent 0-byte marker (and an uncaught crash) on a simulated write
+    failure, un-fixable by any retry because the next run sees
+    "already_present" and moves on. Now published via write-temp-fsync-then-
+    `os.link()`, so a failure anywhere in the write step leaves nothing at
+    the final name. See
+    test_a_write_failure_never_leaves_a_partial_marker_and_is_retryable.
+  * **Audit accuracy.** The marker's own `note` field used to say "This run
+    dispatched work" unconditionally, even for a run id whose only evidence
+    is a `runs/workflows/<RUN_ID>/` directory with zero drafts pointing at
+    it (a legitimate, documented shape -- see
+    test_a_workflow_only_run_is_acknowledged_with_an_empty_seg_list, which
+    already proved `dispatched_segs` is legitimately `[]` for that shape but
+    never checked what `note` said about it). The note now branches on
+    whether anything was actually dispatched.
 """
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -101,6 +129,10 @@ def test_never_writes_an_input_digest(tmp_path):
     assert body["run_id"] == "OLDRUN"
     assert body["acknowledged_at"].endswith("Z")
     assert body["dispatched_segs"] == ["seg01"]
+    assert "dispatched work" in body["note"], (
+        "the positive control for the audit-accuracy fix: a run id that "
+        "genuinely dispatched something must still say so"
+    )
 
 
 # ===========================================================================
@@ -253,6 +285,15 @@ def test_a_workflow_only_run_is_acknowledged_with_an_empty_seg_list(tmp_path):
     assert body["dispatched_segs"] == []
     assert body["evidence"] == ["workflow_dir"]
     assert body["gate_ran"] is False
+    # Audit-accuracy fix: dispatched_segs == [] must not be paired with a
+    # note that still claims dispatch happened. This is the exact defect
+    # codex found -- this test's OWN fixture already proved the shape is
+    # legitimate, but never checked what the durable record SAID about it.
+    assert "dispatched work" not in body["note"], (
+        f"a workflow-dir-only run id never dispatched anything -- the note "
+        f"must not claim it did. note={body['note']!r}"
+    )
+    assert "instantiated" in body["note"]
 
 
 def test_unsafe_run_id_in_a_draft_token_is_refused(tmp_path):
@@ -270,3 +311,107 @@ def test_unsafe_run_id_in_a_draft_token_is_refused(tmp_path):
     assert payload["success"] is False
     assert "unsafe RUN_ID" in payload["error"]
     assert not (root / "runs" / ".." / "escape").exists()
+
+
+# ===========================================================================
+# Physical-path safety -- validate_run_id() constrains the STRING SHAPE of a
+# run id; it says nothing about what actually sits on disk at that name. A
+# validated, safely-shaped run id can still have a symlink planted at its
+# directory, and the pre-fix write_ack() followed it. write_ack() is a pure
+# function of its own arguments, so these call it directly rather than
+# through the CLI/scan machinery -- the symlink is set up by hand at exactly
+# the level write_ack() touches.
+# ===========================================================================
+
+
+def test_write_ack_refuses_a_symlinked_run_directory(tmp_path):
+    """Confirmed pre-fix (this exact fixture, against the parent commit's
+    copy of the script): write_ack() wrote the marker INSIDE the external
+    symlink target, outside the durable root entirely. Post-fix,
+    os.O_NOFOLLOW-anchored directory descriptors refuse to follow it."""
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    external = tmp_path / "external_target"
+    external.mkdir()
+    (runs / "OLDRUN").symlink_to(external, target_is_directory=True)
+
+    outcome = BACKFILL.write_ack("OLDRUN", runs, ["seg01"], evidence=["drafts"])
+
+    assert outcome.startswith("error:"), (
+        f"a symlinked run directory must be refused, not silently followed: {outcome}"
+    )
+    assert not (external / ".resume_gate_ack").exists(), (
+        "the marker must never be written through the symlink into the "
+        "external target -- this is the actual data-escape the fix closes"
+    )
+    assert not (runs / "OLDRUN" / ".resume_gate_ack").exists()
+
+
+def test_write_ack_refuses_a_symlinked_runs_parent(tmp_path):
+    """The second shape the same defect covers: runs/ ITSELF is the
+    symlink, not just the per-run_id directory under it."""
+    external = tmp_path / "external_target"
+    external.mkdir()
+    runs = tmp_path / "runs"
+    runs.symlink_to(external, target_is_directory=True)
+
+    outcome = BACKFILL.write_ack("OLDRUN", runs, ["seg01"], evidence=["drafts"])
+
+    assert outcome.startswith("error:"), (
+        f"a symlinked runs/ parent must be refused, not silently followed: {outcome}"
+    )
+    assert not (external / "OLDRUN").exists(), (
+        "nothing must be created inside the external target at all"
+    )
+
+
+# ===========================================================================
+# Atomicity -- the marker's final name must never be visible in a partial
+# state. Simulated by monkeypatching os.write (which write_ack() calls via
+# its own module-level `os` reference, so patching BACKFILL.os.write reaches
+# it) to fail exactly once, the way an interrupted/ENOSPC write would.
+# ===========================================================================
+
+
+def test_a_write_failure_never_leaves_a_partial_marker_and_is_retryable(tmp_path, monkeypatch):
+    """Confirmed pre-fix (this exact fixture): the failure propagated as an
+    UNCAUGHT OSError out of write_ack() -- but not before O_CREAT|O_EXCL had
+    already made a 0-byte file visible at the final name. A retry, once the
+    transient failure clears, saw "already_present" and left the 0-byte
+    marker corrupt forever -- select_segments.py's own gate would have
+    trusted that empty file as a valid acknowledgement permanently, with no
+    automated way to recover short of a human deleting it by hand.
+
+    Post-fix: the failure is caught and reported as an "error: ..." string,
+    nothing is visible at the final name afterward, and an immediate retry
+    (once os.write works again) succeeds cleanly with the full correct
+    body -- proving this is actually retryable, not merely "does not
+    crash"."""
+    root = make_root(tmp_path, dispatched={"seg01": "OLDRUN"})
+    marker = root / "runs" / "OLDRUN" / ".resume_gate_ack"
+
+    def failing_write(fd, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(BACKFILL.os, "write", failing_write)
+    outcome = BACKFILL.write_ack("OLDRUN", root / "runs", ["seg01"], evidence=["drafts"])
+    monkeypatch.undo()
+
+    assert outcome.startswith("error:"), (
+        f"a write failure must be reported, not silently swallowed: {outcome}"
+    )
+    assert not marker.exists(), (
+        "a failed write must never leave anything at the final marker name "
+        "-- both select_segments.py and this script's own run() trust a "
+        f"bare .exists() there. marker exists with content: "
+        f"{marker.read_bytes() if marker.exists() else None!r}"
+    )
+    leftovers = list((root / "runs" / "OLDRUN").glob(".resume_gate_ack.tmp.*"))
+    assert leftovers == [], f"temp scratch file(s) left behind: {leftovers}"
+
+    retry_outcome = BACKFILL.write_ack("OLDRUN", root / "runs", ["seg01"], evidence=["drafts"])
+    assert retry_outcome == "created", (
+        f"the failure must be RETRYABLE without manual intervention, not "
+        f"just non-crashing: {retry_outcome}"
+    )
+    assert json.loads(marker.read_text(encoding="utf-8"))["run_id"] == "OLDRUN"

@@ -435,6 +435,13 @@ def test_full_classification_taxonomy_and_report(tmp_path):
         # line owns the contract.
         "runs_missing_digest",
         "runs_acknowledged_pre_gate",
+        # Security fix: run ids from either evidence half that failed
+        # validate_run_id() -- {run_id: reason}, never fed into a filesystem
+        # path. Reported on the success path for the same reason
+        # runs_missing_digest is: a consumer must be able to see the exact
+        # set, not merely that the run passed.
+        # tests/resume_gate_skip_detection.test.py owns the behavior.
+        "unsafe_run_ids",
         "dispatching_run_ids",
         "workflow_run_ids",
         "run_id_evidence",

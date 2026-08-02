@@ -295,11 +295,200 @@ def now_iso8601() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _ack_note(segs: list) -> str:
+    """The human-readable explanation written into the marker's own `note`
+    field -- branches on whether this run id actually dispatched anything.
+
+    Audit-accuracy fix: the note used to say "This run dispatched work"
+    unconditionally, even for a run id whose ONLY evidence is a
+    `runs/workflows/<RUN_ID>/` directory with no draft pointing at it --
+    `scan_workflow_run_ids()`'s own docstring documents that shape as
+    legitimate ("one that instantiated and dispatched nothing"), and the
+    comment at this function's call site already notes `segs` is
+    "legitimately empty" for exactly that case. A durable audit record that
+    states something untrue is worse than no record: `dispatched_segs`
+    empty means nothing was ever attributed to this run id by either scan,
+    so the note must say THAT, not claim a dispatch that never happened."""
+    if segs:
+        return (
+            "This run dispatched work before the resume-integrity gate was "
+            "enforced. Its inputs were never digested and cannot be "
+            "reconstructed, so no input.digest exists or can honestly be "
+            "written for it. This file records that gap; it does not close "
+            "it, and this run is not resumable."
+        )
+    return (
+        "This run id's Workflow template was instantiated before the "
+        "resume-integrity gate was enforced for it, but no draft either "
+        "scan can see was ever dispatched under it -- 'dispatched_segs' "
+        "above is empty because nothing was ever attributed to this run id "
+        "by either evidence half, not because the list was omitted. No "
+        "input.digest exists for it either way. This file records that the "
+        "instantiation predates the gate; it makes no claim that any "
+        "translation work happened under this run id."
+    )
+
+
+def _open_real_dir(path: Path, *, create: bool) -> int:
+    """Open `path` as a directory file descriptor, refusing (raising
+    OSError) if the LAST path component is a symlink rather than a real
+    directory. `os.O_NOFOLLOW` on a POSIX `open()` applies only to the FINAL
+    component of the string handed to it, which is exactly the property
+    this needs: `path` here is always a single, self-contained absolute
+    path (the top-level `runs_dir`), never a multi-component string that
+    could carry an untrusted symlink partway through -- see
+    `_open_real_dir_at()` below for the per-component version everything
+    NESTED under it uses instead, for exactly that reason.
+
+    If `create` and the path does not exist, creates it first (0o755,
+    matching every other directory this plugin creates via `Path.mkdir`).
+    If something is raced into that name between the `mkdir` and the
+    `open()` (TOCTOU), the `open()`'s own `O_NOFOLLOW` still refuses a
+    symlink planted in that window -- it never silently follows it."""
+    if create:
+        try:
+            path.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            pass
+    return os.open(str(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+
+
+def _open_real_dir_at(parent_fd: int, name: str, *, create: bool) -> int:
+    """The `dir_fd`-relative sibling of `_open_real_dir()`: opens `name` (a
+    single path component -- a RUN_ID that has already passed
+    `validate_run_id()`) as a directory file descriptor RELATIVE TO
+    `parent_fd`, refusing a symlink at that name.
+
+    Security fix (the physical-path half, distinct from `validate_run_id()`
+    above): the original code resolved `runs_dir / run_id` as a plain path
+    STRING and handed it to `Path.mkdir(exist_ok=True)` / `os.open()`, both
+    of which transparently FOLLOW a symlink planted at `runs_dir/run_id` --
+    `validate_run_id()` only constrains the STRING SHAPE of a run id, it
+    says nothing about what actually sits on disk at that name. With
+    `runs/OLDRUN` a symlink to an external directory, the old code created
+    the marker inside that external target -- writing outside the durable
+    root entirely. Opening relative to an already-verified-real `parent_fd`,
+    one component at a time, closes that: there is never a multi-component
+    string for a symlink planted partway through to hide inside, and
+    `O_NOFOLLOW` here covers exactly the one component (`name`) it is
+    asked about."""
+    if create:
+        try:
+            os.mkdir(name, 0o755, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """Write `data` to `fd` in full, looping on a short write. POSIX
+    `write()` is permitted to write FEWER bytes than requested (e.g. if
+    interrupted by a signal) -- the pre-fix code passed a single
+    `os.write()` call's return value through unchecked, silently accepting
+    a short write as complete."""
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        view = view[n:]
+
+
+def _publish_ack(run_fd: int, run_id: str, segs: list, evidence) -> str:
+    """The write-then-atomic-publish step for `runs/<RUN_ID>/.resume_gate_ack`,
+    run entirely relative to `run_fd` (already opened and verified real --
+    see `write_ack()` below).
+
+    Atomicity fix: the pre-fix code made the marker visible via
+    `O_CREAT | O_EXCL` BEFORE the single `os.write()` that filled it in --
+    an interruption, ENOSPC, short write, or a `close()` failure between
+    those two steps left an EMPTY or TRUNCATED file already visible at the
+    final name. Both `select_segments.py` and this script's own `run()`
+    trust a bare `.exists()`/`.is_file()` on that name, so a corrupt marker
+    permanently (and silently) satisfies the gate -- worse than the refusal
+    it was supposed to acknowledge, and, unlike every other failure in this
+    script, not retryable without a human deleting the broken file by hand.
+
+    Fixed by never writing the final name directly: the full body is
+    written and `fsync`'d to a per-process TEMPORARY name in the same
+    directory first, and only THEN published via a single `os.link()` call
+    (POSIX hard link -- a pure metadata operation, so there is no window
+    where the final name exists with partial content). `ledger_update.py`'s
+    own `write_fragment_atomically()` is this project's house pattern for
+    "write-temp-then-atomic-publish", but it finishes with `os.replace()`,
+    which SILENTLY OVERWRITES an existing destination -- correct for a
+    ledger fragment (each write is meant to supersede the last) but wrong
+    here, where "never overwrite an existing marker" is the pre-existing,
+    deliberate contract (see `write_ack()`'s own docstring). `os.link()`
+    instead FAILS with `FileExistsError` when the destination already
+    exists, which is exactly the idempotent-create semantics the old direct
+    `O_CREAT | O_EXCL` had -- just without ever exposing a partially-written
+    file at the name every caller trusts via a bare existence check."""
+    body = (
+        json.dumps(
+            {
+                "run_id": run_id,
+                "gate_ran": False,
+                "acknowledged_at": now_iso8601(),
+                "acknowledged_by": "backfill_resume_gate_ack.py",
+                # Which evidence half put this run id in scope: "drafts" (a
+                # dispatch_token names it), "workflow_dir" (a template was
+                # instantiated for it), or both. An empty dispatched_segs
+                # alongside a workflow_dir-only evidence list is the normal,
+                # expected shape, not a missing value.
+                "evidence": sorted(evidence or []),
+                "dispatched_segs": segs,
+                "note": _ack_note(segs),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+    tmp_name = f".resume_gate_ack.tmp.{os.getpid()}"
+    try:
+        fd = os.open(
+            tmp_name,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+            0o644,
+            dir_fd=run_fd,
+        )
+    except OSError as exc:
+        return f"error: could not create temp marker {tmp_name!r}: {exc}"
+
+    outcome = None
+    try:
+        try:
+            _write_all(fd, body)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp_name, ".resume_gate_ack", src_dir_fd=run_fd, dst_dir_fd=run_fd)
+            outcome = "created"
+        except FileExistsError:
+            outcome = "already_present"
+        except OSError as exc:
+            outcome = f"error: could not publish marker: {exc}"
+    except OSError as exc:
+        outcome = f"error: {exc}"
+    finally:
+        # Best-effort cleanup of the scratch name only -- the marker itself
+        # is already published (or the publish already failed) by this
+        # point, so a failure here never affects `outcome`.
+        try:
+            os.unlink(tmp_name, dir_fd=run_fd)
+        except OSError:
+            pass
+    return outcome
+
+
 def write_ack(run_id: str, runs_dir: Path, segs: list, evidence=None) -> str:
     """Creates `runs/<RUN_ID>/.resume_gate_ack` with the same idempotent
-    `O_CREAT | O_EXCL | O_WRONLY`, mode-0o644 create-only semantics
-    `ledger_update.py:mark_ever_converged()` uses -- NEVER deletes or
-    overwrites an existing marker.
+    create-only semantics `ledger_update.py:mark_ever_converged()` uses --
+    NEVER deletes or overwrites an existing marker. See `_publish_ack()` for
+    the atomic-write mechanics and `_open_real_dir()`/`_open_real_dir_at()`
+    for the symlink-safe directory anchoring; this function is just the
+    three-level open/verify/close skeleton around them.
 
     Returns "created", "already_present", or an "error: ..." string, so the
     caller can build an accurate report (the same three-way outcome
@@ -310,47 +499,21 @@ def write_ack(run_id: str, runs_dir: Path, segs: list, evidence=None) -> str:
     is recorded as an explicit `false` so that a human reading this file
     later, or a future consumer, cannot mistake it for evidence the gate
     was satisfied."""
-    run_dir = runs_dir / run_id
     try:
-        run_dir.mkdir(parents=True, exist_ok=True)
+        runs_fd = _open_real_dir(runs_dir, create=True)
     except OSError as exc:
-        return f"error: could not create {run_dir}: {exc}"
-    path = resume_gate_ack_path(run_id, runs_dir)
-    body = json.dumps(
-        {
-            "run_id": run_id,
-            "gate_ran": False,
-            "acknowledged_at": now_iso8601(),
-            "acknowledged_by": "backfill_resume_gate_ack.py",
-            # Which evidence half put this run id in scope: "drafts" (a
-            # dispatch_token names it), "workflow_dir" (a template was
-            # instantiated for it), or both. An empty dispatched_segs
-            # alongside a workflow_dir-only evidence list is the normal,
-            # expected shape, not a missing value.
-            "evidence": sorted(evidence or []),
-            "dispatched_segs": segs,
-            "note": (
-                "This run dispatched work before the resume-integrity gate was "
-                "enforced. Its inputs were never digested and cannot be "
-                "reconstructed, so no input.digest exists or can honestly be "
-                "written for it. This file records that gap; it does not close "
-                "it, and this run is not resumable."
-            ),
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
+        return f"error: {runs_dir} is not usable as a real directory: {exc}"
     try:
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
-        return "already_present"
-    except OSError as exc:
-        return f"error: {exc}"
-    try:
-        os.write(fd, (body + "\n").encode("utf-8"))
+        try:
+            run_fd = _open_real_dir_at(runs_fd, run_id, create=True)
+        except OSError as exc:
+            return f"error: {runs_dir / run_id} is not usable as a real directory: {exc}"
+        try:
+            return _publish_ack(run_fd, run_id, segs, evidence)
+        finally:
+            os.close(run_fd)
     finally:
-        os.close(fd)
-    return "created"
+        os.close(runs_fd)
 
 
 def scan_workflow_run_ids(runs_dir: Path) -> list:

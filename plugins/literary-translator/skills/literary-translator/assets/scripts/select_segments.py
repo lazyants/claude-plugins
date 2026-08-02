@@ -73,23 +73,66 @@ What it does (SKILL.md's W5 "Mass-translate" section, authoritative):
      per-segment classification report. This is the exact list that must
      become `mergeLedgerPrompt`'s `--expected-segs` later -- no drift
      between the dispatch decision and the completeness check.
-  5. #409 Step 3: refuses an AUTHORIZING invocation when a prior RUN_ID
-     used this project without the resume-integrity gate -- i.e. a run id
-     that either appears in some draft's `dispatch_token` OR has a
-     `runs/workflows/<RUN_ID>/` directory, and has no
-     `runs/<RUN_ID>/input.digest`. The two evidence halves are UNIONED
-     because neither subsumes the other: the driver leaves only drafts (it
-     never calls pipeline(), so it creates no workflow directory), while a
-     draft holds only its most RECENT token, so a skipped run whose drafts
-     were later overwritten survives only as a workflow directory. See
-     `scan_workflow_run_ids()` for that, and the gate's own block comment in
-     `run()` for the three states the set difference distinguishes (gate ran
-     / gate skipped / first run ever) and why it is scanned over ALL drafts
-     rather than over `segs`. The evidence (`runs_missing_digest`,
-     `dispatching_run_ids`, `workflow_run_ids`, `run_id_evidence`,
-     `drafts_scanned`, `drafts_untokened`) is reported on the success path
-     too, so a caller can assert the exact set rather than merely that the
-     run passed.
+  5. #409 Step 3: refuses an AUTHORIZING invocation when EITHER evidence
+     signal still shows a prior RUN_ID having used this project without the
+     resume-integrity gate -- i.e. a run id that either appears in some
+     draft's `dispatch_token` OR has a `runs/workflows/<RUN_ID>/` directory,
+     and has no `runs/<RUN_ID>/input.digest`. The two evidence halves are
+     UNIONED because neither subsumes the other: the driver leaves only
+     drafts (it never calls pipeline(), so it creates no workflow
+     directory), while a draft holds only its most RECENT token, so a
+     skipped run whose drafts were later overwritten survives only as a
+     workflow directory. See `scan_workflow_run_ids()` for that, and the
+     gate's own block comment in `run()` for the three states the set
+     difference distinguishes (gate ran / gate skipped / first run ever) and
+     why it is scanned over ALL drafts rather than over `segs`. The evidence
+     (`runs_missing_digest`, `dispatching_run_ids`, `workflow_run_ids`,
+     `run_id_evidence`, `drafts_scanned`, `drafts_untokened`,
+     `unsafe_run_ids`) is reported on the success path too, so a caller can
+     assert the exact set rather than merely that the run passed.
+
+     HONEST LIMIT, not covered by "neither subsumes the other" above: a
+     DRIVER-dispatched run whose EVERY draft is LATER overwritten by a
+     subsequent (compliant or not) run is invisible to BOTH halves at once,
+     not just one -- the driver never leaves a workflow directory (so that
+     half was never going to see it), and once every draft pointing at it is
+     overwritten, the draft scan cannot either (a draft holds only its most
+     recent token). No artifact for that run id survives anywhere on disk in
+     that combination, so no scan over current disk state can recover it;
+     this is not a bug in the union, it is what "neither signal keeps
+     history" means when both apply to the same run at once. See
+     `scan_workflow_run_ids()`'s own docstring for the fourth (undetectable)
+     case this adds to its three, and
+     tests/resume_gate_skip_detection.test.py's
+     test_driver_run_fully_overwritten_and_never_instantiated_is_undetectable
+     for the fixture that pins it as an ACCEPTED gap, not silently assumed
+     correctness.
+  6. Security fix (found alongside #409 Step 3): every run id from EITHER
+     evidence half is validated (`validate_run_id()`, the identical shape
+     resume_setup.py's own RUN_ID_RE and backfill_resume_gate_ack.py's own
+     validate_run_id() already enforce) BEFORE it is ever spliced into a
+     filesystem path. A draft's `dispatch_token` is untrusted, unpatterned
+     input -- draft.schema.json has no `pattern` on it, and draft_ready.py's
+     `--expect-token` only checks EQUALITY against an expected token, never
+     shape -- and this gate reads it from drafts that, by definition,
+     predate the gate: the population with the LEAST controlled token
+     provenance. Without this check, a run id like `'../../../../tmp/x'`
+     (from a token `'../../../../tmp/x:seg01'`) escapes `runs_dir` when
+     stat'd, and one like `'/etc'` (from `'/etc:seg01'`) discards `runs_dir`
+     entirely -- `Path('runs') / '/etc' == Path('/etc')`. A run id that
+     fails validation is never used to build a path; see `run()`'s own
+     comment for what happens to it instead and why.
+  7. Audit-accuracy fix: the Step 3 refusal's summary sentence no longer
+     blanket-claims every listed run id "dispatched work" -- a
+     `runs/workflows/<RUN_ID>/` directory with no draft pointing at it
+     (`scan_workflow_run_ids()`'s own documented "instantiated and
+     dispatched nothing" case) proves INSTANTIATION, never dispatch, and a
+     refusal that said otherwise for that id would itself be an inaccurate
+     durable-adjacent claim -- the same class of defect fixed on the writer
+     side in `backfill_resume_gate_ack.py`'s own `.resume_gate_ack` marker
+     (its `note` field used to say the identical untrue thing). Each run
+     id's OWN evidence is still named per-id in the message detail
+     (`evidence: drafts`/`workflow_dir`/`drafts+workflow_dir`), unchanged.
 
 CLI flags:
 
@@ -356,7 +399,14 @@ def scan_dispatching_run_ids(segments_dir: Path) -> dict:
     most recent dispatch, so a skipped run whose every draft was later
     re-dispatched under a compliant run leaves no trace here and is not
     detected. Both are deliberate: this gate under-detects rather than
-    risking a refusal a compliant project cannot explain."""
+    risking a refusal a compliant project cannot explain.
+
+    Those two holes COMPOSE: a driver-dispatched run whose every draft is
+    later overwritten is invisible here for the second reason above AND
+    invisible to `scan_workflow_run_ids()` for a separate, unrelated reason
+    (the driver never writes a workflow directory at all) -- so that
+    combination has no surviving trace in EITHER scan, not just this one.
+    See `scan_workflow_run_ids()`'s own docstring for that fourth case."""
     by_run_id: dict = {}
     scanned = 0
     untokened = 0
@@ -388,8 +438,11 @@ def scan_dispatching_run_ids(segments_dir: Path) -> dict:
 
 # A run-id-shaped directory name. Mirrors resume_setup.py's own RUN_ID_RE
 # (kept as an independent restatement per this project's "no shared lib
-# between self-contained scripts" convention). Used only to skip entries
-# under runs/workflows/ that cannot be run ids at all.
+# between self-contained scripts" convention). Used two ways: to skip
+# entries under runs/workflows/ that cannot be run ids at all (inside
+# scan_workflow_run_ids() below), and -- security fix -- as the shape
+# validate_run_id() enforces on EVERY run id from either evidence half,
+# draft-derived included, before it is ever spliced into a path.
 _RUN_ID_DIR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
@@ -418,6 +471,20 @@ def scan_workflow_run_ids(runs_dir: Path) -> list:
                               overwritten, or one that instantiated and
                               dispatched nothing.
       both                 -- the ordinary manual-path run.
+      neither (undetectable) -- a DRIVER run (so no workflow directory was
+                              ever written for it) whose every draft was
+                              LATER overwritten by a subsequent run (so the
+                              draft scan's own trace is also gone). This
+                              combination leaves NO artifact in either scan,
+                              on either side of the union -- not a gap in
+                              how the two are combined, but the two
+                              documented one-way holes above landing on the
+                              same run id at once. No scan over current disk
+                              state can recover a run id with zero surviving
+                              evidence; this is accepted, not fixed, and
+                              tests/resume_gate_skip_detection.test.py's
+                              test_driver_run_fully_overwritten_and_never_instantiated_is_undetectable
+                              pins it as exactly that.
 
     A workflow directory proves INSTANTIATION, not dispatch -- which is
     sound for this gate in a way it would not be for a stronger claim: the
@@ -435,6 +502,43 @@ def scan_workflow_run_ids(runs_dir: Path) -> list:
         for p in workflows_dir.iterdir()
         if p.is_dir() and _RUN_ID_DIR_RE.fullmatch(p.name)
     )
+
+
+def validate_run_id(run_id):
+    """Return an error string if `run_id` is not a safe RUN_ID, else None.
+
+    Security fix, same class as `validate_seg()` above: `input_digest_path()`
+    and `resume_gate_ack_path()` both splice `run_id`, UNQUOTED, into a
+    filesystem path (`runs_dir / run_id / ...`), so a run id sourced from
+    untrusted evidence -- a draft's `dispatch_token` has no schema `pattern`
+    and is never shape-checked before this script reads it -- must be
+    rejected HERE, before either path function is ever called, exactly as
+    `validate_seg()` rejects a bad segment id before `draft_path()` is built
+    from it.
+
+    Byte-for-byte the same check as backfill_resume_gate_ack.py's own
+    `validate_run_id()` (itself mirroring resume_setup.py's `RUN_ID_RE` --
+    the pattern that script's own `validate_run_id()` uses to reject a
+    RUN_ID at the point it is MINTED). Duplicated rather than imported per
+    this project's "no shared lib between self-contained scripts"
+    convention; pinned against drift by
+    tests/resume_gate_skip_detection.test.py's
+    test_both_copies_of_validate_run_id_agree. Matching the sibling's shape
+    on purpose: a run id this script refuses must be a run id
+    backfill_resume_gate_ack.py refuses too, or the refusal below would
+    recommend a remedy that cannot work (see run()'s own comment)."""
+    if not isinstance(run_id, str) or not run_id:
+        return "run id must be a non-empty string."
+    if not _RUN_ID_DIR_RE.fullmatch(run_id):
+        return (
+            "run id must match [A-Za-z0-9][A-Za-z0-9._-]* (letters/digits/"
+            f"dot/underscore/hyphen only, no ':'); got {run_id!r}."
+        )
+    if run_id in (".", ".."):
+        return f"run id must not be '.' or '..'; got {run_id!r}."
+    if ".." in run_id:
+        return f"run id must not contain '..'; got {run_id!r}."
+    return None
 
 
 # The authoritative 15-field cache-key list (references/ledger-and-
@@ -1191,18 +1295,92 @@ def run(args, dirs: dict) -> dict:
     for run_id in workflow_run_ids:
         evidence.setdefault(run_id, []).append("workflow_dir")
 
+    # Security fix: validate EVERY run id in the union before either path
+    # function below is ever called with it. The workflow-derived half is
+    # already shape-filtered by scan_workflow_run_ids() itself (a
+    # runs/workflows/ entry that doesn't match _RUN_ID_DIR_RE is silently
+    # skipped, never added to `workflow_run_ids` at all), but the
+    # draft-derived half is not: draft_run_id() only ever splits on the first
+    # colon, by design -- see its own docstring -- and never validates what
+    # it returns. This is the ONE choke point both halves pass through
+    # before `input_digest_path()`/`resume_gate_ack_path()` ever splice a
+    # run id into a filesystem path, so neither scanner's own shape can
+    # drift out from under it.
+    unsafe_run_ids = {}
+    safe_evidence = {}
+    for run_id, sources in evidence.items():
+        problem = validate_run_id(run_id)
+        if problem is not None:
+            unsafe_run_ids[run_id] = problem
+        else:
+            safe_evidence[run_id] = sources
+
     runs_acknowledged_pre_gate = sorted(
         run_id
-        for run_id in evidence
+        for run_id in safe_evidence
         if not input_digest_path(run_id, runs_dir).is_file()
         and resume_gate_ack_path(run_id, runs_dir).exists()
     )
     runs_missing_digest = sorted(
         run_id
-        for run_id in evidence
+        for run_id in safe_evidence
         if not input_digest_path(run_id, runs_dir).is_file()
         and not resume_gate_ack_path(run_id, runs_dir).exists()
     )
+
+    # An unsafe run id must neither silently vanish (that would reintroduce
+    # exactly the "gate passes when it should refuse" failure #409 Step 3
+    # exists to close -- a traversing id that happens to resolve onto some
+    # unrelated existing input.digest would otherwise read as gated) nor
+    # point the operator at a remedy that cannot work. This gets its OWN
+    # refusal rather than folding into `runs_missing_digest` below, because
+    # backfill_resume_gate_ack.py validates the IDENTICAL shape (its own
+    # validate_run_id(), matched to this one on purpose) and would refuse
+    # these same id(s) too -- recommending it here, the way the
+    # runs_missing_digest refusal recommends it below, would send the
+    # operator into a dead end: refuse -> --apply -> refuse again, through
+    # neither script. Gated on `authorizes_dispatch`, the same as
+    # runs_missing_digest below, so --classify-only stays a pure read
+    # (final_audit.py's completeness gate calls it and must never start
+    # refusing) while still reporting `unsafe_run_ids` on the success path
+    # for that caller to see. The message names the one remedy that DOES
+    # exist: fix or remove the offending artifact by hand.
+    if unsafe_run_ids and authorizes_dispatch:
+        detail = "; ".join(
+            f"{run_id!r} ({problem}) [evidence: {'+'.join(evidence[run_id])}]"
+            for run_id, problem in sorted(unsafe_run_ids.items())
+        )
+        fatal(
+            f"{len(unsafe_run_ids)} RUN_ID(s) found in this project's own "
+            f"evidence (a draft's dispatch_token, or a runs/workflows/ "
+            f"directory name) do not match the safe RUN_ID shape "
+            f"resume_setup.py itself only ever generates: {detail}. Refusing "
+            f"-- a run id this malformed is never turned into a "
+            f"runs/<RUN_ID>/ filesystem lookup, because one containing '..' "
+            f"could escape the durable root and one starting with '/' would "
+            f"discard runs_dir entirely (Path('runs') / '/etc' == "
+            f"Path('/etc')). This is NOT the same as a run that merely "
+            f"predates the gate: backfill_resume_gate_ack.py validates the "
+            f"identical shape and would refuse these same id(s) too, so "
+            f"running it here would not help. There is no automated remedy "
+            f"-- find and fix (or remove) the offending "
+            f"segments/<seg>.draft.json's dispatch_token, or the "
+            f"runs/workflows/<RUN_ID>/ directory, by hand, then rerun.",
+            classification=classification,
+            counts=counts,
+            ids_by_category=ids_by_category,
+            unsafe_run_ids=unsafe_run_ids,
+            # Computed over `safe_evidence` only (never over an unsafe id --
+            # no path was built for one), but included here so this failure
+            # shape carries the same key set as the runs_missing_digest one
+            # below, and as the success path.
+            runs_missing_digest=runs_missing_digest,
+            runs_acknowledged_pre_gate=runs_acknowledged_pre_gate,
+            run_id_evidence={k: evidence[k] for k in sorted(evidence)},
+            dispatching_run_ids=sorted(dispatch_scan["by_run_id"]),
+            workflow_run_ids=workflow_run_ids,
+            drafts_scanned=dispatch_scan["drafts_scanned"],
+        )
 
     if runs_missing_digest and authorizes_dispatch:
         detail = "; ".join(
@@ -1211,13 +1389,24 @@ def run(args, dirs: dict) -> dict:
             for run_id in runs_missing_digest
         )
         fatal(
-            f"{len(runs_missing_digest)} prior RUN_ID(s) dispatched work in "
-            f"this project without the resume-integrity gate: {detail}. "
+            # Audit-accuracy fix: this used to say every listed id
+            # "dispatched work" unconditionally. A workflow_dir-only id
+            # proves INSTANTIATION, never dispatch (scan_workflow_run_ids()'s
+            # own docstring documents "instantiated and dispatched nothing"
+            # as a legitimate shape) -- so the summary now names both
+            # possibilities and leaves WHICH applies to each id to the
+            # per-id `detail` above, which already carries its own draft
+            # count and evidence tag.
+            f"{len(runs_missing_digest)} prior RUN_ID(s) show evidence of "
+            f"having dispatched work and/or had a Workflow template "
+            f"instantiated in this project without the resume-integrity "
+            f"gate having run for them: {detail}. "
             f"Refusing. resume_setup.py writes runs/<RUN_ID>/input.digest "
-            f"before any dispatch, and these run ids have no digest -- so the "
-            f"run that produced those drafts was never checked against the "
-            f"inputs it actually consumed, and no later run can safely resume "
-            f"it. There is deliberately NO flag to wave this through: run "
+            f"before any dispatch, and these run ids have no digest -- so "
+            f"whatever each one actually did in this project was never "
+            f"checked against the inputs it consumed, and no later run can "
+            f"safely resume it. There is deliberately NO flag to wave this "
+            f"through: run "
             f"backfill_resume_gate_ack.py --apply to record, per run id, that "
             f"these predate the gate (it never fabricates an input.digest -- "
             f"an honest acknowledgement of a gap, not a forged proof). A run "
@@ -1235,6 +1424,11 @@ def run(args, dirs: dict) -> dict:
             dispatching_run_ids=sorted(dispatch_scan["by_run_id"]),
             workflow_run_ids=workflow_run_ids,
             drafts_scanned=dispatch_scan["drafts_scanned"],
+            # Empty here by construction -- a non-empty unsafe_run_ids would
+            # already have fataled above, before this check ever runs. Kept
+            # in the payload anyway so every failure shape carries the same
+            # key set.
+            unsafe_run_ids=unsafe_run_ids,
         )
 
     return {
@@ -1261,6 +1455,13 @@ def run(args, dirs: dict) -> dict:
         # already refused above).
         "runs_missing_digest": runs_missing_digest,
         "runs_acknowledged_pre_gate": runs_acknowledged_pre_gate,
+        # Security fix: run ids from either evidence half that failed
+        # validate_run_id() -- {run_id: reason}. Never fed into
+        # input_digest_path()/resume_gate_ack_path(). Non-empty here only
+        # under --classify-only (an authorizing invocation with a non-empty
+        # set has already refused above, matching runs_missing_digest's own
+        # documented shape).
+        "unsafe_run_ids": unsafe_run_ids,
         "dispatching_run_ids": sorted(dispatch_scan["by_run_id"]),
         "workflow_run_ids": workflow_run_ids,
         # Provenance per run id ("drafts", "workflow_dir", or both). An

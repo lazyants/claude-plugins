@@ -32,6 +32,55 @@ that silently matched nothing -- wrong glob, wrong directory, a fixture that
 forgot the dispatch_token -- produces an empty list and would otherwise pass
 a "did it refuse?" assertion for entirely the wrong reason.
 
+ACCEPTED GAP -- a third category, distinct from both of the above. Not a
+proof the check works and not a bound on a false positive: it pins a
+confirmed false NEGATIVE as deliberately accepted rather than silently
+assumed correct. STAYS GREEN if the check is deleted (same as a BOUND), but
+unlike a BOUND it is not evidence of health -- it documents exactly where
+detection stops:
+
+  * test_driver_run_fully_overwritten_and_never_instantiated_is_undetectable
+    -- the two one-way holes `scan_dispatching_run_ids()`'s own "KNOWN HOLE"
+    paragraph and `scan_workflow_run_ids()`'s own docstring each document
+    separately COMPOSE when a driver-dispatched run's every draft is later
+    overwritten: no artifact survives in either scan, so the union sees
+    nothing and the gate passes silently. Confirmed by the test's own
+    before/after asymmetry -- the SAME run id refuses while its draft still
+    exists and passes silently the instant that draft is overwritten.
+
+## Security fix -- unsafe RUN_ID validation
+
+`select_segments.py` built `runs/<RUN_ID>/input.digest` and
+`.resume_gate_ack` paths straight from a draft's `dispatch_token` with no
+shape check, while its sibling `backfill_resume_gate_ack.py` already
+validated the identical value and refused. Same PROOF/BOUND discipline
+applies to this sub-taxonomy:
+
+PROOFS (go RED if `validate_run_id()` or its call site in `run()` is deleted
+or broken):
+
+  * test_refuses_when_a_traversing_run_id_is_present
+  * test_refuses_on_an_absolute_path_run_id_and_never_reads_outside_runs_dir
+    -- the sharpest shape: reproduces the actual GATE BYPASS (a traversing/
+    absolute run id resolving onto an unrelated existing `input.digest`
+    reads as "already gated"), confirmed pre-fix to return exit 0.
+  * test_unsafe_run_id_refusal_does_not_recommend_the_unclearable_remedy --
+    proves the DESIGN decision, not just the mechanism: the refusal must
+    not recommend `backfill_resume_gate_ack.py`, which validates the
+    identical shape and would refuse the same id (the "unclearable wedge"
+    the union-of-evidence design exists to prevent, one layer deeper).
+
+BOUNDS (stay green if the new check is deleted -- deleting it just means
+`unsafe_run_ids` is never populated, so an emptiness assertion still holds
+vacuously; they prove no false positive, nothing about detection):
+
+  * test_classify_only_reports_unsafe_run_ids_without_refusing
+  * test_frontback_seg_full_flow_is_not_flagged_unsafe -- the positive
+    control: the shape "least likely to appear in a hand-built fixture"
+    (draft_run_id()'s own docstring) must still pass end to end.
+  * the `unsafe_run_ids == {}` assertions added to the pre-existing
+    false-positive bounds above.
+
 ## The three real on-disk states these fixtures mirror
 
 Measured on the live projects that motivated the check, so the fixtures are
@@ -300,6 +349,9 @@ def test_allows_once_that_run_id_has_its_digest(tmp_path):
     assert payload["runs_missing_digest"] == []
     assert payload["dispatching_run_ids"] == ["HANDLABEL20260801"]
     assert payload["drafts_scanned"] == 1
+    assert payload["unsafe_run_ids"] == {}, (
+        "a well-formed run id must never land in the new unsafe bucket"
+    )
 
 
 def test_does_not_fire_on_a_project_with_no_dispatched_drafts(tmp_path):
@@ -316,6 +368,7 @@ def test_does_not_fire_on_a_project_with_no_dispatched_drafts(tmp_path):
     assert payload["runs_missing_digest"] == []
     assert payload["dispatching_run_ids"] == []
     assert payload["drafts_scanned"] == 0
+    assert payload["unsafe_run_ids"] == {}
 
 
 def test_untokened_draft_is_unattributable_and_never_refuses(tmp_path):
@@ -335,6 +388,58 @@ def test_untokened_draft_is_unattributable_and_never_refuses(tmp_path):
     assert payload["drafts_scanned"] == 1, "the draft must have been read"
     assert payload["drafts_untokened"] == 1, (
         "and must be reported as unattributable rather than silently ignored"
+    )
+
+
+def test_driver_run_fully_overwritten_and_never_instantiated_is_undetectable(tmp_path):
+    """ACCEPTED GAP, pinned deliberately -- not a proof the check works, the
+    opposite: this is the one combination where BOTH evidence halves miss at
+    once, and it is not fixable from current disk state alone.
+
+    OLD_DRIVER_RUN dispatches seg01 via the driver (which never creates a
+    runs/workflows/ directory -- see scan_workflow_run_ids()'s own
+    docstring) and is never gated. Before anyone notices, seg01 gets
+    redispatched under NEW_COMPLIANT_RUN, which DOES have its digest and
+    overwrites seg01's draft token (a draft holds only its most recent
+    token). OLD_DRIVER_RUN now has zero surviving evidence anywhere on
+    disk: not in the draft scan (overwritten), not in the workflow scan (a
+    driver run never wrote one to begin with). select_segments.py cannot
+    refuse what it cannot see.
+
+    First confirmed empirically against this exact fixture before either
+    line of documentation above was written: step 1 (OLD_DRIVER_RUN's draft
+    still present) refuses correctly (`runs_missing_digest ==
+    ["OLD_DRIVER_RUN"]`); step 2 (after the overwrite) passes silently. That
+    asymmetry -- not this test failing -- is what proves the gap is real."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01"])
+    write_in_progress_fragment(root, "seg01")
+    write_draft(root, "seg01", dispatch_token="OLD_DRIVER_RUN:seg01")
+
+    before = parse_stdout(run_select(root))
+    assert before["runs_missing_digest"] == ["OLD_DRIVER_RUN"], (
+        "sanity check: while the draft still points at it, the gate must "
+        f"still catch it -- otherwise this test proves nothing. {before}"
+    )
+
+    write_digest(root, "NEW_COMPLIANT_RUN")
+    write_draft(root, "seg01", dispatch_token="NEW_COMPLIANT_RUN:seg01")
+
+    proc = run_select(root)
+
+    assert proc.returncode == 0, (
+        "documenting the accepted gap: OLD_DRIVER_RUN is now undetectable, "
+        f"so the run passes. stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    payload = parse_stdout(proc)
+    assert payload["runs_missing_digest"] == [], payload
+    assert payload["dispatching_run_ids"] == ["NEW_COMPLIANT_RUN"], (
+        "OLD_DRIVER_RUN has genuinely vanished from all evidence -- this is "
+        f"the gap itself, not a scan malfunction. {payload}"
+    )
+    assert payload["workflow_run_ids"] == [], (
+        "a driver run never had a workflow directory to leave a trace in "
+        f"even before the overwrite. {payload}"
     )
 
 
@@ -364,6 +469,14 @@ def test_workflow_dir_alone_is_enough_to_refuse(tmp_path):
         "the draft scan alone genuinely cannot see it -- that is the point"
     )
     assert payload["run_id_evidence"]["OVERWRITTEN_RUN"] == ["workflow_dir"]
+    # Audit-accuracy fix: OVERWRITTEN_RUN itself never dispatched anything
+    # (its only evidence is the workflow directory) -- the summary sentence
+    # must not blanket-claim every listed id "dispatched work".
+    assert (
+        "show evidence of having dispatched work and/or had a Workflow "
+        "template instantiated" in payload["error"]
+    ), payload["error"]
+    assert "OVERWRITTEN_RUN (0 draft(s), evidence: workflow_dir)" in payload["error"]
 
 
 def test_a_run_with_both_evidence_halves_is_reported_as_both(tmp_path):
@@ -436,6 +549,9 @@ def test_compliant_and_busy_project_passes_and_reports_its_run_ids(tmp_path):
         "assertion a silently-empty scan fails"
     )
     assert payload["drafts_untokened"] == 0
+    assert payload["unsafe_run_ids"] == {}, (
+        "none of this real project's own run ids may be flagged unsafe"
+    )
 
 
 def test_classify_only_reports_the_evidence_without_refusing(tmp_path):
@@ -453,6 +569,164 @@ def test_classify_only_reports_the_evidence_without_refusing(tmp_path):
     assert payload["runs_missing_digest"] == ["HANDLABEL20260801"], (
         "the evidence must be reported even where it is not acted on"
     )
+
+
+# ===========================================================================
+# Security fix -- unsafe RUN_ID validation. select_segments.py built
+# runs/<RUN_ID>/ paths straight from an unvalidated draft dispatch_token;
+# backfill_resume_gate_ack.py already validated the identical value. See this
+# file's own module docstring "Security fix" section for the PROOF/BOUND
+# breakdown.
+# ===========================================================================
+
+
+def test_refuses_when_a_traversing_run_id_is_present(tmp_path):
+    """PROOF. A `../`-shaped run id (from a token like
+    '../../../../tmp/pwned:seg01') must never be turned into a filesystem
+    lookup -- refused as unsafe instead, and never folded into
+    `runs_missing_digest` (which WOULD have recommended
+    backfill_resume_gate_ack.py, a remedy that cannot clear this)."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01"])
+    write_in_progress_fragment(root, "seg01")
+    bad_run_id = "../../../../tmp/pwned"
+    write_draft(root, "seg01", dispatch_token=f"{bad_run_id}:seg01")
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert bad_run_id in payload["unsafe_run_ids"], payload
+    assert payload["runs_missing_digest"] == [], (
+        "an unsafe run id must be caught BEFORE it ever reaches the "
+        f"missing-digest bucket, not folded into it. {payload}"
+    )
+    assert bad_run_id in payload["error"]
+
+
+def test_refuses_on_an_absolute_path_run_id_and_never_reads_outside_runs_dir(tmp_path):
+    """PROOF -- the sharpest shape of the bug, and a direct reproduction of
+    its GATE-BYPASS consequence. `pathlib` silently DISCARDS `runs_dir` on
+    an absolute right-hand side: `Path(runs_dir) / '/abs/path' ==
+    Path('/abs/path')`. This plants a decoy `input.digest` at exactly the
+    absolute address an unvalidated run id resolves to. Confirmed against
+    the actual pre-fix code at this branch's parent commit
+    (959a26a/plugins/literary-translator/.../select_segments.py) that this
+    identical fixture returns exit 0 / `success: true` -- the id reads as
+    'already gated' via the decoy, silently passing the check it should
+    have refused."""
+    root = make_durable_root(tmp_path)
+    escape_target = tmp_path / "escaped_elsewhere"
+    escape_target.mkdir()
+    assert (root / "runs") / str(escape_target) == escape_target, (
+        "pathlib's absolute-join behavior changed -- this fixture's premise is stale"
+    )
+    (escape_target / "input.digest").write_text("decoy\n", encoding="utf-8")
+
+    write_manifest(root, ["seg01"])
+    write_in_progress_fragment(root, "seg01")
+    write_draft(root, "seg01", dispatch_token=f"{escape_target}:seg01")
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0, (
+        "an absolute-path run id must never be read as 'gated' via the decoy "
+        f"digest planted at {escape_target}. stdout={proc.stdout!r}"
+    )
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert str(escape_target) in payload["unsafe_run_ids"], payload
+    assert payload["runs_missing_digest"] == [], payload
+
+
+def test_unsafe_run_id_refusal_does_not_recommend_the_unclearable_remedy(tmp_path):
+    """PROOF for the design decision, not just the mechanism: the refusal
+    for an unsafe run id must NOT point at backfill_resume_gate_ack.py,
+    because that script validates the IDENTICAL shape and would refuse the
+    very same id -- confirmed directly against the real
+    BACKFILL_ACK.validate_run_id() below, not merely asserted. Recommending
+    it anyway would reproduce the unclearable wedge the union-of-evidence
+    design exists to avoid, one layer deeper: refuse -> --apply -> refuse
+    again, through neither script."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01"])
+    write_in_progress_fragment(root, "seg01")
+    bad_run_id = "has a space"  # merely malformed, not necessarily malicious
+    write_draft(root, "seg01", dispatch_token=f"{bad_run_id}:seg01")
+
+    assert BACKFILL_ACK.validate_run_id(bad_run_id) is not None, (
+        "fixture premise: backfill_resume_gate_ack.py must ALSO reject this "
+        "id, or this test proves nothing about the wedge"
+    )
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0
+    payload = parse_stdout(proc)
+    assert bad_run_id in payload["unsafe_run_ids"], payload
+    # The message MAY still name backfill_resume_gate_ack.py (explaining why
+    # it won't help is useful), but must not RECOMMEND running it the way
+    # the runs_missing_digest refusal recommends its own remedy (that exact
+    # "backfill_resume_gate_ack.py --apply" phrasing).
+    assert "backfill_resume_gate_ack.py --apply" not in payload["error"], (
+        "the message must not tell the operator to run the remedy that will "
+        "also refuse this same id"
+    )
+    assert "would not help" in payload["error"], (
+        "the message must say explicitly that the sanctioned backfill tool "
+        "cannot clear this refusal"
+    )
+    assert "by hand" in payload["error"], (
+        "the message must name the ONLY remedy that actually exists"
+    )
+
+
+def test_classify_only_reports_unsafe_run_ids_without_refusing(tmp_path):
+    """BOUND. --classify-only must stay a pure read (final_audit.py's
+    completeness gate calls it) even when an unsafe run id is present --
+    mirrors test_classify_only_reports_the_evidence_without_refusing for the
+    new unsafe_run_ids bucket specifically."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01"])
+    write_in_progress_fragment(root, "seg01")
+    bad_run_id = "../escape"
+    write_draft(root, "seg01", dispatch_token=f"{bad_run_id}:seg01")
+
+    proc = run_select(root, "--classify-only")
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["authorizes_dispatch"] is False
+    assert bad_run_id in payload["unsafe_run_ids"], (
+        "the evidence must be reported even where it is not acted on"
+    )
+
+
+def test_frontback_seg_full_flow_is_not_flagged_unsafe(tmp_path):
+    """BOUND -- the positive control the module docstring calls out by name.
+    draft_run_id() splits on the FIRST colon only, precisely so a
+    FRONTBACK:{id} SEG shape (itself containing a colon) is not mistaken for
+    part of the RUN_ID. A naive validation bolted on top could still break
+    this if it validated the wrong half or the raw token instead of the
+    already-split run id. Drives the full flow with the digest present, and
+    asserts both that SEGS still includes the segment and that
+    unsafe_run_ids stays empty."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["FRONTBACK:fm04"])
+    write_in_progress_fragment(root, "FRONTBACK:fm04")
+    write_draft(
+        root, "FRONTBACK:fm04", dispatch_token="w5-batch1-20260801T0500:FRONTBACK:fm04"
+    )
+    write_digest(root, "w5-batch1-20260801T0500")
+
+    proc = run_select(root)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["unsafe_run_ids"] == {}, payload
+    assert payload["runs_missing_digest"] == []
+    assert "FRONTBACK:fm04" in payload["segs"]
 
 
 # ===========================================================================
@@ -519,10 +793,67 @@ def test_the_retrofit_can_clear_every_refusal_the_gate_can_raise(tmp_path):
         "",
         ":seg01",
         "run:",
+        # Security-fix regression coverage: draft_run_id() is a PURE
+        # syntactic split (see its own docstring) and stays that way after
+        # the fix -- it must return the SAME (still unvalidated) substring
+        # in both copies even for a traversing or absolute-path token.
+        # Judging that substring unsafe is validate_run_id()'s job, called
+        # separately downstream; see this test's own docstring below for why
+        # that keeps this exact assertion the right one.
+        "../../../../tmp/pwned:seg01",
+        "/etc:seg01",
     ],
 )
 def test_both_copies_of_draft_run_id_agree(token):
+    """Still the right assertion after the #409 security fix, unchanged in
+    kind. draft_run_id() is a PURE syntactic split -- its docstring is
+    explicit that a naive rsplit/split(':')[-2] gets FRONTBACK segments
+    wrong, which is the whole reason it exists as its own function -- and it
+    is deliberately never the place a run id is judged safe or unsafe. That
+    judgment is validate_run_id()'s job, called separately in run() AFTER
+    extraction, mirroring exactly how backfill_resume_gate_ack.py's own
+    run() already calls its draft_run_id() then its validate_run_id() as two
+    separate steps. So this test correctly continues to assert that both
+    copies extract the IDENTICAL substring -- including for the
+    traversing/absolute-path cases added above, which extract cleanly to
+    '../../../../tmp/pwned' and '/etc' in BOTH files, unsafe as those values
+    are. test_both_copies_of_validate_run_id_agree below is the
+    complementary drift pin for the validation step: it proves both copies
+    REJECT those same two extracted values identically, which is what
+    actually closes the vulnerability."""
     assert SELECT.draft_run_id(token) == BACKFILL_ACK.draft_run_id(token), token
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    [
+        "20260801T090001Z",
+        "w5-batch1-20260801T0500",
+        "RUNX20260801",
+        "../../../../tmp/pwned",
+        "/etc",
+        "..",
+        ".",
+        "",
+        "a..b",
+        "run:id",
+        "has a space",
+        None,
+        123,
+    ],
+)
+def test_both_copies_of_validate_run_id_agree(run_id):
+    """Security-fix drift pin, the complement to
+    test_both_copies_of_draft_run_id_agree above. select_segments.py's
+    validate_run_id() must accept and reject the IDENTICAL set of run ids as
+    backfill_resume_gate_ack.py's own copy -- a run id one script accepted
+    and the other rejected would either reopen the gate bypass (this script
+    accepts what the other would refuse to acknowledge, so nothing here
+    would ever CLEAR it either) or reintroduce the unclearable wedge (this
+    script rejects an id the other could actually acknowledge)."""
+    assert (SELECT.validate_run_id(run_id) is None) == (
+        BACKFILL_ACK.validate_run_id(run_id) is None
+    ), run_id
 
 
 def test_both_copies_of_the_marker_paths_agree(tmp_path):
