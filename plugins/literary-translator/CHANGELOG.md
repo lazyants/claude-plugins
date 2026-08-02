@@ -30,11 +30,19 @@ leaves the sandbox through an fd-pinned, digest-verified copy: the source is ope
 re-verified after the write, and the destination directory is held as an `O_DIRECTORY` fd so
 nothing re-resolves by path between the check and the rename.
 
-*Stated at its true width rather than as a proof:* the confinement check treats a probe that
-did not produce a verdict — `git` timing out against the driver's bounded call, say — as
-confined, so it refuses only when git actually ran and reported a repository. The companion's
-own probe is unbounded, so on that branch it could still resolve an enclosing repository.
-Exposure requires `TMPDIR` to sit inside a git working tree.
+The probe **fails closed**, which took a review round to get right. It originally routed
+through the driver's generic subprocess helper, which collapses "git ran and reported no
+repository", "git timed out" and "git could not be spawned" into one `None`. Everywhere else
+that collapse is safe, because `None` fails the gate closed — but here the polarity is
+inverted, since *absence* of a repository is the success condition, so every no-verdict probe
+scored as confined and dispatched. With `TMPDIR` inside a git working tree and a probe that
+merely timed out, the companion's own unbounded probe would still have found the enclosing
+repository and been handed write access to the very scripts this change protects. The four
+outcomes are now distinct and only two license a dispatch: git ran and found no repository, or
+git is not installed at all — the latter safe only because the companion's resolver degrades
+identically, so there is no enclosing root for it to find either. A timeout or a spawn error
+refuses. Each of the four is pinned by its own regression test, and the fail-open form was
+re-applied as a mutant to confirm the no-verdict cases genuinely go red.
 
 *Not implemented, and stated rather than quietly claimed:* process-group termination. The pid
 of the detached worker is never recorded where a killer could reach it, so

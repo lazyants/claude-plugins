@@ -1765,5 +1765,70 @@ def test_timeout_never_reads_stragglers_from_abandoned_sandbox(tmp_path, monkeyp
     assert not os.path.exists(sandbox_dir_seen["dir"])   # abandoned + removed, straggler moot
 
 
+# ---------------------------------------------------------------------------
+# #409: the confinement probe must FAIL CLOSED on a no-verdict result.
+#
+# The bug this pins: _sandbox_is_confined used to be `not _ok(self._run(...))`, and
+# _run() returns None for a timeout and for a spawn failure as well as for "git ran
+# and said no repository". Because absence-of-a-repository is the SUCCESS condition
+# here, that None collapsed every no-verdict probe into "confined" and dispatched --
+# handing codex the enclosing repository the check exists to deny, since the
+# companion's own probe is unbounded and would still find it.
+#
+# Each branch is asserted separately so a future collapse of the four outcomes back
+# into a boolean cannot pass: two of them mean "go", two mean "refuse", and a test
+# that only checked the happy path would not notice the difference.
+# ---------------------------------------------------------------------------
+
+
+def _probe_job(tmp_path, monkeypatch, outcome):
+    job = _mkjob(tmp_path)
+    monkeypatch.setattr(codex_job.CodexJob, "_probe_enclosing_repo",
+                        lambda self, path: outcome)
+    return job
+
+
+@pytest.mark.parametrize("outcome,expected_confined", [
+    (codex_job.CodexJob._PROBE_STANDALONE, True),    # git ran, no repo -> safe
+    (codex_job.CodexJob._PROBE_GIT_ABSENT, True),    # companion degrades identically
+    (codex_job.CodexJob._PROBE_ENCLOSED, False),     # an enclosing repo exists
+    (codex_job.CodexJob._PROBE_NO_VERDICT, False),   # THE REGRESSION: no verdict -> refuse
+])
+def test_confinement_scores_each_probe_outcome(tmp_path, monkeypatch, outcome, expected_confined):
+    job = _probe_job(tmp_path, monkeypatch, outcome)
+    assert job._sandbox_is_confined(str(tmp_path)) is expected_confined, (
+        f"probe outcome {outcome!r} must score confined={expected_confined}"
+    )
+
+
+def test_probe_reports_no_verdict_on_timeout_and_on_skip(tmp_path, monkeypatch):
+    """A timed-out probe must be distinguishable from 'git said no repository' --
+    the whole point of not routing this through _run()."""
+    job = _mkjob(tmp_path)
+
+    def _boom(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=0.01)
+
+    monkeypatch.setattr(codex_job.subprocess, "run", _boom)
+    assert job._probe_enclosing_repo(str(tmp_path)) == codex_job.CodexJob._PROBE_NO_VERDICT
+    assert job._sandbox_is_confined(str(tmp_path)) is False
+
+    monkeypatch.setattr(codex_job.CodexJob, "poll_timeout", lambda self: 0)
+    assert job._probe_enclosing_repo(str(tmp_path)) == codex_job.CodexJob._PROBE_NO_VERDICT
+
+
+def test_probe_reports_git_absent_distinctly(tmp_path, monkeypatch):
+    """git-not-installed is the ONE no-result case that still licenses a dispatch, and
+    only because the companion's resolver degrades the same way."""
+    job = _mkjob(tmp_path)
+
+    def _enoent(*a, **kw):
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(codex_job.subprocess, "run", _enoent)
+    assert job._probe_enclosing_repo(str(tmp_path)) == codex_job.CodexJob._PROBE_GIT_ABSENT
+    assert job._sandbox_is_confined(str(tmp_path)) is True
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
