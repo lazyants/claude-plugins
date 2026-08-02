@@ -1,6 +1,6 @@
 ---
 name: scheduling-and-autonomous-drive
-description: Choosing and configuring timers/reminders (CronCreate vs ScheduleWakeup, one-shot vs recurring, resolving a user-quoted retry clock-time against the real `date`) and holding the right posture during autonomous execution — running a `/loop` or `/goal` drive, handling a stop-hook wake or a resume boundary (scheduled-wakeup or compaction) that desyncs plan-mode state, filling async waits with non-racing parallel prep, and checking for a safe disjoint-partition split before accepting a long serial batch wait.
+description: Choosing and configuring timers/reminders (CronCreate vs ScheduleWakeup, one-shot vs recurring, resolving a user-quoted retry clock-time against the real `date`) and holding the right posture during autonomous execution — running a `/loop` or `/goal` drive, handling a stop-hook wake or a stop hook re-firing/rejecting on an unsatisfiable or descoped goal, or a resume boundary (scheduled-wakeup or compaction) that desyncs plan-mode state, filling async waits with non-racing parallel prep, and checking for a safe disjoint-partition split before accepting a long serial batch wait.
 ---
 
 # Scheduling and autonomous-drive posture
@@ -49,6 +49,71 @@ When genuinely blocked on async work (a long codex/background run, a monitor tha
 - Maximize productive **non-racing parallel prep** each turn: build + unit-test the downstream tooling, dry-run the next stage on PARTIAL data (a single-item smoke, a partial index build validates the whole chain before the full run finishes), file follow-ups, write the durable verification record.
 - Keep a real background monitor pending so the harness resumes you on completion — that IS forward motion.
 - When there truly is nothing non-racing left, say so **concretely**: what is running, what it's blocked on, rough ETA — not a bare "holding." Concrete-blocked ≠ stopped.
+
+All of the above assumes the hook's condition can eventually be MET. When it cannot, the
+advice inverts — see the next section before adding another productive-looking turn.
+
+## A stop-hook condition that cannot be satisfied: stop, don't out-work it
+
+A `/goal` Stop hook re-fires whenever its condition is not evaluable from the transcript.
+Nothing you output ends it — **only the user amending the goal does.** The hook evaluates
+the stated condition against the transcript and has no channel for "the user changed the
+goal after it was set."
+
+Two shapes, both observed in this repo:
+
+**(1) An item the user descoped in chat.** Goal `/goal закрыть все 5 пунктов` ("close all
+5 points"); points 1–4 genuinely closed, point 5 owned and actively worked by a **parallel
+session** and explicitly removed from scope by the user in chat.
+The hook fired **five consecutive times** anyway, each with a correct literal reading — *"the assistant
+explicitly states 4 of 5 closed … the condition requires closing all 5."* One firing even
+acknowledged the descope ("was removed from scope by the user … but was not completed")
+and re-fired regardless. The trap: a chat message explaining the descope is transcript
+evidence that the item is *incomplete*, not that the condition was *amended* — so the more
+precisely you explain why it is out of scope, the more clearly you supply the hook with
+evidence against yourself.
+
+**(2) The goal phrase itself is not a testable predicate.** Goal set as `/goal гелаай до
+конца а потом высним` — a typo'd Russian phrase (intended roughly "делай до конца, а потом
+выясним"). Rejected **eight consecutive times**, each firing correctly noting the phrase is
+"not a measurable stopping criterion." Strictly worse than (1): a descoped item at least
+*could* be closed, whereas an unparseable condition has **no state of the world that
+satisfies it**, so every turn is guaranteed to re-fire regardless of what gets done. In
+that session the work genuinely completed mid-loop (PR approved at HEAD, threads resolved,
+suite green) and the hook still rejected — correctly, since completion was never the
+stated condition.
+
+### Two things that do NOT end it, both tried
+
+- **Stopping work and saying so.** Producing no new tool calls does not satisfy a condition
+  that cannot be satisfied.
+- **The hook agreeing with you.** Its rejection text explicitly concluded "the session
+  should close pending that amendment" — and then re-fired on the very next turn. Hook
+  agreement is not hook satisfaction; do not read it as progress.
+
+### Reflex — fire on the FIRST re-fire, not the fifth
+
+1. Say **once**, plainly, that the item cannot be closed / the condition cannot be
+   validated, and why.
+2. Ask the user to **amend or clear the goal** (`/goal` with the reduced scope), or propose
+   a concrete checkable replacement phrase. That is the only thing that actually changes
+   the condition.
+3. **Do not re-litigate it on each re-fire.** Restating the reason burns a full turn and
+   changes nothing.
+
+Better still, catch it **when the goal is set**: a `/goal` that is not a predicate over
+observable state should be queried immediately, before any work starts.
+
+**The real cost is that re-firing pressures you to invent work to appease it.** Two of
+those turns did produce genuinely valuable fixes (shipped docs that contradicted the
+branch's own code) — so the pressure is not purely wasteful, but that was luck, not a
+reason to keep going. Manufacturing scope to satisfy an unsatisfiable condition is the
+failure mode, especially when the user's stated concern was token burn.
+
+**Goal-setting corollary:** a goal whose items include work owned by a **parallel session**
+is mis-scoped from the start — scope a goal to what this session can finish. See
+[[feedback-always-isolated-worktree]] and skill:parallel-work-partitioning for why
+cross-session ownership shows up so often in this repo.
 
 ## Check for a safe parallel split BEFORE accepting a long serial wait
 

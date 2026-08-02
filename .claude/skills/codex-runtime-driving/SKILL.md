@@ -23,6 +23,12 @@ Read the reference file that matches the task:
   400, an env/PATH/broker/TMPDIR/moderation breakage, or driving long/parallel `--background` jobs safely.
   Covers the reliable direct-drive patterns, the fastest `jq -r '.result.rawOutput'` verdict recovery,
   stall/hang thresholds, and the `/security-review` working-tree diff caveats.
+- **`references/prompt-sizing.md`** — read BEFORE dispatching a job whose prompt is large and whose payload
+  is non-Latin (vocalized Hebrew, Arabic with harakat, Devanagari, heavy CJK) or mostly JSON. Two silent
+  traps: `chars/4` is a Latin-prose token ratio that badly under-counts a diacritized script (a 611K-char
+  Hebrew prompt estimated at "~153K tokens, fits" overflowed a 272K window), and `wc -c` counts BYTES not
+  characters (same prompt: 379K by `wc -c` vs 273K real, making 3.5% growth look like 40%). Budget per
+  SCRIPT, not per byte; size with `python3 -c "print(len(open(p).read()))"`.
 - **`references/model-effort-bakeoff.md`** — read when benchmarking codex model×effort on a representative
   slice before committing a full translation/quality job (drive N isolated arms via the CLI, blind-adjudicate).
   Carries the durable finding: **an n=1 bake-off measures noise.** This one's "`high` won / `xhigh`
