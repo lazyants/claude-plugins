@@ -596,7 +596,7 @@ def driver_lock_path(durable_root: Path) -> Path:
     return durable_root / "runs" / DRIVER_LOCK_NAME
 
 
-def acquire_driver_lock(durable_root: Path):
+def acquire_driver_lock(durable_root: Path, session_id: "str | None" = None):
     """Acquires the project-wide LOCK_EX|LOCK_NB lease on
     runs/.driver.lock. Returns the open file descriptor on success -- the
     CALLER must keep it open (never close it) for the whole process
@@ -607,6 +607,24 @@ def acquire_driver_lock(durable_root: Path):
     lease -- non-blocking by design (LOCK_NB): a second driver on the same
     project must refuse immediately and namelessly-loudly, never queue
     behind the first one silently.
+
+    codex round-3: what this lease actually excludes, stated precisely
+    rather than asserted as an absolute. It excludes a SECOND DRIVER ON
+    THIS SAME MACHINE, and only on a filesystem that genuinely enforces
+    `flock` -- see the self-test right below for detecting when that
+    second condition does not hold. It does NOT exclude two drivers on
+    TWO DIFFERENT MACHINES each pointed at what looks like the same
+    durable root through a sync-replicated folder (Synology Drive,
+    Dropbox, iCloud, and similar): each machine takes a perfectly valid
+    LOCAL lock against its own local replica, the self-test below PASSES
+    on each of them individually (the local filesystem really does
+    enforce flock), and the sync daemon reconciles the resulting
+    conflicting writes afterward -- there is no shared kernel between the
+    two machines for any flock-based scheme to see across, so this is a
+    DIFFERENT failure than an unenforced filesystem and the self-test
+    below cannot detect it. Closing that case needs a lease with holder
+    identity and a heartbeat, checked against a shared authority both
+    machines can reach -- a real redesign, explicitly out of scope here.
 
     The lock file's CONTENT (pid + UTC start time) is written AFTER a
     successful acquire, purely for a human to read while debugging "who is
@@ -628,7 +646,11 @@ def acquire_driver_lock(durable_root: Path):
             f"-- refusing to start a second one against the same project. "
             f"If you are certain no other driver is running, the lease is "
             f"kernel-held (auto-released on process exit/crash); it cannot "
-            f"be stale while a process holds it.",
+            f"be stale while a process holds it, on a filesystem that "
+            f"enforces flock, on THIS machine. It does not see a second "
+            f"driver on a DIFFERENT machine sharing this durable root "
+            f"through a sync-replicated folder -- that is a different "
+            f"failure this lease cannot exclude at all.",
             exit_code=1,
             lock_path=str(lock_path),
         )
@@ -644,6 +666,64 @@ def acquire_driver_lock(durable_root: Path):
         )
     except OSError:
         pass  # diagnostic content only -- never fatal to the lease itself
+
+    # codex round-3: a runtime self-test that the lease this function just
+    # returned is genuinely enforced HERE, on THIS durable root's
+    # filesystem -- not merely a wording fix to the refusal message above,
+    # which is true only on the FAILURE path; the dangerous direction is
+    # the opposite one, where acquisition SILENTLY SUCCEEDS TWICE and
+    # nothing is ever printed. `flock` is scoped per OPEN FILE
+    # DESCRIPTION, not per process or per fd table, so opening the SAME
+    # path a SECOND time (a genuinely independent open, not a dup of
+    # `fd`) and attempting the SAME LOCK_EX|LOCK_NB is a real, separate
+    # contention attempt against the lease `fd` already holds -- never a
+    # self-deadlock, since flock() within one process across two
+    # DIFFERENT open file descriptions on the same file behaves exactly
+    # like two different processes would. On a conforming local
+    # filesystem this second attempt MUST be refused (measured directly
+    # on this machine: BlockingIOError, errno 35). If it instead
+    # SUCCEEDS, the filesystem is not enforcing flock at all and the
+    # lease this function just "acquired" is worthless -- warned on
+    # stderr unconditionally (this driver's own CLI docstring already
+    # promises "all human-readable detail on stderr", and a caller with
+    # no session_id to journal against, e.g. a direct test, still
+    # deserves to see this) and journaled when a session_id is given, but
+    # NEVER fatal: failing the acquire over a DETECTED gap would turn a
+    # detection into a brand-new outage on every affected filesystem,
+    # strictly worse than the silent gap it replaces.
+    self_test_fd = None
+    try:
+        self_test_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(self_test_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        pass  # expected: a conforming filesystem refuses the second attempt
+    else:
+        sys.stderr.write(
+            f"WARNING: the project lease at {lock_path} is NOT enforced by "
+            f"this filesystem -- a second flock() attempt against the SAME "
+            f"path succeeded instead of being refused. Two drivers can run "
+            f"against this project AT ONCE, on THIS machine, with no "
+            f"warning from the refusal path above (it never fires). Known "
+            f"on some network filesystems (NFS/SMB) that do not implement "
+            f"flock; not a substitute for a real holder-identity+heartbeat "
+            f"lock on such a mount.\n"
+        )
+        if session_id is not None:
+            try:
+                append_journal(
+                    durable_root, session_id,
+                    {"type": "lock_self_test_failed", "lock_path": str(lock_path)},
+                )
+            except Exception:
+                pass  # best-effort diagnostic only, must never mask the real acquire above
+    finally:
+        if self_test_fd is not None:
+            try:
+                fcntl.flock(self_test_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(self_test_fd)
+
     return fd
 
 
@@ -2844,7 +2924,7 @@ def run(args, dirs: dict) -> dict:
             if problem is not None:
                 fatal(f"--only-segs: unsafe segment id: {problem}", exit_code=2)
 
-    lock_fd = acquire_driver_lock(durable_root)
+    lock_fd = acquire_driver_lock(durable_root, session_id=session_id)
     append_journal(durable_root, session_id, {"type": "driver_started", "pid": os.getpid()})
     try:
         select_result = run_select_segments(
