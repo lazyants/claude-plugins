@@ -2466,5 +2466,60 @@ def test_write_joblog_succeeds_normally_when_the_write_is_not_short(tmp_path):
     assert json.loads(Path(job.joblog).read_text(encoding="utf-8"))["jobId"] == "job-1"
 
 
+# --------------------------------------------------------------------------- #
+# Coverage-gap close: main()'s `poll_sec = args.poll_sec if args.poll_sec > 0
+# else 15` clamp was never exercised through the real CLI. Every white-box
+# test using poll=0 (_mkjob(tmp_path, deadline=100, poll=0), several places
+# above) constructs CodexJob directly, bypassing main()'s own argv-parsing
+# clamp entirely -- so args.poll_sec <= 0 was never reached through that
+# path. If this clamp broke, `--poll-sec 0` would make poll()'s
+# `time.sleep(min(self.poll_sec, rem))` sleep zero seconds between
+# iterations: a tight busy-loop hammering the companion's `status`
+# subprocess until the deadline. Not a security bypass -- a self-inflicted
+# resource/DoS-on-yourself concern -- but a real, previously-untested branch
+# on the last unpinned CLI parameter on this file.
+# --------------------------------------------------------------------------- #
+
+
+def test_poll_sec_zero_is_clamped_rather_than_busy_looping(tmp_path):
+    """PROOF, via an OBSERVABLE consequence rather than an assertion on a
+    value (a value-identity assertion can't reach this: poll_sec is never
+    echoed into argv or output, only used as a sleep duration). Drives the
+    REAL driver via subprocess with --poll-sec 0 and a short deadline, the
+    job kept permanently NON-terminal (status_seq=["queued"] -- FAKE_NODE's
+    own counter clamps to the last element of a 1-item sequence, so every
+    poll keeps seeing "queued"), and counts `status` calls in the existing
+    call_log mechanism. Measured directly against both sides before writing
+    this assertion: the clamped/shipped behavior produces exactly 1 status
+    call in a 3-second deadline (poll_sec=15 > any remaining budget that
+    short, so the one sleep runs out the clock); a `poll_sec = args.poll_sec`
+    mutation (dropping the clamp) produces 143 in the SAME window and same
+    fixture -- a two-orders-of-magnitude margin, chosen for headroom, not
+    tuned to the boundary."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    state = base_state(seg, tok, "translate", status_seq=["queued"])
+
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1", state,
+                        deadline=3, poll=0)
+
+    call_log = root / "calls.D1.log"
+    status_calls = 0
+    if call_log.exists():
+        for line in call_log.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                entry = json.loads(line)
+                if entry.get("sub") == "status":
+                    status_calls += 1
+
+    assert status_calls <= 10, (
+        f"--poll-sec 0 must be CLAMPED to a sane default, not passed through "
+        f"literally -- {status_calls} status calls in a 3-second window "
+        f"looks like an unclamped busy-loop (measured: clamped=1, "
+        f"unclamped=143, for this identical fixture)."
+    )
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
