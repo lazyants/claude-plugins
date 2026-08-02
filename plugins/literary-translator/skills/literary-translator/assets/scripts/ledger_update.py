@@ -157,6 +157,24 @@ def ever_converged_path(seg, segments_dir=SEGMENTS_DIR):
     return segments_dir / f".ever_converged.{seg}"
 
 
+def _report_sentinel_failure(path, exc):
+    """The one place this message is spelled out -- shared by every OSError
+    exit from mark_ever_converged() below (open, write, and close alike),
+    so a future edit to the wording can't drift into three copies the way
+    the open-only version of this function once left the write/close paths
+    with no message at all (see mark_ever_converged()'s own docstring)."""
+    sys.stderr.write(
+        f"warning: could not create the ever-converged sentinel at {path}: "
+        f"{exc}. Convergence was NOT recorded for this segment -- the "
+        f"ledger write is refused without its protecting sentinel, so "
+        f"the segment stays whatever status it already had. Nothing on "
+        f"disk was lost: the draft and review artifacts both survive "
+        f"untouched; only the ledger's own 'converged' verdict is "
+        f"withheld. Retry once the underlying OS problem (permissions/"
+        f"quota/I/O) is fixed.\n"
+    )
+
+
 def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
     """Create the sentinel for `seg`, idempotently. Called ONLY from
     enrich_converged_fields, after every convergence precondition has passed
@@ -189,31 +207,67 @@ def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
     -- only the ledger's own 'converged' verdict is withheld until the
     sentinel can actually be written, on this attempt or a retry. Still
     reported on stderr in addition to the fatal failure, so the underlying
-    OS problem is visible without having to parse the JSON error."""
+    OS problem is visible without having to parse the JSON error.
+
+    ALL THREE OS calls this function makes -- open, write, close -- are
+    covered by that same clean-False-plus-message contract (second post-
+    review correction). The first cut of this fix only wrapped open(): the
+    single os.write() and the os.close() that follow a successful open()
+    were left outside any except OSError, so an ENOSPC/EDQUOT/EIO on the
+    write, or a write error some filesystems (notably NFS) defer reporting
+    until close(), propagated as an uncaught exception instead of the
+    documented refusal -- exactly the failure this promise exists to turn
+    into a clean, actionable message.
+
+    The create-then-fill ORDER is deliberately left unchanged, and this is
+    NOT a temp-file-plus-`os.link()` atomic publish the way
+    backfill_resume_gate_ack.py's write_ack()/_publish_ack() is for
+    `.resume_gate_ack` -- that script needed it because ITS marker's JSON
+    BODY is read later (by a human or a future consumer, per its own
+    docstring), so a torn write there corrupts information someone will
+    parse. This sentinel's body is fixed, decorative, and never parsed by
+    anything -- every consumer (select_segments.py, final_audit.py,
+    backfill_ever_converged.py) checks only `.exists()`. And a torn write
+    here can never represent a FALSE fact: this function only ever runs
+    after every convergence precondition already passed, so any file left
+    at `path` -- complete or torn -- correctly asserts "this segment
+    converged at least once", which is true. A retry's own os.open()
+    O_CREAT|O_EXCL then hits FileExistsError against that leftover file and
+    treats it as already-marked, exactly as if the first attempt had fully
+    succeeded. So the ONLY thing worth guaranteeing here is that this
+    function itself never raises past its own documented contract -- not
+    that the sentinel's bytes are written atomically."""
     path = ever_converged_path(seg, segments_dir)
     try:
         fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError:
         return True          # already marked -- idempotent, nothing to do
     except OSError as exc:
-        sys.stderr.write(
-            f"warning: could not create the ever-converged sentinel at {path}: "
-            f"{exc}. Convergence was NOT recorded for this segment -- the "
-            f"ledger write is refused without its protecting sentinel, so "
-            f"the segment stays whatever status it already had. Nothing on "
-            f"disk was lost: the draft and review artifacts both survive "
-            f"untouched; only the ledger's own 'converged' verdict is "
-            f"withheld. Retry once the underlying OS problem (permissions/"
-            f"quota/I/O) is fixed.\n"
-        )
+        _report_sentinel_failure(path, exc)
         return False
+
+    # Content is deliberately fixed, with no timestamp: this file sits in
+    # segments/ and a varying body would make an otherwise identical
+    # project directory compare unequal.
     try:
-        # Content is deliberately fixed, with no timestamp: this file sits in
-        # segments/ and a varying body would make an otherwise identical
-        # project directory compare unequal.
         os.write(fd, b"converged\n")
-    finally:
+    except OSError as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass  # best-effort cleanup; already reporting the write failure
+        _report_sentinel_failure(path, exc)
+        return False
+
+    try:
         os.close(fd)
+    except OSError as exc:
+        # Some filesystems (notably NFS) defer reporting a write error until
+        # close() -- caught here so it gets the SAME clean refusal as a
+        # failure at open() or write() would, never an uncaught exception.
+        _report_sentinel_failure(path, exc)
+        return False
+
     return True
 
 

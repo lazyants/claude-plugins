@@ -49,6 +49,8 @@ recordLedgerPrompt's own mandated "never trust the command's own
 fragment_sha1 claim without this independent check" discipline.
 """
 import hashlib
+import importlib.util
+import io
 import json
 import re
 import shutil
@@ -831,6 +833,107 @@ def test_sentinel_write_failure_refuses_to_record_convergence(tmp_path):
         f"write was actually refused is worse than saying nothing: "
         f"{result.stderr!r}"
     )
+
+
+def _load_module(name, path):
+    """Imports a script as an in-process module -- the established pattern
+    for direct-function-call unit testing elsewhere in this test suite
+    (e.g. resume_integrity.test.py's own `_load_module`, used there for the
+    identical reason: forcing a specific failure deterministically needs a
+    patchable in-process call, which a subprocess boundary would hide)."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None, f"could not load spec for {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_write_failure_after_sentinel_create_is_reported_as_a_clean_refusal(tmp_path):
+    """mark_ever_converged()'s O_CREAT|O_EXCL open() PUBLISHES the sentinel's
+    NAME in segments/ before the single os.write() that fills it in ever
+    runs. Pre-fix, an OSError from that write (or from the os.close() that
+    follows it -- some filesystems, notably NFS, defer reporting a write
+    error until close()) was OUTSIDE the try/except that produces this
+    function's documented "clean False plus stderr explanation" contract --
+    it propagated as an uncaught exception instead, on exactly the failure
+    that contract exists for.
+
+    Genuinely only reachable in-process: there is no portable, reliable way
+    to make a REAL os.write() to a freshly os.open()'d fd fail on a normal
+    filesystem without root/fuse/quota machinery (the write-time analogue of
+    why this codebase's own case-10 TOCTOU tests call a true race "not
+    practically unit-testable"). ledger_update.py is otherwise exercised
+    exclusively via subprocess in this file (matching its own house style),
+    but the one function under test here takes plain seg/segments_dir
+    arguments and has no other side effects worth isolating a subprocess
+    for, so a direct in-process call plus a narrow os.write() patch is the
+    faithful way to reach this specific seam."""
+    ledger_update = _load_module("ledger_update_under_test_write_failure", SCRIPT_SRC)
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segWriteFail"
+
+    real_write = ledger_update.os.write
+    real_stderr = ledger_update.sys.stderr
+
+    def failing_write(fd, data):
+        raise OSError(28, "No space left on device")  # ENOSPC
+
+    captured_stderr = io.StringIO()
+    ledger_update.os.write = failing_write
+    ledger_update.sys.stderr = captured_stderr
+    try:
+        result = ledger_update.mark_ever_converged(seg, segments_dir)
+    finally:
+        ledger_update.os.write = real_write
+        ledger_update.sys.stderr = real_stderr
+
+    assert result is False, (
+        "a write-time OSError must produce the SAME clean False an open-time "
+        "OSError already does -- not an uncaught exception propagating past "
+        "this function's own documented contract"
+    )
+    stderr_lower = captured_stderr.getvalue().lower()
+    assert "could not create the ever-converged sentinel" in stderr_lower
+    assert "was not recorded" in stderr_lower
+    assert "nothing on disk was lost" in stderr_lower
+
+
+def test_close_failure_after_successful_write_is_reported_as_a_clean_refusal(tmp_path):
+    """Sibling of the write-failure test above, for the OTHER OS call this
+    function makes after a successful open(): os.close(). Some filesystems
+    (notably NFS) defer reporting a write error until close() specifically,
+    so this is not a redundant echo of the write-failure case -- it is the
+    one place a write can appear to have succeeded and still turn out to
+    have failed."""
+    ledger_update = _load_module("ledger_update_under_test_close_failure", SCRIPT_SRC)
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segCloseFail"
+
+    real_close = ledger_update.os.close
+    real_stderr = ledger_update.sys.stderr
+
+    def failing_close(fd):
+        raise OSError(5, "Input/output error")  # EIO, as e.g. NFS may defer
+
+    captured_stderr = io.StringIO()
+    ledger_update.os.close = failing_close
+    ledger_update.sys.stderr = captured_stderr
+    try:
+        result = ledger_update.mark_ever_converged(seg, segments_dir)
+    finally:
+        ledger_update.os.close = real_close
+        ledger_update.sys.stderr = real_stderr
+
+    assert result is False, (
+        "a close-time OSError must produce the SAME clean False an open- or "
+        "write-time OSError already does -- not an uncaught exception"
+    )
+    stderr_lower = captured_stderr.getvalue().lower()
+    assert "could not create the ever-converged sentinel" in stderr_lower
+    assert "was not recorded" in stderr_lower
+    assert "nothing on disk was lost" in stderr_lower
 
 
 # ---------------------------------------------------------------------------
