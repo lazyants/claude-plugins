@@ -18,10 +18,14 @@ Reuses `_canon_project_fixture.py` -- the SAME shared builder
 `canon_stamp_conservation.test.py`/`canon_init_zero_candidate_bootstrap.
 test.py` already use, staging the REAL cache_key.py (never a stub), so
 every question this file asks about `generation_hashes` is about a
-GENUINE hash, not a fixture artifact. `--init` is used as the one
-operation under test throughout -- the simplest of the four writing modes
-that all funnel through the SAME `_stamp_write_verify`/
-`_stamp_generation_hash` call chain this override lives in.
+GENUINE hash, not a fixture artifact. `--init` is used as the simplest of
+the four writing modes to establish the proof shape below; the same shape
+is then re-run for the other three (`--restamp-derivation`, legacy
+`--batch` / `run_merge`, and `--merge-batches`) further down, since all
+four funnel through the SAME `_stamp_write_verify`/`_stamp_generation_hash`
+call chain this override lives in -- and, until this file grew these
+extra cases, only `--init`'s own leg of that chain was ever exercised
+with `--plugin-root` at all.
 
 ## The poisoned-sibling proof, both halves
 
@@ -46,10 +50,13 @@ if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 from _canon_project_fixture import (  # noqa: E402
     SCRIPTS_SRC,
+    accepted_item,
     make_project,
     read_canon,
+    run_canon_init,
     run_canon_validate,
     run_script,
+    write_fragment,
 )
 
 
@@ -190,6 +197,124 @@ def test_plugin_root_flag_absent_uses_the_poisoned_durable_root_sibling(tmp_path
         "a failed stamp attempt must write NOTHING -- generation_hashes is "
         "resolved before the atomic write, never patched in afterward"
     )
+
+
+# ---------------------------------------------------------------------------
+# #412 gap closure -- the same poisoned-sibling proof for the other three
+# `_stamp_write_verify` callers. Until now only `--init` (above) exercised
+# `--plugin-root` at all: a whole-suite search found `--plugin-root` next to
+# `--restamp-derivation`, `--batch`, or `--merge-batches` in NO test file.
+# `resolve_cache_key_script`/`_stamp_generation_hash` are shared code, but
+# each of these three threads its OWN `plugin_root_str` parameter through
+# from `main()`'s dispatch (canon_validate.py:2609-2646) to its own
+# `_stamp_write_verify` call -- a regression in any one of those three
+# threading sites would not be caught by the `--init` test above.
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_root_flag_bypasses_a_tampered_durable_root_sibling_on_restamp_derivation(tmp_path):
+    """Same core property as the --init test above, for `run_restamp_derivation`
+    (~:2030). This mode requires an EXISTING canon.json, so bootstrap happens
+    BEFORE the durable root is poisoned -- --init itself needs a working
+    cache_key.py to succeed."""
+    root = make_project(tmp_path)
+    assert run_canon_init(root).returncode == 0
+    poison_durable_root_cache_key(root)
+    plugin_root = make_trusted_plugin_root(tmp_path)
+
+    proc = run_canon_validate(root, "--restamp-derivation", "--plugin-root", str(plugin_root))
+
+    assert proc.returncode == 0, (
+        f"--plugin-root pointing at the REAL cache_key.py must let "
+        f"--restamp-derivation succeed even though durable_root's own copy "
+        f"is poisoned:\n"
+        f"rc={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "TAMPERED" not in proc.stdout and "TAMPERED" not in proc.stderr
+    payload = parse_last_json_line(proc)
+    assert payload["success"] is True
+    assert payload["mode"] == "restamp_derivation"
+    assert payload["generation_hashes_restamped"] is True
+
+    canon = read_canon(root)
+    for field in ("particle_config_hash", "derivation_bundle_hash"):
+        value = canon["generation_hashes"].get(field)
+        assert isinstance(value, str) and value, (
+            f"expected a genuine non-empty stamp for {field!r}, got {value!r}"
+        )
+
+
+def test_plugin_root_flag_bypasses_a_tampered_durable_root_sibling_on_merge(tmp_path):
+    """Same proof for `run_merge` (legacy `--batch`, ~:2092). No prior
+    canon.json is needed: `_load_canon` returns a fresh skeleton for a
+    missing file, and `_preservable_prior` returns None for a missing file
+    too, so this first merge always restamps -- exactly like --init's own
+    bootstrap does. A real accepted item (not an empty fragment) is used so
+    this also proves the override is honored on a merge that actually
+    writes content, not just on a content-free write."""
+    root = make_project(tmp_path)
+    poison_durable_root_cache_key(root)
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    frag = write_fragment(root, [accepted_item("אברהם", "Abraham")])
+
+    proc = run_canon_validate(root, "--batch", str(frag), "--plugin-root", str(plugin_root))
+
+    assert proc.returncode == 0, (
+        f"--plugin-root pointing at the REAL cache_key.py must let a legacy "
+        f"--batch merge succeed even though durable_root's own copy is "
+        f"poisoned:\n"
+        f"rc={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "TAMPERED" not in proc.stdout and "TAMPERED" not in proc.stderr
+    payload = parse_last_json_line(proc)
+    assert payload["success"] is True
+    assert payload["mode"] == "merge"
+    assert payload["merged_accepted"] == 1
+    assert payload["generation_hashes_restamped"] is True
+
+    canon = read_canon(root)
+    assert "אברהם" in canon["entries"]
+    for field in ("particle_config_hash", "derivation_bundle_hash"):
+        value = canon["generation_hashes"].get(field)
+        assert isinstance(value, str) and value, (
+            f"expected a genuine non-empty stamp for {field!r}, got {value!r}"
+        )
+
+
+def test_plugin_root_flag_bypasses_a_tampered_durable_root_sibling_on_merge_batches(tmp_path):
+    """Same proof for `run_merge_batches` (~:2201), across TWO fragments in
+    one call -- its distinguishing shape from legacy --batch, and the mode
+    #193/#291 name as the modern replacement for the unsanctioned restamp
+    trick."""
+    root = make_project(tmp_path)
+    poison_durable_root_cache_key(root)
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    frag1 = write_fragment(root, [accepted_item("אברהם", "Abraham")], "f1.json")
+    frag2 = write_fragment(root, [accepted_item("רבקה", "Rebecca")], "f2.json")
+
+    proc = run_canon_validate(
+        root, "--merge-batches", str(frag1), str(frag2), "--plugin-root", str(plugin_root)
+    )
+
+    assert proc.returncode == 0, (
+        f"--plugin-root pointing at the REAL cache_key.py must let "
+        f"--merge-batches succeed even though durable_root's own copy is "
+        f"poisoned:\n"
+        f"rc={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "TAMPERED" not in proc.stdout and "TAMPERED" not in proc.stderr
+    payload = parse_last_json_line(proc)
+    assert payload["success"] is True
+    assert payload["mode"] == "merge_batches"
+    assert payload["generation_hashes_restamped"] is True
+
+    canon = read_canon(root)
+    assert "אברהם" in canon["entries"] and "רבקה" in canon["entries"]
+    for field in ("particle_config_hash", "derivation_bundle_hash"):
+        value = canon["generation_hashes"].get(field)
+        assert isinstance(value, str) and value, (
+            f"expected a genuine non-empty stamp for {field!r}, got {value!r}"
+        )
 
 
 if __name__ == "__main__":
