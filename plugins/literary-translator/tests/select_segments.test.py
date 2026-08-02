@@ -420,6 +420,11 @@ def test_full_classification_taxonomy_and_report(tmp_path):
         "ids_by_category",
         "overrides",
         "excluded_only_segs",
+        # #409 Step 1. This exact-key assertion is deliberate: a consumer that
+        # reads `authorizes_dispatch` must be able to trust that the key is
+        # always present, so silently dropping it has to fail here.
+        "authorizes_dispatch",
+        "previously_converged",
     }
     assert payload["success"] is True
     assert payload["durable_root"] == str(root)
@@ -1168,6 +1173,139 @@ def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
     payload = parse_stdout(proc)
     assert payload["success"] is True
     assert payload["segs"] == ["segNoFlag"]
+
+
+# ---------------------------------------------------------------------------
+# #409 Step 1 -- the previously-converged re-translate gate.
+#
+# Why this exists: a converged segment becomes dispatch-eligible the moment any
+# cache-key field moves, and a plugin upgrade moves plugin_bundle_hash for EVERY
+# segment at once. Without this gate the next run silently re-translates
+# finished, paid-for work. Measured at v1.17.0: 147 converged segments across
+# three live projects.
+#
+# The predicate is the DURABLE sentinel, never the ledger status: the status is
+# overwritten with `in_progress` before a re-dispatch, so a status-based guard
+# does not fire on the path it exists to guard.
+# ---------------------------------------------------------------------------
+
+EVER_CONVERGED_SEG = "seg03_stale_cachekey"   # converged, then cache-key stale
+
+
+def _mark_ever_converged(root, seg):
+    """Raise the sentinel the way ledger_update.py does, by filename."""
+    p = root / "segments" / f".ever_converged.{seg}"
+    p.write_text("converged\n", encoding="utf-8")
+    return p
+
+
+def test_gate_refuses_by_default_when_a_previously_converged_segment_is_selected(tmp_path):
+    root = setup_full_project(tmp_path)
+    baseline = run_select(root)
+    assert baseline.returncode == 0
+    assert EVER_CONVERGED_SEG in parse_stdout(baseline)["segs"], (
+        "precondition: the stale-cache-key segment must be dispatch-eligible by "
+        "default, otherwise this test proves nothing"
+    )
+
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+
+    proc = run_select(root)
+    assert proc.returncode != 0, (
+        "a previously-converged segment must NOT be silently re-translated\n"
+        f"stdout={proc.stdout!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert EVER_CONVERGED_SEG in out["error"], "the refusal must name the segment"
+    assert "--allow-retranslate-converged" in out["error"], (
+        "the refusal must name the flag that authorizes it"
+    )
+
+
+def test_gate_permits_with_the_explicit_authorization_flag(tmp_path):
+    root = setup_full_project(tmp_path)
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+
+    proc = run_select(root, "--allow-retranslate-converged")
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert EVER_CONVERGED_SEG in out["segs"]
+    assert out["authorizes_dispatch"] is True
+    assert out["previously_converged"] == [EVER_CONVERGED_SEG]
+
+
+def test_classify_only_reports_without_authorizing_a_dispatch(tmp_path):
+    """final_audit.py's path: it needs the classification of a finished book --
+    the normal state of which is 'many previously-converged segments' -- and
+    must not be refused, because it never translates anything."""
+    root = setup_full_project(tmp_path)
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+
+    proc = run_select(root, "--classify-only")
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["authorizes_dispatch"] is False, (
+        "a classify-only call must not hand its caller a dispatch authorization"
+    )
+    assert out["previously_converged"] == [], (
+        "classify-only does not evaluate the gate, so it reports no gate result"
+    )
+    assert EVER_CONVERGED_SEG in out["classification"], "the report is still produced"
+
+
+def test_gate_fires_even_though_the_ledger_status_is_no_longer_converged(tmp_path):
+    """THE decisive case, and the reason the predicate is a sentinel file.
+
+    translateStage() writes `in_progress` BEFORE dispatching, and
+    ledger_update.py rebuilds each fragment from scratch, so by the time a
+    re-dispatch is decided the ledger no longer says `converged`. A guard
+    reading the STATUS is therefore green exactly on the path it exists to
+    guard. Here the fragment is overwritten with a non-converged status while
+    the durable sentinel remains -- the refusal must still fire."""
+    root = setup_full_project(tmp_path)
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+
+    write_fragment(root, EVER_CONVERGED_SEG, in_progress_fragment())
+
+    proc = run_select(root)
+    assert proc.returncode != 0, (
+        "the sentinel outlives the status, so the gate must still refuse; a "
+        "status-based predicate would pass here and re-translate the segment\n"
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    err = parse_stdout(proc)["error"]
+    assert EVER_CONVERGED_SEG in err
+    assert "--allow-retranslate-converged" in err, (
+        "must fail through THIS gate, not through some other fatal that happens "
+        "to mention the same segment"
+    )
+
+
+def test_sentinel_filename_matches_the_writer_in_ledger_update(tmp_path):
+    """The convention is spelled in two standalone scripts with no shared
+    import (ledger_update.py WRITES it, select_segments.py READS it). Pin them
+    against each other by name so a rename in one is not a silent no-op in the
+    other -- which would disable the gate while every test above still passes,
+    because they would agree with the reader."""
+    import importlib.util
+
+    def _load(name):
+        path = ASSETS_DIR / "scripts" / name
+        spec = importlib.util.spec_from_file_location(name.replace(".", "_"), str(path))
+        assert spec is not None and spec.loader is not None, f"cannot load {path}"
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    writer = _load("ledger_update.py")
+    reader = _load("select_segments.py")
+    segments_dir = tmp_path / "segments"
+    seg = "segX"
+    assert (
+        writer.ever_converged_path(seg, segments_dir).name
+        == reader.ever_converged_path(seg, segments_dir).name
+    ), "ledger_update.py writes a sentinel select_segments.py would never find"
 
 
 if __name__ == "__main__":

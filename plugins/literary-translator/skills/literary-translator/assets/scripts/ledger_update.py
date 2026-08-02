@@ -147,6 +147,58 @@ def review_path(seg, segments_dir=SEGMENTS_DIR):
     return segments_dir / f"{seg}.review.json"
 
 
+def ever_converged_path(seg, segments_dir=SEGMENTS_DIR):
+    """#409 Step 1: the DURABLE 'this segment has converged at least once'
+    sentinel. A dotfile, matching the existing `.att.*`/`.att_pending.*`
+    convention in the same directory -- tree walkers here already skip
+    dot-entries (diff_rendered_output.py, render_obsidian.py) and nothing
+    globs this directory wholesale, so it adds no file a consumer must learn
+    to ignore."""
+    return segments_dir / f".ever_converged.{seg}"
+
+
+def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
+    """Create the sentinel for `seg`, idempotently. Called ONLY from
+    enrich_converged_fields, after every convergence precondition has passed
+    -- that function is the single place in the whole plugin where
+    convergence is recorded.
+
+    Why a separate file rather than reading the ledger status: the status is
+    MUTABLE and is overwritten with `in_progress` BEFORE a re-dispatch, by
+    which time a status-based guard can no longer tell that the segment had
+    ever converged -- so it never fires on the one path it exists to guard.
+    ledger_update.py rebuilds each fragment from scratch; this sentinel is a
+    separate file it only ever creates.
+
+    Never removed by any ledger write. The single sanctioned way to clear it
+    is an explicit, authorized re-translate of that segment.
+
+    Failure to create the sentinel is NOT fatal to recording convergence: the
+    convergence itself is already proven and refusing here would discard paid
+    work over a bookkeeping file. It is reported on stderr so a run that
+    cannot protect its own output is visible rather than silent."""
+    path = ever_converged_path(seg, segments_dir)
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return True          # already marked -- idempotent, nothing to do
+    except OSError as exc:
+        sys.stderr.write(
+            f"warning: could not create the ever-converged sentinel at {path}: "
+            f"{exc}. Convergence IS recorded; a later re-translate of this "
+            f"segment will not be refused by the #409 gate.\n"
+        )
+        return False
+    try:
+        # Content is deliberately fixed, with no timestamp: this file sits in
+        # segments/ and a varying body would make an otherwise identical
+        # project directory compare unequal.
+        os.write(fd, b"converged\n")
+    finally:
+        os.close(fd)
+    return True
+
+
 def segpack_path(seg, segments_dir=SEGMENTS_DIR):
     return segments_dir / f"segpack_{seg}.json"
 
@@ -450,6 +502,13 @@ def enrich_converged_fields(seg, fragment, run_token=None, segments_dir=SEGMENTS
         emit_failure("draft changed since review; cannot record convergence")
 
     fragment["reviewed_draft_sha1"] = current_draft_sha1
+
+    # #409 Step 1. This is the single site in the plugin where convergence is
+    # fixed, so it is the only correct place to raise the durable sentinel.
+    # Deliberately AFTER every precondition above: a segment that failed the
+    # token, draft-presence or draft-changed-since-review checks has not
+    # converged and must not be marked as having done so.
+    mark_ever_converged(seg, segments_dir)
 
 
 def write_fragment_atomically(seg, fragment, ledger_fragment_dir=LEDGER_FRAGMENT_DIR):

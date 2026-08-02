@@ -94,7 +94,25 @@ Coverage (per the test's own enumeration):
     an incomplete project still exiting exactly 1 (priority preserved); and
     a direct unit test of the underlying completeness_exit_code() helper;
   - the frontback coverage report (translate-decision cross-referenced to
-    segment classification; regenerate/omit reported by decision alone).
+    segment classification; regenerate/omit reported by decision alone);
+  - #409 Step 2: the stale/ever-converged sentinel carve-out, FIELD-AWARE --
+    a 'stale' segment carrying the durable .ever_converged.<seg> sentinel
+    AND stale ONLY on a machinery-only field (SAFE_STALE_CARVEOUT_FIELDS:
+    plugin_bundle_hash/schema_hash/derivation_bundle_hash) is deliverable
+    (exit 0) while completeness_counts['stale'] stays the raw, unchanged
+    count and the new stale_previously_converged field reports the
+    carve-out; a 'stale' segment with NO sentinel still exits 3 (fail-safe,
+    isolating the carve-out from a bare category deletion, on a safe
+    field); a partial carve-out across two stale segments (same safe
+    field, only one sentineled) still exits 3; a stale caused by a genuine
+    style_bible.md edit (style_contract_hash, CONTENT-affecting, the same
+    fixture shape tests/ledger_e2e_acceptance.test.py uses) still exits 3
+    even WITH the sentinel; and a direct unit test of both
+    compute_project_complete() and count_stale_previously_converged()'s
+    own field-allowlist gate (including an unrecognized/future field name,
+    which the real select_segments.py path can never itself produce, and a
+    draft_sha1_mismatch stale_reason blocking despite empty
+    mismatched_fields).
 """
 import hashlib
 import importlib.util
@@ -474,6 +492,17 @@ def corrupt_cache_key_field(root: Path, seg: str, field: str, bogus_value: str =
     fragment = json.loads(frag_path.read_text(encoding="utf-8"))
     fragment["cache_key"][field] = bogus_value
     frag_path.write_text(json.dumps(fragment, ensure_ascii=False), encoding="utf-8")
+
+
+def mark_ever_converged(root: Path, seg: str) -> None:
+    """Writes the #409 durable ever-converged sentinel directly at
+    segments/.ever_converged.<seg> -- this suite never invokes the real
+    ledger_update.py as a subprocess, so it cannot call that script's own
+    mark_ever_converged() to produce it. Same filename convention and same
+    fixed, no-timestamp content (b"converged\\n") the real
+    ledger_update.py:mark_ever_converged writes, per that function's own
+    docstring ("Content is deliberately fixed, with no timestamp")."""
+    (root / "segments" / f".ever_converged.{seg}").write_bytes(b"converged\n")
 
 
 def load_final_audit_module():
@@ -1287,6 +1316,213 @@ def test_completeness_gate_blocked_needs_regeneration_among_converged_exits_3(tm
 
 
 # ---------------------------------------------------------------------------
+# 17b. #409 Step 2: a 'stale' segment that ALSO carries the durable
+#     .ever_converged.<seg> sentinel (mark_ever_converged() above) is
+#     carved out ONLY when it went stale for a reason that can never, by
+#     itself, change the segment's own translated prose -- every
+#     mismatched_fields entry in SAFE_STALE_CARVEOUT_FIELDS (machinery:
+#     plugin_bundle_hash/schema_hash/derivation_bundle_hash) and
+#     stale_reason exactly ['cache_key_mismatch']. select_segments.py's own
+#     #409 Step 1 gate already refuses to silently re-translate exactly
+#     this segment; the whole-project completeness gate must not keep
+#     blocking W8 Deliver for work that gate already protects. This
+#     carve-out must be VISIBLE, not silent: completeness_counts['stale']
+#     stays the raw, unchanged count, and a new stale_previously_converged
+#     field reports how many of those are carved out. A CONTENT-affecting
+#     field (style_contract_hash, prompt_hash, ...) or an unrecognized
+#     field name must keep blocking -- fail-safe.
+# ---------------------------------------------------------------------------
+
+
+def test_completeness_gate_stale_with_ever_converged_sentinel_is_deliverable(tmp_path):
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02"))
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    # plugin_bundle_hash: machinery-only (SAFE_STALE_CARVEOUT_FIELDS) --
+    # classifies 'stale' with stale_reason exactly ['cache_key_mismatch'].
+    corrupt_cache_key_field(root, "seg02", "plugin_bundle_hash")
+    mark_ever_converged(root, "seg02")  # -> but carved out: already converged once
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0, (
+        f"a 'stale' segment carrying the #409 ever-converged sentinel, "
+        f"stale ONLY on a machinery field, must not block delivery -- its "
+        f"translation already converged, only tooling moved:\n"
+        f"rc={result.returncode}\nstdout={result.stdout!r}\nstderr:\n{result.stderr}"
+    )
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert summary["project_complete"] is True
+    assert summary["completeness_counts"]["stale"] == 1, (
+        "the raw stale count must stay visible, never silently zeroed by "
+        "the carve-out"
+    )
+    assert summary["stale_previously_converged"] == 1
+    assert "stale_previously_converged=1" in result.stderr
+
+
+def test_completeness_gate_stale_without_sentinel_still_exits_3(tmp_path):
+    """Fail-safe half of the carve-out: a 'stale' segment with NO sentinel
+    must still block delivery exactly as before (#208's pre-existing
+    behavior), even though the mismatched field itself (plugin_bundle_hash)
+    IS in the safe allowlist -- isolating the sentinel-presence axis from
+    the field-safety axis. Without this test, simply deleting the 'stale'
+    category from COMPLETENESS_CATEGORIES would satisfy the sentinel-
+    carve-out test above just as well -- this is what actually pins the
+    carve-out to the sentinel, not to the bare 'stale' classification."""
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02"))
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    corrupt_cache_key_field(root, "seg02", "plugin_bundle_hash")  # -> classifies 'stale'
+    # Deliberately NO mark_ever_converged() call for seg02.
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 3, (
+        f"a 'stale' segment with NO ever-converged sentinel must still "
+        f"block delivery exactly as before the carve-out, even on a safe "
+        f"field:\nrc={result.returncode}\nstdout={result.stdout!r}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert summary["project_complete"] is False
+    assert summary["completeness_counts"]["stale"] == 1
+    assert summary["stale_previously_converged"] == 0
+
+
+def test_completeness_gate_partial_stale_carveout_still_incomplete(tmp_path):
+    """Two 'stale' segments, both stale on the SAME safe field
+    (plugin_bundle_hash), only one carrying the sentinel -- the carve-out
+    is per-segment, not per-category: a single un-carved-out stale segment
+    must keep the whole project incomplete even while the other is
+    delivered fine. Both segments share the same (safe) mismatched field
+    deliberately, so the only variable under test is sentinel presence."""
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02", "seg03"))
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    add_converged_segment(root, "seg03", clean_segpack(seg="seg03"), clean_draft(seg="seg03"))
+    corrupt_cache_key_field(root, "seg02", "plugin_bundle_hash")
+    corrupt_cache_key_field(root, "seg03", "plugin_bundle_hash")
+    mark_ever_converged(root, "seg02")  # carved out
+    # seg03 deliberately left without the sentinel.
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 3, (
+        f"one un-carved-out stale segment must keep the project incomplete "
+        f"even though a sibling stale segment IS carved out:\n"
+        f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert summary["project_complete"] is False
+    assert summary["completeness_counts"]["stale"] == 2
+    assert summary["stale_previously_converged"] == 1
+
+
+def test_completeness_gate_stale_style_contract_change_still_exits_3(tmp_path):
+    """The exact scenario the lead flagged as a live gap: an operator edits
+    style_bible.md (a genuine on-disk edit, the SAME mechanism
+    tests/ledger_e2e_acceptance.test.py's own style-bible-edit fixture uses
+    -- never corrupt_cache_key_field's synthetic ledger-JSON poke), which
+    moves the GLOBAL style_contract_hash field for every converged segment.
+    style_contract_hash is CONTENT-affecting (the operator's own style
+    instructions, read on every translate/review call) -- carving this out
+    would report the book deliverable while silently shipping prose that
+    predates the operator's own edit. The sentinel must NOT carve it out."""
+    root = make_durable_root(tmp_path, seg_ids=("seg01",))
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    mark_ever_converged(root, "seg01")
+    # Genuine style_bible.md edit -- moves style_contract_hash for every
+    # converged segment, exactly like a real operator edit would.
+    (root / "style_bible.md").write_bytes(
+        b"# Style Bible\n\n<!-- STYLE_CONTRACT_BEGIN -->\n"
+        b"Informal register, no Oxford comma.\n<!-- STYLE_CONTRACT_END -->\n"
+    )
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 3, (
+        f"a stale segment caused by a genuine style_bible.md edit "
+        f"(style_contract_hash, content-affecting) must NOT be carved out "
+        f"by the sentinel, even though it carries it:\n"
+        f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0
+    assert summary["project_complete"] is False
+    assert summary["completeness_counts"]["stale"] == 1
+    assert summary["stale_previously_converged"] == 0
+    assert "STALE-REVIEW" not in result.stderr, (
+        "a style_bible.md edit is a cache_key drift, not a draft hand-edit "
+        "-- it must never trip hard check 2"
+    )
+
+
+def test_count_stale_previously_converged_field_gating_matrix(tmp_path):
+    """Direct unit test of count_stale_previously_converged()'s field-
+    allowlist gate (mirrors test_compute_project_complete_matrix's own
+    pattern) -- covers the 'unknown/future field name' fail-safe case,
+    which cannot be produced via the real select_segments.py path today:
+    its own mismatched_fields is computed as `f for f in CACHE_KEY_FIELDS
+    if ...`, strictly bounded to the 15 known fields in cache_key.py's
+    CACHE_KEY_FIELD_ORDER, so a synthetic classification dict is the only
+    way to exercise a name outside that set."""
+    fa = load_final_audit_module()
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    fa.SEGMENTS_DIR = segments_dir  # isolate from the real plugin tree
+    for seg in ("seg_safe_multi", "seg_one_unsafe", "seg_unknown_field", "seg_draft_edit"):
+        mark_ever_converged(tmp_path, seg)
+    # seg_no_sentinel deliberately gets NO sentinel file.
+
+    classification = {
+        # All 3 SAFE_STALE_CARVEOUT_FIELDS at once, sentinel present -> counted.
+        "seg_safe_multi": {
+            "category": "stale",
+            "stale_reason": ["cache_key_mismatch"],
+            "mismatched_fields": ["plugin_bundle_hash", "schema_hash", "derivation_bundle_hash"],
+        },
+        # One safe + one content-affecting field -> the whole segment blocks.
+        "seg_one_unsafe": {
+            "category": "stale",
+            "stale_reason": ["cache_key_mismatch"],
+            "mismatched_fields": ["plugin_bundle_hash", "style_contract_hash"],
+        },
+        # A name outside the 15 real cache_key fields entirely -> blocks
+        # (fail-safe: absent from the allowlist by construction).
+        "seg_unknown_field": {
+            "category": "stale",
+            "stale_reason": ["cache_key_mismatch"],
+            "mismatched_fields": ["some_future_cache_key_field"],
+        },
+        # Draft hand-edited since review -- mismatched_fields is even empty
+        # (no cache-key drift at all), but stale_reason rules this out.
+        "seg_draft_edit": {
+            "category": "stale",
+            "stale_reason": ["draft_sha1_mismatch"],
+            "mismatched_fields": [],
+        },
+        # Otherwise-safe, but no sentinel written for this seg.
+        "seg_no_sentinel": {
+            "category": "stale",
+            "stale_reason": ["cache_key_mismatch"],
+            "mismatched_fields": ["plugin_bundle_hash"],
+        },
+        # Not even stale -- must be ignored outright.
+        "seg_reusable": {"category": "reusable"},
+    }
+
+    assert fa.count_stale_previously_converged(classification) == 1
+
+
+# ---------------------------------------------------------------------------
 # 18. #208 fixture E: hard_failures keeps priority over incompleteness -- a
 #     converged segment with a genuine coverage defect, alongside a second,
 #     genuinely not_started segment (project incomplete either way), must
@@ -1328,6 +1564,37 @@ def test_completeness_exit_code_matrix():
     assert fa.completeness_exit_code(hard_failures=1, project_complete=True) == 1
     assert fa.completeness_exit_code(hard_failures=1, project_complete=False) == 1
     assert fa.completeness_exit_code(hard_failures=5, project_complete=False) == 1
+
+
+# ---------------------------------------------------------------------------
+# 20. #409 Step 2: compute_project_complete(completeness_counts,
+#     stale_previously_converged) -- the pure helper the carve-out
+#     introduces, over its own priority matrix (mirrors
+#     test_completeness_exit_code_matrix above).
+# ---------------------------------------------------------------------------
+
+
+def test_compute_project_complete_matrix():
+    fa = load_final_audit_module()
+    all_zero = {
+        "not_started": 0, "recoverable": 0, "stale": 0,
+        "blocked_needs_regeneration": 0, "human_escalation": 0,
+    }
+    assert fa.compute_project_complete(all_zero, stale_previously_converged=0) is True
+
+    stale_only_fully_carved_out = {**all_zero, "stale": 3}
+    assert fa.compute_project_complete(stale_only_fully_carved_out, stale_previously_converged=3) is True
+
+    stale_only_partially_carved_out = {**all_zero, "stale": 3}
+    assert fa.compute_project_complete(stale_only_partially_carved_out, stale_previously_converged=2) is False
+
+    stale_only_no_carveout = {**all_zero, "stale": 1}
+    assert fa.compute_project_complete(stale_only_no_carveout, stale_previously_converged=0) is False
+
+    # A non-'stale' category being nonzero must still block completeness
+    # regardless of the (irrelevant) stale carve-out.
+    not_started_present = {**all_zero, "not_started": 1}
+    assert fa.compute_project_complete(not_started_present, stale_previously_converged=0) is False
 
 
 if __name__ == "__main__":

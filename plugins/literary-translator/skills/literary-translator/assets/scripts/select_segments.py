@@ -244,6 +244,20 @@ def draft_path(seg: str, durable_root: Path = DURABLE_ROOT) -> Path:
     return durable_root / "segments" / f"{seg}.draft.json"
 
 
+def ever_converged_path(seg: str, segments_dir: Path) -> Path:
+    """#409 Step 1: the durable 'this segment has converged at least once'
+    sentinel. WRITTEN by ledger_update.py:mark_ever_converged (the single
+    place convergence is recorded); this script only ever READS it.
+
+    The filename convention is stated in two scripts because both are
+    standalone entrypoints with no shared import, so
+    tests/select_segments.test.py's
+    test_sentinel_filename_matches_the_writer_in_ledger_update pins them
+    against each other by name -- a drift test, not a second source of
+    truth."""
+    return segments_dir / f".ever_converged.{seg}"
+
+
 def segpack_path(seg: str, durable_root: Path = DURABLE_ROOT) -> Path:
     return durable_root / "segments" / f"segpack_{seg}.json"
 
@@ -880,6 +894,45 @@ def run(args, dirs: dict) -> dict:
             ids_by_category=ids_by_category,
         )
 
+    # ---- #409 Step 1: refuse to silently re-translate converged work -------
+    # The predicate is the DURABLE sentinel ledger_update.py raises when it
+    # records convergence, never the ledger status. The status is overwritten
+    # with `in_progress` BEFORE a re-dispatch, so a status-based check would
+    # not fire on the very path this guards.
+    #
+    # Placed after the empty check so an empty selection still reports its own
+    # dedicated error, and before the return so no caller can receive an
+    # authorizing result it did not earn.
+    authorizes_dispatch = not args.classify_only
+    previously_converged = []
+    if authorizes_dispatch:
+        # resolve_dirs() exposes durable_root, not a segments_dir -- derive it
+        # the same way draft_path_for/segpack_path do, so a --durable-root
+        # redirect moves the sentinel lookup with everything else.
+        segments_dir = dirs["durable_root"] / "segments"
+        for seg in segs:
+            if ever_converged_path(seg, segments_dir).exists():
+                previously_converged.append(seg)
+
+    if previously_converged and not args.allow_retranslate_converged:
+        detail = []
+        for seg in previously_converged:
+            mismatched = classification.get(seg, {}).get("mismatched_fields") or []
+            detail.append(f"{seg} (diverged: {', '.join(mismatched) or 'none recorded'})")
+        fatal(
+            f"{len(previously_converged)} previously CONVERGED segment(s) would "
+            f"be translated again: {'; '.join(detail)}. Refusing. A converged "
+            f"segment becomes dispatch-eligible as soon as any cache-key field "
+            f"moves (a plugin upgrade moves plugin_bundle_hash for every "
+            f"segment at once), so this would discard finished work without "
+            f"anyone asking for it. Pass --allow-retranslate-converged to "
+            f"authorize exactly this dispatch, or --classify-only if you only "
+            f"need the classification and will not translate.",
+            classification=classification,
+            counts=counts,
+            ids_by_category=ids_by_category,
+        )
+
     return {
         "success": True,
         "durable_root": str(dirs["durable_root"]),
@@ -890,6 +943,10 @@ def run(args, dirs: dict) -> dict:
         "ids_by_category": ids_by_category,
         "overrides": overrides,
         "excluded_only_segs": excluded_only_segs,
+        # #409: a consumer must be able to tell an authorizing result from a
+        # merely descriptive one without re-deriving which flags were passed.
+        "authorizes_dispatch": authorizes_dispatch,
+        "previously_converged": previously_converged,
     }
 
 
@@ -917,6 +974,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--allow-empty",
         action="store_true",
         help="Do not fatally error if the emitted SEGS is empty.",
+    )
+    parser.add_argument(
+        "--allow-retranslate-converged",
+        action="store_true",
+        help=(
+            "#409: permit dispatching segments that have ALREADY converged at "
+            "least once. Without this flag such a selection is refused, "
+            "because a moved plugin_bundle_hash marks every converged segment "
+            "'stale' and stale is dispatch-eligible by default -- which would "
+            "silently re-translate finished, paid-for work. Naming this flag "
+            "is the authorization; it does not delete the durable sentinel."
+        ),
+    )
+    parser.add_argument(
+        "--classify-only",
+        action="store_true",
+        help=(
+            "#409: produce the classification report WITHOUT authorizing a "
+            "dispatch. For consumers that need the categories but never "
+            "translate anything (final_audit.py's completeness gate). The "
+            "previously-converged refusal does not apply, because nothing "
+            "downstream of this call can dispatch; the emitted 'segs' is "
+            "reported as usual and 'authorizes_dispatch' is false."
+        ),
     )
     parser.add_argument(
         "--durable-root",

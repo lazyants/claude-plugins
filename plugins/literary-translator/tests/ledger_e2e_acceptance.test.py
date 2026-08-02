@@ -513,8 +513,31 @@ def test_ledger_e2e_acceptance_full_batch_cycle(tmp_path):
 
     # =========================================================================
     # ITEM (4): batch 2's select_segments.py classification pass.
+    #
+    # #409 Step 1: this batch re-translates two segments that ALREADY converged
+    # in batch 1 -- the style-bible edit above moved style_contract_hash, which
+    # is exactly what makes a converged segment stale. That is now an
+    # authorized act rather than a default one, so the flag is passed here.
+    # Editing the style bible IS the operator saying "re-apply this to
+    # everything", so this call site is a true positive for the authorization,
+    # not a workaround for the gate.
+    #
+    # The default (no flag) refusal on this very fixture is asserted below, so
+    # the acceptance still proves the gate fires on a real end-to-end history
+    # rather than only in a unit fixture.
     # =========================================================================
-    rc, batch2_classification = run_select_segments(root)
+    rc_unauthorized, unauthorized = run_select_segments(root)
+    assert rc_unauthorized != 0, (
+        "re-translating batch 1's converged segments must not be the default "
+        "outcome of an ordinary style-bible edit"
+    )
+    assert "--allow-retranslate-converged" in unauthorized["error"]
+    assert sorted(unauthorized["ids_by_category"]["stale"]) == sorted([SEG_ALPHA, SEG_BETA]), (
+        "the refusal must still carry the full classification report -- a "
+        "caller that needs the categories has to be able to read them"
+    )
+
+    rc, batch2_classification = run_select_segments(root, ["--allow-retranslate-converged"])
     assert rc == 0, batch2_classification
     assert batch2_classification["success"] is True
 

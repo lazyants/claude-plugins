@@ -58,8 +58,31 @@ ALREADY converged; the completeness gate looks at the whole book, converged
 or not. Unlike the four WARN-only checks below, this gate DOES affect the
 exit code -- a project that is not yet complete exits `3` (below `1`
 priority) rather than `0`, so `select_segments.py`'s W5 delivery-refusal
-rule holds on this default path too. See "Reporting" below for the exact
-0/1/3 contract.
+rule holds on this default path too.
+
+**#409 Step 2 carve-out.** A segment classified `stale` that ALSO carries
+the durable `.ever_converged.<seg>` sentinel (written once by
+`ledger_update.py:mark_ever_converged`, the same sentinel #409 Step 1's
+re-translate gate reads) is NOT automatically carved out just because it
+is stale-plus-sentineled -- the carve-out is FIELD-AWARE. A converged
+segment classifies `stale` whenever ANY of cache_key.py's 15
+`CACHE_KEY_FIELD_ORDER` fields drifted; only 3 of them
+(`plugin_bundle_hash`, `schema_hash`, `derivation_bundle_hash` -- see
+`SAFE_STALE_CARVEOUT_FIELDS`'s own comment for the full field-by-field
+reasoning) are pure tooling/schema/derivation-CODE fingerprints that can
+never, by themselves, change what the segment's own translated prose
+should say. The carve-out applies only when EVERY one of that segment's
+`mismatched_fields` is in that 3-field allowlist AND its `stale_reason` is
+exactly `cache_key_mismatch` (never `draft_sha1_mismatch` -- a hand-edit
+since review, already independently caught as a HARD failure). Any other
+field -- e.g. `style_contract_hash` moving because the operator edited
+`style_bible.md`, or any unrecognized/future field name -- keeps blocking,
+fail-safe. `stale_previously_converged` counts exactly the carved-out
+segments; `completeness_counts['stale']` itself is left UNCHANGED (still
+the raw select_segments.py count, so an operator can always see the true
+total) and `project_complete` is computed net of the carve-out -- see
+`compute_project_complete()`. See "Reporting" below for the exact 0/1/3
+contract.
 
 Finally, a **frontback coverage report** (advisory, never exit-code-gating)
 reads `manifest.json`'s `frontback[]` inventory directly and reports one
@@ -73,10 +96,10 @@ by decision alone (no matching segment exists for those by construction).
 
 `select_segments.py` is specified elsewhere in this plugin (see SKILL.md's
 "W5 Mass-translate") but is not itself this script's concern to implement.
-This script invokes it as a subprocess with `--allow-empty` (full manifest,
-no `--only-segs` restriction -- "Omitting `--only-segs` entirely reproduces
-default behavior byte-for-byte") and expects EXACTLY ONE line of JSON on
-its stdout, one of:
+This script invokes it as a subprocess with `--allow-empty --classify-only`
+(full manifest, no `--only-segs` restriction -- "Omitting `--only-segs`
+entirely reproduces default behavior byte-for-byte") and expects EXACTLY
+ONE line of JSON on its stdout, one of:
 
     {"success": true,
      "segs": [...],                 # the emitted SEGS dispatch list
@@ -101,6 +124,19 @@ passed (a guard meant for a silently-no-op W5 DISPATCH batch, not for this
 whole-project completeness gate). Without the flag this gate would crash at
 exit 2 on exactly the "project_complete: true" case it exists to report.
 
+`--classify-only` is required for a second, independent reason (#409): it
+suppresses select_segments.py's own Step 1 re-translate refusal -- and,
+with it, the `authorizes_dispatch`/`previously_converged` payload fields,
+which are `false`/`[]` under `--classify-only` and so never populated for
+this script to read. This audit only ever CLASSIFIES, it never dispatches
+a translate, so it must never be refused for the ordinary state of a
+finished, previously-converged book. Because `previously_converged` is
+never populated here, this script's own `stale_previously_converged`
+carve-out (above) is derived independently, straight from `classification`
+itself -- each segment's own reported category plus a direct
+`.ever_converged.<seg>` sentinel-file check -- never from
+select_segments.py's `previously_converged` field.
+
 ## Canonical paths (load-bearing, no target-language suffix)
 
     draft_path(seg)   = {durable_root}/segments/{seg}.draft.json
@@ -123,11 +159,13 @@ Exit code is fail-closed on both hard defects and project incompleteness:
 `hard_failures > 0` (hard defects in converged drafts -- takes priority);
 `3` if `hard_failures == 0` but `project_complete` is false (converged
 drafts are clean, but the whole project has not fully converged --
-`not_started`/`recoverable`/`stale`/`blocked_needs_regeneration`/
-`human_escalation` segments remain). `3` is distinct from `1` so callers can
-tell "incomplete" from "defective converged drafts"; either way any
-nonzero exit still gates W8 Deliver. `warnings` and the frontback report
-never affect the exit code -- they remain informational only.
+`not_started`/`recoverable`/`blocked_needs_regeneration`/`human_escalation`
+segments remain, OR a `stale` segment remains that is NOT carved out by the
+#409 ever-converged sentinel -- see `stale_previously_converged` above and
+`compute_project_complete()`). `3` is distinct from `1` so callers can tell
+"incomplete" from "defective converged drafts"; either way any nonzero
+exit still gates W8 Deliver. `warnings` and the frontback report never
+affect the exit code -- they remain informational only.
 
 Usage: python3 final_audit.py
 """
@@ -684,7 +722,13 @@ def run_completeness_gate():
 
     try:
         proc = subprocess.run(
-            [sys.executable, str(SELECT_SEGMENTS_SCRIPT), "--allow-empty"],
+            # #409: --classify-only. This audit needs the CLASSIFICATION and
+            # never translates anything, so it must not be refused when the
+            # project contains previously-converged segments -- which is the
+            # normal state of a finished book, and exactly the state this
+            # audit runs in. Without the flag the new gate would take away
+            # final_audit.py's documented "project incomplete" / exit-3 path.
+            [sys.executable, str(SELECT_SEGMENTS_SCRIPT), "--allow-empty", "--classify-only"],
             capture_output=True,
             text=True,
             timeout=300,
@@ -737,6 +781,195 @@ def run_completeness_gate():
 
 
 # ---------------------------------------------------------------------------
+# #409 Step 2: stale/ever-converged sentinel carve-out -- a 'stale'
+# classification alone must not keep blocking the whole-project completeness
+# gate when the segment's translation already converged and is protected
+# from silent re-translation by #409 Step 1 (select_segments.py's own
+# re-translate refusal). See this module's own docstring ("#409 Step 2
+# carve-out") for the full rationale.
+# ---------------------------------------------------------------------------
+
+def ever_converged_path(seg):
+    """The durable 'this segment has converged at least once' sentinel.
+    WRITTEN by ledger_update.py:mark_ever_converged (the single place
+    convergence is recorded) and also READ by select_segments.py's own
+    #409 Step 1 re-translate gate -- see that function's own docstring for
+    why a separate durable file exists rather than reading the (mutable)
+    ledger status. Filename convention restated here, not imported, per
+    this plugin's "no shared lib between self-contained scripts"
+    convention -- select_segments.py's own ever_converged_path makes the
+    same choice for the same reason."""
+    return SEGMENTS_DIR / f".ever_converged.{seg}"
+
+
+# The 3 of cache_key.py's 15 CACHE_KEY_FIELD_ORDER fields whose drift can
+# NEVER, by itself, change what a converged segment's own translated prose
+# should say -- read directly from cache_key.py (never taken on faith):
+#
+#   - plugin_bundle_hash -- sha1 of PLUGIN_BUNDLE_MEMBERS, the pipeline's
+#     validate/orchestrate/ledger SCRIPTS (validate_draft.py,
+#     canon_validate.py, cache_key.py, draft_sha1.py,
+#     review_artifact_check.py, ledger_update.py, review_ready.py,
+#     resume_setup.py, glossary_batch_plan.py, codex_job.py,
+#     canon_senses.py, fetch_citation.py, + 2 workflow templates).
+#     Deliberately excludes translate_TASK.md/review_TASK.md (prompt_hash's
+#     own membership, below) and style_bible.md (style_contract_hash) --
+#     this bundle is tooling/validation code, never a translation
+#     instruction. This is the field #409's own motivating scenario moves:
+#     a plugin upgrade flips it for every converged segment at once.
+#   - schema_hash -- sha1 of draft/review/segpack JSON *schema* files:
+#     structural-validity rules, not translated content or instructions.
+#   - derivation_bundle_hash -- sha1 of bootstrap_names.py/segpack.py's own
+#     CODE bytes (the segpack-BUILDING tool), never the segpack's data
+#     itself (references/ledger-and-resumability.md's own "derivation_bundle_hash"
+#     entry: "this one uses simple sorted-concatenation ... since it's just
+#     script bytes, not swappable file identities"). It is one of
+#     select_segments.py's DERIVATION_STATE_FIELDS (with particle_config_hash/
+#     source_extraction_hash/source_input_hash), so a mismatch here alone
+#     does NOT immediately classify 'stale': classify_converged_segment()
+#     (select_segments.py:~730) first checks this segment's OWN segpack's
+#     `generation_hashes.derivation_bundle_hash` against the CURRENT value.
+#     Only reaching plain 'stale' (rather than 'blocked_needs_regeneration')
+#     means the segpack has ALREADY been (re)stamped to match today's
+#     bootstrap_names.py/segpack.py bytes -- ledger-and-resumability.md's own
+#     "Derivation-state gate" section calls this state "safe to re-dispatch"
+#     and documents `segpack_{seg}.json`'s generation_hashes as "copied
+#     directly from whatever manifest.json/canon.json currently contain at
+#     segpack-generation time (never independently recomputed --
+#     transitively correct proof of the whole upstream chain)". If that
+#     (re)stamping event had actually changed this segment's OWN segpack
+#     content -- blocks, verses, footnotes, or referenced canon terms --
+#     that would independently move input_sha1/verse_map_hash/
+#     note_map_hash/used_terms_hash: cache_key.py's PER_SEGMENT_FIELDS is
+#     the COMPLETE set of segpack-derived cache-key fields (no 5th
+#     per-segment field exists to carry undetected drift), all 4 of which
+#     are in the CONTENT-affecting set below and would block the carve-out
+#     on their own (mismatched_fields must be a subset of this allowlist,
+#     so any one of them appearing blocks the WHOLE segment). So
+#     derivation_bundle_hash appearing ALONE means the segpack was
+#     re-stamped (possibly re-run) but this segment's own derived content
+#     came out byte-identical -- the draft, translated against the earlier
+#     (now content-identical) segpack, is still valid. The one segpack
+#     dimension input_sha1 does NOT hash is a block's own `id` (only its
+#     order_index-sorted TEXT) -- a hypothetical re-ID without a text
+#     change would slip this specific field, but a draft/segpack key
+#     mismatch there is independently caught, unconditionally, by
+#     hard_check_coverage (validate_draft.py's own structural key-match),
+#     which forces hard_failures>0 -> exit 1 regardless of this carve-out
+#     -- so even that gap fails safe at the system level, not just this
+#     function's.
+#
+#     NOT extended to the other 3 DERIVATION_STATE_FIELDS
+#     (particle_config_hash/source_extraction_hash/source_input_hash)
+#     despite the same per-segment-completeness argument applying to them
+#     structurally too: those three are DATA/CONFIG whose entire purpose is
+#     to shape what gets extracted (a particle-list edit, an adapter_config
+#     segmentation-threshold change, or the raw source book text itself) --
+#     an operator touches them BECAUSE they want different extraction
+#     output, unlike a code-bytes fingerprint that moves on innocuous
+#     refactors having zero effect on any segment. Keeping them blocking is
+#     the fail-safe call the lead's brief already settled for those three.
+#
+# Every other field bears directly on what the translated text should be,
+# and must keep blocking (fail-safe: an unrecognized/future field name is
+# simply absent from this allowlist, so it blocks by construction):
+#
+#   - input_sha1 / source_input_hash -- the segpack's own extracted source
+#     text, and the raw source file's own bytes, respectively: literally
+#     the text being translated.
+#   - style_contract_hash / prompt_hash -- style_bible.md's STYLE_CONTRACT
+#     section and translate_TASK.md/review_TASK.md: the operator's own
+#     translation instructions, read in full on every translate/review
+#     call (style_bible.template.md's own comment: "bump when
+#     style_contract changes in a way that must invalidate every
+#     already-converged segment").
+#   - used_terms_hash -- the canon.json glossary entries this segment
+#     actually references: a name's canonical form changing must be able
+#     to flag this segment as needing a matching update.
+#   - profile_semantics_hash -- source/target language, verse_policy mode,
+#     apparatus_policy, untranslated_sentinel: the translation POLICY
+#     itself.
+#   - agent_config_hash -- effort/max_fix_rounds/model: an operator
+#     deliberately raising effort/switching model to fix a quality problem
+#     must not have already-converged segments silently exempted from
+#     that quality bar.
+#   - particle_config_hash / source_extraction_hash -- both
+#     DERIVATION_STATE_FIELDS (cache_key.py): a mismatch here, even once
+#     the segpack has "caught up" (so it's classified plain 'stale' rather
+#     than 'blocked_needs_regeneration'), means the upstream
+#     extraction/name-recognition config that produced the segpack the
+#     draft was translated against has since moved -- unlike
+#     derivation_bundle_hash (code bytes only), these directly gate
+#     WHICH/HOW source content and candidate names were extracted.
+#   - pipeline_version -- NOT in cache_key.py's own docstring examples the
+#     lead cited, but IS one of the 15 CACHE_KEY_FIELD_ORDER fields (read
+#     verbatim from profile.yml's project.pipeline_version, never hashed).
+#     style_bible.template.md's own comment ties bumping it directly to
+#     "invalidate every already-converged segment" -- it is the operator's
+#     own deliberate lever for exactly that, so it must block.
+#
+# See also: a 'stale' classification whose stale_reason includes
+# 'draft_sha1_mismatch' (the on-disk draft no longer matches its own
+# ledger fragment's reviewed_draft_sha1 -- a hand-edit since review, NOT a
+# cache-key field drift) must NEVER be carved out regardless of
+# mismatched_fields -- see count_stale_previously_converged() below.
+SAFE_STALE_CARVEOUT_FIELDS = frozenset(
+    {"plugin_bundle_hash", "schema_hash", "derivation_bundle_hash"}
+)
+
+
+def count_stale_previously_converged(classification):
+    """How many of the whole-project completeness gate's own 'stale'
+    segments carry the #409 ever-converged sentinel AND went stale for a
+    reason that can never, by itself, change the segment's own translated
+    prose -- i.e. are already finalized translations that only look stale
+    because a MACHINERY-only cache-key field moved out from under them
+    (most commonly plugin_bundle_hash, on every converged segment at once,
+    after a plugin upgrade), not because a content-affecting input (the
+    source text, the style bible, the prompt templates, canon terms,
+    translation policy, engine config, or the source-extraction/particle
+    config) actually changed and was never re-applied.
+
+    Fail-safe direction, each independently sufficient to keep a segment
+    OUT of this count (still blocks project_complete exactly as before):
+      - no sentinel;
+      - `stale_reason` is anything other than exactly
+        `['cache_key_mismatch']` -- in particular 'draft_sha1_mismatch'
+        (a hand-edit since review, wholly unrelated to cache-key drift,
+        already independently caught as a HARD failure by
+        hard_check_stale_review -- but never silently reported as a
+        deliverable carve-out here);
+      - `mismatched_fields` is empty, not a list, or contains ANY field
+        not in SAFE_STALE_CARVEOUT_FIELDS (see that constant's own
+        comment for the full field-by-field reasoning) -- an unrecognized
+        or future cache_key field is absent from the allowlist by
+        construction and so blocks, never silently becomes deliverable.
+
+    `classification` is select_segments.py's own per-segment report
+    (every manifest segment; the value is an object per this module's own
+    "select_segments.py JSON contract" docstring section) -- the SAME
+    dict `completeness_counts['stale']` is tallied from on the
+    select_segments.py side, so this count can never exceed
+    completeness_counts['stale']."""
+    n = 0
+    for seg, entry in classification.items():
+        category = entry.get("category") if isinstance(entry, dict) else entry
+        if category != "stale":
+            continue
+        stale_reason = entry.get("stale_reason") if isinstance(entry, dict) else None
+        if stale_reason != ["cache_key_mismatch"]:
+            continue  # e.g. draft_sha1_mismatch -- never carved out
+        mismatched_fields = entry.get("mismatched_fields") if isinstance(entry, dict) else None
+        if not isinstance(mismatched_fields, list) or not mismatched_fields:
+            continue
+        if not all(field in SAFE_STALE_CARVEOUT_FIELDS for field in mismatched_fields):
+            continue
+        if ever_converged_path(seg).exists():
+            n += 1
+    return n
+
+
+# ---------------------------------------------------------------------------
 # Frontback coverage report -- advisory, never exit-code-gating.
 # ---------------------------------------------------------------------------
 
@@ -770,6 +1003,28 @@ def build_frontback_coverage(classification_by_seg):
             status = None
         coverage.append({"id": fb_id, "decision": decision, "status": status})
     return coverage
+
+
+# ---------------------------------------------------------------------------
+# Project completeness -- #409 Step 2 carve-out applied.
+# ---------------------------------------------------------------------------
+
+def compute_project_complete(completeness_counts, stale_previously_converged):
+    """Pure, unit-testable without a durable root -- mirrors
+    completeness_exit_code()'s own pattern. True iff every non-'stale'
+    completeness category is 0 AND every 'stale' segment is accounted for
+    by the #409 ever-converged sentinel (completeness_counts['stale'] -
+    stale_previously_converged == 0). completeness_counts['stale'] itself
+    is never mutated by this function -- see
+    count_stale_previously_converged()'s own docstring and this module's
+    docstring ("#409 Step 2 carve-out") for why a 'stale' segment without
+    the sentinel must still block completeness exactly as before (the
+    fail-safe direction)."""
+    non_stale_clear = all(
+        v == 0 for cat, v in completeness_counts.items() if cat != "stale"
+    )
+    stale_blocking = completeness_counts.get("stale", 0) - stale_previously_converged
+    return non_stale_clear and stale_blocking == 0
 
 
 # ---------------------------------------------------------------------------
@@ -836,9 +1091,19 @@ def main():
     warnings_count = len(warn_details)
 
     completeness_counts, classification_by_seg = run_completeness_gate()
+    # #409 Step 2: a 'stale' segment that also carries the durable
+    # ever-converged sentinel is carved out of the completeness gate -- see
+    # count_stale_previously_converged()'s and compute_project_complete()'s
+    # own docstrings, and this module's docstring ("#409 Step 2 carve-out"),
+    # for the full rationale. completeness_counts itself is left unchanged
+    # (still the raw select_segments.py count); only project_complete is
+    # computed net of the carve-out.
+    stale_previously_converged = count_stale_previously_converged(classification_by_seg)
     # Rollup invariant, enforced procedurally: project_complete is true if
-    # and only if every one of completeness_counts' five values is 0.
-    project_complete = all(v == 0 for v in completeness_counts.values())
+    # and only if every one of completeness_counts' non-'stale' four values
+    # is 0 AND completeness_counts['stale'] - stale_previously_converged == 0
+    # (i.e. every 'stale' segment is carved out by the sentinel).
+    project_complete = compute_project_complete(completeness_counts, stale_previously_converged)
 
     frontback_coverage = build_frontback_coverage(classification_by_seg)
 
@@ -849,6 +1114,7 @@ def main():
         "warnings": warnings_count,
         "project_complete": project_complete,
         "completeness_counts": completeness_counts,
+        "stale_previously_converged": stale_previously_converged,
         "frontback_coverage": frontback_coverage,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -870,7 +1136,8 @@ def main():
     print(
         f"\nWHOLE-PROJECT COMPLETENESS: "
         f"{'COMPLETE' if project_complete else 'INCOMPLETE'} -- "
-        + ", ".join(f"{k}={v}" for k, v in completeness_counts.items()),
+        + ", ".join(f"{k}={v}" for k, v in completeness_counts.items())
+        + f", stale_previously_converged={stale_previously_converged}",
         file=sys.stderr,
     )
     print(f"\nFRONTBACK COVERAGE ({len(frontback_coverage)} entries):", file=sys.stderr)
