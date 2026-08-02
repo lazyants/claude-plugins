@@ -2019,6 +2019,76 @@ def test_a_poisoned_review_with_a_lone_surrogate_does_not_discard_other_segments
     assert "surrogates not allowed" in by_seg["seg02"]["error_detail"], by_seg["seg02"]
 
 
+def test_append_journal_survives_a_lone_surrogate_in_the_payload(tmp_path, capsys):
+    """Verification-round finding: append_journal()'s own docstring claims
+    "a journal write failure is logged to stderr but never aborts the
+    driver" -- false for one real, content-triggerable failure. A poisoned
+    review's findings can carry a lone Unicode surrogate (see the sibling
+    test above, test_a_poisoned_review_with_a_lone_surrogate_does_not_
+    discard_other_segments, for the full mechanism this reuses), and once
+    that string reaches an append_journal() payload, json.dumps(...,
+    ensure_ascii=False) round-trips it unexamined into `line`, but
+    fh.write(line) against a UTF-8-encoded file handle raises
+    UnicodeEncodeError -- a ValueError subclass, never an OSError, so the
+    bare `except OSError` this function used to have did not catch it.
+    Direct unit test of the primitive itself: calling append_journal()
+    with a poisoned event must not raise, must warn on stderr, and must
+    leave no partial/corrupted entry on disk."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+
+    driver_mod.append_journal(root, "test-session", {"type": "poisoned_event", "detail": "\ud800poison"})
+
+    captured = capsys.readouterr()
+    assert "could not write journal entry" in captured.err, captured.err
+    journal_file = driver_mod.journal_path(root, "test-session")
+    assert not journal_file.is_file() or not journal_file.read_text(encoding="utf-8"), (
+        f"a failed write must leave no partial entry, never a corrupted line -- {journal_file}"
+    )
+
+
+def test_run_one_codex_job_reports_the_real_dispatch_failure_not_the_journals(tmp_path, monkeypatch):
+    """The end-to-end consequence of the bug above, through the REAL call
+    site: run_one_codex_job()'s own two append_journal() calls
+    ("codex_dispatch_started"/"codex_dispatch_finished") are unguarded,
+    unlike acquire_driver_lock()'s own call to the same function (wrapped
+    in `except Exception: pass`) -- the file was inconsistent with
+    itself. Before the fix, a poisoned error_detail (any string reaching
+    an outcome dict -- here, a dispatch failure whose own message happens
+    to carry a lone surrogate) raised UnicodeEncodeError OUT of run_one_
+    codex_job(), through process_segment()'s own outer `except
+    Exception`, reporting the segment as "unexpected-error:
+    UnicodeEncodeError" -- the JOURNAL's problem -- even though the real
+    dispatch had already failed for its OWN, legitimate, unrelated
+    reason before the journal write ever ran. The outer catch always
+    absorbed it (nothing was lost, no batch-wide abort), but the REPORT
+    was wrong: it named the journal's failure and hid the segment's real
+    one. After the fix, the segment's real reason ("driver-dispatch-
+    error", the injected fault below) is reported correctly instead."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    ctx = driver_mod.DispatchContext(
+        dirs=dirs, run_id="20260101T000000Z", translate_cfg=dict(_FIXTURE_TRANSLATE_CFG),
+        companion_path=FIXTURE_COMPANION_PATH, durable_root_str=None, plugin_root_str=None,
+        node_bin="node", session_id="test-session",
+    )
+
+    def _poisoned_dispatch_codex_job(*args, **kwargs):
+        raise driver_mod.DriverError("simulated dispatch failure \ud800poison")
+
+    monkeypatch.setattr(driver_mod, "dispatch_codex_job", _poisoned_dispatch_codex_job)
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result["outcome"] == "failed", result
+    assert result["reason"] == "driver-dispatch-error", (
+        f"the segment's REAL failure reason must survive the journal write -- got {result!r}, "
+        f"which means append_journal()'s own UnicodeEncodeError masked it instead"
+    )
+    assert "poison" in result.get("error_detail", ""), result
+
+
 def test_a_clean_review_stale_against_an_edited_draft_re_reviews_instead_of_live_locking(tmp_path):
     """codex #392-class MAJOR: ledger_update.py's own independent check
     (enrich_converged_fields, ledger_update.py:499-502) refuses a
@@ -2404,6 +2474,25 @@ def test_derive_next_action_invalid_post_fix_draft_uses_the_plugin_root_scripts_
     )
 
 
+def _dna_write_ledger_fragment(root, seg="seg01", *, mtime, status="in_progress"):
+    """A minimal, realistic runs/ledger.d/{seg}.json fragment -- the same
+    shape process_segment()'s own `if action["action"] == "translate":`
+    branch causes ledger_update.py to write immediately before every
+    translate dispatch -- with its mtime pinned via os.utime() rather
+    than real wall-clock ordering, so a test can place it deterministic
+    ticks before or after a review.json regardless of filesystem mtime
+    resolution."""
+    ledger_dir = root / "runs" / "ledger.d"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    fragment_path = ledger_dir / f"{seg}.json"
+    fragment_path.write_text(
+        json.dumps({"timestamp": "irrelevant-to-this-fixture", "status": status}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.utime(fragment_path, (mtime, mtime))
+    return fragment_path
+
+
 def test_derive_next_action_invalid_post_fix_draft_terminates_instead_of_retranslating(tmp_path):
     """codex round-3 MAJOR: after a fix turn, if the edit broke coverage or
     a placeholder, validate_draft_script fails while draft_ready_script's
@@ -2411,22 +2500,35 @@ def test_derive_next_action_invalid_post_fix_draft_terminates_instead_of_retrans
     for byte, per fixPrompt's own instruction) -- so returning
     {"action": "translate"} unconditionally here would discard BOTH the
     fix AND the reviewed draft it was applied to. The discriminator: a
-    review for THIS run+seg exists, and its own recorded draft_sha1
-    differs from the CURRENT (invalid) draft's content hash -- proof
-    something edited the draft since that review, which is what a fix
-    does and nothing else does."""
+    review for THIS run+seg exists, its own recorded draft_sha1 differs
+    from the CURRENT (invalid) draft's content hash, AND -- verification-
+    round addition -- no translate was dispatched by THIS driver since
+    that review (see _translate_redispatched_since()'s own docstring for
+    why the sha1 mismatch alone is no longer sufficient proof). This test
+    pins a REALISTIC ledger fragment from the original translate, dated
+    BEFORE the review, so the mtime comparison is genuinely exercised
+    here rather than short-circuiting on a fragment that simply does not
+    exist."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
 
+    # Integer epoch seconds -- os.utime()/st_mtime round-trip these exactly
+    # regardless of filesystem timestamp resolution, so the later equality
+    # check below is never a precision gamble.
+    base = int(time.time()) - 3600
     pre_fix_draft = _dna_write_draft(root, driver_mod)
+    _dna_write_ledger_fragment(root, mtime=base)  # the original translate's own in_progress write
     pre_fix_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
     findings = [{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}]
     _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True,
                        draft_sha1=pre_fix_sha1, findings=findings)
+    os.utime(root / "segments" / "seg01.review.json", (base + 10, base + 10))
 
     # Simulate the fix turn: draft content changes (a real edit), but the
     # dispatch_token is preserved byte for byte, exactly as fixPrompt
-    # instructs the fixer to do.
+    # instructs the fixer to do. Crucially: NO new ledger fragment is
+    # written here -- a fix turn never goes through process_segment()'s
+    # translate branch at all.
     post_fix_draft = dict(pre_fix_draft, blocks={"p1": "hola FIXED"})
     (root / "segments" / "seg01.draft.json").write_text(
         json.dumps(post_fix_draft, ensure_ascii=False), encoding="utf-8"
@@ -2446,14 +2548,21 @@ def test_derive_next_action_invalid_post_fix_draft_terminates_instead_of_retrans
         "seg": "seg01", "converged": False, "outcome": "failed", "reason": "invalid-post-fix-draft",
     }, result
 
-    # Nothing dispatched, nothing re-translated -- the whole point.
+    # Nothing dispatched, nothing re-translated -- the whole point. The
+    # ledger fragment from the ORIGINAL translate is untouched (still
+    # exactly the fixture wrote, never overwritten with a fresh mtime) --
+    # process_segment()'s invalid_post_fix_draft branch writes no ledger
+    # entry of its own.
     argv_log_path = root / "test_fixture_argv_log.jsonl"
     assert not argv_log_path.is_file() or not argv_log_path.read_text(encoding="utf-8").strip(), (
         "no codex dispatch may have happened -- the fix and the reviewed "
         "draft it was applied to must not be discarded"
     )
-    assert not (root / "runs" / "ledger.d" / "seg01.json").is_file(), (
-        "no terminal ledger write -- the segment must stay recoverable, not converged or non_converged"
+    ledger_fragment_path = root / "runs" / "ledger.d" / "seg01.json"
+    assert ledger_fragment_path.is_file() and ledger_fragment_path.stat().st_mtime == base, (
+        "no terminal (or any other) ledger write -- the segment must stay "
+        "recoverable, and the original translate's own fragment must be "
+        "untouched, not merely absent"
     )
 
 
@@ -2493,6 +2602,64 @@ def test_derive_next_action_invalid_draft_with_an_unrelated_stale_review_still_r
     )
 
     assert driver_mod.derive_next_action("seg01", ctx) == {"action": "translate"}
+
+
+def test_derive_next_action_invalid_post_retranslate_draft_with_a_same_run_review_still_retranslates(tmp_path):
+    """Verification-round finding, reproduced directly: a genuine
+    RE-TRANSLATE under the SAME run_id -- not a fix -- must never be
+    misread as invalid_post_fix_draft. translate_dispatch_token(run_id,
+    seg) is a pure function of run_id+seg, so a legitimate retry
+    (select_segments.py's own --only-segs re-selection of a
+    human_escalation segment, resolved to the SAME run_id by
+    resume_setup.py matching the same input digest on a later
+    invocation) produces the byte-identical token a fix turn's own "copy
+    it exactly" instruction also produces -- the draft_sha1-only
+    discriminator (this test's sibling above,
+    test_derive_next_action_invalid_post_fix_draft_terminates_instead_of_
+    retranslating) cannot tell the two apart by content hash alone.
+
+    The distinguishing evidence: process_segment()'s own translate branch
+    writes a FRESH runs/ledger.d/{seg}.json immediately before every
+    translate dispatch. Here that fragment is dated AFTER the review --
+    exactly what a real retry produces, since the retry's own in_progress
+    write happens strictly after the round-1 review it is retrying past
+    -- rather than absent or dated before it (the fix scenario, covered
+    by the sibling test)."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+
+    base = int(time.time()) - 3600
+    pre_review_draft = _dna_write_draft(root, driver_mod)
+    _dna_write_ledger_fragment(root, mtime=base)  # the ORIGINAL translate's own in_progress write
+    pre_review_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    findings = [{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}]
+    _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True,
+                       draft_sha1=pre_review_sha1, findings=findings)
+    os.utime(root / "segments" / "seg01.review.json", (base + 10, base + 10))
+
+    # The retry: select_segments.py re-selected this segment, so THIS
+    # driver dispatched a fresh translate -- a genuine OVERWRITE under
+    # the SAME token (translate_dispatch_token depends only on run_id+
+    # seg), never an in-place edit -- and wrote a fresh ledger fragment
+    # for it, strictly AFTER the review.
+    retranslated_draft = dict(pre_review_draft, blocks={"p1": "hola RETRANSLATED FROM SCRATCH"})
+    (root / "segments" / "seg01.draft.json").write_text(
+        json.dumps(retranslated_draft, ensure_ascii=False), encoding="utf-8"
+    )
+    retranslated_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    assert retranslated_sha1 != pre_review_sha1, "setup check: the retranslate must genuinely change draft content"
+    _dna_write_ledger_fragment(root, mtime=base + 20)  # the RETRY's own in_progress write, after the review
+
+    # This fresh retranslate itself came back invalid (its own translate
+    # quality issue, unrelated to the discriminator).
+    write_invalid_validate_draft_segs(root, ["seg01"])
+
+    action = driver_mod.derive_next_action("seg01", ctx)
+    assert action == {"action": "translate"}, (
+        f"a genuine retranslate's own invalid output must be retried exactly "
+        f"like any other fresh invalid translate, never terminated as "
+        f"invalid_post_fix_draft -- got {action}"
+    )
 
 
 def test_render_fix_prompt_never_inlines_poisoned_review_findings_text(tmp_path):

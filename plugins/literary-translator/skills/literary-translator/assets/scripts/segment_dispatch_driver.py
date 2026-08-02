@@ -1199,7 +1199,31 @@ def append_journal(durable_root: Path, session_id: str, event: dict) -> None:
     itself lose the ability to actually run the batch. flush()+fsync()
     after every write, since this file is exactly the kind of durable-
     audit-trail artifact the driver's own crash-recovery reasoning (a
-    reader debugging AFTER a driver death) depends on."""
+    reader debugging AFTER a driver death) depends on.
+
+    Verification-round finding: the claim above ("logged to stderr but
+    never aborts the driver") used to be false for one real, content-
+    triggerable failure. `event` payloads can embed strings sourced from
+    a review/codex_job.py error message -- the same lone-Unicode-surrogate
+    class call_template_functions() was fixed for elsewhere (a review
+    carrying an unpaired \\uD800-shaped escape decodes fine via
+    json.loads() and is promoted normally by review_ready.py, which has
+    no pattern to reject it). json.dumps(..., ensure_ascii=False) does
+    NOT reject a lone surrogate either -- it round-trips into `line`
+    unexamined -- but `fh.write(line)` against a UTF-8-encoded file
+    handle does: a lone surrogate cannot be encoded to UTF-8, and that
+    raises UnicodeEncodeError, a ValueError subclass, never an OSError.
+    The bare `except OSError` below did not catch it, so it propagated
+    straight through every caller -- including the two unguarded call
+    sites inside run_one_codex_job() -- reaching process_segment()'s own
+    outer `except Exception`, which absorbs it but reports the SEGMENT as
+    "unexpected-error:UnicodeEncodeError" even when codex_job.py had
+    already durably promoted the real result before this write ever ran:
+    the journal's own problem, misreported as the segment's. Two
+    exception types now, not a bare `except Exception` -- this function's
+    claim is specifically about WRITE failures (I/O and the one confirmed
+    encoding failure), not an invitation to swallow every possible bug a
+    future caller's payload could trigger."""
     path = journal_path(durable_root, session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     entry = {"ts": _utc_now_iso(), **event}
@@ -1209,7 +1233,7 @@ def append_journal(durable_root: Path, session_id: str, event: dict) -> None:
             fh.write(line)
             fh.flush()
             os.fsync(fh.fileno())
-    except OSError as exc:
+    except (OSError, UnicodeEncodeError) as exc:
         print(f"segment_dispatch_driver.py: warning: could not write journal entry to {path}: {exc}", file=sys.stderr)
 
 
@@ -2161,6 +2185,52 @@ def _matched_review_round_label(review_obj, run_id: str, seg: str, max_fix_round
     return None
 
 
+def _translate_redispatched_since(dirs: dict, seg: str, review_path: Path) -> bool:
+    """True iff THIS driver dispatched a fresh translate for `seg` --
+    process_segment()'s own `if action["action"] == "translate":` branch,
+    which writes runs/ledger.d/{seg}.json's status="in_progress" fragment
+    via ledger_update.py IMMEDIATELY BEFORE every translate dispatch, both
+    the very first one and any later retry -- STRICTLY AFTER `review_path`
+    was last written.
+
+    Verification-round finding: derive_next_action()'s `if not draft_ok:`
+    branch used to assume the ONLY thing that ever edits a draft after a
+    review is a fix turn -- true only because a genuine RE-TRANSLATE under
+    the SAME run_id was assumed unreachable. It is reachable:
+    translate_dispatch_token(run_id, seg) is a PURE function of run_id and
+    seg, so a legitimately re-selected segment (select_segments.py's own
+    --only-segs retry of a human_escalation segment, resolved to the SAME
+    run_id by resume_setup.py matching the same input digest on a later
+    invocation) produces a byte-identical token to what a fix turn's "copy
+    dispatch_token exactly" instruction ALSO produces -- so the draft_sha1
+    comparison alone cannot tell "a fix edited this draft" apart from "a
+    fresh retranslate overwrote this draft", and misreading the second as
+    the first wrongly terminates a segment that merely needs retrying.
+
+    The ledger fragment is the durable evidence the sha1 alone is not: a
+    retranslate always writes a FRESH runs/ledger.d/{seg}.json (a new file
+    mtime, stamped by ledger_update.py's own now_iso8601() at write time,
+    ledger_update.py:712) strictly after the review it invalidates; a fix
+    turn edits the draft directly and never goes through process_segment()
+    at all, so it writes no ledger fragment -- the fragment's mtime stays
+    exactly where the LAST translate dispatch (the original one, or an
+    earlier retry) left it, older than the review.
+
+    Conservative on any doubt: a missing or unreadable fragment returns
+    False, the same direction the sha1 comparison's own "cannot prove it"
+    case already takes -- this function only ever ADDS a way to prove a
+    genuine retranslate, never a way to prove a fix. An unprovable case
+    still terminates as invalid_post_fix_draft, which errs toward
+    stopping rather than silently discarding real work."""
+    fragment_path = dirs["runs_dir"] / "ledger.d" / f"{seg}.json"
+    try:
+        fragment_mtime_ns = fragment_path.stat().st_mtime_ns
+        review_mtime_ns = review_path.stat().st_mtime_ns
+    except OSError:
+        return False
+    return fragment_mtime_ns > review_mtime_ns
+
+
 def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
     """Returns exactly one of:
       {"action": "translate"}
@@ -2215,12 +2285,25 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         # segment, and that must NOT be misread as fix evidence) whose
         # OWN recorded draft_sha1 differs from the CURRENT draft's
         # content hash means something edited the draft SINCE that
-        # review was written -- and the only thing that ever edits a
-        # draft after a review is the fix turn. current_draft_sha1()
-        # only needs the draft file to be parseable in the shape
-        # draft_content_sha1() expects -- it does not depend on
-        # validate_draft_script's OWN (unrelated) notion of validity, so
-        # it can still be computed here even though draft_ok is False.
+        # review was written. current_draft_sha1() only needs the draft
+        # file to be parseable in the shape draft_content_sha1() expects
+        # -- it does not depend on validate_draft_script's OWN (unrelated)
+        # notion of validity, so it can still be computed here even
+        # though draft_ok is False.
+        #
+        # Verification-round finding: a sha1 mismatch is NOT proof of a
+        # fix by itself -- a genuine RE-TRANSLATE under the SAME run_id
+        # also changes the draft's content after a review exists, and
+        # produces the identical dispatch_token a fix turn's "copy it
+        # byte for byte" instruction also produces (both are a pure
+        # function of run_id+seg). _translate_redispatched_since() (see
+        # its own docstring) closes the gap with the one piece of
+        # evidence that genuinely differs between the two: whether THIS
+        # driver itself dispatched a translate (writing a fresh ledger
+        # fragment) after the review was written. Only a sha1 mismatch
+        # WITHOUT that evidence is treated as fix-caused; a mismatch WITH
+        # it falls through to plain "translate", the same outcome a
+        # fresh, review-free invalid draft already gets.
         #
         # Deliberately NOT re-surfaced as "needs_fix" with the same old
         # findings: those findings describe the ORIGINAL translation
@@ -2251,6 +2334,7 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
                     current_sha1 is not None
                     and prior_draft_sha1 is not None
                     and current_sha1 != prior_draft_sha1
+                    and not _translate_redispatched_since(dirs, seg, prior_review_path)
                 ):
                     return {"action": "invalid_post_fix_draft"}
         return {"action": "translate"}
