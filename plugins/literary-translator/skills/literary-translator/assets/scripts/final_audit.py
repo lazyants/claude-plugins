@@ -167,8 +167,26 @@ segments remain, OR a `stale` segment remains that is NOT carved out by the
 exit still gates W8 Deliver. `warnings` and the frontback report never
 affect the exit code -- they remain informational only.
 
-Usage: python3 final_audit.py
+Usage: python3 final_audit.py [--plugin-root PATH]
+
+Self-anchored: this script always lives at {durable_root}/scripts/<name>.py.
+It never assumes cwd == durable_root, and never takes a --durable-root flag
+of its own -- its own data is always self-anchored. #412: an explicit
+--plugin-root PATH overrides where the SIBLING select_segments.py script
+the whole-project completeness gate shells out to is resolved from --
+deliberately NEVER derived from this script's own self-anchored
+DURABLE_ROOT (${durable_root}/scripts/ is a Step-0a copy the codex process
+this gate protects can write to, so resolving the checker from inside the
+tree it checks would let a tampered copy pass itself). select_segments.py
+itself DOES accept --plugin-root (it resolves a further sibling of its
+own, ledger_merge.py), so it is forwarded verbatim, together with a
+synthesized --durable-root (this script's own DURABLE_ROOT, since
+select_segments.py no longer physically sits under that root once
+relocated). See run_completeness_gate() below and references/gotchas.md
+§4 for the full two-flag convention this follows. Omitting the flag
+reproduces today's self-anchored sibling lookup byte-for-byte.
 """
+import argparse
 import hashlib
 import json
 import re
@@ -193,8 +211,8 @@ except ImportError:
     sys.exit(2)
 
 # ---------------------------------------------------------------------------
-# Self-anchoring: this script always lives at {durable_root}/scripts/<name>.py.
-# It never assumes cwd == durable_root, and never takes a --durable-root flag.
+# Self-anchoring -- see the module docstring above for the #412 --plugin-root
+# override.
 # ---------------------------------------------------------------------------
 SCRIPTS_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPTS_DIR.parent
@@ -708,53 +726,79 @@ def warn_verse_structure(seg):
 # the full manifest.json, no --only-segs restriction.
 # ---------------------------------------------------------------------------
 
-def run_completeness_gate():
+def run_completeness_gate(plugin_root_str=None):
     """Returns (completeness_counts, classification_by_seg). FATALs (exit 2)
     if select_segments.py is missing, fails, or does not honor its own
-    documented JSON contract -- this gate cannot be silently skipped."""
-    if not SELECT_SEGMENTS_SCRIPT.is_file():
+    documented JSON contract -- this gate cannot be silently skipped.
+
+    #412: `plugin_root_str` (this script's own --plugin-root CLI value, or
+    None) governs where the SIBLING select_segments.py is resolved from --
+    deliberately NEVER derived from this script's own self-anchored
+    DURABLE_ROOT/SCRIPTS_DIR (see module docstring for the full tampered-
+    copy rationale). When given, resolves as
+    `{plugin_root}/assets/scripts/select_segments.py`. select_segments.py
+    itself DOES accept --plugin-root (it resolves a further sibling of its
+    own, ledger_merge.py) -- so it is forwarded verbatim, together with a
+    synthesized `--durable-root str(DURABLE_ROOT)` (this script has no
+    --durable-root of its own; select_segments.py, once resolved via
+    --plugin-root, no longer physically sits under DURABLE_ROOT and would
+    otherwise self-anchor against the wrong tree). Omitting the flag
+    reproduces today's self-anchored sibling lookup unchanged.
+    """
+    if plugin_root_str is None:
+        select_segments_script = SELECT_SEGMENTS_SCRIPT
+    else:
+        select_segments_script = (
+            Path(plugin_root_str).resolve() / "assets" / "scripts" / "select_segments.py"
+        )
+
+    if not select_segments_script.is_file():
         _fatal(
-            f"{SELECT_SEGMENTS_SCRIPT} not found -- final_audit.py's "
+            f"{select_segments_script} not found -- final_audit.py's "
             f"whole-project completeness gate requires it. See this "
             f"script's own module docstring for select_segments.py's "
             f"required JSON contract."
         )
 
+    # #409: --classify-only. This audit needs the CLASSIFICATION and never
+    # translates anything, so it must not be refused when the project
+    # contains previously-converged segments -- which is the normal state
+    # of a finished book, and exactly the state this audit runs in. Without
+    # the flag the new gate would take away final_audit.py's documented
+    # "project incomplete" / exit-3 path.
+    cmd = [sys.executable, str(select_segments_script), "--allow-empty", "--classify-only"]
+    if plugin_root_str is not None:
+        cmd += ["--durable-root", str(DURABLE_ROOT), "--plugin-root", plugin_root_str]
+
     try:
         proc = subprocess.run(
-            # #409: --classify-only. This audit needs the CLASSIFICATION and
-            # never translates anything, so it must not be refused when the
-            # project contains previously-converged segments -- which is the
-            # normal state of a finished book, and exactly the state this
-            # audit runs in. Without the flag the new gate would take away
-            # final_audit.py's documented "project incomplete" / exit-3 path.
-            [sys.executable, str(SELECT_SEGMENTS_SCRIPT), "--allow-empty", "--classify-only"],
+            cmd,
             capture_output=True,
             text=True,
             timeout=300,
             cwd=str(DURABLE_ROOT),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        _fatal(f"could not run {SELECT_SEGMENTS_SCRIPT}: {exc}")
+        _fatal(f"could not run {select_segments_script}: {exc}")
 
     stdout_lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
     if not stdout_lines:
         _fatal(
-            f"{SELECT_SEGMENTS_SCRIPT} printed no JSON to stdout "
+            f"{select_segments_script} printed no JSON to stdout "
             f"(exit {proc.returncode}); stderr: {proc.stderr.strip()}"
         )
     try:
         payload = json.loads(stdout_lines[-1])
     except json.JSONDecodeError as exc:
         _fatal(
-            f"{SELECT_SEGMENTS_SCRIPT}'s last stdout line was not valid "
+            f"{select_segments_script}'s last stdout line was not valid "
             f"JSON: {exc}"
         )
 
     if not isinstance(payload, dict) or not payload.get("success"):
         error = payload.get("error") if isinstance(payload, dict) else None
         _fatal(
-            f"{SELECT_SEGMENTS_SCRIPT} reported failure: "
+            f"{select_segments_script} reported failure: "
             f"{error or '(no error message)'}"
         )
 
@@ -762,7 +806,7 @@ def run_completeness_gate():
     classification = payload.get("classification")
     if not isinstance(counts, dict) or not isinstance(classification, dict):
         _fatal(
-            f"{SELECT_SEGMENTS_SCRIPT}'s JSON output is missing the "
+            f"{select_segments_script}'s JSON output is missing the "
             f"required 'counts'/'classification' objects -- see this "
             f"script's own module docstring for the required contract."
         )
@@ -772,7 +816,7 @@ def run_completeness_gate():
         value = counts.get(cat)
         if not isinstance(value, int) or value < 0:
             _fatal(
-                f"{SELECT_SEGMENTS_SCRIPT}'s 'counts' is missing a valid "
+                f"{select_segments_script}'s 'counts' is missing a valid "
                 f"non-negative integer for category {cat!r}"
             )
         completeness_counts[cat] = value
@@ -1043,10 +1087,38 @@ def completeness_exit_code(hard_failures, project_complete):
     return 0
 
 
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "W7 Final audit -- the last deterministic gate before W8 "
+            "Deliver. See this file's own module docstring."
+        ),
+    )
+    parser.add_argument(
+        "--plugin-root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "#412: use PATH (the plugin's own install root, i.e. "
+            "{{PLUGIN_ROOT}}) to resolve the sibling select_segments.py "
+            "script the whole-project completeness gate shells out to, as "
+            "{PATH}/assets/scripts/select_segments.py -- deliberately "
+            "NEVER derived from this script's own self-anchored durable "
+            "root, because ${durable_root}/scripts/ is writable by the "
+            "codex process this gate protects (codex_job.py grants "
+            "--write over the whole durable root), so resolving the "
+            "checker from inside the tree it checks would let a tampered "
+            "copy pass itself. select_segments.py itself DOES accept "
+            "--plugin-root, so it is forwarded verbatim, together with a "
+            "synthesized --durable-root. Optional; omit for today's "
+            "self-anchored sibling lookup."
+        ),
+    )
+    return parser
+
+
 def main():
-    if len(sys.argv) != 1:
-        print("usage: python3 final_audit.py", file=sys.stderr)
-        sys.exit(2)
+    args = build_arg_parser().parse_args()
 
     converged = load_converged_fragments()
 
@@ -1090,7 +1162,7 @@ def main():
 
     warnings_count = len(warn_details)
 
-    completeness_counts, classification_by_seg = run_completeness_gate()
+    completeness_counts, classification_by_seg = run_completeness_gate(args.plugin_root)
     # #409 Step 2: a 'stale' segment that also carries the durable
     # ever-converged sentinel is carved out of the completeness gate -- see
     # count_stale_previously_converged()'s and compute_project_complete()'s

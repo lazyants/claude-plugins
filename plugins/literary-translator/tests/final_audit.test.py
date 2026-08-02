@@ -1597,6 +1597,163 @@ def test_compute_project_complete_matrix():
     assert fa.compute_project_complete(not_started_present, stale_previously_converged=0) is False
 
 
+# ---------------------------------------------------------------------------
+# #412 -- --plugin-root PATH override for the SIBLING select_segments.py the
+# whole-project completeness gate shells out to.
+#
+# final_audit.py is itself Step-0a-copied (not among SKILL.md's four
+# never-copied plugin-path scripts), so in production its own SCRIPTS_DIR --
+# where it resolves select_segments.py from -- IS the durable-root copy the
+# codex process can write to. A tampered select_segments.py there could
+# report a false "project complete" and let W8 Deliver run over an
+# incomplete book. Same poisoned-sibling technique
+# select_segments.test.py/ledger_merge.test.py already use for their own
+# --plugin-root batteries: both directions are asserted, since a script that
+# never touched select_segments.py at all would look identical to one that
+# correctly routed around the poison.
+#
+# The default make_durable_root() fixture (single PAD-like seg01, untouched
+# -- not_started) is used throughout: it deterministically reaches the
+# whole-project completeness gate's own "incomplete" outcome (exit 3)
+# without needing a converged segment at all, which is the cheapest
+# observable proof that select_segments.py's REAL JSON contract, not a
+# crash, was honored.
+# ---------------------------------------------------------------------------
+
+_TAMPERED_SELECT_SEGMENTS_SRC = (
+    "#!/usr/bin/env python3\n"
+    "import sys\n"
+    "sys.stderr.write('TAMPERED_SELECT_SEGMENTS_MUST_NEVER_RUN')\n"
+    "sys.exit(97)\n"
+)
+
+
+def poison_durable_root_select_segments(root: Path) -> None:
+    """Overwrites the durable-root copy of select_segments.py with a
+    stand-in for a codex-tampered script: it always fails loudly and
+    distinctively rather than silently faking success, so a test can tell
+    whether THIS copy ran at all, in either direction."""
+    (root / "scripts" / "select_segments.py").write_text(
+        _TAMPERED_SELECT_SEGMENTS_SRC, encoding="utf-8"
+    )
+
+
+def make_trusted_plugin_root(tmp_path, name="trusted_plugin_install") -> Path:
+    """A SEPARATE physical location holding the REAL select_segments.py at
+    the {plugin_root}/assets/scripts/ layout SKILL.md documents for the
+    plugin-anchored scripts. select_segments.py resolves ITS OWN siblings
+    (ledger_merge.py, which resolves cache_key.py) the same
+    --plugin-root-aware way once relocated here, so all three must be
+    staged for a genuinely successful run through this trusted root --
+    standing in for the plugin's actual install tree, physically apart
+    from any durable_root fixture."""
+    plugin_root = tmp_path / name
+    plugin_scripts_dir = plugin_root / "assets" / "scripts"
+    plugin_scripts_dir.mkdir(parents=True)
+    for name_ in ("select_segments.py", "ledger_merge.py", "cache_key.py"):
+        shutil.copy2(SCRIPTS_SRC_DIR / name_, plugin_scripts_dir / name_)
+    return plugin_root
+
+
+def run_final_audit_with(root: Path, *extra_args, timeout: int = 90) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(root / "scripts" / "final_audit.py"), *extra_args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def test_select_segments_py_itself_accepts_plugin_root(tmp_path):
+    """Measured proof (not asserted from the task brief's sentence) that
+    select_segments.py -- unlike cache_key.py -- DOES accept --plugin-root:
+    confirmed here by actually running the real select_segments.py against
+    it (with a matching --durable-root, since the flag relocates its own
+    sibling lookup too), not by trusting the claim."""
+    root = make_durable_root(tmp_path)
+    plugin_root = make_trusted_plugin_root(tmp_path)
+
+    proc = subprocess.run(
+        [
+            sys.executable, str(root / "scripts" / "select_segments.py"),
+            "--allow-empty", "--classify-only",
+            "--durable-root", str(root),
+            "--plugin-root", str(plugin_root),
+        ],
+        capture_output=True, text=True, timeout=90,
+    )
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert payload["success"] is True
+
+
+def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility: the ordinary in-place fixture, invoked with
+    no --plugin-root at all, behaves exactly as before."""
+    root = make_durable_root(tmp_path)
+
+    proc = run_final_audit_with(root)
+
+    assert proc.returncode == 3, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    summary = parse_summary(proc)
+    assert_schema_valid(summary)
+    assert summary["project_complete"] is False
+    assert summary["completeness_counts"]["not_started"] == 1
+
+
+def test_plugin_root_flag_bypasses_a_tampered_durable_root_sibling(tmp_path):
+    """The core security property: final_audit.py runs from its own
+    in-place durable-root copy whose SIBLING select_segments.py has been
+    POISONED. --plugin-root pointing at a separate, untampered location
+    must make it use THAT select_segments.py instead -- reaching the
+    normal 'incomplete project' outcome is possible ONLY if the poisoned
+    durable-root sibling was never executed."""
+    root = make_durable_root(tmp_path)
+    poison_durable_root_select_segments(root)
+    plugin_root = make_trusted_plugin_root(tmp_path)
+
+    proc = run_final_audit_with(root, "--plugin-root", str(plugin_root))
+
+    assert proc.returncode == 3, (
+        f"--plugin-root pointing at the REAL select_segments.py must "
+        f"succeed (reaching the normal 'incomplete project' outcome) even "
+        f"though durable_root's own copy is poisoned:\n"
+        f"rc={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "TAMPERED" not in proc.stdout and "TAMPERED" not in proc.stderr
+    summary = parse_summary(proc)
+    assert_schema_valid(summary)
+    assert summary["project_complete"] is False
+    assert summary["completeness_counts"]["not_started"] == 1
+
+
+def test_plugin_root_flag_absent_uses_the_poisoned_durable_root_sibling(tmp_path):
+    """Negative control, and backward-compat proof in one: the SAME
+    poisoned durable-root select_segments.py, invoked WITHOUT
+    --plugin-root, is exactly what today's self-anchored lookup finds --
+    unchanged. The poisoned script genuinely runs and fatals when the flag
+    is omitted, proving the positive test's success above is attributable
+    to --plugin-root specifically, not some other effect. The completeness
+    gate's own contract is "cannot be silently skipped" -- a fatal here,
+    never a false-green project_complete, is the correct failure mode."""
+    root = make_durable_root(tmp_path)
+    poison_durable_root_select_segments(root)
+
+    proc = run_final_audit_with(root)  # no --plugin-root
+
+    assert proc.returncode == 2, (
+        f"the poisoned select_segments.py must actually run and cause the "
+        f"completeness gate to fatal when --plugin-root is omitted:\n"
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert proc.stdout.strip() == "", (
+        "a FATAL must print NO stdout JSON -- nothing can be mistaken for "
+        "a schema-conforming summary"
+    )
+    assert "TAMPERED_SELECT_SEGMENTS_MUST_NEVER_RUN" in proc.stderr
+
+
 if __name__ == "__main__":
     import pytest
 
