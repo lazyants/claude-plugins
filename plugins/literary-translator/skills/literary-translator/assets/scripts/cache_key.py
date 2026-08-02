@@ -73,7 +73,7 @@ except ImportError:  # pragma: no cover - exercised only when PyYAML is absent
 
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 
-# The twelve scripts (+ two workflow templates) that make up plugin_bundle_hash.
+# The thirteen scripts (+ two workflow templates) that make up plugin_bundle_hash.
 # NEVER bootstrap_names.py/segpack.py (their own derivation_bundle_hash) and
 # NEVER the four orchestration-only scripts (orchestration_bundle_hash).
 # review_ready.py and resume_setup.py (1.2.0) join this list rather than
@@ -119,6 +119,17 @@ DURABLE_ROOT = Path(__file__).resolve().parents[1]
 # its output is consumed as evidence rather than as logging. (Step 0a already
 # copies it: SKILL.md's copy pass takes every assets/scripts/*.py except the
 # five plugin-path-only scripts, which this is not.)
+# segment_dispatch_driver.py (#409 Step 4, the W5 local driver) belongs here
+# for the SAME reason codex_job.py does: it owns the ACCEPT decision for
+# dispatched work -- which segments even get dispatched (the Step 1
+# re-translate gate), whether a lease/volume refusal is honored. A bug in
+# either check is exactly the class of defect that must re-invalidate
+# converged work, or a durable root scaffolded before the fix would go on
+# trusting decisions a buggy driver made under the old behavior. Registered
+# from this script's FIRST release, even though today's skeleton does not
+# yet dispatch anything itself (see the driver's own module docstring) --
+# the moment it starts shipping as a Step-0a-copied script is the moment a
+# bug in its gating becomes exactly this class of defect.
 PLUGIN_BUNDLE_MEMBERS = (
     "validate_draft.py",
     "canon_validate.py",
@@ -132,6 +143,7 @@ PLUGIN_BUNDLE_MEMBERS = (
     "codex_job.py",
     "canon_senses.py",
     "fetch_citation.py",
+    "segment_dispatch_driver.py",
     "mass-translate-wf.template.js",
     "glossary-pass-wf.template.js",
 )

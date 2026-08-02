@@ -161,8 +161,9 @@ Bundle membership stays split exactly as follows: `plugin_bundle_hash` gates
 cache reuse and covers `validate_draft.py`, `canon_validate.py`,
 `cache_key.py`, `draft_sha1.py`, `review_artifact_check.py`,
 `ledger_update.py`, `review_ready.py`, `resume_setup.py`,
-`glossary_batch_plan.py`, `codex_job.py`, `canon_senses.py`, and
-`fetch_citation.py`, plus `mass-translate-wf.template.js` and
+`glossary_batch_plan.py`, `codex_job.py`, `canon_senses.py`,
+`fetch_citation.py`, and `segment_dispatch_driver.py` (#409 Step 4, the W5
+local driver), plus `mass-translate-wf.template.js` and
 `glossary-pass-wf.template.js`. Read `cache_key.py`'s own
 `PLUGIN_BUNDLE_MEMBERS` tuple for the authoritative list rather than
 trusting a restated count here — it has already drifted once (1.4.7's "ten
