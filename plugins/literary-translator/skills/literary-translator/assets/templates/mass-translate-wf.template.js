@@ -1801,11 +1801,24 @@ if (estimatedCalls > BATCH_AGENT_CAP) {
 //   1 translate job
 // + (MAXFIX + 1) review jobs      -- one per normal round, plus the one
 //                                    mandatory final confirming review
-// + MAXFIX fix jobs               -- the final confirming round dispatches
-//                                    no fix
-// = 1 + (MAXFIX + 1) + MAXFIX = 2*MAXFIX + 2 codex jobs per segment.
+// = MAXFIX + 2 codex jobs per segment.
+//
+// The MAXFIX fix rounds are deliberately NOT counted here. callFix() is a
+// plain Workflow agent() call -- the CLAUDE fix step -- and never launches
+// codex_job.py. This file has exactly two launch sites, the dispatch shells
+// built in translateDrivePrompt and reviewDrivePrompt; nothing else spawns a
+// driver. A review round cannot re-dispatch either: its retry path
+// (readAndCheck) re-reads the artifact codex already wrote rather than
+// starting a second job.
+//
+// Counting the fix calls made this gate measure a different resource from the
+// one its name, this comment, and the operator-facing refusal all describe --
+// it over-counted by MAXFIX per segment and refused batches that were in fact
+// within engine.max_codex_jobs_per_batch. Concretely, at MAXFIX=4 a
+// 41-segment batch launches 246 codex jobs but was computed as 410 and
+// rejected against the default cap of 400.
 // ---------------------------------------------------------------------------
-const CODEX_JOBS_PER_SEG = 2 * MAXFIX + 2;
+const CODEX_JOBS_PER_SEG = MAXFIX + 2;
 const estimatedCodexJobs = SEGS.length * CODEX_JOBS_PER_SEG;
 if (estimatedCodexJobs > MAX_CODEX_JOBS_PER_BATCH) {
   // Deliberately says "the effective ... limit", never "engine.max_codex_

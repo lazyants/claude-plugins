@@ -14,9 +14,11 @@ launch per translate, per review, and per fix round). Both gates run,
 in sequence, before `pipeline()` is ever called; either one tripping
 refuses the batch before any work starts.
 
-Formula (independently re-derived here, not copied from any plan/brief --
-see the arithmetic laid out below and cross-checked against the template's
-own comment directly above its `estimatedCodexJobs` line):
+Formula (derived by enumerating this template's ACTUAL codex_job.py launch
+sites, not from any plan/brief and not from the template's prose comment --
+an earlier version of this file re-derived the arithmetic "independently"
+and still reproduced the template's own error, because both counted the
+same wrong thing):
 
   Per segment, worst case (every round non-clean, so every fix round
   actually fires):
@@ -26,12 +28,17 @@ own comment directly above its `estimatedCodexJobs` line):
                                            review (runRound's isFinal=true
                                            call, which never dispatches a
                                            fix regardless of its verdict)
-  + max_fix_rounds fix jobs            -- one per normal round; the final
-                                           confirming round dispatches none
-  = 1 + (max_fix_rounds + 1) + max_fix_rounds = 2*max_fix_rounds + 2.
+  = 1 + (max_fix_rounds + 1) = max_fix_rounds + 2.
 
-  At max_fix_rounds=3: 2*3+2 = 8 jobs/segment. At the shipped
-  max_fix_rounds=4 (profile.example.yml): 2*4+2 = 10 jobs/segment.
+  The max_fix_rounds fix rounds are NOT codex jobs: callFix() is a plain
+  Workflow agent() call (the Claude fix step). The template has exactly two
+  codex_job.py launch sites -- the dispatch shells in translateDrivePrompt
+  and reviewDrivePrompt -- and a review round's retry path (readAndCheck)
+  re-reads the artifact codex already wrote rather than starting a second
+  job, so no round can launch more than one.
+
+  At max_fix_rounds=3: 3+2 = 5 jobs/segment. At the shipped
+  max_fix_rounds=4 (profile.example.yml): 4+2 = 6 jobs/segment.
 
 This file does NOT reimplement or trust its own reimplementation of that
 arithmetic -- like its sibling `batch_size_estimator.test.py`, it extracts
@@ -83,9 +90,9 @@ Fixtures:
      itself asserts `len(CASES) > 0` before iterating), cheap check (no
      `pipeline()` execution -- the gate trips before it, `max_codex_jobs_
      per_batch` pinned to 1 so every case refuses) that the real script's
-     own `estimatedCodexJobs` equals the closed form `N * (2*maxFixRounds +
+     own `estimatedCodexJobs` equals the closed form `N * (maxFixRounds +
      2)` across several `(segment_count, max_fix_rounds)` pairs, including
-     the max_fix_rounds=3 -> 8 jobs/segment case the brief itself names.
+     the max_fix_rounds=3 -> 5 jobs/segment case.
 """
 from __future__ import annotations
 
@@ -282,9 +289,11 @@ GENEROUS_BATCH_AGENT_CAP = 10_000_000
 def test_refusal_fires_before_any_work_and_names_all_four_things(tmp_path):
     max_fix_rounds = 3
     segs = _segs(5)
-    # 2*3 + 2 = 8 jobs/segment (the brief's own worked example) * 5 = 40.
-    codex_jobs_per_seg = 2 * max_fix_rounds + 2
-    assert codex_jobs_per_seg == 8, "sanity: max_fix_rounds=3 must cost 8 jobs/segment"
+    # 3 + 2 = 5 jobs/segment * 5 = 25. Only the 1 translate and the
+    # (max_fix_rounds + 1) reviews launch codex_job.py; the fix rounds are
+    # plain Claude agent() calls and are deliberately not counted.
+    codex_jobs_per_seg = max_fix_rounds + 2
+    assert codex_jobs_per_seg == 5, "sanity: max_fix_rounds=3 must cost 5 jobs/segment"
     estimated = len(segs) * codex_jobs_per_seg
     cap = estimated - 1  # one below the true need -> must refuse
 
@@ -345,7 +354,7 @@ def test_refusal_fires_before_any_work_and_names_all_four_things(tmp_path):
 def test_boundary_exactly_at_cap_permits_dispatch(tmp_path):
     max_fix_rounds = 3
     segs = _segs(5)
-    estimated = len(segs) * (2 * max_fix_rounds + 2)  # 40
+    estimated = len(segs) * (max_fix_rounds + 2)  # 25
 
     out = run_workflow(
         tmp_path=tmp_path,
@@ -372,10 +381,10 @@ def test_boundary_exactly_at_cap_permits_dispatch(tmp_path):
 def test_legitimate_small_batch_is_never_refused(tmp_path):
     max_fix_rounds = 4  # profile.example.yml's own shipped default
     segs = _segs(2)
-    # 2*4 + 2 = 10 jobs/segment * 2 = 20, comfortably under any real cap
+    # 4 + 2 = 6 jobs/segment * 2 = 12, comfortably under any real cap
     # (profile.example.yml's own shipped default of 400).
-    estimated = len(segs) * (2 * max_fix_rounds + 2)
-    assert estimated == 20
+    estimated = len(segs) * (max_fix_rounds + 2)
+    assert estimated == 12
 
     out = run_workflow(
         tmp_path=tmp_path,
@@ -418,7 +427,7 @@ def test_estimated_codex_jobs_matches_closed_form_across_cases(tmp_path):
     checked = 0
     for segment_count, max_fix_rounds in CASES:
         segs = _segs(segment_count)
-        expected = segment_count * (2 * max_fix_rounds + 2)
+        expected = segment_count * (max_fix_rounds + 2)
 
         out = run_workflow(
             tmp_path=tmp_path / f"case-{segment_count}-{max_fix_rounds}",
