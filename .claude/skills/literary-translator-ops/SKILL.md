@@ -30,6 +30,14 @@ Three rules dominate every edit here:
   asserting the bounded-by-default property was preserved; the field was measured at 5 200 characters
   inside that prompt, and the plan died on it.
 
+**Wikilink resolution ground truth lives in the `enduser-handbook-ops` skill** →
+`references/wikilink-resolution-ground-truth.md` — read it before changing what `render_obsidian.py`
+or `validate_backlinks.py` emits or accepts as a `[[…]]` target: measured Obsidian and Quartz
+resolution tiers. Vault-root-relative equals content-root-absolute (and so survives both) ONLY when
+Quartz's content root IS the vault root — if content lives at a subdirectory, that form carries a
+stale prefix and resolves nowhere; and under `markdownLinkResolution: relative` NO spelling resolves,
+that mode needs genuinely relative links.
+
 ## References
 
 - **references/plugin-facts.md** — read before writing or editing any script, schema, or test: the
