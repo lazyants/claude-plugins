@@ -79,8 +79,32 @@ precondition), not by this structural check.
     `verses[].placeholder` strings; any other bracketed span is literal
     source prose, not a fidelity token.
 
-Usage: python3 validate_draft.py SEG   (e.g. seg05)
+Usage: python3 validate_draft.py SEG [--durable-root PATH]   (e.g. seg05)
 Exit 0 = clean, 1 = defects (printed), 2 = usage/environment error.
+
+Self-anchoring by default: this script always lives at
+${durable_root}/scripts/validate_draft.py and derives durable_root from its
+own path -- it never assumes cwd. #412 prerequisite: an explicit
+`--durable-root PATH` overrides this, REPLACING the self-anchored root
+entirely for DATA (segments/, and the ownership marker load_profile() reads
+to find profile.yml, which may itself live anywhere). draft_path()/
+segpack_path() already take `segments_dir` as an explicit parameter and
+load_profile()/validate() already take `durable_root`/`segments_dir` as
+explicit parameters, so this only changes what main() passes in -- never
+what a given set of on-disk inputs resolves to, and never a direct-import
+caller's own behavior (assemble.py/output_resolve.py/validate_assembled.py/
+validate_backlinks.py/final_audit.py all call `vd.load_profile()`/
+`vd.validate(seg, cfg)` with no root argument, so they keep today's
+self-anchored resolution unchanged). Omitting the flag reproduces today's
+self-anchored behavior byte-for-byte.
+
+This script is a LEAF: it shells out to nothing, so there is no
+--plugin-root concern here at all, unlike select_segments.py/ledger_merge.py/
+resume_setup.py/review_ready.py, each of which resolves at least one sibling
+script and so needs that second, independent override. Adding --plugin-root
+here regardless would be a flag accepted and never read -- see
+references/gotchas.md §4 for the full two-flag rationale this script
+deliberately does NOT need.
 """
 import argparse
 import json
@@ -105,10 +129,25 @@ except ImportError:
 
 # ---------------------------------------------------------------------------
 # Self-anchoring: this script always lives at {durable_root}/scripts/<name>.py.
-# It never assumes cwd == durable_root, and never takes a --durable-root flag.
+# It never assumes cwd == durable_root. These module-level constants are the
+# fallback used whenever --durable-root is omitted (see resolve_dirs() below
+# for the #412-prerequisite override path).
 # ---------------------------------------------------------------------------
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 SEGMENTS_DIR = DURABLE_ROOT / "segments"
+
+
+def resolve_dirs(durable_root_str):
+    """#412 prerequisite: `durable_root_str` governs DATA (segments/, and
+    where load_profile() looks for the ownership marker) -- rebuilt from
+    that root when given, self-anchored otherwise. This script is a LEAF
+    (see module docstring), so there is only ever the one root to resolve --
+    no separate --plugin-root concern. `durable_root_str=None` reproduces
+    today's exact self-anchored values."""
+    if durable_root_str is None:
+        return {"durable_root": DURABLE_ROOT, "segments_dir": SEGMENTS_DIR}
+    root = Path(durable_root_str).resolve()
+    return {"durable_root": root, "segments_dir": root / "segments"}
 
 # Canonical segment-id safety contract. A seg id is either an ordinary body
 # id (e.g. "seg01", "seg05_blocked_regen", "segAnchor") or a translate-decision
@@ -169,12 +208,12 @@ VERSE_MODES = frozenset({
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
-def draft_path(seg):
-    return SEGMENTS_DIR / f"{seg}.draft.json"
+def draft_path(seg, segments_dir=SEGMENTS_DIR):
+    return segments_dir / f"{seg}.draft.json"
 
 
-def segpack_path(seg):
-    return SEGMENTS_DIR / f"segpack_{seg}.json"
+def segpack_path(seg, segments_dir=SEGMENTS_DIR):
+    return segments_dir / f"segpack_{seg}.json"
 
 
 def placeholders(text, verse_placeholders):
@@ -253,8 +292,14 @@ def _fatal(msg) -> NoReturn:
     sys.exit(2)
 
 
-def load_profile():
-    marker_path = DURABLE_ROOT / ".literary-translator-root.json"
+def load_profile(durable_root=DURABLE_ROOT):
+    """#412 prerequisite: `durable_root` is an explicit parameter (default
+    the self-anchored module constant), matching cache_key.py's own
+    `load_profile(durable_root: Path)` -- every existing direct-import
+    caller (assemble.py/output_resolve.py/validate_assembled.py/
+    validate_backlinks.py/final_audit.py) calls this with NO argument at
+    all, so they keep today's self-anchored resolution unchanged."""
+    marker_path = durable_root / ".literary-translator-root.json"
     if not marker_path.is_file():
         _fatal(
             f"ownership marker not found: {marker_path} -- run Step 0a "
@@ -446,20 +491,24 @@ def _verse_required_fields(mode, rv, n_line, sentinel, vid):
     return errs
 
 
-def validate(seg, cfg, draft_file=None):
+def validate(seg, cfg, draft_file=None, segments_dir=SEGMENTS_DIR):
     """Validate the draft for `seg` against its canonical segpack. When
     `draft_file` is given (a Path), the draft is read from THERE instead of
     the canonical draft_path(seg) -- the W5 codex_job.py driver's
     validate-before-promote path (1.4.7, #198); the segpack is always read
-    from its canonical path regardless."""
-    sp = segpack_path(seg)
+    from its canonical path regardless. `segments_dir` (#412 prerequisite)
+    is an explicit parameter, defaulting to the self-anchored module
+    constant -- final_audit.py's own `vd.validate(seg, cfg)` call passes
+    neither `draft_file` nor `segments_dir`, so it keeps today's
+    self-anchored resolution unchanged."""
+    sp = segpack_path(seg, segments_dir)
     src, err = _load_json(sp, "segpack")
     if err:
         return [err]
     if not isinstance(src, dict):
         return [f"segpack at {sp} must be a JSON object, got {type(src).__name__}"]
 
-    dp = draft_file if draft_file is not None else draft_path(seg)
+    dp = draft_file if draft_file is not None else draft_path(seg, segments_dir)
     draft, err = _load_json(dp, "draft")
     if err:
         return [err]
@@ -643,6 +692,17 @@ def build_arg_parser():
             "for today's canonical-path behavior."
         ),
     )
+    parser.add_argument(
+        "--durable-root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "#412 prerequisite: use PATH as the durable root instead of "
+            "this script's own self-anchored location. Optional; omit for "
+            "today's self-anchored behavior. This script is a LEAF (shells "
+            "out to nothing), so there is no companion --plugin-root flag."
+        ),
+    )
     return parser
 
 
@@ -654,19 +714,20 @@ def main():
         print(f"Error: {_seg_err}", file=sys.stderr)
         sys.exit(2)
 
+    dirs = resolve_dirs(args.durable_root)
     draft_file = Path(args.candidate_file) if args.candidate_file else None
 
-    profile = load_profile()
+    profile = load_profile(dirs["durable_root"])
     cfg = ProfileConfig(profile)
 
-    errs = validate(seg, cfg, draft_file=draft_file)
+    errs = validate(seg, cfg, draft_file=draft_file, segments_dir=dirs["segments_dir"])
     if errs:
         print(f"[{seg}] FAIL ({len(errs)} defects):")
         for e in errs:
             print("   -", e)
         sys.exit(1)
 
-    resolved_draft_path = draft_file if draft_file is not None else draft_path(seg)
+    resolved_draft_path = draft_file if draft_file is not None else draft_path(seg, dirs["segments_dir"])
     draft = json.loads(resolved_draft_path.read_text(encoding="utf-8"))
     print(
         f"[{seg}] OK  blocks={len(draft.get('blocks', {}))} "

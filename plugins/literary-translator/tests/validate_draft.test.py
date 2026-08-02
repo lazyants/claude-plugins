@@ -1141,6 +1141,186 @@ def test_candidate_file_absent_uses_canonical(tmp_path):
     assert "[seg01] OK" in result.stdout
 
 
+# ---------------------------------------------------------------------------
+# #412 prerequisite -- --durable-root PATH. Governs DATA only: segments/, and
+# where load_profile() looks for the ownership marker (which then points at
+# profile.yml wherever it actually lives -- unchanged by this flag). This
+# script is a LEAF -- it shells out to nothing at all, so there is no
+# --plugin-root companion and no forwarded-argv assertion to make (unlike
+# select_segments.py/ledger_merge.py/resume_setup.py/review_ready.py, each
+# of which resolves at least one sibling script). See references/gotchas.md
+# §4 for the full two-flag convention this script deliberately does not need.
+#
+# Every redirect test below uses an ORPHAN-COPY fixture -- the script file
+# itself sits somewhere with NO co-located segments/, profile.yml, or
+# ownership marker at all -- so co-location can never be what makes a
+# redirect test pass; only the flag itself can.
+# ---------------------------------------------------------------------------
+
+def run_validate_from(script_path, seg, *extra_args, timeout=30):
+    return subprocess.run(
+        [sys.executable, str(script_path), seg, *extra_args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility: the ordinary in-place fixture, invoked with no
+    --durable-root at all, behaves exactly as before."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 0
+    assert "[seg01] OK" in result.stdout
+
+
+def test_durable_root_flag_omitted_is_byte_identical_to_explicit_self_root(tmp_path):
+    """An explicit --durable-root pointing at the SAME root the script would
+    have self-anchored to anyway must produce byte-identical stdout -- proof
+    the flag changes nothing when it names today's own location."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+
+    without = run_validate(root, "seg01")
+    with_flag = run_validate_from(
+        root / "scripts" / "validate_draft.py", "seg01", "--durable-root", str(root)
+    )
+
+    assert without.returncode == with_flag.returncode == 0
+    assert without.stdout == with_flag.stdout
+
+
+def test_durable_root_flag_redirects_data_reads_orphan_copy(tmp_path):
+    """The core property, proven via an ORPHAN COPY: the script file sits at
+    a location with NO segments/, profile.yml, or ownership marker
+    co-located at all, so success is possible ONLY if --durable-root
+    actually redirected every data read -- co-location cannot be what made
+    this pass."""
+    data_root = make_durable_root(tmp_path)
+    write_segment(data_root, "seg01", clean_segpack(), clean_draft())
+
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "validate_draft.py"
+    shutil.copy2(SCRIPT_SRC, orphan_script)
+    assert not (orphan_dir.parent / "segments").exists(), (
+        "fixture bug: the orphan location must have NO co-located segments/"
+    )
+    assert not (orphan_dir.parent / ".literary-translator-root.json").exists(), (
+        "fixture bug: the orphan location must have NO co-located ownership marker"
+    )
+
+    result = run_validate_from(orphan_script, "seg01", "--durable-root", str(data_root))
+
+    assert result.returncode == 0, (
+        f"--durable-root must redirect EVERY data read (segments/ AND the "
+        f"ownership-marker-resolved profile.yml) to {data_root}, even though "
+        f"the script itself has none of that co-located:\n"
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "[seg01] OK" in result.stdout
+
+
+def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
+    """Negative control, and proof the positive test above is attributable
+    to --durable-root specifically: the SAME orphan copy, invoked WITHOUT
+    the flag, cannot succeed via self-anchoring -- there is no ownership
+    marker (let alone segments/) anywhere near it, so load_profile() fatals
+    before it ever gets to read a draft."""
+    data_root = make_durable_root(tmp_path)
+    write_segment(data_root, "seg01", clean_segpack(), clean_draft())
+
+    orphan_dir = tmp_path / "orphan_location2" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "validate_draft.py"
+    shutil.copy2(SCRIPT_SRC, orphan_script)
+
+    result = run_validate_from(orphan_script, "seg01")  # no --durable-root
+
+    assert result.returncode == 2, (
+        f"expected the ownership-marker-not-found FATAL (exit 2), got "
+        f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "ownership marker not found" in result.stderr
+
+
+def test_durable_root_flag_redirects_a_defect_report_too(tmp_path):
+    """The redirect applies to the FAIL path too, not just the clean one: an
+    injected defect (empty footnote translation, check 4) must still be
+    found and named when the segpack/draft are read via --durable-root from
+    an orphan copy."""
+    data_root = make_durable_root(tmp_path)
+    draft = clean_draft()
+    draft["footnotes"]["1"] = ""  # injected defect
+    write_segment(data_root, "seg01", clean_segpack(), draft)
+
+    orphan_dir = tmp_path / "orphan_location3" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "validate_draft.py"
+    shutil.copy2(SCRIPT_SRC, orphan_script)
+
+    result = run_validate_from(orphan_script, "seg01", "--durable-root", str(data_root))
+
+    assert result.returncode == 1, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "[FN:1] empty translation" in result.stdout
+    assert defect_count(result.stdout) == 1
+
+
+def test_durable_root_flag_uses_the_redirected_profiles_own_settings(tmp_path):
+    """Proof --durable-root really redirects PROFILE resolution too (not
+    just segments/): the data root's own profile.yml sets
+    apparatus_policy=body_refs_only (a DIFFERENT policy from
+    DEFAULT_PROFILE's translate_all), and the redirected run must apply
+    THAT profile's rules -- a dropped body_ref_marker must be flagged,
+    which only fires under body_refs_only."""
+    profile = {
+        "verse_policy": {"mode": "literal_only", "threshold_lines": None},
+        "footnotes": {"apparatus_policy": "body_refs_only"},
+        "validation": {"untranslated_sentinel": "[TODO-UNTRANSLATED]"},
+    }
+    data_root = make_durable_root(tmp_path, profile=profile)
+    segpack = {
+        "seg": "seg01",
+        "blocks": [
+            {
+                "id": "p1",
+                "order_index": 0,
+                "source_html": "<p>Some prose citing [1].</p>",
+                "body_ref_markers": ["[1]"],
+            }
+        ],
+        "footnotes": [],
+        "verses": [],
+    }
+    draft = {
+        "seg": "seg01",
+        "blocks": {"p1": "Translated prose with the marker DROPPED."},
+        "footnotes": {},
+        "verses": {},
+        "names": [],
+        "notes": [],
+    }
+    write_segment(data_root, "seg01", segpack, draft)
+
+    orphan_dir = tmp_path / "orphan_location4" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "validate_draft.py"
+    shutil.copy2(SCRIPT_SRC, orphan_script)
+
+    result = run_validate_from(orphan_script, "seg01", "--durable-root", str(data_root))
+
+    assert result.returncode == 1, (
+        f"the redirected profile's body_refs_only policy must be applied, "
+        f"flagging the dropped marker:\nstdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    assert "body_ref marker" in result.stdout
+
+
 if __name__ == "__main__":
     import pytest
 
