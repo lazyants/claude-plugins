@@ -203,14 +203,30 @@ def _root_forward_args(dirs: dict, durable_root_str, plugin_root_str) -> list:
     `_root_forward_args()` -- see that function's docstring for why an
     explicit --durable-root must be forwarded whenever --plugin-root is
     given, even when THIS script itself was never passed --durable-root.
+
+    Doubled-path fix (this file's own copy of the shape select_segments.py
+    already fixed): both flags are always forwarded as their RESOLVED
+    value, never the raw CLI string. `run_ledger_merge()` runs the
+    subprocess with `cwd` set to the resolved `dirs["durable_root"]`, and
+    ledger_merge.py's own `resolve_dirs()` does
+    `Path(durable_root_str).resolve()` -- which resolves a RELATIVE
+    fragment against ITS cwd. Forwarding the raw string when it happened to
+    be relative resolved it a SECOND time against the already-resolved
+    value, silently landing the sibling one level too deep --
+    `run_ledger_merge()`'s own success/failure check only sees whether the
+    subprocess printed valid JSON with `"success": true`, never which tree
+    it actually read. Every existing caller already passes an absolute
+    path for both flags (`Path(absolute).resolve()` is a no-op), so this
+    was unreachable until an operator passed a relative override;
+    self-anchored behavior (both flags omitted) is untouched -- the
+    condition for forwarding each flag at all is unchanged, only the VALUE
+    forwarded when it is.
     """
     args = []
-    if durable_root_str is not None:
-        args += ["--durable-root", durable_root_str]
-    elif plugin_root_str is not None:
+    if durable_root_str is not None or plugin_root_str is not None:
         args += ["--durable-root", str(dirs["durable_root"])]
     if plugin_root_str is not None:
-        args += ["--plugin-root", plugin_root_str]
+        args += ["--plugin-root", str(Path(plugin_root_str).resolve())]
     return args
 
 

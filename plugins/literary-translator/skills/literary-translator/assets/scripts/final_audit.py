@@ -738,19 +738,27 @@ def run_completeness_gate(plugin_root_str=None):
     copy rationale). When given, resolves as
     `{plugin_root}/assets/scripts/select_segments.py`. select_segments.py
     itself DOES accept --plugin-root (it resolves a further sibling of its
-    own, ledger_merge.py) -- so it is forwarded verbatim, together with a
-    synthesized `--durable-root str(DURABLE_ROOT)` (this script has no
-    --durable-root of its own; select_segments.py, once resolved via
+    own, ledger_merge.py) -- so it is forwarded as its RESOLVED value
+    (doubled-path fix's sibling defect: forwarding it verbatim would let
+    the CHILD -- launched with `cwd=str(DURABLE_ROOT)`, not this process's
+    own cwd -- resolve a RELATIVE plugin_root_str against a DIFFERENT base
+    than the one THIS script just resolved it against two lines above, so
+    parent and child could silently select two different plugin roots;
+    `--durable-root` itself is NOT subject to this, since it is always the
+    resolved `str(DURABLE_ROOT)` constant, never a raw CLI string), together
+    with a synthesized `--durable-root str(DURABLE_ROOT)` (this script has
+    no --durable-root of its own; select_segments.py, once resolved via
     --plugin-root, no longer physically sits under DURABLE_ROOT and would
     otherwise self-anchor against the wrong tree). Omitting the flag
     reproduces today's self-anchored sibling lookup unchanged.
     """
     if plugin_root_str is None:
         select_segments_script = SELECT_SEGMENTS_SCRIPT
+        resolved_plugin_root_str = None
     else:
-        select_segments_script = (
-            Path(plugin_root_str).resolve() / "assets" / "scripts" / "select_segments.py"
-        )
+        resolved_plugin_root = Path(plugin_root_str).resolve()
+        resolved_plugin_root_str = str(resolved_plugin_root)
+        select_segments_script = resolved_plugin_root / "assets" / "scripts" / "select_segments.py"
 
     if not select_segments_script.is_file():
         _fatal(
@@ -767,8 +775,8 @@ def run_completeness_gate(plugin_root_str=None):
     # the flag the new gate would take away final_audit.py's documented
     # "project incomplete" / exit-3 path.
     cmd = [sys.executable, str(select_segments_script), "--allow-empty", "--classify-only"]
-    if plugin_root_str is not None:
-        cmd += ["--durable-root", str(DURABLE_ROOT), "--plugin-root", plugin_root_str]
+    if resolved_plugin_root_str is not None:
+        cmd += ["--durable-root", str(DURABLE_ROOT), "--plugin-root", resolved_plugin_root_str]
 
     try:
         proc = subprocess.run(

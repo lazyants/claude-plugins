@@ -872,5 +872,105 @@ def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
     assert payload["ever_converged_segs"] == EVER_CONVERGED
 
 
+# ---------------------------------------------------------------------------
+# 8. Doubled-path fix. run_ledger_merge() runs the sibling ledger_merge.py
+# subprocess with `cwd` set to the ALREADY-RESOLVED durable_root, but used
+# to forward the RAW (possibly relative) --durable-root string as that
+# sibling's own --durable-root -- which the sibling's own resolve_dirs()
+# resolves a SECOND time against its cwd (the already-resolved value). The
+# identical shape was independently confirmed (and fixed) in
+# resume_setup.py, segment_dispatch_driver.py, and select_segments.py; this
+# script had its own copy of `_root_forward_args()` (a distinct local
+# function, not an import), which is why the select_segments.py fix did not
+# reach it. Every test above passes an absolute path for both flags, so
+# none of them would have caught this.
+# ---------------------------------------------------------------------------
+
+
+def test_relative_durable_root_is_not_doubled_end_to_end(tmp_path):
+    """PROOF, end to end against the REAL ledger_merge.py: invoked with a
+    genuinely RELATIVE --durable-root, from a cwd that is its own PARENT
+    directory, forced through --apply (never the fast dry-run path that
+    reads an existing runs/ledger.json directly with NO subprocess at all
+    -- see resolve_ledger_segments()). Pre-fix, the raw 'durable_root'
+    string was forwarded to ledger_merge.py, whose subprocess cwd is
+    already {tmp_path}/durable_root -- so its own
+    Path('durable_root').resolve() landed on
+    {tmp_path}/durable_root/durable_root, which has no schemas/manifest,
+    and ledger_merge.py failed outright (confirmed against this exact
+    fixture at the parent commit)."""
+    root = make_durable_root(tmp_path)
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "backfill_ever_converged.py"),
+            "--durable-root",
+            "durable_root",
+            "--apply",
+            "--allow-empty",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=str(tmp_path),
+    )
+
+    assert proc.returncode == 0, (
+        f"a relative --durable-root must resolve to the SAME tree as the "
+        f"equivalent absolute one -- got rc={proc.returncode}\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["durable_root"] == str(root.resolve())
+    assert payload["ledger_source"] == "freshly_merged", (
+        "this test must force the real subprocess path, or it proves nothing"
+    )
+    assert (root / "runs" / "ledger.json").is_file(), (
+        "ledger_merge.py must have materialized the ledger in the SAME "
+        "tree backfill_ever_converged.py itself resolved to, not one level "
+        "deeper"
+    )
+
+
+def test_root_forward_args_never_forwards_a_relative_durable_root(tmp_path, monkeypatch):
+    """Unit-level companion, pinning _root_forward_args() directly: it must
+    forward the RESOLVED durable_root, never the raw (possibly relative)
+    CLI string."""
+    module = _load_module(BACKFILL_SCRIPT_SRC, "backfill_ever_converged_root_forward_test")
+    monkeypatch.chdir(tmp_path)
+    dirs = module.resolve_dirs("some/relative/root", None)
+
+    args = module._root_forward_args(dirs, "some/relative/root", None)
+
+    expected = str((tmp_path / "some" / "relative" / "root").resolve())
+    assert args == ["--durable-root", expected], (
+        f"the forwarded value must equal the RESOLVED root exactly once, not "
+        f"the raw relative string (which the sibling would resolve a SECOND "
+        f"time against its own already-resolved cwd). got {args!r}, expected "
+        f"['--durable-root', {expected!r}]"
+    )
+
+
+def test_root_forward_args_never_forwards_a_relative_plugin_root(tmp_path, monkeypatch):
+    """The --plugin-root half of the same fix: a relative override must be
+    resolved against THIS script's own cwd (the same base resolve_dirs()
+    already used for its own sibling lookup) BEFORE forwarding -- never
+    passed through raw for the child to resolve against ITS OWN, different
+    cwd."""
+    module = _load_module(BACKFILL_SCRIPT_SRC, "backfill_ever_converged_root_forward_test2")
+    (tmp_path / "plugin_dir" / "assets" / "scripts").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    dirs = module.resolve_dirs(None, "plugin_dir")
+
+    args = module._root_forward_args(dirs, None, "plugin_dir")
+
+    assert args[0:2] == ["--durable-root", str(dirs["durable_root"])]
+    expected_plugin_root = str((tmp_path / "plugin_dir").resolve())
+    assert args[2:4] == ["--plugin-root", expected_plugin_root]
+    assert "plugin_dir" != args[3], "must be resolved, not the raw fragment"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

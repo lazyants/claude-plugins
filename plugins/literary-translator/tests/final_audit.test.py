@@ -1754,6 +1754,55 @@ def test_plugin_root_flag_absent_uses_the_poisoned_durable_root_sibling(tmp_path
     assert "TAMPERED_SELECT_SEGMENTS_MUST_NEVER_RUN" in proc.stderr
 
 
+# ---------------------------------------------------------------------------
+# Doubled-path fix's --plugin-root variant: not a doubling (--durable-root
+# here is always the resolved str(DURABLE_ROOT) constant, a self-anchored
+# value this script never takes as a flag, so it cannot double) but a
+# DIVERGENCE. run_completeness_gate() resolves a relative --plugin-root
+# against THIS script's own invocation cwd to find select_segments.py, but
+# used to forward the RAW string to that child, which launches with
+# cwd=str(DURABLE_ROOT) -- a DIFFERENT base. So a relative --plugin-root
+# could resolve to two DIFFERENT absolute paths depending which process
+# resolved it. select_segments.py's own now-fixed docstring warns about
+# exactly this shape. Every existing --plugin-root test above passes an
+# absolute path, so none of them would have caught this.
+# ---------------------------------------------------------------------------
+
+
+def test_relative_plugin_root_resolves_against_the_original_invoker_cwd(tmp_path):
+    """PROOF. Drives a genuinely RELATIVE --plugin-root from a cwd that is
+    its own PARENT directory -- entirely separate from durable_root -- so a
+    wrong resolution fails outright (select_segments.py cannot find its own
+    ledger_merge.py sibling under the WRONG resolved plugin root, and
+    fatals) rather than accidentally landing on the right tree by
+    coincidence. Confirmed pre-fix (this exact fixture, against the parent
+    commit's copy of final_audit.py) to exit 2 with
+    'ledger_merge.py not found'; post-fix reaches the ordinary 'incomplete
+    project' outcome (exit 3), proving the child resolved the SAME plugin
+    root the parent did."""
+    root = make_durable_root(tmp_path)
+    plugin_root = make_trusted_plugin_root(tmp_path, name="trusted_plugin_install")
+
+    proc = subprocess.run(
+        [sys.executable, str(root / "scripts" / "final_audit.py"), "--plugin-root", "trusted_plugin_install"],
+        capture_output=True,
+        text=True,
+        timeout=90,
+        cwd=str(tmp_path),
+    )
+
+    assert proc.returncode == 3, (
+        f"a relative --plugin-root, invoked from its OWN parent directory, "
+        f"must resolve the SAME way final_audit.py itself resolved it for "
+        f"its own sibling lookup -- got rc={proc.returncode}\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    summary = parse_summary(proc)
+    assert_schema_valid(summary)
+    assert summary["project_complete"] is False
+    assert summary["completeness_counts"]["not_started"] == 1
+
+
 if __name__ == "__main__":
     import pytest
 
