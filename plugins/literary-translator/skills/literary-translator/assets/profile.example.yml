@@ -242,14 +242,18 @@ engine:
     #
     # Per segment, worst case (every round non-clean, so every fix round actually fires):
     #   1 translate job + (max_fix_rounds + 1) review jobs (one per normal round, plus the one mandatory final
-    #   confirming review) + max_fix_rounds fix jobs (the final confirming round dispatches no fix)
-    #   = 1 + (max_fix_rounds + 1) + max_fix_rounds = 2*max_fix_rounds + 2.
-    # At the shipped max_fix_rounds: 4 that is 10 jobs/segment; a batch of N segments needs 10N codex jobs worst
-    # case. The shipped default of 400 admits exactly 40 segments at max_fix_rounds:4 (40*10 = 400; 41 segments
-    # would need 410 and the run refuses to start) -- deliberately the SAME 40-segment ceiling batch_agent_cap's
-    # own 3500 default documents above, so the two knobs describe one consistent operational envelope rather
-    # than two independently-tuned ones. Splitting a batch that's too large into smaller ones is the operator's
-    # call, not automated in v1 (same policy as batch_agent_cap).
+    #   confirming review)
+    #   = 1 + (max_fix_rounds + 1) = max_fix_rounds + 2.
+    # The max_fix_rounds FIX rounds are deliberately NOT counted: the fix step is a plain Workflow agent() call
+    # (callFix), never a codex_job.py launch. The template has exactly two launch sites, translate and review,
+    # and a review round's retry path re-reads the artifact codex already wrote rather than dispatching again.
+    # At the shipped max_fix_rounds: 4 that is 6 jobs/segment; a batch of N segments needs 6N codex jobs worst
+    # case, so the shipped default of 400 admits 66 segments (66*6 = 396).
+    # NOTE, so the two knobs are not mistaken for one envelope: they do NOT bind at the same batch size, and at
+    # every shipped setting batch_agent_cap binds FIRST (its own 3500 default admits 40 segments at
+    # max_fix_rounds:4, well below this knob's 66). This cap is therefore currently redundant; it is here for
+    # the local-driver work where it becomes the only meaningful gate. Splitting a batch that's too large into
+    # smaller ones is the operator's call, not automated in v1 (same policy as batch_agent_cap).
 
 footnotes:
   apparatus_policy: translate_all

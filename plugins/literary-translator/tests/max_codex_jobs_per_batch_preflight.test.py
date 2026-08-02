@@ -416,11 +416,15 @@ def test_legitimate_small_batch_is_never_refused(tmp_path):
 
 def test_estimated_codex_jobs_matches_closed_form_across_cases(tmp_path):
     CASES = [
-        (1, 1),   # 1 * (2*1+2) = 4
-        (3, 2),   # 3 * (2*2+2) = 18
-        (5, 3),   # 5 * (2*3+2) = 40 -- the brief's own worked example
-        (10, 4),  # 10 * (2*4+2) = 100
-        (40, 4),  # 40 * (2*4+2) = 400 -- profile.example.yml's own documented ceiling
+        # (segment_count, max_fix_rounds) -> segment_count * (max_fix_rounds + 2).
+        # These comments previously carried the retired 2*max_fix_rounds+2 arithmetic
+        # and disagreed with the value the loop below actually asserts.
+        (1, 1),   # 1 * (1+2) = 3
+        (3, 2),   # 3 * (2+2) = 12
+        (5, 3),   # 5 * (3+2) = 25
+        (10, 4),  # 10 * (4+2) = 60
+        (40, 4),  # 40 * (4+2) = 240 -- 40 segments is batch_agent_cap's ceiling, which
+                  # binds well before this knob's own 400 (which admits 66 here)
     ]
     assert len(CASES) > 0, "CASES must not be silently empty -- this test would otherwise vacuously pass"
 

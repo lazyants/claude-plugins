@@ -257,15 +257,27 @@ class CodexJob:
     #     EXECUTABLES from. Today this is SCRIPTS_DIR (codex_job.py's own directory),
     #     which in production IS the durable-root copy Step 0a makes -- i.e. today's
     #     value is the SAME vulnerability class #409 exists to close, just on the
-    #     driver's own gate-invocation path rather than codex's. Confining codex's
-    #     writes to its sandbox (see _setup_sandbox) already makes that copy
-    #     unreachable to codex, so this is not currently exploitable through codex --
-    #     but the CONCEPT stays distinct from the data root regardless, so lane A's
-    #     real trusted-location mechanism (the plugin's own install path, precedent:
-    #     SKILL.md:111/:120/:525 -- profile_validate.py/validate_extraction.py/
-    #     resolve_codex_companion.py, which are NEVER copied to durable_root for
-    #     exactly this reason) is a one-line change here when it lands, not a
-    #     re-derivation from a data-root variable that was never the right source.
+    #     driver's own gate-invocation path rather than codex's.
+    #
+    #     DO NOT read _setup_sandbox() as closing this. The sandbox confines only the
+    #     codex processes THIS driver launches. Other shipped passes still hand codex
+    #     write access over the whole durable root -- the glossary and skeptic passes
+    #     dispatch `agentType: "codex:codex-rescue"` whose job is to WRITE a fragment
+    #     under ${durable_root}/..., and the sanctioned manual W5 drive launches
+    #     codex-companion with `--write` and cwd = durable_root. ${durable_root}/scripts/
+    #     sits inside every one of those write roots, and the glossary pass runs BEFORE
+    #     W5 in the same project, so a gate script tampered with there is exactly what
+    #     _gate() would execute later. This is a LIVE residual, not defense-in-depth.
+    #
+    #     Closing it is NOT a one-line change (an earlier version of this comment said
+    #     it was): there is no {{PLUGIN_ROOT}} substitution token, so a new field has to
+    #     be threaded resume_setup.py -> template -> this driver's argparse. And moving
+    #     this to the plugin install path ALSO requires draft_ready.py and
+    #     validate_draft.py to adopt --durable-root first -- both are __file__-anchored
+    #     at parents[1] and explicitly take no root flag, so they would otherwise start
+    #     looking for segments/ inside the plugin. Precedent for the destination is
+    #     SKILL.md's never-copied plugin-path scripts (profile_validate.py,
+    #     validate_extraction.py, glossary_preflight.py, resolve_codex_companion.py).
     _DURABLE_ROOT_CONTRACT_SCRIPTS = frozenset({"review_ready.py"})
 
     def _durable_root_args(self, script_name):
@@ -279,9 +291,11 @@ class CodexJob:
         return []
 
     def _trusted_scripts_dir(self):
-        """Where _gate() resolves gate EXECUTABLES from -- see the seam note above.
-        Returns today's byte-identical default; becomes lane A's real mechanism in one
-        line once confirmed."""
+        """Where _gate() resolves gate EXECUTABLES from -- see the seam note above for
+        why this is a LIVE residual and why redirecting it is not a one-line change.
+        Returns today's byte-identical default (SCRIPTS_DIR), never a value derived
+        from self.root: the data root must not be able to decide which executable
+        validates it."""
         return SCRIPTS_DIR
 
     def _gate(self, args, timeout):
