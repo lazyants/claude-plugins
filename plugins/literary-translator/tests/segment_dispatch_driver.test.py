@@ -36,6 +36,7 @@ import fcntl
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -231,7 +232,7 @@ def mark_ever_converged(root, seg):
 # enough to run unmodified against a tmp fixture, and genuinely valuable to
 # exercise for real), FAKES matching the real script's OBSERVABLE CONTRACT
 # only for cache_key.py/resolve_codex_companion.py/draft_ready.py/
-# validate_draft.py/review_ready.py/codex_job.py -- each has its own
+# validate_draft.py/codex_job.py -- each has its own
 # dedicated test file proving ITS internal correctness; this file's job is
 # the driver's own logic (concurrency, resumability, failure-reading, the
 # lease), not re-proving validate_draft.py's six content checks.
@@ -329,37 +330,16 @@ if __name__ == "__main__":
     sys.exit(main())
 """
 
-FAKE_REVIEW_READY_PY = """#!/usr/bin/env python3
-import argparse
-import json
-import sys
-from pathlib import Path
-
-
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("seg")
-    p.add_argument("--expect-token", required=True)
-    p.add_argument("--candidate-file", default=None)
-    p.add_argument("--durable-root", default=None)
-    p.add_argument("--plugin-root", default=None)
-    args = p.parse_args()
-    durable_root = Path(args.durable_root).resolve() if args.durable_root else Path(__file__).resolve().parent.parent
-    path = Path(args.candidate_file) if args.candidate_file else durable_root / "segments" / (args.seg + ".review.json")
-    if not path.is_file():
-        print(json.dumps({"ready": False}))
-        return 1
-    obj = json.loads(path.read_text(encoding="utf-8"))
-    if obj.get("dispatch_token") != args.expect_token:
-        print(json.dumps({"ready": False}))
-        return 1
-    print(json.dumps({"ready": True}))
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-"""
+# NOTE: no FAKE_REVIEW_READY_PY here (codex, round 2). segment_dispatch_driver.py
+# does not resolve review_ready.py at all -- see its own _PHASE2_SIBLING_SCRIPTS
+# comment for why: the canonical review.json this driver reads is already
+# validated by review_ready.py inside codex_job.py's own promote flow before
+# it is ever written, and a second driver-side call would only re-check an
+# already-gated artifact with no round-matching benefit (derive_next_action()
+# still has to try each candidate --expect-token itself to learn WHICH round
+# is recorded). A prior release staged this fixture for a sibling nothing
+# ever called -- deleted along with the unreachable registration, not kept
+# as decorative coverage.
 
 # Controllable fake codex_job.py for Phase 2 end-to-end tests. Accepts the
 # REAL argv shape. Behavior for a given (--kind, --seg) is looked up from a
@@ -412,6 +392,15 @@ def main():
     args = p.parse_args()
 
     cwd = Path(args.cwd)
+
+    # codex #386-class MAJOR: record the RAW argv this process actually
+    # received (never a reconstruction from the parsed Namespace, and never
+    # something the test predicts ahead of time) -- append-only, so a test
+    # observes what was truly sent instead of re-deriving what SHOULD have
+    # been sent from the same code paths that build it.
+    argv_log_path = cwd / "test_fixture_argv_log.jsonl"
+    with open(argv_log_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": args.kind, "seg": args.seg, "argv": sys.argv[1:]}) + "\\n")
     segments_dir = cwd / "segments"
     scenario_path = cwd / "test_fixture_codex_scenario.json"
     scenario = {}
@@ -481,7 +470,6 @@ def stage_phase2_sibling_scripts(scripts_dir, templates_dir):
     (scripts_dir / "resolve_codex_companion.py").write_text(FAKE_RESOLVE_CODEX_COMPANION_PY, encoding="utf-8")
     (scripts_dir / "draft_ready.py").write_text(FAKE_DRAFT_READY_PY, encoding="utf-8")
     (scripts_dir / "validate_draft.py").write_text(FAKE_VALIDATE_DRAFT_PY, encoding="utf-8")
-    (scripts_dir / "review_ready.py").write_text(FAKE_REVIEW_READY_PY, encoding="utf-8")
     (scripts_dir / "codex_job.py").write_text(FAKE_CODEX_JOB_PHASE2_PY, encoding="utf-8")
 
     templates_dir.mkdir(parents=True, exist_ok=True)
@@ -744,6 +732,11 @@ def test_acquire_driver_lock_refuses_when_already_held_by_another_process(tmp_pa
         [sys.executable, str(holder_script), str(lock_path)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
+    # subprocess.Popen's own type stubs declare .stdout/.stderr Optional
+    # unconditionally (they cannot express "non-None because PIPE was
+    # passed to the constructor") -- asserted, not cast/ignored, so both
+    # the type checker and a real runtime check narrow it the same way.
+    assert holder.stdout is not None and holder.stderr is not None
     try:
         line = holder.stdout.readline()
         assert line.strip() == "LOCKED", f"holder failed to acquire: {holder.stderr.read()}"
@@ -775,6 +768,11 @@ def test_two_drivers_on_one_project_second_refuses_end_to_end(tmp_path):
         [sys.executable, str(holder_script), str(lock_path)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
+    # subprocess.Popen's own type stubs declare .stdout/.stderr Optional
+    # unconditionally (they cannot express "non-None because PIPE was
+    # passed to the constructor") -- asserted, not cast/ignored, so both
+    # the type checker and a real runtime check narrow it the same way.
+    assert holder.stdout is not None and holder.stderr is not None
     try:
         line = holder.stdout.readline()
         assert line.strip() == "LOCKED", f"holder failed to acquire: {holder.stderr.read()}"
@@ -1303,22 +1301,699 @@ def test_fixture_sanity_full_dispatch_converges(tmp_path):
     assert payload["summary"]["converged"] == ["seg01"], payload
 
 
+_FIXTURE_TRANSLATE_CFG = {
+    "max_fix_rounds": 2, "batch_agent_cap": 10000, "max_codex_jobs_per_batch": 400,
+    "effort": "high", "model": "", "source_lang": "fr", "target_lang": "ru",
+    "verse_policy": {"mode": "skip", "threshold_lines": None},
+    "research_mode": "", "citation_content_types": [],
+}
+
+
+def _load_fixture_driver(root):
+    """Loads segment_dispatch_driver.py from ITS OWN staged copy under
+    `root/scripts/` (not the module-level DRIVER, which was loaded from the
+    real, un-copied source file) -- self-anchoring (SCRIPTS_DIR/
+    TEMPLATES_DIR, computed from the loaded module's own __file__) only
+    resolves to `root`'s fixture siblings when the module itself is loaded
+    FROM `root/scripts/segment_dispatch_driver.py`, exactly like run_driver()
+    invoking it as a subprocess already does. Calling DRIVER.resolve_dirs()
+    directly against a fixture root without doing this would silently
+    resolve every sibling script from the REAL plugin install tree instead
+    of the fixture's fakes."""
+    return _load_module(root / "scripts" / "segment_dispatch_driver.py", "segment_dispatch_driver_fixture")
+
+
+def _fixture_ctx(root, run_id, translate_cfg=None):
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    ctx = driver_mod.DispatchContext(
+        dirs=dirs, run_id=run_id, translate_cfg=translate_cfg or dict(_FIXTURE_TRANSLATE_CFG),
+        companion_path=FIXTURE_COMPANION_PATH, durable_root_str=None, plugin_root_str=None,
+        node_bin="node", session_id="test-session",
+    )
+    return driver_mod, ctx
+
+
+def test_a_segment_converged_on_the_mandatory_final_round_records_a_real_rounds_number(tmp_path):
+    """codex #384-class BLOCKER: a segment that converges on the mandatory
+    FINAL confirming review (mass-translate-wf.template.js's own
+    `runRound(seg, MAXFIX + 1, true)`, template.js:1757, which records
+    `rounds: round` == MAXFIX + 1, template.js:1595-1596 -- a plain integer,
+    never derived from the "final" round LABEL) is an entirely normal
+    outcome, not an edge case. The ledger schema requires `rounds` to be an
+    integer (ledger-record-base.schema.json:15) and REQUIRES it outright for
+    status=converged (same file's allOf block, :78-86) -- so a write that
+    can't produce a real number for the final round is rejected twice over.
+    """
+    root = phase2_project(tmp_path, n=1)
+    run_id = "20260101T000000Z"
+    driver_mod, ctx = _fixture_ctx(root, run_id)
+    max_fix_rounds = ctx.translate_cfg["max_fix_rounds"]
+
+    draft = {"seg": "seg01", "blocks": {"p1": "hola"},
+             "dispatch_token": driver_mod.translate_dispatch_token(run_id, "seg01")}
+    draft_path = root / "segments" / "seg01.draft.json"
+    draft_path.write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+
+    review = {
+        "clean": True, "coverage_ok": True, "findings": [], "draft_sha1": draft_sha1,
+        "dispatch_token": driver_mod.review_dispatch_token(run_id, "seg01", "final"),
+    }
+    (root / "segments" / "seg01.review.json").write_text(json.dumps(review, ensure_ascii=False), encoding="utf-8")
+
+    action = driver_mod.derive_next_action("seg01", ctx)
+    assert action["action"] == "already_converged", action
+    assert action.get("round_label") == "final", (
+        "derive_next_action() must report WHICH round converged (here, the "
+        "mandatory final one) so the caller can compute a real rounds "
+        f"number instead of parsing a token string -- got {action}"
+    )
+
+    result = driver_mod.process_segment("seg01", ctx)
+    assert result == {"seg": "seg01", "converged": True}, result
+
+    fragment = json.loads((root / "runs" / "ledger.d" / "seg01.json").read_text(encoding="utf-8"))
+    assert fragment["status"] == "converged"
+    assert fragment["rounds"] == max_fix_rounds + 1, (
+        f"the mandatory final round is round number max_fix_rounds+1={max_fix_rounds + 1} "
+        f"in the template's own runRound(seg, MAXFIX + 1, true) call (template.js:1757) -- "
+        f"got rounds={fragment.get('rounds')!r}"
+    )
+
+
+def test_resume_digest_stays_stable_as_a_segment_converges_and_drops_out_of_the_eligible_list(tmp_path):
+    """codex #392-class BLOCKER: select_segments.py's own eligible list
+    SHRINKS by one entry every time a segment converges
+    (DEFAULT_ELIGIBLE_CATEGORIES excludes `reusable`). resolve_run_id()
+    must NOT hash that shrinking list into compute_input_digest()'s
+    `domain` (resume_setup.py:433-445), or a single convergence mints a
+    fresh RUN_ID and orphans every dispatch_token already on disk --
+    including the just-converged segment's own draft/review, and any fix
+    just applied by hand to a DIFFERENT still-in-progress segment."""
+    root = phase2_project(tmp_path, n=2)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    translate_cfg = dict(_FIXTURE_TRANSLATE_CFG)
+
+    select_before = driver_mod.run_select_segments(dirs)
+    assert select_before.get("success") is True, select_before
+    assert sorted(select_before["segs"]) == ["seg01", "seg02"], select_before
+
+    run_before = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    run_id_before = run_before["effectiveRunId"]
+
+    # Simulate seg01 having genuinely converged: a real draft, plus a
+    # fragment whose cache_key/reviewed_draft_sha1 MATCH it exactly --
+    # select_segments.py's own "reusable" classification, the one
+    # DEFAULT_ELIGIBLE_CATEGORIES excludes from the eligible list.
+    seg01_key = make_cache_key("seg01")
+    draft = {"seg": "seg01", "blocks": {"p1": "hola"}, "dispatch_token": f"{run_id_before}:seg01"}
+    (root / "segments" / "seg01.draft.json").write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    write_fragment(root, "seg01", converged_fragment(seg01_key, draft_sha1))
+    mark_ever_converged(root, "seg01")
+
+    select_after = driver_mod.run_select_segments(dirs)
+    assert select_after.get("success") is True, select_after
+    assert select_after["segs"] == ["seg02"], (
+        "seg01 must have dropped out of the eligible list once genuinely "
+        f"converged -- the reported bug only reproduces if it does: {select_after}"
+    )
+
+    run_after = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    assert run_after["effectiveRunId"] == run_id_before, (
+        f"RUN_ID changed from {run_id_before!r} to {run_after['effectiveRunId']!r} purely "
+        f"because seg01 converged and dropped out of the eligible list select_segments.py "
+        f"reports -- every dispatch_token already on disk (including seg01's OWN "
+        f"just-converged draft/review, and any fix just applied by hand to seg02) is now orphaned"
+    )
+    assert run_after.get("resume") is True, run_after
+
+
+def test_resume_finds_an_older_mass_run_behind_a_newer_glossary_run(tmp_path):
+    """codex #392-class MAJOR: `runs/` mixes mass and glossary run dirs (both
+    kinds write input.digest there via write_run_dir()) -- offering only the
+    single NEWEST candidate means an interrupted mass run followed by any
+    later glossary pass hides the genuinely resumable mass candidate behind
+    one that can never match a kind="mass" digest."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    translate_cfg = dict(_FIXTURE_TRANSLATE_CFG)
+
+    run_mass = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    run_id_mass = run_mass["effectiveRunId"]
+    assert run_mass.get("resume") is False, run_mass  # first-ever run for this project
+
+    # Simulate a LATER glossary run: a lexicographically-greater run id
+    # (a later timestamp) with its own runs/<id>/input.digest AND the
+    # glossary/runs/<id>/ sibling write_run_dir() always creates for
+    # kind="glossary" -- the exact marker _resumable_run_id_candidates()
+    # uses to tell the two kinds apart.
+    later_run_id = "9" + run_id_mass  # sorts after any real timestamp-shaped id
+    (root / "runs" / later_run_id).mkdir()
+    (root / "runs" / later_run_id / "input.digest").write_text("deadbeef\n", encoding="utf-8")
+    (root / "glossary" / "runs" / later_run_id).mkdir(parents=True)
+
+    run_again = driver_mod.resolve_run_id(
+        dirs, translate_cfg=translate_cfg, plugin_root_str=None, durable_root_str=None,
+    )
+    assert run_again["effectiveRunId"] == run_id_mass, (
+        f"expected to resume the older mass run {run_id_mass!r} behind the newer "
+        f"glossary run {later_run_id!r}, got {run_again['effectiveRunId']!r} "
+        f"(resume={run_again.get('resume')}) -- the glossary candidate must never "
+        f"shadow a genuinely resumable mass one"
+    )
+    assert run_again.get("resume") is True, run_again
+
+
+def test_dedupe_segs_is_order_preserving_first_occurrence_wins():
+    deduped, dupes = DRIVER._dedupe_segs(["seg02", "seg01", "seg02", "seg03", "seg01"])
+    assert deduped == ["seg02", "seg01", "seg03"]
+    assert dupes == ["seg02", "seg01"]
+
+
+def test_a_duplicate_manifest_entry_is_dispatched_exactly_once(tmp_path):
+    """codex #392-class MAJOR: manifest.schema.json has no uniqueItems on
+    segments[], and select_segments.py's default (non---only-segs) path
+    appends every manifest entry with no dedupe of its own -- so a
+    duplicate manifest entry would otherwise reach pool.map() and drive the
+    SAME segment on two worker threads at once (two codex_job.py dispatches
+    racing for the same per-segment lease)."""
+    root = phase2_project(tmp_path, n=1)
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["segments"] == [{"seg": "seg01"}]
+    manifest["segments"] = [{"seg": "seg01"}, {"seg": "seg01"}]
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+    proc = run_driver(root, timeout=60)
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["segs"] == ["seg01"], payload
+    assert payload["summary"]["converged"] == ["seg01"], payload
+
+    # read_recorded_argv() itself asserts exactly one match -- a duplicate
+    # dispatch would fail THAT assertion before ever reaching this one.
+    read_recorded_argv(root, "translate", "seg01")
+    read_recorded_argv(root, "review", "seg01")
+
+    session_id = payload["session_id"]
+    journal = DRIVER.journal_path(root, session_id)
+    types = [json.loads(ln)["type"] for ln in journal.read_text(encoding="utf-8").splitlines()]
+    assert "duplicate_segs_dropped" in types, types
+
+
+def test_one_segments_dispatch_timeout_does_not_discard_the_others(tmp_path):
+    """codex #392-class BLOCKER: dispatch_codex_job()'s own backstop-timeout
+    path calls fatal() (raises DriverError) -- left uncaught, that
+    propagates through run_one_codex_job() -> process_segment() ->
+    pool.map() -> run_segment_loop(), discarding every OTHER segment's
+    already-completed result over ONE segment's overrun. Drives the REAL
+    run_segment_loop() (the same pool.map() the reported bug names) over
+    two segments, one of which genuinely blows its dispatch_codex_job()
+    wait_timeout -- proven with a REAL short timeout and a REAL child that
+    outlives it, not a mocked exception."""
+    root = phase2_project(tmp_path, n=2)
+    write_codex_scenario(root, {"translate:seg02": {"sleep_s": 2}})
+
+    driver_mod = _load_fixture_driver(root)
+    driver_mod.CODEX_JOB_WAIT_TIMEOUT_SEC = 0.3  # real, short -- seg02's 2s sleep genuinely overruns it
+    dirs = driver_mod.resolve_dirs(None)
+    ctx = driver_mod.DispatchContext(
+        dirs=dirs, run_id="20260101T000000Z", translate_cfg=dict(_FIXTURE_TRANSLATE_CFG),
+        companion_path=FIXTURE_COMPANION_PATH, durable_root_str=None, plugin_root_str=None,
+        node_bin="node", session_id="test-session",
+    )
+
+    results = driver_mod.run_segment_loop(["seg01", "seg02"], ctx, max_concurrent_codex_jobs=2)
+
+    by_seg = {r["seg"]: r for r in results}
+    assert set(by_seg) == {"seg01", "seg02"}, (
+        "run_segment_loop() must return a result for EVERY segment, even "
+        f"when one times out -- got {list(by_seg)}"
+    )
+    assert by_seg["seg01"]["converged"] is True, by_seg["seg01"]
+    assert by_seg["seg02"]["converged"] is False, by_seg["seg02"]
+    assert by_seg["seg02"]["reason"] == "driver-dispatch-error", by_seg["seg02"]
+    assert "did not terminate within its own deadline" in by_seg["seg02"]["error_detail"], by_seg["seg02"]
+
+
+def test_a_clean_review_stale_against_an_edited_draft_re_reviews_instead_of_live_locking(tmp_path):
+    """codex #392-class MAJOR: ledger_update.py's own independent check
+    (enrich_converged_fields, ledger_update.py:499-502) refuses a
+    convergence write when the current draft's sha1 no longer matches the
+    reviewer's recorded draft_sha1 -- correctly: it means the draft was
+    edited out-of-band since this (clean) review was written, and the
+    review's own verdict no longer applies to what is on disk now. Without
+    a branch that detects this and re-dispatches a review,
+    derive_next_action() would keep reporting already_converged from the
+    SAME stale review forever, and the write would keep being refused
+    forever -- a live-lock, not a transient failure."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    run_id = "20260101T000000Z"
+    ctx = driver_mod.DispatchContext(
+        dirs=driver_mod.resolve_dirs(None), run_id=run_id, translate_cfg=dict(_FIXTURE_TRANSLATE_CFG),
+        companion_path=FIXTURE_COMPANION_PATH, durable_root_str=None, plugin_root_str=None,
+        node_bin="node", session_id="test-session",
+    )
+
+    draft = {"seg": "seg01", "blocks": {"p1": "hola"},
+             "dispatch_token": driver_mod.translate_dispatch_token(run_id, "seg01")}
+    (root / "segments" / "seg01.draft.json").write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
+
+    # A CLEAN review recorded against a draft_sha1 that does NOT match the
+    # draft actually on disk -- simulating an out-of-band edit after this
+    # review was written.
+    review = {
+        "clean": True, "coverage_ok": True, "findings": [],
+        "draft_sha1": "0" * 40,
+        "dispatch_token": driver_mod.review_dispatch_token(run_id, "seg01", "1"),
+    }
+    (root / "segments" / "seg01.review.json").write_text(json.dumps(review, ensure_ascii=False), encoding="utf-8")
+
+    action = driver_mod.derive_next_action("seg01", ctx)
+    assert action == {"action": "review", "round_label": "1"}, (
+        f"a clean review stale against the current draft must trigger a fresh "
+        f"re-review, never already_converged (ledger_update.py would refuse "
+        f"that write and this would repeat forever) -- got {action}"
+    )
+
+    # And the live-lock is actually broken: process_segment() re-dispatches,
+    # the fake codex_job.py writes a review with the CURRENT (matching)
+    # sha1, and the segment converges for real on this same call.
+    result = driver_mod.process_segment("seg01", ctx)
+    assert result == {"seg": "seg01", "converged": True}, result
+
+
+# ===========================================================================
+# codex #392-class (tests): derive_next_action() IS the driver's state
+# machine, and it had no direct test at all before this -- every branch was
+# exercised only incidentally through happy-path end-to-end runs. One
+# direct test per branch, writing durable state by hand and asserting the
+# EXACT returned action dict -- items 1 and 5 above already cover
+# already_converged and the clean-but-stale re-review branch; this section
+# covers the rest.
+# ===========================================================================
+
+_DNA_RUN_ID = "20260101T000000Z"
+
+
+def _dna_setup(root):
+    """Common setup for the derive_next_action() branch tests below: a
+    fully staged Phase 2 fixture, a driver module loaded from IT (never the
+    module-level DRIVER, see _load_fixture_driver()'s own docstring), and a
+    DispatchContext at max_fix_rounds=2 (rounds "1", "2", then "final")."""
+    driver_mod = _load_fixture_driver(root)
+    ctx = driver_mod.DispatchContext(
+        dirs=driver_mod.resolve_dirs(None), run_id=_DNA_RUN_ID, translate_cfg=dict(_FIXTURE_TRANSLATE_CFG),
+        companion_path=FIXTURE_COMPANION_PATH, durable_root_str=None, plugin_root_str=None,
+        node_bin="node", session_id="test-session",
+    )
+    return driver_mod, ctx
+
+
+def _dna_write_draft(root, driver_mod, run_id=_DNA_RUN_ID, seg="seg01"):
+    draft = {"seg": seg, "blocks": {"p1": "hola"}, "dispatch_token": driver_mod.translate_dispatch_token(run_id, seg)}
+    (root / "segments" / f"{seg}.draft.json").write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
+    return draft
+
+
+def _dna_write_review(root, driver_mod, *, round_label, clean, coverage_ok, draft_sha1,
+                       findings=None, run_id=_DNA_RUN_ID, seg="seg01"):
+    review = {
+        "clean": clean, "coverage_ok": coverage_ok, "findings": findings or [],
+        "draft_sha1": draft_sha1,
+        "dispatch_token": driver_mod.review_dispatch_token(run_id, seg, round_label),
+    }
+    (root / "segments" / f"{seg}.review.json").write_text(json.dumps(review, ensure_ascii=False), encoding="utf-8")
+    return review
+
+
+def test_derive_next_action_translate_when_no_draft_exists(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "translate"}
+
+
+def test_derive_next_action_review_round_1_when_draft_ready_but_no_review_yet(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "1"}
+
+
+def test_derive_next_action_review_round_1_when_review_token_matches_no_candidate_round(tmp_path):
+    """A review.json present but belonging to a DIFFERENT run (stale token,
+    e.g. left over from before a resume) -- treated exactly like "no review
+    yet", matching select_segments.py's own "unrecognized -> recoverable"
+    default, never a crash or a wrong-round match."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    (root / "segments" / "seg01.review.json").write_text(
+        json.dumps({"clean": True, "coverage_ok": True, "findings": [], "draft_sha1": "irrelevant",
+                    "dispatch_token": "SOME-OTHER-RUN:seg01:r1"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "1"}
+
+
+def test_derive_next_action_already_converged_round_1_when_clean_and_draft_matches(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label="1", clean=True, coverage_ok=True, draft_sha1=draft_sha1)
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "already_converged", "round_label": "1"}
+
+
+def test_derive_next_action_needs_fix_when_not_clean_and_draft_unchanged(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    findings = [{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}]
+    _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True,
+                       draft_sha1=draft_sha1, findings=findings)
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "needs_fix", "round_label": "1", "findings": findings,
+    }
+
+
+def test_derive_next_action_advances_to_round_2_when_not_clean_but_fix_already_applied(tmp_path):
+    """A not-clean round-1 review whose recorded draft_sha1 no longer
+    matches the current draft: the fix has already landed since this
+    review, so the next action is a FRESH round-2 review, never needs_fix
+    again (that would re-dispatch a fix over content already fixed)."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True, draft_sha1="0" * 40)
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "2"}
+
+
+def test_derive_next_action_cap_reached_when_final_round_not_clean(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    findings = [{"loc": "p1:1", "severity": "minor", "issue": "x", "suggest": "y"}]
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=draft_sha1, findings=findings)
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "cap_reached", "findings": findings}
+
+
+def test_derive_next_action_already_converged_on_final_round(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label="final", clean=True, coverage_ok=True, draft_sha1=draft_sha1)
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "already_converged", "round_label": "final"}
+
+
+def test_derive_next_action_re_reviews_instead_of_needs_fix_on_a_fabricated_loc(tmp_path):
+    """codex #392 round-2 item 8 (MAJOR): review.schema.json types
+    findings[].loc as a bare string with no pattern -- a reviewer that died
+    mid-judgment can emit a structurally-valid, PROMOTED review whose
+    finding content is semantically empty (team lead's own example: loc:
+    "TASK" instead of a real block_id/FN:n/VERSE:vid reference). Without
+    the ported findingsAuthentic()/matchedVerdict() gate, this would have
+    gone straight to needs_fix and handed an empty finding to
+    render_fix_prompt() -- a real content edit dispatched over nothing."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    fabricated = [{"loc": "TASK", "severity": "major", "issue": "x", "suggest": "y"}]
+    _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True,
+                       draft_sha1=draft_sha1, findings=fabricated)
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "1"}
+
+
+# ===========================================================================
+# codex #392 round-2 item 9: type holes pyright caught. A None round_label
+# reaching review_dispatch_token()'s f-string would not crash -- it would
+# silently build "<run_id>:<seg>:rNone", a token no real round label can
+# ever match, orphaning that dispatch. Fixed by making run_one_codex_job()
+# refuse explicitly rather than build the broken token.
+# ===========================================================================
+
+
+def test_run_one_codex_job_refuses_a_missing_round_label_for_kind_review(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    with pytest.raises(driver_mod.DriverError) as exc_info:
+        driver_mod.run_one_codex_job(ctx, kind="review", seg="seg01")  # round_label omitted
+    assert "round_label is required" in str(exc_info.value)
+
+    # And no orphaned task-file/dispatch ever happened -- the refusal is
+    # BEFORE any codex_job.py invocation, not a wasted one.
+    assert not list((root / "segments").glob(".codex_task.review.seg01.*"))
+    assert not (root / "test_fixture_argv_log.jsonl").is_file()
+
+
+def test_verse_policy_instruction_block_refuses_a_missing_mode(tmp_path):
+    """Same class of hole in verse_policy_instruction_block(): a malformed
+    verse_policy dict with no (or a non-string) 'mode' key must fatal
+    explicitly, never silently reach a dict lookup keyed by None/non-str."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, _ctx = _dna_setup(root)
+    with pytest.raises(driver_mod.DriverError) as exc_info:
+        driver_mod.verse_policy_instruction_block({})  # no 'mode' key at all
+    assert "unknown verse_policy.mode" in str(exc_info.value)
+
+
+# ===========================================================================
+# codex #392 round-2 item 10: best-effort orphan cancellation on
+# dispatch_codex_job()'s own backstop-timeout path. NOT a state-corruption
+# fix (that half of the original report was refuted by research: an orphan
+# that later completes writes into a leaked sandbox tempdir nothing ever
+# reads again) -- this closes wasted spend, mirroring codex_job.py's own
+# hygiene() shape (codex_job.py:681-717): query/cancel with the joblog's
+# own recorded jobCwd, never durable_root.
+# ===========================================================================
+
+FAKE_COMPANION_CANCEL_RECORDER = """#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+record_path = Path(__file__).resolve().parent / "cancel_record.json"
+record_path.write_text(json.dumps({"argv": sys.argv[1:]}), encoding="utf-8")
+sys.exit(0)
+"""
+
+
+def _write_fake_companion(tmp_path):
+    path = tmp_path / "fake_companion.py"
+    path.write_text(FAKE_COMPANION_CANCEL_RECORDER, encoding="utf-8")
+    return path
+
+
+def _write_joblog(root, joblog_seg, **fields):
+    joblog_path = root / "segments" / f".codex_job.{joblog_seg}.json"
+    joblog_path.write_text(json.dumps(fields, ensure_ascii=False), encoding="utf-8")
+    return joblog_path
+
+
+def test_attempt_cancel_orphan_calls_the_companion_with_the_recorded_job_cwd(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    companion = _write_fake_companion(tmp_path)
+    _write_joblog(root, "seg01", jobId="job-abc123", kind="translate", seg="seg01",
+                  disp="mydisp", status="launched", jobCwd="/some/sandbox/path")
+
+    DRIVER._attempt_cancel_orphan(
+        durable_root=root, seg="seg01", disp="mydisp",
+        companion_path=str(companion), node_bin=sys.executable,
+    )
+
+    record = json.loads((tmp_path / "cancel_record.json").read_text(encoding="utf-8"))
+    assert record["argv"] == ["cancel", "job-abc123", "--cwd", "/some/sandbox/path"], (
+        "must cancel with the joblog's own recorded jobCwd, never durable_root -- "
+        "the companion's job store is keyed by that exact cwd (codex_job.py's own "
+        "hygiene() docstring)"
+    )
+
+
+def test_attempt_cancel_orphan_does_nothing_when_joblog_status_is_not_launched(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    companion = _write_fake_companion(tmp_path)
+    _write_joblog(root, "seg01", jobId="job-abc123", kind="translate", seg="seg01",
+                  disp="mydisp", status="terminal", jobCwd="/some/sandbox/path")
+
+    DRIVER._attempt_cancel_orphan(
+        durable_root=root, seg="seg01", disp="mydisp",
+        companion_path=str(companion), node_bin=sys.executable,
+    )
+    assert not (tmp_path / "cancel_record.json").is_file()
+
+
+def test_attempt_cancel_orphan_does_nothing_on_a_disp_mismatch(tmp_path):
+    """The joblog belongs to a DIFFERENT dispatch (e.g. hygiene() or a
+    later invocation already overwrote it since this one launched) -- must
+    never cancel a job this call did not itself launch."""
+    root = phase2_project(tmp_path, n=1)
+    companion = _write_fake_companion(tmp_path)
+    _write_joblog(root, "seg01", jobId="job-abc123", kind="translate", seg="seg01",
+                  disp="some-other-disp", status="launched", jobCwd="/some/sandbox/path")
+
+    DRIVER._attempt_cancel_orphan(
+        durable_root=root, seg="seg01", disp="mydisp",
+        companion_path=str(companion), node_bin=sys.executable,
+    )
+    assert not (tmp_path / "cancel_record.json").is_file()
+
+
+def test_attempt_cancel_orphan_does_nothing_when_joblog_is_absent(tmp_path):
+    root = phase2_project(tmp_path, n=1)
+    companion = _write_fake_companion(tmp_path)
+    DRIVER._attempt_cancel_orphan(
+        durable_root=root, seg="seg01", disp="mydisp",
+        companion_path=str(companion), node_bin=sys.executable,
+    )
+    assert not (tmp_path / "cancel_record.json").is_file()
+
+
+def test_dispatch_codex_job_backstop_timeout_attempts_cancel_via_recorded_job_cwd(tmp_path):
+    """End-to-end through dispatch_codex_job() itself (not just the helper
+    in isolation): a real backstop timeout, with a joblog PRE-SEEDED the
+    way codex_job.py's own launch() would have already written it (before
+    poll(), see _attempt_cancel_orphan()'s own docstring), must reach the
+    fake companion with the correct cancel argv."""
+    root = phase2_project(tmp_path, n=1)
+    companion = _write_fake_companion(tmp_path)
+    fake_codex_job = tmp_path / "slow_fake_codex_job.py"
+    fake_codex_job.write_text(FAKE_CODEX_JOB_SRC, encoding="utf-8")
+    marker = tmp_path / "marker.json"
+    _write_joblog(root, "seg01", jobId="job-xyz789", kind="translate", seg="seg01",
+                  disp="thedisp", status="launched", jobCwd="/the/sandbox/dir")
+
+    with pytest.raises(DRIVER.DriverError):
+        DRIVER.dispatch_codex_job(
+            fake_codex_job, [str(marker), "5", "0"], wait_timeout=0.3,
+            cancel_context={
+                "durable_root": root, "seg": "seg01", "disp": "thedisp",
+                "companion_path": str(companion), "node_bin": sys.executable,
+            },
+        )
+
+    record = json.loads((tmp_path / "cancel_record.json").read_text(encoding="utf-8"))
+    assert record["argv"] == ["cancel", "job-xyz789", "--cwd", "/the/sandbox/dir"]
+
+
+# ===========================================================================
+# codex #385-class MAJOR: _codex_job_outcome() has no direct test, and the
+# "outcome":"fail" scenario support the fake codex_job.py already has was
+# never exercised by any test. Two direct unit tests of the pure function
+# (its own two branches), plus one integration test proving the WHOLE
+# dispatch pipeline relays a genuine child-reported reason unchanged (a unit
+# test of the pure function alone would not catch a wiring bug in
+# run_one_codex_job() that never reaches it).
+# ===========================================================================
+
+
+def test_codex_job_outcome_relays_a_genuine_child_reported_reason_unchanged(tmp_path):
+    dispatch_result = {
+        "exit_code": 1,
+        "stdout": json.dumps({
+            "ok": False, "kind": "review", "seg": "seg01", "jobId": "j1",
+            "job_status": "completed", "timed_out": False, "adopted": False,
+            "reason": "validate-failed", "error_detail": "some real detail from codex_job.py",
+        }),
+        "stderr": "",
+    }
+    outcome = DRIVER._codex_job_outcome(dispatch_result)
+    assert outcome["ok"] is False
+    assert outcome["reason"] == "validate-failed"
+    assert outcome["error_detail"] == "some real detail from codex_job.py"
+
+
+def test_codex_job_outcome_falls_back_to_driver_attributed_reason_on_unparseable_stdout(tmp_path):
+    for dispatch_result in (
+        {"exit_code": 2, "stdout": "", "stderr": "codex_job.py crashed before finalize()"},
+        {"exit_code": 2, "stdout": "not json at all", "stderr": "traceback text"},
+        {"exit_code": 2, "stdout": json.dumps({"no_ok_key": True}), "stderr": ""},
+        {"exit_code": 2, "stdout": None, "stderr": "no stdout captured"},
+    ):
+        outcome = DRIVER._codex_job_outcome(dispatch_result)
+        assert outcome["ok"] is False
+        assert outcome["reason"] == "driver-no-parseable-stdout", dispatch_result
+        assert outcome["error_detail"] == (dispatch_result.get("stderr") or None), dispatch_result
+
+
+def test_review_dispatch_relays_a_genuine_codex_job_failure_reason_through_the_full_pipeline(tmp_path):
+    """Same property as the unit test above, but end to end: the fake
+    codex_job.py's own "outcome":"fail" scenario support (previously never
+    invoked by any test) reports a specific reason/error_detail, and the
+    real dispatch pipeline (run_one_codex_job -> dispatch_codex_job ->
+    _codex_job_outcome) must relay it into the segment result unchanged --
+    never "translate-timeout"/"review-timeout" or any other invented label."""
+    root = phase2_project(tmp_path, n=1)
+    write_codex_scenario(root, {
+        "review:seg01": {
+            "outcome": "fail", "reason": "review-artifact-mismatch",
+            "error_detail": "canary detail text seg01",
+        },
+    })
+
+    proc = run_driver(root, timeout=60)
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    results = {r["seg"]: r for r in payload["results"]}
+    assert results["seg01"]["converged"] is False
+    assert results["seg01"]["reason"] == "review-artifact-mismatch", results["seg01"]
+    assert results["seg01"]["error_detail"] == "canary detail text seg01", results["seg01"]
+
+
 # ===========================================================================
 # THE TRUST-CRITICAL EQUIVALENCE TEST. For a given (seg, round), the
 # driver's own codex prompt text and codex_job.py argv must be byte-
 # identical to what mass-translate-wf.template.js's own builders produce --
-# obtained here by EXECUTING those builders (DRIVER.call_template_functions,
-# the same harness the driver itself uses at dispatch time), never by
-# re-authoring them. See this test module's own docstring / the Task 5
-# report for exactly which fields CANNOT be compared byte-for-byte and why
-# (--disp and --prompt-file: each side mints its own fresh nonce/path by
-# design, so those are asserted present and well-formed, never equal).
+# the TEMPLATE side obtained by EXECUTING those builders
+# (DRIVER.call_template_functions, the same harness the driver itself uses
+# at dispatch time), never by re-authoring them.
+#
+# codex #387-class BLOCKER, fixed here: the DRIVER side is now OBSERVED, not
+# predicted. The fake codex_job.py records its own raw sys.argv to
+# test_fixture_argv_log.jsonl (see FAKE_CODEX_JOB_PHASE2_PY above) the
+# instant it starts -- these tests read THAT recording, never a second call
+# to build_codex_job_argv() after the fact. A bug that drops or misroutes a
+# flag between building the argv and spawning the child is exactly the class
+# this project already burned a session on (see verification-and-runtime-
+# traps); calling the same builder function twice cannot catch it, only
+# observing the actual dispatch can.
+#
+# Parametrized over plugin_root/model so neither equality is vacuous: the
+# "default" case leaves both empty (--plugin-root/--model both OMITTED, the
+# common path), "plugin_root_and_model" sets BOTH non-empty -- --plugin-root
+# is the #412 trust boundary and asserting its equality only when it's always
+# absent from both sides proves nothing about it ever being forwarded
+# correctly.
 # ===========================================================================
 
 FIXTURE_COMPANION_PATH = "/fake/codex-companion.mjs"  # matches FAKE_RESOLVE_CODEX_COMPANION_PY's fixed output
+FIXTURE_MODEL_VALUE = "gpt-5-codex-fixture"
+_DISP_WELL_FORMED_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,127}")  # mirrors codex_job.py's own _DISP_RE
 
 
-def _fixture_template_subst(root, run_id, plugin_root=""):
+def _profile_yaml_with_model(model_value):
+    if not model_value:
+        return FULL_PROFILE_YAML
+    assert "  effort: high\n" in FULL_PROFILE_YAML
+    return FULL_PROFILE_YAML.replace("  effort: high\n", f"  effort: high\n  model: {model_value}\n")
+
+
+def _fixture_template_subst(root, run_id, plugin_root="", model=""):
     """The exact subst shape _template_subst() builds inside the driver,
     reconstructed independently here from FULL_PROFILE_YAML's own known
     values -- an INDEPENDENT reconstruction (not calling the driver's own
@@ -1333,7 +2008,7 @@ def _fixture_template_subst(root, run_id, plugin_root=""):
         "batch_agent_cap": 10000,
         "max_codex_jobs_per_batch": 400,
         "effort": "high",
-        "model": "",
+        "model": model,
         "verse_policy_instruction_block": DRIVER.verse_policy_instruction_block({"mode": "skip"}),
         "companion_path": FIXTURE_COMPANION_PATH,
         "plugin_root": plugin_root,
@@ -1372,22 +2047,46 @@ def _as_flag_dict(tokens):
     return d
 
 
-def test_translate_dispatch_byte_equivalence_to_template(tmp_path):
+def read_recorded_argv(root, kind, seg):
+    """The REAL argv codex_job.py's own process observed, straight from
+    sys.argv -- never predicted. See FAKE_CODEX_JOB_PHASE2_PY's own argv-log
+    write for what's recorded."""
+    log_path = root / "test_fixture_argv_log.jsonl"
+    assert log_path.is_file(), f"no argv log at {log_path} -- codex_job.py was never dispatched"
+    entries = [json.loads(ln) for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    matches = [e["argv"] for e in entries if e["kind"] == kind and e["seg"] == seg]
+    assert len(matches) == 1, f"expected exactly one {kind}:{seg} dispatch in the argv log, got {len(matches)}: {matches}"
+    return matches[0]
+
+
+@pytest.mark.parametrize(
+    "with_plugin_root,model_value",
+    [(False, ""), (True, FIXTURE_MODEL_VALUE)],
+    ids=["default", "plugin_root_and_model"],
+)
+def test_translate_dispatch_byte_equivalence_to_template(tmp_path, with_plugin_root, model_value):
     """Task-file content (translatePrompt) AND codex_job.py argv
     (translateDrivePrompt) for a real translate dispatch, compared against
-    an INDEPENDENT execution of the real template's own builders."""
-    root = phase2_project(tmp_path, n=1)
-    proc = run_driver(root, timeout=60)
-    payload = parse_stdout(proc)
+    an INDEPENDENT execution of the real template's own builders. The argv
+    used for the DRIVER side is the RECORDED argv the child actually
+    received (read_recorded_argv()), never a second call to
+    build_codex_job_argv()."""
+    root = phase2_project(tmp_path, n=1, profile_yaml=_profile_yaml_with_model(model_value))
+    plugin_root_str = str(make_trusted_plugin_root(tmp_path)) if with_plugin_root else None
+    extra_args = ["--plugin-root", plugin_root_str] if plugin_root_str else []
+
+    proc = run_driver(root, *extra_args, timeout=60)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
     run_id = payload["run_id"]
 
     task_files = list((root / "segments").glob(".codex_task.translate.seg01.*"))
     assert len(task_files) == 1, task_files
     written_text = task_files[0].read_text(encoding="utf-8")
 
-    dirs = DRIVER.resolve_dirs(str(root))
-    subst = _fixture_template_subst(root, run_id)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None, plugin_root_str)
+    subst = _fixture_template_subst(root, run_id, plugin_root=plugin_root_str or "", model=model_value)
     out = DRIVER.call_template_functions(
         dirs, subst,
         [
@@ -1398,23 +2097,27 @@ def test_translate_dispatch_byte_equivalence_to_template(tmp_path):
     assert written_text == out["text"], "driver's task-file content diverges from translatePrompt(seg)'s own output"
 
     template_flags = _as_flag_dict(_extract_nohup_argv(out["cmd"], "translate"))
-    driver_flags = _as_flag_dict(DRIVER.build_codex_job_argv(
-        kind="translate", seg="seg01", companion_path=FIXTURE_COMPANION_PATH, durable_root=root,
-        prompt_file=task_files[0], expect_token=DRIVER.translate_dispatch_token(run_id, "seg01"),
-        disp="fixturedisp", deadline_sec=DRIVER.CODEX_DEADLINE_SEC, effort="high", model="",
-        plugin_root_str=None,
-    ))
+    driver_flags = _as_flag_dict(read_recorded_argv(root, "translate", "seg01"))
+
+    if model_value:
+        assert driver_flags.get("--model") == model_value, driver_flags
+    if plugin_root_str:
+        assert driver_flags.get("--plugin-root") == plugin_root_str, driver_flags
 
     # --disp and --prompt-file are the two fields that CANNOT be compared
     # byte-for-byte: the template's own shell text carries them as
     # UNEXPANDED shell variable references ($DISP/$TASKFILE, minted by the
     # dispatcher's own uuidgen/heredoc at RUNTIME), while this driver mints
     # its own fresh uuid4 disp and writes its own task-file path. Both sides
-    # are asserted PRESENT (the template names the flag at all) and this
-    # driver's own values are asserted well-formed; only presence, never
-    # equality, is checked for these two.
+    # are asserted PRESENT; this driver's own RECORDED values are asserted
+    # well-formed for real, not merely claimed to be.
     assert "--disp" in template_flags and "--disp" in driver_flags
     assert "--prompt-file" in template_flags and "--prompt-file" in driver_flags
+    assert _DISP_WELL_FORMED_RE.fullmatch(driver_flags["--disp"]), driver_flags["--disp"]
+    prompt_file_path = Path(driver_flags["--prompt-file"])
+    assert prompt_file_path.is_file(), driver_flags["--prompt-file"]
+    assert prompt_file_path == task_files[0], (prompt_file_path, task_files[0])
+    assert prompt_file_path.read_text(encoding="utf-8") == out["text"]
     for flag in ("--disp", "--prompt-file"):
         del template_flags[flag]
         del driver_flags[flag]
@@ -1425,23 +2128,32 @@ def test_translate_dispatch_byte_equivalence_to_template(tmp_path):
     )
 
 
-def test_review_dispatch_byte_equivalence_to_template(tmp_path):
+@pytest.mark.parametrize(
+    "with_plugin_root,model_value",
+    [(False, ""), (True, FIXTURE_MODEL_VALUE)],
+    ids=["default", "plugin_root_and_model"],
+)
+def test_review_dispatch_byte_equivalence_to_template(tmp_path, with_plugin_root, model_value):
     """Same equivalence proof as the translate test above, for the review
     round this same real run dispatched (round label "1", since a single
     not_started segment converges in one round against the fake
     codex_job.py's always-clean verdict)."""
-    root = phase2_project(tmp_path, n=1)
-    proc = run_driver(root, timeout=60)
-    payload = parse_stdout(proc)
+    root = phase2_project(tmp_path, n=1, profile_yaml=_profile_yaml_with_model(model_value))
+    plugin_root_str = str(make_trusted_plugin_root(tmp_path)) if with_plugin_root else None
+    extra_args = ["--plugin-root", plugin_root_str] if plugin_root_str else []
+
+    proc = run_driver(root, *extra_args, timeout=60)
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
     run_id = payload["run_id"]
 
     task_files = list((root / "segments").glob(".codex_task.review.seg01.*"))
     assert len(task_files) == 1, task_files
     written_text = task_files[0].read_text(encoding="utf-8")
 
-    dirs = DRIVER.resolve_dirs(str(root))
-    subst = _fixture_template_subst(root, run_id)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None, plugin_root_str)
+    subst = _fixture_template_subst(root, run_id, plugin_root=plugin_root_str or "", model=model_value)
     out = DRIVER.call_template_functions(
         dirs, subst,
         [
@@ -1452,15 +2164,20 @@ def test_review_dispatch_byte_equivalence_to_template(tmp_path):
     assert written_text == out["text"], "driver's task-file content diverges from reviewDispatchPrompt(seg, round)'s own output"
 
     template_flags = _as_flag_dict(_extract_nohup_argv(out["cmd"], "review"))
-    driver_flags = _as_flag_dict(DRIVER.build_codex_job_argv(
-        kind="review", seg="seg01", companion_path=FIXTURE_COMPANION_PATH, durable_root=root,
-        prompt_file=task_files[0], expect_token=DRIVER.review_dispatch_token(run_id, "seg01", "1"),
-        disp="fixturedisp", deadline_sec=DRIVER.CODEX_DEADLINE_SEC, effort="high", model="",
-        plugin_root_str=None,
-    ))
+    driver_flags = _as_flag_dict(read_recorded_argv(root, "review", "seg01"))
+
+    if model_value:
+        assert driver_flags.get("--model") == model_value, driver_flags
+    if plugin_root_str:
+        assert driver_flags.get("--plugin-root") == plugin_root_str, driver_flags
 
     assert "--disp" in template_flags and "--disp" in driver_flags
     assert "--prompt-file" in template_flags and "--prompt-file" in driver_flags
+    assert _DISP_WELL_FORMED_RE.fullmatch(driver_flags["--disp"]), driver_flags["--disp"]
+    prompt_file_path = Path(driver_flags["--prompt-file"])
+    assert prompt_file_path.is_file(), driver_flags["--prompt-file"]
+    assert prompt_file_path == task_files[0], (prompt_file_path, task_files[0])
+    assert prompt_file_path.read_text(encoding="utf-8") == out["text"]
     for flag in ("--disp", "--prompt-file"):
         del template_flags[flag]
         del driver_flags[flag]

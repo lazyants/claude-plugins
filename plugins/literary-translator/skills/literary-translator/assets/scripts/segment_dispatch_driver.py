@@ -10,9 +10,14 @@ for every SEGS entry select_segments.py authorizes: resolves the
 resume-integrity RUN_ID via resume_setup.py, dispatches a translate
 codex_job.py job, then dispatches ONE review round at a time -- reading
 codex prompt text by EXECUTING mass-translate-wf.template.js's own builder
-functions under Node (never a hand-written second copy), reading
-codex_job.py's own reported `reason`/`error_detail` for any failure (never
-inventing one), and driving ledger/cache-key bookkeeping directly through
+functions under Node (never a hand-written second copy), relaying
+codex_job.py's own reported `reason`/`error_detail` for any failure
+UNCHANGED (see `_codex_job_outcome()`'s own docstring for the one narrow
+exception: when the child produced no parseable stdout at all -- a genuine
+invocation-level anomaly, not a codex_job.py-reported outcome -- this
+driver attributes a `driver-`-prefixed reason to ITSELF, honestly labeled
+by that prefix as its own, rather than inventing a codex_job.py-shaped one
+in its place), and driving ledger/cache-key bookkeeping directly through
 ledger_update.py/cache_key.py (no agent() indirection -- this mechanical
 bookkeeping never needed judgment, only a shell call, which is exactly
 what this driver has natively).
@@ -349,8 +354,18 @@ _PHASE2_SIBLING_SCRIPTS = (
     "cache_key.py",
     "draft_ready.py",
     "validate_draft.py",
-    "review_ready.py",
 )
+# review_ready.py deliberately NOT here (codex, round 2): the canonical
+# segments/{seg}.review.json this driver reads is ALREADY validated by
+# review_ready.py before it is ever written -- codex_job.py runs it
+# internally as part of its own validate-before-promote flow -- so a
+# second, driver-side call would re-check an artifact review_ready.py
+# already gated, with no round-matching benefit of its own (this driver
+# still has to try each candidate --expect-token itself, in
+# derive_next_action(), to learn WHICH round is recorded -- a single
+# review_ready.py call only answers yes/no for ONE token, never "which").
+# A prior release resolved this sibling and staged a fixture for it
+# without ever calling it -- deleted rather than wired in.
 _TEMPLATE_NAME = "mass-translate-wf.template.js"
 
 
@@ -362,7 +377,7 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
     SIBLING SCRIPTS this script shells out to / Popens (select_segments.py,
     codex_job.py, and -- Phase 2 -- resume_setup.py, resolve_codex_companion.py,
     ledger_update.py, cache_key.py, draft_ready.py, validate_draft.py,
-    review_ready.py, plus the mass-translate-wf.template.js TEMPLATE this
+    plus the mass-translate-wf.template.js TEMPLATE this
     script reads to obtain codex prompt text) are resolved from --
     deliberately NEVER derived from `durable_root_str`, for the identical
     tampered-copy reason select_segments.py's own `resolve_dirs()` states.
@@ -420,8 +435,8 @@ def _root_forward_args(dirs: dict, durable_root_str, plugin_root_str, *, support
     ledger_update.py, cache_key.py, resolve_codex_companion.py -- all
     LEAVES per their own module docstrings) omits --plugin-root from the
     result even when plugin_root_str is set; --durable-root is still
-    forwarded so the leaf reads the right DATA root. select_segments.py,
-    resume_setup.py and review_ready.py accept both (the default).
+    forwarded so the leaf reads the right DATA root. select_segments.py and
+    resume_setup.py accept both (the default).
     codex_job.py is NOT covered by this helper at all -- it accepts
     neither flag on the data side; only the file path Popen'd for it
     changes (see resolve_dirs()).
@@ -472,6 +487,26 @@ def validate_seg(seg):
             f"separators, '..', or shell metacharacters); got {seg!r}."
         )
     return None
+
+
+def _dedupe_segs(segs: list) -> tuple:
+    """(deduped_segs, duplicate_ids) -- order-preserving, first occurrence
+    wins. manifest.schema.json has no uniqueItems on segments[], and
+    select_segments.py's default (non---only-segs) path appends every
+    manifest entry with no dedupe of its own (only the --only-segs path
+    does) -- so a duplicate manifest entry reaches this driver's own SEGS
+    list unfiltered. See run()'s own call site for why this matters:
+    pool.map() driving the same segment on two worker threads at once."""
+    seen = set()
+    deduped = []
+    duplicates = []
+    for seg in segs:
+        if seg in seen:
+            duplicates.append(seg)
+            continue
+        seen.add(seg)
+        deduped.append(seg)
+    return deduped, duplicates
 
 
 # ---------------------------------------------------------------------------
@@ -762,7 +797,67 @@ def run_select_segments(
 # ---------------------------------------------------------------------------
 
 
-def dispatch_codex_job(codex_job_script: Path, job_args: list, *, wait_timeout: float, **popen_kwargs):
+def _attempt_cancel_orphan(*, durable_root: Path, seg: str, disp: str, companion_path: str, node_bin: str) -> None:
+    """codex round-2 item 10: best-effort orphan cancellation, called ONLY
+    from dispatch_codex_job()'s own backstop-timeout path, right after the
+    SIGKILL+reap. Mirrors codex_job.py's own `hygiene()` method
+    (codex_job.py:681-717) exactly rather than inventing a new shape: the
+    ONLY place to learn where to query/cancel is the joblog's own recorded
+    `jobCwd` -- codex-companion keys its job store by a hash of the
+    git-toplevel-resolved cwd, and codex_job.py's sandbox is a fresh
+    `mkdtemp()` PER INVOCATION, so querying with any other cwd (e.g.
+    `durable_root`) hits a DIFFERENT, unrelated store and returns
+    "No job found" -- the identical string whether the job never existed
+    or the wrong workspace was asked. Do not let that false absence read
+    as "already gone".
+
+    `jobId`/`jobCwd` ARE durable by the time this driver's backstop can
+    realistically fire: codex_job.py's own `launch()` writes both, via an
+    atomic O_EXCL+os.replace, BEFORE `poll()` (codex_job.py:797-802) --
+    `poll()` is the long phase, so the joblog this reads is already
+    written in the overwhelming majority of cases. The one case this
+    genuinely cannot close, stated rather than papered over: if the
+    backstop fires MID-launch(), before that write completes, there is no
+    id to cancel with -- unlikely (the write is local and fast) but not
+    impossible, and this function silently does nothing in that case,
+    which is the correct behavior (there is nothing to act on).
+
+    Cancellation is BEST EFFORT ONLY and proves NEITHER that billing
+    stopped NOR that the process died: companion 1.0.6's own handleCancel
+    writes status:"cancelled" UNCONDITIONALLY after two independent,
+    non-blocking attempts -- an app-server turn/interrupt (gated on live
+    thread/turn ids and a live broker; returns attempted:false when either
+    is missing) and a terminateProcessTree (SIGTERM, not SIGKILL, whose
+    own return value is discarded at its own call site). Never raises --
+    a failed cancel attempt must never turn an already-fatal dispatch into
+    a worse one; this is cleanup on a best-effort path, not a gate."""
+    joblog_path = durable_root / "segments" / f".codex_job.{seg}.json"
+    try:
+        joblog = json.loads(joblog_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(joblog, dict) or joblog.get("status") != "launched":
+        return
+    if joblog.get("disp") != disp:
+        # A DIFFERENT dispatch's record (hygiene() or a later invocation
+        # already overwrote it since this one launched) -- never cancel a
+        # job this call did not itself launch.
+        return
+    job_id = joblog.get("jobId")
+    job_cwd = joblog.get("jobCwd")
+    if not isinstance(job_id, str) or not job_id or not isinstance(job_cwd, str) or not job_cwd:
+        return
+    try:
+        subprocess.run(
+            [node_bin, companion_path, "cancel", job_id, "--cwd", job_cwd],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # best-effort -- see this function's own docstring
+
+
+def dispatch_codex_job(codex_job_script: Path, job_args: list, *, wait_timeout: float,
+                        cancel_context: "dict | None" = None, **popen_kwargs):
     """Launches ONE codex_job.py invocation (`[sys.executable,
     str(codex_job_script), *job_args]`) as a fully detached child --
     `start_new_session=True` (property 2) -- and blocks on
@@ -789,11 +884,14 @@ def dispatch_codex_job(codex_job_script: Path, job_args: list, *, wait_timeout: 
     1 = recoverable failure, 2 = usage/env error) plus whatever text landed
     on each stream (None for a stream the caller redirected away from
     PIPE, e.g. DEVNULL). codex_job.py's own `finalize()` writes its one-line
-    result JSON to stdout UNCONDITIONALLY (even on a lease-loss exit, unlike
-    its terminal joblog file, which is written only when this invocation
-    held the lease) -- so `result["stdout"]` is the PRIMARY, always-present
-    source callers should parse for `reason`/`error_detail`, never a
-    driver-composed summary (see module docstring / Task 5 report).
+    result JSON to stdout UNCONDITIONALLY *when finalize() runs at all* --
+    which makes it the PRIMARY source callers should parse for
+    `reason`/`error_detail` on every NORMAL exit (0/1/2), never a
+    driver-composed summary. That source is NOT present on the backstop-
+    timeout path below: SIGKILL skips codex_job.py's own
+    `finally: finalize()` entirely, so there is no stdout line to read on
+    exactly the one failure this docstring used to describe as "always-
+    present". Corrected here rather than left to overclaim a second time.
 
     Raises DriverError if `communicate(timeout=wait_timeout)` itself
     expires -- codex_job.py has its own internal `--deadline-sec`/finalize
@@ -802,6 +900,25 @@ def dispatch_codex_job(codex_job_script: Path, job_args: list, *, wait_timeout: 
     property 6. On backstop expiry the child (which is in its OWN session,
     so this cannot affect anything else) is SIGKILLed and reaped via a
     second `communicate()` before raising, so no zombie is left behind.
+    If `cancel_context` ({"durable_root", "seg", "disp", "companion_path",
+    "node_bin"}) is given, a best-effort orphan-cancel is attempted first
+    (see `_attempt_cancel_orphan()`'s own docstring for exactly what that
+    can and cannot prove) -- `cancel_context=None` (the default) skips it
+    entirely, e.g. for a caller/test using a `job_args` shape that is not
+    a real codex_job.py invocation.
+
+    What the NEXT reader of this segment's own durable state will find
+    after a backstop timeout -- these absences are EXPECTED on this path,
+    not evidence of a different, separate problem: the joblog wedged at
+    `status: "launched"` forever (or, if this driver's own best-effort
+    cancel above genuinely reached and stopped it, whatever `jobCwd`
+    happened to hold at that instant -- this function never rewrites it);
+    NO fail sentinel for this `disp` (codex_job.py's own
+    `_write_fail_sentinel()` also lives inside the `finally:` block SIGKILL
+    skips); and NO stdout line at all (see this docstring's own correction
+    above) -- so a caller reading `dispatch_result["stdout"]` after this
+    exception was avoided (i.e. after catching this DriverError) gets
+    nothing to parse, by design, not by omission.
     """
     if not codex_job_script.is_file():
         fatal(f"codex_job.py not found at {codex_job_script}")
@@ -821,12 +938,22 @@ def dispatch_codex_job(codex_job_script: Path, job_args: list, *, wait_timeout: 
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.communicate()  # reap -- never leave a zombie behind (kill() only signals)
+        if cancel_context is not None:
+            try:
+                _attempt_cancel_orphan(**cancel_context)
+            except Exception:
+                pass  # best-effort cleanup must never mask the real fatal() below
         fatal(
             f"codex_job.py (pid {proc.pid}) did not terminate within its own "
             f"deadline (backstop wait_timeout={wait_timeout}s exceeded) -- "
             f"killed and reaped. This should not happen if codex_job.py's own "
             f"--deadline-sec/finalize budget is honored; treat as a driver-level "
-            f"failure for this dispatch, not a normal 'not ready yet' outcome.",
+            f"failure for this dispatch, not a normal 'not ready yet' outcome. "
+            f"A best-effort orphan-cancel was attempted if cancel_context was "
+            f"given; it proves neither that billing stopped nor that the "
+            f"process died (see _attempt_cancel_orphan()'s own docstring). No "
+            f"stdout line exists for this dispatch -- codex_job.py's own "
+            f"finalize() never ran.",
         )
 
 
@@ -1017,9 +1144,17 @@ _VERSE_POLICY_INSTRUCTIONS = {
 
 def verse_policy_instruction_block(verse_policy: dict) -> str:
     mode = verse_policy.get("mode")
-    text = _VERSE_POLICY_INSTRUCTIONS.get(mode)
-    if text is None:
+    # Checked as a real precondition (isinstance, not just "in the dict"),
+    # not merely to satisfy the type checker: verse_policy.get("mode") can
+    # genuinely be None (or any other malformed value) for a hand-edited or
+    # corrupted profile.yml, and passing that straight to
+    # _VERSE_POLICY_INSTRUCTIONS.get(mode) -- a dict keyed by str -- would
+    # let a non-str key reach a lookup that assumes str. fatal() is
+    # declared -> NoReturn, so `mode` is narrowed to str for every line
+    # below this guard.
+    if not isinstance(mode, str) or mode not in _VERSE_POLICY_INSTRUCTIONS:
         fatal(f"unknown verse_policy.mode {mode!r} -- not one of {sorted(_VERSE_POLICY_INSTRUCTIONS)}", exit_code=2)
+    text = _VERSE_POLICY_INSTRUCTIONS[mode]
     if mode == "mixed_by_length":
         threshold = verse_policy.get("threshold_lines")
         if not isinstance(threshold, int) or isinstance(threshold, bool):
@@ -1042,36 +1177,85 @@ def verse_policy_instruction_block(verse_policy: dict) -> str:
 _RUN_ID_DIR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
-def _latest_resumable_run_id(runs_dir: Path) -> "str | None":
-    """A candidate `resume_from_run_id` for resolve_run_id() below: the
-    lexicographically-latest (== chronologically latest, since RUN_ID is the
-    colon-free `YYYYMMDDTHHMMSSZ` form) subdirectory of `runs_dir` that
-    LOOKS like a run id (matches resume_setup.py's own RUN_ID_RE) AND
-    carries an `input.digest` file (the one marker that distinguishes a real
-    prior run directory from `ledger.d`, `workflows/`, or any other
-    non-run-id entry `runs/` also holds). Returns None if `runs_dir` does
-    not exist or holds no such directory -- resolve_run_id() then omits
-    `resume_from_run_id` entirely, exactly like a genuinely first-ever run.
+def _manifest_seg_ids(durable_root: Path) -> list:
+    """The FULL candidate segment-id list from manifest.json's segments[] --
+    mirrors select_segments.py's own load_candidate_segments() shape/
+    validation (duplicated, not imported, per this project's "no shared lib
+    between self-contained scripts" convention), but this is NOT a second
+    Step 1 gate: it exists ONLY to give resolve_run_id() below a digest
+    domain that does not shrink as segments converge -- see that function's
+    own docstring for why the ELIGIBLE (post-select_segments.py) list is
+    the wrong thing to hash."""
+    manifest_path = durable_root / "manifest.json"
+    if not manifest_path.is_file():
+        fatal(f"manifest.json not found at {manifest_path}", exit_code=2)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fatal(f"manifest.json at {manifest_path} is not valid JSON: {exc}", exit_code=2)
+    segments = manifest.get("segments") if isinstance(manifest, dict) else None
+    if not isinstance(segments, list) or not segments:
+        fatal(f"manifest.json at {manifest_path} has no non-empty 'segments' array", exit_code=2)
+    ids = []
+    for item in segments:
+        if not (isinstance(item, dict) and isinstance(item.get("seg"), str)):
+            fatal(f"manifest.json: malformed segments[] entry: {item!r}", exit_code=2)
+        seg = item["seg"]
+        problem = validate_seg(seg)
+        if problem is not None:
+            fatal(f"manifest.json: unsafe segment id: {problem}", exit_code=2)
+        ids.append(seg)
+    return ids
 
-    This is the ONLY thing that makes killing and relaunching this driver
-    actually resumable: resume_setup.py's own resolve_run() NEVER resumes
-    on its own initiative -- it only ever resumes a caller-SUPPLIED
-    candidate whose digest matches (see that function's own docstring).
+
+_RESUMABLE_CANDIDATE_LIMIT = 5  # mirrors resume_setup.py's own RUN_ID_RETRY_LIMIT bounded-retry shape
+
+
+def _resumable_run_id_candidates(runs_dir: Path, durable_root: Path, limit: int = _RESUMABLE_CANDIDATE_LIMIT) -> list:
+    """Candidate `resume_from_run_id` values for resolve_run_id() below, most
+    recent first: every subdirectory of `runs_dir` that LOOKS like a run id
+    (matches resume_setup.py's own RUN_ID_RE) AND carries an `input.digest`
+    file (the one marker that distinguishes a real prior run directory from
+    `ledger.d`, `workflows/`, or any other non-run-id entry `runs/` also
+    holds), sorted lexicographically descending (== chronologically, since
+    RUN_ID is the colon-free `YYYYMMDDTHHMMSSZ` form), capped at `limit`.
+
+    #392 (codex, round 2): a SINGLE "latest" candidate is not enough.
+    `{durable_root}/runs/` mixes mass AND glossary run dirs -- both kinds
+    write `input.digest` there via write_run_dir() (resume_setup.py), the
+    glossary tree at `{durable_root}/glossary/runs/<run_id>/` is an
+    ADDITIONAL directory, never a substitute -- so an interrupted mass run
+    at 09:00 followed by any glossary pass at 10:00 means the newest
+    `runs/` entry is the glossary one, which can never match a kind="mass"
+    digest, and the mass run's own genuinely-resumable candidate was never
+    even offered to resolve_run_id() before. Candidates whose id also has a
+    `{durable_root}/glossary/runs/<id>/` sibling are dropped here -- a
+    write_run_dir() call for kind="glossary" ALWAYS creates that directory,
+    unconditionally, so its presence is strong (if not perfectly certain)
+    evidence the candidate is a glossary run and would waste a doomed
+    resume_setup.py round-trip trying it. This is a filter over EXISTING
+    on-disk artifacts, never a re-derivation of compute_input_digest()'s
+    own algorithm -- resume_setup.py's digest comparison remains the ONLY
+    authority on whether resuming any one of these candidates is actually
+    safe; this function only decides which candidates are worth OFFERING
+    to that authority, and in what order.
+
     Never invents a run_id itself, never writes anything -- a pure,
-    read-only directory scan; resume_setup.py's digest comparison remains
-    the ONLY authority on whether resuming this candidate is actually safe."""
+    read-only scan. Returns [] if `runs_dir` does not exist or holds no
+    such directory -- resolve_run_id() then omits `resume_from_run_id`
+    entirely, exactly like a genuinely first-ever run."""
     if not runs_dir.is_dir():
-        return None
+        return []
+    glossary_runs_dir = durable_root / "glossary" / "runs"
     candidates = [
         p.name for p in runs_dir.iterdir()
         if p.is_dir() and _RUN_ID_DIR_RE.fullmatch(p.name) and (p / "input.digest").is_file()
+        and not (glossary_runs_dir / p.name).is_dir()
     ]
-    if not candidates:
-        return None
-    return max(candidates)
+    return sorted(candidates, reverse=True)[:limit]
 
 
-def resolve_run_id(dirs: dict, *, cli_args: dict, segs: list, translate_cfg: dict,
+def resolve_run_id(dirs: dict, *, translate_cfg: dict,
                     plugin_root_str, durable_root_str) -> dict:
     """Builds the exact payload shape resume_setup.py's own module docstring
     documents (kind="mass", args, subst, plugin_root, segs), writes it to a
@@ -1081,19 +1265,60 @@ def resolve_run_id(dirs: dict, *, cli_args: dict, segs: list, translate_cfg: dic
     payload verbatim on success; raises DriverError (never a bare traceback)
     on any invocation failure or a `success: false` response.
 
-    `resume_from_run_id` is populated from _latest_resumable_run_id() above,
-    never left None -- omitting it would mean this driver can NEVER resume
-    (resume_setup.py's own resolve_run() only ever resumes a caller-supplied
-    candidate), silently defeating the whole "a driver killed mid-batch must
-    be safely restartable" property on every single relaunch, not just an
-    edge case."""
+    `resume_from_run_id` is tried across EVERY candidate
+    _resumable_run_id_candidates() offers (most recent first), never just
+    the single newest -- see that function's own docstring for why one
+    candidate is not enough (`runs/` mixes mass and glossary run dirs, and
+    the newest entry can be a glossary run that can never match a
+    kind="mass" digest even when an older, genuinely resumable mass run
+    sits right behind it). The first candidate resume_setup.py reports
+    resume=True for wins; if none do, the LAST attempt's own fresh-mint
+    result is used (resolve_run() always returns a valid fresh RUN_ID on a
+    mismatch, regardless of which candidate produced it) -- so a project
+    with zero resumable candidates costs exactly one resume_setup.py call,
+    same as before this fix, and only a genuine multi-candidate situation
+    costs more than one.
+
+    #392 (codex, round 2): `segs` is now the FULL manifest candidate set
+    (_manifest_seg_ids()), never the currently-ELIGIBLE list
+    select_segments.py returns. compute_input_digest() (resume_setup.py:
+    406-471) hashes its `domain` straight from payload["segs"] -- and
+    select_segments.py's own DEFAULT_ELIGIBLE_CATEGORIES excludes `reusable`
+    (already-converged) segments, so the eligible list SHRINKS by exactly
+    one entry every time a segment converges. Passing that shrinking list
+    here meant every single convergence minted a brand-new digest -> a
+    brand-new RUN_ID -> every dispatch_token already on disk (including a
+    fix JUST applied by hand) stopped matching -> derive_next_action()
+    returned "translate" for everything, discarding the fix and
+    re-translating from scratch, repeating on every subsequent invocation.
+    The full manifest set does not shrink as segments converge (a
+    segment's OWN cache_key does not change just because ITS ledger status
+    did), so the digest now stays stable across exactly the case the whole
+    resumability story exists to survive; it still changes, correctly, if
+    the manifest itself changes (a real W2/W3 re-run) or any segment's
+    cache_key does (a real profile/source/derivation change).
+
+    `args` is now always `{}` for kind="mass" -- for the SAME shrinking-
+    domain reason, one level up: this driver's own CLI scoping flags
+    (--only-segs/--allow-retranslate-converged/--allow-empty) used to be
+    hashed here as payload["args"] (resume_setup.py:466), and an
+    orchestrating session narrowing --only-segs between invocations as
+    segments converge (the natural thing to do) broke resume the identical
+    way, independently of the segs fix above. These flags govern Step 1's
+    OWN gating (select_segments.py, already run and already enforced
+    before resolve_run_id() is ever called) -- they do not change what any
+    already-promoted per-segment artifact MEANS, so they have no business
+    gating whether this run's digest matches a prior one. Every input that
+    genuinely SHOULD invalidate resume (engine config, verse policy,
+    language pair, the plugin/orchestration bundle hashes, each segment's
+    own cache_key) is still fully covered by `subst`/`domain`/`version`."""
     script = dirs["resume_setup_script"]
     if not script.is_file():
         fatal(f"resume_setup.py not found at {script}", exit_code=2)
 
-    payload = {
+    base_payload = {
         "kind": "mass",
-        "args": cli_args,
+        "args": {},
         "subst": {
             "research_mode": translate_cfg["research_mode"],
             "verse_policy": translate_cfg["verse_policy"],
@@ -1106,10 +1331,33 @@ def resolve_run_id(dirs: dict, *, cli_args: dict, segs: list, translate_cfg: dic
             "citation_content_types": translate_cfg["citation_content_types"],
         },
         "plugin_root": plugin_root_str or "",
-        "resume_from_run_id": _latest_resumable_run_id(dirs["runs_dir"]),
-        "segs": segs,
+        "segs": _manifest_seg_ids(dirs["durable_root"]),
     }
 
+    # candidates is never empty (the "or [None]" fallback guarantees a
+    # first element), and `result` is assigned from that first, guaranteed
+    # element BEFORE the loop over the rest -- never starting as None --
+    # so this function provably always returns a dict, not dict | None.
+    candidates = _resumable_run_id_candidates(dirs["runs_dir"], dirs["durable_root"]) or [None]
+    result = _call_resume_setup(
+        script, dict(base_payload, resume_from_run_id=candidates[0]), dirs, durable_root_str, plugin_root_str,
+    )
+    for candidate in candidates[1:]:
+        if result.get("resume") is True:
+            break
+        result = _call_resume_setup(
+            script, dict(base_payload, resume_from_run_id=candidate), dirs, durable_root_str, plugin_root_str,
+        )
+    return result
+
+
+def _call_resume_setup(script: Path, payload: dict, dirs: dict, durable_root_str, plugin_root_str) -> dict:
+    """ONE resume_setup.py --payload-file invocation for the given payload.
+    Raises DriverError on a genuine invocation failure (bad output, or
+    resume_setup.py's own `success: false`, e.g. a malformed manifest) --
+    never on a mere digest MISMATCH, which resume_setup.py itself reports
+    as `success: true, resume: false` (a valid, expected outcome, not an
+    error)."""
     with tempfile.TemporaryDirectory(prefix="ltdriver.resume.") as tmpdir:
         payload_path = Path(tmpdir) / "payload.json"
         payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -1142,7 +1390,14 @@ def resolve_run_id(dirs: dict, *, cli_args: dict, segs: list, translate_cfg: dic
 # ---------------------------------------------------------------------------
 
 
-def resolve_companion_path(dirs: dict, *, durable_root_str, node_bin: str) -> str:
+def resolve_companion_path(dirs: dict, *, node_bin: str) -> str:
+    """No `durable_root_str` parameter -- a prior version accepted and
+    silently ignored one (dead: the `--durable-root` value actually passed
+    below always came from `dirs["durable_root"]`, which resolve_dirs()
+    already resolved from that same string). A parameter nothing reads is
+    the same "sets something nothing reads" shape as a test patching an
+    attribute nothing checks -- removed rather than left to invite a
+    caller into believing it does something."""
     script = dirs["resolve_codex_companion_script"]
     if not script.is_file():
         fatal(f"resolve_codex_companion.py not found at {script}", exit_code=2)
@@ -1216,6 +1471,7 @@ TEMPLATE_EXPORTED_FUNCTIONS = (
     "translatePrompt", "translateDrivePrompt",
     "reviewDispatchPrompt", "reviewDrivePrompt",
     "fixPrompt", "parseDisp",
+    "matchedVerdict",  # codex round 2, item 8 -- the fabricated-finding gate, see derive_next_action()
 )
 
 # The template substitutes each token in one of three shapes -- see
@@ -1345,7 +1601,24 @@ def call_template_functions(dirs: dict, subst: dict, calls: list, node_bin: str 
     template's text. `args`/`log`/`agent`/`pipeline` are stubbed as
     harmless globals before the dynamic import (agent()/pipeline() throw if
     ever reached; they must not be, since the pipeline()-invoking tail is
-    truncated away before this source is written)."""
+    truncated away before this source is written).
+
+    STANDING TRAP (codex, round 2): `globalThis.args = "[]"` makes SEGS
+    ALWAYS EMPTY (`const SEGS = Array.isArray(args) ? args : JSON.parse(
+    args);`, template.js:494) -- and the truncation marker
+    (_TRUNCATE_BEFORE_MARKER) sits well AFTER that line, so this harness
+    DOES execute the template's own top-level SEGS guards (the duplicate-id
+    `seen`-set check at template.js:536-541, and the SEG_ID_RE safety loop
+    at template.js:513-518) on every call. They run, and they look like
+    coverage -- but against an always-empty SEGS they are zero-iteration
+    loops: they can never fire, on any input, ever, under this harness.
+    This is NOT a one-time bug to fix; it is a property of this
+    architecture that will stay true for any FUTURE guard added to that
+    same top-level block. Do not treat those guards as tested by anything
+    that runs through this function. (This is exactly why this driver's
+    own SEGS-facing checks -- validate_seg()'s --only-segs loop in run(),
+    _dedupe_segs() -- are separate, independent code, never delegated to
+    "the template already checks this.")"""
     template_path = dirs["template_script"]
     if not template_path.is_file():
         fatal(f"mass-translate-wf.template.js not found at {template_path}", exit_code=2)
@@ -1595,7 +1868,7 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
       {"action": "review", "round_label": "1".."<max_fix_rounds>"|"final"}
       {"action": "needs_fix", "round_label": ..., "findings": [...]}
       {"action": "cap_reached", "findings": [...]}
-      {"action": "already_converged"}
+      {"action": "already_converged", "round_label": "1".."<max_fix_rounds>"|"final"}
     """
     dirs = ctx.dirs
     durable_root = dirs["durable_root"]
@@ -1635,32 +1908,105 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         # select_segments.py's own "unrecognized -> recoverable" default).
         return {"action": "review", "round_label": "1"}
 
+    # #392 round-2 item 8: the fabricated-finding gate, PORTED (never
+    # transcribed) from the template's own findingsAuthentic()/
+    # matchedVerdict() (mass-translate-wf.template.js:568-581), by
+    # executing them via call_template_functions() -- the same authority
+    # every prompt this driver sends is already sourced from.
+    # review.schema.json types findings[].loc as a bare string with no
+    # pattern, so a reviewer that died mid-judgment can emit a
+    # structurally-valid review (review_ready.py has nothing to reject,
+    # codex_job.py promotes it normally) whose finding content is
+    # semantically empty -- e.g. loc: "TASK" instead of a real
+    # block_id/FN:n/VERSE:vid reference. Reading review.json directly with
+    # no LLM in this driver's OWN read path closes ARTIFACT AUTHENTICITY
+    # (tampering, forgery, an agent misreporting what it read) -- that is
+    # why this driver never needs an equivalent of the template's own
+    # verifyReviewArtifactPrompt/review_artifact_check.py double-check.
+    # It says nothing about a LEGITIMATELY promoted artifact carrying a
+    # semantically empty finding -- a different property, and nothing else
+    # in this driver caught it before this check existed.
+    verdict = call_template_functions(
+        ctx.dirs, _template_subst(ctx),
+        [{"key": "verdict", "fn": "matchedVerdict", "args": [review_obj]}],
+    )["verdict"]
+    if verdict.get("status") != "ok":
+        # Mirrors the template's own runRound() handling of a "blocked"
+        # getVerifiedReview verdict: never terminal, never a ledger write,
+        # never routed through needs_fix (a fabricated finding has nothing
+        # real to apply -- dispatching a fix over it would edit a real
+        # draft on the strength of an empty judgment). Unlike the
+        # Workflow -- which relies on a WHOLE NEW run's translateStage to
+        # eventually retry -- this driver's own draft is still valid, so
+        # only a fresh review at the SAME round label is needed, never a
+        # re-translate.
+        return {"action": "review", "round_label": matched_round_label}
+
     clean = review_obj.get("clean") is True
     coverage_ok = review_obj.get("coverage_ok") is True
-    if clean and coverage_ok:
-        return {"action": "already_converged"}
 
-    if matched_round_label == "final":
-        return {"action": "cap_reached", "findings": review_obj.get("findings") or []}
-
-    # Not clean, not the mandatory final round -- a fix is needed before the
-    # NEXT review round can be dispatched. Distinguish "still awaiting that
-    # fix" from "fix already applied" the same primitive-reuse way
+    # Distinguish "still awaiting a fix" / "genuinely converged" from "this
+    # review's own verdict no longer applies" the same primitive-reuse way
     # review_ready.py/draft_sha1.py already tie review<->draft together:
     # compare the CURRENT draft's content sha1 against what THIS review
-    # recorded at review time. Any ambiguity (can't compute either sha1)
-    # stays conservative -- report needs_fix rather than silently advancing.
+    # recorded at review time. Computed once, used by both branches below.
     reviewed_sha1 = review_obj.get("draft_sha1")
     try:
         current_sha1 = current_draft_sha1(seg, segments_dir, dirs["scripts_dir"])
     except DriverError:
         current_sha1 = None
-    if current_sha1 is None or reviewed_sha1 is None or current_sha1 == reviewed_sha1:
+    draft_matches_review = (
+        current_sha1 is not None and reviewed_sha1 is not None and current_sha1 == reviewed_sha1
+    )
+
+    if clean and coverage_ok:
+        if draft_matches_review:
+            # round_label is REQUIRED here, not decoration: the caller needs
+            # it to compute the ledger's own `rounds` field (a real integer,
+            # per mass-translate-wf.template.js's own runRound(),
+            # template.js:1595-1596 -- `rounds: round`, the NUMERIC loop
+            # variable, which equals MAXFIX + 1 on the mandatory final call,
+            # template.js:1757). Without this, a segment that converges on
+            # the FINAL round -- an entirely ordinary outcome -- could never
+            # be told apart from one that converged on a numbered round.
+            return {"action": "already_converged", "round_label": matched_round_label}
+        # codex #392-class MAJOR: a CLEAN review whose draft_sha1 no longer
+        # matches the CURRENT draft (edited out-of-band since this review
+        # was written -- or the sha1 simply could not be recomputed) must
+        # NEVER fall through to already_converged: ledger_update.py's own
+        # independent check (enrich_converged_fields, ledger_update.py:
+        # 499-502) refuses that convergence write outright, and with no
+        # branch that ever re-dispatches a review in that case, every later
+        # invocation would repeat the SAME refused write forever -- a
+        # live-lock, not a transient failure. There is also nothing to FIX
+        # (this review's own findings are empty), so this is never routed
+        # through needs_fix either -- the only correct move is a fresh
+        # review of the current draft, at the SAME round label (a genuine
+        # re-check of what changed, not a new round spent).
+        return {"action": "review", "round_label": matched_round_label}
+
+    if matched_round_label == "final":
+        return {"action": "cap_reached", "findings": review_obj.get("findings") or []}
+
+    # Not clean, not the mandatory final round -- a fix is needed before the
+    # NEXT review round can be dispatched. Any ambiguity (can't compute
+    # either sha1) stays conservative -- report needs_fix rather than
+    # silently advancing.
+    if draft_matches_review or current_sha1 is None or reviewed_sha1 is None:
         return {"action": "needs_fix", "round_label": matched_round_label, "findings": review_obj.get("findings") or []}
 
-    next_round = int(matched_round_label) + 1
-    next_label = "final" if next_round == max_fix_rounds + 1 else str(next_round)
-    return {"action": "review", "round_label": next_label}
+    return {"action": "review", "round_label": _next_round_label(matched_round_label, max_fix_rounds)}
+
+
+def _next_round_label(round_label: str, max_fix_rounds: int) -> str:
+    """The round label immediately after `round_label` -- "final" stays
+    "final" (there is no round beyond the mandatory final one; a fresh
+    re-review of a stale "final" round is dispatched at the SAME label, see
+    derive_next_action()'s clean-but-stale branch)."""
+    if round_label == "final":
+        return "final"
+    next_round = int(round_label) + 1
+    return "final" if next_round == max_fix_rounds + 1 else str(next_round)
 
 
 # ---------------------------------------------------------------------------
@@ -1724,7 +2070,10 @@ def render_fix_prompt(ctx: "DispatchContext", seg: str, round_num: int, review_o
 # ---------------------------------------------------------------------------
 # Phase 2 -- per-segment codex dispatch: builds the prompt/argv, launches
 # codex_job.py (Property 2/6's dispatch_codex_job), and reads the outcome
-# from codex_job.py's OWN stdout line -- never a driver-composed summary.
+# from codex_job.py's OWN stdout line, relayed unchanged -- see
+# _codex_job_outcome()'s own docstring for the one narrow exception (no
+# parseable stdout at all), where this driver attributes a `driver-`
+# prefixed reason to ITSELF rather than inventing a codex_job.py-shaped one.
 # ---------------------------------------------------------------------------
 
 
@@ -1760,19 +2109,33 @@ def _codex_job_outcome(dispatch_result: dict) -> dict:
     }
 
 
-def run_one_codex_job(ctx: "DispatchContext", *, kind: str, seg: str, round_label=None) -> dict:
+def run_one_codex_job(ctx: "DispatchContext", *, kind: str, seg: str, round_label: "str | None" = None) -> dict:
     """Dispatches ONE codex_job.py invocation for `seg` (translate, or one
     review round) and returns codex_job.py's OWN reported outcome (see
     _codex_job_outcome()) plus the {kind, seg, round_label, disp} this
     dispatch used. Writes the task-file, builds the argv via
     build_codex_job_argv(), and blocks via dispatch_codex_job() -- every
-    property (start_new_session, no polling) that primitive already closes."""
+    property (start_new_session, no polling) that primitive already closes.
+
+    round_label is genuinely optional for kind="translate" (there is no
+    round for a translate dispatch) but REQUIRED for kind="review" --
+    render_review_prompt()/review_dispatch_token() both declare it `str`,
+    never `Optional`. Checked explicitly here rather than left implicit:
+    an unchecked None reaching review_dispatch_token()'s f-string would not
+    crash -- it would silently build "<run_id>:<seg>:rNone", a
+    syntactically fine but semantically orphaned token no real round label
+    can ever match, so the resulting review is dispatched, promoted, and
+    then invisible to every future derive_next_action() call -- the exact
+    "a value derived by a lookup that can fail, fed into something that
+    assumes it cannot" class as the `rounds: null` defect fixed earlier."""
     dirs = ctx.dirs
     durable_root = dirs["durable_root"]
     if kind == "translate":
         prompt_text = render_translate_prompt(ctx, seg)
         expect_token = translate_dispatch_token(ctx.run_id, seg)
     else:
+        if round_label is None:
+            fatal(f"internal error: round_label is required for kind={kind!r}, got None", exit_code=2)
         prompt_text = render_review_prompt(ctx, seg, round_label)
         expect_token = review_dispatch_token(ctx.run_id, seg, round_label)
 
@@ -1792,10 +2155,31 @@ def run_one_codex_job(ctx: "DispatchContext", *, kind: str, seg: str, round_labe
         "type": "codex_dispatch_started", "seg": seg, "kind": kind,
         "round_label": round_label, "disp": disp,
     })
-    dispatch_result = dispatch_codex_job(
-        dirs["codex_job_script"], argv, wait_timeout=CODEX_JOB_WAIT_TIMEOUT_SEC,
-    )
-    outcome = _codex_job_outcome(dispatch_result)
+    # codex #392-class BLOCKER: dispatch_codex_job() calls fatal() (raises
+    # DriverError) on its own backstop-timeout path and on a missing
+    # codex_job.py script -- BOTH left uncaught here would propagate through
+    # process_segment() -> pool.map() -> run(), discarding every OTHER
+    # segment's already-completed result and reporting the whole batch a
+    # failure over ONE segment's overrun. Every other per-segment failure in
+    # this file is carefully returned as an outcome, never raised past its
+    # own segment's boundary -- this is the one path that broke that
+    # discipline. Caught here and reshaped into the SAME outcome shape
+    # _codex_job_outcome() produces, so process_segment()'s existing
+    # `if not result["ok"]:` handling needs no changes at all.
+    try:
+        dispatch_result = dispatch_codex_job(
+            dirs["codex_job_script"], argv, wait_timeout=CODEX_JOB_WAIT_TIMEOUT_SEC,
+            cancel_context={
+                "durable_root": durable_root, "seg": seg, "disp": disp,
+                "companion_path": ctx.companion_path, "node_bin": ctx.node_bin,
+            },
+        )
+        outcome = _codex_job_outcome(dispatch_result)
+    except DriverError as exc:
+        outcome = {
+            "ok": False, "reason": "driver-dispatch-error", "error_detail": str(exc),
+            "job_status": None, "adopted": None,
+        }
     append_journal(durable_root, ctx.session_id, {
         "type": "codex_dispatch_finished", "seg": seg, "kind": kind,
         "round_label": round_label, "disp": disp, **outcome,
@@ -1866,10 +2250,13 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
         if action["action"] == "already_converged":
             # A review already landed clean+coverage_ok but the convergence
             # ledger write may not have (a prior driver could have died
-            # between the two) -- record it now, mechanically.
-            review_obj = _read_review_obj(ctx, seg)
+            # between the two) -- record it now, mechanically. `rounds` is
+            # computed from the round_label derive_next_action() just
+            # reported (see _ledger_rounds_value()'s own docstring), never
+            # re-parsed from the review's own dispatch_token string.
+            rounds = _ledger_rounds_value(action["round_label"], ctx.translate_cfg["max_fix_rounds"])
             rec = write_ledger(
-                ctx.dirs, seg, {"status": "converged", "rounds": _round_number(review_obj.get("dispatch_token"))},
+                ctx.dirs, seg, {"status": "converged", "rounds": rounds},
                 run_id=ctx.run_id, needs_cache_key=True,
                 durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
             )
@@ -1923,17 +2310,32 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
     }
 
 
-def _round_number(dispatch_token) -> "int | None":
-    """Best-effort extraction of the trailing round digit from a review
-    dispatch_token (RUN_ID:seg:rN form) for the ledger's own `rounds`
-    field -- purely cosmetic (ledger_update.py does not require it), never
-    load-bearing for any gate."""
-    if not isinstance(dispatch_token, str):
-        return None
-    tail = dispatch_token.rsplit(":r", 1)
-    if len(tail) != 2 or not tail[1].isdigit():
-        return None
-    return int(tail[1])
+def _ledger_rounds_value(round_label: str, max_fix_rounds: int) -> int:
+    """The ledger's own `rounds` field for a converged write -- a REQUIRED
+    plain integer, per ledger-record-base.schema.json:15 (`"rounds":
+    {"type": "integer"}`) and that same schema's allOf block (:78-86),
+    which requires `rounds` outright whenever `status == "converged"`.
+    `null` satisfies neither.
+
+    Mirrors mass-translate-wf.template.js's own runRound(seg, round,
+    isFinal) exactly (template.js:1574): `recordLedgerCall(seg, {status:
+    "converged", rounds: round, ...})` (template.js:1595-1596) always
+    writes the NUMERIC loop variable `round`, never a value derived from
+    the "final" round LABEL -- and on the mandatory final call that
+    variable is `MAXFIX + 1` (`runRound(seg, MAXFIX + 1, true)`,
+    template.js:1757). So round_label == "final" -> max_fix_rounds + 1;
+    every other round_label is already the decimal round number as a
+    string and converts directly. This REPLACES the former
+    `_round_number()`, which parsed the trailing digit out of a
+    dispatch_token string and returned None for a "...:rfinal" token --
+    silently writing `rounds: null` on every final-round convergence, a
+    write ledger_update.py/its schema then rejects twice over. Never call
+    this with a round_label this function cannot classify; the caller
+    (derive_next_action()) is the sole source of round_label values, and
+    every one it produces is either "final" or a decimal string."""
+    if round_label == "final":
+        return max_fix_rounds + 1
+    return int(round_label)
 
 
 # ---------------------------------------------------------------------------
@@ -2011,7 +2413,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "to resolve every sibling script this script shells out to/"
             "Popens (select_segments.py, codex_job.py, resume_setup.py, "
             "resolve_codex_companion.py, ledger_update.py, cache_key.py, "
-            "draft_ready.py, validate_draft.py, review_ready.py) and the "
+            "draft_ready.py, validate_draft.py) and the "
             "mass-translate-wf.template.js template it reads for codex "
             "prompt text, as {PATH}/assets/scripts/<name>.py / "
             "{PATH}/assets/templates/<name>.js -- deliberately NEVER derived "
@@ -2083,6 +2485,25 @@ def run(args, dirs: dict) -> dict:
         segs = select_result.get("segs")
         if not isinstance(segs, list):
             fatal("select_segments.py's JSON output has no 'segs' array", exit_code=2)
+        segs, duplicate_segs = _dedupe_segs(segs)
+        if duplicate_segs:
+            # #392 (codex, round 2): manifest.json's segments[] carries no
+            # uniqueItems constraint (manifest.schema.json), and
+            # select_segments.py's default (non---only-segs) manifest path
+            # appends every entry with no dedupe of its own -- unlike the
+            # mass-translate-wf.template.js Workflow template, which refuses
+            # a duplicate outright with an explicit `seen` set (template.js:
+            # 536-541). Without this, pool.map() would drive the SAME
+            # segment on two worker threads at once: two codex_job.py
+            # dispatches racing for the same per-segment flock lease, two
+            # ledger writes, two entries in the argv/journal log -- silent
+            # duplicate work, never a crash. Deduped here (first occurrence
+            # wins, order preserved) rather than in select_segments.py
+            # itself, which this dispatch does not own.
+            append_journal(
+                durable_root, session_id,
+                {"type": "duplicate_segs_dropped", "duplicates": duplicate_segs},
+            )
         append_journal(
             durable_root, session_id,
             {"type": "step1_gate_passed", "segs": segs, "counts": select_result.get("counts")},
@@ -2123,13 +2544,7 @@ def run(args, dirs: dict) -> dict:
 
         translate_cfg = load_translate_config(durable_root)
         run_result = resolve_run_id(
-            dirs,
-            cli_args={
-                "only_segs": args.only_segs,
-                "allow_retranslate_converged": args.allow_retranslate_converged,
-                "allow_empty": args.allow_empty,
-            },
-            segs=segs, translate_cfg=translate_cfg,
+            dirs, translate_cfg=translate_cfg,
             plugin_root_str=args.plugin_root, durable_root_str=args.durable_root,
         )
         run_id = run_result["effectiveRunId"]
@@ -2138,9 +2553,7 @@ def run(args, dirs: dict) -> dict:
             {"type": "run_id_resolved", "run_id": run_id, "resume": run_result.get("resume")},
         )
 
-        companion_path = resolve_companion_path(
-            dirs, durable_root_str=args.durable_root, node_bin=args.node,
-        )
+        companion_path = resolve_companion_path(dirs, node_bin=args.node)
 
         ctx = DispatchContext(
             dirs=dirs, run_id=run_id, translate_cfg=translate_cfg, companion_path=companion_path,
