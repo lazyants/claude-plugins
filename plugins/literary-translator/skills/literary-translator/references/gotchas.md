@@ -151,8 +151,24 @@ running. Both are needed; neither substitutes for the other.
 - `--durable-root PATH` governs **data** — `manifest.json`, `segments/`,
   `schemas/`, `runs/`, `canon.json`.
 - `--plugin-root PATH` governs **where sibling scripts are resolved from**;
-  a sibling becomes `{plugin_root}/assets/scripts/<name>.py`, and the flag
-  is forwarded verbatim down any further subordinate call.
+  a sibling becomes `{plugin_root}/assets/scripts/<name>.py`.
+
+**The two flags do not propagate the same way, and this asymmetry is
+deliberate.** `--durable-root` is forwarded to every subordinate call;
+`--plugin-root` is forwarded only to a subordinate that itself resolves
+further siblings — i.e. only to another of the four scripts above. The
+leaves `cache_key.py`, `draft_sha1.py` and `ledger_update.py` accept the
+data-root override *only*, having no siblings of their own to resolve, so
+passing them `--plugin-root` would simply make the invocation fail.
+(`draft_sha1.py` parses its arguments by hand rather than with argparse, to
+preserve its exact wrong-argc usage/exit-2 behavior.)
+
+One consequence worth knowing before editing a call site: when
+`--plugin-root` is given but `--durable-root` is not, the caller
+*synthesizes* `--durable-root` from its own resolved durable root before
+invoking a leaf. It has to — `--plugin-root` means the leaf no longer
+physically sits under the durable root, so its self-anchoring would
+otherwise resolve against the wrong tree.
 
 Omitting both is byte-identical to the old self-anchored behavior, so this
 is a widening, not a breaking change. Earlier revisions of this file said
