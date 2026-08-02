@@ -246,26 +246,35 @@ EXACTLY the v1.17.0 convention `select_segments.py`/`ledger_merge.py`/
 already establish (see `references/gotchas.md` §4). Not asked for by
 name in this dispatch, but the driver is itself Step-0a-copied (it is a
 `PLUGIN_BUNDLE_MEMBERS` script, see below) and resolves TWO siblings --
-`select_segments.py` (which DOES accept `--plugin-root`) and
-`codex_job.py` (which does NOT yet accept any root-redirect flag at all)
--- from `${durable_root}/scripts/`, the SAME writable-by-codex tree the
-whole `--plugin-root` mechanism exists to route around. Omitting this
-would leave a brand-new, gate-enforcing script with the exact trust gap
-the last several LT-409 hardening rounds closed everywhere else. For
-`select_segments.py`, `--plugin-root` is forwarded verbatim (it accepts
-the flag) together with a synthesized `--durable-root` (this script has
-no `--durable-root` of its own to forward, so what's synthesized is
-always its own resolved durable root -- see `resolve_dirs()`). For
-`codex_job.py` (a leaf with no root-redirect flags of its own),
-`--plugin-root` only changes WHICH FILE this script `Popen`s -- never a
-flag forwarded to it -- but that alone is a real improvement: `codex_job.py`
-resolves ITS OWN sibling gate scripts (`draft_ready.py`, `validate_draft.py`,
-`review_ready.py`) relative to wherever ITS OWN `__file__` sits, so
-launching the `{plugin_root}/assets/scripts/codex_job.py` copy transitively
-moves codex_job.py's own gate resolution onto the trusted plugin tree too,
-with no change to codex_job.py itself. `--durable-root` for the
-DATA side (`runs/.driver.lock`, `runs/<session>/`) is likewise optional,
-self-anchored by default, matching every other v1.17.0-hardened script.
+`select_segments.py` and `codex_job.py` -- from `${durable_root}/scripts/`,
+the SAME writable-by-codex tree the whole `--plugin-root` mechanism exists
+to route around. Omitting this would leave a brand-new, gate-enforcing
+script with the exact trust gap the last several LT-409 hardening rounds
+closed everywhere else. For `select_segments.py`, `--plugin-root` is
+forwarded verbatim (it accepts the flag) together with a synthesized
+`--durable-root` (this script has no `--durable-root` of its own to
+forward, so what's synthesized is always its own resolved durable root --
+see `resolve_dirs()`).
+
+codex round-3 correction: two claims used to stand here about `codex_job.py`
+-- that `--plugin-root` "only changes WHICH FILE this script Popens, never
+a flag forwarded to it", and (in `_root_forward_args()`'s own docstring)
+that `codex_job.py` "accepts neither flag on the data side". Both were
+false, and the first one directly contradicted `build_codex_job_argv()`'s
+OWN docstring in this same file, which already listed `[--plugin-root]`
+among the flags it splices. Verified against the shipped `codex_job.py`:
+it DOES accept `--plugin-root` (`codex_job.py:1050`) -- `build_codex_job_argv()`
+forwards it whenever `plugin_root_str` is set (below, in the argv-building
+section) -- and consumes it in `_trusted_scripts_dir()` (`codex_job.py:327-336`),
+which returns `{plugin_root}/assets/scripts/` directly when given and falls
+back to its own `__file__`-relative `SCRIPTS_DIR` only when it is absent.
+"Accepts neither flag" is HALF right, not simply backwards: `codex_job.py`
+accepts `--plugin-root` but NOT `--durable-root` -- for the DATA side it
+takes a required `--cwd` instead (`codex_job.py:1030`), which this driver
+already forwards as `str(durable_root)` in every dispatch (build_codex_job_argv()'s
+own `--cwd` argument), matching every other v1.17.0-hardened script's
+self-anchored-unless-redirected shape without needing a second, redundant
+root flag on this particular leaf.
 
 ## Bundle registration
 
@@ -432,14 +441,31 @@ def _root_forward_args(dirs: dict, durable_root_str, plugin_root_str, *, support
     relocated and would otherwise self-anchor against the wrong tree.
 
     `supports_plugin_root=False` (draft_ready.py, validate_draft.py,
-    ledger_update.py, cache_key.py, resolve_codex_companion.py -- all
-    LEAVES per their own module docstrings) omits --plugin-root from the
-    result even when plugin_root_str is set; --durable-root is still
-    forwarded so the leaf reads the right DATA root. select_segments.py and
-    resume_setup.py accept both (the default).
-    codex_job.py is NOT covered by this helper at all -- it accepts
-    neither flag on the data side; only the file path Popen'd for it
-    changes (see resolve_dirs()).
+    ledger_update.py, cache_key.py -- all LEAVES per their own module
+    docstrings) omits --plugin-root from the result even when
+    plugin_root_str is set; --durable-root is still forwarded so the leaf
+    reads the right DATA root. select_segments.py and resume_setup.py
+    accept both (the default).
+    codex_job.py is NOT covered by this helper at all -- build_codex_job_argv()
+    hand-builds its own --plugin-root handling inline rather than calling
+    this function. codex round-3 correction: this used to also claim
+    codex_job.py "accepts neither flag on the data side" -- false, and
+    HALF backwards, not simply reversed: codex_job.py DOES accept
+    --plugin-root (codex_job.py:1050, forwarded by build_codex_job_argv()
+    whenever plugin_root_str is set) but does NOT accept --durable-root --
+    for the DATA side it takes a required --cwd instead (codex_job.py:1030),
+    which this driver already forwards separately as str(durable_root).
+    The file path Popen'd for it changes too (see resolve_dirs()), but
+    that is in addition to, not instead of, the --plugin-root flag itself
+    changing behavior inside codex_job.py (see the module docstring's own
+    "Beyond the 8 named properties" section for the full correction).
+    resolve_codex_companion.py is ALSO not covered (codex round-3
+    correction -- it used to be listed above, wrongly): resolve_companion_
+    path() below hand-builds its own argv rather than calling this helper,
+    and always forwards --durable-root unconditionally, including in the
+    "both root strings None" self-anchored case where this helper would
+    return []. See that function's own comment for why switching it to
+    this helper would be a real behavior change, not a cleanup.
     """
     args = []
     if durable_root_str is not None:
@@ -467,12 +493,23 @@ def fatal(message: str, exit_code: int = 1, **extra) -> NoReturn:
 
 # ---------------------------------------------------------------------------
 # Segment id safety contract -- duplicated byte-for-byte per this project's
-# "no shared lib between self-contained scripts" convention. This script
-# never builds a path from a segment id directly (it only ever forwards ids
-# to/from select_segments.py, which validates them against manifest.json
-# itself), but --only-segs values are still checked here FIRST so a
-# malformed id is refused before it is ever spliced into the
-# select_segments.py subprocess argv.
+# "no shared lib between self-contained scripts" convention. codex round-3
+# correction: this comment used to claim this script "never builds a path
+# from a segment id directly" -- false, it does, at task_file_path()
+# (durable_root / "segments" / f".codex_task.{kind}.{seg}.{disp}"),
+# derive_next_action()'s own review_path (segments_dir / f"{seg}.review.
+# json"), and _read_review_obj()'s copy of the same. The REAL protection is
+# cross-file, not "this script never does it": select_segments.py's own
+# load_candidate_segments() fatals on any manifest.json `seg` failing its
+# validate_seg() (select_segments.py:764-786, the check at :778-780) --
+# every `seg` this script ever operates on already came from THAT
+# validated output (the `segs` list Step 1's own gate returns), never from
+# an unvalidated source, before this script ever builds a path from one.
+# --only-segs values are still checked here FIRST regardless (validate_seg()
+# below, identical to select_segments.py's own copy), so a malformed id is
+# refused before it is ever spliced into the select_segments.py subprocess
+# argv -- this script's own check is real, it is just not the reason a
+# manifest-sourced seg id is safe to build a path from.
 # ---------------------------------------------------------------------------
 
 _SEG_ID_RE = re.compile(r"(?:FRONTBACK:)?[A-Za-z0-9_]+")
@@ -791,9 +828,12 @@ def run_select_segments(
 
 
 # ---------------------------------------------------------------------------
-# Properties 2 + 6 -- the codex_job.py dispatch primitive. Not yet called by
-# main() below in a per-segment loop (see module docstring); provided and
-# tested as the primitive the next phase wires in.
+# Properties 2 + 6 -- the codex_job.py dispatch primitive. codex round-3:
+# this comment used to say "not yet called by main() below in a per-segment
+# loop", left over from this driver's skeleton phase -- Phase 2 wired it in
+# for real: run_one_codex_job() (below) calls dispatch_codex_job(), and
+# process_segment() calls run_one_codex_job() for both the translate and
+# review dispatch.
 # ---------------------------------------------------------------------------
 
 
@@ -1380,6 +1420,12 @@ def resolve_companion_path(dirs: dict, *, node_bin: str) -> str:
     script = dirs["resolve_codex_companion_script"]
     if not script.is_file():
         fatal(f"resolve_codex_companion.py not found at {script}", exit_code=2)
+    # codex round-3 correction: hand-built rather than routed through
+    # _root_forward_args() -- --durable-root is forwarded UNCONDITIONALLY
+    # here, even in the "both root strings None" self-anchored case, where
+    # that helper returns [] (no flag at all). Switching to the helper
+    # would silently drop this flag in the common case, a real behavior
+    # change, not a cleanup.
     cmd = [sys.executable, str(script), "--durable-root", str(dirs["durable_root"]), "--node", node_bin]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -1841,6 +1887,24 @@ def _run_gate(script: Path, argv_rest: list, ctx: "DispatchContext", *, supports
     return proc.returncode == 0
 
 
+def _matched_review_round_label(review_obj, run_id: str, seg: str, max_fix_rounds: int) -> "str | None":
+    """The round_label `review_obj`'s own `dispatch_token` matches for
+    THIS run+seg (rounds 1..max_fix_rounds, then the mandatory "final"),
+    or None if it belongs to a different run/round shape -- absent,
+    malformed, or a stale token left over from a prior run/round. Shared
+    by derive_next_action()'s own review-reading branch and its
+    post-fix-invalid-draft discriminator (codex round-3 MAJOR) below, both
+    of which need the identical "is this review genuinely evidence about
+    THIS run" check -- a review from an unrelated run must never be read
+    as proof that a fix was applied in this one."""
+    token = review_obj.get("dispatch_token") if isinstance(review_obj, dict) else None
+    for n in range(1, max_fix_rounds + 2):
+        label = "final" if n == max_fix_rounds + 1 else str(n)
+        if token == review_dispatch_token(run_id, seg, label):
+            return label
+    return None
+
+
 def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
     """Returns exactly one of:
       {"action": "translate"}
@@ -1853,6 +1917,9 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
       {"action": "needs_fix", "round_label": ..., "findings": [...]}
       {"action": "cap_reached", "findings": [...]}
       {"action": "already_converged", "round_label": "1".."<max_fix_rounds>"|"final"}
+      {"action": "invalid_post_fix_draft"} -- codex round-3 MAJOR, see the
+        `if not draft_ok:` branch below for the full reasoning: an invalid
+        draft is NOT always safe to re-translate.
     """
     dirs = ctx.dirs
     durable_root = dirs["durable_root"]
@@ -1867,6 +1934,69 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         and _run_gate(dirs["validate_draft_script"], [seg], ctx, supports_plugin_root=False)
     )
     if not draft_ok:
+        # codex round-3 MAJOR: an invalid draft used to mean "translate",
+        # unconditionally -- correct for a genuinely fresh/post-translate
+        # invalid draft (nothing has happened to it yet, redo the
+        # translate), but WRONG for a POST-FIX invalid draft: after the
+        # orchestrating session performs a fix turn, if that edit broke
+        # coverage or a placeholder, validate_draft_script fails here --
+        # draft_ready_script's own token check still passes, because
+        # fixPrompt tells the fixer to copy dispatch_token byte for byte,
+        # so validate_draft_script is the sole hinge -- and returning
+        # "translate" unconditionally would discard BOTH the fix AND the
+        # reviewed draft it was applied to, re-translating from scratch
+        # over already-paid-for review work. The same failure MODE as
+        # this branch's own headline BLOCKER (already-completed work
+        # silently discarded and redone), surviving in a different branch
+        # of this same function.
+        #
+        # The discriminator lives in durable state, the same primitive
+        # the "clean but stale" branch below already uses: a review for
+        # THIS run+seg (_matched_review_round_label(), never a stale
+        # token from a different run -- a genuinely fresh translate can
+        # have an UNRELATED review.json on disk too, e.g. after
+        # --allow-retranslate-converged on a previously-converged
+        # segment, and that must NOT be misread as fix evidence) whose
+        # OWN recorded draft_sha1 differs from the CURRENT draft's
+        # content hash means something edited the draft SINCE that
+        # review was written -- and the only thing that ever edits a
+        # draft after a review is the fix turn. current_draft_sha1()
+        # only needs the draft file to be parseable in the shape
+        # draft_content_sha1() expects -- it does not depend on
+        # validate_draft_script's OWN (unrelated) notion of validity, so
+        # it can still be computed here even though draft_ok is False.
+        #
+        # Deliberately NOT re-surfaced as "needs_fix" with the same old
+        # findings: those findings describe the ORIGINAL translation
+        # issues, not "your fix broke draft validity", and _run_gate()
+        # only returns a bool -- validate_draft_script's own specific
+        # complaint is never captured anywhere this function could relay.
+        # Re-issuing stale findings under a NEW, different problem would
+        # mislead the orchestrating session about what actually needs
+        # fixing. Terminating and leaving the segment recoverable (see
+        # process_segment()'s own handling of this action) hands the
+        # decision back honestly instead of guessing at guidance this
+        # function cannot construct correctly.
+        prior_review_path = segments_dir / f"{seg}.review.json"
+        if prior_review_path.is_file():
+            try:
+                prior_review = json.loads(prior_review_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                prior_review = None
+            if isinstance(prior_review, dict) and _matched_review_round_label(
+                prior_review, run_id, seg, max_fix_rounds
+            ) is not None:
+                prior_draft_sha1 = prior_review.get("draft_sha1")
+                try:
+                    current_sha1 = current_draft_sha1(seg, segments_dir, dirs["scripts_dir"])
+                except DriverError:
+                    current_sha1 = None
+                if (
+                    current_sha1 is not None
+                    and prior_draft_sha1 is not None
+                    and current_sha1 != prior_draft_sha1
+                ):
+                    return {"action": "invalid_post_fix_draft"}
         return {"action": "translate"}
 
     review_path = segments_dir / f"{seg}.review.json"
@@ -1879,13 +2009,7 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
     if not isinstance(review_obj, dict):
         return {"action": "review", "round_label": "1"}
 
-    token = review_obj.get("dispatch_token")
-    matched_round_label = None
-    for n in range(1, max_fix_rounds + 2):  # rounds 1..max_fix_rounds, then the mandatory "final"
-        label = "final" if n == max_fix_rounds + 1 else str(n)
-        if token == review_dispatch_token(run_id, seg, label):
-            matched_round_label = label
-            break
+    matched_round_label = _matched_review_round_label(review_obj, run_id, seg, max_fix_rounds)
     if matched_round_label is None:
         # Absent, malformed, or belonging to a different run/round shape --
         # treated exactly like "no review yet" (safe degradation, matches
@@ -1910,9 +2034,19 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
     # It says nothing about a LEGITIMATELY promoted artifact carrying a
     # semantically empty finding -- a different property, and nothing else
     # in this driver caught it before this check existed.
+    #
+    # codex round-3 MAJOR: `node_bin=ctx.node_bin` is REQUIRED here -- the
+    # other three call_template_functions() call sites (render_translate_
+    # prompt()/render_review_prompt()/render_fix_prompt()) all pass it;
+    # this one, until fixed, passed nothing and silently fell back to this
+    # function's own `node_bin: str = "node"` default (bare `node` on
+    # PATH). Under --node pointing at a different interpreter, this gate
+    # would have run against a DIFFERENT node than every prompt render --
+    # or fataled outright if PATH had no `node` at all.
     verdict = call_template_functions(
         ctx.dirs, _template_subst(ctx),
         [{"key": "verdict", "fn": "matchedVerdict", "args": [review_obj]}],
+        node_bin=ctx.node_bin,
     )["verdict"]
     if verdict.get("status") != "ok":
         # Mirrors the template's own runRound() handling of a "blocked"
@@ -2246,6 +2380,39 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               "recoverable" default retries
                                               this segment next invocation.
       outcome="failed", reason=
+        "unexpected-error:<TYPE>"         -- ANY exception raised anywhere
+                                              in this iteration's own body
+                                              (codex round-3 BLOCKER,
+                                              corrected -- see the
+                                              try/except wrapping this
+                                              whole iteration, right below
+                                              the loop's own `for` line,
+                                              for the full enumeration of
+                                              the worker subtree's 13
+                                              known raise sites across 6
+                                              functions, and why this is
+                                              `except Exception`, not a
+                                              narrower `except
+                                              DriverError`: at least one
+                                              real, content-triggerable
+                                              exception in that subtree --
+                                              a poisoned review finding
+                                              carrying a lone Unicode
+                                              surrogate -- is a raw
+                                              UnicodeEncodeError, never a
+                                              DriverError). `<TYPE>` is
+                                              `type(exc).__name__`;
+                                              `error_detail` is the caught
+                                              exception's own message,
+                                              verbatim -- together they
+                                              carry both without needing a
+                                              second, richer outcome shape
+                                              for every possible cause. NO
+                                              terminal ledger write, same
+                                              recoverable-next-invocation
+                                              story as every other row
+                                              here.
+      outcome="failed", reason=
         "review-fabricated-loc"           -- a fabricated (inauthentic)
                                               finding recurred on the ONE
                                               retry this driver allows (see
@@ -2262,6 +2429,34 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               "recoverable" next invocation
                                               exactly as the template's own
                                               runRound() leaves it.
+      outcome="failed", reason=
+        "invalid-post-fix-draft"          -- codex round-3 MAJOR: the
+                                              draft failed draft_ready_
+                                              script/validate_draft_script
+                                              AFTER a fix turn edited it
+                                              (a review for THIS run+seg
+                                              exists and its OWN recorded
+                                              draft_sha1 differs from the
+                                              current draft's content hash
+                                              -- see derive_next_action()'s
+                                              own `if not draft_ok:`
+                                              branch for the full
+                                              discriminator). Deliberately
+                                              NEVER re-translated (that
+                                              would discard the fix AND
+                                              the reviewed draft it was
+                                              applied to) and NEVER
+                                              re-surfaced as needs_fix
+                                              (the old findings describe a
+                                              different problem, and this
+                                              function has no way to
+                                              relay validate_draft_
+                                              script's OWN specific
+                                              complaint). NO terminal
+                                              ledger write, same
+                                              recoverable-next-invocation
+                                              story as every other row
+                                              here -- a human has to look.
       outcome="failed", reason=
         "loop-exhausted-without-
         terminal-state"                   -- the defensive iteration cap
@@ -2297,88 +2492,190 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
     max_iterations = codex_jobs_per_segment(ctx.translate_cfg["max_fix_rounds"])
     fabricated_loc_retries = 0
     for _ in range(max_iterations):
-        action = derive_next_action(seg, ctx)
+        # codex round-3 BLOCKER, corrected after an initial fix was itself
+        # wrong. The worker subtree below `derive_next_action()` (this
+        # loop's own decision step) reaches 13 fatal()/raise sites across
+        # 6 functions, enumerated by reading every callee, not assumed:
+        # call_template_functions() (missing-template-script :1619,
+        # internal-error-unknown-fn :1625, could-not-run-node :1648,
+        # node-exited-nonzero :1651, node-did-not-print-valid-JSON :1659);
+        # _run_gate() (missing-gate-script :1849, could-not-run-script
+        # :1856, called for both draft_ready_script and
+        # validate_draft_script); template_harness_source()
+        # (truncation-marker-not-found :1573); render_template_source()
+        # (internal-error-unknown-token-style :1532, unresolved-{{TOKEN}}
+        # :1535); verse_policy_instruction_block() (unknown-mode :1166,
+        # missing/invalid-threshold_lines :1171); run_one_codex_job()
+        # (round_label-required-for-review :2162, reached before ITS OWN
+        # narrower try/except below, which only wraps dispatch_codex_job()
+        # specifically).
+        #
+        # An EARLIER version of this fix caught only `except DriverError`
+        # around derive_next_action() alone, on the theory that the
+        # per-segment/transient sites should be caught while the
+        # seemingly-global ones (missing script, malformed verse_policy)
+        # could reasonably keep aborting the whole batch. That theory was
+        # wrong on both axes:
+        #
+        # (1) There is a REAL non-DriverError path. call_template_
+        # functions()'s `runner_path.write_text(runner_src,
+        # encoding="utf-8")` raises a raw UnicodeEncodeError, not a
+        # DriverError, when `runner_src` embeds a lone Unicode surrogate --
+        # measured end to end: review.schema.json types findings[].issue/
+        # suggest as a bare string with no pattern, json.loads() accepts an
+        # UNPAIRED \uD800-shaped escape and decodes it into a Python str
+        # holding a genuine lone surrogate code point (confirmed:
+        # json.loads('{"x":"\\ud800"}') succeeds), review_ready.py has no
+        # pattern to reject it so a review carrying one is promoted
+        # normally, and `call_template_functions()`'s own
+        # `json.dumps(calls, ensure_ascii=False)` re-serializes that
+        # in-memory string WITHOUT escaping it, embedding the raw
+        # surrogate into `runner_src` -- which then fails on
+        # `.write_text(encoding="utf-8")`. `except DriverError` alone
+        # would have let this one specific, real, content-triggerable
+        # exception escape and still discard every other segment's
+        # result -- proven by test_a_poisoned_review_with_a_lone_
+        # surrogate_does_not_discard_other_segments below, and by its own
+        # mutation-proof (narrowing back to `except DriverError` there
+        # turns it red).
+        #
+        # (2) Even for the genuinely GLOBAL sites (a missing gate script
+        # or a malformed verse_policy really is the identical condition
+        # for every segment in this run -- ctx.translate_cfg/ctx.dirs are
+        # built once in run() and never rebuilt per segment), catching is
+        # STRICTLY BETTER than aborting, not merely "arguably correct":
+        # every one of these fires BEFORE that segment's own dispatch, so
+        # letting each segment discover the SAME global condition
+        # independently costs nothing extra (no wasted codex spend), and
+        # with an abort the operator gets one error line and loses the
+        # report for every segment that had ALREADY converged and been
+        # paid for, whereas with catching they get a complete summary
+        # naming the identical reason N times. dispatch_codex_job()'s OWN
+        # existing catch below already applies this exact reasoning to ITS
+        # missing-script case ("codex_job.py not found", itself just as
+        # global) with no preflight in front of it -- this is that same
+        # precedent, generalized rather than selectively half-applied.
+        #
+        # Left uncaught, ANY of the 13 (or any other exception this
+        # worker subtree could ever raise) would propagate through this
+        # loop -> pool.map() -> run(), discarding every OTHER segment's
+        # already-completed result -- the SAME batch-wide-abort class
+        # already fixed for dispatch_codex_job() (see that try/except's
+        # own comment), which this loop body had NOT been covered by
+        # until now, making that comment's "this is the ONE path that
+        # broke that discipline" claim false since the moment this file
+        # shipped both helpers. Fixed here, not by rewording that claim,
+        # so it is accurate again.
+        #
+        # `except Exception`, not a bare `except:` -- KeyboardInterrupt and
+        # SystemExit are NOT Exception subclasses (confirmed:
+        # issubclass(KeyboardInterrupt, Exception) is False, both ARE
+        # BaseException subclasses), so Ctrl-C and a deliberate exit still
+        # propagate through this loop exactly as before; only genuine
+        # per-segment worker failures are absorbed.
+        try:
+            action = derive_next_action(seg, ctx)
 
-        if action["action"] == "already_converged":
-            # A review already landed clean+coverage_ok but the convergence
-            # ledger write may not have (a prior driver could have died
-            # between the two) -- record it now, mechanically. `rounds` is
-            # computed from the round_label derive_next_action() just
-            # reported (see _ledger_rounds_value()'s own docstring), never
-            # re-parsed from the review's own dispatch_token string.
-            rounds = _ledger_rounds_value(action["round_label"], ctx.translate_cfg["max_fix_rounds"])
-            rec = write_ledger(
-                ctx.dirs, seg, {"status": "converged", "rounds": rounds},
-                run_id=ctx.run_id, needs_cache_key=True,
-                durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
-            )
-            if not rec.get("success"):
-                return {"seg": seg, "converged": False, "outcome": "failed",
-                        "reason": "ledger-write-failed", "detail": rec.get("error")}
-            return {"seg": seg, "converged": True, "outcome": "converged"}
-
-        if action["action"] == "cap_reached":
-            rec = write_ledger(
-                ctx.dirs, seg, {"status": "non_converged", "reason": "cap"},
-                durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
-            )
-            if not rec.get("success"):
-                return {"seg": seg, "converged": False, "outcome": "failed",
-                        "reason": "ledger-write-failed", "detail": rec.get("error")}
-            return {"seg": seg, "converged": False, "outcome": "failed",
-                    "reason": "cap", "lastFindings": action.get("findings")}
-
-        if action["action"] == "needs_fix":
-            round_label = action["round_label"]
-            review_obj = _read_review_obj(ctx, seg, fallback_findings=action.get("findings"))
-            fix_prompt = render_fix_prompt(ctx, seg, int(round_label), review_obj)
-            return {
-                "seg": seg, "converged": False, "outcome": "needs_fix", "reason": "needs_fix",
-                "round_label": round_label, "findings": action.get("findings"), "fix_prompt": fix_prompt,
-            }
-
-        if action["action"] == "translate":
-            rec = write_ledger(
-                ctx.dirs, seg, {"status": "in_progress"},
-                durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
-            )
-            if not rec.get("success"):
-                return {"seg": seg, "converged": False, "outcome": "failed",
-                        "reason": "ledger-write-failed", "detail": rec.get("error")}
-            result = run_one_codex_job(ctx, kind="translate", seg=seg)
-            if not result["ok"]:
-                return {"seg": seg, "converged": False, "outcome": "failed", "stage": "translate",
-                         "reason": result["reason"], "error_detail": result["error_detail"]}
-            continue  # re-derive: should now see "review round 1"
-
-        if action["action"] == "review":
-            round_label = action["round_label"]
-            if action.get("cause") == "fabricated_loc":
-                if fabricated_loc_retries >= 1:
-                    # Already retried once -- the reviewer is persistently
-                    # emitting fabricated locs (within its own documented
-                    # latitude, not a fault of its own). Terminate NOW,
-                    # never dispatch a third time: the template's own
-                    # reason, no ledger write (matches runRound()'s own
-                    # "blocked" -> recoverable-next-run handling).
+            if action["action"] == "already_converged":
+                # A review already landed clean+coverage_ok but the convergence
+                # ledger write may not have (a prior driver could have died
+                # between the two) -- record it now, mechanically. `rounds` is
+                # computed from the round_label derive_next_action() just
+                # reported (see _ledger_rounds_value()'s own docstring), never
+                # re-parsed from the review's own dispatch_token string.
+                rounds = _ledger_rounds_value(action["round_label"], ctx.translate_cfg["max_fix_rounds"])
+                rec = write_ledger(
+                    ctx.dirs, seg, {"status": "converged", "rounds": rounds},
+                    run_id=ctx.run_id, needs_cache_key=True,
+                    durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
+                )
+                if not rec.get("success"):
                     return {"seg": seg, "converged": False, "outcome": "failed",
-                            "reason": "review-fabricated-loc"}
-                fabricated_loc_retries += 1
-            result = run_one_codex_job(ctx, kind="review", seg=seg, round_label=round_label)
-            if not result["ok"]:
-                return {"seg": seg, "converged": False, "outcome": "failed", "stage": "review",
-                         "round_label": round_label,
-                         "reason": result["reason"], "error_detail": result["error_detail"]}
-            continue  # re-derive from the freshly promoted canonical review
+                            "reason": "ledger-write-failed", "detail": rec.get("error")}
+                return {"seg": seg, "converged": True, "outcome": "converged"}
 
-        # Still genuinely unreachable: derive_next_action()'s own return
-        # contract (see its docstring) is EXHAUSTIVELY one of the 5 actions
-        # checked above (translate/review/needs_fix/cap_reached/
-        # already_converged) -- nothing in this release added a 6th, so
-        # nothing can reach this line. Unlike the loop-exhaustion fallback
-        # below, this one is not made reachable by anything shipped so far.
-        return {"seg": seg, "converged": None, "outcome": "failed",
-                "reason": f"unknown-action:{action['action']}"}  # pragma: no cover
+            if action["action"] == "cap_reached":
+                rec = write_ledger(
+                    ctx.dirs, seg, {"status": "non_converged", "reason": "cap"},
+                    durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
+                )
+                if not rec.get("success"):
+                    return {"seg": seg, "converged": False, "outcome": "failed",
+                            "reason": "ledger-write-failed", "detail": rec.get("error")}
+                return {"seg": seg, "converged": False, "outcome": "failed",
+                        "reason": "cap", "lastFindings": action.get("findings")}
+
+            if action["action"] == "needs_fix":
+                round_label = action["round_label"]
+                review_obj = _read_review_obj(ctx, seg, fallback_findings=action.get("findings"))
+                fix_prompt = render_fix_prompt(ctx, seg, int(round_label), review_obj)
+                return {
+                    "seg": seg, "converged": False, "outcome": "needs_fix", "reason": "needs_fix",
+                    "round_label": round_label, "findings": action.get("findings"), "fix_prompt": fix_prompt,
+                }
+
+            if action["action"] == "translate":
+                rec = write_ledger(
+                    ctx.dirs, seg, {"status": "in_progress"},
+                    durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
+                )
+                if not rec.get("success"):
+                    return {"seg": seg, "converged": False, "outcome": "failed",
+                            "reason": "ledger-write-failed", "detail": rec.get("error")}
+                result = run_one_codex_job(ctx, kind="translate", seg=seg)
+                if not result["ok"]:
+                    return {"seg": seg, "converged": False, "outcome": "failed", "stage": "translate",
+                             "reason": result["reason"], "error_detail": result["error_detail"]}
+                continue  # re-derive: should now see "review round 1"
+
+            if action["action"] == "review":
+                round_label = action["round_label"]
+                if action.get("cause") == "fabricated_loc":
+                    if fabricated_loc_retries >= 1:
+                        # Already retried once -- the reviewer is persistently
+                        # emitting fabricated locs (within its own documented
+                        # latitude, not a fault of its own). Terminate NOW,
+                        # never dispatch a third time: the template's own
+                        # reason, no ledger write (matches runRound()'s own
+                        # "blocked" -> recoverable-next-run handling).
+                        return {"seg": seg, "converged": False, "outcome": "failed",
+                                "reason": "review-fabricated-loc"}
+                    fabricated_loc_retries += 1
+                result = run_one_codex_job(ctx, kind="review", seg=seg, round_label=round_label)
+                if not result["ok"]:
+                    return {"seg": seg, "converged": False, "outcome": "failed", "stage": "review",
+                             "round_label": round_label,
+                             "reason": result["reason"], "error_detail": result["error_detail"]}
+                continue  # re-derive from the freshly promoted canonical review
+
+            if action["action"] == "invalid_post_fix_draft":
+                # codex round-3 MAJOR: see derive_next_action()'s own
+                # `if not draft_ok:` branch for the full reasoning this
+                # action exists to close. Terminates like every other
+                # infra/environment failure in this function -- NO
+                # terminal ledger write, so the in_progress fragment
+                # already on disk stays the durable record and
+                # select_segments.py's "recoverable" default retries this
+                # segment next invocation -- and deliberately does NOT
+                # re-dispatch anything: re-reviewing an invalid draft is
+                # pointless (there is nothing new to judge), and
+                # re-translating is the exact defect this action exists
+                # to prevent.
+                return {"seg": seg, "converged": False, "outcome": "failed",
+                        "reason": "invalid-post-fix-draft"}
+
+            # Still genuinely unreachable: derive_next_action()'s own return
+            # contract (see its docstring) is EXHAUSTIVELY one of the 6 actions
+            # checked above (translate/review/needs_fix/cap_reached/
+            # already_converged/invalid_post_fix_draft) -- nothing in this
+            # release added a 7th, so nothing can reach this line. Unlike the
+            # loop-exhaustion fallback below, this one is not made reachable
+            # by anything shipped so far.
+            return {"seg": seg, "converged": None, "outcome": "failed",
+                    "reason": f"unknown-action:{action['action']}"}  # pragma: no cover
+        except Exception as exc:
+            return {"seg": seg, "converged": False, "outcome": "failed",
+                    "reason": f"unexpected-error:{type(exc).__name__}", "error_detail": str(exc)}
 
     # Reachable (not purely defensive) -- see this function's own docstring
     # for the "clean but stale" scenario that can drive it: a draft edited
@@ -2421,8 +2718,13 @@ def _ledger_rounds_value(round_label: str, max_fix_rounds: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 -- the concurrency-bounded per-segment loop. See module docstring's
-# "Concurrency" section for the knob choice and its justification.
+# Phase 2 -- the concurrency-bounded per-segment loop. codex round-3: the
+# module docstring has no "Concurrency" section (its `##` headings are Why a
+# local process/Launch contract/The 8 mandatory safety properties/Property 4
+# in detail/Property 7 in detail/What this driver deliberately does NOT
+# implement/Beyond the 8 named properties/Bundle registration/CLI) -- see
+# run_segment_loop()'s own docstring below for the threads-vs-async
+# reasoning behind the knob choice.
 # ---------------------------------------------------------------------------
 
 
@@ -2518,8 +2820,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "never a governed limit): 'pipeline() capped at 8 while codex "
             "job concurrency peaked at 40, producing 38.4 hours of queueing "
             "inside a 2.1-hour run.' This flag makes that same ceiling an "
-            "explicit, overridable knob instead of an accident. See this "
-            "file's own module docstring's 'Concurrency' section."
+            "explicit, overridable knob instead of an accident. See "
+            "run_segment_loop()'s own docstring for the threads-vs-async "
+            "reasoning behind the knob."
         ),
     )
     parser.add_argument(
