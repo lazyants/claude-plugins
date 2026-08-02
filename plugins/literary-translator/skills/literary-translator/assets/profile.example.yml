@@ -159,7 +159,7 @@ engine:
     # ledger-bookkeeping call are both effort:'low' by design.
   # model: gpt-5.3-codex   # optional codex model for W5 translate/review; unset = codex config default
   max_fix_rounds: 4                       # cap before escalating to non_converged / blocked
-  batch_agent_cap: 3500
+  batch_agent_cap: 10000
     # A worst-case agent-call-count ESTIMATE for this batch is computed before dispatch begins -- if the
     # estimate for the given SEGS array would exceed this cap, the run refuses to start, logging the estimate
     # and the offending segment count. Splitting a batch that's too large into smaller ones is the operator's
@@ -168,12 +168,22 @@ engine:
     # call at 600 s, so each of W5's two waits is spent as up to 8 bounded chunks plus one authoritative
     # non-polling re-check -- WAIT_CALLS = 9. Worst case is therefore
     # 1 + N*(8 + 2*WAIT_CALLS + max_fix_rounds*(6 + WAIT_CALLS)) = 1 + N*86 at the shipped max_fix_rounds:4,
-    # up from the pre-#348 1 + N*38. READ THE CONSEQUENCE BEFORE SIZING A BATCH: 3500 now admits at most 40
-    # segments (1 + 40*86 = 3441); 41 segments would need 3527 and the run would refuse to start. A
-    # 40-segment book batch thus sits just under the ceiling, where before #348 the same batch carried
-    # ~2000 calls of margin (1 + 40*38 = 1521). Raising this cap is a deliberate operator decision, not
-    # something to discover mid-run. (The old default of 1000 refused any batch over 26 segments at the
-    # pre-#348 rate -- worse than a full novel needs.)
+    # up from the pre-#348 1 + N*38. READ THE CONSEQUENCE BEFORE SIZING A BATCH: the shipped 10000 admits
+    # at most 116 segments (1 + 116*86 = 9977); 117 would need 10063 and the run would refuse to start.
+    # Raised from 3500 (#409 step 2), which admitted only 40 segments (1 + 40*86 = 3441) -- i.e. an ordinary
+    # book batch sat just under the ceiling, where before #348 the same batch carried ~2000 calls of margin
+    # (1 + 40*38 = 1521). The knob is deliberately EXCLUDED from agent_config_hash (cache_key.py's
+    # compute_agent_config_hash whitelists exactly effort/max_fix_rounds/model, with a dedicated negative
+    # test in ledger_composite_key.test.py), so changing it invalidates NO converged segment. It is a
+    # SUBST_FIELDS member, so it does need one fresh RUN_ID -- a re-dispatch, never a re-translate.
+    # Raising it further is a deliberate operator decision, not something to discover mid-run.
+    #
+    # COUPLING, easy to miss (#402): `CODEX_DEADLINE_SEC` in the workflow template is marked "(tunable)",
+    # but raising it raises WAIT_CALLS, which multiplies straight into the estimate above -- so a longer
+    # deadline SILENTLY SHRINKS how many segments this same cap admits. The two knobs are not independent
+    # even though they live in different files. If a batch starts refusing after you lengthened the
+    # deadline, this is why; the refusal message names the estimate and the cap, but it cannot name the
+    # deadline that moved the estimate.
     # Also read by the W3 glossary-pass preflight and (when enabled) the skeptic pass, reusing this one knob for
     # THREE consumers -- but the glossary estimate is mode-dependent.
     # offline (glossary.research_mode) -- 5*BATCHES.length + 2: basis:"established" is fatal offline,
@@ -182,13 +192,14 @@ engine:
     # template's own shipped MAX_CITATION_RETRIES = 2 and WAIT_CALLS = 3. Substituting those, the live shape
     # spells out as 1 + 6*(MAX_CITATION_RETRIES+1) = 19, which is where an operator re-deriving it should land.
     # Size the cap for the LIVE ladder, or a live run refuses "batch-too-large".
-    # ALL THREE GATES MOVED IN 1.16.2 -- read this table before sizing anything. Max batches at this cap of 3500:
+    # ALL THREE GATES MOVED IN 1.16.2 -- read this table before sizing anything. #409 step 2 then raised the
+    # SHIPPED CAP itself (3500 -> 10000, see above) without touching either formula below, so every max-batch
+    # figure here scales by that same ~2.857x -- recomputed at the current cap of 10000:
     #
-    #   gate                before      after      max batches (3500)
-    #   glossary live       13N+2       19N+2      269 -> 184
-    #   glossary offline     3N+2        5N+2     1166 -> 699
-    #   skeptic (both)       3N+2        5N+2     1166 -> 699
-    #
+    #   gate                before      after      max batches (10000)
+    #   glossary live       13N+2       19N+2       769 -> 526
+    #   glossary offline     3N+2        5N+2      3332 -> 1999
+    #   skeptic (both)       3N+2        5N+2      3332 -> 1999
     # "skeptic (both)" = the Workflow's own preflight AND skeptic_setup.py's independent step-5 assertion; they
     # must move together, since leaving one behind makes one refuse a batch the other admits.
     # The live per-attempt cost rose from 3 to 4 in 1.16.1 (#347): the single agent that both fetched citations
@@ -249,10 +260,13 @@ engine:
     # and a review round's retry path re-reads the artifact codex already wrote rather than dispatching again.
     # At the shipped max_fix_rounds: 4 that is 6 jobs/segment; a batch of N segments needs 6N codex jobs worst
     # case, so the shipped default of 400 admits 66 segments (66*6 = 396).
-    # NOTE, so the two knobs are not mistaken for one envelope: they do NOT bind at the same batch size, and at
-    # every shipped setting batch_agent_cap binds FIRST (its own 3500 default admits 40 segments at
-    # max_fix_rounds:4, well below this knob's 66). This cap is therefore currently redundant; it is here for
-    # the local-driver work where it becomes the only meaningful gate. Splitting a batch that's too large into
+    # NOTE, so the two knobs are not mistaken for one envelope: they do NOT bind at the same batch size, and
+    # WHICH ONE binds first depends on both shipped values, not fixed. #409 step 2 raised batch_agent_cap's
+    # shipped default from 3500 (admitted 40 segments) to 10000 (admits 116, see above) without touching this
+    # knob -- so THIS cap now binds FIRST at every shipped setting (its own 400 default admits 66 segments,
+    # well below batch_agent_cap's 116), the reverse of the pre-#409-step-2 relationship. This cap is
+    # therefore no longer redundant with batch_agent_cap above for an ordinary book in the 67-116 segment
+    # range: it is the gate that actually refuses first. Splitting a batch that's too large into
     # smaller ones is the operator's call, not automated in v1 (same policy as batch_agent_cap).
 
 footnotes:
