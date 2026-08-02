@@ -1,5 +1,97 @@
 # Changelog
 
+## 1.18.0 — 2026-08-03
+
+W5 mass-translate can now be driven by a local out-of-band process instead of from inside agent
+calls. `segment_dispatch_driver.py` resolves the resume RUN_ID, dispatches translate and review
+jobs, reads the artifacts the gates promote, and writes the ledger, with no 600-second per-call
+ceiling to work around.
+
+**It is an OPTIONAL path and `pipeline()` remains W5's default.** It cannot perform the fix step
+— applying review findings is a content-editing LLM turn — so on a not-clean review it returns
+`needs_fix` with the round label, the findings and a rendered fix prompt, and stops. Nothing
+ships that consumes that handoff or watches the driver's redirected log, so today a human or a
+session drives that loop. Do not launch it unattended expecting a batch to complete. `SKILL.md`
+documents the launch contract, including why it must be an ordinary foreground Bash call and
+never `run_in_background`.
+
+### Mandatory before the first W5 on any project this plugin has touched before
+
+This release adds the driver to `PLUGIN_BUNDLE_MEMBERS`, so `plugin_bundle_hash` moves, so every
+already-converged segment's cache key mismatches and reclassifies `stale` — dispatch-eligible
+again. The `.ever_converged` sentinel gate refuses that, and a project that converged its
+segments before the sentinel existed has none, so the gate has nothing to refuse with and the
+first W5 after upgrading would retranslate the whole book.
+
+`backfill_ever_converged.py` shipped in 1.17.0 and nothing instructed anyone to run it. Step 0a
+now carries the instruction. It is a dry run by default and makes zero filesystem writes without
+`--apply`; read `counts.missing_sentinels` to decide whether action is needed.
+
+### Resume identity — a standing property, not a cost of this change
+
+Any upgrade that touches a plugin-bundle script moves `plugin_bundle_hash`, which is one of the
+15 cache-key fields the resume digest's domain is built from — so the first run after upgrading
+always mints a fresh `RUN_ID`, whatever the domain is derived from. A fresh `RUN_ID` orphans the
+dispatch tokens on any not-yet-converged draft, so those segments retranslate. Converged work is
+untouched: reusability is decided by cache key and draft sha1, never by a run id. The moment to
+decide is at `select_segments.py`'s previously-converged refusal, before authorizing past it.
+
+### Fixed
+
+- **The resume story did not work.** `compute_input_digest()` took its `kind="mass"` domain from
+  the caller's `segs`, and `select_segments.py` drops converged segments from that list — so
+  every invocation in which even one segment converged shrank the domain, minted a fresh
+  `RUN_ID`, and orphaned every surviving draft including fixes applied by hand between
+  invocations. It repeated: each invocation discarded the one before it. The domain now comes
+  from `manifest.json` itself, `args` is pinned to `{}` for mass, and resume candidates are
+  offered in the plural so an interrupted run is not hidden behind a newer one.
+- **`--plugin-root ""` silently disabled #412's redirect.** `main()` validated with `is not None`
+  and the constructor tested truthiness; `os.path.realpath("")` is the current directory, so the
+  check passed and the value was then coerced to `None`, falling back to the copy inside the
+  durable root that the codex process these gates police can write. Rejected at usage time now,
+  with both definitions of validity collapsed into one.
+- **A relative `--durable-root` was resolved twice** in six files (seven sites), each forwarding
+  the raw string to a child run with `cwd` already at the resolved root. Every instance reported
+  success while reading the wrong tree. In `final_audit.py` the same shape was a `--plugin-root`
+  divergence instead.
+- **Convergence was recorded when its sentinel could not be written.** `ledger_update.py`
+  discarded `mark_ever_converged()`'s return value, so a segment could be marked converged with
+  nothing to protect it from a later re-selection. The ledger write is now refused; nothing on
+  disk is lost by the refusal.
+- **A `RUN_ID` taken off disk became a filesystem path unchecked** in `select_segments.py`, while
+  its sibling validated the same class of value and refused. Both the traversal and the resulting
+  unclearable wedge are closed.
+- **`backfill_resume_gate_ack.py` could write outside the durable root** through a symlinked
+  `runs/<RUN_ID>` or a symlinked `runs/` parent, and published its marker before an unchecked
+  write completed. Directory opening is now anchored with `dir_fd` and `O_NOFOLLOW`, and the
+  marker is published atomically.
+- **One segment's failure could discard the whole batch.** Thirteen raise sites were reachable
+  from the per-segment loop outside any handler, including a `UnicodeEncodeError` that no
+  `except DriverError` would have caught — a lone surrogate in a findings string is valid JSON,
+  passes `review_ready.py`, and fails on write.
+- Also: an invalid post-fix draft was retranslated from scratch, discarding the fix; a segment
+  could live-lock on a clean-but-stale review; `max_fix_rounds: 0` was accepted against the
+  schema minimum and recreated an unmatchable round token; the fabricated-finding gate ignored
+  `--node`; two `mark_ever_converged()` copies and `append_journal()` let OS errors escape past
+  their own documented failure contracts.
+
+### Known limits
+
+- The driver has never dispatched a real codex job. Every dispatch test uses a fake `codex_job.py`
+  matching the real CLI contract and no more.
+- The `--max-concurrent-codex-jobs` default of 40 is the peak a manual drive was observed to
+  reach; it has not been load-tested.
+- The orphan-cancel path is static analysis plus a status check, never triggered on a live job.
+- Nothing audits what a fix turn wrote outside `segments/<seg>.draft.json`, and `canon.json`
+  tampering is quieter than it looks: `used_terms_hash` covers only the canon entries a segment
+  actually references, so a tampered entry invalidates the cache key of every segment citing it
+  and is **silent for every segment that does not** — an entry no segment references yet changes
+  nothing at all. Source-text exfiltration has no structural mitigation.
+- The driver's project-wide lock excludes a second driver on THIS machine, on a filesystem that
+  enforces `flock`. A durable root on a network mount or a sync-replicated folder can admit a
+  second driver on another machine that this lease cannot see; the driver now self-tests whether
+  `flock` is enforced and warns when it is not, which does not cover the two-machine case.
+
 ## 1.17.0 — 2026-08-02
 
 The scripts that decide whether a codex job's output is acceptable lived inside the directory
