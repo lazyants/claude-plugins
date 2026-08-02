@@ -146,7 +146,13 @@ uses):
   named `node_modules` — so the symlink is *not* ignored and a blanket
   `git add -A` will commit it. Stage only the artifacts you mean to ship with
   `git add <paths>`, listing the chapter, manifest, and screenshot paths
-  explicitly.
+  explicitly — and, when this run's W1 ownership outcome was active, the
+  provenance paths too: `<publish.chapters_dir>/.provenance/run/current.json`
+  (if this run produced one) and
+  `<publish.chapters_dir>/.provenance/chapters/<group>/<slug>.json` for every
+  chapter this run recorded. A skipped run wrote no provenance tree at all —
+  there is nothing under `.provenance/` to stage for it, and staging nothing is
+  correct, not an omission.
 - **Serialize capture across parallel worktrees.** Worktrees share the
   developer's single running dev stack and its port; two captures running at once
   contend for the same app instance and produce non-deterministic shots (guarantee

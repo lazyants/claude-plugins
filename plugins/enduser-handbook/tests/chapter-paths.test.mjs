@@ -38,6 +38,16 @@ import {
   specReferencesDir,
   chapterHasWikilinkTo,
   containerTitleMatches,
+  findMarkdownLinkGroups,
+  stripInertContexts,
+  parseMdLinkDestination,
+  buildEmbedCandidates,
+  isCanonicalAssetKey,
+  expectedAssets,
+  isValidSlugSyntax,
+  findCanonicalPathCollisions,
+  resolvePhysicalContainment,
+  findPhysicalPathCollisions,
 } from '../skills/enduser-handbook/assets/lib/chapter-paths.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -316,7 +326,7 @@ test('F4: an absolute-rooted migration fact/halt path is never silently downgrad
   });
   const old = entry({ group: 'admin', group_title: 'Admin' });
   const next = entry({ group: 'management', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
   assert.equal(findFact(facts, 'current-chapter-path').path, '/vault/handbook/management/items.md');
   assert.equal(findFact(facts, 'old-asset-dir-gone').path, '/vault/handbook/assets/admin/items');
 });
@@ -333,15 +343,30 @@ test('F4: "." and ".." segments normalize through join/dirname (parent-segment c
   assert.equal(chapterAssetDir(p3, entry()), '/assets/items');
 });
 
+// [round 7] Asserts the exact-Error contract chapter-paths.mjs draws between its own guards: the
+// manualMigrationChecklist provenanceActive guard throws TypeError deliberately ("this one reports
+// the argument's own TYPE being wrong"), contrasted with "every other guard in this module" —
+// posixRelative's mixed-rootedness check (line 121) and currentIndexExpectedTarget's three (lines
+// 1773/1779/1784) — which report a malformed VALUE and so throw plain Error. `instanceof Error`
+// alone cannot catch an Error->TypeError mutation (TypeError IS an Error), so this checks the exact
+// constructor rather than the prototype chain.
+function assertPlainErrorThrows(fn, messageRe) {
+  assert.throws(fn, (err) => {
+    assert.strictEqual(err.constructor, Error, `expected a plain Error, got ${err.constructor.name}`);
+    assert.match(err.message, messageRe);
+    return true;
+  });
+}
+
 test('R2-F4: mixed rootedness (one absolute, one relative path) THROWS rather than diffing garbage', () => {
   // An absolute asset dir diffed against a relative chapter file (or vice versa) would silently
   // discard one side's real root and produce a nonsense delta that still LOOKS like a valid
   // relative path — fail loud instead.
-  assert.throws(
+  assertPlainErrorThrows(
     () => embedPath('/vault/handbook/items.md', 'vault/handbook/assets/items', '01.png'),
     /mixed rootedness/,
   );
-  assert.throws(
+  assertPlainErrorThrows(
     () => embedPath('vault/handbook/items.md', '/vault/handbook/assets/items', '01.png'),
     /mixed rootedness/,
   );
@@ -3043,7 +3068,7 @@ test('R2-F5: the halt record renders the TRIMMED title, never the raw padded val
   const p = profile();
   const old = entry({ group: 'a', group_title: '  Admin  ' });
   const next = entry({ group: 'b', group_title: '  Admin  ' });
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
   const changes = [{ kind: 'group-change', slug: 'items', oldEntry: old, newEntry: next }];
   const text = renderManualMigrationHalt(changes, [facts]);
   assert.match(text, /was under container 'Admin'/);
@@ -3336,18 +3361,18 @@ test('§1a codex R2 BLOCKER-1 symlink-subdir topology: a multi-segment precomput
 
 test('§1a fail-loud guard: WIKILINKS mode with vaultRelChaptersDir omitted/null throws (no silent bare-slug fallback)', () => {
   const p = profile({ publish: { wikilinks: true } });
-  assert.throws(() => currentIndexExpectedTarget(p, entry()), /vaultRelChaptersDir is required/);
-  assert.throws(() => currentIndexExpectedTarget(p, entry(), null), /vaultRelChaptersDir is required/);
+  assertPlainErrorThrows(() => currentIndexExpectedTarget(p, entry()), /vaultRelChaptersDir is required/);
+  assertPlainErrorThrows(() => currentIndexExpectedTarget(p, entry(), null), /vaultRelChaptersDir is required/);
 });
 
 test('§1a fail-loud guard: WIKILINKS mode with an ABSOLUTE vaultRelChaptersDir throws', () => {
   const p = profile({ publish: { wikilinks: true } });
-  assert.throws(() => currentIndexExpectedTarget(p, entry(), '/v'), /must be vault-root-relative/);
+  assertPlainErrorThrows(() => currentIndexExpectedTarget(p, entry(), '/v'), /must be vault-root-relative/);
 });
 
 test('§1a fail-loud guard: WIKILINKS mode with a \'..\'-escaping vaultRelChaptersDir throws', () => {
   const p = profile({ publish: { wikilinks: true } });
-  assert.throws(() => currentIndexExpectedTarget(p, entry(), '../x'), /escapes the vault root/);
+  assertPlainErrorThrows(() => currentIndexExpectedTarget(p, entry(), '../x'), /escapes the vault root/);
 });
 
 // =================================================================================================
@@ -3362,7 +3387,7 @@ test('manualMigrationChecklist: retained group-change facts (current path/dir/in
   const p = profile();
   const old = entry({ group: 'admin', group_title: 'Admin' });
   const next = entry({ group: 'management', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   assert.equal(findFact(facts, 'current-chapter-path').path, 'vault/handbook/management/items.md');
   assert.equal(findFact(facts, 'current-asset-dir').path, 'vault/handbook/assets/management/items');
@@ -3392,7 +3417,7 @@ test('#253: manualMigrationChecklist derives each fact from its OWN root — dec
   });
   const old = entry({ group: 'admin', group_title: 'Admin' });
   const next = entry({ group: 'management', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   assert.equal(findFact(facts, 'current-chapter-path').path, 'book/pages/management/items.md');
   assert.equal(findFact(facts, 'current-asset-dir').path, 'shots/management/items');
@@ -3410,7 +3435,7 @@ test('#294 group-slug move, WIKILINK mode: old vault-rel target is expected GONE
   const p = profile({ publish: { wikilinks: true } });
   const old = entry({ group: 'admin', group_title: 'Admin' });
   const next = entry({ group: 'management', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(p, old, next, 'handbook');
+  const facts = manualMigrationChecklist(p, old, next, 'handbook', false);
 
   const oldTarget = findFact(facts, 'old-index-target-gone');
   assert.equal(oldTarget.form, 'wikilink');
@@ -3423,7 +3448,7 @@ test('R9-F5/R12-F2 grouped -> flat retained entry: flat-placement facts, NO titl
   const p = profile();
   const old = entry({ group: 'admin', group_title: 'Admin' });
   const next = entry();
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   assert.equal(findFact(facts, 'current-chapter-path').path, 'vault/handbook/items.md');
   assert.equal(findFact(facts, 'current-asset-dir').path, 'vault/handbook/assets/items');
@@ -3439,7 +3464,7 @@ test('manualMigrationChecklist: title-only change emits ONLY the orthogonal titl
   const p = profile();
   const old = entry({ group: 'admin', group_title: 'Old Title' });
   const next = entry({ group: 'admin', group_title: 'New Title' });
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   assert.deepEqual(facts, [
     { kind: 'title-container', containerTitle: 'New Title', oldContainerTitle: 'Old Title' },
@@ -3449,7 +3474,7 @@ test('manualMigrationChecklist: title-only change emits ONLY the orthogonal titl
 test('manualMigrationChecklist: grouped removal emits old-gone + no-live-sink + no-forbidden-wikilink facts', () => {
   const p = profile();
   const old = entry({ group: 'admin', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(p, old, null);
+  const facts = manualMigrationChecklist(p, old, null, undefined, false);
 
   assert.equal(findFact(facts, 'old-chapter-path-gone').path, 'vault/handbook/admin/items.md');
   assert.equal(findFact(facts, 'old-asset-dir-gone').path, 'vault/handbook/assets/admin/items');
@@ -3465,7 +3490,7 @@ test('manualMigrationChecklist: grouped removal emits old-gone + no-live-sink + 
 test('#294 manualMigrationChecklist: grouped removal in WIKILINK mode carries the vault-rel qualified target + legacyBareTarget', () => {
   const p = profile({ publish: { wikilinks: true } });
   const old = entry({ group: 'admin', group_title: 'Admin' });
-  const facts = manualMigrationChecklist(p, old, null, 'handbook');
+  const facts = manualMigrationChecklist(p, old, null, 'handbook', false);
 
   const oldTarget = findFact(facts, 'old-index-target-gone');
   assert.equal(oldTarget.form, 'wikilink');
@@ -3490,7 +3515,7 @@ test('R11-F3 combined same-entry fixture: group AND title both change => facts U
   const p = profile();
   const old = entry({ group: 'admin', group_title: 'Admin' });
   const next = entry({ group: 'management', group_title: 'Ops' });
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   assert.ok(findFact(facts, 'current-chapter-path'));
   assert.ok(findFact(facts, 'current-asset-dir'));
@@ -3862,7 +3887,7 @@ test('R10-F5/R11-F4 halt-record pin: the rendered halt names every changed entry
     newEntry: null,
   };
   const changes = [changeA, changeB];
-  const checklists = changes.map((c) => manualMigrationChecklist(p, c.oldEntry, c.newEntry));
+  const checklists = changes.map((c) => manualMigrationChecklist(p, c.oldEntry, c.newEntry, undefined, false));
   const text = renderManualMigrationHalt(changes, checklists);
 
   assert.match(text, /^This manifest change requires manual group migration \(not automated in 1\.5\.0\):/);
@@ -3881,7 +3906,7 @@ test('context-free reconstruction (a): a grouped removal record supplies the old
   const p = profile();
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
   const change = { kind: 'removal', slug: 'orders', oldEntry: old, newEntry: null };
-  const facts = manualMigrationChecklist(p, old, null);
+  const facts = manualMigrationChecklist(p, old, null, undefined, false);
   const text = renderManualMigrationHalt([change], [facts]);
 
   const line = text.split('\n').find((l) => l.includes('orders:'));
@@ -3900,7 +3925,7 @@ test('context-free reconstruction (b): a grouped->flat move record is the ONLY s
   assert.equal(next.group_title, undefined, 'the current entry has no title to fall back on');
 
   const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
   const text = renderManualMigrationHalt([change], [facts]);
 
   const line = text.split('\n').find((l) => l.includes('orders:'));
@@ -3912,7 +3937,7 @@ test('context-free reconstruction (c): the scan-failure re-embed preserves the o
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
   const next = entry({ slug: 'orders' });
   const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   const scanFailures = [{ chapter: 'other.md', line: 12, target: 'admin/orders.md' }];
   const text = renderManualMigrationHalt([change], [facts], scanFailures);
@@ -3934,7 +3959,7 @@ test('#255: renderManualMigrationHalt scan-failure header + detail cover ALL tup
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
   const next = entry({ slug: 'orders' });
   const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   const scanFailures = [
     { chapter: 'a.md', line: 3, target: 'admin/orders.md' },
@@ -3957,7 +3982,7 @@ test('renderManualMigrationHalt: an EMPTY scanFailures array uses the normal for
   const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
   const next = entry({ slug: 'orders' });
   const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
-  const facts = manualMigrationChecklist(p, old, next);
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
 
   const text = renderManualMigrationHalt([change], [facts], []);
   assert.match(text, /^This manifest change requires manual group migration/);
@@ -3976,8 +4001,8 @@ test('R10-F4 mixed-domain fixture: a retained change + a grouped removal + a new
   assert.equal(changes[1].slug, 'b');
 
   const p = profile();
-  const factsA = manualMigrationChecklist(p, changes[0].oldEntry, changes[0].newEntry);
-  const factsB = manualMigrationChecklist(p, changes[1].oldEntry, changes[1].newEntry);
+  const factsA = manualMigrationChecklist(p, changes[0].oldEntry, changes[0].newEntry, undefined, false);
+  const factsB = manualMigrationChecklist(p, changes[1].oldEntry, changes[1].newEntry, undefined, false);
   assert.ok(factsA.length > 0);
   assert.ok(factsB.length > 0);
 });
@@ -4385,4 +4410,1069 @@ test(`${PINNED_DEFECT_ACCUMULATION}: a chapter title EDITED between publishes ac
       `generation ${generation} is still in the index`,
     );
   }
+});
+
+// =================================================================================================
+// [1.12.0] Image-destination API — buildEmbedCandidates, isCanonicalAssetKey, expectedAssets.
+// Section order mirrors the plan's own "Extraction" discussion: candidate generation (round-trip +
+// character-subset gates, legacy eligibility) -> isCanonicalAssetKey -> the raw-text
+// completeness-or-halt extractor (recognition, reference forms, raw-HTML/PI/ref-def triggers,
+// inert-context erasure halts, indentation, legacy candidates, keys).
+// =================================================================================================
+
+const GROUPED_CHAPTER_FILE = 'vault/handbook/billing/invoices.md';
+const GROUPED_ENTRY = { slug: 'invoices', group: 'billing', group_title: 'Billing' };
+
+// output_dir sits BESIDE chapters_dir (a sibling, not beneath it) — the shipped worked example for
+// a multi-'../'-climb embed (plan: "chapterFile = vault/docs/handbook/billing/invoices.md with
+// output_dir = vault/assets yields ../../../assets/billing/invoices/shot.png").
+const MULTI_CLIMB_PROFILE = profile({ capture: { output_dir: 'vault/assets' } });
+const MULTI_CLIMB_CHAPTER_FILE = 'vault/docs/handbook/billing/invoices.md';
+
+// output_dir strictly ABOVE chapters_dir (the "parent" row of the shipped divergence table,
+// chapter-paths.test.mjs's own staticEmbedPath new-write table above) — the one layout where the
+// current and legacy embed spellings genuinely DIFFER for a flat entry. A plain sibling layout
+// (output_dir a sibling of chapters_dir, e.g. profile()'s own default) makes the two formulas
+// coincide for a flat entry with no subdirectory nesting, which would make a legacy-eligibility
+// fixture built on it pass vacuously regardless of whether the legacy candidate is actually offered.
+const PARENT_PROFILE = profile({
+  capture: { output_dir: 'vault/handbook' },
+  publish: { chapters_dir: 'vault/handbook/items' },
+});
+const PARENT_CHAPTER_FILE = 'vault/handbook/items/items.md';
+
+function chapterText(...lines) {
+  return lines.join('\n');
+}
+
+// The real, adapter-produced destination string for `filename` under the DEFAULT profile()/entry()
+// /'vault/handbook/items.md' fixture used throughout this section (always 'assets/items/<file>').
+// A bare filename used directly as a markdown destination is never byte-equal to a real candidate,
+// so every fixture below that needs an image to be genuinely LIVE goes through this helper rather
+// than a literal string.
+function dest(filename) {
+  return embedPath('vault/handbook/items.md', chapterAssetDir(profile(), entry()), filename);
+}
+
+// =================================================================================================
+// buildEmbedCandidates
+// =================================================================================================
+
+test('buildEmbedCandidates: flat entry produces the byte-exact current candidate, keyed by the directory entry', () => {
+  const candidates = buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['01-overview.png'], 'obsidian_vault');
+  assert.equal(candidates.get('assets/items/01-overview.png'), '01-overview.png');
+  assert.equal(candidates.size, 1);
+});
+
+test('buildEmbedCandidates: grouped entry candidate begins ../assets/<group>/<slug>/', () => {
+  const candidates = buildEmbedCandidates(profile(), GROUPED_ENTRY, GROUPED_CHAPTER_FILE, ['01-open.png'], 'static_md');
+  assert.equal(candidates.get('../assets/billing/invoices/01-open.png'), '01-open.png');
+});
+
+test('buildEmbedCandidates: multi-climb entry begins ../../../assets/ (output_dir a sibling of chapters_dir, not beneath it)', () => {
+  const candidates = buildEmbedCandidates(MULTI_CLIMB_PROFILE, GROUPED_ENTRY, MULTI_CLIMB_CHAPTER_FILE, ['shot.png'], 'static_md');
+  assert.equal(candidates.get('../../../assets/billing/invoices/shot.png'), 'shot.png');
+});
+
+test('buildEmbedCandidates: subdirectory directory-listing entry sub/a.png produces one candidate, key stays sub/a.png', () => {
+  const candidates = buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['sub/a.png'], 'obsidian_vault');
+  assert.equal(candidates.get('assets/items/sub/a.png'), 'sub/a.png');
+});
+
+test('buildEmbedCandidates: built from the DIRECTORY, not a manifest — every filename gets a candidate regardless of whether anything embeds it', () => {
+  const candidates = buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['a.png', 'b.png', 'c.png'], 'obsidian_vault');
+  assert.equal(candidates.size, 3);
+});
+
+// --- legacy candidate eligibility: all four cases -----------------------------------------------
+
+test('buildEmbedCandidates legacy eligibility 1/4: a genuinely flat static_md entry gets BOTH the current and the legacy spelling, mapped to the SAME key', () => {
+  const candidates = buildEmbedCandidates(PARENT_PROFILE, entry(), PARENT_CHAPTER_FILE, ['01.png'], 'static_md');
+  const current = embedPath(PARENT_CHAPTER_FILE, chapterAssetDir(PARENT_PROFILE, entry()), '01.png');
+  const legacy = legacyStaticEmbedPath(PARENT_CHAPTER_FILE, PARENT_PROFILE.capture.output_dir, entry().slug, '01.png');
+  assert.notEqual(current, legacy, 'the fixture must actually exercise two DISTINCT spellings');
+  assert.equal(candidates.get(current), '01.png');
+  assert.equal(candidates.get(legacy), '01.png');
+});
+
+test('buildEmbedCandidates legacy eligibility 2/4: a DEGENERATE layout (dirname(chapterFile) === outputDir) offers no legacy candidate', () => {
+  const degenerate = profile({ capture: { output_dir: 'vault/handbook' } });
+  const chapterFile = 'vault/handbook/items.md';
+  const candidates = buildEmbedCandidates(degenerate, entry(), chapterFile, ['01.png'], 'static_md');
+  const legacy = legacyStaticEmbedPath(chapterFile, degenerate.capture.output_dir, entry().slug, '01.png');
+  assert.equal(legacy, '/items/01.png', 'sanity: the legacy spelling really does degenerate to a leading slash here');
+  assert.equal(candidates.has(legacy), false);
+  assert.equal(candidates.size, 1, 'only the current candidate is offered');
+});
+
+test('buildEmbedCandidates legacy eligibility 3/4: a non-static target (obsidian_vault) offers no legacy candidate even for a flat entry', () => {
+  const candidates = buildEmbedCandidates(PARENT_PROFILE, entry(), PARENT_CHAPTER_FILE, ['01.png'], 'obsidian_vault');
+  const legacy = legacyStaticEmbedPath(PARENT_CHAPTER_FILE, PARENT_PROFILE.capture.output_dir, entry().slug, '01.png');
+  assert.equal(candidates.size, 1);
+  assert.equal(candidates.has(legacy), false, 'the legacy spelling must not be offered under a non-static target');
+});
+
+test('buildEmbedCandidates legacy eligibility 4/4: a GROUPED static_md entry offers no legacy candidate — the group-free spelling would bind a stale group-free file', () => {
+  const flatProfile = profile({ capture: { output_dir: 'vault/assets' } });
+  const candidates = buildEmbedCandidates(flatProfile, GROUPED_ENTRY, GROUPED_CHAPTER_FILE, ['01.png'], 'static_md');
+  assert.equal(candidates.size, 1, 'grouped entries never get the group-free legacy spelling, regardless of target');
+});
+
+// [round 7] EmbedCandidateHalt (chapter-paths.mjs:2374) is a private, unexported class — the
+// .d.mts documents the distinction explicitly ("Throws (an EmbedCandidateHalt, an ordinary Error
+// to a caller outside this module)"), and it is load-bearing at runtime: expectedAssets' own catch
+// (`err instanceof EmbedCandidateHalt`, chapter-paths.mjs:2693) depends on buildEmbedCandidates
+// actually throwing THIS class rather than a plain Error, or the halt would escape uncaught instead
+// of converting to `{ok:false, halt:...}`. A regex-only assertion cannot see that distinction — both
+// classes would carry the same message. Since the class itself cannot be imported, `.name` (set
+// explicitly in the constructor) is the only caller-visible identity signal.
+function assertEmbedCandidateHaltThrows(fn, messageRe, label) {
+  const prefix = label ? `${label}: ` : '';
+  assert.throws(fn, (err) => {
+    assert.equal(err.name, 'EmbedCandidateHalt', `${prefix}expected an EmbedCandidateHalt, got ${err.name}`);
+    assert.match(err.message, messageRe, `${prefix}message mismatch`);
+    return true;
+  });
+}
+
+// --- the round-trip gate -------------------------------------------------------------------------
+
+test('buildEmbedCandidates round-trip gate: a sole file literally named sub\\stale.png HALTS — embedPath normalizes the backslash into a separator, so the candidate addresses a DIFFERENT (nonexistent) file', () => {
+  assertEmbedCandidateHaltThrows(
+    () => buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['sub\\stale.png'], 'obsidian_vault'),
+    /round-trip/,
+  );
+});
+
+test('buildEmbedCandidates round-trip gate: a genuine subdirectory entry sub/a.png (a real "/", not a disguised "\\\\") round-trips fine', () => {
+  assert.doesNotThrow(() =>
+    buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['sub/a.png'], 'obsidian_vault'),
+  );
+});
+
+// --- the closed character-subset gate, both directions -------------------------------------------
+
+test('buildEmbedCandidates charset gate, negative direction: café.png in NFC and in NFD, shot@2x.png, a&b.png and a\'b.png all HALT', () => {
+  const bad = ['caf\u00e9.png', 'cafe\u0301.png', 'shot@2x.png', 'a&b.png', "a'b.png"];
+  for (const filename of bad) {
+    assertEmbedCandidateHaltThrows(
+      () => buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', [filename], 'obsidian_vault'),
+      new RegExp(filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace('\u00e9', '.').replace('\u0301', '.')),
+      `'${filename}' must halt naming the file`,
+    );
+  }
+});
+
+test('buildEmbedCandidates charset gate, positive direction: the template shot.png, a grouped embed, a multi-climb embed, and a_b-c.1.png are all ACCEPTED', () => {
+  assert.doesNotThrow(() => buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['shot.png'], 'obsidian_vault'));
+  assert.doesNotThrow(() => buildEmbedCandidates(profile(), GROUPED_ENTRY, GROUPED_CHAPTER_FILE, ['01-open-invoice.png'], 'obsidian_vault'));
+  assert.doesNotThrow(() =>
+    buildEmbedCandidates(MULTI_CLIMB_PROFILE, GROUPED_ENTRY, MULTI_CLIMB_CHAPTER_FILE, ['shot.png'], 'obsidian_vault'),
+  );
+  assert.doesNotThrow(() => buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', ['a_b-c.1.png'], 'obsidian_vault'));
+});
+
+test('buildEmbedCandidates charset gate: an exhaustive on-disk sweep — every ASCII byte outside [A-Za-z0-9._-] that is a legal POSIX filename byte HALTS naming the file', () => {
+  // '/' and NUL cannot appear in a single filename component at all, so they are excluded from the
+  // sweep — everything else printable-ASCII outside the allowed class is tried.
+  for (let code = 0x21; code <= 0x7e; code += 1) {
+    const ch = String.fromCharCode(code);
+    if (/[A-Za-z0-9._-]/.test(ch)) continue;
+    if (ch === '/' || ch === '\\') continue; // '\\' is the round-trip gate's own dedicated case above
+    const filename = `x${ch}y.png`;
+    // [round 7] The ORIGINAL two-arg form here passed a plain string as the second assert.throws
+    // argument — per node:assert semantics that is used ONLY as the AssertionError's own message if
+    // the call fails to throw at all; it never checked the thrown error's message or class. Both are
+    // now checked: the class via assertEmbedCandidateHaltThrows (see its own comment above), the
+    // message via the escaped filename, so a mutant that halts for the WRONG reason (or on the wrong
+    // byte) is also caught, not just "halted at all".
+    assertEmbedCandidateHaltThrows(
+      () => buildEmbedCandidates(profile(), entry(), 'vault/handbook/items.md', [filename], 'obsidian_vault'),
+      new RegExp(filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      `byte 0x${code.toString(16)} ('${ch}') must halt`,
+    );
+  }
+});
+
+// =================================================================================================
+// isCanonicalAssetKey
+// =================================================================================================
+
+test('isCanonicalAssetKey: rejects a leading slash, an empty segment, and the segments "." and ".."', () => {
+  assert.equal(isCanonicalAssetKey('/a.png'), false);
+  assert.equal(isCanonicalAssetKey('sub//a.png'), false);
+  assert.equal(isCanonicalAssetKey('./a.png'), false);
+  assert.equal(isCanonicalAssetKey('../a.png'), false);
+  assert.equal(isCanonicalAssetKey('sub/../a.png'), false);
+  assert.equal(isCanonicalAssetKey(''), false);
+});
+
+test('isCanonicalAssetKey: constrains NO characters — a literal backslash and a "%2e%2e" segment are both ACCEPTED', () => {
+  assert.equal(isCanonicalAssetKey('sub\\stale.png'), true);
+  assert.equal(isCanonicalAssetKey('%2e%2e/a.png'), true);
+  assert.equal(isCanonicalAssetKey('sub/a.png'), true);
+  assert.equal(isCanonicalAssetKey('a&b.png'), true);
+  assert.equal(isCanonicalAssetKey('caf\u00e9.png'), true);
+});
+
+test('isCanonicalAssetKey: destructive round-trip — a directory containing %2e%2e and a literal backslash is snapshotted by W2, and its own keys must be accepted, never rejected by the reader', () => {
+  const filenames = ['%2e%2e/a.png', 'sub\\stale.png', 'normal.png'];
+  for (const key of filenames) {
+    assert.equal(isCanonicalAssetKey(key), true, `a reader rejecting '${key}' would reject a record its own writer just wrote`);
+  }
+});
+
+test('isCanonicalAssetKey: non-string input is rejected, not coerced', () => {
+  assert.equal(isCanonicalAssetKey(null), false);
+  assert.equal(isCanonicalAssetKey(undefined), false);
+  assert.equal(isCanonicalAssetKey(42), false);
+});
+
+// =================================================================================================
+// stripInertContexts — the exported shared stripper, direct unit coverage for its [1.12.0]
+// indentedRunIsCode option (review finding: this option REPLACES the private
+// stripInertContextsForImages duplicate expectedAssets used to carry — one scanner, one place the
+// fence/indented-code boundary is decided).
+// =================================================================================================
+
+test('stripInertContexts: default (no options) — a four-space-indented backtick run is STILL treated as a fence, blanking to EOF (byte-identical to pre-1.12.0)', () => {
+  const text = '    ```\n\n![live](a.png)\n';
+  const stripped = stripInertContexts(text);
+  assert.ok(!stripped.includes('!['), 'the shipped, option-less behavior blanks the run to EOF, taking the image with it');
+});
+
+test('stripInertContexts: {indentedRunIsCode: true} — the SAME four-space-indented run is passthrough, not a fence', () => {
+  const text = '    ```\n\n![live](a.png)\n';
+  const stripped = stripInertContexts(text, { indentedRunIsCode: true });
+  assert.ok(stripped.includes('![live](a.png)'), 'an indented code block, not a fence — the image after it must survive unblanked');
+});
+
+test('stripInertContexts: {indentedRunIsCode: true} does not affect an ORDINARY column-0 fence — still blanked', () => {
+  const text = '```\nplain sample text\n```\n![live](a.png)';
+  const strippedDefault = stripInertContexts(text);
+  const strippedOption = stripInertContexts(text, { indentedRunIsCode: true });
+  assert.equal(strippedDefault, strippedOption, 'the option only changes the >= 4-column case, never a true column-0 fence');
+  assert.ok(!strippedOption.includes('plain sample text'));
+  assert.ok(strippedOption.includes('![live](a.png)'), 'the image AFTER the closed fence must remain live either way');
+});
+
+// =================================================================================================
+// expectedAssets — recognition (candidate matching, nested brackets, escape parity, offsets)
+// =================================================================================================
+
+test('expectedAssets: a flat, real adapter-produced embed is recognized end-to-end', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const assetDir = chapterAssetDir(profile(), entry());
+  const dest = embedPath(chapterFile, assetDir, '01-overview.png');
+  const text = chapterText(`![Overview](${dest})`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['01-overview.png'], 'obsidian_vault');
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.assets, [{ key: '01-overview.png', absPath: 'vault/handbook/assets/items/01-overview.png' }]);
+});
+
+test('expectedAssets: a grouped embed (../assets/<group>/<slug>/...) is recognized end-to-end', () => {
+  const assetDir = chapterAssetDir(profile(), GROUPED_ENTRY);
+  const dest = embedPath(GROUPED_CHAPTER_FILE, assetDir, '01-open.png');
+  const text = chapterText(`![Open invoice](${dest})`);
+  const result = expectedAssets(profile(), GROUPED_ENTRY, GROUPED_CHAPTER_FILE, text, ['01-open.png'], 'obsidian_vault');
+  assert.equal(result.ok, true);
+  assert.equal(result.assets.length, 1);
+  assert.equal(result.assets[0].key, '01-open.png');
+});
+
+test('expectedAssets: a multi-climb embed (../../../assets/...) is recognized end-to-end', () => {
+  const assetDir = chapterAssetDir(MULTI_CLIMB_PROFILE, GROUPED_ENTRY);
+  const dest = embedPath(MULTI_CLIMB_CHAPTER_FILE, assetDir, 'shot.png');
+  assert.ok(dest.startsWith('../../../assets/'), 'sanity: this really is a multi-climb destination');
+  const text = chapterText(`![Shot](${dest})`);
+  const result = expectedAssets(MULTI_CLIMB_PROFILE, GROUPED_ENTRY, MULTI_CLIMB_CHAPTER_FILE, text, ['shot.png'], 'obsidian_vault');
+  assert.equal(result.ok, true);
+  assert.equal(result.assets[0].key, 'shot.png');
+});
+
+test('expectedAssets: a nested-bracket label is SUPPORTED, never silently dropped — ![A [Beta]](<real dest>) yields the image', () => {
+  const text = chapterText(`![A [Beta]](${dest('img.png')})`);
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['img.png'], 'obsidian_vault');
+  assert.equal(result.ok, true, 'the shipped link scanner declines this shape by design; the image extractor must not');
+  assert.equal(result.assets[0].key, 'img.png');
+});
+
+test('expectedAssets: escape parity on three fixtures — one backslash escapes, two do not, three do', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const d = dest('img.png');
+  const single = expectedAssets(profile(), entry(), chapterFile, chapterText(`\\![x](${d})`), ['img.png'], 'obsidian_vault');
+  assert.equal(single.ok, true, 'one backslash: escaped, no image at all — zero embeds is not a halt');
+  assert.equal(single.assets.length, 0);
+
+  const double = expectedAssets(profile(), entry(), chapterFile, chapterText(`\\\\![x](${d})`), ['img.png'], 'obsidian_vault');
+  assert.equal(double.ok, true, 'two backslashes: UNESCAPED — the image is live');
+  assert.equal(double.assets.length, 1);
+
+  const triple = expectedAssets(profile(), entry(), chapterFile, chapterText(`\\\\\\![x](${d})`), ['img.png'], 'obsidian_vault');
+  assert.equal(triple.ok, true, 'three backslashes: escaped again — no image');
+  assert.equal(triple.assets.length, 0);
+});
+
+test('expectedAssets: offsets are asserted at NONZERO positions — two images separated by a blanked comment', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText(`![fresh](${dest('fresh.png')})`, `<!-- ![stale](${dest('stale.png')}) -->`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png', 'stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+  assert.ok(result.halt.line >= 2, `the halt must be attributed to line 2 (the comment), not line 1; got ${result.halt.line}`);
+});
+
+// =================================================================================================
+// expectedAssets — reference forms and the "no `![` at all" triggers
+// =================================================================================================
+
+for (const [label, image] of [
+  ['full', '![alt][shot]'],
+  ['collapsed', '![shot][]'],
+  ['shortcut', '![shot]'],
+]) {
+  test(`expectedAssets: every reference-image form HALTS — ${label}`, () => {
+    const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', chapterText(image), ['shot.png'], 'obsidian_vault');
+    assert.equal(result.ok, false, `${label} reference form must halt, never resolve`);
+  });
+}
+
+test('expectedAssets: a bare reference definition with no image at all still HALTS (carries no "![" and cannot be counted)', () => {
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', chapterText('[shot]: a.png'), ['a.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+test('expectedAssets: the scoping decoy HALTS rather than resolving — a last-wins map would bind provenance to the wrong file', () => {
+  const text = chapterText('![shot]', '> [shot]: stale.png', '[shot]: changed.png');
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['stale.png', 'changed.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+// =================================================================================================
+// expectedAssets — raw HTML tags, autolinks, processing instructions (mixed shapes: only one file
+// changed, so a wrong-file binding would be provable)
+// =================================================================================================
+
+test('expectedAssets: a raw-HTML image HALTS in the mixed shape — one live inline image beside one <img> tag', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText(`![fresh](${dest('fresh.png')})`, '<img src="assets/example/stale.png">');
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png'], 'obsidian_vault');
+  assert.equal(result.ok, false, 'the raw <img> renders a stale image no rule here catches without this trigger');
+});
+
+test('expectedAssets: the raw-HTML trigger is structural, not a tag list — figure/object/svg-image/span/a custom element all HALT', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const shapes = [
+    '<figure>x</figure>',
+    '<object data="stale.png"></object>',
+    '<svg><image href="stale.png" /></svg>',
+    '<span>x</span>',
+    '<x-provenance-probe>',
+  ];
+  for (const shape of shapes) {
+    const text = chapterText(`![fresh](${dest('fresh.png')})`, shape);
+    const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png'], 'obsidian_vault');
+    assert.equal(result.ok, false, `'${shape}' must halt — a name list would miss exactly this one`);
+  }
+});
+
+test('expectedAssets: raw HTML detection is case-insensitive and spans lines — <IMG SRC=...> and a tag split across a line break both HALT', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const upper = chapterText(`![fresh](${dest('fresh.png')})`, '<IMG SRC="stale.png">');
+  assert.equal(expectedAssets(profile(), entry(), chapterFile, upper, ['fresh.png'], 'obsidian_vault').ok, false);
+
+  const splitAcrossLines = chapterText(`![fresh](${dest('fresh.png')})`, '<img', ' src="stale.png">');
+  assert.equal(expectedAssets(profile(), entry(), chapterFile, splitAcrossLines, ['fresh.png'], 'obsidian_vault').ok, false);
+});
+
+test('expectedAssets: autolinks are POSITIVE controls — a URL autolink and an email autolink beside a live image do NOT halt', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const url = expectedAssets(
+    profile(),
+    entry(),
+    chapterFile,
+    chapterText(`![fresh](${dest('fresh.png')})`, '<https://example.test/x>'),
+    ['fresh.png'],
+    'obsidian_vault',
+  );
+  assert.equal(url.ok, true, 'a URL autolink is not a raw HTML tag — a multiline tag matcher would wrongly halt here');
+  const email = expectedAssets(
+    profile(),
+    entry(),
+    chapterFile,
+    chapterText(`![fresh](${dest('fresh.png')})`, '<user@example.test>'),
+    ['fresh.png'],
+    'obsidian_vault',
+  );
+  assert.equal(email.ok, true, 'an email autolink is not a raw HTML tag either');
+});
+
+test('expectedAssets: a processing instruction HALTS (carries no "![" and is not a raw HTML tag)', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText(`![fresh](${dest('fresh.png')})`, '<?xml-stylesheet href="x.xsl"?>');
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+// =================================================================================================
+// expectedAssets — inert-context POSITIVES (no image inside, must not false-halt) and ERASURE
+// halts (an image genuinely inside/beyond the construct must halt instead of being believed inert)
+// =================================================================================================
+
+test('expectedAssets: every supported closed inert construct with NO image inside it yields the live image and does not halt', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const shapes = [
+    ['closed backtick fence', chapterText('```', 'plain sample text', '```')],
+    ['closed tilde fence', chapterText('~~~', 'plain sample text', '~~~')],
+    ['closed inline code span', '`plain code`'],
+    ['well-formed closed HTML comment', '<!-- a comment, no image inside -->'],
+  ];
+  for (const [label, construct] of shapes) {
+    const text = chapterText(`![fresh](${dest('fresh.png')})`, construct);
+    const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png'], 'obsidian_vault');
+    assert.equal(result.ok, true, `${label}: must not false-halt`);
+  }
+});
+
+test('expectedAssets: a well-formed CLOSED comment containing an image still HALTS — raw-text accounting, not stripped-text counting', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText(`<!-- ![stale](${dest('stale.png')}) -->`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false, 'counting on the STRIPPED text (the previous revision) would see zero images and pass silently');
+});
+
+test('expectedAssets: an UNCLOSED comment followed by a live image HALTS', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText('<!-- no closer here', `![stale](${dest('stale.png')})`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+test('expectedAssets: the malformed comment openers <!--> and <!---> both HALT (mixed with a live image)', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  for (const opener of ['<!-->', '<!--->']) {
+    const text = chapterText(opener, `![stale](${dest('stale.png')})`, 'more text', '-->');
+    const result = expectedAssets(profile(), entry(), chapterFile, text, ['stale.png'], 'obsidian_vault');
+    assert.equal(result.ok, false, `'${opener}' must halt`);
+  }
+});
+
+test('expectedAssets: an unmatched inline-code opener HALTS in the mixed shape (fresh above, stale swallowed below)', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText(`![fresh](${dest('fresh.png')})`, '`no closing run here', `![stale](${dest('stale.png')})`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png', 'stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false, 'CommonMark treats an unmatched inline-code opener as literal text, not code-to-EOF');
+});
+
+test('expectedAssets: a three-backtick opener whose info string contains a backtick is not a fence, and HALTS', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText('```has`backtick', `![stale](${dest('stale.png')})`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+test('expectedAssets: the over-indented FENCE counterexample YIELDS — four spaces is an indented code block, not a fence', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = `    \`\`\`\n\n![live](${dest('a.png')})\n`;
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['a.png'], 'obsidian_vault');
+  assert.equal(result.ok, true, 'the shipped stripper reads this as an unterminated fence and erases the live image after it');
+  assert.equal(result.assets[0].key, 'a.png');
+});
+
+test('expectedAssets: an Obsidian-native ![[shot.png]] HALTS — the generic unconsumed-"![" rule, a guard against hand-authoring', () => {
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', chapterText('![[shot.png]]'), ['shot.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+// =================================================================================================
+// expectedAssets — indentation: five fixtures, no single four-space rule passes all of them
+// =================================================================================================
+
+test('expectedAssets indentation 1/5: "1. Step" + blank + a four-space-indented image YIELDS (content column 3)', () => {
+  const text = chapterText('1. Step', '', `    ![x](${dest('a.png')})`);
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['a.png'], 'obsidian_vault');
+  assert.equal(result.ok, true);
+});
+
+test('expectedAssets indentation 2/5: "10. Step" + blank + a four-space-indented image YIELDS (content column 4)', () => {
+  const text = chapterText('10. Step', '', `    ![x](${dest('a.png')})`);
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['a.png'], 'obsidian_vault');
+  assert.equal(result.ok, true, 'the two-digit marker makes four spaces exactly the content column');
+});
+
+test('expectedAssets indentation 3/5: a four-space-indented image at DOCUMENT START HALTS', () => {
+  const text = `    ![x](${dest('a.png')})\n`;
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['a.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+test('expectedAssets indentation 4/5: "paragraph" + a four-space-indented image HALTS (indented code cannot interrupt a paragraph, but this release does not decide it either way)', () => {
+  const text = chapterText(`![fresh](${dest('fresh.png')})`, 'paragraph', `    ![live](${dest('stale.png')})`);
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['fresh.png', 'stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+test('expectedAssets indentation 5/5: the SAME shape INSIDE a list item HALTS — seven spaces is four past the "1. " content column', () => {
+  const text = chapterText(`![fresh](${dest('fresh.png')})`, '1. paragraph', `       ![stale](${dest('stale.png')})`);
+  const result = expectedAssets(profile(), entry(), 'vault/handbook/items.md', text, ['fresh.png', 'stale.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+// =================================================================================================
+// expectedAssets — the unmatched-destination corpus (one assertion, not a list of separate rules:
+// none of these is byte-equal to an embedPath output, so all fall through the SAME halt)
+// =================================================================================================
+
+test('expectedAssets: the unmatched-destination corpus all HALT, each in the mixed shape (only the fresh file actually changed)', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const badDestinations = [
+    'a&#46;png',
+    'data:image/png;base64,AAAA',
+    'https://example.test/a.png',
+    '//host/x.png',
+    '/x.png',
+    'stale.png?cache.png',
+    'stale.png?',
+    'stale.png#',
+    'sub/%2e%2e/stale.png',
+    'sub\\stale.png',
+    '<a\\>b.png>',
+    'a b.png',
+    'a.png "caption"',
+  ];
+  for (const badDest of badDestinations) {
+    const text = chapterText(`![fresh](${dest('fresh.png')})`, `![stale](${badDest})`);
+    const result = expectedAssets(profile(), entry(), chapterFile, text, ['fresh.png', 'stale.png'], 'obsidian_vault');
+    assert.equal(result.ok, false, `destination '${badDest}' must halt — it is not byte-equal to any embedPath output`);
+  }
+});
+
+test('expectedAssets: resolution replacing byte-equality with PATH RESOLUTION must fail — sub/%2e%2e/ and sub\\\\stale.png resolve to a real candidate while their bytes do not', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const dotDot = expectedAssets(
+    profile(),
+    entry(),
+    chapterFile,
+    chapterText('![x](sub/%2e%2e/stale.png)'),
+    ['stale.png'],
+    'obsidian_vault',
+  );
+  assert.equal(dotDot.ok, false, 'a resolving implementation would treat this as ../stale.png -> assets/items/stale.png and wrongly match');
+});
+
+test('expectedAssets: a HAND-WRITTEN candidate set is killed by a second on-disk file the hand-written set omits', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const text = chapterText(`![a](${dest('01.png')})`, `![b](${dest('02-detail.png')})`);
+  const result = expectedAssets(profile(), entry(), chapterFile, text, ['01.png', '02-detail.png'], 'obsidian_vault');
+  assert.equal(result.ok, true, 'the generated candidate set covers the whole directory, not just the first file');
+  assert.equal(result.assets.length, 2);
+});
+
+// =================================================================================================
+// expectedAssets — legacy candidates: all four cases, end-to-end
+// =================================================================================================
+
+test('expectedAssets legacy 1/4: a genuinely valid legacy-only retained static chapter YIELDS its image, never halts', () => {
+  const legacyDest = legacyStaticEmbedPath(PARENT_CHAPTER_FILE, PARENT_PROFILE.capture.output_dir, entry().slug, '01.png');
+  const currentDest = embedPath(PARENT_CHAPTER_FILE, chapterAssetDir(PARENT_PROFILE, entry()), '01.png');
+  assert.notEqual(legacyDest, currentDest, 'the fixture must actually exercise the RETAINED spelling, not a coincidentally-identical one');
+  const text = chapterText(`![Overview](${legacyDest})`);
+  const result = expectedAssets(PARENT_PROFILE, entry(), PARENT_CHAPTER_FILE, text, ['01.png'], 'static_md');
+  assert.equal(result.ok, true, 'a pre-1.6.0 group-free chapter keeps its retained legacy spelling; refusing it is provenance silently absent');
+  assert.equal(result.assets[0].key, '01.png');
+});
+
+test('expectedAssets legacy 2/4: a DEGENERATE layout is neither falsely accepted NOR the cause of a false halt on the ordinary current embed', () => {
+  const degenerate = profile({ capture: { output_dir: 'vault/handbook' } });
+  const chapterFile = 'vault/handbook/items.md';
+  const currentDest = embedPath(chapterFile, chapterAssetDir(degenerate, entry()), '01.png');
+  const text = chapterText(`![Overview](${currentDest})`);
+  const result = expectedAssets(degenerate, entry(), chapterFile, text, ['01.png'], 'static_md');
+  assert.equal(result.ok, true, 'the ordinary current embed in the same degenerate-layout chapter must still be accepted');
+  assert.equal(result.assets[0].key, '01.png');
+});
+
+test('expectedAssets legacy 3/4: a non-static target offers no legacy candidate — a legacy-spelled destination HALTS under obsidian_vault', () => {
+  const legacyDest = legacyStaticEmbedPath(PARENT_CHAPTER_FILE, PARENT_PROFILE.capture.output_dir, entry().slug, '01.png');
+  const text = chapterText(`![Overview](${legacyDest})`);
+  const result = expectedAssets(PARENT_PROFILE, entry(), PARENT_CHAPTER_FILE, text, ['01.png'], 'obsidian_vault');
+  assert.equal(result.ok, false);
+});
+
+test('expectedAssets legacy 4/4: a GROUPED static_md entry offers no legacy candidate — the group-free spelling HALTS while the current spelling in the same chapter is accepted', () => {
+  const flatProfile = profile({ capture: { output_dir: 'vault/assets' } });
+  const chapterFile = 'vault/handbook/billing/invoices.md';
+  const legacyDest = legacyStaticEmbedPath(chapterFile, flatProfile.capture.output_dir, GROUPED_ENTRY.slug, '01.png');
+  const legacyOnly = expectedAssets(flatProfile, GROUPED_ENTRY, chapterFile, chapterText(`![x](${legacyDest})`), ['01.png'], 'static_md');
+  assert.equal(legacyOnly.ok, false, 'the group-free spelling would bind a stale group-free file for a grouped entry');
+
+  const currentDest = embedPath(chapterFile, chapterAssetDir(flatProfile, GROUPED_ENTRY), '01.png');
+  const currentOk = expectedAssets(flatProfile, GROUPED_ENTRY, chapterFile, chapterText(`![x](${currentDest})`), ['01.png'], 'static_md');
+  assert.equal(currentOk.ok, true, 'the current spelling for the SAME grouped entry must still be accepted');
+});
+
+test('expectedAssets legacy same-file case: a flat retained-static chapter where BOTH the current and legacy spellings appear resolves to ONE key, not two records', () => {
+  const currentDest = embedPath(PARENT_CHAPTER_FILE, chapterAssetDir(PARENT_PROFILE, entry()), '01.png');
+  const legacyDest = legacyStaticEmbedPath(PARENT_CHAPTER_FILE, PARENT_PROFILE.capture.output_dir, entry().slug, '01.png');
+  assert.notEqual(currentDest, legacyDest, 'the fixture must actually exercise two DISTINCT spellings of the same file');
+  const text = chapterText(`![current](${currentDest})`, `![legacy](${legacyDest})`);
+  const result = expectedAssets(PARENT_PROFILE, entry(), PARENT_CHAPTER_FILE, text, ['01.png'], 'static_md');
+  assert.equal(result.ok, true);
+  assert.equal(result.assets.length, 1, 'both spellings of the same file must collapse to one asset entry');
+  assert.equal(result.assets[0].key, '01.png');
+});
+
+// =================================================================================================
+// expectedAssets — keys are byte-exact, taken from the matched candidate's own file path
+// =================================================================================================
+
+test('expectedAssets: the written key equals the directory-listing path byte-exactly — a subdirectory embed and special-character filenames', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const subDest = embedPath(chapterFile, chapterAssetDir(profile(), entry()), 'sub/a.png');
+  const sub = expectedAssets(profile(), entry(), chapterFile, chapterText(`![x](${subDest})`), ['sub/a.png'], 'obsidian_vault');
+  assert.equal(sub.ok, true);
+  assert.equal(sub.assets[0].key, 'sub/a.png');
+});
+
+test('expectedAssets: zero in-directory embeds is a clean success with an empty asset list, not a halt', () => {
+  const chapterFile = 'vault/handbook/items.md';
+  const result = expectedAssets(profile(), entry(), chapterFile, chapterText('no images here'), ['01.png'], 'obsidian_vault');
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.assets, []);
+});
+
+// =================================================================================================
+// [1.12.0] manualMigrationChecklist's twelfth fact kind — the provenance record — and the matching
+// renderManualMigrationHalt rendering. `provenanceActive` is the caller's OWN re-assertion of this
+// run's W1 ownership outcome — REQUIRED (no default) whenever the delta kind is not null, per the
+// fail-loud guard's own tests below; explicit `false` still reproduces every pre-1.12.0 rendering
+// byte-for-byte (the plan's "omit the whole fragment on a skipped run" rule).
+// =================================================================================================
+
+test('manualMigrationChecklist: provenanceActive=false — a removal checklist is byte-identical to the pre-1.12.0 shape (no 12th fact)', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const facts = manualMigrationChecklist(profile(), old, null, undefined, false);
+  assert.equal(findFact(facts, 'provenance-record'), undefined);
+});
+
+test('manualMigrationChecklist: provenanceActive=false — a group-change checklist carries no 12th fact', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing' });
+  const facts = manualMigrationChecklist(profile(), old, next, undefined, false);
+  assert.equal(findFact(facts, 'provenance-record'), undefined);
+});
+
+test('manualMigrationChecklist: provenanceActive=true on REMOVAL adds the provenance-record fact, oldPath full-derived, newPath null', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const facts = manualMigrationChecklist(profile(), old, null, undefined, true);
+  const record = findFact(facts, 'provenance-record');
+  assert.ok(record, 'the fact must be present when provenanceActive is true');
+  assert.equal(record.oldPath, 'vault/handbook/.provenance/chapters/admin/orders.json');
+  assert.equal(record.newPath, null);
+});
+
+test('manualMigrationChecklist: provenanceActive=true on GROUP-CHANGE adds the fact with BOTH endpoints, full-derived', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing' });
+  const facts = manualMigrationChecklist(profile(), old, next, undefined, true);
+  const record = findFact(facts, 'provenance-record');
+  assert.ok(record);
+  assert.equal(record.oldPath, 'vault/handbook/.provenance/chapters/admin/orders.json');
+  assert.equal(record.newPath, 'vault/handbook/.provenance/chapters/billing/orders.json');
+});
+
+test('manualMigrationChecklist: a FLAT entry (no group) derives the provenance record path with no group segment', () => {
+  // A pure flat-entry removal never reaches manualMigrationChecklist at all — "only a GROUPED
+  // removal is a migration matter" (classifyEntryDelta's own comment; also pinned by the existing
+  // "a flat removal (never a migration matter) => []" test above). The flat side of
+  // migrationRecordPath is therefore exercised via a grouped-to-flat GROUP-CHANGE, whose newEntry
+  // is genuinely flat.
+  const old = entry({ slug: 'items', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'items' });
+  const facts = manualMigrationChecklist(profile(), old, next, undefined, true);
+  const record = findFact(facts, 'provenance-record');
+  assert.equal(record.oldPath, 'vault/handbook/.provenance/chapters/admin/items.json');
+  assert.equal(record.newPath, 'vault/handbook/.provenance/chapters/items.json');
+});
+
+test('manualMigrationChecklist: a title-only change NEVER carries the provenance-record fact, even with provenanceActive=true — a title change does not move the record', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'admin', group_title: 'Orders (renamed)' });
+  const facts = manualMigrationChecklist(profile(), old, next, undefined, true);
+  assert.equal(findFact(facts, 'provenance-record'), undefined);
+});
+
+test('renderManualMigrationHalt: with provenanceActive=false, a removal line is BYTE-IDENTICAL to the pre-1.12.0 wording (fragment omitted, not a placeholder)', () => {
+  const p = profile();
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const change = { kind: 'removal', slug: 'orders', oldEntry: old, newEntry: null };
+  const facts = manualMigrationChecklist(p, old, null, undefined, false);
+  const text = renderManualMigrationHalt([change], [facts]);
+  assert.ok(text.includes("orders: removed — delete vault/handbook/admin/orders.md, vault/handbook/assets/admin/orders, and its index line (was under container 'Admin')"));
+  assert.ok(!text.includes('record'), 'no "record" word must appear anywhere when the run is not active');
+});
+
+test('renderManualMigrationHalt: with provenanceActive=true, a removal line matches the agreed wording exactly (docs/revalidation.md verbatim contract)', () => {
+  const p = profile();
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const change = { kind: 'removal', slug: 'orders', oldEntry: old, newEntry: null };
+  const facts = manualMigrationChecklist(p, old, null, undefined, true);
+  const text = renderManualMigrationHalt([change], [facts]);
+  assert.ok(
+    text.includes(
+      "orders: removed — delete vault/handbook/admin/orders.md, vault/handbook/assets/admin/orders, its index line, and its record vault/handbook/.provenance/chapters/admin/orders.json (was under container 'Admin')",
+    ),
+  );
+});
+
+test('renderManualMigrationHalt: with provenanceActive=true, a group-change line matches the agreed wording exactly', () => {
+  const p = profile();
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing' });
+  const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
+  const facts = manualMigrationChecklist(p, old, next, undefined, true);
+  const text = renderManualMigrationHalt([change], [facts]);
+  assert.ok(text.includes('orders: vault/handbook/admin/orders.md -> vault/handbook/billing/orders.md'));
+  assert.ok(
+    text.includes(
+      'record vault/handbook/.provenance/chapters/admin/orders.json -> vault/handbook/.provenance/chapters/billing/orders.json',
+    ),
+  );
+  // the record clause must sit BEFORE the "was under container" suffix, per this file's own
+  // ordering decision — agreed with `docs` as the resolution of their under-specified example.
+  const line = text.split('\n').find((l) => l.includes('orders:'));
+  assert.ok(line.indexOf('; record ') < line.indexOf("; was under container"));
+});
+
+test('renderManualMigrationHalt: with provenanceActive=true on a group-AND-title change, all four clauses appear in the agreed order — record, was-under-container, container-title', () => {
+  // The combination `docs` flagged as worth its own fixture: none of the "record alone" or
+  // "suffix alone" tests above can catch a future edit that reorders record/suffix/title-clause
+  // relative to each other, because each of those fixtures only carries a subset of the three.
+  const p = profile();
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing Dept' });
+  const change = { kind: 'group-and-title-change', slug: 'orders', oldEntry: old, newEntry: next };
+  const facts = manualMigrationChecklist(p, old, next, undefined, true);
+  const text = renderManualMigrationHalt([change], [facts]);
+  const line = text.split('\n').find((l) => l.includes('orders:'));
+  assert.equal(
+    line,
+    "  orders: vault/handbook/admin/orders.md -> vault/handbook/billing/orders.md; assets vault/handbook/assets/admin/orders -> vault/handbook/assets/billing/orders; record vault/handbook/.provenance/chapters/admin/orders.json -> vault/handbook/.provenance/chapters/billing/orders.json; was under container 'Admin'; container title 'Admin' -> 'Billing Dept'",
+  );
+});
+
+test('renderManualMigrationHalt: with provenanceActive=false, a group-change line is BYTE-IDENTICAL to the pre-1.12.0 wording (no "record" clause)', () => {
+  const p = profile();
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing' });
+  const change = { kind: 'group-change', slug: 'orders', oldEntry: old, newEntry: next };
+  const facts = manualMigrationChecklist(p, old, next, undefined, false);
+  const text = renderManualMigrationHalt([change], [facts]);
+  const line = text.split('\n').find((l) => l.includes('orders:'));
+  assert.equal(
+    line,
+    "  orders: vault/handbook/admin/orders.md -> vault/handbook/billing/orders.md; assets vault/handbook/assets/admin/orders -> vault/handbook/assets/billing/orders; was under container 'Admin'",
+  );
+});
+
+// IMPORTANT-2 (codex review of 69671ee): the twelfth fact kind was reachable only when a caller
+// opted in, every test constructed `true`/`false` by hand, and no real caller existed to opt in at
+// all — the same defect shape as the W5 blocker this release already closed once. These four pin
+// the fail-loud guard that closes it: provenanceActive is now REQUIRED (no default) whenever the
+// delta kind is not null, so a caller that forgets to thread this run's real W1 ownership outcome
+// through gets a thrown TypeError immediately, never a checklist and halt text that silently omit
+// the provenance-record move. The untouched-entry / pure-addition / flat-removal tests above (kind
+// === null) are deliberately UNCHANGED by this guard — see "an untouched entry never reaches the
+// guard" below for why that is the guard's own contract, not an oversight.
+//
+// Round-4 codex mutation audit: a mutant that swapped the guard's `throw new TypeError(...)` back
+// to plain `Error` (matching the module's OTHER guards, which are intentionally plain Error —
+// see the guard's own comment for why this one is different) survived all four tests below when
+// they asserted only the MESSAGE via a RegExp — `assert.throws(fn, /regex/)` never inspects the
+// thrown value's constructor. `chapter-paths.d.mts` specifically promises a `TypeError` here (not
+// merely "throws"), so the class itself is part of the contract and needs its own assertion.
+function assertProvenanceGuardThrows(fn) {
+  assert.throws(fn, (err) => {
+    assert.ok(err instanceof TypeError, `expected a TypeError, got ${err.constructor.name}`);
+    assert.match(err.message, /provenanceActive must be an explicit boolean/);
+    return true;
+  });
+}
+
+test('fail-loud guard: provenanceActive omitted on a REMOVAL throws a TypeError — no silent default', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  assertProvenanceGuardThrows(() => manualMigrationChecklist(profile(), old, null));
+});
+
+test('fail-loud guard: provenanceActive omitted on a GROUP-CHANGE throws a TypeError', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'billing', group_title: 'Billing' });
+  assertProvenanceGuardThrows(() => manualMigrationChecklist(profile(), old, next));
+});
+
+test('fail-loud guard: provenanceActive omitted on a TITLE-ONLY change throws a TypeError too — the guard is uniform across every real delta kind, even one that never reads the value', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  const next = entry({ slug: 'orders', group: 'admin', group_title: 'Orders (renamed)' });
+  assertProvenanceGuardThrows(() => manualMigrationChecklist(profile(), old, next));
+});
+
+test('fail-loud guard: a non-boolean provenanceActive (a truthy string) throws a TypeError the same as omission', () => {
+  const old = entry({ slug: 'orders', group: 'admin', group_title: 'Admin' });
+  assertProvenanceGuardThrows(() => manualMigrationChecklist(profile(), old, null, undefined, 'yes'));
+});
+
+// =================================================================================================
+// [1.12.0] W2 preflight gates 1-4 — pure, exported, independently callable predicates. Codex
+// DO-NOT-SHIP finding: gates 1-4 never ran on the production path because they did not exist;
+// `record` wires these into openCaptureRun/recordChapterProvenance/buildProvenanceReport.
+// =================================================================================================
+
+// ---------------------------------------------------------------------------------------------
+// Gate 1 — isValidSlugSyntax
+// ---------------------------------------------------------------------------------------------
+
+test('isValidSlugSyntax: rejects every row of the measured 1.11.0 aliasing table', () => {
+  const bad = [
+    'admin/items',
+    'admin\\items',
+    'admin/./items',
+    'x/../items',
+    1, // number, not a string — the numeric-vs-string aliasing this gate removes at the source
+    'Items', // uppercase
+    'café', // NFC
+    'café', // NFD
+    'items.', // trailing dot
+  ];
+  for (const slug of bad) {
+    assert.equal(isValidSlugSyntax(slug), false, `'${String(slug)}' must be rejected`);
+  }
+});
+
+test('isValidSlugSyntax: digit-bearing positive controls PROCEED — q1 (the shipped suite\'s own fixture) and an all-digit slug', () => {
+  assert.equal(isValidSlugSyntax('q1'), true);
+  assert.equal(isValidSlugSyntax('123'), true);
+});
+
+test('isValidSlugSyntax: hyphen rules pinned in BOTH directions', () => {
+  assert.equal(isValidSlugSyntax('-a'), false);
+  assert.equal(isValidSlugSyntax('a-'), false);
+  assert.equal(isValidSlugSyntax('a--b'), false);
+  assert.equal(isValidSlugSyntax('invoice-export'), true);
+});
+
+test('isValidSlugSyntax: empty string and non-string types all rejected', () => {
+  assert.equal(isValidSlugSyntax(''), false);
+  assert.equal(isValidSlugSyntax(null), false);
+  assert.equal(isValidSlugSyntax(undefined), false);
+  assert.equal(isValidSlugSyntax(true), false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Gate 2 — findCanonicalPathCollisions
+// ---------------------------------------------------------------------------------------------
+
+test('findCanonicalPathCollisions: the canonicalizer is tested DIRECTLY, with alphabet-gate-bypass inputs — a case/separator/dot alias collides even though gate 1 would have rejected it first in the real preflight', () => {
+  const p = profile();
+  const collisions = findCanonicalPathCollisions(p, [
+    entry({ slug: 'Items' }), // uppercase — gate 1 would reject this, but gate 2 must still catch it
+    entry({ slug: 'items' }),
+  ]);
+  // chapterAssetDir is purely lexical join+normalize — it does NOT itself case-fold, so 'Items'
+  // and 'items' derive DISTINCT canonical paths lexically; the real aliasing collision (same file
+  // on a case-insensitive FS) is exactly what gate 1 exists to remove at the source, not gate 2.
+  // Gate 2's own collision case is a lexical-identity one instead: '../items' vs 'items' both
+  // normalize to the identical canonical path once dot-segments collapse.
+  assert.equal(collisions.length, 0, "'Items' and 'items' are lexically distinct canonical paths — not gate 2's job");
+
+  const dotCollisions = findCanonicalPathCollisions(p, [entry({ slug: 'x/../items' }), entry({ slug: 'items' })]);
+  assert.equal(dotCollisions.length, 1, 'a raw Set over UN-normalized tails would miss this; the canonical chapterAssetDir must not');
+  assert.equal(dotCollisions[0].entries.length, 2);
+});
+
+test('findCanonicalPathCollisions: a genuine cross-shape collision — flat vs grouped deriving the identical canonical directory', () => {
+  const p = profile();
+  const collisions = findCanonicalPathCollisions(p, [
+    entry({ slug: 'admin/items' }), // flat, but the SLUG ITSELF spells a nested path — gate 1's job to reject, not gate 2's
+    entry({ slug: 'items', group: 'admin', group_title: 'Admin' }),
+  ]);
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].canonicalPath, chapterAssetDir(p, entry({ slug: 'items', group: 'admin' })));
+});
+
+test('findCanonicalPathCollisions: distinct entries produce NO collisions', () => {
+  const p = profile();
+  const collisions = findCanonicalPathCollisions(p, [entry({ slug: 'items' }), entry({ slug: 'orders' })]);
+  assert.deepEqual(collisions, []);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Gate 3 — resolvePhysicalContainment
+// ---------------------------------------------------------------------------------------------
+
+// A minimal lstat/readlink mock — `symlinks` maps an exact candidate path to its raw readlink()
+// target string. Any path not in the map is treated as a plain, non-symlink entry.
+function mockFsDeps(symlinks) {
+  const map = new Map(Object.entries(symlinks));
+  return {
+    lstat(p) {
+      return { isSymbolicLink: () => map.has(p) };
+    },
+    readlink(p) {
+      if (!map.has(p)) throw new Error(`readlink called on a non-symlink path: ${p}`);
+      return map.get(p);
+    },
+  };
+}
+
+test('resolvePhysicalContainment: a legitimate deep tail with no symlinks anywhere is accepted, not false-halted', () => {
+  const result = resolvePhysicalContainment('out/assets', 'out/assets/admin/billing/items', mockFsDeps({}));
+  assert.deepEqual(result, { ok: true, resolved: 'out/assets/admin/billing/items' });
+});
+
+test('resolvePhysicalContainment: {slug:"../elsewhere"} — no symlinks, purely lexical escape — HALTS', () => {
+  const result = resolvePhysicalContainment('out/assets', 'out/elsewhere', mockFsDeps({}));
+  assert.equal(result.ok, false);
+  assert.equal(result.halt.reason, 'escapes-root');
+});
+
+test('resolvePhysicalContainment: a component-boundary check, not a string-prefix one — out/assets-evil is rejected', () => {
+  const result = resolvePhysicalContainment('out/assets', 'out/assets-evil/items', mockFsDeps({}));
+  assert.equal(result.ok, false, 'a prefix-only check would wrongly accept this sibling directory');
+  assert.equal(result.halt.reason, 'escapes-root');
+});
+
+test('resolvePhysicalContainment: no-follow is pinned POSITIVELY — a symlink whose target stays INSIDE the root is accepted', () => {
+  const result = resolvePhysicalContainment(
+    'out/assets',
+    'out/assets/admin/items',
+    mockFsDeps({ 'out/assets/admin': 'real-admin' }),
+  );
+  assert.deepEqual(result, { ok: true, resolved: 'out/assets/real-admin/items' });
+});
+
+test('resolvePhysicalContainment: the two-hop chain halts — substituting only the first hop and accepting its immediate target would wrongly pass', () => {
+  const result = resolvePhysicalContainment(
+    'out/assets',
+    'out/assets/admin/items',
+    mockFsDeps({ 'out/assets/admin': 'hop', 'out/assets/hop': '../../outside' }),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.halt.reason, 'escapes-root');
+});
+
+test('resolvePhysicalContainment: the relative-target discriminator — ../outside (ONE level) resolved against the link\'s PARENT halts, where resolving against the link\'s own path would wrongly accept', () => {
+  const result = resolvePhysicalContainment(
+    'out/assets',
+    'out/assets/admin/items',
+    mockFsDeps({ 'out/assets/admin': '../outside' }),
+  );
+  assert.equal(result.ok, false, "'../outside' against admin's parent 'out/assets' lands on 'out/outside', outside root");
+  assert.equal(result.halt.reason, 'escapes-root');
+});
+
+test('resolvePhysicalContainment: the deeper ../../outside case ALSO halts (both bases would agree here — this fixture alone pins nothing about which base is used)', () => {
+  const result = resolvePhysicalContainment(
+    'out/assets',
+    'out/assets/admin/items',
+    mockFsDeps({ 'out/assets/admin': '../../outside' }),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.halt.reason, 'escapes-root');
+});
+
+test('resolvePhysicalContainment: a symlink cycle halts with a `cycle` reason, not an infinite loop', () => {
+  const result = resolvePhysicalContainment(
+    'out/assets',
+    'out/assets/admin/items',
+    mockFsDeps({ 'out/assets/admin': 'hop', 'out/assets/hop': 'admin' }),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.halt.reason, 'cycle');
+});
+
+test('resolvePhysicalContainment: lstat throwing is its own halt (`inspection-failed`), never treated as "absent, therefore not a symlink"', () => {
+  const throwingLstat = {
+    lstat() {
+      throw new Error('EACCES');
+    },
+    readlink() {
+      throw new Error('must not be called — lstat already failed');
+    },
+  };
+  const result = resolvePhysicalContainment('out/assets', 'out/assets/admin', throwingLstat);
+  assert.equal(result.ok, false);
+  assert.equal(result.halt.reason, 'inspection-failed');
+});
+
+test('resolvePhysicalContainment: readlink throwing (lstat says symlink, readlink fails) is its own halt, distinct from a plain non-symlink', () => {
+  const deps = {
+    lstat(p) {
+      return { isSymbolicLink: () => p === 'out/assets/admin' };
+    },
+    readlink() {
+      throw new Error('EIO');
+    },
+  };
+  const result = resolvePhysicalContainment('out/assets', 'out/assets/admin/items', deps);
+  assert.equal(result.ok, false);
+  assert.equal(result.halt.reason, 'inspection-failed');
+});
+
+test('resolvePhysicalContainment: an absolute symlink target is followed correctly under a consistently-absolute root/dir', () => {
+  const inside = resolvePhysicalContainment(
+    '/out/assets',
+    '/out/assets/admin/items',
+    mockFsDeps({ '/out/assets/admin': '/out/assets/real-admin' }),
+  );
+  assert.deepEqual(inside, { ok: true, resolved: '/out/assets/real-admin/items' });
+
+  const outside = resolvePhysicalContainment(
+    '/out/assets',
+    '/out/assets/admin/items',
+    mockFsDeps({ '/out/assets/admin': '/outside' }),
+  );
+  assert.equal(outside.ok, false);
+  assert.equal(outside.halt.reason, 'escapes-root');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Gate 4 — findPhysicalPathCollisions
+// ---------------------------------------------------------------------------------------------
+
+test('findPhysicalPathCollisions: a symlink that collapses two lexically-distinct, gate-2-clean entries onto one physical directory is caught', () => {
+  const admin = entry({ slug: 'items', group: 'admin', group_title: 'Admin' });
+  const billing = entry({ slug: 'invoices', group: 'billing', group_title: 'Billing' });
+  // Both entries resolve (via gate 3, simulated here directly) to the SAME physical directory —
+  // gate 2 cannot see this (it compares the two lexical strings, which are distinct), and gate 3
+  // cannot see it either (each resolved path, checked individually, sits inside the root).
+  const collisions = findPhysicalPathCollisions([
+    { entry: admin, resolved: 'out/assets/billing/invoices' },
+    { entry: billing, resolved: 'out/assets/billing/invoices' },
+  ]);
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].resolvedPath, 'out/assets/billing/invoices');
+  assert.deepEqual(collisions[0].entries, [admin, billing]);
+});
+
+test('findPhysicalPathCollisions: the resolved-directory collection is a THREE-item fixture whose alias is NOT in the first pair', () => {
+  // An implementation comparing only entries[0] against entries[1] passes every two-item fixture
+  // in this suite and still misses a collision between the SECOND and THIRD entries.
+  const a = entry({ slug: 'one' });
+  const b = entry({ slug: 'two' });
+  const c = entry({ slug: 'three' });
+  const collisions = findPhysicalPathCollisions([
+    { entry: a, resolved: 'out/assets/one' },
+    { entry: b, resolved: 'out/assets/shared' },
+    { entry: c, resolved: 'out/assets/shared' },
+  ]);
+  assert.equal(collisions.length, 1);
+  assert.equal(collisions[0].resolvedPath, 'out/assets/shared');
+  assert.deepEqual(collisions[0].entries, [b, c]);
+});
+
+test('findPhysicalPathCollisions: all-distinct resolved paths produce NO collisions', () => {
+  const collisions = findPhysicalPathCollisions([
+    { entry: entry({ slug: 'one' }), resolved: 'out/assets/one' },
+    { entry: entry({ slug: 'two' }), resolved: 'out/assets/two' },
+  ]);
+  assert.deepEqual(collisions, []);
 });

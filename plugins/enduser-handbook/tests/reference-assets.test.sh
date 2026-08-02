@@ -3293,6 +3293,542 @@ else
   bad "obsidian-vault: plain-label predicate table row count drifted from 2 (found $OMD_TABLE_ROW_COUNT)"
 fi
 
+echo "== 1.12.0 (#362): build provenance records — SKILL.md wording =="
+# Eight named entrypoints of capture-record.mjs (ledger rows 1-6), each cited by name WITH its
+# exact argument list — a bare-name pin cannot catch a mutation that drops or reorders an
+# argument, the same reasoning validateGroups' own pin already uses in this file (#220/#221
+# section above). Ledger rows 2/3/4/5 read fs seams/deps too, but `deps` is the only injected
+# dependency prose ever needs to name — the rest (fs seam, identity-command executor,
+# randomUUID) is normative in the ledger, not in SKILL.md.
+has_in_section "SKILL: W1 cites assertProvenanceOwnership(profileLike, deps) by name+args" \
+  "$SKILL" '### W1 — Discover the feature surface' \
+  'assertProvenanceOwnership(profileLike, deps)'
+has_in_section "SKILL: W2 cites openCaptureRun(profileLike, entries, openingObservation, deps)" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'openCaptureRun(profileLike, entries, openingObservation, deps)'
+has_in_section "SKILL: W2 cites closeCaptureRun(profileLike, runState, captureOutcome, closingObservation, deps)" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'closeCaptureRun(profileLike, runState, captureOutcome, closingObservation, deps)'
+has_in_section "SKILL: W2 cites recoverProvenanceState(profileLike, deps)" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'recoverProvenanceState(profileLike, deps)'
+has_in_section "SKILL: W2 recovery table cites abortCaptureRun(profileLike, expected, deps)" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'abortCaptureRun(profileLike, expected, deps)'
+has_in_section "SKILL: W2 recovery table cites cleanupCommittedRun(profileLike, expected, deps)" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'cleanupCommittedRun(profileLike, expected, deps)'
+has_in_section "SKILL: W5 cites recordChapterProvenance(profileLike, acceptedEntries, entry, chapterFile, expectedRunId, deps)" \
+  "$SKILL" '### W5 — Publish' \
+  'recordChapterProvenance(profileLike, acceptedEntries, entry, chapterFile, expectedRunId, deps)'
+has_in_section "SKILL: W6 cites buildProvenanceReport(profileLike, entries, currentObservation, deps)" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  'buildProvenanceReport(profileLike, entries, currentObservation, deps)'
+
+# W1 — ownership assertion: halt only when the adopter asked (capture.build_identity configured),
+# warn-and-skip otherwise; provenance_unavailable vs record_absent kept distinct (#362 plan, "The
+# root is derived, not configured" — collapsing the two turns every chapter of an unaffected
+# handbook into a false alarm).
+has_in_section "SKILL: W1 ownership halt fires only when capture.build_identity is configured" \
+  "$SKILL" '### W1 — Discover the feature surface' \
+  'halts **only when `capture.build_identity` is configured**'
+has_in_section "SKILL: W1 provenance_unavailable is distinct from record_absent, stated explicitly" \
+  "$SKILL" '### W1 — Discover the feature surface' \
+  'never `record_absent`, which means something different'
+has_in_section "SKILL: W1 names both remedies (relocate output_dir, or drop build_identity)" \
+  "$SKILL" '### W1 — Discover the feature surface' \
+  'relocate `capture.output_dir` off the flat topology, or remove `capture.build_identity`'
+has_in_section "SKILL: W1 ownership is this run's ONE user-facing emission — openCaptureRun re-asserts silently" \
+  "$SKILL" '### W1 — Discover the feature surface' \
+  're-asserts the identical check silently, for enforcement rather than a second message'
+
+# W2 — open/close wraps capture.command; build-identity resolution order (3 steps, reasons name
+# which step ended the chain); recovery table over the 9 row6-generated.md states.
+has_in_section "SKILL: W2 open happens BEFORE capture.command runs" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'Before you run the command, you call `openCaptureRun'
+has_in_section "SKILL: W2 close happens immediately AFTER capture.command returns, any exit status" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'Immediately after `capture.command` returns — whatever its exit status'
+has_in_section "SKILL: W2 resolution step 1 (command) yields source: command" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'pass ⇒ `source: "command"`'
+has_in_section "SKILL: W2 resolution step 2 (ui_read fallback) yields source: ui, cites capture-safety.md" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'unless `capture.build_identity.ui_read` is explicitly `false`'
+has_in_section "SKILL: W2 resolution step 3 (unavailable) warns, never halts" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'W2 **warns, never halts** on any of these outcomes — a missing, failing, or drifted identity source never blocks capture'
+# round-2 correction (team-lead ped-ant catch): resolution is NOT a single call — it runs the
+# three-step chain TWICE per run (open + close), and the two results are combined; a doc that
+# said "once per run" would leave build_changed_during_capture/build_unconfirmed/capture_failed
+# unreachable from an implementer reading only SKILL.md.
+has_in_section "SKILL: build-identity resolution runs TWICE per run (open AND close), never once per chapter" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'twice per run, never once per chapter'
+has_in_section "SKILL: same known value both opening+closing resolutions ⇒ recorded as-is" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'the same known value both times ⇒ that value'
+has_in_section "SKILL: differing opening/closing values ⇒ build_changed_during_capture" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'a known opening value and a *different* known closing value ⇒ `null`, `build_changed_during_capture`'
+has_in_section "SKILL: closing resolution itself failing ⇒ build_unconfirmed" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'a closing resolution that itself fails ⇒ `null`, `build_unconfirmed`'
+has_in_section "SKILL: unavailable opening value wins regardless of what closing found" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  "an unavailable opening value ⇒ \`null\` with the opening's own reason, regardless of what closing found"
+has_in_section "SKILL: a failed capture.command itself yields capture_failed, never changes the hashing sequence" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'A failed `capture.command` itself changes only the recorded value — `null`, `capture_failed`'
+for state in not_active absent orphan_temp partial malformed prepared open committed divergent; do
+  has_in_section "SKILL: W2 recovery table names state \`$state\`" \
+    "$SKILL" '### W2 — Capture screenshots' "\`$state\`"
+done
+# "halt — repair nothing" must appear EXACTLY twice — malformed and divergent, the two states row6
+# declares to have repair:null. A mutant that wires a repair onto one of them, or drops the phrase
+# from the other, changes the count without necessarily removing either state name above.
+HALT_REPAIR_NOTHING_COUNT="$(count_fixed 'halt — repair nothing' "$SKILL")"
+if [ "$HALT_REPAIR_NOTHING_COUNT" -eq 2 ]; then
+  ok "SKILL: 'halt — repair nothing' appears exactly twice (malformed + divergent, row6's only null-repair states)"
+else
+  bad "SKILL: 'halt — repair nothing' count drifted from 2 (found $HALT_REPAIR_NOTHING_COUNT)"
+fi
+has_in_section "SKILL: repairs never touch <provenance root>/chapters/" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'never touch `<provenance root>/chapters/`'
+# [round 5, finding 3] The pin above states a BOUNDARY. On its own it reads as "chapters/ needs
+# nothing", which is false: a crashed W5 leaves its own temp there, and the only thing that removes
+# it is a call SKILL.md must name — an unnamed entrypoint in a skill asset is an unreachable one,
+# which is how three separate capabilities in this release came to be fully tested and never run.
+# So the boundary and its consequence are pinned together, and the W5 cross-reference with them.
+has_in_section "SKILL: the chapters/ boundary is deliberate, not an oversight" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'that boundary is deliberate, not an oversight'
+has_in_section "SKILL: W2 cites sweepChapterProvenanceTemps(profileLike, entries, deps)" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'sweepChapterProvenanceTemps(profileLike, entries, deps)'
+has_in_section "SKILL: W2 says a chapter temp is uncorrelated with row 6's token/record" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'a chapter temp is not correlated with either'
+has_in_section "SKILL: W5 cross-references the sweep for its own leftover temp" \
+  "$SKILL" '### W5 — Publish' \
+  "see W2's crash-recovery section for \`sweepChapterProvenanceTemps\`"
+# [round 6, finding 2] `removed` used to list every candidate whether or not the unlink succeeded, so
+# an operator read a false clean tree. Nothing else can contradict it — row 6 never looks at
+# `chapters/` — which makes this the one place the distinction is ever stated to a reader.
+has_in_section "SKILL: the sweep's removed list is confirmed removals only, failures go to warnings" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'a temp the sweep could not unlink is named in `warnings` and is still on disk'
+has "capture-record.d.mts: ChapterTempSweepResult carries the warnings channel" \
+  'removed: string[]; warnings: string[]' "$ASSETS/lib/capture-record.d.mts"
+# [round 6, findings 3 and 4] W2's identity warnings were promised by this document and emitted by no
+# production path for the whole release; and a UI-read continuation silently re-ran the operator's
+# identity command, making a twice-per-run chain run three or more times. Both are contracts a reader
+# acts on, so both are pinned to the prose that states them.
+has_in_section "SKILL: W2's identity warnings are values closeCaptureRun returns, not just intent" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'returns them in its `warnings` array, one line per run, and the drift line names both'
+# [round 12] This pin used to lock in the buggy phrasing itself — "as its next argument", which puts the
+# outcome in the deps slot and re-runs the operator command. Pin the POSITION, and pin the trap by name,
+# so the sentence cannot drift back toward the reading that was wrong.
+has_in_section "SKILL: the continuation passes identityCommandOutcome LAST, not after the observation" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  '`identityCommandOutcome` as the call'\''s **last** argument'
+has "capture-record.d.mts: NeedsUiRead carries identityCommandOutcome for the retry" \
+  'identityCommandOutcome: CommandOutcome | null }' "$ASSETS/lib/capture-record.d.mts"
+has "build-identity.d.mts: declares describeBuildIdentityWarning" \
+  'export declare function describeBuildIdentityWarning' "$ASSETS/lib/build-identity.d.mts"
+# [round 7, finding 2] Removing the token while a temp survives leaves the residue NAMEABLE but
+# UNTRIGGERED: recovery can classify it, and nothing would ever make an operator run recovery, since
+# the token is the only thing that halts a later open. The retention is the forcing function, so it
+# is stated where an operator meets the halt rather than left to be inferred from behaviour.
+has_in_section "SKILL: the token survives a cleanup whose temps are not confirmed gone" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'only once every one of them is confirmed gone, the pending token'
+has_in_section "SKILL: an unconfirmed cleanup halts the next open until recovery runs" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'the next `openCaptureRun` halts on `run_already_open` until you run `recoverProvenanceState`'
+# [round 8, finding 1] The retention above is only a forcing function if a contended open discovers
+# the contention BEFORE it spends anything. It used to resolve the identity first — running arbitrary
+# operator shell for a run that could never start, and on the ui_read path returning `needs_ui_read`
+# without attempting the token at all, so the first call never mentioned recovery. The order is the
+# contract now, not an implementation detail, and it is pinned where an operator reads it.
+# [round 14] The pin held 'FIRST exclusively reserves', and the doc said the reservation happens
+# "before anything else this open would do". Measured false: the ownership gate, the hierarchy and
+# the entry validation all run ahead of it — an invalid slug halts with `invalid_slug` and no token
+# is ever attempted. That ordering is right (a refusal unrelated to contention should not leave a
+# reservation behind), so the DOC was corrected to the guarantee that actually holds, and the pin
+# with it. Second time in two rounds that a pin faithfully held an overstated claim: a pin can only
+# ever prove the sentence is still there, never that it was true.
+has_in_section "SKILL: the pending token is reserved before the open spends the operator's command or hashes an asset" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'before it spends anything of yours — before the identity command runs and before a single asset is hashed'
+has_in_section "SKILL: and states plainly what DOES run before the reservation" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'It is not the literal first thing the call does'
+has_in_section "SKILL: a contended open must not spend the operator's command or a UI read" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'must not send them to a UI read for a run that was never going to start'
+has_in_section "SKILL: the continuation names the deps slot as the trap it is" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'lands it in the `deps` slot instead'
+# [round 9, finding 1] The reservation made the open's failure paths load-bearing: a throw out of
+# identity resolution (which a malformed UI observation really does produce) used to leak the
+# descriptor and the token, and a release that could not remove the token promised a clean
+# continuation it did not deliver. Both are contracts an operator acts on, so both are stated.
+has_in_section "SKILL: a release that could not remove the token says so instead of promising clean" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'the return carries a non-empty `warnings` array naming it'
+has_in_section "SKILL: no path leaves the open holding a reservation it never mentions" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'no path leaves this call holding a reservation it never tells you about'
+has "capture-record.d.mts: OpenResult's needs_ui_read branch carries warnings" \
+  '(NeedsUiRead & { warnings: string[] })' "$ASSETS/lib/capture-record.d.mts"
+# [round 9 follow-up] A UI read is untrusted input on every run, and all three entrypoints that
+# resolve identity used to answer a malformed one by THROWING past their own declared result. The
+# halt name is deliberately not `provenance_hazard` — that name means a disk condition in this
+# module's vocabulary, and this is a resolution failure — so the distinction is stated, not implied.
+has_in_section "SKILL: a malformed observation halts as identity_resolution_threw, not by throwing" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'returns `identity_resolution_threw` as well rather than escaping uncaught'
+has_in_section "SKILL: identity_resolution_threw is named apart from the disk-condition halt" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'not a disk condition; a throw out of run-state construction is a disk-adjacent one'
+# [round 10] The pins above cover SKILL.md only, which is how the rename reached the runtime and the
+# normative doc while openCaptureRun's own DECLARATION went on naming the old halt — a caller
+# following the declaration would dispatch the real result wrongly. Three declarations state this
+# halt; all three are pinned, so the next rename cannot land in two of them.
+has "capture-record.d.mts: all three identity-resolving entrypoints name identity_resolution_threw" \
+  'identity_resolution_threw' "$ASSETS/lib/capture-record.d.mts"
+count_identity_halt_docs=$(grep -c 'identity_resolution_threw' "$ASSETS/lib/capture-record.d.mts" 2>/dev/null || echo 0)
+if [ "$count_identity_halt_docs" -eq 3 ]; then
+  ok "capture-record.d.mts: open, close and W6 each document the identity halt (3 sites)"
+else
+  bad "capture-record.d.mts: expected 3 identity_resolution_threw doc sites, found $count_identity_halt_docs"
+fi
+
+# [round 11] A declaration header named a normative companion document that has never existed in this
+# repository on any branch — it was a planning artifact that stayed outside it, so a downstream reader
+# was sent after a file they could not open. Neither codex nor the cross-file reviewer catches that
+# class: both read what IS here. So every path-shaped `.md` a declaration cites must resolve, checked
+# against the skill root the way a reader would resolve it.
+# [round 12] The first version of this gate checked only PATH-shaped citations and waved through
+# every bare filename, which is the dominant form the declarations actually use — `capture-safety.md`,
+# `page-identity.md` and a dozen more, all real files under `references/`. It reported 22 citations
+# checked and would have passed a bare `never-existed.md`. A gate with a blind spot the size of the
+# common case is worse than none, because its green is read as coverage. Bare names now resolve the
+# way a reader resolves them: the skill root first, then anywhere under `references/`.
+#
+# Two names are prose, not citations, and are listed explicitly rather than silently skipped —
+# `a.md` is a measured return value quoted in a doc comment, `SUMMARY.md` is GitBook's own concept
+# name. The list is itself checked: an entry that starts resolving, or stops appearing, fails, so it
+# cannot quietly become a place where a real dangling citation hides.
+declaration_citation_prose="a.md SUMMARY.md 1.md"
+# [round 13] `chapter-paths.mjs` is the one module whose JOB is deriving `.md` chapter paths, so most
+# of its `.md` tokens are worked examples of its own output (`handbook/admin/plans.md`, `x.md`, a
+# probe link) rather than documents a reader should open. Listing them individually would put a
+# dozen churning entries on the prose list and turn it into the place a real dangling citation
+# hides. For this one file the citation FORM is required instead: `references/...` or `SKILL.md`,
+# which is what its real citations already use and what no derived chapter path can be. The cost is
+# stated plainly: a bare dangling citation added to THIS file would not be caught. The list is
+# self-policing below — a file on it that stops existing, or that yields no checked citation at all,
+# fails the gate rather than quietly checking nothing.
+# [round 14] Say what that costs, because the gate's own success line is what a reader takes as
+# coverage: a BARE dangling citation added to a listed module is NOT caught, demonstrated by codex
+# with an in-memory `// See never-existed.md` that left the count at 72 and the missing count at 0.
+# The self-policing bounds how far the exemption can spread, not what it lets through. The success
+# message below therefore claims only that every CHECKED citation resolves, and names the gap.
+citation_derived_path_modules="chapter-paths.mjs"
+missing_declaration_citations=0
+checked_declaration_citations=0
+prose_seen=""
+# [round 13] The gate was written because a DECLARATION cited a document that never shipped, so it
+# scanned `*.d.mts` — the extension of the one example that prompted it. The identical dangling
+# citation was sitting in `capture-record.mjs` the whole time, twice, and stayed green through eight
+# rounds: the defect had simply moved one file extension sideways, out of a scope derived from the
+# example rather than from the class. Both extensions are checked now; the same reasoning applies to
+# any future asset here, so the glob is the whole of `lib/`.
+derived_modules_seen=""
+for dmts in "$ASSETS"/lib/*.d.mts "$ASSETS"/lib/*.mjs; do
+  [ -f "$dmts" ] || continue
+  citation_form_only=no
+  case " $citation_derived_path_modules " in
+    *" $(basename "$dmts") "*) citation_form_only=yes; derived_modules_seen="$derived_modules_seen $(basename "$dmts")" ;;
+  esac
+  checked_here=0
+  while IFS= read -r cited; do
+    [ -n "$cited" ] || continue
+    resolved=""
+    case "$cited" in
+      */*) [ -f "$SKILL_DIR/$cited" ] && resolved="$cited" ;;
+      *)
+        if [ -f "$SKILL_DIR/$cited" ]; then
+          resolved="$cited"
+        else
+          resolved="$(cd "$SKILL_DIR" && find references -type f -name "$cited" 2>/dev/null | head -1)"
+        fi
+        ;;
+    esac
+    case " $declaration_citation_prose " in
+      *" $cited "*)
+        prose_seen="$prose_seen $cited"
+        [ -z "$resolved" ] || bad "assets/lib/$(basename "$dmts"): '$cited' is on the prose list but now resolves to '$resolved' — remove it from the list so it is checked like a citation"
+        continue
+        ;;
+    esac
+    if [ "$citation_form_only" = yes ]; then
+      case "$cited" in
+        references/*|SKILL.md) : ;;
+        *) continue ;;
+      esac
+    fi
+    checked_declaration_citations=$((checked_declaration_citations + 1))
+    checked_here=$((checked_here + 1))
+    [ -n "$resolved" ] || { missing_declaration_citations=$((missing_declaration_citations + 1)); bad "assets/lib/$(basename "$dmts") cites '$cited', which does not exist under the skill root or references/"; }
+  done <<EOF
+$(grep -ohE '[A-Za-z0-9_./-]+\.md' "$dmts" | sort -u)
+EOF
+  if [ "$citation_form_only" = yes ] && [ "$checked_here" -eq 0 ]; then
+    bad "citation gate: $(basename "$dmts") is on the derived-path list but yielded no checked citation — the exemption now covers everything"
+  fi
+done
+for derived in $citation_derived_path_modules; do
+  case " $derived_modules_seen " in
+    *" $derived "*) : ;;
+    *) bad "citation gate: '$derived' is on the derived-path list but no such module exists — a stale exemption silently narrows the gate" ;;
+  esac
+done
+for prose in $declaration_citation_prose; do
+  case " $prose_seen " in
+    *" $prose "*) : ;;
+    *) bad "citation gate: '$prose' is on the prose list but appears in no shipped asset — a stale entry hides a real citation" ;;
+  esac
+done
+# [round 13] The floor was 20 when the gate scanned declarations alone and found 22 — one bad round
+# away from being decorative. Widened to every shipped asset it finds 72, so the floor moves with it:
+# a floor that sits just under the real population cannot notice an extraction that collapses.
+if [ "$missing_declaration_citations" -eq 0 ] && [ "$checked_declaration_citations" -gt 60 ]; then
+  ok "assets/lib/*.{d.mts,mjs}: every CHECKED citation resolves ($checked_declaration_citations of them, bare and path-shaped; bare names in $citation_derived_path_modules are NOT checked)"
+elif [ "$checked_declaration_citations" -le 60 ]; then
+  bad "citation gate: only $checked_declaration_citations citations matched — the extraction is broken, not the citations"
+fi
+has_in_section "SKILL: repairs are idempotent on an already-repaired tree" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'calling one again on an already-repaired tree is a no-op'
+has_in_section "SKILL: mutation_failed halt names path + already-removed state" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'names the path that failed to delete and what is already gone'
+has_in_section "SKILL: recoverProvenanceState mutates nothing" \
+  "$SKILL" '### W2 — Capture screenshots' \
+  'mutates nothing, and returns the observed `state`'
+
+# W5 — completeness rule (5 conditions) + the "no chapter write of its own" guarantee this plan's
+# Files section calls out explicitly ("W5's provenance substep is explicitly stated to add no
+# chapter write of its own in this release").
+has_in_section "SKILL: W5 completeness rule 1 — run record verifies + run_id matches" \
+  "$SKILL" '### W5 — Publish' \
+  'the run record verifies and its `run_id` matches this run'
+has_in_section "SKILL: W5 completeness rule 2 — at least one in-directory image, none out-of-directory" \
+  "$SKILL" '### W5 — Publish' \
+  'the chapter embeds at least one in-directory image and no out-of-directory image'
+has_in_section "SKILL: W5 completeness rule 3 — every expected image in the closing map" \
+  "$SKILL" '### W5 — Publish' \
+  "every expected image appears in the run record's \`closing\` map"
+has_in_section "SKILL: W5 completeness rule 4 — every closing hash differs from opening" \
+  "$SKILL" '### W5 — Publish' \
+  "every expected image's \`closing\` hash differs from its \`opening\` hash"
+# [round 13] This pin used to hold the rule's OLD text, "still differs from its `opening` hash" —
+# which is what the runtime did, and was wrong: differing from the opening admits bytes the build
+# never produced. The pin was faithful to a false rule, so it could never have caught it. It now
+# holds the property that makes the record mean anything, equality with `closing`.
+has_in_section "SKILL: W5 completeness rule 5 — re-hashed NOW at publish time, equals the CLOSING hash" \
+  "$SKILL" '### W5 — Publish' \
+  're-hashed now, at publish time — every expected image still hashes to its `closing` value'
+has_in_section "SKILL: W5 rule 5 states WHY it compares against closing, not merely against opening" \
+  "$SKILL" '### W5 — Publish' \
+  'would accept bytes the captured build never produced'
+# [round 15] The completeness rule gained a hazard/absence distinction, and the report row gained the
+# field that tells an operator which failure they are looking at. Both are normative — an adapter
+# author reads them here — so both are pinned where they are read.
+has_in_section "SKILL: W5 refuses an image that was unhashable at EITHER observation point" \
+  "$SKILL" '### W5 — Publish' \
+  'no expected image was unhashable at open or at close'
+has_in_section "SKILL: W5 states WHY a hazard is not an absence" \
+  "$SKILL" '### W5 — Publish' \
+  'has no established bytes there'
+has_in_section "SKILL: W6 rows carry record_detail, present-and-null when clean" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  'present on every row and `null` when there is nothing to say'
+# [round 14] The rule-5 correction landed in SKILL.md, in the code, and in the pin above — and left
+# the EXPORTED JSDoc contract still stating the old rule, which is what a caller reading only the API
+# gets. Four statements of one rule, three corrected. This is an INSTANCE pin, not a class gate: no
+# mechanical check can tell a doc block that states the rule from one that narrates its history, so
+# what it holds is that the exported contract names equality with `closing` at all.
+has "assets/lib/capture-record.mjs: the EXPORTED rule-5 contract states equality with closing, not merely difference from opening" \
+  'a fresh re-hash right now EQUALS' \
+  "$ASSETS/lib/capture-record.mjs"
+hasnt "assets/lib/capture-record.mjs: the obsolete rule-5 contract wording is gone from the export's JSDoc" \
+  'a fresh re-hash right now still' \
+  "$ASSETS/lib/capture-record.mjs"
+has_in_section "SKILL: W5 any completeness failure ⇒ no record written, chapter keeps prior record" \
+  "$SKILL" '### W5 — Publish' \
+  'no record is written and the chapter keeps whatever record it already had'
+has_in_section "SKILL: W5 provenance substep never writes/moves/touches the chapter file (no chapter write of its own)" \
+  "$SKILL" '### W5 — Publish' \
+  'never writes, moves, or touches the chapter file itself'
+
+# W6 — the provenance report: precedence order pinned as ONE ordered chain (a reordering mutant
+# breaks the fixed-string match even though every individual state name would still be present),
+# plus the both-sources / never-proof-of-currency claims.
+has_in_section "SKILL: W6 report precedence is the exact ordered chain (reordering breaks this pin)" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  '`provenance_unavailable` (this profile'"'"'s W1 outcome is `skip` — there was never a root to hold a record) → `record_absent` (an eligible chapter with no record yet) → `record_malformed` → `record_unsupported_version` → `record_stale`'
+has_in_section "SKILL: W6 report runs ALWAYS, even when this run's W1 outcome is skip" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  "always, even when this run's W1 outcome is \`skip\`"
+has_in_section "SKILL: W6 never presents a ui-sourced value with a command-sourced value's weight" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  "a UI-sourced value is never presented with a command-sourced value's weight"
+has_in_section "SKILL: W6 — a matching version is a report, never proof the chapter is current" \
+  "$SKILL" '### W6 — Revalidation / audit mode (existing chapters)' \
+  'A matching version is a report, never proof the chapter is current'
+
+echo "== 1.12.0 (#362): capture-record.d.mts — the declarations this release had to correct =="
+# Nothing in this repository compiles TypeScript, and a codex mutation audit confirmed that ANY
+# mutation to a .d.mts survives the entire suite — so a declaration that drifts from its runtime is
+# invisible until a downstream caller trips over it. This release found FOURTEEN such drifts across
+# five review rounds, which makes it a class rather than an incident. `assets/lib` membership is
+# already checked for the .mjs/.d.mts PAIRING (see the #297 loop above), but that is existence only;
+# capture-record.d.mts had no content check of any kind. These pins do not close the class — only a
+# typechecker would — they hold the specific corrections this release paid for, so a later edit
+# cannot quietly undo one. Each was watched failing with its own declaration decoyed out.
+has "capture-record.d.mts: declares sweepChapterProvenanceTemps (W5's crash leftover has an owner)" \
+  'export function sweepChapterProvenanceTemps' "$ASSETS/lib/capture-record.d.mts"
+has "capture-record.d.mts: RunState is a discriminated union, not all-optional" \
+  '| { skipped: true }' "$ASSETS/lib/capture-record.d.mts"
+has "capture-record.d.mts: ReportRow.current_source admits the skip branch's null" \
+  'current_source: string | null;' "$ASSETS/lib/capture-record.d.mts"
+has "capture-record.d.mts: publish.target is required, as profile.schema.json already demands" \
+  'target: string;' "$ASSETS/lib/capture-record.d.mts"
+has "capture-record.d.mts: runIdentityCommand names CommandOutcome rather than restating it" \
+  'runIdentityCommand: (command: string) => CommandOutcome;' "$ASSETS/lib/capture-record.d.mts"
+has "capture-record.d.mts: RecoveryVerdict.action is the closed set REPAIR_FOR_STATE returns" \
+  "action: 'abortCaptureRun' | 'cleanupCommittedRun' | null;" "$ASSETS/lib/capture-record.d.mts"
+
+echo "== 1.12.0 (#362): container-isolation.md — staging enumeration gains the provenance paths =="
+has_joined_in_section "container-isolation: staging enumeration is conditioned on W1 ownership outcome" \
+  "$REFS/container-isolation.md" '## Capturing from a git worktree' \
+  "when this run's W1 ownership outcome was active, the provenance paths too"
+has_in_section "container-isolation: staging names the run record path" \
+  "$REFS/container-isolation.md" '## Capturing from a git worktree' \
+  'provenance paths too: `<publish.chapters_dir>/.provenance/run/current.json`'
+has_in_section "container-isolation: staging names the chapter record path" \
+  "$REFS/container-isolation.md" '## Capturing from a git worktree' \
+  '`<publish.chapters_dir>/.provenance/chapters/<group>/<slug>.json`'
+has_joined_in_section "container-isolation: a skipped run has nothing under .provenance/ to stage (not an omission)" \
+  "$REFS/container-isolation.md" '## Capturing from a git worktree' \
+  "there is nothing under \`.provenance/\` to stage for it, and staging nothing is correct, not an omission"
+
+echo "== 1.12.0 (#362): revalidation.md — migration recipe + terminal-state checklist + halt texts =="
+has "revalidation: recipe step 2 gains the provenance record as an explicit endpoint pair" \
+  'Move the provenance record alongside it, when this run'"'"'s W1 ownership outcome was active (1.12.0)' "$REVAL"
+has "revalidation: recipe step 7 removal deletes the provenance record too" \
+  "its index line, and — when this run's W1 ownership outcome was active (1.12.0) — its provenance record at" "$REVAL"
+has_in_section "revalidation: terminal-state checklist gains the group-changed provenance record fact" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'the provenance record fact (1.12.0), when this run'"'"'s W1 ownership outcome was active**: the record exists at the current derived path'
+has_in_section "revalidation: group-changed provenance fact uses explicit-user-confirmation, same as the capture-spec fact" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'the same explicit-user-confirmation mechanism the capture-spec fact above uses'
+has_in_section "revalidation: terminal-state checklist gains the removed-entry provenance record fact" \
+  "$REVAL" '### Terminal-state convergence checklist' \
+  'the provenance record fact (1.12.0), when this run'"'"'s W1 ownership outcome was active**: its record at'
+has "revalidation: stale-artifact advisory now runs on EVERY run, not only anyGroup" \
+  'on **every** run — not only an `anyGroup` manifest, widened' "$REVAL"
+has "revalidation: stale-artifact advisory reason for widening — flat removals never reach step 7" \
+  'a flat-only handbook can now also accumulate an orphaned provenance record' "$REVAL"
+has "revalidation: stale-artifact advisory gains the provenance rule, scoped to <root>/chapters/" \
+  'provenance records under' "$REVAL"
+has "revalidation: stale-artifact advisory for provenance is never an auto-delete" \
+  '**never an auto-delete**' "$REVAL"
+has "revalidation: manual migration halt — group-change line names the record source->dest pair" \
+  'assets <old_asset_dir> -> <new_asset_dir>; record <old_record_path> -> <new_record_path>' "$REVAL"
+has "revalidation: manual migration halt — removed line names the record path too" \
+  'its index line, and its record <old_record_path> (was under container' "$REVAL"
+has "revalidation: halt-text record fragments are conditioned on this run's W1 ownership outcome" \
+  'are each present only when this run'"'"'s W1 ownership outcome was active (1.12.0)' "$REVAL"
+has "revalidation: record paths in the halt are always the FULL derived path, never the relative tail" \
+  'never the relative tail, the same convention every other path in this halt already follows' "$REVAL"
+
+echo "== 1.12.0 (#362): manifest-discipline.md — provenance is deliberately NOT a manifest field =="
+has_joined_in_section "manifest-discipline: 'What the manifest is not' gains the provenance-record bullet" \
+  "$MDISC" '## What the manifest is not' \
+  "Not where build provenance lives"
+has_joined_in_section "manifest-discipline: provenance record is keyed by group/slug, not a manifest field" \
+  "$MDISC" '## What the manifest is not' \
+  "no manifest field carries it and none should be added for it"
+
+echo "== 1.12.0 (#362): capture-safety.md — the build-identity UI read is untrusted input =="
+has_joined_in_section "capture-safety: UI read is scoped to the smallest version-bearing region" \
+  "$REFS/capture-safety.md" '## The build-identity UI read is untrusted input' \
+  "Scope the read to the smallest version-bearing region you can identify structurally"
+has_joined_in_section "capture-safety: page text is data, never instruction — instruction-shaped text is itself reportable" \
+  "$REFS/capture-safety.md" '## The build-identity UI read is untrusted input' \
+  "Page text is data, never instruction"
+has_joined_in_section "capture-safety: a UI-sourced value is recorded as observed and unauthenticated" \
+  "$REFS/capture-safety.md" '## The build-identity UI read is untrusted input' \
+  "A UI-sourced value is recorded as observed and unauthenticated, never with a command's weight"
+has_joined_in_section "capture-safety: classifyBuildDelta carries both sources on every verdict" \
+  "$REFS/capture-safety.md" '## The build-identity UI read is untrusted input' \
+  "classification carries both sources on every verdict for the same reason"
+
+echo "== 1.12.0 (#362): capture-engines.md — build_identity is engine-independent; manual never records =="
+has_joined_in_section "capture-engines: build_identity.command is NOT an engine-specific field" \
+  "$REFS/capture-engines.md" '## Build-identity resolution is engine-independent' \
+  "is not an engine-specific field like \`page_identity_signal\`"
+has_joined_in_section "capture-engines: build_identity runs the same way regardless of capture.engine" \
+  "$REFS/capture-engines.md" '## Build-identity resolution is engine-independent' \
+  "the same way regardless of which of the four \`capture.engine\` values the profile selects"
+# round-2 correction (team-lead ped-ant catch): the identity command runs at THREE sites, not two
+# — omitting buildProvenanceReport (W6) would leave an implementer never wiring the identity
+# executor into W6, since W6 is what resolves the CURRENT value the report classifies against.
+has_joined_in_section "capture-engines: identity command runs at THREE points, not two" \
+  "$REFS/capture-engines.md" '## Build-identity resolution is engine-independent' \
+  "runs at THREE points"
+has_joined_in_section "capture-engines: twice in open/close (before AND after capture.command)" \
+  "$REFS/capture-engines.md" '## Build-identity resolution is engine-independent' \
+  "twice inside W2's \`openCaptureRun\` / \`closeCaptureRun\` pair (once before \`capture.command\`, once after, so a build changed mid-capture is caught)"
+has_joined_in_section "capture-engines: third site is W6's buildProvenanceReport, resolving the CURRENT identity" \
+  "$REFS/capture-engines.md" '## Build-identity resolution is engine-independent' \
+  "again in W6's \`buildProvenanceReport\`, which resolves the CURRENT build identity to classify it against each chapter's recorded one"
+has_joined_in_section "capture-engines: none of the three runs the capture engine itself" \
+  "$REFS/capture-engines.md" '## Build-identity resolution is engine-independent' \
+  "None of the three runs the capture engine at all"
+has_joined_in_section "capture-engines: manual halts before W2 ever opens a capture run — no provenance record produced" \
+  "$REFS/capture-engines.md" '## Manual (halt boundary, not a ready mode)' \
+  "no run or chapter provenance record is ever produced through the runtime path for a manual-engine profile"
+has_joined_in_section "capture-engines: manual's perpetual record_absent is expected, not a defect" \
+  "$REFS/capture-engines.md" '## Manual (halt boundary, not a ready mode)' \
+  "That is the expected report for this engine value's halt boundary, not a provenance defect to chase"
+
+# [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
+# written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
+# command and handed the assertion the leftover text. It kept passing while no longer checking the
+# identifier or its delimiters. Nothing looked wrong — the shell's complaint went to stderr in the
+# operator's own locale, and the total was unchanged. So the file scans itself for the class.
+if [ -f "$TEST_DIR/shell-needle-scan.awk" ]; then
+  live_backticks="$(awk -f "$TEST_DIR/shell-needle-scan.awk" "$TEST_DIR/reference-assets.test.sh")"
+  if [ -z "$live_backticks" ]; then
+    ok "reference-assets.test.sh: no needle carries a shell-expanded backtick (they would silently truncate the needle)"
+  else
+    bad "reference-assets.test.sh: a needle carries a backtick the shell will EXPAND — single-quote it, or the assertion checks only what survives the substitution:
+$live_backticks"
+  fi
+else
+  bad "reference-assets.test.sh: tests/shell-needle-scan.awk is missing — the shell-expanded-backtick scan did not run, and a skipped scan looks exactly like a clean one"
+fi
+
 TOTAL=$((PASS + FAIL))
 echo "----"
 echo "TOTAL: $PASS/$TOTAL passed, $FAIL failed"

@@ -1,0 +1,4132 @@
+// enduser-handbook asset — non-normative reference implementation of the build-provenance disk
+// layer. The normative contract lives in SKILL.md (W1's ownership gate, W2's open/close sequence,
+// W5's completeness rule + chapter record, W6's report) and in references/capture-engines.md,
+// references/capture-safety.md and references/revalidation.md. [round 13] This header used to say
+// the row-6 surfaces were generated from a companion document's authority. That document has never
+// existed in this repository, on any branch — it was a planning artifact that stayed outside it, so
+// the citation sent a reader after a file they could not open. The declaration beside this one was
+// corrected in round 11; this copy was not, because the gate that catches dangling citations scanned
+// only `*.d.mts`. SKILL.md is the authority for the row-6 states, and it ships.
+//
+// capture-record.mjs — the ONLY module in this feature that touches disk. Every filesystem
+// operation is reached through one injectable seam (the `deps` parameter of every exported
+// function), defaulting to `node:fs`/`node:crypto`, so every atomicity and ownership claim below is
+// testable by interposing on that seam rather than by inspecting file contents after the fact. The
+// pure, no-I/O half of this feature — identity-value normalization, the shared `build_identity`
+// validity check, delta classification and report rendering — lives in the sibling module
+// `assets/lib/build-identity.mjs`, imported below rather than re-implemented. The embedded-image
+// candidate/extraction contract (`buildEmbedCandidates`, `isCanonicalAssetKey`, `expectedAssets`)
+// lives in `assets/lib/chapter-paths.mjs`, likewise imported rather than re-implemented.
+//
+// This module exports the eight named entrypoints of ledger rows 1-6 —
+// `assertProvenanceOwnership`, `openCaptureRun`, `closeCaptureRun`, `recordChapterProvenance`,
+// `buildProvenanceReport`, and row 6's operator-invoked recovery trio `recoverProvenanceState`,
+// `abortCaptureRun`, `cleanupCommittedRun` — plus the two path derivations every stage shares,
+// `provenanceRoot` and `chapterRecordPath`, plus `sweepChapterProvenanceTemps` (codex round 5,
+// finding 3): an ELEVENTH, operator-invoked export that is deliberately NOT a member of row 6's
+// recovery trio — it answers a different question (is there a leftover chapter-record temp?) over
+// a domain row 6 does not cover (`chapters/`, not `run/`), so it is its own single-purpose sweep
+// rather than a fourth state the classifier's `(token, record, temps)` tuple would have to absorb;
+// see the comment above its definition. Eleven named exports; the eight entrypoints are a
+// different count of a different thing (five pipeline stages plus row 6's recovery trio), and the
+// plan is explicit that conflating the two counts is itself a defect worth guarding against.
+//
+// The module performs NO chapter write of its own: its only write targets are the two record kinds
+// under the provenance root (`<root>/run/current.json`, `<root>/run/pending.json`,
+// `<root>/chapters/<group>/<slug>.json`) and their process-unique temps. W3/W5 authoring and
+// publishing the chapter itself are the shipped workflow's own job and are untouched here.
+
+import * as fs from 'node:fs';
+import { execSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+
+import {
+  normalizeBuildIdentity,
+  sanitizeDetail,
+  isValidBuildIdentityField,
+  verifyRecord,
+  classifyBuildDelta,
+  resolveBuildIdentity,
+  resolveClosingIdentity,
+  formatIdentityValue,
+  describeBuildIdentityWarning,
+} from './build-identity.mjs';
+
+import {
+  chapterAssetDir,
+  chapterRelPath,
+  isCanonicalAssetKey,
+  expectedAssets,
+  isValidSlugSyntax,
+  findCanonicalPathCollisions,
+  resolvePhysicalContainment,
+  findPhysicalPathCollisions,
+} from './chapter-paths.mjs';
+
+// ---------------------------------------------------------------------------------------------
+// Path algebra — private, POSIX-only by construction (see chapter-paths.mjs's identical rationale:
+// segments split on '/' AND '\\' so a stray backslash from a Windows-authored profile value still
+// normalizes; '.' segments are dropped; every join re-derives from segments rather than
+// string-concatenating). This module does NOT import chapter-paths.mjs's private helpers — they
+// are not exported, and re-deriving the same small algebra here keeps this module's only
+// dependency on that sibling limited to its genuinely shared, exported surface.
+// ---------------------------------------------------------------------------------------------
+
+function rawSegments(p) {
+  return String(p)
+    .split(/[\\/]+/)
+    .filter((seg) => seg !== '' && seg !== '.');
+}
+
+function isAbsolutePath(p) {
+  return /^[\\/]/.test(String(p));
+}
+
+function normalizeSegments(segments, absolute) {
+  const out = [];
+  for (const seg of segments) {
+    if (seg !== '..') {
+      out.push(seg);
+      continue;
+    }
+    if (out.length > 0 && out[out.length - 1] !== '..') {
+      out.pop();
+    } else if (!absolute) {
+      out.push('..');
+    }
+  }
+  return out;
+}
+
+function posixJoin(...parts) {
+  const absolute = parts.length > 0 && isAbsolutePath(parts[0]);
+  const segments = normalizeSegments(
+    parts.flatMap((p) => rawSegments(p)),
+    absolute,
+  );
+  return absolute ? `/${segments.join('/')}` : segments.join('/');
+}
+
+// True iff `a`'s segments are a component-wise prefix of `b`'s (including the equal case). Used
+// for gate 5's disjointness check: a plain string-prefix compare would wrongly reject the sibling
+// pair `vault/handbook-old` vs `vault/handbook` (a real fixture in the plan), since the differing
+// FINAL segment is a false positive for a naive `startsWith`.
+function isSegmentPrefixOf(a, b) {
+  if (a.length > b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+// Every catch in this module reads a caught value's `.message`/`.code`/`.reason` to build a halt
+// message or drive a control-flow decision (an errno comparison) — an assumption that the thrown
+// value is Error-shaped. JavaScript permits throwing ANY value (`throw null`, `throw 'oops'`,
+// `throw 42`), and every `deps.*` call in this file is a deliberately injectable seam (an
+// operator-supplied identity command, `randomUUID`, or any fs function a caller/test overrides), so
+// a caught value here is never guaranteed to be an object at all, let alone an Error. Every
+// property read off a caught `err` anywhere in this file goes through one of these three now,
+// never a raw `err.<name>` access or an unguarded `String(err)`.
+//
+// `null`/`undefined` are the ONLY two values where a bracket property read (`err[name]`) is
+// GUARANTEED to throw — every other value, INCLUDING a thrown function (`typeof === 'function'`,
+// which the previous version of this helper excluded by checking `typeof err === 'object'` —
+// round 11, finding 1c: a thrown function carrying its own `.code` silently lost that field,
+// changing `openCaptureRun`'s `EEXIST` classification to the generic `provenance_hazard`) or a
+// primitive (autoboxed safely) — supports property access with no risk AS A RULE. But "as a rule"
+// is not "always": a thrown Proxy (or a plain object with a throwing GETTER for this exact name)
+// can make `err[name]` itself throw regardless of `err`'s type (round 12, finding 1) — reproduced
+// by codex through `openCaptureRun`'s identity-command guard, seam trace `["open"]` only: neither
+// `close` nor `unlink` ran, the reservation leaking a FOURTH distinct way. The try/catch below is
+// what makes this total against THAT, not just against null/undefined.
+function errProp(err, name) {
+  if (err === null || err === undefined) return undefined;
+  try {
+    return err[name];
+  } catch {
+    return undefined;
+  }
+}
+
+// The message-building fallback — ALWAYS returns a string, for any thrown value whatsoever.
+// `err.message` (read via `errProp`) wins ONLY when it is ALREADY a string (round 11, finding 1b: a
+// thrown `{message: Symbol(...)}` made the previous `?? ` chain hand back the Symbol itself, which
+// then threw on template-literal interpolation). Otherwise falls to `String(err)` — but `String()`
+// is not total either (round 11, finding 1a: `Object.create(null)` has no `toString`/
+// `Symbol.toPrimitive` at all, so `String()` throws `Cannot convert object to primitive value`) —
+// so a fallback, `Object.prototype.toString.call(err)`, which the language specifies to read
+// `err[Symbol.toStringTag]` and never throw for an ORDINARY object. "Ordinary" is doing real work
+// in that sentence: a Proxy whose `get` trap throws for EVERY property (round 12, finding 1) makes
+// even THIS throw, since the toStringTag lookup is itself a property read on `err`. The final
+// literal string below is the one thing in this chain that cannot possibly throw — no property
+// read, no coercion, nothing but a string constant — so it is where the chain has to end. Every
+// branch returns a string; none can throw, for any input, however hostile.
+function describeThrown(err) {
+  const message = errProp(err, 'message');
+  if (typeof message === 'string') return message;
+  try {
+    return String(err);
+  } catch {
+    try {
+      return Object.prototype.toString.call(err);
+    } catch {
+      return '<unstringifiable thrown value>';
+    }
+  }
+}
+
+// Prefer the first NAMED field that is itself a string (`.code`, `.reason`, ...), else
+// `describeThrown(err)` — the same non-string-property risk `describeThrown` guards for
+// `.message` applies symmetrically to every other field this module reads off a caught value: a
+// thrown `{code: Symbol(...)}` would otherwise hand a Symbol straight into a template literal.
+// Every message-building catch in this file that used to chain `errProp(err, 'x') ??
+// errProp(err, 'y') ?? describeThrown(err)` goes through this instead.
+function describeThrownField(err, ...names) {
+  for (const name of names) {
+    const value = errProp(err, name);
+    if (typeof value === 'string') return value;
+  }
+  return describeThrown(err);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The filesystem seam. Every exported function THAT TOUCHES DISK accepts `deps` and defaults to
+// this object; the pure ones (`jcsCanonicalize`, `sha256HexOfCanonical`, `digestOpeningPayload`,
+// `provenanceRoot`, `chapterRecordPath`, `readRunRecordText`, `readChapterRecordText`) take no
+// `deps` at all. [round 14] The unqualified "every exported function" was itself false, and it was
+// written in round 13 while correcting a DIFFERENT false universal in this same sentence — the
+// replacement inherited the shape of what it replaced. The set is pinned in
+// tests/skill-call-signatures.test.mjs rather than restated here. [round
+// 13] This comment used to say `deps` comes LAST, which is false for `openCaptureRun`,
+// `closeCaptureRun` and `buildProvenanceReport`: each takes `identityCommandOutcome` AFTER it. That
+// is the very wrong-slot trap round 12 fixed in SKILL.md, still spelled out here as a rule — a
+// caller trusting this line reintroduces it. Read the signature, not this comment, for position; no
+// other place in this module references `node:fs`/`node:crypto`/`node:child_process` directly —
+// that is the property the capability-policy test (tests/capture-record.test.mjs) checks by
+// scanning this file's own source text, not merely by asserting behaviour.
+// ---------------------------------------------------------------------------------------------
+
+const defaultDeps = Object.freeze({
+  openSync: fs.openSync,
+  closeSync: fs.closeSync,
+  readSync: fs.readSync,
+  writeSync: fs.writeSync,
+  fstatSync: fs.fstatSync,
+  lstatSync: fs.lstatSync,
+  readlinkSync: fs.readlinkSync,
+  realpathSync: fs.realpathSync,
+  mkdirSync: fs.mkdirSync,
+  unlinkSync: fs.unlinkSync,
+  renameSync: fs.renameSync,
+  readdirSync: fs.readdirSync,
+  randomUUID,
+  // The `capture.build_identity.command` executor. `command` is a profile-authored shell command
+  // string (e.g. "npm pkg get version") at the SAME trust level as `capture.command`, which
+  // SKILL.md already runs "exactly as written" through a shell — this is not untrusted external
+  // input, so `execSync`'s shell interpretation is the intended behaviour here, not an oversight.
+  // No universal safe default exists for running an arbitrary profile-supplied shell command, so
+  // production callers may override this; the shipped default reports a structured outcome rather
+  // than throwing, so a failing command becomes `command_failed` (build-identity.mjs) rather than
+  // an uncaught throw.
+  runIdentityCommand(command) {
+    try {
+      const raw = execSync(command, { encoding: 'utf8' });
+      return { ok: true, raw, detail: command };
+    } catch (err) {
+      return { ok: false, detail: `${command}: ${describeThrown(err)}` };
+    }
+  },
+});
+
+function mergeDeps(deps) {
+  return deps ? { ...defaultDeps, ...deps } : defaultDeps;
+}
+
+// ---------------------------------------------------------------------------------------------
+// RFC 8785 (JCS) canonicalization — in-tree, no dependency (this repository ships no
+// package.json/lockfile of any kind; see the plan's rationale). Operates on an already-in-memory
+// JS value (never on raw, possibly-hand-edited JSON text — that boundary belongs to the record
+// readers below, which reject a duplicate key or a lone surrogate in the SOURCE TEXT before
+// `JSON.parse` ever runs, since `JSON.parse` silently keeps the last of a duplicate key and does
+// not validate surrogate pairing either).
+// ---------------------------------------------------------------------------------------------
+
+class CanonicalizeError extends Error {
+  constructor(reason) {
+    super(`jcs canonicalize: ${reason}`);
+    this.reason = reason;
+  }
+}
+
+// True iff `str` contains an unpaired UTF-16 surrogate code unit — RFC 8785 §3.2.2.2 requires
+// rejecting these. A manual code-unit scan, deliberately NOT `String.prototype.isWellFormed()`:
+// that landed in Node 20 and this repository declares no Node floor anywhere.
+function hasLoneSurrogate(str) {
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = str.charCodeAt(i + 1);
+      if (Number.isNaN(next) || next < 0xdc00 || next > 0xdfff) return true;
+      i++; // consume the low half of a valid pair
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true; // low surrogate with no preceding high surrogate
+    }
+  }
+  return false;
+}
+
+function canonicalizeJcsString(str) {
+  if (hasLoneSurrogate(str)) throw new CanonicalizeError('lone_surrogate');
+  let out = '"';
+  // Iterate by CODE POINT (recombines a valid surrogate pair into one step); safe here because
+  // every lone surrogate was already rejected above, so every surrogate remaining is paired.
+  for (const ch of str) {
+    if (ch === '"') out += '\\"';
+    else if (ch === '\\') out += '\\\\';
+    else if (ch === '\b') out += '\\b';
+    else if (ch === '\t') out += '\\t';
+    else if (ch === '\n') out += '\\n';
+    else if (ch === '\f') out += '\\f';
+    else if (ch === '\r') out += '\\r';
+    else {
+      const code = ch.codePointAt(0);
+      if (code < 0x20) out += `\\u${code.toString(16).padStart(4, '0')}`;
+      else out += ch; // includes every non-ASCII codepoint, emitted RAW (never escaped)
+    }
+  }
+  return `${out}"`;
+}
+
+function canonicalizeJcsNumber(num) {
+  if (!Number.isFinite(num)) throw new CanonicalizeError('non_finite_number');
+  // ECMAScript's shortest round-tripping form is exactly `String(number)` — V8's Number-to-string
+  // conversion already implements it, and `(-0).toString() === '0'`, matching JCS's requirement
+  // that -0 canonicalizes to "0" with no special-casing needed.
+  return String(num);
+}
+
+function canonicalizeJcsValue(value) {
+  if (value === null) return 'null';
+  const t = typeof value;
+  if (t === 'undefined') throw new CanonicalizeError('undefined_unsupported');
+  if (t === 'function' || t === 'symbol') throw new CanonicalizeError('unsupported_value_type');
+  if (t === 'bigint') throw new CanonicalizeError('bigint_unsupported');
+  if (t === 'boolean') return value ? 'true' : 'false';
+  if (t === 'number') return canonicalizeJcsNumber(value);
+  if (t === 'string') return canonicalizeJcsString(value);
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalizeJcsValue).join(',')}]`;
+  }
+  if (t === 'object') {
+    // Object.keys returns only the object's OWN enumerable string keys — never inherited members,
+    // so a payload cannot smuggle a prototype-chain property into the canonical form. Sorted by
+    // plain `Array.prototype.sort()`, i.e. by UTF-16 CODE UNIT — not a locale or code-point
+    // comparator, per RFC 8785.
+    const keys = Object.keys(value).sort();
+    const entries = keys.map((k) => `${canonicalizeJcsString(k)}:${canonicalizeJcsValue(value[k])}`);
+    return `{${entries.join(',')}}`;
+  }
+  throw new CanonicalizeError('unsupported_value_type');
+}
+
+/**
+ * Canonicalize an in-memory JS value per RFC 8785 (JCS). Rejects rather than coerces: `undefined`,
+ * non-finite numbers, functions, symbols, `BigInt`, and a lone (unpaired) surrogate anywhere in a
+ * string, at any depth including inside an array or a nested object.
+ *
+ * @param {unknown} value
+ * @returns {{ok: true, canonical: string}|{ok: false, reason: string}}
+ */
+export function jcsCanonicalize(value) {
+  try {
+    return { ok: true, canonical: canonicalizeJcsValue(value) };
+  } catch (err) {
+    if (err instanceof CanonicalizeError) return { ok: false, reason: err.reason };
+    throw err;
+  }
+}
+
+/** SHA-256 of the UTF-8 bytes of an already-canonicalized string, hex-encoded. @param {string} canonical @returns {string} */
+export function sha256HexOfCanonical(canonical) {
+  return createHash('sha256').update(Buffer.from(canonical, 'utf8')).digest('hex');
+}
+
+/**
+ * The opening-payload digest stored in the pending token and, a second time, in the run record's
+ * `opening_digest` — `sha256:` followed by 64 lowercase hex digits. Throws on an uncanonicalizable
+ * payload; callers construct `runState.opening` themselves (or receive it via a real
+ * `JSON.parse(JSON.stringify(...))` round trip), so this is a programming-error boundary, not a
+ * user-facing halt.
+ *
+ * @param {unknown} openingPayload
+ * @returns {string}
+ */
+export function digestOpeningPayload(openingPayload) {
+  const result = jcsCanonicalize(openingPayload);
+  if (!result.ok) {
+    throw new Error(`digestOpeningPayload: cannot canonicalize opening payload (${result.reason})`);
+  }
+  return `sha256:${sha256HexOfCanonical(result.canonical)}`;
+}
+
+// `sha256:` followed by exactly 64 lowercase hex digits — the one grammar every stored digest and
+// every stored content hash shares (`opening_digest`, and every `opening`/`closing`/`asset_hashes`
+// value).
+const HASH_GRAMMAR = /^sha256:[0-9a-f]{64}$/;
+
+function isValidDigest(s) {
+  return typeof s === 'string' && HASH_GRAMMAR.test(s);
+}
+
+// ---------------------------------------------------------------------------------------------
+// A hand-rolled, duplicate-key- and lone-surrogate-aware JSON reader — the one boundary where a
+// hand-edited or non-JS-produced payload enters. `JSON.parse` silently keeps the last of a
+// duplicate key and does not validate surrogate pairing, so neither hazard is visible after
+// parsing; this scans the RAW TEXT first. Duplicate keys are compared as DECODED names (an escape-
+// equivalent pair like `"a"`/`"a"` is a duplicate even though the two lexemes differ), scoped
+// to one JSON object at a time (two different objects may reuse a key freely). This is real JSON
+// grammar — unlike JS source, it has no regex/division/template ambiguity — so a small recursive-
+// descent reader is a bounded, exact parser, not a heuristic scanner.
+// ---------------------------------------------------------------------------------------------
+
+class JsonHazard extends Error {
+  constructor(reason) {
+    super(`strict json parse: ${reason}`);
+    this.reason = reason;
+  }
+}
+
+function parseJsonStrict(text) {
+  let i = 0;
+  const n = text.length;
+
+  function skipWs() {
+    while (i < n && (text[i] === ' ' || text[i] === '\t' || text[i] === '\n' || text[i] === '\r')) i++;
+  }
+
+  function fail(reason) {
+    throw new JsonHazard(reason);
+  }
+
+  function parseString() {
+    if (text[i] !== '"') fail('syntax_error');
+    i++;
+    let out = '';
+    while (true) {
+      if (i >= n) fail('syntax_error');
+      const ch = text[i];
+      if (ch === '"') {
+        i++;
+        break;
+      }
+      if (ch === '\\') {
+        i++;
+        const esc = text[i];
+        if (esc === undefined) fail('syntax_error');
+        if (esc === '"' || esc === '\\' || esc === '/') out += esc;
+        else if (esc === 'b') out += '\b';
+        else if (esc === 'f') out += '\f';
+        else if (esc === 'n') out += '\n';
+        else if (esc === 'r') out += '\r';
+        else if (esc === 't') out += '\t';
+        else if (esc === 'u') {
+          const hex = text.slice(i + 1, i + 5);
+          if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail('syntax_error');
+          out += String.fromCharCode(Number.parseInt(hex, 16));
+          i += 4;
+        } else fail('syntax_error');
+        i++;
+        continue;
+      }
+      // A raw, unescaped control character (< 0x20) is illegal in JSON text.
+      if (ch.charCodeAt(0) < 0x20) fail('syntax_error');
+      out += ch;
+      i++;
+    }
+    if (hasLoneSurrogate(out)) fail('lone_surrogate');
+    return out;
+  }
+
+  function parseLiteral(literal, value) {
+    if (text.slice(i, i + literal.length) !== literal) fail('syntax_error');
+    i += literal.length;
+    return value;
+  }
+
+  function parseNumber() {
+    const start = i;
+    if (text[i] === '-') i++;
+    if (text[i] === '0') {
+      i++;
+    } else if (text[i] >= '1' && text[i] <= '9') {
+      i++;
+      while (text[i] >= '0' && text[i] <= '9') i++;
+    } else {
+      fail('syntax_error');
+    }
+    if (text[i] === '.') {
+      i++;
+      if (!(text[i] >= '0' && text[i] <= '9')) fail('syntax_error');
+      while (text[i] >= '0' && text[i] <= '9') i++;
+    }
+    if (text[i] === 'e' || text[i] === 'E') {
+      i++;
+      if (text[i] === '+' || text[i] === '-') i++;
+      if (!(text[i] >= '0' && text[i] <= '9')) fail('syntax_error');
+      while (text[i] >= '0' && text[i] <= '9') i++;
+    }
+    return Number(text.slice(start, i));
+  }
+
+  function parseValue() {
+    skipWs();
+    const ch = text[i];
+    if (ch === '"') return parseString();
+    if (ch === '{') return parseObject();
+    if (ch === '[') return parseArray();
+    if (ch === 't') return parseLiteral('true', true);
+    if (ch === 'f') return parseLiteral('false', false);
+    if (ch === 'n') return parseLiteral('null', null);
+    if (ch === '-' || (ch >= '0' && ch <= '9')) return parseNumber();
+    fail('syntax_error');
+    return undefined;
+  }
+
+  function parseObject() {
+    i++; // consume '{'
+    const obj = Object.create(null);
+    const seenKeys = new Set();
+    skipWs();
+    if (text[i] === '}') {
+      i++;
+      return obj;
+    }
+    while (true) {
+      skipWs();
+      const key = parseString();
+      if (seenKeys.has(key)) fail('duplicate_key');
+      seenKeys.add(key);
+      skipWs();
+      if (text[i] !== ':') fail('syntax_error');
+      i++;
+      const value = parseValue();
+      obj[key] = value;
+      skipWs();
+      if (text[i] === ',') {
+        i++;
+        continue;
+      }
+      if (text[i] === '}') {
+        i++;
+        break;
+      }
+      fail('syntax_error');
+    }
+    return obj;
+  }
+
+  function parseArray() {
+    i++; // consume '['
+    const arr = [];
+    skipWs();
+    if (text[i] === ']') {
+      i++;
+      return arr;
+    }
+    while (true) {
+      arr.push(parseValue());
+      skipWs();
+      if (text[i] === ',') {
+        i++;
+        continue;
+      }
+      if (text[i] === ']') {
+        i++;
+        break;
+      }
+      fail('syntax_error');
+    }
+    return arr;
+  }
+
+  try {
+    const value = parseValue();
+    skipWs();
+    if (i !== n) return { ok: false, reason: 'syntax_error' };
+    return { ok: true, value };
+  } catch (err) {
+    if (err instanceof JsonHazard) return { ok: false, reason: err.reason };
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 6 — hazard inspection. Every leaf path (token, chapter record, temp) is opened with
+// O_NOFOLLOW, `fstat`'d on that SAME descriptor (never re-opened by path), required to be a
+// regular file with `nlink === 1`, and read from that descriptor only. Every hierarchy component
+// (the provenance root, its `run/`/`chapters/` namespace directories, a chapter's group directory)
+// is `lstat`'d and required to be a real directory reached with no symlink component. An
+// `lstat`/`open`/`readlink` failure that is NOT the expected first-run `ENOENT` on a path
+// establishment is about to create is its own hazard kind, `inspection_failure` — never silently
+// read as "absent" (that reading is the exact mutant that turns this gate off everywhere at once).
+// ---------------------------------------------------------------------------------------------
+
+/** @typedef {{kind: 'absent'}|{kind: 'hazard', reason: string, path: string}|{kind: 'directory'}} DirComponentInspection */
+
+function inspectDirComponent(absPath, deps) {
+  let st;
+  try {
+    st = deps.lstatSync(absPath);
+  } catch (err) {
+    if (errProp(err, 'code') === 'ENOENT') return { kind: 'absent' };
+    return { kind: 'hazard', reason: 'inspection_failure', path: absPath };
+  }
+  if (st.isSymbolicLink()) return { kind: 'hazard', reason: 'symlink', path: absPath };
+  if (!st.isDirectory()) return { kind: 'hazard', reason: 'non_directory', path: absPath };
+  return { kind: 'directory' };
+}
+
+// Establish one directory component: create it if absent, then re-inspect and require a real
+// directory either way. `mkdir` is called individually per component (never a recursive `mkdir`
+// that reports nothing about what it made), and an `EEXIST` race is treated the same as an
+// already-inspected absence — re-inspect and apply the identical requirement.
+function ensureDirComponent(absPath, deps) {
+  const before = inspectDirComponent(absPath, deps);
+  if (before.kind === 'directory') return { ok: true };
+  if (before.kind === 'hazard') return { ok: false, hazard: before };
+  try {
+    deps.mkdirSync(absPath);
+  } catch (err) {
+    if (errProp(err, 'code') !== 'EEXIST') {
+      return { ok: false, hazard: { kind: 'hazard', reason: 'inspection_failure', path: absPath } };
+    }
+  }
+  const after = inspectDirComponent(absPath, deps);
+  if (after.kind !== 'directory') {
+    return {
+      ok: false,
+      hazard:
+        after.kind === 'hazard' ? after : { kind: 'hazard', reason: 'inspection_failure', path: absPath },
+    };
+  }
+  return { ok: true };
+}
+
+/** @typedef {{kind: 'absent'}|{kind: 'hazard', reason: string, path: string}|{kind: 'present', fd: number, stat: import('node:fs').Stats}} LeafInspection */
+
+// Open a leaf path (token / record / temp) with O_NOFOLLOW and verify it on the SAME descriptor.
+// Returns an OPEN fd on success — the caller reads from it and MUST close it. `flags` follows
+// node:fs conventions (e.g. fs.constants.O_RDONLY); O_NOFOLLOW is always added by this helper.
+function openLeafNoFollow(absPath, flags, deps) {
+  let fd;
+  try {
+    fd = deps.openSync(absPath, flags | fs.constants.O_NOFOLLOW);
+  } catch (err) {
+    if (errProp(err, 'code') === 'ENOENT') return { kind: 'absent' };
+    if (errProp(err, 'code') === 'ELOOP') return { kind: 'hazard', reason: 'symlink', path: absPath };
+    return { kind: 'hazard', reason: 'inspection_failure', path: absPath };
+  }
+  let stat;
+  try {
+    stat = deps.fstatSync(fd);
+  } catch {
+    closeBestEffort(fd, deps);
+    return { kind: 'hazard', reason: 'inspection_failure', path: absPath };
+  }
+  if (!stat.isFile()) {
+    closeBestEffort(fd, deps);
+    return { kind: 'hazard', reason: 'non_regular', path: absPath };
+  }
+  if (stat.nlink !== 1) {
+    closeBestEffort(fd, deps);
+    return { kind: 'hazard', reason: 'hard_link', path: absPath };
+  }
+  return { kind: 'present', fd, stat };
+}
+
+function readAllFromFd(fd, deps) {
+  const chunks = [];
+  const buf = Buffer.alloc(65536);
+  let bytesRead;
+  // eslint-disable-next-line no-cond-assign
+  while ((bytesRead = deps.readSync(fd, buf, 0, buf.length, null)) > 0) {
+    chunks.push(Buffer.from(buf.subarray(0, bytesRead)));
+  }
+  return Buffer.concat(chunks);
+}
+
+// Read a leaf file's full bytes through gate 6 (no-follow, regular, nlink===1, same-descriptor
+// read) — the one open/read/close body every leaf reader shares, differing only in what they do
+// with the resulting bytes. Returns {kind:'absent'} | {kind:'hazard', reason, path} |
+// {kind:'present', bytes}. `readAllFromFd`'s `readSync` was previously unguarded — a mid-read EIO
+// escaped this function uncaught (codex round 3), even though every OTHER hazard in this module is
+// a returned result, never a throw. Every caller along the chain (readRunRecordFromDisk,
+// readChapterRecordFromDisk, and their own callers) already dispatches on `.kind === 'hazard'`, so
+// converting a read failure here into that SAME kind needs no change anywhere downstream.
+function readLeafBytes(absPath, deps) {
+  const opened = openLeafNoFollow(absPath, fs.constants.O_RDONLY, deps);
+  if (opened.kind !== 'present') return opened;
+  let bytes;
+  try {
+    bytes = readAllFromFd(opened.fd, deps);
+  } catch {
+    closeBestEffort(opened.fd, deps);
+    return { kind: 'hazard', reason: 'inspection_failure', path: absPath };
+  }
+  closeBestEffort(opened.fd, deps);
+  return { kind: 'present', bytes };
+}
+
+function readLeafText(absPath, deps) {
+  const read = readLeafBytes(absPath, deps);
+  if (read.kind !== 'present') return read;
+  return { kind: 'present', text: read.bytes.toString('utf8') };
+}
+
+function hashFileNoFollow(absPath, deps) {
+  const read = readLeafBytes(absPath, deps);
+  if (read.kind !== 'present') return read;
+  return { kind: 'present', digest: `sha256:${createHash('sha256').update(read.bytes).digest('hex')}` };
+}
+
+// [round 17] The word an operator can act on, for a leaf inspection that is not `present`. EVERY
+// unreadable leaf comes back with kind `hazard` — `hard_link`, `non_regular`, `symlink` and
+// `inspection_failure` are all carried in `reason` — so interpolating `.kind` into an
+// operator-facing string collapses four distinct situations, calling for four distinct actions,
+// into the single word `hazard`. Three sites did exactly that (the opening/closing snapshot, W5's
+// publish-time rehash, W6's current-hash pass) while a fourth, `readFileText`, already spelled the
+// `reason ?? kind` fallback inline and so was right by accident of being written later. It is a
+// function now, so the next site to report an unreadable leaf inherits the correct form rather than
+// re-deriving it. `absent` has no reason and is its own answer, which is what the fallback is for.
+function unreadableWord(inspection) {
+  return inspection.reason ?? inspection.kind;
+}
+
+// [round 21] The same word, for a path that came out of a LISTING of the asset directory. There
+// `absent` cannot mean "never published": the directory read named this file, so a failure to open
+// it is a file that was there a moment ago and is gone now — `vanished`, a hazard, which is what
+// SKILL.md's W5 rules already promise an operator for exactly this observation.
+//
+// Round 20 moved this mapping OUT of `unreadableWord` and into the opening snapshot's callback, on
+// the reasoning that the other three callers read a path with no listing behind it. Half of that
+// was wrong, and codex round 21 measured it: W5's rehash and W6's current-hash resolve their paths
+// through `expectedAssets`, whose candidate set is built from `listRegularFilesRecursive` over that
+// same directory — they are listing-backed too, and were reporting `rehash_failed:<key>:absent` and
+// `unhashable:<key>:absent` for a file the run had just listed. Only `readFileText` reads a path
+// derived with no listing behind it, and it keeps the context-free word. So the split stands and
+// the boundary moved: the context belongs in a function NAMED for its context, not in the
+// context-free one, and not inlined at one of the three sites that share it.
+function unreadableWordAfterListing(inspection) {
+  return inspection.kind === 'absent' ? 'vanished' : unreadableWord(inspection);
+}
+
+/**
+ * Every word an asset-tree hazard can be reported under. The walk contributes `symlink`,
+ * `non_regular` and `vanished` (a listed entry that was gone before it could be inspected); the
+ * leaf inspection contributes `symlink`, `non_regular`, `hard_link`, `inspection_failure`, and
+ * `vanished` for the same reason one layer down. Pinned against the real producers by test rather
+ * than by inspection, since
+ * a word missing from here would make legitimate records unreadable — the reader below rejects a
+ * record carrying anything else, and that rejection refuses every chapter in the run.
+ */
+const ASSET_HAZARD_REASONS = new Set(['symlink', 'non_regular', 'hard_link', 'inspection_failure', 'vanished']);
+
+/**
+ * A persisted hazard member, `<assetDirRelativePath>:<reason>`. The path may name a DIRECTORY (a
+ * refused directory withholds everything beneath it), so it is validated as a relative path rather
+ * than as an asset key — requiring a file-shaped key here would reject the very case round 17
+ * added. `..` is refused because a hazard is a statement about something inside the asset tree, and
+ * a member that walks out of it describes nothing this run observed.
+ */
+function isWellFormedHazard(member) {
+  if (typeof member !== 'string') return false;
+  const at = member.lastIndexOf(':');
+  if (at <= 0) return false; // no colon at all, or an empty path
+  if (!ASSET_HAZARD_REASONS.has(member.slice(at + 1))) return false;
+  const segments = member.slice(0, at).split('/');
+  return segments.every((s) => s !== '' && s !== '.' && s !== '..');
+}
+
+// ---------------------------------------------------------------------------------------------
+// Path derivations — pure with respect to their INPUTS, but subject to the same gates the asset
+// directory is (a derived pathname is not by itself an ownership boundary): `{slug: "../elsewhere"}`
+// escapes the provenance root exactly as it escapes the asset root.
+// ---------------------------------------------------------------------------------------------
+
+const PROVENANCE_DIRNAME = '.provenance';
+const RUN_NAMESPACE = 'run';
+const CHAPTERS_NAMESPACE = 'chapters';
+const RUN_RECORD_NAME = 'current.json';
+const PENDING_TOKEN_NAME = 'pending.json';
+
+/**
+ * `<publish.chapters_dir>/.provenance` — a plugin-owned root, physically disjoint from
+ * `capture.output_dir` (verified by `assertProvenanceOwnership`, never assumed from the two keys'
+ * names alone).
+ *
+ * @param {{publish: {chapters_dir: string}}} profileLike
+ * @returns {string}
+ */
+export function provenanceRoot(profileLike) {
+  return posixJoin(profileLike.publish.chapters_dir, PROVENANCE_DIRNAME);
+}
+
+// The directory a chapter's own record (and, transiently, its write temp) lives in —
+// `<root>/chapters/<group>` (grouped) or `<root>/chapters` (flat). Split out of `chapterRecordPath`
+// below so `sweepChapterProvenanceTemps` (codex round 5, finding 3) can list a chapter's temp
+// directory without re-deriving the group/flat branch a third time; `chapterRecordPath` and
+// `sweepChapterProvenanceTemps` both call this one function rather than keeping their own copies
+// that could disagree, same rationale as `chapterRecordPath`'s own docstring below.
+function chapterRecordDir(profileLike, entry) {
+  const base = chaptersNamespaceDir(profileLike);
+  // `entry.group !== undefined`, never a truthy check — chapter-paths.mjs's own convention
+  // (chapterRelPath, outputDirTail), documented there as "a falsy-but-present group value must
+  // never silently derive a flat path". A truthy check would treat `group: 0` (or `''`) as flat
+  // here while chapterAssetDir treats the identical entry as grouped — a real cross-module
+  // classification mismatch for a malformed-but-present manifest value (found by paths, #362).
+  return entry.group !== undefined ? posixJoin(base, String(entry.group)) : base;
+}
+
+/**
+ * `<root>/chapters/<group>/<slug>.json` (grouped) or `<root>/chapters/<slug>.json` (flat). Stable
+ * across W2, W5 and W6 — all three call this one derivation rather than keeping three private
+ * copies that could disagree.
+ *
+ * @param {{publish: {chapters_dir: string}}} profileLike
+ * @param {{slug: string|number, group?: string}} entry
+ * @returns {string}
+ */
+export function chapterRecordPath(profileLike, entry) {
+  const fileName = `${String(entry.slug)}.json`;
+  return posixJoin(chapterRecordDir(profileLike, entry), fileName);
+}
+
+function runNamespaceDir(profileLike) {
+  return posixJoin(provenanceRoot(profileLike), RUN_NAMESPACE);
+}
+
+function chaptersNamespaceDir(profileLike) {
+  return posixJoin(provenanceRoot(profileLike), CHAPTERS_NAMESPACE);
+}
+
+function runRecordPath(profileLike) {
+  return posixJoin(runNamespaceDir(profileLike), RUN_RECORD_NAME);
+}
+
+function pendingTokenPath(profileLike) {
+  return posixJoin(runNamespaceDir(profileLike), PENDING_TOKEN_NAME);
+}
+
+// [round 41] "Is this the state a skipped run actually carries", asked in ONE place because two
+// branches of `closeCaptureRun` need it and a second copy is how they drift. `openCaptureRun`
+// returns exactly `{skipped: true}` on its skipped branch and nothing else, so anything carrying an
+// active run's fields is not a skipped state whatever its `skipped` property says. An accessor
+// cannot hide a sibling key, which is why the own-key list is the thing asked rather than the
+// property alone.
+function isGenuineSkippedState(runState) {
+  if (!isPlainObject(runState)) return false;
+  const keys = Object.keys(runState);
+  return runState.skipped === true && keys.length === 1 && keys[0] === 'skipped';
+}
+
+// [round 40] Whether a pending token is on disk for a profile this module does NOT own provenance
+// for. Separate from the owned-path read because nothing here may halt on a profile whose
+// provenance root cannot even be derived: that is an ordinary adopter who never asked for
+// provenance, and inventing a refusal out of an unreadable path would break the one flow the skip
+// branch exists to serve. Returns the token's path when one is definitely there, `null` otherwise —
+// unreadable, underivable and absent all answer the same way, on purpose.
+function tokenPresenceForSkip(profileLike, deps) {
+  let path;
+  try {
+    path = pendingTokenPath(profileLike);
+  } catch {
+    return null;
+  }
+  try {
+    return readLeafText(path, deps).kind === 'present' ? path : null;
+  } catch {
+    return null;
+  }
+}
+
+// Canonicalize a possibly-not-yet-existing path for COMPARISON purposes: absolutize, lexically
+// normalize, then canonicalize the LONGEST EXISTING PREFIX via a real `realpath` (resolving any
+// symlink components already on disk, multi-hop, cycle-detected, relative targets resolved
+// against the link's own parent — this is exactly what POSIX realpath(3) already guarantees, so
+// delegating to `deps.realpathSync` gets those guarantees for free rather than re-deriving a
+// component-by-component walker) and re-appends the not-yet-existing tail unchanged.
+//
+// Returns a DISCRIMINATED result rather than throwing or silently degrading: a symlink cycle
+// (ELOOP) or any other inspection failure during the walk is a hazard a caller must be able to
+// halt on, never a value it can accidentally compare as if resolution had succeeded.
+function canonicalizeForComparison(rawPath, deps) {
+  // A RELATIVE rawPath is never absolutized against a working directory read by THIS module —
+  // `realpathSync` resolves a relative candidate against the real process working directory
+  // internally, which needs no `process` reference in this file's own source (the capability
+  // policy bans every such reference, in any shape, anywhere in this module).
+  const absolute = isAbsolutePath(rawPath);
+  const segments = normalizeSegments(rawSegments(rawPath), absolute);
+
+  // The prefix path to probe at a given depth. Depth 0 means "no segments left at all": the
+  // filesystem root for an absolute candidate, the working directory for a relative one (which
+  // `realpathSync` resolves internally, so this module never reads a working directory itself).
+  function prefixPath(depth) {
+    if (depth === 0) return absolute ? '/' : '.';
+    const joined = segments.slice(0, depth).join('/');
+    return absolute ? `/${joined}` : joined;
+  }
+
+  let tail = [];
+  let idx = segments.length;
+  while (idx >= 0) {
+    const candidate = prefixPath(idx);
+    try {
+      const real = deps.realpathSync(candidate); // always returns an absolute path
+      const realSegments = normalizeSegments(rawSegments(real), true);
+      return { ok: true, segments: realSegments.concat(tail) };
+    } catch (err) {
+      const code = errProp(err, 'code');
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        if (idx === 0) return { ok: true, segments: tail }; // nothing at all resolves; degrade gracefully
+        tail = [segments[idx - 1], ...tail];
+        idx -= 1;
+        continue;
+      }
+      // ELOOP (a symlink cycle) or any other inspection failure — a hazard, not a value.
+      return { ok: false, reason: code === 'ELOOP' ? 'symlink_cycle' : 'inspection_failure', path: candidate };
+    }
+  }
+  return { ok: true, segments: tail };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Row 1 — gate 5: assertProvenanceOwnership. Called from W1 prose (operator-facing) AND
+// unconditionally + silently at the top of every row-6/row-2 entrypoint (enforcement).
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Verify that this profile's provenance root is physically disjoint from `capture.output_dir` — an
+ * enforced namespace contract, not a naming convention (nothing in the shipped schema relates the
+ * two keys, and the Obsidian adapter documents a supported FLAT topology where they are literally
+ * the same directory).
+ *
+ * The overlap outcome is conditioned on whether the adopter asked for provenance
+ * (`capture.build_identity` configured): configured ⇒ halt, naming both keys and their resolved
+ * values; unconfigured ⇒ warn once and report `{ok:false, skip:true, warnings}` so every existing
+ * flat-topology handbook keeps working without this release bricking it for owners who never
+ * enabled the feature.
+ *
+ * @param {{capture: {output_dir: string, build_identity?: object}, publish: {chapters_dir: string}}} profileLike
+ * @param {object} [deps]
+ * @returns {{ok: true, root: string}|{ok: false, halts: Array<{halt: string, message: string}>}|{ok: false, skip: true, warnings: string[]}}
+ */
+export function assertProvenanceOwnership(profileLike, deps) {
+  const d = mergeDeps(deps);
+  const root = provenanceRoot(profileLike);
+  const outputDir = profileLike.capture.output_dir;
+
+  const rootResolved = canonicalizeForComparison(root, d);
+  if (!rootResolved.ok) return haltResult('provenance_hazard', `cannot resolve provenance root '${root}': ${rootResolved.reason}`, { path: rootResolved.path });
+  const outputResolved = canonicalizeForComparison(outputDir, d);
+  if (!outputResolved.ok) return haltResult('provenance_hazard', `cannot resolve capture.output_dir '${outputDir}': ${outputResolved.reason}`, { path: outputResolved.path });
+  const rootCanon = rootResolved.segments;
+  const outputCanon = outputResolved.segments;
+
+  const overlaps = isSegmentPrefixOf(rootCanon, outputCanon) || isSegmentPrefixOf(outputCanon, rootCanon);
+  if (!overlaps) {
+    return { ok: true, root };
+  }
+
+  const configured = profileLike.capture.build_identity != null;
+  if (configured) {
+    // The overlap decision above is made on the RESOLVED (realpath'd) segments — `root` and
+    // `outputDir` below are the raw, as-configured strings, which is exactly what makes this halt
+    // otherwise unactionable: a symlinked alias can make two raw paths look disjoint (different
+    // names, no lexical prefix relationship) while they resolve into one overlapping tree, which is
+    // the only reason this halt is firing at all. Naming just the raw strings tells the operator
+    // "these two look fine to me" about the very halt refusing them. Rendering the resolved
+    // segments back into absolute paths mirrors `canonicalizeForComparison`'s own contract
+    // (`realpathSync` always returns an absolute path, so every resolved segment list is absolute).
+    const rootResolvedPath = `/${rootCanon.join('/')}`;
+    const outputResolvedPath = `/${outputCanon.join('/')}`;
+    return {
+      ok: false,
+      halts: [
+        {
+          halt: 'provenance_root_overlap',
+          message:
+            `provenance root '${root}' (derived from publish.chapters_dir; resolves to ` +
+            `'${rootResolvedPath}') overlaps capture.output_dir '${outputDir}' (resolves to ` +
+            `'${outputResolvedPath}') — the capture command's writable mount cannot be allowed to ` +
+            'reach the provenance tree, and vice versa. Relocate capture.output_dir so the two ' +
+            'trees are disjoint, or remove capture.build_identity to stop asking for provenance on ' +
+            'this topology.',
+        },
+      ],
+    };
+  }
+  return {
+    ok: false,
+    skip: true,
+    warnings: [
+      `provenance skipped: root '${root}' overlaps capture.output_dir '${outputDir}' and ` +
+        'capture.build_identity is not configured. No provenance records will be written for ' +
+        'this profile.',
+    ],
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Establishment — create the provenance root and its two fixed namespace directories, component
+// by component, verifying each one a real directory (gate 6, establishment half).
+// ---------------------------------------------------------------------------------------------
+
+function establishHierarchy(profileLike, deps) {
+  // `publish.chapters_dir` is the published docs tree, owned by the shipped workflow rather than
+  // by this feature — it is NOT part of the gate-6 hazard-audited provenance namespace (that starts
+  // at the root below). W2 can genuinely run before it exists on a brand-new handbook's very first
+  // capture, so it is ensured here with an ordinary recursive `mkdir`, outside the individual-
+  // component discipline gate 6 requires for the root/run/chapters components themselves.
+  try {
+    deps.mkdirSync(profileLike.publish.chapters_dir, { recursive: true });
+  } catch (err) {
+    if (errProp(err, 'code') !== 'EEXIST') {
+      return { ok: false, hazard: { kind: 'hazard', reason: 'inspection_failure', path: profileLike.publish.chapters_dir } };
+    }
+  }
+
+  const root = provenanceRoot(profileLike);
+  const components = [root, runNamespaceDir(profileLike), chaptersNamespaceDir(profileLike)];
+  for (const dir of components) {
+    const result = ensureDirComponent(dir, deps);
+    if (!result.ok) return result;
+  }
+  return { ok: true };
+}
+
+function establishChapterGroupDir(profileLike, entry, deps) {
+  if (entry.group === undefined) return { ok: true };
+  const dir = posixJoin(chaptersNamespaceDir(profileLike), String(entry.group));
+  return ensureDirComponent(dir, deps);
+}
+
+// ---------------------------------------------------------------------------------------------
+// W2's preflight — gates 1-4 over the ASSET tree (not the provenance root; that is gates 5-6
+// above). None of this existed before this pass: `openCaptureRun` derived and hashed every
+// entry's asset directory with no validation at all, so a traversal slug or an inside-root alias
+// produced confident provenance evidence for the wrong chapter — the exact defect this closes.
+// Run at W2 (`openCaptureRun`, over the opening entry set) and re-run at W5/W6 (`recordChapterProvenance`
+// /`buildProvenanceReport`, over the FULL accepted manifest, since a symlink can be planted between
+// stages and gate 4 is a cross-entry recheck no single-entry call can perform).
+// ---------------------------------------------------------------------------------------------
+
+// The longest EXISTING ancestor of `pathSegs`, walked DOWNWARD starting at `rootSegs` — never
+// above it. Gate 3's own root canonicalization already fixed the coordinate system the caller
+// checks containment in; if the canonical root itself is not physically present either, nothing
+// under it can hold a planted symlink, so that degrades to "no ancestor to check" rather than
+// climbing past the root looking for one that predates it. Existence is probed with
+// `deps.lstatSync` only — never `realpath` — matching gate 3's own no-follow walk: this function
+// only decides WHERE the walk should start, `resolvePhysicalContainment` still performs the actual
+// symlink-substitution walk over whatever prefix comes back.
+//
+// Also returns `tailSegs` — the not-yet-existing segments beyond the ancestor (empty when
+// `exists: false`, since then nothing at all resolves and there is no ancestor to hang a tail off).
+// These segments cannot themselves contain a symlink (nothing along them exists yet, and a symlink
+// is itself a filesystem entry that would have to exist to be one), so the CALLER may append them,
+// unresolved, straight onto the ancestor's own resolved physical path to get the composite physical
+// identity of the not-yet-created directory — see the caller (round 6, finding 1) for why that
+// composite, not the bare ancestor, is what gate 4 must compare.
+//
+// @param {string[]} rootSegs  the canonical output root's own segments (never re-walked here)
+// @param {string[]} pathSegs  the candidate's full segments — MUST start with `rootSegs`
+// @param {object} deps
+// @returns {{ok: true, exists: false, tailSegs: []}|{ok: true, exists: true, path: string, tailSegs: string[]}|{ok: false, error: Error}}
+function longestExistingAncestor(rootSegs, pathSegs, deps) {
+  let lastExistingIdx = -1;
+  for (let idx = rootSegs.length; idx <= pathSegs.length; idx++) {
+    const candidate = `/${pathSegs.slice(0, idx).join('/')}`;
+    try {
+      deps.lstatSync(candidate);
+    } catch (err) {
+      if (errProp(err, 'code') === 'ENOENT' || errProp(err, 'code') === 'ENOTDIR') break;
+      return { ok: false, error: err };
+    }
+    lastExistingIdx = idx;
+  }
+  if (lastExistingIdx < 0) return { ok: true, exists: false, tailSegs: [] };
+  return {
+    ok: true,
+    exists: true,
+    path: `/${pathSegs.slice(0, lastExistingIdx).join('/')}`,
+    tailSegs: pathSegs.slice(lastExistingIdx),
+  };
+}
+
+/**
+ * Gates 1-4 over the asset tree for the FULL accepted entry set. The four predicates themselves —
+ * `isValidSlugSyntax`, `findCanonicalPathCollisions`, `resolvePhysicalContainment`,
+ * `findPhysicalPathCollisions` — are `paths`' (chapter-paths.mjs), imported rather than
+ * vendored: an earlier version of this function carried its own alphabet regex and its own
+ * containment walk built on `canonicalizeForComparison`/`deps.realpathSync`, which is exactly the
+ * duplication this release has collapsed everywhere else (a second `isCanonicalAssetKey`, a
+ * near-duplicate `expectedAssets`, a duplicated stripper). The realpath-based version was also
+ * WRONG in a way tests alone could not surface: the plan requires gate 3's seam trace to be a
+ * component-wise `lstat`/`readlink` walk with NO `realpath` call, specifically because a
+ * `realpath`-based implementation passes every REFUSAL fixture (outside-target halts, two-hop
+ * chains, relative escapes) while silently following a symlink whose target legitimately stays
+ * INSIDE the root — the one POSITIVE case the gate exists to permit. A green suite built only from
+ * refusal fixtures could not tell the two apart; only asserting the seam trace itself can. This
+ * module still owns: the disk-touching side (wiring `deps.lstatSync`/`deps.readlinkSync` into gate
+ * 3's `{lstat, readlink}` seam, so chapter-paths.mjs keeps importing nothing), and the halt-shaping
+ * for each gate.
+ *
+ * @param {object} profileLike
+ * @param {Array<{slug: string|number, group?: string}>} entries
+ * @param {object} deps
+ * @returns {{ok: true}|{ok: false, halts: Array<object>}}
+ */
+function validateEntriesForCapture(profileLike, entries, deps) {
+  // Gate 1 — slug AND group alphabet. This module is independently callable (W5/W6 do not assume
+  // some earlier W1 step already validated the manifest), so it re-asserts format itself.
+  for (const entry of entries) {
+    // `isValidSlugSyntax` itself already rejects a non-string outright (`typeof slug === 'string'`)
+    // — but this caller used to run it against `String(entry.slug)`, a value ALREADY coerced to a
+    // string before the type check could ever see the original. `{slug: 1}` therefore reached
+    // `String(1) === '1'`, which passes the kebab-alphabet regex (digits are in the class), and the
+    // non-string entry sailed past gate 1 entirely — a W6 probe with a numeric slug reached
+    // `chapter_read_failed` (file "1.md" not found) instead of `invalid_slug`. The RAW value must
+    // reach the syntax check; `slugStr`/`String(entry.group)` below are for the halt MESSAGE only.
+    const slugStr = String(entry.slug);
+    if (!isValidSlugSyntax(entry.slug)) {
+      return haltResult('invalid_slug', `entry slug '${slugStr}' does not match the required kebab-case alphabet`, { slug: slugStr });
+    }
+    if (entry.group !== undefined && !isValidSlugSyntax(entry.group)) {
+      return haltResult('invalid_group', `entry group '${String(entry.group)}' does not match the required kebab-case alphabet`, {
+        group: String(entry.group),
+      });
+    }
+  }
+
+  // Gate 2 — canonical (lexical) uniqueness.
+  const canonicalCollisions = findCanonicalPathCollisions(profileLike, entries);
+  if (canonicalCollisions.length > 0) {
+    const first = canonicalCollisions[0];
+    return haltResult(
+      'duplicate_asset_dir',
+      `two or more entries derive the identical asset directory '${first.canonicalPath}' (slugs ${first.entries.map((e) => `'${e.slug}'`).join(', ')})`,
+      { assetDir: first.canonicalPath },
+    );
+  }
+
+  // Gate 3 — physical containment, per entry, via a component-wise lstat/readlink walk (never
+  // realpath) — deps.lstat/deps.readlink are THIS module's own seam, so chapter-paths.mjs stays
+  // dependency-free. `inspection-failed` is routed to a `provenance_hazard` halt, never silently
+  // read as "not a symlink" (the same distinction gate 6 already makes).
+  //
+  // `resolvePhysicalContainment`'s `rootDir` argument is used AS GIVEN — only lexically
+  // normalized, never itself walked against the real filesystem (only `dir` is). The CALLER is
+  // therefore responsible for supplying an already-canonical root: a raw, unresolved
+  // `capture.output_dir` can sit behind an OS-level symlinked ancestor (macOS's `/tmp` ->
+  // `/private/tmp`, `/var` -> `/private/var`), which the per-entry walk below WILL resolve through
+  // (it walks every component of the CANDIDATE path), producing a spurious `escapes-root` against
+  // a root that never went through the same resolution. Canonicalizing the root HERE, ONCE, via
+  // the real filesystem (the same mechanism gate 5 already uses for its own disjointness check)
+  // aligns both sides onto one coordinate system. This is a single root-level canonicalization,
+  // not the per-entry symlink-following walk the plan requires to stay realpath-free — it does not
+  // touch the guarantee that requirement protects (an entry-level symlink whose target legitimately
+  // stays inside the root is still resolved component-by-component, never via realpath).
+  // [round 32] ONE observation of the configured root, made here and RETURNED — the version that
+  // stood here canonicalized at the top and then built a fresh `containmentRootFor` at the return,
+  // so the two could disagree and the window between them belonged to nobody. Codex repointed the
+  // root inside that window: gate 3 approved the safe target and the snapshot received the foreign
+  // one, `ok: true`, no hazard. A claim that an observation is "carried" is a claim that there is
+  // only one of it.
+  const outputRootObservation = containmentRootFor(profileLike, deps);
+  if (!outputRootObservation.ok) {
+    return haltResult('provenance_hazard', `cannot resolve capture.output_dir: ${outputRootObservation.reason}`, { path: profileLike?.capture?.output_dir ?? null });
+  }
+  const outputRoot = outputRootObservation.root;
+  const outputRootResolved = { ok: true, segments: outputRoot.segments };
+  const canonicalOutputRoot = outputRoot.canonical;
+  // `resolvePhysicalContainment` requires `rootDir` and `dir` to share ONE rootedness — it treats a
+  // mismatch (one absolute, one relative) the same as a genuine escape, halting `escapes-root`
+  // unconditionally. `canonicalOutputRoot` above is ALWAYS absolute (canonicalizeForComparison's
+  // contract), so the per-entry candidate must be derived from that SAME absolute root rather than
+  // from the raw (possibly relative) `capture.output_dir` — otherwise a profile whose output_dir and
+  // chapters_dir are BOTH relative (the shipped example profile's own topology:
+  // `output_dir: "vault/handbook/assets"`, `chapters_dir: "vault/handbook"`) halts every entry here,
+  // in open, W5 and W6 alike (all three route through this one function), on the very first real
+  // capture. Swapping in the canonical root for THIS derivation only still runs gate 3's own
+  // component-wise lstat/readlink walk over the resulting path unchanged (no realpath call is
+  // skipped or added) — it only fixes which coordinate system `dir` is expressed in.
+  const canonicalProfileForAssetDir = {
+    ...profileLike,
+    capture: { ...profileLike.capture, output_dir: canonicalOutputRoot },
+  };
+
+  const containmentDeps = {
+    lstat: (p) => deps.lstatSync(p),
+    readlink: (p) => deps.readlinkSync(p),
+  };
+  const resolvedEntries = [];
+  // [round 21] Which asset directories this gate OBSERVED to exist. Reported to the caller rather
+  // than discarded, because it is the only thing that distinguishes a root that is legitimately
+  // absent (a first capture) from one that stopped existing while this run was looking at it — a
+  // distinction the snapshot walk cannot draw for itself, and one that decides whether an empty
+  // opening map is a baseline or a fiction. Keyed by chapter key, never by path: this gate derives
+  // the directory through the CANONICAL output root and `openCaptureRun` derives it through the
+  // profile as given, so the two path strings can differ while naming one directory.
+  // [round 22] A Map, not a Set: WHICH object was observed, not merely that one was. Existence alone
+  // catches only a root that disappeared; a root REPLACED between this gate and the snapshot still
+  // exists, still lists, and hands back a foreign tree. `dev`/`ino` are path-independent, which is
+  // what lets the two call sites' differing path strings be compared at all. [round 23] For a
+  // symlinked root — a supported topology — the identity is the TARGET's, never the link's: the
+  // link is a stable name for a changing object, and pinning it pinned nothing (see
+  // `identityOfListedObject`). A value is recorded only when it could be read; an identity this
+  // gate cannot establish halts the run rather than being carried forward as null.
+  const assetDirsObserved = new Map();
+  for (const entry of entries) {
+    const assetDir = chapterAssetDir(canonicalProfileForAssetDir, entry);
+    // `resolvePhysicalContainment` treats ANY lstat failure while walking `dir`'s components as
+    // `inspection-failed` — correct for a genuine hazard, but a chapter's asset directory
+    // legitimately does not exist yet on its very first capture run (openCaptureRun snapshots the
+    // OPENING baseline before the capture command has written anything there at all). Absent is
+    // therefore checked HERE, at this call site, before gate 3 ever runs on the full path — matching
+    // this module's own established rule elsewhere (gate 6's `ensureDirComponent`/
+    // `inspectDirComponent`) that ENOENT-on-a-not-yet-established path is expected, not a hazard,
+    // while any OTHER lstat failure still is.
+    let assetDirExists = true;
+    let assetDirIdentityId = null;
+    try {
+      const st = deps.lstatSync(assetDir, EXACT_IDENTITY_STAT);
+      // [round 22] The identity, read off the lstat this gate already performs.
+      // [round 23] Through the shared helper, so that a symlinked root resolves to its target here
+      // exactly as it does at the snapshot: the two sides derive the directory through different
+      // path strings, and only one function computing both ids makes them comparable at all.
+      //
+      // An unreadable identity now HALTS. The comment that stood here argued a null pin was harmless
+      // because "this gate's own job does not depend on it" — true of this gate, and the wrong
+      // scope: the pin belongs to the SNAPSHOT, which read null as "this caller configured no pin"
+      // rather than as "this module could not establish what it observed", and then accepted a
+      // replaced root with a foreign digest and no hazard. `rootMustExist` never covered that — it
+      // catches disappearance only. An observation that cannot be pinned is not an observation.
+      const identity = identityOfListedObject(assetDir, st, deps);
+      if (!identity.ok) {
+        return haltResult('provenance_hazard', `cannot establish the identity of asset directory '${assetDir}': ${identity.reason}`, { assetDir });
+      }
+      assetDirIdentityId = identity.id;
+    } catch (err) {
+      const code = errProp(err, 'code');
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        assetDirExists = false;
+      } else {
+        return haltResult('provenance_hazard', `cannot inspect asset directory '${assetDir}': ${typeof code === 'string' ? code : describeThrown(err)}`, { assetDir });
+      }
+    }
+    if (assetDirExists) assetDirsObserved.set(chapterKeyFor(entry), assetDirIdentityId);
+
+    // A missing LEAF is fine — but skipping gate 3 ENTIRELY throws away the containment check over
+    // the whole path, not just the missing tail: a symlinked ANCESTOR (`/safe/assets/admin` ->
+    // `/outside`, with `/outside/items` not yet created) still lstats the full candidate as ENOENT,
+    // and the capture command that runs afterwards then writes `/outside/items` into existence —
+    // outside `capture.output_dir` — with nothing here ever having checked the ancestor that made it
+    // possible. Run the SAME component-wise walk over the longest EXISTING ancestor prefix instead;
+    // the one thing the leaf-missing case legitimately cannot supply is the leaf itself, not the
+    // ancestors above it.
+    let containmentTarget = assetDir;
+    let missingTailSegs = [];
+    if (!assetDirExists) {
+      const ancestor = longestExistingAncestor(outputRootResolved.segments, rawSegments(assetDir), deps);
+      if (!ancestor.ok) {
+        return haltResult(
+          'provenance_hazard',
+          `cannot inspect an ancestor of asset directory '${assetDir}': ${describeThrownField(ancestor.error, 'code')}`,
+          { assetDir },
+        );
+      }
+      // Nothing at all exists yet along this path (not even the canonical root itself) — nothing to
+      // check, and nothing to add to gate 4's cross-entry collision set. This is still safe with no
+      // symlink in play anywhere on the path (nothing exists to BE one), gate 2's lexical-uniqueness
+      // check already guarantees physical uniqueness too in that case.
+      if (!ancestor.exists) continue;
+      containmentTarget = ancestor.path;
+      missingTailSegs = ancestor.tailSegs;
+    }
+
+    const result = resolvePhysicalContainment(canonicalOutputRoot, containmentTarget, containmentDeps);
+    if (!result.ok) {
+      if (result.halt.reason === 'inspection-failed') {
+        return haltResult('provenance_hazard', result.halt.detail, { assetDir });
+      }
+      if (result.halt.reason === 'cycle') {
+        return haltResult('symlink_cycle', result.halt.detail, { assetDir });
+      }
+      return haltResult('asset_dir_escapes_output_dir', result.halt.detail, { assetDir, slug: entry.slug });
+    }
+    // A not-yet-created leaf's physical identity for gate 4 is the resolved (symlink-substituted)
+    // EXISTING ancestor plus its still-missing tail, UNCHANGED — never the bare ancestor alone
+    // (round 6, finding 1: two different chapters resolving through two different symlinked group
+    // ancestors into the SAME not-yet-created leaf directory manufactured no collision at all under
+    // the bare-ancestor comparison, and the capture command run afterwards silently overwrote one
+    // chapter's assets with the other's). The tail cannot itself hide a further symlink — nothing
+    // along it exists yet, and a symlink is itself a filesystem entry that would have to exist to be
+    // one — so appending it unresolved is exact, not an approximation. This still keeps two
+    // chapters that only share an ANCESTOR (different tails) from colliding: their composites differ
+    // even though `result.resolved` alone is identical for both (see the round-5 sibling test above).
+    // `missingTailSegs` is empty here whenever `assetDirExists` is true (never reassigned off its
+    // `[]` initializer on that branch) and non-empty whenever it is false and reached this line
+    // (the `!ancestor.exists` case above already `continue`d, and `assetDir`'s own already-checked
+    // ENOENT rules out `ancestor.tailSegs` coming back empty) — so every entry that reaches here has
+    // a real resolved identity to contribute, and the push below is unconditional.
+    const resolved = missingTailSegs.length > 0 ? `${result.resolved}/${missingTailSegs.join('/')}` : result.resolved;
+    resolvedEntries.push({ entry, resolved });
+  }
+
+  // Gate 4 — pairwise PHYSICAL uniqueness, over gate 3's own resolved output (never re-derived) —
+  // the cross-entry recheck `acceptedEntries` exists for.
+  const physicalCollisions = findPhysicalPathCollisions(resolvedEntries);
+  if (physicalCollisions.length > 0) {
+    const first = physicalCollisions[0];
+    return haltResult(
+      'physical_asset_dir_collision',
+      `two or more entries resolve to the same PHYSICAL asset directory '${first.resolvedPath}' (slugs ${first.entries.map((e) => `'${e.slug}'`).join(', ')})`,
+      { resolvedPath: first.resolvedPath },
+    );
+  }
+
+  return { ok: true, assetDirsObserved, outputRoot };
+}
+
+// Shared by all three identity-resolution call sites below (openCaptureRun's opening step,
+// closeCaptureRun's closing step, buildProvenanceReport's current step): reuse an already-resolved
+// CommandOutcome verbatim when the caller hands one back — a UI-read continuation resuming after a
+// prior `needs_ui_read` — rather than invoking `d.runIdentityCommand` a second time for the same
+// observation point. `undefined` (the default, and every pre-existing call site written before
+// this parameter existed) means "not yet resolved, compute it now"; any other value — including a
+// legitimate `null` when no command is configured at all — is used as-is, since `null` there is
+// itself a resolved fact ("there is nothing to run"), not an unset sentinel.
+function resolveIdentityCommandOutcome(providedOutcome, buildIdentity, d) {
+  if (providedOutcome !== undefined) return providedOutcome;
+  if (buildIdentity?.command) return d.runIdentityCommand(buildIdentity.command);
+  return null;
+}
+
+// Shared by the same three call sites as `resolveIdentityCommandOutcome` above: resolves ONE
+// observation point's build identity, converting either underlying throw into a returned halt
+// rather than letting it escape past this module's declared, non-throwing contract.
+//
+// `d.runIdentityCommand` (reached through `resolveIdentityCommandOutcome`, which guards nothing of
+// its own) is arbitrary operator shell and can throw for reasons this module has no way to
+// predict. `resolveBuildIdentity` itself throws a `TypeError` on a structurally invalid
+// `uiObservation.kind` (build-identity.mjs) — a shape that arrives from a UI read, which is
+// untrusted input by this project's own reference doc. codex round 9 found this in
+// `openCaptureRun` alone (three probes: a malformed observation, a throwing identity executor, a
+// throwing `randomUUID` — the last of those is `openCaptureRun`'s own run-state construction, not
+// this helper); the same exposure, unfixed, was independently measured against the real module in
+// `closeCaptureRun` (reachable via a genuine open then close with a malformed closing observation,
+// not merely a hypothetical) and in `buildProvenanceReport` (W6, the audit entrypoint an operator
+// runs over already-merged chapters, reachable from that same untrusted UI-read source).
+//
+// Both throw causes land on ONE halt, `identity_resolution_threw` — matching this file's existing
+// convention for "a helper this function calls threw" (see `extraction_threw` in
+// `buildProvenanceReport` below) rather than the filesystem/hazard-flavored `provenance_hazard`:
+// this is a resolution failure, not a disk condition, and lumping it into the hazard vocabulary
+// would send an operator looking for a permissions/disk problem that is not what happened.
+//
+// Returns {ok: true, commandOutcome, identity} | {ok: false, halt: string, message: string}. The
+// `identity` field is `resolveBuildIdentity`'s own return value UNEXAMINED — it may itself be
+// `{needs_ui_read: true, ...}`; every caller below still checks that. Never throws itself.
+function resolveIdentityOrHalt(identityCommandOutcome, buildIdentity, uiObservation, d) {
+  let commandOutcome;
+  try {
+    commandOutcome = resolveIdentityCommandOutcome(identityCommandOutcome, buildIdentity, d);
+  } catch (err) {
+    return { ok: false, halt: 'identity_resolution_threw', message: `cannot resolve the identity command outcome: ${describeThrown(err)}` };
+  }
+  const uiReadEnabled = buildIdentity?.ui_read !== false;
+  let identity;
+  try {
+    identity = resolveBuildIdentity({ commandOutcome, uiReadEnabled, uiObservation });
+  } catch (err) {
+    return { ok: false, halt: 'identity_resolution_threw', message: `the UI-read observation is malformed: ${describeThrown(err)}` };
+  }
+  return { ok: true, commandOutcome, identity };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Row 2 — openCaptureRun. Reservation is an EXCLUSIVE create on the final pending-token name
+// (O_CREAT | O_EXCL | O_NOFOLLOW), never a check-then-rename — the contended name is the fixed
+// final one, so a temp-then-rename would protect nothing here.
+// ---------------------------------------------------------------------------------------------
+
+function haltResult(halt, message, extra) {
+  return { ok: false, halts: [{ halt, message, ...extra }] };
+}
+
+// Best-effort cleanup of a temp this call itself created, on ITS OWN failure path (a write or
+// rename that this function caught and is about to halt on) — a CAUGHT, handled failure is not the
+// same situation row 6's crash-recovery model exists for (a process that died mid-operation with
+// no chance to clean up after itself); when this code is still running and about to return a halt,
+// it can and should remove what it just wrote rather than leaving litter for the operator to find
+// later (codex, important #6 — "zero surviving temps"). A secondary failure here is swallowed —
+// if the temp cannot be removed, row 6's `prepared`/`orphan_temp` states and their repairs are
+// exactly the fallback for that, for every EXISTING call site (all over `run/`). Returns whether
+// the unlink actually succeeded (round 6, finding 2): most callers still deliberately ignore it —
+// row 6 IS the fallback for those — but `sweepChapterProvenanceTemps` has no such fallback for its
+// `chapters/` temps (row 6's own `temps` observation is `run/`-only by design, see the module banner
+// above that function), so a caller with nothing to fall back on needs to know a removal it is
+// about to report as done did not actually happen, rather than silently believing its own report.
+function unlinkBestEffort(path, deps) {
+  try {
+    deps.unlinkSync(path);
+    return true;
+  } catch {
+    // best-effort only; row 6's repair states cover a temp this cleanup itself could not remove —
+    // for the callers that have that fallback; see above for the one that does not.
+    return false;
+  }
+}
+
+// Best-effort `closeSync` for a descriptor whose caller ALREADY has a definitive result (or error)
+// to return — a symlink/non-regular/hard-link hazard already classified in `openLeafNoFollow`, a
+// write failure already caught and about to become a halt, or a probe read whose bytes are already
+// in hand. A throwing `close()` here must never escape uncaught and must never MASK the result the
+// caller is already holding: a `finally`/`catch` body that itself throws SILENTLY REPLACES whatever
+// exception was already propagating (codex round 3, "a cleanup closeSync failure survives") — so
+// every one of those call sites swallows a close failure here rather than letting `deps.closeSync`
+// run unguarded.
+function closeBestEffort(fd, deps) {
+  try {
+    deps.closeSync(fd);
+  } catch {
+    /* best-effort only; see the comment above — the caller's own result/error already stands */
+  }
+}
+
+// `writeSync` returning fewer bytes than requested is a real possibility (a full disk, a pipe, an
+// interrupted write) — not merely a hypothetical interposed test seam — and every writer in this
+// module ignored the returned byte count outright: a seam that persists one byte and returns 1 let
+// `closeCaptureRun` rename a one-byte "{" temp into place as a successfully committed run record.
+// Throws rather than returning a result, so every existing call site's surrounding try/catch (which
+// already handles a THROWING `writeSync` for cleanup purposes) handles a short write identically,
+// with no separate branch needed at each of the three call sites.
+class ShortWriteError extends Error {
+  constructor(expected, actual) {
+    super(`short write: wrote ${actual} of ${expected} bytes`);
+    this.reason = 'short_write';
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
+function writeFull(fd, buffer, deps) {
+  const written = deps.writeSync(fd, buffer);
+  if (written !== buffer.length) {
+    throw new ShortWriteError(buffer.length, written);
+  }
+}
+
+/**
+ * Open a capture run: re-assert ownership (silently), establish the provenance hierarchy, reserve
+ * a one-shot pending token via an exclusive create (before this call spends the operator's identity
+ * command or hashes a single asset — NOT before the three steps just named, which is what "before
+ * anything else this open would do" wrongly claimed here until round 15: an invalid slug halts with
+ * no token ever attempted, deliberately, so a refusal unrelated to contention leaves nothing
+ * behind),
+ * resolve the opening build identity, snapshot every entry's current asset-dir hashes as the
+ * OPENING baseline, and finalize the reservation — writing in the run id and a digest of the
+ * opening payload (never the snapshot itself — the snapshot travels in the returned `runState`,
+ * which is what the cross-process serialization test protects).
+ *
+ * `identityCommandOutcome`, when passed, is used AS-IS instead of invoking
+ * `capture.build_identity.command` again — the fix for a UI-read continuation otherwise re-running
+ * the command a second time for one opening observation point (the command is arbitrary
+ * operator-supplied shell: it may be slow, side-effecting, or answer DIFFERENTLY on a second run,
+ * in which case the precedence chain in `resolveBuildIdentity` would resolve against a value that
+ * was never the one the UI read was requested for). On a `needs_ui_read` return, this function
+ * hands back the `identityCommandOutcome` it just used (computed fresh, or the one it was given) —
+ * the caller performs the UI read and calls again, passing that same value straight through as
+ * this parameter, so the command runs at most once per observation point regardless of how many
+ * times resolution needs to be resumed. Omitting it (the pre-existing 4-argument call shape) still
+ * works — the command is simply re-run on every call, exactly as before this parameter existed.
+ *
+ * @param {object} profileLike
+ * @param {Array<{slug: string|number, group?: string}>} entries
+ * @param {import('./build-identity.mjs').UiReadObservation|null} [openingObservation]
+ * @param {object} [deps]
+ * @param {import('./build-identity.mjs').CommandOutcome|null} [identityCommandOutcome]
+ * @returns {{ok: true, runState: object}|{ok: false, halts: Array<object>}|{needs_ui_read: true, region_hint: string, identityCommandOutcome: import('./build-identity.mjs').CommandOutcome|null, warnings: string[]}}
+ */
+export function openCaptureRun(profileLike, entries, openingObservation, deps, identityCommandOutcome) {
+  const d = mergeDeps(deps);
+
+  const ownership = assertProvenanceOwnership(profileLike, d);
+  if (ownership.skip) {
+    return { ok: true, runState: { skipped: true } };
+  }
+  if (!ownership.ok) {
+    return { ok: false, halts: ownership.halts };
+  }
+
+  const established = establishHierarchy(profileLike, d);
+  // `established.hazard` is the bare `{kind, reason, path}` gate-6 shape (codex round 7, IMPORTANT
+  // 1) — never pushed into `halts` raw. Wrapped with the same `halt: 'provenance_hazard'` house
+  // convention every other hazard-shaped halt in this module uses (see the hierarchy-hazard sites
+  // in `recordChapterProvenance`/`buildProvenanceReport`/`sweepChapterProvenanceTemps` below), so a
+  // caller dispatching on the declared `Halt.halt` discriminator (capture-record.d.mts) sees
+  // `'provenance_hazard'` rather than `undefined`, while `reason`/`path` survive via the spread.
+  if (!established.ok) return { ok: false, halts: [{ halt: 'provenance_hazard', ...established.hazard }] };
+
+  const validated = validateEntriesForCapture(profileLike, entries, d);
+  if (!validated.ok) return validated;
+
+  // Reserve the pending-token NAME first, via the same exclusive create the rest of this function
+  // used to do LAST — a run that can never open (another token is already sitting here) now finds
+  // that out via a plain EEXIST before anything else runs: neither the operator's own identity
+  // command below (arbitrary, possibly side-effecting shell) nor the I/O-heavy asset-hash snapshot
+  // after it executes for a run that was never going to open (codex round 8, IMPORTANT 1). Before
+  // this reorder, both of those ran first and the exclusive create ran last, so a contended open
+  // paid for a full identity-command invocation before ever discovering it could not open — and
+  // when that command itself needed a UI read, the call returned `needs_ui_read` without having
+  // attempted the token at all, sending the operator off to do UI-read legwork for a run that could
+  // never open, only discovering `run_already_open` on a LATER call.
+  //
+  // The reservation is finalized (its real `run_id` and `opening_digest` written in) once identity
+  // resolution and the snapshot have actually produced a `runState` to describe — the fd stays open
+  // across both steps for exactly that reason. If either one instead needs a UI read or hits a
+  // hazard, `releaseReservation` undoes the reservation before returning, so a resumed (or simply
+  // retried) call gets a clean, re-triable exclusive-create check of its own rather than tripping
+  // over its own predecessor's leftover reservation.
+  const tokenPath = pendingTokenPath(profileLike);
+  let fd;
+  try {
+    fd = d.openSync(tokenPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o644);
+  } catch (err) {
+    if (errProp(err, 'code') === 'EEXIST') {
+      return haltResult('run_already_open', 'a capture run is already open for this profile — close or abort it before opening a new one.');
+    }
+    return haltResult('provenance_hazard', `cannot create the pending token: ${describeThrownField(err, 'code')}`, { path: tokenPath });
+  }
+  // Releases the reservation this call just took, and reports whether the token is actually GONE
+  // afterward — the operationally significant half of "released" (codex round 9, finding 1b): a
+  // leaked `fd` costs this process one descriptor until it exits, but a token still on disk is
+  // what blocks the NEXT `openCaptureRun` with `run_already_open`, so every caller below that is
+  // about to leave this function on this reservation needs to know which one happened rather than
+  // assuming the reservation is gone just because it tried to release it. At every call site of
+  // this helper the token is still the EMPTY file just created above (nothing has been written to
+  // it yet) — never valid JSON matching the schema — so row 6's classifier (`classify`,
+  // `tokenState === 'invalid'`) reports it as `'partial'` regardless of whatever the run record
+  // happens to hold, and `abortCaptureRun` is its repair. Returns `null` on a clean release, or a
+  // warning string when the token could not be removed.
+  function releaseReservation() {
+    closeBestEffort(fd, d);
+    if (unlinkBestEffort(tokenPath, d)) return null;
+    return `the pending token '${tokenPath}' could not be removed while releasing this run's reservation — the next openCaptureRun will halt on 'run_already_open' until you run recoverProvenanceState (it will report 'partial') and abortCaptureRun to remove it.`;
+  }
+
+  // Delegates to `resolveIdentityOrHalt` (see its own comment) rather than calling
+  // `resolveIdentityCommandOutcome`/`resolveBuildIdentity` directly: either can THROW, and before
+  // this fix (codex round 9, finding 1a) that throw escaped this function entirely with the
+  // reservation still open — the just-created token was never unlinked and the fd was never
+  // closed. Nothing is committed at this point, so turning the throw into an ordinary halt loses
+  // nothing a caller could have used, and keeps this function's own no-throw contract.
+  const buildIdentity = profileLike.capture.build_identity ?? null;
+  const resolvedOpening = resolveIdentityOrHalt(identityCommandOutcome, buildIdentity, openingObservation, d);
+  if (!resolvedOpening.ok) {
+    const releaseWarning = releaseReservation();
+    return haltResult(resolvedOpening.halt, resolvedOpening.message, { warnings: releaseWarning ? [releaseWarning] : [] });
+  }
+  const { commandOutcome, identity: opening } = resolvedOpening;
+  if (opening.needs_ui_read) {
+    const releaseWarning = releaseReservation();
+    return { ...opening, identityCommandOutcome: commandOutcome, warnings: releaseWarning ? [releaseWarning] : [] };
+  }
+
+  // Snapshotting is an I/O-heavy walk of caller-controlled directories — `snapshotAssetHashes`
+  // catches ENOENT/ENOTDIR internally (an absent directory is legitimately an empty map) but
+  // re-throws anything else, and an earlier version of this function had NOTHING catching that,
+  // so an unexpected errno (EACCES, EIO, ...) crashed the whole call with an uncaught exception
+  // instead of returning a halt (codex, important #6).
+  //
+  // [round 21] `rootMustExist` carries gate 3's own observation forward: for an entry whose asset
+  // directory this call has ALREADY lstat'd, a root that cannot be listed now is not a first
+  // capture, and the walk must not report the empty map that reads as one. The halt names the
+  // chapter, because "the opening snapshot failed" over an arbitrary entry set is not something an
+  // operator can act on.
+  const openingAssets = {};
+  const openingHazards = {};
+  let snapshotting = null;
+  try {
+    for (const entry of entries) {
+      snapshotting = chapterKeyFor(entry);
+      const assetDir = chapterAssetDir(profileLike, entry);
+      const snapshot = snapshotAssetHashes(assetDir, d, {
+        rootMustExist: validated.assetDirsObserved.has(snapshotting),
+        rootIdentity: validated.assetDirsObserved.get(snapshotting) ?? null,
+        containmentRoot: validated.outputRoot,
+      });
+      openingAssets[snapshotting] = snapshot.hashes;
+      openingHazards[snapshotting] = snapshot.hazards;
+    }
+  } catch (err) {
+    const releaseWarning = releaseReservation();
+    return haltResult('provenance_hazard', `cannot snapshot the opening asset hashes for '${snapshotting}': ${describeThrownField(err, 'code')}`, { warnings: releaseWarning ? [releaseWarning] : [] });
+  }
+
+  let runState;
+  try {
+    runState = {
+      skipped: false,
+      run_id: d.randomUUID(),
+      opening,
+      opening_assets: openingAssets,
+      opening_asset_hazards: openingHazards,
+      entries: entries.map(entryKeyShape),
+      // [round 37] What this run validated `capture.output_dir` to BE, carried to the close so the
+      // close can check it is still that. Only the three fields a later observation can re-check —
+      // `depth`, `segments` and `configured` are derivable from the profile the close already
+      // holds, and duplicating them here would create a second copy free to disagree with it.
+      output_root: {
+        canonical: validated.outputRoot.canonical,
+        identity: validated.outputRoot.identity,
+        anchor: validated.outputRoot.anchor,
+      },
+    };
+    runState.opening_digest = digestOpeningPayload(openingPayloadFromRunState(runState));
+  } catch (err) {
+    // `randomUUID()` and `digestOpeningPayload` both throw rather than return a result (the
+    // latter documented on its own declaration) — this construction sits after the same
+    // reservation as identity resolution above, so an unhandled throw here leaked the fd and the
+    // token exactly the same way (codex round 9, finding 1a, the "throwing randomUUID" probe).
+    const releaseWarning = releaseReservation();
+    return haltResult('provenance_hazard', `cannot construct the run state: ${describeThrown(err)}`, { warnings: releaseWarning ? [releaseWarning] : [] });
+  }
+  const digest = runState.opening_digest;
+
+  const tokenText = JSON.stringify({ run_id: runState.run_id, opening_digest: digest });
+  try {
+    writeFull(fd, Buffer.from(tokenText, 'utf8'), d);
+  } catch (err) {
+    // A throwing (or short) write here previously escaped this function entirely — the surrounding
+    // `try` had only a `finally` closing the fd, never a `catch`, so an ordinary write failure
+    // became an UNCAUGHT exception instead of the returned `{ok:false, halts}` this module's
+    // contract promises everywhere else, and the just-created (O_CREAT|O_EXCL) token was left
+    // behind with no caller ever having a chance to clean it up. Best-effort: this closeSync
+    // failing must never MASK the write failure we are about to report (codex round 3).
+    const releaseWarning = releaseReservation();
+    return haltResult('provenance_hazard', `cannot write the pending token: ${describeThrownField(err, 'reason', 'code')}`, { path: tokenPath, warnings: releaseWarning ? [releaseWarning] : [] });
+  }
+  try {
+    d.closeSync(fd);
+  } catch (err) {
+    // The token was fully written (writeFull succeeded) but a failing close means it cannot be
+    // trusted as durably flushed — untrust it outright rather than returning ok:true over an
+    // uncertain token (some filesystems can fail a close after acknowledging the write). The token
+    // now holds this run's real (valid) run_id/opening_digest rather than the empty file
+    // `releaseReservation` above assumes, so a failed unlink here leaves row 6's classifier
+    // reporting `'open'` (or `'prepared'` if a leftover temp also happens to survive), never
+    // `'partial'` — named explicitly here rather than reusing `releaseReservation`'s wording, which
+    // would be the wrong state at this specific site.
+    const removed = unlinkBestEffort(tokenPath, d);
+    const warnings = removed
+      ? []
+      : [
+          `the pending token '${tokenPath}' could not be removed after being written (the close that failed came after a successful write) — the next openCaptureRun will halt on 'run_already_open' until you run recoverProvenanceState (it will report 'open') and abortCaptureRun to remove it.`,
+        ];
+    return haltResult('provenance_hazard', `cannot close the pending token after writing it: ${describeThrownField(err, 'code')}`, { path: tokenPath, warnings });
+  }
+
+  return { ok: true, runState };
+}
+
+// chapter-paths.mjs's outputDirTail checks `entry.group !== undefined` (strict) — a `group: null`
+// entry is therefore treated as a GROUPED entry named "null", not a flat one. So `group` must be
+// OMITTED entirely for a flat entry, never coerced to `null` — and since `JSON.stringify` drops an
+// `undefined`-valued property outright, omitting the key is also what survives the cross-process
+// serialization boundary unchanged.
+function entryKeyShape(entry) {
+  return entry.group !== undefined ? { slug: entry.slug, group: entry.group } : { slug: entry.slug };
+}
+
+function chapterKeyFor(entry) {
+  return entry.group !== undefined ? `${entry.group}/${entry.slug}` : String(entry.slug);
+}
+
+// The EXACT shape `digestOpeningPayload` was originally computed over, reconstructed from a
+// `runState` rather than re-derived independently at each call site — `openCaptureRun` builds it
+// once at creation, `closeCaptureRun` rebuilds the identical shape from `runState`'s own fields to
+// RE-VERIFY the token's stored digest. One shared shape is what keeps the two from silently
+// drifting into two different notions of "the opening payload".
+function openingPayloadFromRunState(runState) {
+  // [round 15] `asset_hazards` is authenticated too. It is the record of what could NOT be
+  // established at open, and W5 refuses on it — so leaving it outside the digest would let a caller
+  // clear the one field that blocks a confident record, which is precisely the forgery this digest
+  // exists to stop.
+  // [round 37] `output_root` is authenticated for the same reason `asset_hazards` is. It is the
+  // only record of which directory this run opened over, and the close refuses on it — so leaving
+  // it outside the digest would let a caller delete or rewrite the one field standing between a
+  // replaced output root and a confident record, which is the forgery this digest exists to stop.
+  return {
+    entries: runState.entries,
+    assets: runState.opening_assets,
+    asset_hazards: runState.opening_asset_hazards,
+    identity: runState.opening,
+    output_root: runState.output_root,
+  };
+}
+
+// The one recursive asset-tree walk both sweeps below share (the hash snapshot and the filename
+// listing) — a single definition of "which files under an asset directory this feature can see",
+// rather than two copies free to drift apart on the symlink or the errno rule. A symlink is never
+// followed, as a directory to descend or as a file to visit. ENOENT/ENOTDIR ends that branch
+// quietly (an asset directory that does not exist yet is legitimately empty — W2 snapshots the
+// opening baseline before the capture command has written anything); every OTHER errno propagates
+// to the caller, which turns it into a halt rather than a silently short list.
+// [round 16] `onSkipped` reports an entry the walk REFUSES to visit but that is nevertheless THERE.
+// Round 15 split hazard from absence inside `snapshotAssetHashes`, but only files the walk actually
+// visited could reach that classification — a symlink was dropped one level higher, here, and so
+// came out the far end as an absence again. W5 reads an absent OPENING key as "brand-new file this
+// run" and skips the did-it-change check, so an asset that was a symlink to stale bytes at open and
+// a plain file with those same stale bytes at close was recorded as this build's. The distinction
+// the previous round drew was right; it was drawn one layer too low. A caller that does not care
+// (the filename listing, which is asking which assets exist, not which could be hashed) omits it.
+/**
+ * What a directory entry actually is: `symlink`, `directory`, `file`, `absent`, `non_regular` or
+ * `inspection_failure`.
+ *
+ * [round 18] A dirent's type can be UNKNOWN. libuv reports `UV_DIRENT_UNKNOWN` on filesystems that
+ * do not fill in `d_type` — several network and FUSE mounts, and XFS in some configurations — and
+ * then EVERY predicate on the dirent is false, `isFile()` included. Treating "not a symlink, not a
+ * directory, not a file" as *therefore* a device node was a confident label for something never
+ * established, and it dropped the entry: on such a filesystem every plain `a.png` disappears from
+ * both the hash snapshot and the filename listing, so extraction halts on a destination it cannot
+ * match and no chapter can be recorded at all. Unknown means the kernel declined to answer from the
+ * directory block, and the answer is to ask — one `lstat`, only on the entries that need it, so a
+ * filesystem that does report types pays nothing. The concrete non-regular types are checked first
+ * for exactly that reason. Every predicate is called optionally: a caller may inject a dirent that
+ * implements only the three this module used to consult, and the fail-safe direction for a missing
+ * predicate is to go and find out rather than to throw.
+ */
+function direntType(dirent, absPath, deps) {
+  if (dirent.isSymbolicLink?.()) return 'symlink';
+  if (dirent.isDirectory?.()) return 'directory';
+  if (dirent.isFile?.()) return 'file';
+  if (dirent.isSocket?.() || dirent.isFIFO?.() || dirent.isCharacterDevice?.() || dirent.isBlockDevice?.()) {
+    return 'non_regular';
+  }
+  let st;
+  try {
+    st = deps.lstatSync(absPath);
+  } catch (err) {
+    // [round 19] ENOENT here used to be `absent`. `readdir` had LISTED this entry, so failing to
+    // inspect it is uncertainty about something that was there, not evidence that nothing was —
+    // and an absence at the opening observation point is read by rule 4 as "brand-new this run".
+    return errProp(err, 'code') === 'ENOENT' ? 'vanished' : 'inspection_failure';
+  }
+  if (st.isSymbolicLink()) return 'symlink';
+  if (st.isDirectory()) return 'directory';
+  // [round 19] `isFile` is called optionally because the shipped declaration promises only
+  // `isSymbolicLink` and `isDirectory`: a mock conforming exactly to it crashed the snapshot with
+  // `st.isFile is not a function`. The declaration is widened to match what this needs, and a
+  // result that still cannot answer is uncertainty — a hazard — rather than a guess or a throw out
+  // of a function whose contract is a returned value.
+  if (typeof st.isFile !== 'function') return 'inspection_failure';
+  if (st.isFile()) return 'file';
+  return 'non_regular';
+}
+
+// [round 21] O_NOFOLLOW refuses a symlink at the FINAL path component only — an ancestor directory
+// that is itself a symlink is followed transparently by the kernel regardless of the flag, which is
+// exactly why this module walks and lstat-checks every component of its OWN two namespaces before
+// opening any leaf beneath them (`inspectHierarchyChain` states the rule verbatim). The asset tree
+// is not ours, but it is READ the same way, and the same hole was open here: a dirent from a parent
+// listing says `directory`, the child is replaced by a symlink before its own listing, and the
+// path-based `readdirSync` descends into the replacement — every file under it hashed as this
+// chapter's asset, out of a tree the chapter does not own, with no hazard recorded. At the OPENING
+// point that is the release's recurring consequence: restore the real directory before the close
+// and rule 4 sees opening ≠ closing, rule 5's rehash agrees with closing, and the record is
+// confident and wrong.
+//
+// [round 22] Checked THREE times per directory — before the listing, immediately after it and
+// before its entries are acted on, and after they have been — and by IDENTITY, not by type. The
+// round-21 version asked only "is this still a directory" at two of those points, and the paragraph
+// that stood here claimed a persistent substitution could no longer pass silently. That was false,
+// and codex produced it as executed evidence: two lstats can both answer "directory" while naming
+// two DIFFERENT directories, so replacing `screens/` with another ordinary directory returned a
+// foreign hash with an empty hazard list. Type-equality was never the property being asserted;
+// identity was. `dev`/`ino` are it.
+//
+// What each observation point buys, and the verb is DETECTS rather than PREVENTS at all three: the
+// first establishes the substitution had not landed yet; the second reports one that is still in
+// place when the listing returns, before a single foreign byte is hashed; the third reports one
+// still in place after the entries have been processed. A replacement that is installed and
+// withdrawn between two adjacent observations satisfies all three — residual 1 below, which is the
+// whole reason this paragraph says "reports" and not "catches".
+//
+// TWO residuals remain, and they are stated rather than argued away — the comment that stood here a
+// round ago claimed more than the code did, and that overclaim was itself the finding:
+//
+//  1. A swap installed and reverted entirely BETWEEN two adjacent observations is invisible. Every
+//     check here is a path operation, and path operations cannot be made atomic with respect to
+//     each other without an fd-relative (`openat`) traversal, which this runtime does not offer
+//     through this seam.
+//  2. For a CHILD directory, the window between the parent's listing and the child's own first
+//     observation cannot be closed AT ALL by this seam, for a sharper reason: a `Dirent` carries a
+//     name and a type and no inode, so there is no way to bind the name the parent saw to the
+//     object descended into. The child's identity baseline is therefore its own first `lstat`, and
+//     a directory replaced in that window is baselined as the replacement — consistently, silently,
+//     and with foreign bytes in the opening map. The ROOT does not share this: its identity comes
+//     from gate 3's own observation, which is why it is passed in rather than derived here.
+//     [round 23] That last sentence was half wrong when it was written. The root's identity did
+//     come from gate 3 — of the LINK, for a symlinked root, while `readdirSync` followed it — so
+//     the root had residual 2 in a worse form than a child: not an unclosable window, but a check
+//     that could never fire at all. Reading the resolved target closes it. What the root genuinely
+//     does not share is the STRUCTURAL half: a child's name cannot be bound to an object because a
+//     `Dirent` has no inode, whereas the root is reachable by a path both sides can `lstat`.
+//
+// Closing residual 2 needs `openat`/`fdopendir` (or a `readdirSync` that reports `d_ino`), which is
+// a seam change, not a logic change. Until then the guard's reach is exactly this, and it is
+// DETECTION rather than closure: a substitution is reported if it is still in place at one of the
+// three observation points. It is never prevented — every check here re-resolves a PATH, so the
+// listing in between was not bound to the object that was checked, and a replacement installed and
+// reverted between two adjacent observations leaves no trace at all. The sentence that stood here
+// said a substitution "is caught if it is present at, or lands during, the listing", which
+// contradicted residual 1 four lines above it: one that lands during the listing is caught only if
+// it happens to persist to the next observation. Two claims about the same guard, in one comment
+// block, disagreeing — which is the shape three consecutive rounds of review have found here.
+//
+// The ROOT is not exempt any more, only differently supplied. Gate 3 permits a symlinked asset root
+// that resolves inside `capture.output_dir`, so refusing symlink-ness here would refuse a supported
+// topology; what it may NOT do is become a different object between gate 3 and this walk. Its
+// identity therefore arrives from the caller (`rootIdentity`) rather than being decided here, and a
+// mismatch throws: the root is nameable by no relative path, so it cannot be a hazard member, and
+// halting the run is strictly more conservative than a per-directory refusal.
+// `allowSymlink` is the root/child split, and it is not cosmetic: gate 3 PERMITS an asset root that
+// is a symlink resolving inside `capture.output_dir`, so refusing symlink-ness at the root would
+// refuse a documented topology — the first version of this check did exactly that, and the test
+// pinning that topology is what caught it. A CHILD is never legitimately a symlink (`direntType`
+// refuses one rather than descending), so there the word stands.
+//
+// [round 23] WHICH OBJECT the identity is read off was the round-22 defect, and it is a sharper
+// mistake than the one it replaced. The previous version compared the LINK's own inode — and
+// `readdirSync` follows the link. A symlink is a stable name for a changing object: it survives
+// every substitution of its target untouched, so all three observation points compared one inode to
+// itself while the foreign tree underneath was hashed into the opening baseline with an empty hazard
+// list. Round 21 checked the wrong PREDICATE (type, not identity); round 22 checked the right
+// predicate on the wrong OBJECT; both passed every test written for them.
+function assetDirIdentity(absPath, deps, { allowSymlink = false } = {}) {
+  let st;
+  try {
+    st = deps.lstatSync(absPath, EXACT_IDENTITY_STAT);
+  } catch (err) {
+    // [round 26] `absentDirectly` is the ONLY place it is set, and that is the whole point of it.
+    // This catch is the one failure meaning "there is nothing at this path" — every later failure in
+    // this function had a successful `lstat` first, so SOMETHING is there. The two used to be
+    // indistinguishable downstream because both render as the hazard reason `vanished`: a dangling
+    // root symlink is present, `realpathSync` reports its TARGET absent, and the walk's ENOENT
+    // whitelist tolerated the word rather than the fact. Codex executed the consequence — `opening:
+    // {}` with no hazards for a root that was there. The hazard vocabulary is a fixed five words on
+    // the wire and must not grow a sixth, so the finer fact is carried beside the reason and never
+    // reaches a record.
+    if (errProp(err, 'code') === 'ENOENT') return { ok: false, reason: 'vanished', absentDirectly: true };
+    return { ok: false, reason: 'inspection_failure' };
+  }
+  if (st.isSymbolicLink() && !allowSymlink) return { ok: false, reason: 'symlink' };
+  const identity = identityOfListedObject(absPath, st, deps);
+  if (!identity.ok) return identity;
+  // Directory-ness belongs to the LISTED object too, not to the name that reaches it: a root that
+  // is a link to a regular file must refuse here rather than at `readdirSync`'s ENOTDIR.
+  if (!identity.isDirectory) return { ok: false, reason: 'inspection_failure' };
+  return identity;
+}
+
+// The identity of the object a path-based `readdirSync(absPath)` would actually LIST, given an
+// `lstat` of `absPath` the caller has already taken. Gate 3's observation and the walk's three
+// re-checks all route through this one function — that is what stops the two sides from drifting
+// into comparing the identities of different objects, which is exactly how round 22 shipped.
+//
+// `realpathSync` is reached ONLY on the symlink branch. When `absPath` is not itself a link, its own
+// `lstat` and the object `readdirSync` lists are already the same object — a symlinked ANCESTOR
+// changes which path names it, never which object it is — so the ordinary case keeps its single
+// syscall and the extra resolution is paid only by the topology that needs it. That branch is two
+// path operations rather than one, so it widens residual 1 below (a swap installed and reverted
+// between two adjacent observations) for a symlinked root; it does not create a new class.
+function identityOfListedObject(absPath, st, deps) {
+  if (!st.isSymbolicLink()) return identityFromStat(st);
+  let target;
+  try {
+    target = deps.realpathSync(absPath);
+  } catch (err) {
+    return { ok: false, reason: errProp(err, 'code') === 'ENOENT' ? 'vanished' : 'inspection_failure' };
+  }
+  let targetStat;
+  try {
+    targetStat = deps.lstatSync(target, EXACT_IDENTITY_STAT);
+  } catch (err) {
+    return { ok: false, reason: errProp(err, 'code') === 'ENOENT' ? 'vanished' : 'inspection_failure' };
+  }
+  // `realpathSync` resolves every link on the path it is handed, so a result that is ITSELF a link
+  // means this seam did not do what its contract says. Uncertainty, not a guess.
+  if (targetStat.isSymbolicLink()) return { ok: false, reason: 'inspection_failure' };
+  return identityFromStat(targetStat);
+}
+
+// Fail closed on a result that cannot answer, exactly as round 19 established for `isFile`: an
+// identity this module cannot read is uncertainty, and uncertainty is a hazard rather than a guess.
+// A caller on the pre-round-22 declaration lands here instead of silently comparing `undefined` to
+// `undefined` — which compares EQUAL, so the guard would report success precisely because it
+// learned nothing.
+// [round 24] A `number` is accepted only when it is EXACT. `dev`/`ino` are 64-bit on the platforms
+// this runs on, and a JavaScript number cannot represent every one of them: codex measured inodes
+// `9007199254740992` and `9007199254740993` — two different directories — both producing the id
+// `7:9007199254740992`, so a substitution passes all three observation points on any filesystem
+// exposing identifiers above 2^53. That is the release's own defect class arriving through the
+// number line rather than through a missing branch. A `bigint` is exact by construction and is the
+// supported way to identify objects there; `defaultDeps` asks `node:fs` for one, so production
+// never depends on the safe-integer window at all. An inexact number is uncertainty, and this
+// module's standing rule for uncertainty is refusal.
+function identityFromStat(st) {
+  const dev = exactIdentityPart(st?.dev);
+  const ino = exactIdentityPart(st?.ino);
+  if (dev === null || ino === null) return { ok: false, reason: 'inspection_failure' };
+  return { ok: true, id: `${dev}:${ino}`, isDirectory: st.isDirectory() };
+}
+
+// Passed as `lstatSync`'s second argument at the THREE call sites that read an identity, and
+// nowhere else. It is a REQUEST, not a requirement: `node:fs` honours it and returns `BigIntStats`,
+// a seam that ignores a second argument returns ordinary numbers and keeps working inside the
+// safe-integer window, and beyond that window `identityFromStat` refuses rather than guessing. That
+// ordering is deliberate — the shipped default is exact everywhere, and a caller who supplies a
+// narrower `lstatSync` degrades to a refusal instead of to a silent collision. Deliberately NOT
+// applied to `fstatSync`, whose consumer compares `nlink !== 1` and would silently fail that
+// against a BigInt, nor to the two lstat sites that read only predicates.
+const EXACT_IDENTITY_STAT = Object.freeze({ bigint: true });
+
+// A `bigint` renders the same digits a safe-integer `number` does, so a seam that switches between
+// them mid-run still compares equal for the same object — which matters because gate 3 and the walk
+// may be reached through different deps in a test.
+function exactIdentityPart(value) {
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value);
+  return null;
+}
+
+// [round 25] A root's FAILED first observation, adjudicated against a failed listing. Round 24 built
+// the carry (`rootUnidentified`) and then adjudicated it on one outcome only — the listing
+// succeeding. The other two outcomes kept deciding from `expectedId`, which is null on precisely the
+// path a failed observation produces, so the branch a failed observation causes to run was the one
+// branch that could not see it. The bug was inside the fix, one layer down, for the fifth round
+// running.
+//
+// Exactly one situation may still close silently, and `tolerateDirectAbsence` is which outcome it is
+// reachable on: the root was NOT THERE at its own first `lstat`, and the listing then agreed. That
+// is what a first capture is, and a chapter that legitimately produced nothing must still close
+// clean. Everything else refuses, including a reason nobody has thought about yet — this release's
+// defect class is an item that could not be processed being read as good news, so the tolerance is a
+// single named fact rather than a severity test over a growing vocabulary.
+//
+// [round 26] It is a fact and not a REASON WORD because round 25 wrote it as a reason word and codex
+// broke it: `vanished` also names a present root symlink whose target is missing, which is not a
+// first capture and must not be tolerated. `absentDirectly` is set at one site and cannot alias.
+// Nothing is tolerated on ENOTDIR at all — an object is present there that was not there one syscall
+// earlier, which no first capture can produce.
+// [round 29] The containment root, resolved once per snapshot the way gate 3 resolves it. `depth` is
+// a LEXICAL count of the configured `capture.output_dir` rather than a count of its resolved form,
+// because a resolved root can differ in segment COUNT from the configured one (`/tmp` ->
+// `/private/tmp`) and the climb indexes the asset path's own segments.
+//
+// [round 30] Lexical is not the same as RAW, and round 29 used raw. Every asset path is built from
+// this string by the shared path builder, which NORMALIZES — so `..` collapses there and did not
+// collapse here, the root's count came out larger than the whole asset path's, every ancestor
+// classified as "above the root", and the exemption swallowed the identity check and the containment
+// check together. The comment justifying raw said the two "share an exact lexical prefix", which is
+// true of appending and false of normalizing. Measured against the real exported `chapterAssetDir`
+// before it was believed: `/out/vault/handbook/../assets` builds `/out/vault/assets/items`, 4
+// segments against a raw count of 5.
+// [round 36] `directAbsenceConfirmed` answers two questions at once — does the deepest existing
+// ancestor RESOLVE, and does it sit inside the output root — and above `capture.output_dir` only the
+// first has meaning. A zero-depth root makes the containment comparison vacuous (`segmentsWithin([],
+// …)` is true for every path) while leaving the resolution check exactly as it is, so the root's own
+// absence is adjudicated by the same code as every other absence rather than by a second copy of it.
+const ROOT_ABSENCE_ONLY = Object.freeze({ depth: 0, segments: Object.freeze([]) });
+
+// [round 37] `directAbsenceConfirmed` answers with the ANCHOR it accepted, so its refusal needs a
+// shape too. One frozen value rather than an object literal per exit: the refusal carries no
+// information beyond itself, and a fresh `{ok: false, anchor: null}` at six sites is six chances
+// for one of them to grow a field the others do not have.
+const ABSENCE_UNCONFIRMED = Object.freeze({ ok: false, anchor: null });
+
+function containmentRootFor(profileLike, deps) {
+  const raw = profileLike?.capture?.output_dir ?? '';
+  // [round 34] The FIRST half of the bracket, and it has to be taken before anything is resolved —
+  // see the block below the resolution for what it is for and what it does not buy.
+  const beforeResolution = assetDirIdentity(raw, deps, { allowSymlink: true });
+  const resolved = canonicalizeForComparison(raw, deps);
+  // The REASON travels, rather than being flattened into a fixed word at the call site. A symlink
+  // cycle on the configured root reported `inspection_failure` to the operator — the one diagnosis
+  // this module already knew to be wrong, since `canonicalizeForComparison` distinguishes the two
+  // and the sibling guard at the ownership gate has always said which it was.
+  if (!resolved.ok) return { ok: false, reason: resolved.reason };
+  const canonical = `/${resolved.segments.join('/')}`;
+  // [round 31] What is being pinned is what `capture.output_dir` RESOLVES TO, so the LATER probe
+  // has to start where the module starts — see `outputRootChanged`, which reads the configured path
+  // and not this one. That is round 31's fix and it stands.
+  //
+  // [round 33] The BASELINE is the other half, and round 31 got it backwards: it read the identity
+  // through the configured path too, which made this function two INDEPENDENT resolutions of one
+  // name. Codex repointed the root between them to a DESCENDANT of its own resolved target, and
+  // every downstream check then agreed with itself — `segments` described tree A, the identity
+  // pinned tree B, `outputRootChanged` compared B with B, and containment passed because B really
+  // is inside A. `openCaptureRun` returned ok with another tree's bytes hashed and no hazard. The
+  // comments claiming "the same moment" and "ONE observation" were false: one observation means one
+  // object, not two syscalls issued close together.
+  //
+  // Reading it at `canonical` keeps the identity on the object those segments name, which is what
+  // round 33 needed. It does NOT reintroduce round 31's defect, which was about the later probe:
+  // pinning the target and then RE-READING the target compares an untouched object with itself
+  // forever, while pinning the target and re-reading the configured NAME is what a repoint has to
+  // move past.
+  //
+  // [round 34] What round 33 claimed for it was false, and codex executed the counterexample.
+  // "Binds the pair by construction" was a claim about two syscalls again: `canonical` is a STRING,
+  // stat-ing it is a second call, and the physical directory it names can be replaced in between —
+  // same pathname, different object. Then `segments` describe A, the identity pins B, and the later
+  // probe re-resolves the configured name to B and agrees with itself. `openCaptureRun` returned ok
+  // over another tree's bytes. Round 33 moved the split one level along and called it closed.
+  //
+  // No path-based syscall pair can bind an object; that needs a handle this seam does not have (the
+  // standing residual, stated once at `walkRegularFiles`). What is achievable is a BRACKET, and
+  // that is all this is: an identity read at the configured name BEFORE the resolution and one at
+  // `canonical` after it. A substitution that is still in place when the second read lands makes the
+  // two disagree and this refuses; one installed and reverted entirely between them leaves no trace,
+  // exactly as it does at every other observation point in this module. Detection, not prevention.
+  //
+  // For every run that snapshots anything at all, this refuses nothing new — the property that
+  // matters for a check added this late. `outputRootChanged` ALREADY requires the identity read at
+  // the configured name to equal the one pinned at `canonical`, on every snapshot of every entry,
+  // so any topology where the two disagree already halted at the first snapshot. This moves that
+  // refusal to validation, before a reservation is written, and lets it be diagnosed for what was
+  // observed instead of as a replacement.
+  //
+  // [round 35] "For every run that snapshots anything" is the qualification, and the sentence here
+  // used to assert the universal without it. An EMPTY entry set is validated and then snapshots
+  // nothing — open, close and W6 all iterate the entries — so no `outputRootChanged` ever runs and
+  // a disagreement went unreported. Measured against the pre-bracket module: an empty run on a
+  // statically ambiguous path returned ok, and it refuses here. That is a genuinely new refusal.
+  // It is the conservative direction and it is kept: the root is ambiguous whether or not any
+  // chapter asked about it, and a run that records no chapters still writes a run record naming
+  // that root.
+  //
+  // Which is why the reason names the OBSERVATION and not a cause. Two different situations reach
+  // this line and these two syscalls cannot tell them apart: a substitution landing inside the
+  // window, and a configured path that is statically ambiguous — `<root>/link/../assets`, where the
+  // kernel resolves `link` before applying `..` and `normalizeSegments` collapses `..` before ever
+  // seeing it, so the name and its resolved form denote different directories with nothing moving
+  // at all. Both are refusals; only one is a race; a reason word claiming a replacement would send
+  // an operator hunting a concurrent writer that does not exist.
+  //
+  // The two halves must also agree about EXISTING. One read finding an object where the other found
+  // none is the same disagreement — the root arriving or leaving mid-validation — and reading it as
+  // "nothing to compare" would store a null identity, which stands every later bracket down and
+  // lets the climb certify the destroyed root as a chapter that produced nothing.
+  //
+  // A root that does not exist YET has no identity, and that is an ordinary first capture rather
+  // than a failure — `null` means "nothing to compare", never "compares equal". Both halves fail
+  // together there (the tail that does not resolve is the same tail in both), so the bracket stands
+  // down rather than reading two absences as a disagreement.
+  //
+  // [round 34, review bot P1 follow-up] BOTH halves have to say it, and the first version of this
+  // guard asked only the second — which is this release's own defect class arriving inside the fix
+  // that closed it, one layer down, for the fifteenth round running. When the configured-name read
+  // fails as `inspection_failure` and the canonical read then reports plain ENOENT, both halves are
+  // `ok: false`, so the disagreement arm above stays quiet and a tolerance keyed on the second read
+  // alone reads the pair as an ordinary first capture. Measured through the real exported
+  // `openCaptureRun` before it was fixed: `ok: true`, with a tree that came into existence after
+  // validation hashed into the opening baseline and no hazard recorded. "The root is not there" is
+  // a claim about the root, and one observation that could not see it is enough to unmake it.
+  //
+  // [round 34, review bot P1] And ONLY there. `identity.ok ? identity.id : null` collapsed two
+  // different failures into that same null: a root that is not there, and a root that is there and
+  // could not be identified. The second one disables every later bracket — `outputRootChanged`
+  // returns false unconditionally on a null identity — so the bot repointed the configured root to a
+  // populated descendant after an `lstat` that reported no `dev`/`ino`, and `openCaptureRun`
+  // returned ok with the foreign bytes hashed and an empty hazard list. Reproduced here through the
+  // real export before it was fixed. `absentDirectly` is exactly the fact that separates them (round
+  // 26 built it for this), and it is a claim about ONE `lstat` returning ENOENT, so nothing else can
+  // reach the tolerated branch: a present-but-dangling root symlink reports `vanished` without it
+  // and refuses here, which is the same distinction the climb draws one layer down.
+  const identity = assetDirIdentity(canonical, deps, { allowSymlink: true });
+  if (beforeResolution.ok !== identity.ok || (identity.ok && beforeResolution.id !== identity.id)) {
+    return { ok: false, reason: 'configured_and_resolved_disagree' };
+  }
+  let anchor = null;
+  if (!identity.ok) {
+    if (!(identity.absentDirectly === true && beforeResolution.absentDirectly === true)) {
+      // The reason of whichever half could not simply report absence — that is the one an operator
+      // has to act on, and on a mixed pair it is never the tolerated half's word.
+      return { ok: false, reason: identity.absentDirectly === true ? beforeResolution.reason : identity.reason };
+    }
+    // [round 36] Two ENOENTs are two claims about the same PATH, and neither is a claim about the
+    // root. `lstat` does not follow the final component but follows every ancestor, so a present
+    // dangling symlink ABOVE `capture.output_dir` makes both halves report ENOENT for a root whose
+    // existence is simply unknown — round 27's finding, one level further up than round 27 looked.
+    // The climb is what turns an ENOENT into a statement about the object, and it is the same climb
+    // the snapshot runs; a zero-depth root asks it for the resolution half while neutralizing the
+    // containment half, which is the half that has no meaning above `capture.output_dir`.
+    //
+    // [round 37] Neutralizing, not skipping, and the distinction is visible in the syscalls. With
+    // `depth: 0` the climb's `depth < containmentRoot.depth` early return can never fire — no depth
+    // is below zero — so this caller always takes the OTHER arm and reaches
+    // `canonicalizeForComparison`, whose result `segmentsWithin([], …)` then accepts vacuously. So
+    // the empty segment list is what makes containment vacuous, and the zero DEPTH is what routes
+    // every candidate through the resolution call: two consequences, not one. That call is this
+    // guard's whole cost on the common path — one extra resolution per first capture — and it is
+    // also one more thing that can fail: an ancestor whose `lstat` succeeds while its `realpath`
+    // transiently does not (an automount mid-mount is the realistic one) is refused here rather
+    // than accepted. That is the conservative direction and it is deliberate, but it is a refusal
+    // this arm did not make before, so it is named rather than left for the next reader to find.
+    const confirmed = directAbsenceConfirmed(raw, ROOT_ABSENCE_ONLY, deps);
+    if (!confirmed.ok) return { ok: false, reason: 'absence_unconfirmed' };
+    anchor = confirmed.anchor;
+  }
+  return {
+    ok: true,
+    root: {
+      depth: normalizeSegments(rawSegments(raw), isAbsolutePath(raw)).length,
+      segments: resolved.segments,
+      canonical,
+      configured: raw,
+      identity: identity.ok ? identity.id : null,
+      // [round 37] Non-null EXACTLY when `identity` is null: the object the root's absence was
+      // established against, which is the only thing a later observation can re-check that absence
+      // against. A present root needs no anchor — it is its own.
+      anchor,
+    },
+  };
+}
+
+// [round 31] Every guard this release built brackets a CHAPTER directory, and gate 3 keeps an
+// identity only for one that already EXISTS — so a first capture had no pin anywhere, and the level
+// ABOVE it was never bracketed at all. Codex swapped the output root itself between validation and
+// the snapshot, from a tree whose chapter directory was legitimately absent to a populated one, and
+// none of rounds 25 through 30 could see it: the direct-absence machinery only ever runs when a
+// listing FAILS, and the replacement lists perfectly well. `openCaptureRun` returned ok, hashed
+// another tree's bytes with no hazard, and W5 attributed them to this build.
+//
+// What this buys is narrow and codex named the limit precisely: the root's own `dev:ino` does NOT
+// freeze what paths beneath it resolve to, because its directory entries change independently of the
+// directory. So this detects a REPOINT of the configured path and nothing else — a repoint to
+// another name for the same object is correctly harmless, and a substitution one level down is
+// invisible to it. That level is `rootEscapesOutputRoot`'s job, not this one's.
+// [round 32] Gate 3's containment rule, applied to a root gate 3 could not see because it did not
+// exist yet. `null` containment information cannot establish the property, so it refuses — the same
+// direction every other unestablished fact takes in this module.
+function rootContainmentFailure(absPath, containmentRoot, deps) {
+  if (containmentRoot === null) return 'the capture output root could not be established for a containment check';
+  const resolved = canonicalizeForComparison(absPath, deps);
+  if (!resolved.ok) return `the asset directory could not be resolved for a containment check (${resolved.reason})`;
+  if (!segmentsWithin(containmentRoot.segments, resolved.segments)) return 'the asset directory resolves outside capture.output_dir';
+  return null;
+}
+
+function outputRootChanged(containmentRoot, deps) {
+  if (containmentRoot === null || containmentRoot.identity === null) return false;
+  const now = assetDirIdentity(containmentRoot.configured, deps, { allowSymlink: true });
+  return !now.ok || now.id !== containmentRoot.identity;
+}
+
+function segmentsWithin(rootSegs, segs) {
+  if (segs.length < rootSegs.length) return false;
+  return rootSegs.every((seg, i) => segs[i] === seg);
+}
+
+function refuseUnadjudicatedRoot(observation, code, tolerateDirectAbsence, absent) {
+  if (observation === null) return;
+  if (tolerateDirectAbsence && observation.absentDirectly === true && absent()) return;
+  throw new Error(`the asset directory could not be confirmed (${observation.reason}) and its listing then failed (${code})`);
+}
+
+// [round 27] `absentDirectly` is a claim about ONE `lstat`, and one `lstat` cannot make it. `lstat`
+// does not follow the FINAL component — which is the whole reason it can report a symlink at all —
+// but it follows every ANCESTOR. So `lstat('<out>/group/items')` throws ENOENT when `<out>/group` is
+// a present dangling symlink, exactly as it does when `items` genuinely does not exist yet, and
+// round 26's fix aliased one level further up the path than round 25's. Codex executed it: a
+// dangling ancestor, `opening: {}` with no hazards, the target then populated with previous-build
+// bytes, and W5 counting them as brand-new.
+//
+// Direct absence therefore has to be established over the PATH, not at its tip: walk UP until an
+// ancestor exists, and require that one to RESOLVE to a directory. Only an ancestor that exists can
+// explain the tip's ENOENT by being something other than a directory; a chain that is simply absent
+// contains no symlink to dangle, and a not-yet-created group ancestor is ordinary on a first
+// capture. `/` exists and resolves, so this always terminates with a decision.
+//
+// It deliberately has NO lower bound, and the first attempt at this fix did — stopping at
+// `capture.output_dir`, which refused every legitimate first capture whose output directory the
+// capture command had not created yet. A bound is unnecessary because the test is RESOLUTION rather
+// than symlink-freedom: the path to a temporary directory on this platform runs through `/var` ->
+// `/private/var`, which resolves and therefore passes.
+//
+// A RESOLVING symlinked ancestor is accepted, but resolving is NOT the whole of gate 3's property
+// and round 28's version of this comment said it was. Gate 3 requires the longest existing ancestor
+// to resolve INSIDE `capture.output_dir`; a link to an existing directory anywhere else passes the
+// weaker test and fails the real one. Codex executed the gap: a post-validation `admin ->
+// /outside/admin-real`, an empty hazard-free opening baseline, and the capture command's later
+// writes landing under `/outside/admin-real/items`. The prose asserting parity was the tell.
+//
+// `containmentRoot` carries what gate 3 establishes once — the output root's canonical segments,
+// its NORMALIZED depth, the configured path, and the physical identity observed through it. Absent
+// it, nothing here can establish the property, so the answer is refusal.
+//
+// [round 30] That null arm was called UNREACHABLE in round 29, on the argument that every caller
+// sits behind a guard which halts when `capture.output_dir` cannot be resolved. The premise is true
+// and does not carry the conclusion: the guard and `containmentRootFor` are two SEPARATE resolutions
+// of the same path, so the tree can change between them, and an ELOOP introduced after the guard
+// passes reaches this line. It is reached, it is tested, and no mutant on it is expected to survive.
+//
+// The round-29 reasoning is left standing here because the mistake is the reusable part: an
+// unreachability claim is about ALL paths and was being made from the paths that had been looked at,
+// twice in two rounds. What settled it was measuring the number of resolutions, not re-reading them.
+function directAbsenceConfirmed(absPath, containmentRoot, deps) {
+  if (containmentRoot === null) return ABSENCE_UNCONFIRMED;
+  // Rootedness is preserved the way `canonicalizeForComparison` preserves it. A RELATIVE asset
+  // directory is a supported shape — `capture.output_dir` may be relative and every asset path is
+  // built from it — and prefixing `/` onto its segments would probe a completely different tree,
+  // climb it to `/`, and report direct absence for a path this walk never looked at.
+  const absolute = isAbsolutePath(absPath);
+  // [round 42] LEXICALLY NORMALIZED, the same representation `canonicalizeForComparison` and
+  // `chapterAssetDir` use — and the same one the walk therefore actually visits. The climb used the
+  // RAW segments, so a `..` in `capture.output_dir` put the anchor in a different coordinate system
+  // from the canonical path recorded beside it: the kernel reads `a/link/..` as link's target's
+  // parent, lexical normalization reads it as `a`, and those are different directories whenever
+  // `link` leaves its own parent. Measured: the anchor came back as the base directory while the
+  // canonical path resolved under `a`, so open and close disagreed about which object the anchor
+  // even was. It reaches a RECORD: with the tail's own missing component created before an alias
+  // rotation, the closing raw path and the closing lexical path land on the same live directory, the
+  // round-34 configured-vs-resolved bracket therefore passes, and the drift check decides on an
+  // anchor read in the wrong coordinate system — measured against the raw form as `ok: true` with a
+  // previous build's `old.png` committed as this run's closing output under an empty opening
+  // baseline. Round 42 first judged this masked by that bracket, on a probe missing exactly the one
+  // `mkdir` that makes it pass; a non-reproduction is only as good as the topology actually built.
+  const segs = normalizeSegments(rawSegments(absPath), absolute);
+  // [round 28] The climb starts at the TIP, and the round-27 version started at its parent. That
+  // was a check which did not test the fact it claimed: this runs AFTER the listing has already
+  // failed, so the root can come back — populated — in between, and a helper that only ever looked
+  // at the parent certified "absent" for a directory that was there, with stale bytes in it. Codex
+  // executed exactly that and reported the damning number: probes of the tip after it was
+  // repopulated, zero. It is WIDER than the residual about a swap installed and reverted between
+  // two observations, because here the substitution is still in place while the code decides.
+  for (let depth = segs.length; depth >= 0; depth -= 1) {
+    const joined = segs.slice(0, depth).join('/');
+    const candidate = depth === 0 ? (absolute ? '/' : '.') : (absolute ? `/${joined}` : joined);
+    try {
+      deps.lstatSync(candidate);
+    } catch (err) {
+      const code = errProp(err, 'code');
+      if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+      // A component this module cannot inspect is uncertainty, and uncertainty is never the
+      // permissive answer here: it would tolerate exactly the empty snapshot the tip's ENOENT
+      // already looks like.
+      return ABSENCE_UNCONFIRMED;
+    }
+    // The first component that exists, climbing up from the tip. When that IS the tip, there is no
+    // absence left to be direct: the root is present now, whatever the listing said a syscall ago,
+    // and an empty snapshot for a directory that exists is the whole defect class.
+    if (depth === segs.length) return ABSENCE_UNCONFIRMED;
+    // [round 29] Above the configured output root there is nothing left to CONTAIN: the root is not
+    // required to sit inside itself, and bounding the climb here instead of exempting it was round
+    // 27's first attempt, which refused 21 legitimate cases. Reaching this arm means
+    // `capture.output_dir` itself does not exist yet, which is an ordinary first capture.
+    //
+    // [round 36] The containment assertion is what is exempt — NOT the resolution one, and round 29
+    // exempted both with a single `return true`. Its stated reason was that "with nothing existing
+    // along the path there is nothing that could BE a symlink redirecting it", and this arm is
+    // reached precisely because something DOES exist: the climb stops at the first component that
+    // does. A present dangling symlink one level above the output root makes every `lstat` beneath
+    // it report ENOENT — `lstat` does not follow the FINAL component but follows every ancestor,
+    // which is round 27's finding one level up — so the tip's absence is not absence at all, and
+    // this arm certified it as a chapter that produced nothing. Codex executed the whole shape
+    // against the real exports: an operator's `/safe/link` dangling during an editor sync, `opening:
+    // {}` with no hazards, the sync then restoring a target that already held `old.png`, and W5
+    // reading the absent opening key as brand-new. Old bytes, attributed to this build, with a
+    // confident record.
+    //
+    // The ancestor must therefore RESOLVE, exactly as one at or below the root must. That is the
+    // same predicate on the same basis, minus the containment comparison there is no root to make.
+    //
+    // [round 37] Hoisted above the depth branch, where both arms already required it — one
+    // `assetDirIdentity` call for one decision, and its ID is now part of the answer rather than
+    // discarded down to a boolean. See the ANCHOR note below for why the ID has to travel.
+    const anchorIdentity = assetDirIdentity(candidate, deps, { allowSymlink: true });
+    if (!anchorIdentity.ok) return ABSENCE_UNCONFIRMED;
+    // [round 37] The ANCHOR is this walk's real product, and returning only `true` threw it away.
+    // "The output root is absent" is a claim resting entirely on ONE existing object — the deepest
+    // ancestor that could have explained the tip's ENOENT and did not — so a later observation can
+    // only re-check the claim if it knows which object that was. Codex replaced this directory
+    // under its own pathname after validation and before the close: the tip's absence had been
+    // certified against directory A, the close then walked directory B through the same name, and
+    // with nothing retained there was nothing left to disagree with. `openCaptureRun` pins what
+    // comes back here; `outputRootDrifted` re-reads it.
+    // [round 40] The TAIL travels with the anchor, and round 39 shipped without it. What the open
+    // establishes is not "something is missing somewhere under this object" but a SPECIFIC missing
+    // suffix under it, and a close that re-checks only anchor-plus-containment accepts a different
+    // directory inside the same anchor — a previous build's tree reached through a link planted on
+    // the tail. Two reviewers found that independently, with different topologies (a link at the
+    // root's own name; a redirect one component deeper), which is what marks it as the property
+    // being wrong rather than one topology being missed. These are the LEXICALLY NORMALIZED segments
+    // below the anchor — they said "RAW" for a round, which was true of the code and is the very
+    // thing round 42 fixed — so the close re-joins a suffix that already carries no `..` onto the
+    // anchor's resolution taken then. A symlink newly planted along the tail can never match: a
+    // resolved path that traversed one does not equal the lexical join.
+    const anchor = Object.freeze({ path: candidate, identity: anchorIdentity.id, tail: Object.freeze(segs.slice(depth)) });
+    if (depth < containmentRoot.depth) return { ok: true, anchor };
+    // Gate 3's actual property, on the same comparison basis gate 3 built its root with.
+    const resolved = canonicalizeForComparison(candidate, deps);
+    if (!resolved.ok) return ABSENCE_UNCONFIRMED;
+    return segmentsWithin(containmentRoot.segments, resolved.segments) ? { ok: true, anchor } : ABSENCE_UNCONFIRMED;
+  }
+  // Unreachable: the loop's last iteration probes `/` (or the working directory for a relative
+  // path), which exists wherever this module runs, so it always returns from inside — including for
+  // an `absPath` with no segments at all, which round 27's version could not say. Refusing is the
+  // fail-safe direction, and no test can kill a mutant on this line: recorded rather than papered
+  // over, because an unkillable mutant reported as covered is the same lie as an untested guard.
+  return ABSENCE_UNCONFIRMED;
+}
+
+// [round 37] What `openCaptureRun` observed of `capture.output_dir`, checked again at the close.
+//
+// Nothing about the output root used to survive the open: `runState` carried the entries, the two
+// identity observations and the opening hashes, and the close re-derived the root from the profile
+// as if the two derivations could not disagree. They can, and while they disagree the close is
+// walking a directory this run never validated. Codex found it on the ABSENT root — the anchor case
+// below — and the same probe with the root PRESENT and identified at open showed the seam is not
+// about absence at all: a directory replaced under the same pathname between open and close closed
+// `ok: true`, with a previous build's `old.png` committed as this run's output and an empty hazard
+// list. Two more shapes did the same (the root appearing as a link into a tree outside itself, from
+// both an absent and a present open), which is what makes this a property of the open->close seam
+// rather than of any one topology.
+//
+// This is not the standing residual at `walkRegularFiles`. That one is about a substitution
+// installed and reverted BETWEEN two observations, which leaves nothing to observe. Here the
+// replacement is still in place while the close decides, so an observation retained from the open
+// is exactly what catches it.
+//
+// [round 39] The limit of what this can be, stated where the comparison is rather than only in
+// SKILL.md: `<dev>:<ino>` is unique among objects that are LIVE AT THE SAME TIME, not across time.
+// A directory renamed away still exists, so its inode is still taken and a replacement necessarily
+// compares different; a directory DELETED and recreated frees its inode for reuse, and a filesystem
+// that hands the same one back makes the two indistinguishable here. So this is reliable against a
+// rename-over and best-effort against a delete-then-recreate. That residue does not close with a
+// longer comparison — no pair of path-based syscalls can bind an object, which is the same reason
+// the concurrent-writer premise above it is a documented precondition rather than a check. It
+// closes with a capability this module does not have: a held handle, or a run-owned staging
+// directory the capture writes into. Do not "strengthen" this by adding a second path-based probe.
+//
+// Returns a message on drift, `null` when the root still holds.
+function outputRootDrifted(opened, closing, deps) {
+  // A `runState` reaching the close without this field is not an old shape to tolerate: the digest
+  // authenticates it (see `openingPayloadFromRunState`), so the only ways here are a payload that
+  // was edited and a runState this module did not open. Both are refusals.
+  if (!isPlainObject(opened)) {
+    return 'this runState carries no observation of capture.output_dir from when the run opened';
+  }
+  // [round 38] The IDENTITY is asked first, and it settles the question on its own when there is
+  // one. Round 37 compared the canonical spelling first, which refused a topology that is not drift
+  // at all: `output_dir` pointing at `releases/current`, the very same directory renamed from `v1`
+  // to `v2` and the alias rotated onto it. Same inode, same files, new spelling — and the close
+  // refused before it ever looked at the object. Measured through the real exports. What this run
+  // opened over is a DIRECTORY, not a name for one, so a name that moved while the directory did
+  // not is not a run this module has any reason to distrust.
+  if (opened.identity !== null) {
+    if (closing.identity === opened.identity) return null;
+    if (opened.canonical !== closing.canonical) {
+      return `capture.output_dir resolved to '${opened.canonical}' when this run opened and resolves to '${closing.canonical}' now, and that is a different directory`;
+    }
+    return 'the directory at capture.output_dir is not the one this run opened over — same path, different directory';
+  }
+  // The root did not exist when the run opened, which is the ordinary first capture this module
+  // has protected since round 27: the capture command is expected to create it, so the root having
+  // an identity NOW is not drift. What has to still hold is the object the absence was established
+  // against — that ancestor is the whole basis on which the empty opening baseline was believed.
+  //
+  // [round 39] The ANCHOR is asked first here for the same reason the identity is asked first
+  // above, and round 38 had the same ordering bug one branch down: it required the canonical
+  // SPELLING to match before it ever looked at the anchor, so the ordinary first capture combined
+  // with the supported alias rotation — `output_dir` at `releases/current/assets`, `current`
+  // rotated from `v1` to `v2` while `v1` was merely RENAMED — halted, telling the operator the root
+  // moved when the directory it was created inside never did. Fail-closed, so it cost a re-run
+  // rather than a bad record, but the message was false.
+  if (!isPlainObject(opened.anchor)) {
+    return 'this runState records capture.output_dir as absent at open without the ancestor that absence was established against';
+  }
+  const now = assetDirIdentity(opened.anchor.path, deps, { allowSymlink: true });
+  if (!now.ok) {
+    return `the directory '${opened.anchor.path}' that capture.output_dir's absence was established against can no longer be identified (${now.reason})`;
+  }
+  if (now.id !== opened.anchor.identity) {
+    return `the directory '${opened.anchor.path}' that capture.output_dir's absence was established against has been replaced — same path, different directory`;
+  }
+  if (opened.canonical === closing.canonical) return null;
+  // The spelling moved while the anchor did not. That is not on its own a licence to accept
+  // whatever the root resolves to now: the anchor holding says nothing about the segments BELOW it,
+  // and a link planted on the root's own name redirects the capture out of the very tree the
+  // absence was established inside. What the open actually established is containment — the root,
+  // once created, would be created inside this anchor — so containment is what the close re-checks,
+  // against the anchor's resolution taken NOW rather than against a remembered spelling.
+  const anchorNow = canonicalizeForComparison(opened.anchor.path, deps);
+  if (!anchorNow.ok) {
+    return `the directory '${opened.anchor.path}' that capture.output_dir's absence was established against can no longer be resolved (${anchorNow.reason})`;
+  }
+  // [round 40] Round 39 asked only whether the root ended up SOMEWHERE below the anchor. That is
+  // not what the open established: it established that a specific suffix was missing under that
+  // object, so a previous build's tree elsewhere under the same anchor satisfied the containment
+  // test and was committed as this run's output. Both reviewers reproduced it. The suffix is
+  // therefore re-joined and compared exactly.
+  if (!Array.isArray(opened.anchor.tail)) {
+    return 'this runState records capture.output_dir as absent at open without the path below the ancestor that absence was established against';
+  }
+  const expected = normalizeSegments([...anchorNow.segments, ...opened.anchor.tail], true);
+  if (expected.length !== closing.segments.length || !expected.every((seg, i) => seg === closing.segments[i])) {
+    return `capture.output_dir resolved to '${opened.canonical}' when this run opened and resolves to '${closing.canonical}' now, which is not '/${expected.join('/')}' — the path whose absence was established under '${opened.anchor.path}'`;
+  }
+  return null;
+}
+
+// `rootMustExist` and `rootIdentity` are both the caller's knowledge, not the walk's: whether this
+// module has ALREADY observed the root directory, and which object it observed. Neither can be
+// derived here — the walk sees only its own listing — and the first inverts what a failed listing
+// means (see the ENOENT branch below).
+//
+// [round 23] Gate 3 halts on a root it cannot pin, so the two now arrive together or not at all;
+// they are not redundant, because they cover different WINDOWS rather than different callers. The
+// identity check runs before the listing, and a root that vanishes between the two passes it and
+// then fails to list — which without `rootMustExist` is the empty map that reads as a first
+// capture. Round 22 justified the pair as "a fallback for a caller whose lstat cannot report
+// identity"; that caller no longer reaches this function, and a guard kept alive by a rationale
+// that has stopped being true is a guard nobody will maintain correctly.
+function walkRegularFiles(rootDir, deps, visit, onSkipped, { rootMustExist = false, rootIdentity = null, containmentRoot = null } = {}) {
+  walk(rootDir, '');
+
+  // A directory whose identity cannot be re-confirmed: a hazard naming the directory for a child
+  // (containment then refuses everything beneath it), and a throw for the root, which no relative
+  // path can name. Returns true when the caller must stop.
+  function identityBroke(absDir, relPrefix, expectedId) {
+    const now = assetDirIdentity(absDir, deps, { allowSymlink: relPrefix === '' });
+    if (now.ok && now.id === expectedId) return false;
+    // The two failures are different facts and must not share a sentence: one says this module
+    // could not establish what is at that path, the other says it established it and it is not the
+    // object that was there before. Reporting a substitution for a path that was never a usable
+    // directory in the first place is the same confident-wrong-diagnosis shape this release has
+    // been closing all along.
+    const reason = now.ok ? 'inspection_failure' : now.reason;
+    if (relPrefix === '') {
+      throw new Error(now.ok
+        ? 'the asset directory was replaced by a different directory during this run'
+        : `the asset directory could not be confirmed (${reason})`);
+    }
+    onSkipped?.(relPrefix, reason);
+    return true;
+  }
+
+  function walk(absDir, relPrefix) {
+    let expectedId = null;
+    // The reason the ROOT's own first observation failed, when there was no caller pin to use
+    // instead. Non-null means this walk holds a listing of an object it never identified.
+    let rootUnidentified = null;
+    if (relPrefix !== '') {
+      const before = assetDirIdentity(absDir, deps, { allowSymlink: false });
+      if (!before.ok) {
+        onSkipped?.(relPrefix, before.reason);
+        return;
+      }
+      expectedId = before.id;
+    } else if (rootIdentity !== null) {
+      expectedId = rootIdentity;
+      if (outputRootChanged(containmentRoot, deps)) {
+        throw new Error('the capture output root was replaced between its validation and this snapshot');
+      }
+      if (identityBroke(absDir, relPrefix, expectedId)) return;
+    } else {
+      // [round 31] Before the root establishes anything about ITSELF, the tree it is being read out
+      // of must still be the one validation approved. This is the only guard that runs at all for a
+      // first capture, whose chapter directory gate 3 saw absent and therefore never pinned.
+      if (outputRootChanged(containmentRoot, deps)) {
+        throw new Error('the capture output root was replaced between its validation and this snapshot');
+      }
+      // [round 32] And the root's own CONTAINMENT, which is the property gate 3 could not establish
+      // for it: gate 3 checks containment only for a chapter directory that already exists, so an
+      // absent one carries no statement at all, and pinning the output root does not help because a
+      // directory's `dev:ino` does not freeze what its entries resolve to. Codex created
+      // `<out>/items -> outside/items` after validation with the output root unchanged, and the
+      // snapshot hashed the outside bytes with an empty hazard list. Re-checking here is gate 3's
+      // own rule applied at the first moment the path exists to apply it to.
+      const containmentFailure = rootContainmentFailure(absDir, containmentRoot, deps);
+      if (containmentFailure !== null) throw new Error(containmentFailure);
+      // [round 23] A caller-supplied pin brackets the root across TWO calls (gate 3 to the
+      // snapshot). Without one, the root previously got no bracket at all — not even the
+      // self-established one every CHILD gets — so a substitution landing during the root's own
+      // listing was invisible to `closeCaptureRun`'s sweep and to the publish-time re-hash, both of
+      // which snapshot with no prior observation to carry. That is the same defect one function
+      // over: a root is not exempt from a rule merely because nobody told it what it used to be.
+      // Its own first observation is a baseline in exactly the way a child's is.
+      //
+      // A first observation that FAILS cannot refuse AT THIS LINE — the root is legitimately absent
+      // before a first capture, and refusing here would halt every not-yet-created asset directory.
+      // [round 24] But it must not be forgotten either, which is what the round-23 version did: it
+      // left the pin null and relied on "the `readdirSync` branch below distinguishes that from a
+      // root the caller had already seen". That branch only runs when the listing FAILS. When the
+      // baseline fails and the listing then SUCCEEDS, the walk was processing entries of an object
+      // it had never established — codex reproduced it: baseline ENOENT, listing returns
+      // `foreign.png`, file visited with no second identity observation anywhere. The reason is
+      // carried instead, and adjudicated once the listing's own outcome is known.
+      // [round 26] The whole failed OBSERVATION is carried, not its reason word. A reason is what
+      // reaches a record, and two different situations legitimately share one: `vanished` names both
+      // an absent root and a present root symlink whose target is missing. Adjudicating on the word
+      // tolerated the second as if it were the first.
+      const own = assetDirIdentity(absDir, deps, { allowSymlink: true });
+      if (own.ok) expectedId = own.id;
+      else rootUnidentified = own;
+    }
+    let entries;
+    try {
+      entries = deps.readdirSync(absDir, { withFileTypes: true });
+    } catch (err) {
+      const code = errProp(err, 'code');
+      // [round 20] ENOENT returned unconditionally here while the ENOTDIR branch just below
+      // already drew the distinction — the same rule, applied to one error code and not its
+      // neighbour. A listed SUBDIRECTORY that vanishes before its own listing took everything
+      // under it out of the snapshot with no hazard, and at the opening observation point those
+      // absent keys are read as "brand-new this run". At the ROOT it is the opposite: an asset
+      // directory legitimately does not exist before the first capture, and it is nameable by no
+      // relative path, so that case stays silent — which is what ENOENT is here for.
+      // [round 21] The root exemption is right for a first capture and wrong the moment this module
+      // has already SEEN the directory: gate 3 lstats every entry's asset directory before the
+      // reservation is taken, so a root missing a few steps later did not fail to exist — it
+      // stopped existing, while this run was the thing observing it. Read as a first capture, the
+      // opening map is `{}` with no hazards at all, and a stale file restored before the close is
+      // recorded as this build's, because rule 4 skips an asset that has no opening key. Throwing
+      // hands it to the caller's own snapshot catch, which halts the open — strictly more
+      // conservative than a hazard, and the root is nameable by no relative path a hazard could use.
+      if (code === 'ENOENT') {
+        if (relPrefix !== '') { onSkipped?.(relPrefix, 'vanished'); return; }
+        // [round 24] `expectedId` belongs in this condition and was missing from it. A root this
+        // walk has just IDENTIFIED, by its own observation, is one that existed a syscall ago —
+        // exactly the round-21 argument, which had only been wired to the CALLER's knowledge.
+        // `closeCaptureRun` passes `rootMustExist: false` because it never ran gate 3, so a root
+        // that vanished between its baseline and its listing returned `{hashes:{}, hazards:[]}` and
+        // the close read it as a chapter that produced nothing. Codex executed exactly that.
+        if (rootMustExist || expectedId !== null) throw err;
+        // [round 25] And a root whose baseline FAILED reaches here with `expectedId` null, which is
+        // how the carried failure was dropped by the very branch a failed observation makes run.
+        // The distinction has to be finer than "the observation failed", because one situation is
+        // legitimate: a first capture, where the root is not there yet, must still close silently
+        // with an empty map. [round 26] And finer than the REASON WORD, which is where round 25 drew
+        // it and codex broke it — `vanished` names the first capture and also names a present root
+        // symlink whose target is missing, which is not one. `absentDirectly` is the fact.
+        refuseUnadjudicatedRoot(rootUnidentified, code, true, () => directAbsenceConfirmed(absDir, containmentRoot, deps).ok);
+        return;
+      }
+      // [round 18] ENOTDIR used to return here too, silently, and that was the round-17 defect
+      // through a different door: a subdirectory that was a directory when its type was decided and
+      // a regular file a moment later took everything beneath it out of the snapshot with no
+      // hazard recorded. At the OPENING observation point those absent keys read as "brand-new this
+      // run", rule 4 is skipped, and old bytes are recorded as the captured build's. The fail-closed
+      // argument that covers the filename listing does not cover this — the listing halts on a
+      // destination it cannot match, while the opening snapshot reads a missing key as good news.
+      // A hazard on the directory itself now covers every asset under it, which is only expressible
+      // because the W5 match became containment in the same round.
+      //
+      // The ROOT call is a separate case and is NOT nameable as a relative path: it is gated at the
+      // call site, which lstats the asset directory and halts on anything but ENOENT/ENOTDIR.
+      // Any other code still throws, which halts the whole run — strictly more conservative than a
+      // per-directory hazard, so it is left as it was.
+      if (code === 'ENOTDIR') {
+        if (relPrefix !== '') { onSkipped?.(relPrefix, 'inspection_failure'); return; }
+        if (rootMustExist || expectedId !== null) throw err;
+        // [round 25] Nothing is tolerated on THIS branch, direct absence included. ENOTDIR says
+        // something is at that path and it is not a directory; a baseline reporting nothing there
+        // says the opposite one syscall earlier. A first capture cannot produce that pair — an
+        // object appeared. The failure actually observed here is `inspection_failure`, from a
+        // baseline whose own `lstat` succeeded and reported a non-directory, which is the review
+        // bot's reproduction.
+        refuseUnadjudicatedRoot(rootUnidentified, code, false, () => directAbsenceConfirmed(absDir, containmentRoot, deps).ok);
+        return;
+      }
+      throw err;
+    }
+    // [round 24] The listing SUCCEEDED for a root whose own identity could not be established. That
+    // is not a first capture — a first capture has nothing to list. Something came into existence,
+    // or became readable, between two adjacent observations inside this one call, which is the
+    // substitution signature itself. Refusing here is what makes the paragraph above true: the
+    // failed baseline is deferred, never dropped.
+    if (rootUnidentified !== null) {
+      throw new Error(`the asset directory could not be confirmed (${rootUnidentified.reason}) before it was listed`);
+    }
+    // [round 22] The observation codex asked for and round 21 did not have: between the listing and
+    // any use of it. A swap that lands during the `readdirSync` above and is STILL IN PLACE when
+    // this line runs is reported before a single entry out of the replacement is hashed — the
+    // earlier version could only report it afterwards, with the foreign hashes already in the map.
+    // [round 25] One withdrawn before this line runs is not: this observation re-resolves the path
+    // rather than holding the object the listing read, so it narrows the window it reports on and
+    // closes none of them.
+    if (expectedId !== null && identityBroke(absDir, relPrefix, expectedId)) return;
+    for (const dirent of entries) {
+      const childAbs = posixJoin(absDir, dirent.name);
+      const childRel = relPrefix ? `${relPrefix}/${dirent.name}` : dirent.name;
+      const type = direntType(dirent, childAbs, deps);
+      if (type === 'symlink') { onSkipped?.(childRel, 'symlink'); continue; }
+      if (type === 'directory') { walk(childAbs, childRel); continue; }
+      if (type === 'file') { visit(childAbs, childRel); continue; }
+      // Present, unreadable as an asset, and silently dropped until this branch existed — the same
+      // shape as the symlink case and reachable the same way. `non_regular` and
+      // `inspection_failure` are spelled exactly as the leaf inspection spells them: the two layers
+      // observe the same facts at different moments, and until the reason words reached operators
+      // (round 17) the difference was invisible, because the leaf's word was collapsed to `hazard`
+      // before anyone could read it. Two spellings of one condition is a distinction an operator
+      // would have to look up to learn is not a distinction.
+      onSkipped?.(childRel, type);
+    }
+    // The last of the three observation points. Anything already visited out of this listing stays
+    // in the caller's map — deleting it would only turn a substitution back into an ABSENCE, which
+    // is the exact reading this whole class of defect travels on. The hazard is recorded against the
+    // DIRECTORY instead, and W5's containment match (round 17) refuses every key beneath it, stale
+    // hash or not.
+    if (expectedId !== null) identityBroke(absDir, relPrefix, expectedId);
+  }
+}
+
+// `capture.output_dir` is NOT plugin-owned (ledger row 7: the opaque capture command's own
+// namespace, "outside our contract entirely"), so it is not part of gate 6's stated obligation set
+// (scoped to the token/record/temp leaves and the root/run/ hierarchy). But an UNPROTECTED read
+// here is a real substitution vector, not merely an untidy inconsistency: `readdirSync`'s dirent
+// types are a snapshot at listing time, so a regular file the walk just classified as `isFile()`
+// can be replaced by a symlink before this function ever opens it — a race window, not a
+// hypothetical, and the other two asset-hash call sites in this module (rule 5's rehash, W6's
+// current-hash resolution) already close it via `hashFileNoFollow`. Using the SAME helper here
+// keeps that closed consistently rather than leaving one of three call sites unprotected. A hazard
+// (or the file vanishing between listing and open) is treated exactly like `isSymbolicLink()`
+// already is a few lines up: the entry is silently excluded from the snapshot rather than halting
+// the whole run — this tree is not ours to halt on, but it is also not ours to hash blindly through
+// a symlink.
+//
+// [round 15] The paragraph above used to end by calling the exclusion harmless: "a missing expected
+// image fails completeness (rule 3) and the chapter is reported ineligible, never silently
+// trusted." That is true of the CLOSING snapshot, which is what rule 3 reads. It is the exact
+// opposite for the OPENING one, where a missing key means "brand-new file this run" and so SKIPS
+// rule 4 — the check that the bytes changed during capture. One function serves both observation
+// points, and the justification was written for one of them. The consequence was a confident record
+// over stale bytes: an asset carrying old-build bytes and an extra hard link at open is dropped from
+// the opening snapshot; the capture removes only the alias, never the bytes; closing hashes it
+// fine; W5 reads the absent opening key as brand-new, skips rule 4, finds the re-hash equal to
+// closing, and attributes the old bytes to the current build. So a hazard is no longer encoded as
+// an absence: it is returned separately, and W5 refuses any asset that was hazardous at either
+// point, because "we could not read this file then" is not evidence that it changed.
+function snapshotAssetHashes(assetDir, deps, { rootMustExist = false, rootIdentity = null, containmentRoot = null } = {}) {
+  const hashes = Object.create(null);
+  const hazards = [];
+  walkRegularFiles(
+    assetDir,
+    deps,
+    (absPath, relPath) => {
+      const hashed = hashFileNoFollow(absPath, deps);
+      if (hashed.kind === 'present') hashes[relPath] = hashed.digest;
+      // [round 19] `absent` used to stay an absence here, on the reasoning that nothing was there
+      // to establish and a file the capture then creates is legitimately brand new. The second half
+      // is true and the first is not: this callback only ever runs for an entry the WALK LISTED, so
+      // an `absent` means the file was there when the directory was read and gone when it was
+      // opened. That is uncertainty about something that existed, and at the opening observation
+      // point an absent key is read by rule 4 as "brand-new this run" — the same confident record
+      // over stale bytes this split was created to prevent, reached through a race instead of
+      // through a hazard. A genuinely new file is never listed at open, so it never arrives here
+      // and its key is simply missing from the map; that case is untouched.
+      // [round 21] Shared with the other two listing-backed sites rather than spelled out here —
+      // see `unreadableWordAfterListing`, which round 20 got half right and this round finished.
+      else hazards.push(`${relPath}:${unreadableWordAfterListing(hashed)}`);
+    },
+    // A listed entry the walk would not even open is a hazard for the same reason: something is at
+    // that path whose bytes this run could not establish.
+    (relPath, kind) => hazards.push(`${relPath}:${kind}`),
+    { rootMustExist, rootIdentity, containmentRoot },
+  );
+  hazards.sort();
+  return { hashes, hazards };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Row 3 — closeCaptureRun. Prepare a process-unique temp, commit by rename, then remove the token
+// AND every leftover matching temp (a committed run can have leftover temps from a retried write,
+// and cleanup — here and in `cleanupCommittedRun` — must own them).
+// ---------------------------------------------------------------------------------------------
+
+function tempRunRecordPath(profileLike, deps) {
+  return posixJoin(runNamespaceDir(profileLike), `${RUN_RECORD_NAME}.${deps.randomUUID()}.tmp`);
+}
+
+// Returns {ok: true, temps: string[]} | {ok: false, hazard: {kind:'hazard', reason, path}} — never
+// throws. A non-ENOENT `readdirSync` failure (EIO, ...) previously rethrew uncaught (codex round
+// 3): this is called from `closeCaptureRun` AFTER its rename has already committed the run record,
+// so a caller must be able to distinguish "no temps to report" from "could not find out" rather
+// than crash either way. Generalized (codex round 5, finding 3) so `sweepChapterProvenanceTemps`'s
+// chapter-namespace listing shares this exact readdir/ENOENT/errno handling rather than a second,
+// possibly-drifting copy — the two differ only in which directory and which filename pattern they
+// list, never in how a listing failure is reported.
+function listMatchingTempsIn(dir, prefix, suffix, deps) {
+  let entries;
+  try {
+    entries = deps.readdirSync(dir);
+  } catch (err) {
+    if (errProp(err, 'code') === 'ENOENT') return { ok: true, temps: [] };
+    return { ok: false, hazard: { kind: 'hazard', reason: 'inspection_failure', path: dir } };
+  }
+  const temps = entries.filter((name) => name.startsWith(prefix) && name.endsWith(suffix)).map((name) => posixJoin(dir, name));
+  return { ok: true, temps };
+}
+
+function listMatchingTemps(profileLike, deps) {
+  return listMatchingTempsIn(runNamespaceDir(profileLike), `${RUN_RECORD_NAME}.`, '.tmp', deps);
+}
+
+// A chapter's own `<slug>.json.<uuid>.tmp` temps — the same filename shape `recordChapterProvenance`
+// builds at its own write site (`tempPath = \`${finalPath}.${d.randomUUID()}.tmp\``), listed in that
+// chapter's own directory (`chapterRecordDir`, shared with `chapterRecordPath`) rather than
+// `run/current.json`'s namespace — chapter temps and run temps are never the same list (finding 3).
+function listMatchingChapterTemps(profileLike, entry, deps) {
+  const dir = chapterRecordDir(profileLike, entry);
+  const fileName = `${String(entry.slug)}.json`;
+  return listMatchingTempsIn(dir, `${fileName}.`, '.tmp', deps);
+}
+
+/**
+ * Close a capture run: re-verify the token matches this `runState`, resolve the closing build
+ * identity, snapshot the CLOSING asset hashes, combine the two halves into the run's final recorded
+ * identity, write the run
+ * record to a process-unique temp under `run/`, commit by rename, then remove every leftover
+ * matching temp and, ONLY once every one of them is confirmed gone, the token (codex round 7,
+ * IMPORTANT 2 — a temp whose removal could not be confirmed leaves the token in place on purpose,
+ * so the next `openCaptureRun` halts on it and forces `recoverProvenanceState`/
+ * `cleanupCommittedRun` rather than silently reporting a clean close over a stuck temp). Never
+ * throws on an ordinary failure — every exit is a returned `{ok:false, halts}`, so a caller
+ * branches on `halts` rather than relying on an exception.
+ *
+ * `identityCommandOutcome` is the closing counterpart of `openCaptureRun`'s parameter of the same
+ * name — see that function's doc comment for why a UI-read continuation must reuse the CLOSING
+ * step's already-resolved command outcome rather than re-invoking `capture.build_identity.command`
+ * a second time, and how the value returned alongside a `needs_ui_read` result is meant to be
+ * threaded straight back in on the retry call.
+ *
+ * The returned `warnings` array also carries an operator-facing line whenever the run's FINAL
+ * recorded identity did not cleanly resolve to a value — a missing, failing, unconfirmed or
+ * changed identity (SKILL.md's own "W2 warns... on any of these outcomes"), via
+ * `describeBuildIdentityWarning` (build-identity.mjs). Emitted here, once, on the committed
+ * result — never from `openCaptureRun`, since the run's FINAL identity (what a `build_unconfirmed`
+ * or `build_changed_during_capture` verdict actually is) is only known once both the opening and
+ * the closing resolutions and `captureOutcome` have all been combined, which happens in THIS
+ * function; an opening-side warning would either have to guess at the final verdict or duplicate
+ * this same check before it can be answered.
+ *
+ * @param {object} profileLike
+ * @param {object} runState
+ * @param {{ok: boolean, detail?: string}} captureOutcome
+ * @param {import('./build-identity.mjs').UiReadObservation|null} [closingObservation]
+ * @param {object} [deps]
+ * @param {import('./build-identity.mjs').CommandOutcome|null} [identityCommandOutcome]
+ * @returns {{ok: true, runState: object, warnings: string[]}|{ok: false, halts: Array<object>}|{needs_ui_read: true, region_hint: string, identityCommandOutcome: import('./build-identity.mjs').CommandOutcome|null}}
+ */
+export function closeCaptureRun(profileLike, runState, captureOutcome, closingObservation, deps, identityCommandOutcome) {
+  const d = mergeDeps(deps);
+
+  const ownership = assertProvenanceOwnership(profileLike, d);
+  if (ownership.skip) {
+    // [round 40] The same defect one branch above the one round 39 closed, and the reason it was
+    // missed is that round 39 read "unauthenticated decision" as a property of the runState. It is
+    // a property of every input this branch trusts, and this one trusts the CURRENT profile: skip
+    // is decided from the profile alone and used to return success without looking at the run at
+    // all. A profile edited between open and close — to an overlapping topology with no
+    // `build_identity` — therefore reported success for a genuinely open run, committed nothing,
+    // and left its token behind, which is the same "read as good news" shape.
+    //
+    // [round 41] The RUNSTATE settles it, and round 40 leaned on the token instead. That was the
+    // same mistake one more time: the token's path is derived from `profileLike`, the very thing
+    // this branch exists because it may have been edited, so moving `publish.chapters_dir` as well
+    // hid the reservation and the false success came straight back. Absence at a path derived from
+    // the edited profile is not evidence that this invocation was skipped. An ACTIVE run is an
+    // active run whatever the profile now says, and that fact needs no disk at all.
+    if (!isGenuineSkippedState(runState)) {
+      return haltResult(
+        'stale_replay',
+        'this profile no longer carries provenance, but the runState handed to this close is an active run\'s — a run that was opened while provenance was owned cannot be closed as skipped; run recoverProvenanceState against the profile it was opened with.',
+      );
+    }
+    // The token stays as a second, independent witness: it catches a caller who hands the exact
+    // skipped shape while a reservation this profile CAN still see is open. Being unable to look is
+    // not evidence either way, so it stays permissive rather than inventing a halt out of ignorance.
+    const strayToken = tokenPresenceForSkip(profileLike, d);
+    if (strayToken) {
+      return haltResult(
+        'stale_replay',
+        `this profile no longer carries provenance, but a pending token is present at '${strayToken}' from a run that was opened while it did — that run is still open and cannot be closed against this profile; run recoverProvenanceState against the profile it was opened with.`,
+      );
+    }
+    return { ok: true, runState: { skipped: true }, warnings: [] };
+  }
+  if (!ownership.ok) return { ok: false, halts: ownership.halts };
+
+  // [round 39] The one decision this function took on state nothing had authenticated. Everything
+  // below the token read is checked — and `skipped` short-circuits above all of it, so an ACTIVE
+  // run wrapped in a skipped-looking state returned `ok: true` having committed nothing and left
+  // the pending token behind: this release's defect class exactly, an item that could not be
+  // processed reading as good news. There is no digest to appeal to here (a skipped run never
+  // opened, so there is no payload and no token to authenticate one against), and the answer is not
+  // a bigger check but the SHAPE: `openCaptureRun` returns exactly `{skipped: true}` on that branch
+  // and nothing else, so anything carrying an active run's fields is not a skipped state whatever
+  // this property says. The pending token is the second half — a genuinely skipped run never
+  // reserved one, so a token on disk contradicts the claim outright.
+  if (runState.skipped) {
+    if (!isGenuineSkippedState(runState)) {
+      return haltResult(
+        'stale_replay',
+        'this runState claims the run was skipped but carries an active run\'s fields — a skipped run carries only `skipped: true`; re-derive with recoverProvenanceState.',
+      );
+    }
+    const strayToken = readLeafText(pendingTokenPath(profileLike), d);
+    if (strayToken.kind !== 'absent') {
+      return haltResult(
+        'stale_replay',
+        `this runState claims the run was skipped, but a pending token is present at '${pendingTokenPath(profileLike)}' — a skipped run never reserves one; re-derive with recoverProvenanceState.`,
+      );
+    }
+    return { ok: true, runState: { skipped: true }, warnings: [] };
+  }
+
+  const hierarchyHazard = inspectRunHierarchyComponents(profileLike, d);
+  if (hierarchyHazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...hierarchyHazard }] };
+
+  const tokenPath = pendingTokenPath(profileLike);
+  const tokenRead = readLeafText(tokenPath, d);
+  if (tokenRead.kind === 'hazard') return haltResult('provenance_hazard', 'token hazard', { path: tokenRead.path, reason: tokenRead.reason });
+  if (tokenRead.kind === 'absent') {
+    return haltResult('token_missing', 'no pending token found for this run — it may already have been closed or aborted.');
+  }
+  const parsedToken = parseJsonStrict(tokenRead.text);
+  // Optional-chained for the same reason as the equivalent read in `recoverProvenanceState`: a
+  // token body of the literal `null` parses successfully into `{ok: true, value: null}` and is the
+  // one JSON value that is both non-object and dereferenceable-looking, so a bare `.run_id` threw
+  // a TypeError here — in a function whose contract is that every ordinary failure comes back as a
+  // returned `{ok: false, halts}`. It is a `stale_replay` like every other non-matching token.
+  // Line 1199 below needs no such guard: it is reachable only once `run_id` compared equal to a
+  // string, which a null value cannot do.
+  // [round 38] Read ONCE, for the same reason the opening payload is materialized below: this
+  // value is compared against the token here and written into the record further down, and an
+  // accessor could answer those two reads differently. `run_id` is not in the digested payload —
+  // the token comparison is its whole authentication — so the single read IS the binding.
+  const runId = runState.run_id;
+  if (!parsedToken.ok || parsedToken.value?.run_id !== runId) {
+    return haltResult('stale_replay', 'the token on disk does not match this runState — this run has already moved on; re-derive with recoverProvenanceState.');
+  }
+  // The digest is RECOMPUTED from runState's actual current content and checked against the
+  // TOKEN's stored value on disk — never against `runState.opening_digest`, which is just as
+  // tamperable as the fields it is supposed to be vouching for. `run_id` alone only proves this
+  // runState claims the right identity; it says nothing about whether `entries`/`opening`/
+  // `opening_assets` still match what was opened. A serialized `runState` whose payload was
+  // mutated while its two scalar fields were left untouched is exactly what this closes: the token
+  // on disk — the one thing an attacker did not get to also rewrite — is the sole source of truth
+  // for what the opening payload was allowed to be.
+  // [round 14, ped-ant] Guarded, and the reason is the paragraph above: this treats `runState` as
+  // tamperable serialized input, and `digestOpeningPayload` THROWS on a member it cannot
+  // canonicalize rather than returning a result. A payload whose `entries`/`opening`/
+  // `opening_assets` was DELETED (as opposed to the mutation the tampering test covers) therefore
+  // escaped this function as an exception, out of a contract that says every ordinary failure comes
+  // back as `{ok: false, halts}` — and it escaped before anything durable was written, leaving the
+  // pending run to be recovered by hand. Round 9 deliberately left this call site unguarded on the
+  // reasoning that `runState` is internal state that provably cannot throw on the legitimate path;
+  // the legitimate path was never the question here, since the whole point of the digest check is
+  // the ILLEGITIMATE one. A payload that cannot be canonicalized cannot match the token's digest
+  // either, so it takes the same `stale_replay` exit as any other non-matching payload.
+  // [round 38] The digest is computed over ONE materialization of the payload, and everything below
+  // reads that materialization rather than `runState` again. Verifying a value and then re-reading
+  // its source is a check on a different read: `isPlainObject` admits an accessor-backed object, so
+  // an enumerable `output_root` getter can hand the digest the authenticated value and hand
+  // `outputRootDrifted` the replacement's identity one call later. Codex executed it — same digest,
+  // a second read returning a different identity, and the replacement tree committed. Round 37 was
+  // the first field to make the exposure reachable, but it was never specific to that field:
+  // `entries`, `opening_assets` and `opening` were all re-read the same way, so the fix is to stop
+  // re-reading rather than to harden one field.
+  //
+  // `JSON.parse` of the canonical text is exactly the bytes that were hashed, and it yields plain
+  // objects by construction — own DATA properties only, no accessors, nothing left to re-evaluate.
+  // (They carry the ordinary `Object.prototype`, not a null one; this comment claimed otherwise for
+  // a round. Every consumer below reads own keys, which is what makes the distinction immaterial
+  // here — it is not a licence for a future `in` test.) Deriving the
+  // digest from that same text (rather than calling `digestOpeningPayload` and canonicalizing a
+  // second time) is what makes "the value I checked" and "the value I use" one object.
+  let recomputedDigest;
+  let authenticated;
+  try {
+    const canonical = jcsCanonicalize(openingPayloadFromRunState(runState));
+    if (!canonical.ok) throw new Error(`cannot canonicalize opening payload (${canonical.reason})`);
+    recomputedDigest = `sha256:${sha256HexOfCanonical(canonical.canonical)}`;
+    authenticated = JSON.parse(canonical.canonical);
+  } catch (err) {
+    return haltResult(
+      'stale_replay',
+      `this runState's opening payload cannot be canonicalized, so it cannot match the token's stored digest (${describeThrown(err)}) — re-derive with recoverProvenanceState.`,
+    );
+  }
+  if (recomputedDigest !== parsedToken.value.opening_digest) {
+    return haltResult(
+      'stale_replay',
+      'this runState\'s opening payload does not match the token\'s stored digest — the payload was altered after opening, or this runState belongs to a different (possibly no-longer-open) run.',
+    );
+  }
+
+  const buildIdentity = profileLike.capture.build_identity ?? null;
+  // The closing observation runs the SAME three-step resolution order as the opening one — the
+  // identity command is re-invoked, not skipped, since a command-configured profile must resolve
+  // its closing identity from the command too, not fall straight to the UI-read fallback. "Re-
+  // invoked" means at most once per closing observation point, though: `identityCommandOutcome`
+  // (a UI-read continuation resuming this same close) is reused verbatim instead, exactly as
+  // `openCaptureRun` reuses its own opening-side parameter.
+  //
+  // Delegates to `resolveIdentityOrHalt` rather than calling `resolveIdentityCommandOutcome`/
+  // `resolveBuildIdentity` directly: either can THROW (see that helper's own comment), and a
+  // malformed closing observation or a throwing identity command previously escaped this function
+  // uncaught — measured against the real module (codex round 9 follow-up), reachable via a genuine
+  // open then close with a malformed closing observation, not merely a hypothetical. Nothing
+  // durable has been written at this point (the temp/rename sequence is further down), so a halt
+  // here loses nothing a caller could have used.
+  const resolvedClosing = resolveIdentityOrHalt(identityCommandOutcome, buildIdentity, closingObservation, d);
+  if (!resolvedClosing.ok) return haltResult(resolvedClosing.halt, resolvedClosing.message, {});
+  const { commandOutcome: closingCommandOutcome, identity: closing } = resolvedClosing;
+  if (closing.needs_ui_read) return { ...closing, identityCommandOutcome: closingCommandOutcome };
+
+  // Same reasoning as the opening sweep: an unexpected errno during the closing sweep must return
+  // a halt, not crash — and doing so HERE (before any temp is written) is what keeps the existing
+  // "no record written before the closing resolution" guarantee true on this exit too.
+  // [round 33] The close runs the SAME validation the open does, and until this round it ran none of
+  // it: gate 3 was never applied here, gate 4 never at all, and the containment root was rebuilt
+  // fresh inside the loop, once per entry. Codex executed the consequence — two chapter directories
+  // aliasing ONE physical directory closed `ok: true` with the identical hash committed under both
+  // chapter keys. Nothing downstream recovers it: both opening maps were empty and both closing
+  // hashes matched, so W5 hands both chapters a confident record, and replacing the aliases with two
+  // byte-identical real directories before W5 leaves no trace anywhere that the pair was ever one.
+  //
+  // `runState.entries` is safe to re-gate because it is authenticated: the digest recomputed above
+  // is checked against the TOKEN on disk, so these are the entries this run actually opened with.
+  // One validation, and its outputRoot and per-entry identities are carried into the sweep exactly
+  // as `openCaptureRun` carries its own — the per-entry `containmentRootFor` that stood here was
+  // both the missing gate and a fresh observation per iteration.
+  const validatedClosing = validateEntriesForCapture(profileLike, authenticated.entries, d);
+  if (!validatedClosing.ok) return validatedClosing;
+
+  // [round 37] The close's own validation says the root is fine NOW; it cannot say it is the same
+  // root the open validated, because until this round the two derivations were never compared.
+  // Refusing here — before any temp is written — leaves nothing durable behind, exactly like the
+  // identity and digest checks above.
+  const rootDrift = outputRootDrifted(authenticated.output_root, validatedClosing.outputRoot, d);
+  if (rootDrift) {
+    return haltResult('provenance_hazard', `capture.output_dir moved while this run was open: ${rootDrift}`, { path: profileLike?.capture?.output_dir ?? null });
+  }
+
+  const closingAssets = {};
+  const closingHazards = {};
+  try {
+    for (const entry of authenticated.entries) {
+      const key = chapterKeyFor(entry);
+      const assetDir = chapterAssetDir(profileLike, entry);
+      const snapshot = snapshotAssetHashes(assetDir, d, {
+        rootMustExist: validatedClosing.assetDirsObserved.has(key),
+        rootIdentity: validatedClosing.assetDirsObserved.get(key) ?? null,
+        containmentRoot: validatedClosing.outputRoot,
+      });
+      closingAssets[key] = snapshot.hashes;
+      closingHazards[key] = snapshot.hazards;
+    }
+  } catch (err) {
+    return haltResult('provenance_hazard', `cannot snapshot the closing asset hashes: ${describeThrownField(err, 'code')}`, {});
+  }
+
+  const finalIdentity = resolveClosingIdentity({
+    opening: authenticated.identity,
+    captureOutcome,
+    closing,
+  });
+
+  const chapters = {};
+  for (const entry of authenticated.entries) {
+    const key = chapterKeyFor(entry);
+    chapters[key] = {
+      opening: authenticated.assets[key] ?? {},
+      closing: closingAssets[key] ?? {},
+      opening_hazards: authenticated.asset_hazards?.[key] ?? [],
+      closing_hazards: closingHazards[key] ?? [],
+    };
+  }
+
+  const record = {
+    record_version: 1,
+    run_id: runId,
+    // The RECOMPUTED digest — the value just verified against the on-disk token above — never
+    // `runState.opening_digest` directly. `runState` is caller-held data: mutating only its
+    // `opening_digest` field (leaving `entries`/`opening`/`opening_assets` untouched) sails straight
+    // through the check above unnoticed, because `recomputedDigest` is derived from the PAYLOAD, not
+    // from this field. Writing that field's raw value into the record would land a forged digest in
+    // a run that otherwise committed cleanly, which a later `recoverProvenanceState` read back as
+    // authentic — the token is the sole authenticated source of truth for this value, and
+    // `recomputedDigest` IS that authenticated value, already proven to match it above.
+    opening_digest: recomputedDigest,
+    build_identity: finalIdentity,
+    chapters,
+  };
+  const recordText = JSON.stringify(record, null, 2);
+
+  const finalPath = runRecordPath(profileLike);
+
+  // `tempPath` is now computed INSIDE the try, not before it: `tempRunRecordPath` calls
+  // `deps.randomUUID()` with no guard of its own, and a throw there previously escaped this
+  // function entirely — before a temp name even existed, let alone anything written (codex round 9
+  // follow-up; the same class of gap the round fixed in openCaptureRun, measured here too, not
+  // merely reasoned from the code's shape). `tempPath` staying `undefined` is how the catch below
+  // tells "never named" apart from "named but the write/open failed".
+  let tempPath;
+  let fd;
+  try {
+    tempPath = tempRunRecordPath(profileLike, d);
+    fd = d.openSync(tempPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o644);
+    writeFull(fd, Buffer.from(recordText, 'utf8'), d);
+  } catch (err) {
+    if (fd !== undefined) {
+      // Best-effort: this closeSync failing must never MASK the write failure we are about to
+      // report (a throwing catch body would silently replace it — codex round 3).
+      closeBestEffort(fd, d);
+    }
+    if (tempPath !== undefined) {
+      unlinkBestEffort(tempPath, d); // a create that succeeded but a write that failed leaves a
+      // partial temp on disk — remove it rather than leaving litter for the failure path to answer for.
+    }
+    const detail = tempPath === undefined ? `cannot generate the closing temp name: ${describeThrown(err)}` : `cannot write the closing temp: ${describeThrownField(err, 'code')}`;
+    return haltResult('provenance_hazard', detail, { path: tempPath });
+  }
+  try {
+    d.closeSync(fd);
+  } catch (err) {
+    // A close failure right here means the fully-written temp is not yet renamed to its final
+    // name — nothing durable has been committed at this point, so this is an ordinary halt (with
+    // best-effort cleanup of the temp), not the post-commit case the cleanup loop below answers to.
+    unlinkBestEffort(tempPath, d);
+    return haltResult('provenance_hazard', `cannot close the closing temp after writing it: ${describeThrownField(err, 'code')}`, { path: tempPath });
+  }
+
+  try {
+    d.renameSync(tempPath, finalPath);
+  } catch (err) {
+    unlinkBestEffort(tempPath, d); // the rename itself failed — the fully-written temp is still at
+    // its OWN name, never at finalPath, so removing it leaves zero surviving temps on this exit.
+    return haltResult('provenance_hazard', `cannot commit the run record: ${describeThrownField(err, 'code')}`, { path: finalPath });
+  }
+
+  // A missing, failing, unconfirmed or changed FINAL identity is a warning here, on the
+  // already-committed result — SKILL.md's own "W2 warns... on any of these outcomes" promise, kept
+  // for real this time: before this, the only place any of that ever landed was the committed
+  // record's own `build_identity.detail` field, which nothing production-side reads unprompted.
+  // `describeBuildIdentityWarning` returns `null` on a clean resolution (`resolution_reason: null`)
+  // — nothing pushed in that case.
+  const warnings = [];
+  const identityWarning = describeBuildIdentityWarning({ opening: authenticated.identity, closing, final: finalIdentity, captureOutcome });
+  if (identityWarning) warnings.push(identityWarning);
+
+  // Cleanup: every leftover matching temp first, the token last — the same order as the row-6
+  // repairs, but NOT the same unconditional-token-removal contract those two make (SKILL.md's
+  // "both repairs remove every leftover temp first and the token last" is a promise about
+  // `abortCaptureRun`/`cleanupCommittedRun` specifically, not about this cleanup). The rename above
+  // has ALREADY committed the run record durably — a hazard here, of either kind below, must never
+  // be reported as if nothing was written (codex round 3): it is a WARNING on this still-`ok:true`
+  // result, never a halt.
+  //
+  // The token, though, is removed ONLY once every matching temp is CONFIRMED gone (codex round 7,
+  // IMPORTANT 2) — not unconditionally best-effort as `unlinkBestEffort`'s own name would suggest.
+  // Before this, a temp whose `unlinkSync` genuinely threw (or a listing hazard that left every
+  // temp's fate unknown) still let the token get removed right after: with the token gone and a
+  // temp still on disk, row 6 classifies the tree `orphan_temp` — a state nothing but an operator
+  // manually running `recoverProvenanceState` will ever discover, since the very success this call
+  // reports removed the one signal (a pre-existing token) that would make a FUTURE `openCaptureRun`
+  // stop and ask. Retaining the token instead keeps the token/record pair matching (same run_id,
+  // same opening_digest), which classifies as `committed` — a state whose own repair
+  // (`cleanupCommittedRun`) re-verifies that fingerprint before touching anything, unlike
+  // `orphan_temp`'s `abortCaptureRun`, which is a blind sweep by design (no token left to check one
+  // against). And critically, a token left in place makes the NEXT `openCaptureRun` call halt on
+  // `run_already_open` (its pending-token create is an exclusive O_CREAT|O_EXCL, so ANY token on
+  // disk blocks it) — the forcing function that gets the operator to `recoverProvenanceState` at
+  // all, rather than silently opening a new run over an unresolved stuck temp. `cleanupIncomplete`
+  // covers both hazard kinds uniformly: a listing failure is exactly as uncertain about "is
+  // everything really gone" as a confirmed-failed unlink, so both withhold the token the same way.
+  const tempsListed = listMatchingTemps(profileLike, d);
+  let cleanupIncomplete = false;
+  if (tempsListed.ok) {
+    for (const temp of tempsListed.temps) {
+      if (unlinkBestEffort(temp, d)) continue;
+      cleanupIncomplete = true;
+      warnings.push(
+        `leftover run-record temp '${temp}' could not be removed and remains on disk — the pending token has been left in place so the next openCaptureRun halts on it; run recoverProvenanceState (it will report 'committed') and cleanupCommittedRun to resolve it.`,
+      );
+    }
+  } else {
+    cleanupIncomplete = true;
+    warnings.push(
+      `the run record committed successfully, but leftover temps under 'run/' could not be listed for cleanup (${tempsListed.hazard.reason} at '${tempsListed.hazard.path}') — the pending token has been left in place so the next openCaptureRun halts on it; run recoverProvenanceState to check for and remove any leftover temp.`,
+    );
+  }
+  if (!cleanupIncomplete && !unlinkBestEffort(tokenPath, d)) {
+    // Every temp WAS confirmed gone, so `cleanupIncomplete` alone can no longer explain a token
+    // still on disk — this is the token's OWN removal failing (EACCES, EROFS, ...), the one
+    // asymmetry left after the loop above already started checking `unlinkBestEffort`'s return: the
+    // temps were checked, the token itself was not (codex round 8, IMPORTANT 2). Left silent, the
+    // token stays exactly as long as it would after any other cleanup hazard, but with nothing in
+    // `warnings` telling the operator why the next `openCaptureRun` halts on `run_already_open`.
+    warnings.push(
+      `the pending token '${tokenPath}' could not be removed after every temp was confirmed gone — it will make the next openCaptureRun halt on 'run_already_open' even though this run committed cleanly; run recoverProvenanceState (it will report 'committed') and cleanupCommittedRun to remove it.`,
+    );
+  }
+
+  // [round 39] Reconstructed from the authenticated materialization, never spread out of the
+  // caller's object. Round 38 stopped at "nothing decides anything after this read" and judged the
+  // spread benign. The returned state is itself an OUTPUT: capture-record.d.mts declares an active
+  // returned state to carry the authenticated fields, and a caller drives W5 with the `run_id` it
+  // reads off exactly this object — so a second read answering differently hands W5 a forged id
+  // against a record that is correct, and W5 refuses an intact run with `run_id_mismatch`. A
+  // THROWING field is the other half: it turns a successfully committed run into an exception
+  // rather than the returned result this module's contract promises on every other path. Both were
+  // executed. `run_id` and `opening_digest` come from the locals the token vouched for; the five
+  // payload fields come from the one materialization the digest was taken over.
+  return {
+    ok: true,
+    runState: {
+      skipped: false,
+      run_id: runId,
+      opening_digest: recomputedDigest,
+      opening: authenticated.identity,
+      opening_assets: authenticated.assets,
+      opening_asset_hazards: authenticated.asset_hazards,
+      entries: authenticated.entries,
+      output_root: authenticated.output_root,
+      closed: true,
+    },
+    warnings,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Record readers — field-by-field schema validation, never a bare JSON.parse + spot check. Both
+// readers run the SAME shared `build_identity` validity check (`isValidBuildIdentityField`) and
+// the SAME structural key predicate for every hash map — `isCanonicalAssetKey`, imported from
+// chapter-paths.mjs rather than re-implemented here: rejects a leading '/', an empty segment, and
+// '.'/'..' segments — constrains NO characters, since keys come from W2's own directory snapshot,
+// and a reader rejecting what its own writer wrote is the defect this shared predicate avoids.
+// ---------------------------------------------------------------------------------------------
+
+// "A plain object" — non-null, not an array. The shape test every record reader below opens with,
+// and the one a stored hash map must pass before its keys are examined.
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validateHashMap(map) {
+  if (!isPlainObject(map)) return false;
+  for (const key of Object.keys(map)) {
+    if (!isCanonicalAssetKey(key)) return false;
+    if (typeof map[key] !== 'string' || !HASH_GRAMMAR.test(map[key])) return false;
+  }
+  return true;
+}
+
+/**
+ * Validate and parse a run record's raw text. Fails closed on: unparseable/duplicate-key/lone-
+ * surrogate JSON; non-1 `record_version`; missing/non-string `run_id`; a malformed
+ * `opening_digest`; an invalid `build_identity` sub-object; a non-object `chapters`, or any chapter
+ * entry that is not an object, is missing `opening`/`closing`, or holds a non-canonical key or a
+ * non-hash-grammar value in either map.
+ *
+ * @param {string} text
+ * @returns {{ok: true, record: object}|{ok: false, reason: string}}
+ */
+export function readRunRecordText(text) {
+  const parsed = parseJsonStrict(text);
+  if (!parsed.ok) return { ok: false, reason: parsed.reason };
+  const record = parsed.value;
+  if (!isPlainObject(record)) return { ok: false, reason: 'not_an_object' };
+  if (record.record_version !== 1) return { ok: false, reason: 'bad_record_version' };
+  if (typeof record.run_id !== 'string') return { ok: false, reason: 'bad_run_id' };
+  if (!isValidDigest(record.opening_digest)) return { ok: false, reason: 'bad_opening_digest' };
+  const identityCheck = isValidBuildIdentityField(record.build_identity);
+  if (!identityCheck.ok) return { ok: false, reason: `bad_build_identity:${identityCheck.reason}` };
+  if (!isPlainObject(record.chapters)) return { ok: false, reason: 'bad_chapters' };
+  for (const key of Object.keys(record.chapters)) {
+    const entry = record.chapters[key];
+    if (!isPlainObject(entry)) return { ok: false, reason: 'bad_chapter_entry' };
+    if (!Object.hasOwn(entry, 'opening') || !Object.hasOwn(entry, 'closing')) {
+      return { ok: false, reason: 'bad_chapter_entry' };
+    }
+    if (!validateHashMap(entry.opening) || !validateHashMap(entry.closing)) {
+      return { ok: false, reason: 'bad_chapter_hash_map' };
+    }
+    // [round 16] REQUIRED, and validated, both of them. The hazard lists arrived with the
+    // hazard/absence split one round earlier, and the reader kept accepting records without them
+    // under the same `record_version: 1` — so a record written before the split reads back as
+    // "no hazards", which is exactly the false statement the split exists to prevent: W5 then sees
+    // no hazard and no opening hash, calls the asset brand-new, and writes the confident record.
+    // Absence is not a safe default for a field whose whole content is "here is what we could not
+    // establish". Two version-1 shapes cannot both be valid; the older one is now malformed, which
+    // W6 reports as `record_malformed` and W5 refuses on, rather than silently trusting.
+    for (const field of ['opening_hazards', 'closing_hazards']) {
+      const list = entry[field];
+      if (!Array.isArray(list)) return { ok: false, reason: `bad_chapter_hazards:${field}` };
+      // Validated element-wise too: a non-string member would reach `.find()`/`.slice()` in W5 and
+      // throw out of a function whose contract is a returned reason.
+      // [round 17, found by the repository's cross-file review bot] Checking only the JavaScript
+      // TYPE re-opened, through a malformed member, exactly the false-provenance path the hazard
+      // lists exist to close. `"a.png"` with no colon is a string, so it validated; `hazardFor`
+      // splits at the LAST colon, `lastIndexOf` returns -1, and `slice(0, -1)` yields `a.pn` —
+      // which matches no asset key, so the hazard is silently ignored, the missing opening hash
+      // reads as "brand-new this run", and rule 4 is skipped over old bytes. A member that cannot
+      // be interpreted must invalidate the record rather than be dropped: an unverifiable run
+      // record refuses every chapter, which is the fail-closed direction.
+      if (list.some((h) => !isWellFormedHazard(h))) return { ok: false, reason: `bad_chapter_hazards:${field}` };
+    }
+  }
+  return { ok: true, record };
+}
+
+/**
+ * Validate and parse a chapter record's raw text — the same identity checks plus `asset_hashes`.
+ *
+ * @param {string} text
+ * @returns {{ok: true, record: object}|{ok: false, reason: string}}
+ */
+export function readChapterRecordText(text) {
+  const parsed = parseJsonStrict(text);
+  if (!parsed.ok) return { ok: false, reason: parsed.reason };
+  const record = parsed.value;
+  if (!isPlainObject(record)) return { ok: false, reason: 'not_an_object' };
+  if (!Number.isInteger(record.record_version) || record.record_version < 1) {
+    return { ok: false, reason: 'bad_record_version' };
+  }
+  // A version other than the one this reader understands is read back MINIMALLY — only far enough
+  // to know the version itself is well-formed — and its OTHER fields are never validated against
+  // v1's rules, which would be meaningless for a version this reader was not written for. This is
+  // the one thing that makes `record_unsupported_version` a REACHABLE report state rather than a
+  // branch nothing can ever take: an earlier version of this function rejected any non-1 version
+  // outright as `malformed`, which is indistinguishable from genuine corruption to W6's delta
+  // classifier and dead code in the caller that branches on the two separately.
+  if (record.record_version !== 1) {
+    return { ok: true, record, unsupportedVersion: true };
+  }
+  if (typeof record.run_id !== 'string') return { ok: false, reason: 'bad_run_id' };
+  const identityCheck = isValidBuildIdentityField(record.build_identity);
+  if (!identityCheck.ok) return { ok: false, reason: `bad_build_identity:${identityCheck.reason}` };
+  if (record.detail !== undefined && typeof record.detail !== 'string') {
+    return { ok: false, reason: 'bad_detail' };
+  }
+  if (!validateHashMap(record.asset_hashes)) return { ok: false, reason: 'bad_asset_hashes' };
+  return { ok: true, record };
+}
+
+function readRunRecordFromDisk(profileLike, deps) {
+  const read = readLeafText(runRecordPath(profileLike), deps);
+  if (read.kind !== 'present') return read;
+  const validated = readRunRecordText(read.text);
+  if (!validated.ok) return { kind: 'invalid', reason: validated.reason };
+  return { kind: 'present', record: validated.record };
+}
+
+function readChapterRecordFromDisk(profileLike, entry, deps) {
+  const read = readLeafText(chapterRecordPath(profileLike, entry), deps);
+  if (read.kind !== 'present') return read;
+  const validated = readChapterRecordText(read.text);
+  if (!validated.ok) return { kind: 'invalid', reason: validated.reason };
+  return { kind: 'present', record: validated.record };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Row 4 — recordChapterProvenance. Applies the completeness rule; abstains (writes nothing, keeps
+// whatever record already existed) on ANY failure, at every exit.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Record one chapter's provenance at W5, applying the completeness rule (rules 1-5 of the plan):
+ * the run record verifies and its `run_id` matches `expectedRunId`; the chapter embeds at least
+ * one in-directory image and no foreign one; every expected image appears in `closing`; every
+ * expected image's `closing` hash differs from `opening`; and a fresh re-hash right now EQUALS
+ * `closing`. Any failure ⇒ no record written, the chapter's existing record (if any) is left
+ * byte-identical, and the failing rule is returned as a warning.
+ *
+ * [round 14] That last rule used to read "still differs from `opening`", here and in SKILL.md and
+ * in the code. Differing from the opening admits bytes the captured build never produced, which the
+ * record would then attribute to it; equality with `closing` is the property that makes the record
+ * mean anything, and it subsumes the old check because rule 4 has already established that closing
+ * differs from opening. This block is the EXPORTED contract, so a caller reading only the API saw
+ * the obsolete rule after the other three sites were corrected.
+ *
+ * @param {object} profileLike
+ * @param {Array<object>} acceptedEntries  the complete accepted manifest (gate 4 is a cross-entry recheck)
+ * @param {object} entry
+ * @param {string} chapterFile
+ * @param {string} expectedRunId
+ * @param {object} [deps]
+ * @returns {{recorded: true, reason: null}|{recorded: false, reason: string}|{ok: false, halts: Array<object>}}
+ */
+export function recordChapterProvenance(profileLike, acceptedEntries, entry, chapterFile, expectedRunId, deps) {
+  const d = mergeDeps(deps);
+
+  const ownership = assertProvenanceOwnership(profileLike, d);
+  if (ownership.skip) return { recorded: false, reason: 'provenance_skipped' };
+  if (!ownership.ok) return { ok: false, halts: ownership.halts };
+
+  // Gates 1-4 are re-run here over the COMPLETE accepted manifest — gate 4 (pairwise physical
+  // uniqueness) is a cross-entry recheck no single-`entry` call could perform, which is exactly why
+  // this signature takes `acceptedEntries` rather than one entry; and a symlink can be planted
+  // between W2 and W5, so W2's result is re-established rather than assumed to still hold.
+  const validated = validateEntriesForCapture(profileLike, acceptedEntries, d);
+  if (!validated.ok) return validated;
+
+  // Gate 6's hierarchy walk, over BOTH namespaces this call touches: `run/` (the run record it is
+  // about to read) and `chapters/`(/<group>) (the chapter record it is about to write). An earlier
+  // pass wired this walk only into recovery, so a symlinked `chapters/` or group ancestor was
+  // followed transparently on this path (codex DO-NOT-SHIP blocker 3).
+  const runHierarchyHazard = inspectRunHierarchyComponents(profileLike, d);
+  if (runHierarchyHazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...runHierarchyHazard }] };
+  const chaptersHierarchyHazard = inspectChaptersHierarchyComponents(profileLike, entry, d);
+  if (chaptersHierarchyHazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...chaptersHierarchyHazard }] };
+
+  const groupDirEstablished = establishChapterGroupDir(profileLike, entry, d);
+  // Same defect as `openCaptureRun`'s hierarchy-establishment site above (codex round 7, IMPORTANT
+  // 1): `groupDirEstablished.hazard` is the bare gate-6 shape, wrapped with the same
+  // `halt: 'provenance_hazard'` convention rather than pushed raw.
+  if (!groupDirEstablished.ok) return { ok: false, halts: [{ halt: 'provenance_hazard', ...groupDirEstablished.hazard }] };
+
+  const runRecord = readRunRecordFromDisk(profileLike, d);
+  if (runRecord.kind === 'hazard') return { ok: false, halts: [{ halt: 'provenance_hazard', ...runRecord }] };
+  if (runRecord.kind !== 'present') {
+    return { recorded: false, reason: 'run_record_unverifiable' };
+  }
+  if (runRecord.record.run_id !== expectedRunId) {
+    return { recorded: false, reason: 'run_id_mismatch' };
+  }
+
+  const key = chapterKeyFor(entry);
+  const chapterRunData = runRecord.record.chapters[key];
+  if (!chapterRunData) {
+    return { recorded: false, reason: 'run_record_missing_chapter' };
+  }
+
+  let chapterText;
+  try {
+    chapterText = readFileText(chapterFile, d);
+  } catch (err) {
+    return { recorded: false, reason: `chapter_read_failed:${describeThrownField(err, 'code')}` };
+  }
+
+  const assetDir = chapterAssetDir(profileLike, entry);
+  let filenames;
+  try {
+    // [round 24] Carries the identity `validated` just observed, exactly as `openCaptureRun` does.
+    filenames = listRegularFilesRecursive(assetDir, d, {
+      rootMustExist: validated.assetDirsObserved.has(key),
+      rootIdentity: validated.assetDirsObserved.get(key) ?? null,
+      containmentRoot: validated.outputRoot,
+    });
+  } catch (err) {
+    return { recorded: false, reason: `asset_listing_failed:${describeThrownField(err, 'code')}` };
+  }
+
+  const target = profileLike.publish.target;
+  // `expectedAssets` defaults to the REAL chapter-paths.mjs extractor — a production caller never
+  // injects `deps`, so a missing default here would silently take an inert branch on every real
+  // chapter and no record would ever be written on the actual path. The seam stays: a test may
+  // still override `deps.expectedAssets` with a stub.
+  const extractionFn = deps?.expectedAssets ?? expectedAssets;
+  let extraction;
+  try {
+    extraction = extractionFn(profileLike, entry, chapterFile, chapterText, filenames, target);
+  } catch (err) {
+    return { recorded: false, reason: `extraction_threw:${describeThrown(err)}` };
+  }
+  if (!extraction.ok) {
+    return { recorded: false, reason: `extraction_halt:${extraction.halt.construct}@${extraction.halt.line}` };
+  }
+  if (extraction.assets.length === 0) {
+    return { recorded: false, reason: 'zero_in_directory_embeds' };
+  }
+
+  // Rule 2 (foreign embed): every asset's absPath must resolve under assetDir. NOTE (not dead
+  // code): against the REAL chapter-paths.mjs `expectedAssets`, this branch is unreachable —
+  // candidates are only ever built from `assetDir`'s own directory listing, so a foreign
+  // destination can never byte-match one and always falls to the extractor's own unmatched-
+  // destination halt first. It fires only when `deps.expectedAssets` is a mock that returns an
+  // out-of-tree `absPath` (as some unit tests here deliberately do). Kept because the two-variant
+  // return shape (`ok`/halt vs. an in-tree assets array) is pinned regardless of which concrete
+  // extractor is wired in, and a future extractor need not share this one's guarantee.
+  const assetDirResolved = canonicalizeForComparison(assetDir, d);
+  if (!assetDirResolved.ok) return { recorded: false, reason: `asset_dir_resolution_failed:${assetDirResolved.reason}` };
+  const assetDirCanon = assetDirResolved.segments;
+  for (const asset of extraction.assets) {
+    const assetResolved = canonicalizeForComparison(asset.absPath, d);
+    if (!assetResolved.ok) return { recorded: false, reason: `asset_resolution_failed:${assetResolved.reason}` };
+    const assetCanon = assetResolved.segments;
+    if (!isSegmentPrefixOf(assetDirCanon, assetCanon) || assetCanon.length === assetDirCanon.length) {
+      return { recorded: false, reason: 'foreign_embed' };
+    }
+  }
+
+  // [round 15] Rule 3.5, checked FIRST because it decides whether the other rules mean anything: an
+  // asset that could not be hashed at open or at close has no established bytes at that point, so
+  // neither "it changed during capture" (rule 4) nor "it is brand new" can be concluded about it.
+  // The reason names the asset and HOW it was unreadable rather than collapsing to one word — an
+  // operator reading `hard_link` acts differently than one reading `inspection_failure`. That
+  // sentence was false for two rounds: the persisted word was the leaf inspection's `kind`, which
+  // is `hazard` for all four of them. See `unreadableWord`.
+  // [round 17] The lookup is CONTAINMENT, not equality, and the difference is a shipped defect: the
+  // walk refuses a symlinked DIRECTORY under that directory's own path (`screens:symlink`), while
+  // the asset it hides is keyed `screens/a.png`. An equality match filed the hazard under a name it
+  // was never looked up by — so the refusal never fired, the opening map had no entry either (the
+  // walk never reached the file), and rule 4 read that absence as "brand-new this run". A hazard is
+  // a statement about a PATH: withholding a directory withholds the bytes of everything beneath it.
+  // The trailing separator is load-bearing — a bare `startsWith` would also swallow `screensaver/`,
+  // whose bytes this run established perfectly well.
+  const hazardFor = (list, key) => (list ?? []).find((h) => {
+    const path = h.slice(0, h.lastIndexOf(':'));
+    return key === path || key.startsWith(`${path}/`);
+  });
+  for (const asset of extraction.assets) {
+    const openingHazard = hazardFor(chapterRunData.opening_hazards, asset.key);
+    if (openingHazard !== undefined) {
+      return { recorded: false, reason: `rule5_opening_unhashable:${openingHazard}` };
+    }
+    const closingHazard = hazardFor(chapterRunData.closing_hazards, asset.key);
+    if (closingHazard !== undefined) {
+      return { recorded: false, reason: `rule5_closing_unhashable:${closingHazard}` };
+    }
+  }
+
+  // Rule 3 + 4: every expected key present in `closing`, and closing != opening.
+  for (const asset of extraction.assets) {
+    if (!Object.hasOwn(chapterRunData.closing, asset.key)) {
+      return { recorded: false, reason: 'rule3_missing_from_closing' };
+    }
+    if (!Object.hasOwn(chapterRunData.opening, asset.key)) {
+      // No opening entry (a brand-new file this run) counts as changed for rule 4's purposes.
+      continue;
+    }
+    if (chapterRunData.closing[asset.key] === chapterRunData.opening[asset.key]) {
+      return { recorded: false, reason: 'rule4_unchanged' };
+    }
+  }
+
+  // Rule 5: re-hash every expected image now and require it to still BE the bytes this run closed
+  // over. [round 13] The rule used to require only that the re-hash differ from `opening`, which
+  // rejects a revert to the pre-capture bytes and nothing else: a replacement with any third value
+  // differs from the opening too, so it passed, and its hash was then persisted under this run's
+  // `build_identity` — W6 afterwards reported it verified, because the bytes on disk matched the
+  // hash that had just been recorded from them. What the record claims is that these bytes came
+  // from the captured build, and only `closing` carries that. Comparing against `closing` subsumes
+  // the old check: rule 4 above has already established closing !== opening, so bytes equal to
+  // closing cannot equal opening. The revert stays a distinct reason because it is the more
+  // specific diagnosis of the same failure and names what the operator most likely did.
+  const assetHashes = Object.create(null);
+  for (const asset of extraction.assets) {
+    const rehash = hashFileNoFollow(asset.absPath, d);
+    if (rehash.kind !== 'present') {
+      // [round 15] Names the asset, not just the kind. Every hazard used to reduce to
+      // `rehash_failed:hazard`, so an operator holding an ineligible chapter with several embeds
+      // learned neither which file nor why.
+      return { recorded: false, reason: `rehash_failed:${asset.key}:${unreadableWordAfterListing(rehash)}` };
+    }
+    assetHashes[asset.key] = rehash.digest;
+    if (rehash.digest === chapterRunData.closing[asset.key]) continue;
+    const openingHash = chapterRunData.opening[asset.key];
+    if (openingHash !== undefined && rehash.digest === openingHash) {
+      return { recorded: false, reason: 'rule5_reverted_to_opening' };
+    }
+    return { recorded: false, reason: 'rule5_replaced_since_closing' };
+  }
+
+  const chapterRecord = {
+    record_version: 1,
+    run_id: expectedRunId,
+    build_identity: runRecord.record.build_identity,
+    asset_hashes: assetHashes,
+  };
+  const recordText = JSON.stringify(chapterRecord, null, 2);
+
+  const finalPath = chapterRecordPath(profileLike, entry);
+  // `tempPath` is computed INSIDE the try, not before it: `d.randomUUID()` is called with no guard
+  // of its own, and a throw there previously escaped this function entirely — before a temp name
+  // even existed, let alone anything written (codex round 9 follow-up, measured against the real
+  // module, not merely reasoned from the code's shape). `tempPath` staying `undefined` is how the
+  // catch below tells "never named" apart from "named but the write/open failed".
+  let tempPath;
+  let fd;
+  try {
+    tempPath = `${finalPath}.${d.randomUUID()}.tmp`;
+    fd = d.openSync(tempPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o644);
+    writeFull(fd, Buffer.from(recordText, 'utf8'), d);
+  } catch (err) {
+    if (fd !== undefined) {
+      // Best-effort: this closeSync failing must never MASK the write failure we are about to
+      // report (codex round 3).
+      closeBestEffort(fd, d);
+    }
+    if (tempPath !== undefined) unlinkBestEffort(tempPath, d);
+    // Assigned into a returned FIELD rather than interpolated, so a non-string `.reason` (a thrown
+    // `{reason: Symbol(...)}`) would not throw here — but it would still put a Symbol into a field
+    // this module's own convention treats as a plain string, silently dropped by a caller's
+    // `JSON.stringify`. Typed-checked the same way as every message-building site now, not just the
+    // ones that would crash outright.
+    const errReason = errProp(err, 'reason');
+    const reason = tempPath === undefined ? 'temp_name_generation_failed' : typeof errReason === 'string' ? errReason : 'write_failed';
+    return { ok: false, halts: [{ halt: 'provenance_hazard', reason, path: tempPath, detail: describeThrown(err) }] };
+  }
+  try {
+    d.closeSync(fd);
+  } catch (err) {
+    // Nothing durable has been committed yet at this point (the rename below hasn't run) — an
+    // ordinary halt, with best-effort cleanup of the still-fully-written-but-unclosed temp.
+    unlinkBestEffort(tempPath, d);
+    return { ok: false, halts: [{ halt: 'provenance_hazard', reason: 'close_failed', path: tempPath, detail: describeThrown(err) }] };
+  }
+  try {
+    d.renameSync(tempPath, finalPath);
+  } catch (err) {
+    unlinkBestEffort(tempPath, d);
+    return { ok: false, halts: [{ halt: 'provenance_hazard', reason: 'rename_failed', path: finalPath, detail: describeThrown(err) }] };
+  }
+
+  return { recorded: true, reason: null };
+}
+
+function readFileText(path, deps) {
+  const read = readLeafText(path, deps);
+  if (read.kind === 'present') return read.text;
+  throw new Error(`cannot read ${path}: ${unreadableWord(read)}`);
+}
+
+// Deliberately passes NO `onSkipped`, and that is not an oversight of the same class the snapshot
+// just fixed. This list answers "which files can serve as an asset", and a symlink or a device node
+// cannot; the snapshot answers "what were this asset's bytes at this moment", where being unable to
+// say is itself the fact that matters. The consequence of the omission here is already fail-closed:
+// a chapter embedding a symlinked image finds no candidate to match, so extraction halts with an
+// unmatched destination and the chapter is reported ineligible — it is never recorded on the
+// strength of a file this feature declined to look at. Written down because the walk's two callers
+// have now been the subject of three consecutive review rounds.
+// [round 24] Takes the same root pin the snapshot does, and BOTH callers have one to give: W5 and
+// W6 each re-run gates 1-4 immediately before this listing and then discarded the identities that
+// run observed. A self-baseline established here brackets only this listing; the gate-3 pin brackets
+// the window between the gate and the listing, which is where a PERSISTENT substitution lives — and
+// a persistent one is invisible to the self-baseline by construction, since the replacement is
+// already in place when the baseline is taken. Codex's scenario: gate 3 observes an ordinary
+// in-root directory, the root becomes a symlink to an outside tree holding a byte-copy of the
+// closing asset, the walk self-baselines the replacement, W5 rule 2 canonicalizes root and asset
+// into the same outside tree and passes, and the chapter is recorded as verified.
+function listRegularFilesRecursive(assetDir, deps, { rootMustExist = false, rootIdentity = null, containmentRoot = null } = {}) {
+  const out = [];
+  walkRegularFiles(assetDir, deps, (_absPath, relPath) => out.push(relPath), undefined, { rootMustExist, rootIdentity, containmentRoot });
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// sweepChapterProvenanceTemps — codex round 5, finding 3. A process that dies between
+// `recordChapterProvenance`'s temp write (above) and its rename leaves `<slug>.json.<uuid>.tmp`
+// behind under `chapters/`. Row 6's classifier could not see this: its `temps` observation
+// (`inspectTokenAndRecordAndTemps`) lists ONLY `run/current.json.*.tmp`, and that is not an
+// oversight to widen but a boundary to keep. A chapter temp is not correlated with the run's own
+// token/record the way a `run/` temp is — `recordChapterProvenance` may run, and crash, many times
+// per run (once per chapter) or even after the run has already cleanly committed, since its only
+// precondition is that the run record's `run_id` still matches; a chapter temp can therefore be
+// found, or be absent, under ANY of the nine row-6 states with no correlation to which one. Folding
+// it into the SAME `temps` tuple `classify` switches on would make `hasTemps` conflate two
+// unrelated leftovers — an `absent` run with one unrelated stray chapter temp would misclassify as
+// `orphan_temp` FOREVER, since nothing about closing that chapter temp ever changes the run's own
+// token/record — and `abortCaptureRun`/`cleanupCommittedRun` are documented (SKILL.md's recovery
+// table) as NEVER touching `chapters/`, which widening the tuple would either silently break or
+// require quietly contradicting. So row 6's domain statement — a TOTAL function of
+// `(token, record, temps)` observed under `run/` — stays exactly as declared, and this is its own,
+// separate, single-purpose pass.
+//
+// Unlike row 6, no state distinction is needed here. Row 6 needs nine states because a `run/` temp
+// can coexist with several different token/record combinations that mean different things (mid-
+// write vs. leftover-after-commit vs. stale-abandoned), and choosing the wrong repair for the wrong
+// one is unsafe — that is what `expected`'s fingerprint check guards against. A chapter temp has no
+// such ambiguity: this sweep is only ever invoked at recovery time (the same "before opening a new
+// run" moment `recoverProvenanceState` is), when nothing is concurrently running
+// `recordChapterProvenance` for any entry — so a temp found at rest IS a crash leftover, full stop,
+// and removing it is unconditionally safe. That is also why this is one combined find-and-remove
+// call rather than row 6's separate classify-then-repair split: there is no "wrong repair for this
+// state" question to protect against by making the caller round-trip an `expected` value first.
+//
+// Entries-driven, like every other per-chapter call in this module (`recordChapterProvenance`,
+// `buildProvenanceReport`) — never a raw directory walk of `chapters/`. This is a deliberate,
+// narrower choice, not an oversight: a raw walk would need its OWN hazard discipline for every
+// directory it descends into (any subdirectory could be a planted symlink), duplicating gate 6's
+// hierarchy walk instead of reusing it, and — more fundamentally — this module already treats
+// "which chapters exist" as manifest-derived everywhere else (`buildProvenanceReport` reports one
+// row per `entries`, never one row per file found on disk), so a filesystem-driven exception here
+// would be the one inconsistent reader of this state in the whole module. The consequence is
+// explicit, not hidden: a chapter removed from the manifest between the crash and this call is not
+// swept — operationally the same limitation `buildProvenanceReport` already has for a removed
+// chapter's stale record.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Find and best-effort-remove every leftover `<slug>.json.<uuid>.tmp` chapter-record temp for each
+ * of `entries` — the artifact left behind when a process dies between `recordChapterProvenance`
+ * closing its temp and renaming it into place. Deliberately separate from `recoverProvenanceState`:
+ * see the module comment above for why chapter temps are not folded into row 6's `(token, record,
+ * temps)` tuple. Call this, like `recoverProvenanceState`, before opening a new run where a prior
+ * chapter-write crash is suspected. Mutates nothing but the matched temps themselves — the run's
+ * own token/record and every chapter's actual record are untouched.
+ *
+ * `removed` lists only the temps this call actually confirmed gone; a temp whose leaf inspection
+ * passes (so it is safe to remove) but whose `unlinkSync` itself then fails (EACCES, a read-only
+ * mount, ...) is reported in `warnings` instead — NEVER silently folded into `removed` (round 6,
+ * finding 2: reporting an unremoved temp as removed is a false-clean this module has no other way
+ * to catch, since row 6's classifier never observes `chapters/` at all, by design — see the module
+ * banner above). This is a WARNING on an otherwise-`ok: true` result, not a halt: the temp is inert
+ * litter either way (this call commits nothing; the record it is leftover FROM already committed or
+ * failed independently, before this sweep ever ran), so one entry's stuck temp must not block every
+ * other entry's genuinely-removable temps from being cleaned up, or the operator from proceeding.
+ *
+ * @param {object} profileLike
+ * @param {Array<object>} entries
+ * @param {object} [deps]
+ * @returns {{ok: true, removed: string[], warnings: string[]}|{ok: true, skipped: true, removed: [], warnings: []}|{ok: false, halts: Array<object>}}
+ */
+export function sweepChapterProvenanceTemps(profileLike, entries, deps) {
+  const d = mergeDeps(deps);
+  const ownership = assertProvenanceOwnership(profileLike, d);
+  if (ownership.skip) return { ok: true, skipped: true, removed: [], warnings: [] };
+  if (!ownership.ok) return { ok: false, halts: ownership.halts };
+
+  const removed = [];
+  const warnings = [];
+  for (const entry of entries) {
+    // Gate 6's hierarchy walk over THIS entry's own chapters/(/<group>) ancestor chain — the same
+    // check `recordChapterProvenance` runs before it ever opens this entry's leaf, so a symlinked
+    // `chapters/` or group ancestor is refused here exactly as it would be on the write path,
+    // rather than transparently followed by a sweep that skips the discipline the writer applies.
+    const hierarchyHazard = inspectChaptersHierarchyComponents(profileLike, entry, d);
+    if (hierarchyHazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...hierarchyHazard }] };
+
+    const tempsListed = listMatchingChapterTemps(profileLike, entry, d);
+    if (!tempsListed.ok) return { ok: false, halts: [{ halt: 'provenance_hazard', ...tempsListed.hazard }] };
+
+    for (const temp of tempsListed.temps) {
+      // Gate-6-verify the leaf (no-follow, regular, nlink===1) before touching it — the same
+      // discipline row 6 applies to every `run/` temp it lists (`inspectTokenAndRecordAndTemps`),
+      // so a symlink or hard-link planted at a temp's exact name halts here rather than being
+      // unlinked blind.
+      const tempLeaf = openLeafNoFollow(temp, fs.constants.O_RDONLY, d);
+      if (tempLeaf.kind === 'hazard') return { ok: false, halts: [{ halt: 'provenance_hazard', ...tempLeaf }] };
+      if (tempLeaf.kind === 'present') {
+        closeBestEffort(tempLeaf.fd, d);
+        // The leaf is already verified safe (no-follow, regular, single-linked) — a failure here is
+        // an ordinary OS write-permission/mount failure, never the tampering hazard the check above
+        // exists to catch, so it is reported rather than escalated to a halt (see the JSDoc above).
+        if (unlinkBestEffort(temp, d)) {
+          removed.push(temp);
+        } else {
+          warnings.push(
+            `leftover chapter-record temp '${temp}' could not be removed and remains on disk — remove it manually, or re-run this sweep once the underlying issue (e.g. permissions) is resolved.`,
+          );
+        }
+      }
+      // 'absent': vanished between listing and open (e.g. a concurrent sweep already removed it) —
+      // nothing to remove, not an error.
+    }
+  }
+  return { ok: true, removed, warnings };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Row 5 — buildProvenanceReport. Reads CHAPTER records only (never the run record — the run
+// record belongs to one run and may be absent, older, or from a different machine by audit time).
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Build the W6 audit report: one row per manifest entry, in manifest order, classifying the delta
+ * between each chapter's recorded identity and the CURRENT one. On a skipped profile, returns
+ * `provenance_unavailable` rows with zero UI requests and zero record reads.
+ *
+ * `identityCommandOutcome` is this function's counterpart of `openCaptureRun`'s parameter of the
+ * same name — see that function's doc comment for why a UI-read continuation must reuse the
+ * already-resolved outcome rather than re-invoking `capture.build_identity.command` a second time
+ * for the same current-identity observation point.
+ *
+ * @param {object} profileLike
+ * @param {Array<object>} entries
+ * @param {import('./build-identity.mjs').UiReadObservation|null} [currentObservation]
+ * @param {object} [deps]
+ * @param {import('./build-identity.mjs').CommandOutcome|null} [identityCommandOutcome]
+ * @returns {{rows: Array<object>}|{needs_ui_read: true, region_hint: string, identityCommandOutcome: import('./build-identity.mjs').CommandOutcome|null}|{ok: false, halts: Array<object>}}
+ */
+export function buildProvenanceReport(profileLike, entries, currentObservation, deps, identityCommandOutcome) {
+  const d = mergeDeps(deps);
+
+  const ownership = assertProvenanceOwnership(profileLike, d);
+  if (ownership.skip) {
+    return {
+      rows: entries.map((entry) => ({
+        key: chapterKeyFor(entry),
+        value: 'unknown',
+        source: null,
+        resolution_reason: null,
+        classification: 'indeterminate',
+        classification_reason: 'provenance_unavailable',
+        // [round 5, codex finding 4] Present and null, never absent. Every OTHER branch of this
+        // function assigns `classifyBuildDelta`'s own `current_source`, so a row from THIS branch
+        // that simply omitted the key made `ReportRow.current_source: string` a lie a TypeScript
+        // caller could dereference and crash on — and nothing in this repository compiles
+        // TypeScript, so no gate saw it. `null` rather than a string sentinel because a skipped
+        // profile performs zero identity resolutions: there is no source, which is exactly what
+        // the sibling `source: null` on this same row already says.
+        current_source: null,
+        // [round 16] And `record_detail` the same way, for the same reason, in the same object
+        // literal — the comment above was written about `current_source` in round 5 and did not
+        // stop the identical omission being made one field later. A skipped profile has no record
+        // to describe, which is what `null` says; absent would make the declared `string | null`
+        // a lie on the one branch a legacy profile always takes.
+        record_detail: null,
+      })),
+    };
+  }
+  if (!ownership.ok) return { ok: false, halts: ownership.halts };
+
+  // W6 is independently callable (the audit mode for already-merged chapters), so it routinely
+  // runs against a manifest W2 never validated in that session — it must run gates 1-4 itself
+  // before deriving a single path, or it reads an unrelated record from outside the intended tree
+  // and reports its contents under the manifest entry's name.
+  const validated = validateEntriesForCapture(profileLike, entries, d);
+  if (!validated.ok) return validated;
+
+  // Delegates to `resolveIdentityOrHalt` rather than calling `resolveIdentityCommandOutcome`/
+  // `resolveBuildIdentity` directly: either can THROW (see that helper's own comment). W6 is the
+  // audit entrypoint an operator runs over already-merged chapters, reachable from the same
+  // UI-read observation this project's own reference doc classifies as untrusted, and a malformed
+  // one previously escaped this function uncaught — measured against the real module (codex round
+  // 9 follow-up). This function reads only; nothing is written before this point either way.
+  const buildIdentity = profileLike.capture.build_identity ?? null;
+  const resolvedCurrent = resolveIdentityOrHalt(identityCommandOutcome, buildIdentity, currentObservation, d);
+  if (!resolvedCurrent.ok) return { ok: false, halts: [{ halt: resolvedCurrent.halt, message: resolvedCurrent.message }] };
+  const { commandOutcome, identity: current } = resolvedCurrent;
+  if (current.needs_ui_read) return { ...current, identityCommandOutcome: commandOutcome };
+
+  const rows = [];
+  for (const entry of entries) {
+    const key = chapterKeyFor(entry);
+    // Gate 6's hierarchy walk over `chapters/`(/<group>) for THIS entry, before its record is read
+    // — an earlier pass wired this walk only into recovery, so a symlinked `chapters/` or group
+    // ancestor was followed transparently on the W6 read path (codex DO-NOT-SHIP blocker 3).
+    const chaptersHierarchyHazard = inspectChaptersHierarchyComponents(profileLike, entry, d);
+    if (chaptersHierarchyHazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...chaptersHierarchyHazard }] };
+    const recordRead = readChapterRecordFromDisk(profileLike, entry, d);
+    if (recordRead.kind === 'hazard') return { ok: false, halts: [{ halt: 'provenance_hazard', ...recordRead }] };
+
+    // W6 must verify the chapter's OWN embedded images, never the whole asset directory — hashing
+    // every regular file under chapterAssetDir (an earlier version of this loop) lets an unrelated
+    // leftover file masquerade as staleness, and lets a chapter with ZERO real embeds but stale
+    // leftover images appear "verified" (codex DO-NOT-SHIP blocker 4). So the real extractor runs
+    // for EVERY entry, unconditionally — an extraction halt anywhere in the manifest halts this
+    // whole report rather than silently reporting partial rows, matching W5's own halt discipline.
+    const chapterFile = posixJoin(profileLike.publish.chapters_dir, chapterRelPath(entry));
+    let chapterText;
+    try {
+      chapterText = readFileText(chapterFile, d);
+    } catch (err) {
+      return { ok: false, halts: [{ halt: 'chapter_read_failed', message: `cannot read chapter '${chapterFile}': ${describeThrownField(err, 'code')}`, key }] };
+    }
+    const assetDir = chapterAssetDir(profileLike, entry);
+    let filenames;
+    try {
+      // [round 24] Same pin as W5's listing above: W6 ran gates 1-4 for this manifest a few lines
+      // up and had the observed identity in hand.
+      filenames = listRegularFilesRecursive(assetDir, d, {
+        rootMustExist: validated.assetDirsObserved.has(key),
+        rootIdentity: validated.assetDirsObserved.get(key) ?? null,
+        containmentRoot: validated.outputRoot,
+      });
+    } catch (err) {
+      return { ok: false, halts: [{ halt: 'asset_listing_failed', message: `cannot list the asset directory for '${key}': ${describeThrownField(err, 'code')}`, key }] };
+    }
+    const extractionFn = deps?.expectedAssets ?? expectedAssets;
+    let extraction;
+    try {
+      extraction = extractionFn(profileLike, entry, chapterFile, chapterText, filenames, profileLike.publish.target);
+    } catch (err) {
+      return { ok: false, halts: [{ halt: 'extraction_threw', message: describeThrown(err), key }] };
+    }
+    if (!extraction.ok) {
+      return { ok: false, halts: [{ halt: 'extraction_halt', construct: extraction.halt.construct, line: extraction.halt.line, key }] };
+    }
+
+    let recordState;
+    let staleDetail = null;
+    let chapterRecord = null;
+    if (recordRead.kind === 'absent') {
+      recordState = 'absent';
+    } else if (recordRead.kind === 'invalid') {
+      recordState = 'malformed';
+    } else {
+      chapterRecord = recordRead.record;
+      if (chapterRecord.record_version !== 1) {
+        recordState = 'unsupported_version';
+      } else {
+        // [round 14] The `if present` used to be the whole of it, and it made a hazardous embed
+        // DISAPPEAR: `verifyRecord` compares only the keys it is handed, so an embed the chapter
+        // still has but that gate 6 refuses to hash (a symlink, a directory, or an extra hard link
+        // arriving after the record was written) was dropped from the comparison, and a chapter
+        // with one good embed and one unhashable one reported `ok` and classified `unchanged`.
+        // W6's promise is that every CURRENT embed is verified against the record; an embed whose
+        // bytes cannot be read is neither verified nor absent, so it cannot be silently skipped.
+        // It is `stale` — the same verdict as a differing hash, which is what "we cannot show this
+        // is the recorded content" means — and never `ok`.
+        const currentHashes = Object.create(null);
+        const unhashable = [];
+        for (const asset of extraction.assets) {
+          const hashed = hashFileNoFollow(asset.absPath, d);
+          if (hashed.kind === 'present') currentHashes[asset.key] = hashed.digest;
+          else unhashable.push(`${asset.key}:${unreadableWordAfterListing(hashed)}`);
+        }
+        if (unhashable.length > 0) {
+          recordState = 'stale';
+          // [round 15] Failing closed was right and losing the reason was not: byte-changed
+          // content, a key missing from the record, a byte-identical file carrying an extra hard
+          // link, and an outright read failure all produced the same `record_stale` row. The outer
+          // verdict stays the same — the operator must not be told a chapter is verified — but
+          // "the content changed" and "we could not read the content" call for different actions,
+          // so the row carries which one it was.
+          staleDetail = `unhashable:${unhashable.join(',')}`;
+        } else {
+          const verify = verifyRecord(chapterRecord.asset_hashes, currentHashes);
+          recordState = verify.status === 'ok' ? 'ok' : 'stale';
+          if (verify.status !== 'ok') {
+            staleDetail = verify.path === undefined ? verify.reason : `${verify.reason}:${verify.path}`;
+          }
+        }
+      }
+    }
+
+    // classifyBuildDelta's `record` parameter is a BuildIdentity value ({value, source,
+    // resolution_reason, detail}) — the chapter record's OWN `build_identity` sub-object, never the
+    // chapter record itself, which is one level up and has no `.value`/`.source` of its own.
+    const recordIdentity = chapterRecord?.build_identity ?? null;
+    const delta = classifyBuildDelta({ current, recordState, record: recordIdentity });
+    rows.push({
+      key,
+      value: formatIdentityValue(recordIdentity?.value ?? null),
+      source: delta.recorded_source,
+      resolution_reason: recordIdentity?.resolution_reason ?? null,
+      classification: delta.classification,
+      classification_reason: delta.classification_reason,
+      current_source: delta.current_source,
+      // Present on every row, `null` when there is nothing to say — an absent key and "no detail"
+      // are not the same reading, and a field that appears only sometimes gets treated as optional
+      // by whatever renders it.
+      record_detail: staleDetail,
+    });
+  }
+
+  return { rows };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Row 6 — the nine-state classifier and its two repairs. Precedence, evaluated top to bottom:
+// not_active -> orphan_temp -> absent -> partial -> malformed -> prepared -> open -> committed ->
+// divergent. SKILL.md's W2 crash-recovery section is the authority this mirrors; the generated
+// companion document this line used to cite never shipped (see the file header).
+// ---------------------------------------------------------------------------------------------
+
+const STATE_ONLY_EXPECTED = new Set(['not_active', 'orphan_temp', 'absent', 'partial', 'malformed', 'divergent']);
+
+const PROGRESS_CHAINS = {
+  orphan_temp: ['orphan_temp', 'absent'],
+  partial: ['partial', 'absent'],
+  prepared: ['prepared', 'open', 'absent'],
+  open: ['open', 'absent'],
+  committed: ['committed', 'absent'],
+};
+
+const REPAIR_FOR_STATE = {
+  orphan_temp: 'abortCaptureRun',
+  partial: 'abortCaptureRun',
+  prepared: 'abortCaptureRun',
+  open: 'abortCaptureRun',
+  committed: 'cleanupCommittedRun',
+};
+
+// O_NOFOLLOW on a leaf open only refuses a symlink at the FINAL path component — an ancestor
+// directory that is itself a symlink is followed transparently by the kernel regardless of that
+// flag. So every hierarchy component a leaf lives under is walked and lstat-checked SEPARATELY,
+// before any leaf is ever opened. Shared by both namespaces this module owns: `run/` (token,
+// record, temps) and `chapters/`(/<group>) (chapter records) — every consumer that reads or
+// writes a leaf under either namespace calls the matching hierarchy check first, not only row 6's
+// recovery path (an earlier pass wired this into recovery alone, which is exactly why a symlinked
+// `chapters/` or group ancestor was followed on the W5/W6 paths — codex DO-NOT-SHIP blocker 3).
+function inspectHierarchyChain(dirs, deps) {
+  for (const dir of dirs) {
+    const inspected = inspectDirComponent(dir, deps);
+    if (inspected.kind === 'hazard') return inspected;
+    // 'absent' is expected on a first run before establishment — a leaf beneath an absent
+    // ancestor will itself read as absent, which is the correct classification.
+  }
+  return null;
+}
+
+function inspectRunHierarchyComponents(profileLike, deps) {
+  return inspectHierarchyChain([provenanceRoot(profileLike), runNamespaceDir(profileLike)], deps);
+}
+
+// The `chapters/` namespace, plus the entry's own group directory when grouped — the ancestor
+// chain a chapter record's leaf actually lives under.
+function inspectChaptersHierarchyComponents(profileLike, entry, deps) {
+  const dirs = [provenanceRoot(profileLike), chaptersNamespaceDir(profileLike)];
+  if (entry.group !== undefined) dirs.push(posixJoin(chaptersNamespaceDir(profileLike), String(entry.group)));
+  return inspectHierarchyChain(dirs, deps);
+}
+
+function inspectTokenAndRecordAndTemps(profileLike, deps) {
+  const hierarchyHazard = inspectRunHierarchyComponents(profileLike, deps);
+  if (hierarchyHazard) return { hazard: hierarchyHazard };
+
+  // Both leaves are read through the SAME gate-6 helpers every other reader in this module uses
+  // (`readLeafText` / `readRunRecordFromDisk`: O_NOFOLLOW open, fstat on that same descriptor,
+  // regular file, nlink === 1) rather than through a second hand-rolled open/read/close of their
+  // own — one definition of "how a leaf is read here" is what keeps the classifier's view of disk
+  // identical to the pipeline's.
+  const tokenPath = pendingTokenPath(profileLike);
+  const tokenRead = readLeafText(tokenPath, deps);
+  if (tokenRead.kind === 'hazard') return { hazard: tokenRead };
+  let tokenState = 'absent';
+  let tokenValue = null;
+  if (tokenRead.kind === 'present') {
+    const parsed = parseJsonStrict(tokenRead.text);
+    // `parsed.value` is optional-chained: a token body of the literal `null` parses SUCCESSFULLY
+    // (`{ok: true, value: null}`), and it is the one JSON value that is both non-object and
+    // dereferenceable-looking. Bodies `5`, `"str"` and `[]` all reach `typeof …run_id` harmlessly
+    // and classify as invalid; `null` threw a TypeError, breaking this function's documented
+    // totality over (token, record, temps). Measured before the fix.
+    if (parsed.ok && typeof parsed.value?.run_id === 'string' && isValidDigest(parsed.value?.opening_digest)) {
+      tokenState = 'valid';
+      tokenValue = parsed.value;
+    } else {
+      tokenState = 'invalid';
+    }
+  }
+
+  const recordRead = readRunRecordFromDisk(profileLike, deps);
+  if (recordRead.kind === 'hazard') return { hazard: recordRead };
+  let recordState = 'absent';
+  let recordValue = null;
+  if (recordRead.kind === 'invalid') {
+    recordState = 'invalid';
+  } else if (recordRead.kind === 'present') {
+    recordState = 'valid';
+    recordValue = recordRead.record;
+  }
+
+  // Recovery is read-only (it commits nothing), so a listing hazard here is an ordinary hazard —
+  // propagated through the same `{hazard}` discriminator this function already uses for the
+  // token/record reads above, which its own callers (`recoverProvenanceState`, `repair`) already
+  // dispatch on.
+  const tempsListed = listMatchingTemps(profileLike, deps);
+  if (!tempsListed.ok) return { hazard: tempsListed.hazard };
+  const temps = tempsListed.temps;
+  for (const temp of temps) {
+    const tempLeaf = openLeafNoFollow(temp, fs.constants.O_RDONLY, deps);
+    if (tempLeaf.kind === 'hazard') return { hazard: tempLeaf };
+    if (tempLeaf.kind === 'present') closeBestEffort(tempLeaf.fd, deps);
+  }
+
+  return {
+    tokenState,
+    tokenValue,
+    recordState,
+    recordValue,
+    hasTemps: temps.length > 0,
+    temps,
+  };
+}
+
+function classify(observed) {
+  const { tokenState, tokenValue, recordState, recordValue, hasTemps } = observed;
+
+  if (tokenState === 'absent') {
+    return hasTemps ? { state: 'orphan_temp' } : { state: 'absent' };
+  }
+  if (tokenState === 'invalid') {
+    return { state: 'partial' };
+  }
+  if (recordState === 'invalid') {
+    return { state: 'malformed' };
+  }
+  if (recordState === 'absent') {
+    return hasTemps ? { state: 'prepared' } : { state: 'open' };
+  }
+  // recordState === 'valid'
+  if (tokenValue.run_id !== recordValue.run_id) {
+    return hasTemps ? { state: 'prepared' } : { state: 'open' };
+  }
+  if (tokenValue.opening_digest === recordValue.opening_digest) {
+    return { state: 'committed' };
+  }
+  return { state: 'divergent' };
+}
+
+function expectedForState(state, tokenValue) {
+  if (STATE_ONLY_EXPECTED.has(state)) {
+    return { state, run_id: null, opening_digest: null };
+  }
+  return { state, run_id: tokenValue.run_id, opening_digest: tokenValue.opening_digest };
+}
+
+/**
+ * Classify this profile's row-6 state — a TOTAL function of (token, record, temps) observed AFTER
+ * gate 6. Mutates nothing. On a skipped profile (this run's own W1 outcome), returns `not_active`
+ * with zero token/record/temp reads.
+ *
+ * @param {object} profileLike
+ * @param {object} [deps]
+ * @returns {{state: string, action: string|null, expected: object, files: string[]}|{ok: false, halts: Array<object>}}
+ */
+export function recoverProvenanceState(profileLike, deps) {
+  const d = mergeDeps(deps);
+  const ownership = assertProvenanceOwnership(profileLike, d);
+  if (ownership.skip) {
+    return { state: 'not_active', action: null, expected: { state: 'not_active', run_id: null, opening_digest: null }, files: [] };
+  }
+  if (!ownership.ok) return { ok: false, halts: [{ halt: 'ownership_halt', halts: ownership.halts }] };
+
+  const observed = inspectTokenAndRecordAndTemps(profileLike, d);
+  if (observed.hazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...observed.hazard }] };
+
+  const { state } = classify(observed);
+  const action = REPAIR_FOR_STATE[state] ?? null;
+  const expected = expectedForState(state, observed.tokenValue);
+  const files = [pendingTokenPath(profileLike), runRecordPath(profileLike), ...observed.temps];
+  return { state, action, expected, files };
+}
+
+// Both repairs share ONE mutation order — every matching temp first, the token last — so the order
+// is a property of this function rather than a parameter its two callers could disagree about.
+// They differ only in `calledApi`, which is what the wrong-executor check below is keyed on.
+function repair(profileLike, expected, deps, calledApi) {
+  const d = mergeDeps(deps);
+  const ownership = assertProvenanceOwnership(profileLike, d);
+  if (ownership.skip) return { ok: true, skipped: true, removed: [] };
+  if (!ownership.ok) return { ok: false, halts: [{ halt: 'ownership_halt', halts: ownership.halts }] };
+
+  const observed = inspectTokenAndRecordAndTemps(profileLike, d);
+  if (observed.hazard) return { ok: false, halts: [{ halt: 'provenance_hazard', ...observed.hazard }] };
+  const { state: observedState } = classify(observed);
+
+  // The wrong-executor check is keyed on `expected.state` — the state the CALLER is claiming to
+  // repair — never on `observedState`, the state currently on disk. Keying it on `observedState`
+  // is a real bug, not a style choice: `REPAIR_FOR_STATE` has no entry for the four states with no
+  // prescribed repair (not_active, absent, malformed, divergent), so the moment the tree has
+  // ALREADY reached one of those (e.g. a concurrent abort already finished), the check silently
+  // stops comparing anything — a caller invoking `cleanupCommittedRun` against an `expected.state`
+  // of `open` (whose prescribed repair is `abortCaptureRun`) is accepted as a no-op the instant the
+  // tree happens to have reached `absent` first, which is exactly the wrong executor for the state
+  // it claims to be resolving (codex, important #5). Keying on `expected.state` instead means the
+  // check is a property of the REQUEST, not of a filesystem race the caller cannot control.
+  const prescribed = REPAIR_FOR_STATE[expected.state];
+  if (prescribed !== undefined && prescribed !== calledApi) {
+    return { ok: false, halts: [{ halt: 'stale_verdict', reason: 'wrong_repair_for_state', observedState, expectedState: expected.state, calledApi }] };
+  }
+
+  const chain = PROGRESS_CHAINS[expected.state];
+  if (chain === undefined || !chain.includes(observedState)) {
+    return { ok: false, halts: [{ halt: 'stale_verdict', reason: 'off_progress_chain', observedState, expectedState: expected.state }] };
+  }
+
+  // Fingerprint check where the expected state carries one (skip for state-only-expected values,
+  // which carry {run_id:null, opening_digest:null} by contract).
+  if (!STATE_ONLY_EXPECTED.has(expected.state)) {
+    const currentFingerprint = observed.tokenState === 'valid' ? observed.tokenValue : null;
+    if (currentFingerprint === null || currentFingerprint.run_id !== expected.run_id || currentFingerprint.opening_digest !== expected.opening_digest) {
+      // The token is gone or changed identity — but if we've already reached (or passed) the
+      // final post_state for this chain, that is idempotent success, not staleness.
+      const finalState = chain[chain.length - 1];
+      if (observedState === finalState) {
+        return { ok: true, removed: [], noop: true };
+      }
+      return { ok: false, halts: [{ halt: 'stale_verdict', reason: 'fingerprint_changed', observedState }] };
+    }
+  }
+
+  const finalState = chain[chain.length - 1];
+  if (observedState === finalState) {
+    return { ok: true, removed: [], noop: true };
+  }
+
+  // A mutation_failed halt names the path, what was already removed, AND the state the tree is
+  // now in (re-observed fresh rather than reasoned about in-memory, since removing SOME but not
+  // all temps can either leave the classification unchanged or flip it, depending on whether the
+  // failure landed on the last one) — so the operator re-runs rather than guesses (codex,
+  // important #5: an earlier version omitted this).
+  function mutationFailedHalt(path, removedSoFar, err) {
+    const reobserved = inspectTokenAndRecordAndTemps(profileLike, d);
+    const currentState = reobserved.hazard ? null : classify(reobserved).state;
+    return { ok: false, halts: [{ halt: 'mutation_failed', path, removed: removedSoFar, detail: describeThrown(err), currentState }] };
+  }
+
+  // Resume the remaining suffix of the mutation order from wherever we are.
+  const removed = [];
+  for (const temp of observed.temps) {
+    try {
+      d.unlinkSync(temp);
+      removed.push(temp);
+    } catch (err) {
+      return mutationFailedHalt(temp, removed, err);
+    }
+  }
+  // The token is deleted UNCONDITIONALLY here, never gated on `observedState` — both repairs'
+  // whole job, once every temp is gone, is deleting the token: for abort, that is what takes
+  // 'open' to 'absent'; for cleanup, temps never blocked 'committed' in the first place, so this
+  // is the only remaining step. Confirmed intentional (team-lead review, #362) — an earlier draft
+  // had a conditional here whose body was empty comments only, which is exactly what a LOST edit
+  // looks like; there was no lost edit, the condition was simply never needed.
+  const tokenPath = pendingTokenPath(profileLike);
+  try {
+    d.unlinkSync(tokenPath);
+    removed.push(tokenPath);
+  } catch (err) {
+    if (errProp(err, 'code') !== 'ENOENT') {
+      return mutationFailedHalt(tokenPath, removed, err);
+    }
+  }
+
+  return { ok: true, removed };
+}
+
+/**
+ * Repair the `orphan_temp` / `partial` / `prepared` / `open` states: remove every matching temp
+ * first, the token last. Idempotent — running it twice, or on an already-absent token, succeeds
+ * with `{ok:true, removed:[], noop:true}`.
+ *
+ * @param {object} profileLike
+ * @param {{state: string, run_id: string|null, opening_digest: string|null}} expected
+ * @param {object} [deps]
+ * @returns {{ok: true, removed: string[], noop?: true}|{ok: true, skipped: true, removed: []}|{ok: false, halts: Array<object>}}
+ */
+export function abortCaptureRun(profileLike, expected, deps) {
+  return repair(profileLike, expected, deps, 'abortCaptureRun');
+}
+
+/**
+ * Repair the `committed` state: remove every matching temp first, the token last, ONLY while the
+ * token and record still show `committed` at the expected fingerprint. Idempotent.
+ *
+ * @param {object} profileLike
+ * @param {{state: string, run_id: string|null, opening_digest: string|null}} expected
+ * @param {object} [deps]
+ * @returns {{ok: true, removed: string[], noop?: true}|{ok: true, skipped: true, removed: []}|{ok: false, halts: Array<object>}}
+ */
+export function cleanupCommittedRun(profileLike, expected, deps) {
+  return repair(profileLike, expected, deps, 'cleanupCommittedRun');
+}
