@@ -202,17 +202,27 @@ class CodexJob:
         self.model = model
         # #412: the plugin's own install root -- realpath'd at construction
         # (matching self.root's own treatment) so a symlink cannot be swapped
-        # underneath an already-resolved trust decision. Trust-boundary fix:
-        # "given" is tested as `is not None` here, matching main()'s own
-        # definition exactly -- a bare truthiness test (`if plugin_root`)
-        # used to treat an empty string as "not given" too, silently
-        # falling back to SCRIPTS_DIR (the codex-writable durable-root
-        # copy) even though main()'s own pre-flight check had validated
-        # `os.path.realpath("")` (the CURRENT WORKING DIRECTORY) as a real
-        # assets/scripts/ location -- an operator who passed the flag at
-        # all believed the redirect was active. `None` (the flag genuinely
-        # omitted) is the only value that reproduces the pre-#412 default;
-        # see _trusted_scripts_dir()'s own docstring.
+        # underneath an already-resolved trust decision. main() now resolves
+        # this exactly once and passes the RESOLVED value here (never the
+        # raw CLI string a second time -- re-resolving would open a TOCTOU
+        # window between main()'s own validation and this call, benign under
+        # this file's threat model since winning that race already requires
+        # write access to the one tree #412 exists to keep out of codex's
+        # reach, but pointless to carry once removing it is this cheap); the
+        # realpath() call here stays for any OTHER caller (tests, a future
+        # caller) that constructs a CodexJob directly with an unresolved
+        # path -- idempotent, so a caller that already resolved it pays
+        # nothing extra. Trust-boundary fix: "given" is tested as `is not
+        # None` here, matching main()'s own definition exactly -- a bare
+        # truthiness test (`if plugin_root`) used to treat an empty string
+        # as "not given" too, silently falling back to SCRIPTS_DIR (the
+        # codex-writable durable-root copy) even though main()'s own
+        # pre-flight check had validated `os.path.realpath("")` (the
+        # CURRENT WORKING DIRECTORY) as a real assets/scripts/ location --
+        # an operator who passed the flag at all believed the redirect was
+        # active. `None` (the flag genuinely omitted) is the only value
+        # that reproduces the pre-#412 default; see _trusted_scripts_dir()'s
+        # own docstring.
         self.plugin_root = os.path.realpath(plugin_root) if plugin_root is not None else None
 
         self.inv = os.urandom(8).hex()
@@ -1090,6 +1100,20 @@ def main(argv=None):
     if not os.path.isfile(args.companion):
         print("Error: --companion not found: %s" % args.companion, file=sys.stderr)
         return 2
+    # Resolved exactly ONCE, right here, and reused for both the validation
+    # below and the CodexJob() construction further down -- never re-derived
+    # from the raw `args.plugin_root` string a second time. A second
+    # `os.path.realpath()` call on the raw string would open a TOCTOU window
+    # (a symlink swapped between the two resolutions could make them
+    # disagree, so a caller passing a validated PATH could still end up with
+    # a CodexJob resolving somewhere else); not a live attack in this
+    # threat model (an actor able to swap a symlink INSIDE --plugin-root
+    # already has write access to the one tree #412 exists to keep
+    # write-inaccessible to codex, which is a strictly worse position than
+    # winning this race), but resolving once removes the possibility of the
+    # two ever meaning something different -- the exact "two definitions of
+    # the same value can drift" shape the empty-string bug above was.
+    resolved_plugin_root = None
     if args.plugin_root is not None:
         # #412: fail loudly at usage time on a misconfigured --plugin-root
         # (e.g. a typo, or a plugin layout that predates assets/scripts/)
@@ -1124,7 +1148,8 @@ def main(argv=None):
                 file=sys.stderr,
             )
             return 2
-        plugin_scripts_dir = os.path.join(os.path.realpath(args.plugin_root), "assets", "scripts")
+        resolved_plugin_root = os.path.realpath(args.plugin_root)
+        plugin_scripts_dir = os.path.join(resolved_plugin_root, "assets", "scripts")
         if not os.path.isdir(plugin_scripts_dir):
             print(
                 "Error: --plugin-root %s does not resolve to a directory containing "
@@ -1146,7 +1171,7 @@ def main(argv=None):
         kind=args.kind, seg=args.seg, tok=args.expect_token, disp=args.disp, root=args.cwd,
         companion=args.companion, prompt_text=prompt_text, prompt_file=args.prompt_file,
         deadline_sec=args.deadline_sec, poll_sec=poll_sec, effort=args.effort, node=args.node,
-        model=args.model, plugin_root=args.plugin_root,
+        model=args.model, plugin_root=resolved_plugin_root,
     )
     return job.run()
 
