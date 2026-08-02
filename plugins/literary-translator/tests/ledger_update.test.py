@@ -735,6 +735,86 @@ def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
     assert read_fragment(root, seg)["status"] == "in_progress"
 
 
+# ---------------------------------------------------------------------------
+# 10. mark_ever_converged() failure is FATAL to recording convergence
+#     (post-review correction, LT-409).
+# ---------------------------------------------------------------------------
+
+def test_sentinel_write_failure_refuses_to_record_convergence(tmp_path):
+    """When the sentinel write inside mark_ever_converged() fails, the whole
+    'converged' write must be refused -- no ledger fragment written at all --
+    rather than recording convergence anyway. A fragment recorded as
+    'converged' without its sentinel is invisible to the one check that
+    refuses to re-select and retranslate an already-converged segment, so
+    failing OPEN here (the pre-fix behavior) is the dangerous direction. The
+    positive control -- convergence recorded successfully WITH its sentinel
+    -- is test_durable_root_flag_redirects_converged_enrich above.
+
+    ledger_update.py runs as a real subprocess here, so there is no
+    in-process call to monkeypatch (the way an in-process test would patch
+    around an unreliable chmod, per skeptic_ready.test.py's own precedent).
+    The failure is induced at the OS level instead: segments/ is made
+    read-only so os.open()'s O_CREAT cannot create the new sentinel file.
+    Guarded with a runtime write-probe, not just a geteuid()==0 check --
+    some sandboxes/containers ignore permission bits even for a non-root
+    user, and a false negative here would silently degrade this into
+    testing nothing.
+    """
+    root = make_durable_root(tmp_path)
+    seg = "segSentinelFail"
+    write_segpack_fixture(root, seg)
+    draft_sha1_value = write_draft_fixture(root, seg)
+    write_review_fixture(root, seg, draft_sha1_value)
+    payload_path = write_payload(
+        root, "pSentinelFail",
+        {"status": "converged", "cache_key": FULL_CACHE_KEY, "rounds": 1},
+    )
+
+    segments_dir = root / "segments"
+    original_mode = segments_dir.stat().st_mode
+    segments_dir.chmod(0o555)  # read + execute only -- no new entry creatable
+
+    probe_path = segments_dir / ".write_probe"
+    try:
+        probe_path.touch()
+    except PermissionError:
+        blocked = True
+    else:
+        probe_path.unlink()
+        blocked = False
+
+    if not blocked:
+        segments_dir.chmod(original_mode)
+        pytest.skip(
+            "segments/ chmod 0o555 did not actually block file creation -- "
+            "running as root or in a sandbox that ignores permission bits; "
+            "cannot exercise the sentinel-write-failure path this way here"
+        )
+
+    try:
+        result = run_ledger_update(root, seg, payload_path)
+    finally:
+        segments_dir.chmod(original_mode)  # restore for pytest's tmp_path cleanup
+
+    assert result.returncode != 0, (
+        f"a sentinel write failure must refuse the whole write, got rc="
+        f"{result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    stdout = json.loads(result.stdout.strip())
+    assert stdout["success"] is False
+    assert "sentinel" in stdout["error"].lower(), stdout["error"]
+    # Failure shapes never claim a fragment_path/fragment_sha1 that was
+    # never written.
+    assert "fragment_path" not in stdout
+    assert "fragment_sha1" not in stdout
+    assert not (root / "runs" / "ledger.d" / f"{seg}.json").exists(), (
+        "no ledger fragment may be written for a 'converged' status whose "
+        "sentinel could not be created -- recording convergence without its "
+        "sentinel is exactly the unprotected state this fix closes"
+    )
+    assert not (segments_dir / f".ever_converged.{seg}").exists()
+
+
 if __name__ == "__main__":
     import pytest as _pytest
 

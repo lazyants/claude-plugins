@@ -173,10 +173,23 @@ def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
     Never removed by any ledger write. The single sanctioned way to clear it
     is an explicit, authorized re-translate of that segment.
 
-    Failure to create the sentinel is NOT fatal to recording convergence: the
-    convergence itself is already proven and refusing here would discard paid
-    work over a bookkeeping file. It is reported on stderr so a run that
-    cannot protect its own output is visible rather than silent."""
+    Failure to create the sentinel IS FATAL to recording convergence
+    (post-review correction). The original version of this docstring called
+    a failure here non-fatal, reasoning that the convergence was already
+    proven and refusing would discard paid work over a bookkeeping file --
+    that reasoning had the dangerous direction backwards. This sentinel is
+    the ONLY thing that later refuses to re-select and retranslate a segment
+    that has already converged (see the "MUTABLE status" paragraph above): a
+    ledger fragment recorded as 'converged' WITHOUT it is a segment that
+    looks done but carries no protection, and a later re-dispatch will
+    silently retranslate it -- discarding the exact work this call exists to
+    protect. The caller (enrich_converged_fields, below) now checks this
+    return value and refuses to record convergence at all when it is False.
+    Nothing already on disk (the draft/review artifacts) is lost either way
+    -- only the ledger's own 'converged' verdict is withheld until the
+    sentinel can actually be written, on this attempt or a retry. Still
+    reported on stderr in addition to the fatal failure, so the underlying
+    OS problem is visible without having to parse the JSON error."""
     path = ever_converged_path(seg, segments_dir)
     try:
         fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
@@ -508,7 +521,27 @@ def enrich_converged_fields(seg, fragment, run_token=None, segments_dir=SEGMENTS
     # Deliberately AFTER every precondition above: a segment that failed the
     # token, draft-presence or draft-changed-since-review checks has not
     # converged and must not be marked as having done so.
-    mark_ever_converged(seg, segments_dir)
+    #
+    # Post-review correction: the sentinel write's own success is now a hard
+    # precondition for recording convergence at all -- checked HERE, before
+    # this function returns, and therefore before write_fragment_atomically()
+    # in main() ever runs. See mark_ever_converged()'s own docstring for why
+    # treating a sentinel failure as non-fatal was the dangerous direction to
+    # fail open in: a fragment written as 'converged' without its sentinel is
+    # invisible to the one check that refuses to re-select and retranslate an
+    # already-converged segment.
+    if not mark_ever_converged(seg, segments_dir):
+        emit_failure(
+            f"Cannot record convergence for segment '{seg}': failed to "
+            f"create the ever-converged sentinel at "
+            f"{ever_converged_path(seg, segments_dir)} (see stderr for the "
+            f"underlying OS error). Refusing to write a 'converged' ledger "
+            f"fragment without its protecting sentinel -- doing so would "
+            f"leave the segment looking done while remaining eligible for "
+            f"silent re-selection and retranslation. The draft/review "
+            f"artifacts are untouched; retry once the underlying filesystem "
+            f"problem (permissions/quota/I/O) is fixed."
+        )
 
 
 def write_fragment_atomically(seg, fragment, ledger_fragment_dir=LEDGER_FRAGMENT_DIR):

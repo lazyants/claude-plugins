@@ -1124,11 +1124,19 @@ def test_case12_stale_token_pair_surfaces_in_missing_segments(tmp_path):
 # self-anchored behavior for both when both flags are omitted.
 # ===========================================================================
 
-def run_resume_setup_from(script_path, payload_obj, tmp_dir, *extra_args, timeout=30):
+def run_resume_setup_from(script_path, payload_obj, tmp_dir, *extra_args, timeout=30, cwd=None):
+    """`cwd=None` (the default) preserves every pre-existing caller's
+    behavior exactly (subprocess.run() with no cwd= inherits the test
+    process's own cwd) -- only a caller that needs to control the SUBPROCESS's
+    own working directory (e.g. to exercise a caller-relative --durable-root
+    end to end) passes one explicitly."""
     payload_path = tmp_dir / "scratch_resume_payload.json"
     write_json(payload_path, payload_obj)
     cmd = [sys.executable, str(script_path), "--payload-file", str(payload_path), *extra_args]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout,
+        cwd=str(cwd) if cwd is not None else None,
+    )
     parsed = None
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
     if len(lines) == 1:
@@ -1179,6 +1187,104 @@ def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
 
     parsed = assert_setup_success(proc, parsed)
     assert parsed.get("resume") is False
+
+
+# ---------------------------------------------------------------------------
+# A RELATIVE --durable-root must be resolved exactly ONCE (LT-409 post-review
+# fix). resolve_dirs() already resolves it correctly against resume_setup.py's
+# OWN cwd -- but _cache_key_for_seg() then runs the cache_key.py subprocess
+# with cwd SET TO that already-resolved root while (pre-fix) forwarding the
+# ORIGINAL, still-relative string as the subprocess's own --durable-root.
+# cache_key.py resolves ITS --durable-root against ITS OWN cwd (the
+# already-resolved root) -- joining the relative fragment onto the root a
+# second time.
+# ---------------------------------------------------------------------------
+
+PATH_PROBE_CACHE_KEY_PY = """#!/usr/bin/env python3
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seg")
+    parser.add_argument("--durable-root", default=None)
+    args, _ = parser.parse_known_args()
+    if args.durable_root:
+        resolved = Path(args.durable_root).resolve()
+    else:
+        resolved = Path(__file__).resolve().parent.parent
+    # Record what THIS invocation resolved --durable-root to. __file__ is
+    # this stub's own FIXED on-disk location, unaffected by any doubling bug
+    # in the --durable-root VALUE it receives, so the probe file's own path
+    # is trustworthy regardless of what is under test.
+    probe_path = Path(__file__).resolve().parent.parent / "cache_key_probe.jsonl"
+    with open(probe_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"seg": args.seg, "resolved_durable_root": str(resolved)}) + "\\n")
+    if not args.seg:
+        sys.stderr.write("path-probe cache_key.py: test stub requires --seg\\n")
+        return 1
+    # Always succeeds with a real-shaped (if fake) composite, regardless of
+    # what it resolved -- decouples "did resume_setup.py notice a problem"
+    # from "did cache_key.py read the RIGHT tree", so the doubled-path defect
+    # is caught by a direct path comparison even in a build where it happens
+    # not to crash (e.g. the doubled directory exists for an unrelated
+    # reason) -- the more dangerous, silent failure mode.
+    print(json.dumps({"probe": True, "seg": args.seg}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
+
+
+def test_relative_durable_root_is_not_double_resolved_for_cache_key_subprocess(tmp_path):
+    """Caller runs from an outer cwd (e.g. `cd /repo`) with a RELATIVE
+    --durable-root (e.g. `projects/book`) -- the exact shape every real
+    caller of this script COULD use, even though every other test in this
+    file happens to pass an absolute one."""
+    outer = tmp_path  # stands in for the caller's own cwd, e.g. "/repo"
+    root = make_resume_setup_root(outer, name="projects/book")
+    (root / "scripts" / "cache_key.py").write_text(PATH_PROBE_CACHE_KEY_PY, encoding="utf-8")
+    probe_path = root / "cache_key_probe.jsonl"
+    assert not probe_path.exists()  # fixture sanity: nothing recorded yet
+
+    proc, parsed = run_resume_setup_from(
+        root / "scripts" / "resume_setup.py",
+        mass_base_payload(),
+        root,
+        "--durable-root", "projects/book",  # RELATIVE, relative to `outer`
+        cwd=outer,
+    )
+
+    assert probe_path.is_file(), (
+        f"the probe stub never ran -- resume_setup.py must have failed "
+        f"before even shelling out to cache_key.py: rc={proc.returncode}\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    probe_lines = [
+        json.loads(ln) for ln in probe_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+    ]
+    assert probe_lines, "probe file exists but recorded no invocations"
+    for entry in probe_lines:
+        assert entry["resolved_durable_root"] == str(root), (
+            f"cache_key.py's own --durable-root resolution must land on the "
+            f"SAME root resume_setup.py itself resolved ({root}) -- got "
+            f"{entry['resolved_durable_root']!r} for seg {entry['seg']!r}. A "
+            f"doubled path here (the relative fragment 'projects/book' "
+            f"joined onto root a second time) means the raw relative "
+            f"string was forwarded verbatim into a subprocess whose cwd is "
+            f"already that resolved root."
+        )
+
+    # The probe stub never fails, so resume_setup.py itself must have
+    # reported success -- proving the wrong-tree read (pre-fix) would have
+    # been entirely SILENT: a caller reading only {"success": true, ...}
+    # would never learn its digest was computed from the wrong directory.
+    parsed = assert_setup_success(proc, parsed)
 
 
 # ---------------------------------------------------------------------------

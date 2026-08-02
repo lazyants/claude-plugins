@@ -498,22 +498,33 @@ def _cache_key_for_seg(
     against -- self-anchored by default, or resolve_dirs()'s own
     --plugin-root-aware `{plugin_root}/assets/scripts/cache_key.py` (never
     derived from durable_root; see resolve_dirs()'s own docstring for why).
-    `durable_root` is cache_key.py's DATA root (cwd for the subprocess).
+    `durable_root` is cache_key.py's DATA root (cwd for the subprocess) --
+    ALREADY resolve()'d by resolve_dirs(), so it is always an absolute path.
     `durable_root_str`/`plugin_root_str` are THIS script's own CLI values
-    (cache_key.py has no --plugin-root, being a leaf): `durable_root_str` is
-    forwarded verbatim as cache_key.py's own --durable-root when given; when
-    it is NOT given but `plugin_root_str` IS (meaning `cache_key_script` was
-    itself resolved via --plugin-root, so it no longer physically sits under
-    durable_root), `durable_root` is forwarded explicitly anyway -- otherwise
-    cache_key.py's own self-anchoring would silently resolve its data from
-    the plugin root instead of the real durable root.
+    (cache_key.py has no --plugin-root, being a leaf), used only to DECIDE
+    whether a --durable-root should be forwarded at all -- never their own
+    string VALUE.
+
+    Post-review correction: whenever either flag is set, the subprocess's
+    own --durable-root is now the ALREADY-RESOLVED `durable_root`, never the
+    raw `durable_root_str`. Forwarding the raw string used to double-resolve
+    it whenever it was RELATIVE: the subprocess below runs with
+    cwd=str(durable_root) (an absolute path), so a relative --durable-root
+    VALUE would be resolved a SECOND time inside cache_key.py, against that
+    already-resolved cwd -- e.g. --durable-root projects/book run from
+    /repo resolves HERE to /repo/projects/book, then cache_key.py resolves
+    "projects/book" again against that cwd, landing on
+    /repo/projects/book/projects/book (a directory that generally doesn't
+    exist, or -- worse -- silently reads whatever unrelated tree happens to
+    sit there). Forwarding the resolved path is a no-op for a caller that
+    already passes an absolute path (every existing caller does), and does
+    not change cache_key.py's own contract -- it already accepts an
+    absolute --durable-root.
     """
     if not cache_key_script.is_file():
         raise ResumeSetupError(f"{cache_key_script} not found")
     cmd = [sys.executable, str(cache_key_script), "--seg", seg]
-    if durable_root_str is not None:
-        cmd += ["--durable-root", durable_root_str]
-    elif plugin_root_str is not None:
+    if durable_root_str is not None or plugin_root_str is not None:
         cmd += ["--durable-root", str(durable_root)]
     try:
         proc = subprocess.run(
