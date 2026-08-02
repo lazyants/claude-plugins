@@ -176,7 +176,10 @@ if sub == "task":
     log({"sub": "task", "cwd": cwd, "prompt_file": opt("--prompt-file"),
          "write": "--write" in rest, "fresh": "--fresh" in rest, "effort": opt("--effort")})
     if state.get("task_returncode", 0):
-        sys.stderr.write("task boom")
+        # #400: task_stderr lets a test simulate the companion's own thrown-error
+        # text (e.g. an auth/quota message) on a launch failure, instead of the
+        # generic "task boom" placeholder.
+        sys.stderr.write(state.get("task_stderr", "task boom"))
         sys.exit(state["task_returncode"])
     seg = state["seg"]; tok = state["tok"]; kind = state["kind"]
     mode = state.get("attempt_mode", "valid")
@@ -250,7 +253,16 @@ if sub == "status":
         f.write(str(n + 1))
     st = seq[min(n, len(seq) - 1)]
     ws = state.get("status_ws", cwd)
-    print(json.dumps({"job": {"status": st, "workspaceRoot": ws}}))
+    job_obj = {"status": st, "workspaceRoot": ws}
+    # #400: status_error_message mimics the companion's own job-store field
+    # (job.errorMessage, persisted when its tracked-job runner catches a thrown
+    # exception -- e.g. quota/auth -- verified directly against the installed
+    # codex-companion.mjs's lib/tracked-jobs.mjs), so a test can simulate a
+    # failure that carries a real cause instead of a bare status string.
+    err = state.get("status_error_message")
+    if err:
+        job_obj["errorMessage"] = err
+    print(json.dumps({"job": job_obj}))
     sys.exit(0)
 
 if sub == "cancel":
@@ -870,6 +882,100 @@ def test_validate_attempt_translate_quality_defect(tmp_path, monkeypatch):
     assert calls == ["draft_ready.py", "validate_draft.py"]
 
 
+# --------------------------------------------------------------------------- #
+# #399: a REJECTING gate's own output must be captured into error_detail
+# (reusing the #400 plumbing) rather than discarded, both from
+# validate_attempt()'s own gate calls and from adopt_pending()'s.
+# --------------------------------------------------------------------------- #
+def _gate_recorder_with_output(results):
+    """Like _gate_recorder, but `results` maps gate name -> (returncode,
+    stdout, stderr) so a test can inspect the CONTENT a rejecting gate
+    printed, not just whether it rejected."""
+    calls = []
+
+    def _gate(args, timeout):
+        calls.append(args[0])
+        rc, out, err = results.get(args[0], (0, "", ""))
+        return SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+    return _gate, calls
+
+
+def test_validate_attempt_captures_rejecting_gate_output(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="translate")
+    _seed_sandbox(tmp_path, job)
+    assert job.error_detail is None   # precondition
+    gate, calls = _gate_recorder_with_output({
+        "draft_ready.py": (0, "", ""),
+        "validate_draft.py": (1, "[c001] FAIL: [FN:1] empty translation", ""),
+    })
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.validate_attempt() is False
+    assert job.error_detail == "validate_draft.py: [c001] FAIL: [FN:1] empty translation", (
+        f"expected the rejecting gate's own name + output captured, got "
+        f"{job.error_detail!r}"
+    )
+
+
+def test_validate_attempt_pass_leaves_error_detail_none(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="translate")
+    _seed_sandbox(tmp_path, job)
+    gate, calls = _gate_recorder_with_output({
+        "draft_ready.py": (0, "", ""),
+        "validate_draft.py": (0, "[c001] OK", ""),
+    })
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.validate_attempt() is True
+    assert job.error_detail is None, "a PASSING gate's output must never be captured"
+
+
+def test_capture_gate_rejection_combines_stdout_and_stderr(tmp_path):
+    job = _mkjob(tmp_path)
+    proc = SimpleNamespace(returncode=1, stdout="stdout line", stderr="stderr line")
+    job._capture_gate_rejection("validate_draft.py", proc)
+    assert job.error_detail == "validate_draft.py: stdout line\nstderr line"
+
+
+def test_capture_gate_rejection_empty_output_leaves_error_detail_none(tmp_path):
+    job = _mkjob(tmp_path)
+    proc = SimpleNamespace(returncode=1, stdout="", stderr="")
+    job._capture_gate_rejection("validate_draft.py", proc)
+    assert job.error_detail is None, "nothing to capture -- must not fabricate a value"
+
+
+def test_capture_gate_rejection_truncates_with_explicit_bound_marker(tmp_path):
+    job = _mkjob(tmp_path)
+    long_output = "X" * (job._GATE_OUTPUT_CAP + 500)
+    proc = SimpleNamespace(returncode=1, stdout=long_output, stderr="")
+    job._capture_gate_rejection("validate_draft.py", proc)
+    assert job.error_detail is not None
+    # The captured value stays a bounded artifact (this lands in the durable
+    # joblog): the raw payload before the "gate_name: " prefix + truncation
+    # marker must not exceed _GATE_OUTPUT_CAP chars.
+    prefix = "validate_draft.py: "
+    assert job.error_detail.startswith(prefix)
+    payload = job.error_detail[len(prefix):]
+    assert len(payload) <= job._GATE_OUTPUT_CAP + len("... [truncated at %d chars]" % job._GATE_OUTPUT_CAP)
+    assert ("... [truncated at %d chars]" % job._GATE_OUTPUT_CAP) in job.error_detail, (
+        "truncation must carry an EXPLICIT marker naming the exact bound, "
+        "never a silent cut"
+    )
+    assert long_output not in job.error_detail, "the full untruncated text must not survive"
+
+
+def test_adopt_pending_captures_rejecting_gate_output(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    assert job.error_detail is None   # precondition
+    gate, calls = _gate_recorder_with_output({
+        "draft_ready.py": (0, "", ""),
+        "validate_draft.py": (1, "[c001] FAIL: dangling FNREF_2", ""),
+    })
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.adopt_pending() is False
+    assert job.error_detail == "validate_draft.py: [c001] FAIL: dangling FNREF_2"
+    assert not os.path.exists(job.pending)   # still discarded, per #213's existing contract
+
+
 def test_validate_attempt_review_uses_review_ready(tmp_path, monkeypatch):
     job = _mkjob(tmp_path, kind="review")
     _seed_sandbox(tmp_path, job)
@@ -955,6 +1061,63 @@ def test_poll_failed_is_terminal_no_cancel(tmp_path, monkeypatch):
     job.poll()
     assert job.job_status == "failed"
     assert job.timed_out is False
+
+
+# --------------------------------------------------------------------------- #
+# #400: poll() must capture the companion's own job.errorMessage rather than
+# discarding it -- verified against the REAL installed codex-companion.mjs's
+# lib/tracked-jobs.mjs: errorMessage is persisted on the job record ONLY when
+# its tracked-job runner catches a thrown exception (auth/quota/etc, not a
+# content defect), which is exactly the "N unrelated per-segment content
+# failures instead of one cause" signal #400 reports as missing.
+# --------------------------------------------------------------------------- #
+def _status_runner_with_error(statuses, error_message, record):
+    """Like _status_runner, but the LAST status in the sequence carries an
+    errorMessage field -- mirroring the real companion, which only ever sets
+    it on the terminal record."""
+    it = iter(statuses)
+    last = {"v": None}
+
+    def _run(argv, timeout):
+        sub = argv[2] if len(argv) > 2 else ""
+        record.append((sub, timeout))
+        if sub == "status":
+            try:
+                last["v"] = next(it)
+            except StopIteration:
+                pass
+            job = {"status": last["v"]}
+            if last["v"] == "failed" and error_message is not None:
+                job["errorMessage"] = error_message
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"job": job}))
+        return SimpleNamespace(returncode=0, stdout="{}")
+    return _run
+
+
+def test_poll_captures_error_message_on_failed_job(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path, deadline=100, poll=0)
+    job.jobId = "J"
+    assert job.error_detail is None   # precondition: nothing captured yet
+    rec = []
+    monkeypatch.setattr(job, "_run", _status_runner_with_error(
+        ["queued", "running", "failed"], "quota exceeded: retry after 3600s", rec))
+    job.poll()
+    assert job.job_status == "failed"
+    assert job.error_detail == "quota exceeded: retry after 3600s"
+
+
+def test_poll_leaves_error_detail_none_when_companion_omits_it(tmp_path, monkeypatch):
+    """Fail-safe/no-false-positive companion: a job.errorMessage the companion
+    never set must not be invented -- error_detail stays None, never "None"
+    the string or any other placeholder."""
+    job = _mkjob(tmp_path, deadline=100, poll=0)
+    job.jobId = "J"
+    rec = []
+    monkeypatch.setattr(job, "_run", _status_runner_with_error(
+        ["completed"], None, rec))
+    job.poll()
+    assert job.job_status == "completed"
+    assert job.error_detail is None
 
 
 def test_poll_deadline_cancels_and_times_out(tmp_path, monkeypatch):
@@ -1104,6 +1267,45 @@ def test_launch_no_jobid_returns_false(tmp_path, monkeypatch):
     assert job.launch() is False
 
 
+# --------------------------------------------------------------------------- #
+# #400: launch() must capture the companion's own stderr on a launch failure
+# (non-zero exit, or a proc that exists but yields no usable jobId) rather
+# than silently discarding it -- the other half of #400 alongside poll()'s
+# errorMessage capture above.
+# --------------------------------------------------------------------------- #
+def test_launch_captures_stderr_on_companion_nonzero_exit(tmp_path, monkeypatch):
+    job = _mkjob(tmp_path)
+    job.sandbox_dir = str(tmp_path / "sandbox")
+    assert job.error_detail is None   # precondition
+    monkeypatch.setattr(job, "_run", lambda argv, timeout: SimpleNamespace(
+        returncode=1, stdout="", stderr="Error: rate limit exceeded, retry in 60s"))
+    assert job.launch() is False
+    assert job.error_detail == "Error: rate limit exceeded, retry in 60s"
+
+
+def test_launch_captures_stderr_on_run_returning_none(tmp_path, monkeypatch):
+    """_run() itself returns None on a timeout or spawn failure (see its own
+    docstring) -- launch() must not crash reading .stderr off that None, and
+    must leave error_detail None (nothing to capture)."""
+    job = _mkjob(tmp_path)
+    job.sandbox_dir = str(tmp_path / "sandbox")
+    monkeypatch.setattr(job, "_run", lambda argv, timeout: None)
+    assert job.launch() is False
+    assert job.error_detail is None
+
+
+def test_launch_captures_stderr_when_jobid_missing(tmp_path, monkeypatch):
+    """The companion exits 0 but the JSON carries no jobId -- a distinct
+    failure mode from a non-zero exit, still worth whatever stderr came with
+    it (usually empty on a clean exit, but never silently dropped if not)."""
+    job = _mkjob(tmp_path)
+    job.sandbox_dir = str(tmp_path / "sandbox")
+    monkeypatch.setattr(job, "_run", lambda argv, timeout: SimpleNamespace(
+        returncode=0, stdout="{}", stderr="warning: unexpected response shape"))
+    assert job.launch() is False
+    assert job.error_detail == "warning: unexpected response shape"
+
+
 def test_launch_parses_jobid_and_writes_launched_joblog(tmp_path, monkeypatch):
     job = _mkjob(tmp_path)
     job.sandbox_dir = str(tmp_path / "sandbox")
@@ -1250,6 +1452,103 @@ def test_failed_job_writes_sentinel_and_terminal_joblog(tmp_path):
     assert sentinel_path(root, seg, "D1").exists()
     jl = json.loads((root / "segments" / ".codex_job.c001.json").read_text())
     assert jl["status"] == "terminal" and jl["ok"] is False
+    # #398: "reason" used to be computed by run() and thrown away at
+    # finalize()'s terminal joblog write -- job_status "failed" (with no
+    # timeout, no completion) falls to run()'s final else branch,
+    # self.reason = "job-%s" % self.job_status.
+    assert jl["reason"] == "job-failed"
+    assert line["reason"] == "job-failed"   # stdout already carried this; unaffected by the fix
+
+
+# --------------------------------------------------------------------------- #
+# #398: end-to-end -- a gate-REJECTED translate attempt (validate_draft.py
+# FAILs on the promoted-but-rejected candidate) must record ITS OWN precise
+# reason ("validate-failed"), not get relabeled generically later. This is
+# the exact "label half of #398" scenario from the issue: before this fix,
+# run() computed "validate-failed" correctly but finalize()'s joblog write
+# dropped it -- the ONLY durable record once the driver is launched detached
+# with stdout redirected to /dev/null (see mass-translate-wf.template.js's
+# nohup dispatch), which run() itself never simulates, so this test asserts
+# directly against the joblog file, the real durable surface.
+# --------------------------------------------------------------------------- #
+def test_terminal_joblog_carries_precise_reason_on_gate_rejection(tmp_path):
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="invalid_quality",
+                                   status_seq=["completed"]))
+    line = parse_line(proc)
+    assert proc.returncode == 1 and line["ok"] is False
+    jl = json.loads((root / "segments" / ".codex_job.c001.json").read_text())
+    assert jl["reason"] == "validate-failed", (
+        "a gate-REJECTED attempt must record its own precise reason in the "
+        "joblog, not fall through to a generic timeout-shaped label"
+    )
+    assert line["reason"] == "validate-failed"
+
+
+# --------------------------------------------------------------------------- #
+# #400: end-to-end -- a job that fails with the companion's own errorMessage
+# (e.g. a quota/auth error) must carry that text into BOTH the stdout line
+# and the terminal joblog, never just be reported as a bare "failed" status
+# indistinguishable from any other cause.
+# --------------------------------------------------------------------------- #
+def test_terminal_joblog_and_line_carry_error_detail_from_companion(tmp_path):
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="none",
+                                   status_seq=["failed"],
+                                   status_error_message="quota exceeded: retry after 3600s"))
+    line = parse_line(proc)
+    assert proc.returncode == 1 and line["ok"] is False
+    assert line["error_detail"] == "quota exceeded: retry after 3600s"
+    jl = json.loads((root / "segments" / ".codex_job.c001.json").read_text())
+    assert jl["error_detail"] == "quota exceeded: retry after 3600s", (
+        "the joblog is the ONLY durable record once the driver runs detached "
+        "with stdout redirected to /dev/null -- the stdout line alone is not enough"
+    )
+
+
+def test_terminal_joblog_and_line_error_detail_absent_when_companion_silent(tmp_path):
+    """Companion control: a plain failure with no errorMessage at all must
+    leave error_detail null/absent everywhere, never a fabricated value."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="none",
+                                   status_seq=["failed"]))
+    line = parse_line(proc)
+    assert line["error_detail"] is None
+    jl = json.loads((root / "segments" / ".codex_job.c001.json").read_text())
+    assert jl["error_detail"] is None
+
+
+# --------------------------------------------------------------------------- #
+# #399: end-to-end -- a REJECTING gate's own output (via the real STUB
+# validate_draft.py, not a hand-typed stand-in) must reach both the stdout
+# line and the terminal joblog, so a rejection can be diagnosed without
+# re-running the whole translation.
+# --------------------------------------------------------------------------- #
+def test_terminal_joblog_and_line_carry_rejecting_gate_output(tmp_path):
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="invalid_quality",
+                                   status_seq=["completed"]))
+    line = parse_line(proc)
+    assert proc.returncode == 1 and line["ok"] is False
+    # STUB_VALIDATE_DRAFT (this file's own gate stub, honoring the real
+    # validate_draft.py candidate-file CLI) prints exactly this on rejection.
+    assert line["error_detail"] == "validate_draft.py: [c001] FAIL (quality)", (
+        f"expected the rejecting gate's own name + printed output; got "
+        f"{line['error_detail']!r}"
+    )
+    jl = json.loads((root / "segments" / ".codex_job.c001.json").read_text())
+    assert jl["error_detail"] == "validate_draft.py: [c001] FAIL (quality)", (
+        "the joblog is the durable sink once the driver runs detached with "
+        "stdout redirected to /dev/null -- must carry this too"
+    )
 
 
 def test_deadline_exceeded_cancels(tmp_path):

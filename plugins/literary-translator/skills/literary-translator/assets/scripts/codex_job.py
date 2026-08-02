@@ -153,6 +153,17 @@ def _ok(proc):
     return proc is not None and proc.returncode == 0
 
 
+def _stderr_text(proc):
+    # type: (subprocess.CompletedProcess | None) -> "str | None"
+    """#400: whatever stderr text a companion subprocess produced, or None if there is
+    none to read (proc is None -- a timeout or spawn failure never produced a
+    CompletedProcess at all -- or stderr is empty/whitespace-only). Never raises."""
+    if proc is None:
+        return None
+    text = (getattr(proc, "stderr", None) or "").strip()
+    return text or None
+
+
 def _sha256_fd(fd):
     """Hash the CURRENT contents of an already-open fd (rewinds first). Never opens a
     path -- callers hold the identity via the fd itself."""
@@ -218,6 +229,16 @@ class CodexJob:
         self.jobId = None
         self.job_status = None
         self.reason = None
+        # #398/#400: the ONE piece of free-text diagnostic detail this driver ever
+        # captures, from whichever of two sources actually produced one -- the
+        # companion job store's own `errorMessage` (poll(), set when codex-companion's
+        # tracked-job runner caught an exception -- e.g. an API/quota error -- and
+        # persisted its message) or the `task` LAUNCH subprocess's own stderr
+        # (launch(), set when the launch invocation itself failed to even queue a job).
+        # Never both at once in practice (a launch that never queued a job has nothing
+        # for poll() to later overwrite this with). See poll()/launch() for exactly
+        # when each is set.
+        self.error_detail = None
 
     # ---- time helpers (FLOAT, no floor) -------------------------------------
     def poll_remaining(self):
@@ -336,18 +357,61 @@ class CodexJob:
         except OSError:
             pass
 
+    # #399: a gate that RAN and REJECTED an attempt currently discards both its
+    # own diagnostic output and the rejected attempt itself (finalize()
+    # _silent_remove()s self.attempt when not promoted) -- so diagnosing WHY a
+    # rejection happened requires re-running the whole translation. Capture the
+    # rejecting gate's own combined stdout+stderr into self.error_detail
+    # (reusing the #400 plumbing) instead.
+    _GATE_OUTPUT_CAP = 4000  # chars; this text lands in the durable joblog, so it must stay bounded
+
+    def _capture_gate_rejection(self, gate_name, proc):
+        """`proc` is the CompletedProcess of a gate call that just REJECTED
+        (returncode != 0) -- never a None proc (a gate that could not even run
+        has nothing to capture; _ok(None) is already False and the caller
+        never reaches here for that case). This plugin's gate scripts are NOT
+        uniform about which stream carries the diagnostic text (see each
+        script's own docstring), so both stdout and stderr are captured
+        rather than guessing one. Truncated to _GATE_OUTPUT_CAP chars with an
+        explicit marker naming the exact bound -- never left unbounded."""
+        out = getattr(proc, "stdout", None) or ""
+        err = getattr(proc, "stderr", None) or ""
+        combined = (out + (("\n" + err) if err else "")).strip()
+        if not combined:
+            return
+        if len(combined) > self._GATE_OUTPUT_CAP:
+            combined = combined[: self._GATE_OUTPUT_CAP] + (
+                "... [truncated at %d chars]" % self._GATE_OUTPUT_CAP
+            )
+        self.error_detail = "%s: %s" % (gate_name, combined)
+
     def _validate_candidate(self, candidate, timeout_fn):
         """Kind-specific candidate-file gate against `candidate`; each gate call is bounded by a
         FRESH timeout_fn() (remaining budget re-read per call). Returns True iff every gate PASSED
-        (an _ok()-True). Used by validate_attempt (attempt path)."""
+        (an _ok()-True). Used by validate_attempt (attempt path). #399: on a REJECTING gate (ran,
+        returned non-zero), captures that gate's own output via _capture_gate_rejection() before
+        returning False -- a gate that could not even run (proc is None) has nothing to capture."""
         if self.kind == "translate":
-            if not _ok(self._gate(["draft_ready.py", self.seg, "--expect-token", self.tok,
-                                   "--candidate-file", candidate], timeout_fn())):
+            proc = self._gate(["draft_ready.py", self.seg, "--expect-token", self.tok,
+                               "--candidate-file", candidate], timeout_fn())
+            if not _ok(proc):
+                if proc is not None:
+                    self._capture_gate_rejection("draft_ready.py", proc)
                 return False
-            return _ok(self._gate(["validate_draft.py", self.seg, "--candidate-file", candidate],
-                                 timeout_fn()))
-        return _ok(self._gate(["review_ready.py", self.seg, "--expect-token", self.tok,
-                              "--candidate-file", candidate], timeout_fn()))
+            proc = self._gate(["validate_draft.py", self.seg, "--candidate-file", candidate],
+                             timeout_fn())
+            if not _ok(proc):
+                if proc is not None:
+                    self._capture_gate_rejection("validate_draft.py", proc)
+                return False
+            return True
+        proc = self._gate(["review_ready.py", self.seg, "--expect-token", self.tok,
+                          "--candidate-file", candidate], timeout_fn())
+        if not _ok(proc):
+            if proc is not None:
+                self._capture_gate_rejection("review_ready.py", proc)
+            return False
+        return True
 
     # ---- step 2: write-isolated sandbox (#409) -------------------------------
     # Outcomes of the enclosing-repository probe. These MUST stay distinct: the generic
@@ -673,6 +737,7 @@ class CodexJob:
             if proc is None:
                 return False                       # could not validate -> keep pending, launch fresh
             if proc.returncode != 0:
+                self._capture_gate_rejection(name, proc)  # #399: capture before discarding
                 _silent_remove(self.pending)       # gate ran & rejected -> discard stale/bad, launch fresh
                 return False
         os.replace(self.pending, self.canonical)   # every gate passed
@@ -693,6 +758,13 @@ class CodexJob:
         argv += ["--cwd", self.sandbox_dir, "--prompt-file", self.final_prompt]
         proc = self._run(argv, self.poll_timeout())
         if not _ok(proc):
+            # #400: the launch invocation itself failed (non-zero exit, or _run()
+            # returned None on a timeout/spawn failure) -- capture whatever stderr
+            # the companion printed (its own thrown error, e.g. auth/quota) rather
+            # than silently falling through to run()'s generic "launch-failed"
+            # reason with no detail behind it. proc is None on a timeout/spawn
+            # failure, so there is nothing to read in that case.
+            self.error_detail = _stderr_text(proc)
             return False
         try:
             obj = json.loads(proc.stdout)
@@ -700,6 +772,9 @@ class CodexJob:
             obj = None
         jid = obj.get("jobId") if isinstance(obj, dict) else None
         if not isinstance(jid, str) or not jid:
+            # The companion exited 0 but produced no usable jobId -- capture its
+            # stderr too (usually empty on a clean exit, but never discarded).
+            self.error_detail = _stderr_text(proc)
             return False
         self.jobId = jid
         self._write_joblog({
@@ -722,6 +797,22 @@ class CodexJob:
                     job = obj.get("job") if isinstance(obj, dict) else None
                     if isinstance(job, dict):
                         self.job_status = job.get("status")
+                        # #400: the companion's own job store persists errorMessage
+                        # when its tracked-job runner caught a thrown exception (an
+                        # API/quota/auth error, not a content defect) -- this is
+                        # EXACTLY the "N unrelated per-segment content failures"
+                        # signal #400 reports as missing. Present (a non-empty
+                        # string) once the job reaches a real failure, never before
+                        # -- so plain assignment (not "first/last non-empty wins")
+                        # is fine, but guard the type/emptiness rather than
+                        # overwriting a real capture with an absent/blank one on a
+                        # later poll of the SAME job (polling stops the instant
+                        # job_status goes terminal, so in practice there is no
+                        # "later poll" once errorMessage first appears -- this
+                        # guard is defensive, not load-bearing on that guarantee).
+                        err = job.get("errorMessage")
+                        if isinstance(err, str) and err.strip():
+                            self.error_detail = err.strip()
                 except ValueError:
                     pass
             if self.job_status in _TERMINAL:
@@ -820,16 +911,25 @@ class CodexJob:
         _silent_remove(self.prompt_file)
         # Terminal hygiene joblog ONLY IF we hold the lease (a lease-loser must never clobber
         # the live holder's control state -- HIGH-3 r8).
+        #
+        # #398/#400: `reason` and `error_detail` are BOTH carried into this joblog, not just
+        # the stdout line below -- run() launches this driver DETACHED (`nohup ... >/dev/null
+        # 2>&1 &`, see mass-translate-wf.template.js), so the stdout line's own "reason"/
+        # "error_detail" are thrown away at the shell level on that path; THIS FILE is the
+        # only durable place either ever lands. Previously `reason` (a gate-REJECTED attempt
+        # reported no differently from a genuine timeout) and error_detail's two sources
+        # (poll()'s companion errorMessage, launch()'s stderr) were computed and discarded.
         if self.holds_lock:
             self._write_joblog({
                 "jobId": self.jobId, "kind": self.kind, "seg": self.seg, "token": self.tok,
                 "disp": self.disp, "inv": self.inv, "status": "terminal", "ok": self.ok,
                 "timed_out": self.timed_out, "job_status": self.job_status, "adopted": self.adopted,
+                "reason": self.reason, "error_detail": self.error_detail,
             })
         line = {
             "ok": self.ok, "kind": self.kind, "seg": self.seg, "jobId": self.jobId,
             "job_status": self.job_status, "timed_out": self.timed_out,
-            "adopted": self.adopted, "reason": self.reason,
+            "adopted": self.adopted, "reason": self.reason, "error_detail": self.error_detail,
         }
         sys.stdout.write(json.dumps(line) + "\n")
         sys.stdout.flush()

@@ -1199,6 +1199,35 @@ function waitRecheckPrompt(seg) {
 // even exists, silently dropping it on every fixed segment's first round --
 // which would then always fail ledger_update.py's convergence-time
 // dispatch_token check (references/ledger-and-resumability.md).
+//
+// #409 Step 3: this prompt does NOT ask the fixer to run validate_draft.py
+// and certify its own output. An earlier revision did (via the line just
+// below the draft-rewrite instruction), but that self-report was dead text:
+// runRound's own handling of callFix's return value (`fx`) only ever scans
+// it for the literal DRAFT_MISSING sentinel -- "confirm it prints OK" was
+// never parsed, checked, or acted on by anything downstream, so it read as
+// an assurance this pipeline provides while providing none. A deterministic
+// gate must not be executed by the party it is checking -- and the fixer
+// self-certifying its own edit is exactly that.
+//
+// This is NOT closed by translateAcceptCmd()'s validate_draft.py splice
+// (:1020) -- that gate is the TRANSLATE wait's own ACCEPT command
+// (waitPrompt/waitChunkPrompt), fired exactly once, before this fix step
+// (and the whole round loop) ever runs; it is never invoked again after a
+// fix. Verified directly: reviewAcceptCmd() (the ACCEPT command every round
+// after a fix actually waits on, via getVerifiedReview/reviewWaitPrompt)
+// calls ONLY review_ready.py, and review_ready.py's own docstring lists
+// its exact three checks -- review.schema.json validity, draft_sha1
+// freshness, dispatch_token match -- none of which is validate_draft.py.
+// The only thing that currently determines a post-fix draft's coverage_ok
+// is reviewDispatchPrompt's own instruction to the NEXT round's REVIEWER
+// ("First run the deterministic gate: validate_draft.py ... remember
+// whether it printed OK or FAIL") -- still a self-report, just by a
+// different party (a fresh reviewer turn, not the fixer that made the
+// edit) than the one this comment removes. Deleting the fixer's own
+// self-check is correct regardless (it was unparsed dead text either way);
+// it is not, by itself, a claim that the post-fix draft is independently,
+// deterministically re-validated anywhere in this file today.
 function fixPrompt(seg, round, revObj) {
   const lines = [];
   lines.push("Effort: " + EFFORT + ". You are the Claude editor applying review findings to segment " + seg + ", round " + round + ".");
@@ -1207,7 +1236,7 @@ function fixPrompt(seg, round, revObj) {
   lines.push("Otherwise, read " + ROOT + "/segments/" + seg + ".draft.json and " + ROOT + "/segments/segpack_" + seg + ".json, and carefully apply every finding from " + ROOT + "/segments/" + seg + ".review.json to the draft. Never touch a placeholder sentinel (e.g. ⟦FNREF_...⟧, ⟦VERSE_...⟧) -- copy each one byte for byte in place. Keep the verse policy: " + VERSE_POLICY_INSTRUCTION_BLOCK);
   lines.push("Never change the set of block, footnote, or verse keys -- they must stay exactly 1:1 with the segpack.");
   lines.push("The draft also carries a dispatch_token top-level field -- copy its existing value byte for byte into your rewritten draft, unchanged; never invent, drop, or recompute it.");
-  lines.push("Rewrite " + ROOT + "/segments/" + seg + ".draft.json with your fixes. Then run " + PY + " " + ROOT + "/scripts/validate_draft.py " + seg + " and confirm it prints OK -- if your own edit broke coverage or a placeholder, repair it and rewrite the file again until it prints OK.");
+  lines.push("Rewrite " + ROOT + "/segments/" + seg + ".draft.json with your fixes.");
   lines.push("Return exactly the line: FIXED " + seg + " r" + round);
   return lines.join("\n");
 }
