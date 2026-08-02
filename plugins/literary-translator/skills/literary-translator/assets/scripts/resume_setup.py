@@ -112,9 +112,15 @@ cache_key.py script (kind="mass" only) is found, as
 --durable-root, because ${durable_root}/scripts/ is writable by the codex
 process this resume-integrity gate protects (codex_job.py grants --write
 over the whole durable root), so resolving the checker from inside the
-thing it checks would let a tampered copy pass itself. Each flag, when
-given, is forwarded to the cache_key.py subprocess as its own same-named
-flag. Omitting BOTH reproduces today's self-anchored behavior byte-for-byte.
+thing it checks would let a tampered copy pass itself. Only --durable-root
+is forwarded to the cache_key.py subprocess as its own same-named flag:
+cache_key.py is a LEAF with no siblings of its own to resolve, and does not
+accept --plugin-root at all, so passing it would simply make the invocation
+fail. When --plugin-root is given WITHOUT --durable-root, a --durable-root
+synthesized from the resolved durable root is passed instead, because
+cache_key.py no longer physically sits under that root and would otherwise
+self-anchor against the wrong tree. Omitting BOTH reproduces today's
+self-anchored behavior byte-for-byte.
 
 Part of `plugin_bundle_hash` (see cache_key.py's own PLUGIN_BUNDLE_MEMBERS
 comment) -- this script's own logic directly determines whether a run

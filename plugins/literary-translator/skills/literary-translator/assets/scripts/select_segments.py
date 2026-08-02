@@ -115,11 +115,19 @@ A single root cannot serve both roles: ``${durable_root}/scripts/`` is a
 Step-0a copy that the codex process (via codex_job.py's ``--write`` over
 the whole durable root) can write to, so resolving the checker scripts
 FROM there would let a tampered copy validate itself -- exactly the
-vulnerability this flag split exists to close. Each flag, independently,
-is forwarded down the whole subprocess chain
-(select_segments.py -> ledger_merge.py -> cache_key.py) as the sibling's
-own same-named flag. Omitting BOTH reproduces today's self-anchored
-behavior byte-for-byte.
+vulnerability this flag split exists to close. The two flags do NOT
+propagate identically, and the asymmetry is deliberate: ``--durable-root``
+travels the whole subprocess chain (select_segments.py -> ledger_merge.py
+-> cache_key.py) as each sibling's own same-named flag, but
+``--plugin-root`` is passed only to ledger_merge.py, which resolves a
+further sibling of its own. cache_key.py is a LEAF -- it has no siblings to
+resolve and does not accept ``--plugin-root`` at all, so passing it would
+simply make the invocation fail. When ``--plugin-root`` is given WITHOUT
+``--durable-root``, a ``--durable-root`` synthesized from the resolved
+durable root is passed to the leaf instead, because the leaf no longer
+physically sits under that root and would otherwise self-anchor against the
+wrong tree. Omitting BOTH reproduces today's self-anchored behavior
+byte-for-byte.
 
 Output: exactly one JSON object on stdout. Success:
 {"success": true, "durable_root": ..., "segs": [...],
@@ -937,9 +945,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "writable by the codex process these scripts gate (codex_job.py "
             "grants --write over the whole durable root), so resolving a "
             "checker from inside the thing it checks would let a tampered "
-            "copy pass itself. Forwarded down the subprocess chain as their "
-            "own --plugin-root. Optional; omit for today's self-anchored "
-            "sibling lookup."
+            "copy pass itself. Passed on only to ledger_merge.py, which "
+            "resolves a further sibling of its own; the leaf cache_key.py "
+            "does not accept this flag and receives only --durable-root. "
+            "Optional; omit for today's self-anchored sibling lookup."
         ),
     )
     return parser

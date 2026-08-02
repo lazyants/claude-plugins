@@ -69,9 +69,14 @@ subprocess is found, as {PATH}/assets/scripts/cache_key.py -- deliberately
 NEVER derived from --durable-root, because ${durable_root}/scripts/ is
 writable by the codex process this stale-check gates, so resolving the
 checker from inside the thing it checks would let a tampered copy pass
-itself. Each flag, when given, is forwarded to the cache_key.py subprocess
-as its own same-named flag. Omitting BOTH reproduces today's self-anchored
-behavior byte-for-byte.
+itself. Only --durable-root is forwarded to the cache_key.py subprocess as
+its own same-named flag: cache_key.py is a LEAF with no siblings of its own
+to resolve, and does not accept --plugin-root at all, so passing it would
+simply make the invocation fail. When --plugin-root is given WITHOUT
+--durable-root, a --durable-root synthesized from the resolved durable root
+is passed instead, because cache_key.py no longer physically sits under
+that root and would otherwise self-anchor against the wrong tree. Omitting
+BOTH reproduces today's self-anchored behavior byte-for-byte.
 
 Exit code 0 on success, 1 on failure. Either way, exactly one JSON line is
 printed to stdout -- callers (the `mergeLedgerPrompt` agent prompt, tests)
