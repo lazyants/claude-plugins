@@ -11,7 +11,7 @@ as a careful first design, not as something already proven surprise-free.
 
 CLI:
 
-    python3 ledger_update.py {seg} --payload-file <path>
+    python3 ledger_update.py {seg} --payload-file <path> [--durable-root PATH]
 
 The caller (an agent, shelling out mid-turn) first writes its intended
 fields as a JSON object to a scratch payload file -- no shell
@@ -93,14 +93,43 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Self-anchoring: this script always lives at {durable_root}/scripts/<name>.py.
-# It never assumes cwd == durable_root, and never takes a --durable-root flag.
+# Self-anchoring by default: this script always lives at
+# {durable_root}/scripts/<name>.py. It never assumes cwd == durable_root.
+# LT-409: an explicit --durable-root PATH overrides this at runtime (see
+# resolve_dirs() below) -- these module-level constants remain the fallback
+# used whenever the flag is omitted.
 # ---------------------------------------------------------------------------
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 SCHEMAS_DIR = DURABLE_ROOT / "schemas"
 SEGMENTS_DIR = DURABLE_ROOT / "segments"
 RUNS_DIR = DURABLE_ROOT / "runs"
 LEDGER_FRAGMENT_DIR = RUNS_DIR / "ledger.d"
+
+
+def resolve_dirs(durable_root_str):
+    """LT-409: when `durable_root_str` is given (the --durable-root CLI
+    value), every path this script derives is rebuilt from THAT root
+    instead of the self-anchored module-level constants above. Returns a
+    dict with keys durable_root/schemas_dir/segments_dir/runs_dir/
+    ledger_fragment_dir. `durable_root_str=None` reproduces today's
+    self-anchored values unchanged."""
+    if durable_root_str is None:
+        return {
+            "durable_root": DURABLE_ROOT,
+            "schemas_dir": SCHEMAS_DIR,
+            "segments_dir": SEGMENTS_DIR,
+            "runs_dir": RUNS_DIR,
+            "ledger_fragment_dir": LEDGER_FRAGMENT_DIR,
+        }
+    root = Path(durable_root_str).resolve()
+    runs_dir = root / "runs"
+    return {
+        "durable_root": root,
+        "schemas_dir": root / "schemas",
+        "segments_dir": root / "segments",
+        "runs_dir": runs_dir,
+        "ledger_fragment_dir": runs_dir / "ledger.d",
+    }
 
 # The only statuses ledger_update.py itself ever writes to a fragment.
 # 'stale' is never one of them -- that status is computed by ledger_merge.py
@@ -110,16 +139,16 @@ FRAGMENT_STATUS_FALLBACK_ENUM = [
 ]
 
 
-def draft_path(seg):
-    return SEGMENTS_DIR / f"{seg}.draft.json"
+def draft_path(seg, segments_dir=SEGMENTS_DIR):
+    return segments_dir / f"{seg}.draft.json"
 
 
-def review_path(seg):
-    return SEGMENTS_DIR / f"{seg}.review.json"
+def review_path(seg, segments_dir=SEGMENTS_DIR):
+    return segments_dir / f"{seg}.review.json"
 
 
-def segpack_path(seg):
-    return SEGMENTS_DIR / f"segpack_{seg}.json"
+def segpack_path(seg, segments_dir=SEGMENTS_DIR):
+    return segments_dir / f"segpack_{seg}.json"
 
 
 def sha1_bytes_of_file(path):
@@ -233,8 +262,8 @@ def emit_success(status, fragment_path, fragment_sha1):
     sys.exit(0)
 
 
-def load_schema(name):
-    path = SCHEMAS_DIR / name
+def load_schema(name, schemas_dir=SCHEMAS_DIR):
+    path = schemas_dir / name
     if not path.is_file():
         emit_failure(
             f"Required schema file not found: {path}. Was Step 0a run to "
@@ -321,7 +350,7 @@ def read_json_file(path, what):
         return None, f"{what} at {path} is not valid JSON: {exc}"
 
 
-def enrich_converged_fields(seg, fragment, run_token=None):
+def enrich_converged_fields(seg, fragment, run_token=None, segments_dir=SEGMENTS_DIR):
     """Populate n_blocks/n_footnotes/n_verses (from the segpack) and
     reviewed_draft_sha1 (via the review-artifact binding check) -- fields
     the calling agent's payload is never allowed to supply directly.
@@ -344,7 +373,7 @@ def enrich_converged_fields(seg, fragment, run_token=None):
     function either returns normally having mutated `fragment` in place,
     or the process has already exited.
     """
-    spath = segpack_path(seg)
+    spath = segpack_path(seg, segments_dir)
     segpack, err = read_json_file(spath, f"Segpack for segment '{seg}'")
     if err is not None:
         emit_failure(f"Cannot record convergence for segment '{seg}': {err}")
@@ -362,7 +391,7 @@ def enrich_converged_fields(seg, fragment, run_token=None):
             )
         fragment[out_key] = len(array_value)
 
-    rpath = review_path(seg)
+    rpath = review_path(seg, segments_dir)
     review_obj, err = read_json_file(rpath, f"Review artifact for segment '{seg}'")
     if err is not None:
         emit_failure(f"Cannot record convergence for segment '{seg}': {err}")
@@ -387,7 +416,7 @@ def enrich_converged_fields(seg, fragment, run_token=None):
                 f"record convergence."
             )
 
-    dpath = draft_path(seg)
+    dpath = draft_path(seg, segments_dir)
     if not dpath.is_file():
         emit_failure(
             f"Cannot record convergence for segment '{seg}': draft not found "
@@ -423,14 +452,14 @@ def enrich_converged_fields(seg, fragment, run_token=None):
     fragment["reviewed_draft_sha1"] = current_draft_sha1
 
 
-def write_fragment_atomically(seg, fragment):
+def write_fragment_atomically(seg, fragment, ledger_fragment_dir=LEDGER_FRAGMENT_DIR):
     try:
-        LEDGER_FRAGMENT_DIR.mkdir(parents=True, exist_ok=True)
+        ledger_fragment_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        emit_failure(f"Could not create ledger fragment directory {LEDGER_FRAGMENT_DIR}: {exc}")
+        emit_failure(f"Could not create ledger fragment directory {ledger_fragment_dir}: {exc}")
 
-    final_path = LEDGER_FRAGMENT_DIR / f"{seg}.json"
-    tmp_path = LEDGER_FRAGMENT_DIR / f"{seg}.json.tmp.{os.getpid()}"
+    final_path = ledger_fragment_dir / f"{seg}.json"
+    tmp_path = ledger_fragment_dir / f"{seg}.json.tmp.{os.getpid()}"
 
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -440,7 +469,7 @@ def write_fragment_atomically(seg, fragment):
             os.fsync(f.fileno())
         os.replace(tmp_path, final_path)
         try:
-            dir_fd = os.open(LEDGER_FRAGMENT_DIR, os.O_RDONLY)
+            dir_fd = os.open(ledger_fragment_dir, os.O_RDONLY)
             try:
                 os.fsync(dir_fd)
             finally:
@@ -480,12 +509,24 @@ def main():
             "run_token."
         ),
     )
+    parser.add_argument(
+        "--durable-root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LT-409: use PATH as the durable root instead of this script's "
+            "own self-anchored location. Optional; omit for today's "
+            "self-anchored behavior."
+        ),
+    )
     args = parser.parse_args()
 
     seg = args.seg
     seg_error = validate_seg(seg)
     if seg_error is not None:
         emit_failure(seg_error)
+
+    dirs = resolve_dirs(args.durable_root)
 
     payload_path = Path(args.payload_file)
 
@@ -501,8 +542,8 @@ def main():
             f"got {type(payload).__name__}."
         )
 
-    base_schema = load_schema("ledger-record-base.schema.json")
-    fragment_schema = load_schema("ledger-fragment.schema.json")
+    base_schema = load_schema("ledger-record-base.schema.json", dirs["schemas_dir"])
+    fragment_schema = load_schema("ledger-fragment.schema.json", dirs["schemas_dir"])
 
     payload_schema = build_payload_schema(base_schema, fragment_schema)
     try:
@@ -523,11 +564,11 @@ def main():
             fragment[key] = payload[key]
 
     if fragment["status"] == "converged":
-        enrich_converged_fields(seg, fragment, payload.get("run_token"))
+        enrich_converged_fields(seg, fragment, payload.get("run_token"), dirs["segments_dir"])
 
     validate_final_fragment(fragment, base_schema, fragment_schema)
 
-    final_path = write_fragment_atomically(seg, fragment)
+    final_path = write_fragment_atomically(seg, fragment, dirs["ledger_fragment_dir"])
     fragment_sha1 = sha1_bytes_of_file(final_path)
 
     # Best-effort scratch cleanup -- a failure to delete the already-consumed

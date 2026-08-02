@@ -60,6 +60,23 @@ Usage:
     python3 ledger_merge.py --expected-from-manifest /path/to/manifest.json
     python3 ledger_merge.py --expected-segs seg05,seg06,seg07
     python3 ledger_merge.py --expected-segs seg05,seg06 --skip-stale-check
+    python3 ledger_merge.py --durable-root /path/to/durable_root --plugin-root /path/to/plugin/install
+
+LT-409 (post-review correction): --durable-root PATH and --plugin-root PATH
+are TWO INDEPENDENT overrides. --durable-root governs DATA (schemas/,
+segments/, runs/). --plugin-root governs where the sibling cache_key.py
+subprocess is found, as {PATH}/assets/scripts/cache_key.py -- deliberately
+NEVER derived from --durable-root, because ${durable_root}/scripts/ is
+writable by the codex process this stale-check gates, so resolving the
+checker from inside the thing it checks would let a tampered copy pass
+itself. Only --durable-root is forwarded to the cache_key.py subprocess as
+its own same-named flag: cache_key.py is a LEAF with no siblings of its own
+to resolve, and does not accept --plugin-root at all, so passing it would
+simply make the invocation fail. When --plugin-root is given WITHOUT
+--durable-root, a --durable-root synthesized from the resolved durable root
+is passed instead, because cache_key.py no longer physically sits under
+that root and would otherwise self-anchor against the wrong tree. Omitting
+BOTH reproduces today's self-anchored behavior byte-for-byte.
 
 Exit code 0 on success, 1 on failure. Either way, exactly one JSON line is
 printed to stdout -- callers (the `mergeLedgerPrompt` agent prompt, tests)
@@ -87,10 +104,19 @@ except ImportError as e:
     )
     sys.exit(1)
 
-# Self-anchored: this script always lives at
+# Self-anchored by default: this script always lives at
 # ${durable_root}/scripts/ledger_merge.py, so parents[1] is the durable
-# root. Never assumes cwd, never takes a --durable-root flag -- see
-# references/ledger-and-resumability.md's "Script self-anchoring" invariant.
+# root. Never assumes cwd. LT-409 (post-review correction): --durable-root
+# PATH and --plugin-root PATH are TWO INDEPENDENT overrides (see
+# resolve_dirs() below) -- --durable-root governs DATA (schemas/segments/
+# runs), --plugin-root governs where the cache_key.py SIBLING SCRIPT is
+# found. They are deliberately never derived from each other:
+# ${durable_root}/scripts/ is a Step-0a copy the codex process can write to
+# (codex_job.py runs it with --write over the whole durable root), so
+# resolving the checker cache_key.py FROM there would let a tampered copy
+# validate itself. Omitting BOTH flags reproduces today's self-anchored
+# behavior byte-for-byte -- see references/ledger-and-resumability.md's
+# "Script self-anchoring" invariant.
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = Path(__file__).resolve().parent
 SCHEMAS_DIR = DURABLE_ROOT / "schemas"
@@ -100,12 +126,57 @@ LEDGER_JSON_PATH = DURABLE_ROOT / "runs" / "ledger.json"
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
 
 
-def draft_path(seg):
-    return SEGMENTS_DIR / f"{seg}.draft.json"
+def resolve_dirs(durable_root_str, plugin_root_str=None):
+    """LT-409: `durable_root_str` governs DATA (schemas/segments/runs) --
+    rebuilt from that root when given, self-anchored otherwise.
+
+    `plugin_root_str` is a SEPARATE, independent input governing where the
+    cache_key.py SIBLING SCRIPT this script shells out to is resolved from
+    -- deliberately NEVER derived from `durable_root_str` (see module
+    docstring / the comment above these constants for why). When given, it
+    resolves as `{plugin_root}/assets/scripts/cache_key.py` -- the SAME
+    layout SKILL.md documents for the plugin-anchored scripts, NOT
+    durable_root's own flattened `scripts/cache_key.py` copy layout.
+    `plugin_root_str=None` reproduces today's self-anchored sibling lookup
+    unchanged.
+
+    Both None -> today's exact self-anchored values for both concerns.
+    """
+    if durable_root_str is None:
+        durable_root = DURABLE_ROOT
+        schemas_dir = SCHEMAS_DIR
+        segments_dir = SEGMENTS_DIR
+        ledger_d = LEDGER_D
+        ledger_json_path = LEDGER_JSON_PATH
+    else:
+        durable_root = Path(durable_root_str).resolve()
+        runs_dir = durable_root / "runs"
+        schemas_dir = durable_root / "schemas"
+        segments_dir = durable_root / "segments"
+        ledger_d = runs_dir / "ledger.d"
+        ledger_json_path = runs_dir / "ledger.json"
+
+    if plugin_root_str is None:
+        cache_key_script = CACHE_KEY_SCRIPT
+    else:
+        cache_key_script = Path(plugin_root_str).resolve() / "assets" / "scripts" / "cache_key.py"
+
+    return {
+        "durable_root": durable_root,
+        "schemas_dir": schemas_dir,
+        "segments_dir": segments_dir,
+        "ledger_d": ledger_d,
+        "ledger_json_path": ledger_json_path,
+        "cache_key_script": cache_key_script,
+    }
 
 
-def review_path(seg):
-    return SEGMENTS_DIR / f"{seg}.review.json"
+def draft_path(seg, segments_dir=SEGMENTS_DIR):
+    return segments_dir / f"{seg}.draft.json"
+
+
+def review_path(seg, segments_dir=SEGMENTS_DIR):
+    return segments_dir / f"{seg}.review.json"
 
 # The authoritative 15-field cache-key list (references/ledger-and-
 # resumability.md, "Composite cache key -- exact 15-field structure"). Kept
@@ -154,42 +225,42 @@ def _load_schema_document(schema_path: Path) -> dict:
         ) from e
 
 
-def _build_schema_registry() -> "Registry":
-    """Registers every *.schema.json file under SCHEMAS_DIR by its own `$id`
-    (a bare filename, per this project's convention -- e.g.
+def _build_schema_registry(schemas_dir: Path = SCHEMAS_DIR) -> "Registry":
+    """Registers every *.schema.json file under `schemas_dir` by its own
+    `$id` (a bare filename, per this project's convention -- e.g.
     "ledger-record-base.schema.json"), so `ledger.schema.json`'s `$ref` to
     that filename resolves regardless of load order.
     """
-    if not SCHEMAS_DIR.is_dir():
-        raise LedgerMergeError(f"schemas directory not found: {SCHEMAS_DIR}")
+    if not schemas_dir.is_dir():
+        raise LedgerMergeError(f"schemas directory not found: {schemas_dir}")
     resources = []
-    for schema_file in sorted(SCHEMAS_DIR.glob("*.schema.json")):
+    for schema_file in sorted(schemas_dir.glob("*.schema.json")):
         contents = _load_schema_document(schema_file)
         schema_id = contents.get("$id", schema_file.name)
         resources.append((schema_id, Resource.from_contents(contents)))
     if not resources:
-        raise LedgerMergeError(f"no *.schema.json files found under {SCHEMAS_DIR}")
+        raise LedgerMergeError(f"no *.schema.json files found under {schemas_dir}")
     return Registry().with_resources(resources)
 
 
-def _validator_for(schema_filename: str, registry: "Registry"):
-    schema = _load_schema_document(SCHEMAS_DIR / schema_filename)
+def _validator_for(schema_filename: str, registry: "Registry", schemas_dir: Path = SCHEMAS_DIR):
+    schema = _load_schema_document(schemas_dir / schema_filename)
     validator_cls = jsonschema_validators.validator_for(schema)
     validator_cls.check_schema(schema)
     return validator_cls(schema, registry=registry)
 
 
-def _read_fragments() -> dict:
+def _read_fragments(ledger_d: Path = LEDGER_D) -> dict:
     """Reads every runs/ledger.d/*.json fragment. The filename stem (minus
     the .json suffix) IS the segment id, by construction of
     ledger_update.py's own write path (runs/ledger.d/{seg}.json). Returns
     {seg: record_dict}. A missing ledger.d directory means "no fragments
     written yet" -- not an error; merges to an empty ledger.
     """
-    if not LEDGER_D.is_dir():
+    if not ledger_d.is_dir():
         return {}
     fragments = {}
-    for frag_path in sorted(LEDGER_D.glob("*.json")):
+    for frag_path in sorted(ledger_d.glob("*.json")):
         seg = frag_path.stem
         try:
             record = json.loads(frag_path.read_text(encoding="utf-8"))
@@ -245,7 +316,14 @@ def _expected_segments(args) -> "list | None":
     return None
 
 
-def _compute_stale_segments(fragments: dict, skip_stale_check: bool) -> set:
+def _compute_stale_segments(
+    fragments: dict,
+    skip_stale_check: bool,
+    cache_key_script: Path = CACHE_KEY_SCRIPT,
+    durable_root: Path = DURABLE_ROOT,
+    durable_root_str=None,
+    plugin_root_str=None,
+) -> set:
     """For every fragment whose on-disk status is 'converged', recomputes
     the current cache key via `cache_key.py --seg <id>` and compares it
     field-by-field against the fragment's own stored `cache_key`. Returns
@@ -258,6 +336,21 @@ def _compute_stale_segments(fragments: dict, skip_stale_check: bool) -> set:
     currently be recomputed (e.g. its segpack was deleted); refusing to
     materialize the whole ledger over one segment would defeat the point of
     per-segment fragmenting in the first place.
+
+    LT-409: `cache_key_script` is the resolved sibling path to shell out
+    against -- self-anchored by default, or resolve_dirs()'s own
+    --plugin-root-aware `{plugin_root}/assets/scripts/cache_key.py` (never
+    derived from durable_root; see resolve_dirs()'s own docstring for why).
+    `durable_root` is cache_key.py's DATA root (cwd for the subprocess).
+    `durable_root_str`/`plugin_root_str` are THIS script's own CLI values
+    (cache_key.py has no --plugin-root, being a leaf with no siblings of its
+    own): `durable_root_str` is forwarded verbatim as cache_key.py's own
+    --durable-root when given; when it is NOT given but `plugin_root_str` IS
+    (meaning `cache_key_script` was itself resolved via --plugin-root, so it
+    no longer physically sits under durable_root), `durable_root` is
+    forwarded explicitly anyway -- otherwise cache_key.py's own
+    self-anchoring would silently resolve its data from the plugin root
+    instead of the real durable root.
     """
     stale = set()
     if skip_stale_check:
@@ -275,20 +368,25 @@ def _compute_stale_segments(fragments: dict, skip_stale_check: bool) -> set:
             stale.add(seg)
             continue
 
-        if not CACHE_KEY_SCRIPT.is_file():
+        if not cache_key_script.is_file():
             sys.stderr.write(
-                f"ledger_merge.py: warning: {CACHE_KEY_SCRIPT} not found -- "
+                f"ledger_merge.py: warning: {cache_key_script} not found -- "
                 f"skipping stale-check for segment '{seg}'\n"
             )
             continue
 
+        cmd = [sys.executable, str(cache_key_script), "--seg", seg]
+        if durable_root_str is not None:
+            cmd += ["--durable-root", durable_root_str]
+        elif plugin_root_str is not None:
+            cmd += ["--durable-root", str(durable_root)]
         try:
             proc = subprocess.run(
-                [sys.executable, str(CACHE_KEY_SCRIPT), "--seg", seg],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=120,
-                cwd=str(DURABLE_ROOT),
+                cwd=str(durable_root),
             )
         except (OSError, subprocess.TimeoutExpired) as e:
             sys.stderr.write(
@@ -379,7 +477,9 @@ def _read_json_file(path: Path, what: str):
         return None, f"{what} at {path} is not valid JSON: {exc}"
 
 
-def _reassert_token_and_sha(seg: str, record: dict, run_token: str) -> "str | None":
+def _reassert_token_and_sha(
+    seg: str, record: dict, run_token: str, segments_dir: Path = SEGMENTS_DIR
+) -> "str | None":
     """1.2.0 addition: re-asserts, for one EXPECTED CONVERGED segment, that
     the on-disk draft's own dispatch_token equals
     expected_draft_token(run_token, seg) = '<run_token>:<seg>' EXACTLY, that
@@ -399,8 +499,8 @@ def _reassert_token_and_sha(seg: str, record: dict, run_token: str) -> "str | No
     Returns a human-readable error string naming the specific mismatch, or
     None if all checks pass.
     """
-    dpath = draft_path(seg)
-    rpath = review_path(seg)
+    dpath = draft_path(seg, segments_dir)
+    rpath = review_path(seg, segments_dir)
 
     draft_obj, err = _read_json_file(dpath, f"draft for segment '{seg}'")
     if err is not None:
@@ -450,11 +550,14 @@ def _atomic_write_json(path: Path, doc: dict) -> None:
     os.replace(tmp_path, path)
 
 
-def merge(args, registry: "Registry") -> dict:
+def merge(args, registry: "Registry", dirs: dict) -> dict:
     """Runs the full merge and returns the SUCCESS confirmation dict, or
     raises LedgerMergeError (caller turns that into the FAILURE dict).
+
+    `dirs` (LT-409) is resolve_dirs()'s returned dict -- self-anchored
+    defaults, or --durable-root's own paths.
     """
-    fragments = _read_fragments()
+    fragments = _read_fragments(dirs["ledger_d"])
 
     expected = _expected_segments(args)
     if expected is not None:
@@ -466,7 +569,14 @@ def merge(args, registry: "Registry") -> dict:
                 missing_segments=missing_segments,
             )
 
-    stale_segments = _compute_stale_segments(fragments, args.skip_stale_check)
+    stale_segments = _compute_stale_segments(
+        fragments,
+        args.skip_stale_check,
+        dirs["cache_key_script"],
+        dirs["durable_root"],
+        args.durable_root,
+        args.plugin_root,
+    )
 
     materialized_segments = {}
     for seg, record in fragments.items():
@@ -492,7 +602,7 @@ def merge(args, registry: "Registry") -> dict:
             entry = materialized_segments.get(seg)
             if entry is None or entry.get("status") != "converged":
                 continue
-            err = _reassert_token_and_sha(seg, entry, args.run_token)
+            err = _reassert_token_and_sha(seg, entry, args.run_token, dirs["segments_dir"])
             if err is not None:
                 reassert_errors.append(err)
         if reassert_errors:
@@ -504,7 +614,7 @@ def merge(args, registry: "Registry") -> dict:
 
     ledger_doc = {"segments": materialized_segments}
 
-    ledger_validator = _validator_for("ledger.schema.json", registry)
+    ledger_validator = _validator_for("ledger.schema.json", registry, dirs["schemas_dir"])
     errors = sorted(
         ledger_validator.iter_errors(ledger_doc),
         key=lambda e: [str(p) for p in e.path],
@@ -518,18 +628,18 @@ def merge(args, registry: "Registry") -> dict:
             f"materialized ledger.json failed schema validation: {detail}"
         )
 
-    _atomic_write_json(LEDGER_JSON_PATH, ledger_doc)
+    _atomic_write_json(dirs["ledger_json_path"], ledger_doc)
 
     return {
         "success": True,
-        "ledger_path": str(LEDGER_JSON_PATH),
+        "ledger_path": str(dirs["ledger_json_path"]),
         "n_segments": len(materialized_segments),
         "missing_segments": [],
         "stale_segments": sorted(stale_segments),
     }
 
 
-def _validate_confirmation(payload: dict, registry: "Registry") -> None:
+def _validate_confirmation(payload: dict, registry: "Registry", schemas_dir: Path = SCHEMAS_DIR) -> None:
     """Self-check: the confirmation payload this script is about to print
     must itself validate against ledger-merge-confirmation.schema.json's
     `oneOf`. If it doesn't, that's a bug in this script -- report it as a
@@ -537,7 +647,7 @@ def _validate_confirmation(payload: dict, registry: "Registry") -> None:
     shape (the same "don't trust an unverified success claim" principle
     `recordLedgerPrompt` applies to `ledger_update.py`'s own stdout).
     """
-    validator = _validator_for("ledger-merge-confirmation.schema.json", registry)
+    validator = _validator_for("ledger-merge-confirmation.schema.json", registry, schemas_dir)
     errors = list(validator.iter_errors(payload))
     if errors:
         detail = "; ".join(e.message for e in errors)
@@ -605,6 +715,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "re-verification)."
         ),
     )
+    parser.add_argument(
+        "--durable-root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LT-409: use PATH as the DATA root instead of this script's "
+            "own self-anchored location -- replaces where schemas/, "
+            "segments/, and runs/ are found (including the cache_key.py "
+            "subprocess's own data), forwarded to it as its own "
+            "--durable-root. Optional; omit for today's self-anchored "
+            "behavior. Independent of --plugin-root below -- never affects "
+            "where the SIBLING SCRIPT itself is found."
+        ),
+    )
+    parser.add_argument(
+        "--plugin-root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LT-409: use PATH (the plugin's own install root, i.e. "
+            "{{PLUGIN_ROOT}}) to resolve the sibling cache_key.py script "
+            "this script shells out to, as {PATH}/assets/scripts/"
+            "cache_key.py -- deliberately NEVER derived from "
+            "--durable-root, because ${durable_root}/scripts/ is writable "
+            "by the codex process this stale-check gates (codex_job.py "
+            "grants --write over the whole durable root), so resolving the "
+            "checker from inside the thing it checks would let a tampered "
+            "copy pass itself. Optional; omit for today's self-anchored "
+            "sibling lookup."
+        ),
+    )
     return parser
 
 
@@ -613,9 +754,10 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        registry = _build_schema_registry()
-        result = merge(args, registry)
-        _validate_confirmation(result, registry)
+        dirs = resolve_dirs(args.durable_root, args.plugin_root)
+        registry = _build_schema_registry(dirs["schemas_dir"])
+        result = merge(args, registry, dirs)
+        _validate_confirmation(result, registry, dirs["schemas_dir"])
     except LedgerMergeError as e:
         payload = {"success": False, "error": str(e)}
         if e.missing_segments is not None:

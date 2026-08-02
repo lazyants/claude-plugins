@@ -58,6 +58,8 @@ path. Payload shape:
         "research_mode": "...", "verse_policy": "...",
         "source_lang": "...", "target_lang": "...",
         "max_fix_rounds": N, "batch_agent_cap": N,
+        "max_codex_jobs_per_batch": N,            # engine.max_codex_jobs_per_batch,
+                                                  # or 400 when the profile omits it
         "effort": "low|medium|high|xhigh",       # #197; NOT "model" (see SUBST_FIELDS)
         "citation_content_types": "text/,application/pdf"   # 1.16.1 (#347);
                                                  # "" when the profile key is
@@ -100,9 +102,25 @@ timestamp form `YYYYMMDDTHHMMSSZ`, which trivially satisfies the
 allowlist. A caller-supplied `resume_from_run_id` is validated against the
 SAME allowlist before it is ever used to build a path.
 
-Self-anchored: this script always lives at
+Self-anchored by default: this script always lives at
 ${durable_root}/scripts/resume_setup.py, so parents[1] is the durable
-root. Never assumes cwd, never takes a --durable-root flag.
+root. Never assumes cwd. LT-409 (post-review correction): --durable-root
+PATH and --plugin-root PATH are TWO INDEPENDENT overrides. --durable-root
+governs DATA (schemas/, runs/). --plugin-root governs where the sibling
+cache_key.py script (kind="mass" only) is found, as
+{PATH}/assets/scripts/cache_key.py -- deliberately NEVER derived from
+--durable-root, because ${durable_root}/scripts/ is writable by the codex
+process this resume-integrity gate protects (codex_job.py grants --write
+over the whole durable root), so resolving the checker from inside the
+thing it checks would let a tampered copy pass itself. Only --durable-root
+is forwarded to the cache_key.py subprocess as its own same-named flag:
+cache_key.py is a LEAF with no siblings of its own to resolve, and does not
+accept --plugin-root at all, so passing it would simply make the invocation
+fail. When --plugin-root is given WITHOUT --durable-root, a --durable-root
+synthesized from the resolved durable root is passed instead, because
+cache_key.py no longer physically sits under that root and would otherwise
+self-anchor against the wrong tree. Omitting BOTH reproduces today's
+self-anchored behavior byte-for-byte.
 
 Part of `plugin_bundle_hash` (see cache_key.py's own PLUGIN_BUNDLE_MEMBERS
 comment) -- this script's own logic directly determines whether a run
@@ -131,9 +149,49 @@ SCHEMAS_DIR = DURABLE_ROOT / "schemas"
 RUNS_DIR = DURABLE_ROOT / "runs"
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
 
+
+def resolve_dirs(durable_root_str, plugin_root_str=None):
+    """LT-409: `durable_root_str` governs DATA (schemas/runs) -- rebuilt
+    from that root when given, self-anchored otherwise.
+
+    `plugin_root_str` is a SEPARATE, independent input governing where the
+    cache_key.py SIBLING SCRIPT (kind="mass" only) is resolved from --
+    deliberately NEVER derived from `durable_root_str`: ${durable_root}/
+    scripts/ is a Step-0a copy the codex process can write to (codex_job.py
+    runs it with --write over the whole durable root), so resolving the
+    checker from inside the thing it checks would let a tampered copy
+    validate itself. When given, it resolves as
+    `{plugin_root}/assets/scripts/cache_key.py` -- the SAME layout SKILL.md
+    documents for the plugin-anchored scripts, NOT durable_root's own
+    flattened `scripts/cache_key.py` copy layout. `plugin_root_str=None`
+    reproduces today's self-anchored sibling lookup unchanged.
+
+    Both None -> today's exact self-anchored values for both concerns.
+    """
+    if durable_root_str is None:
+        durable_root = DURABLE_ROOT
+        schemas_dir = SCHEMAS_DIR
+        runs_dir = RUNS_DIR
+    else:
+        durable_root = Path(durable_root_str).resolve()
+        schemas_dir = durable_root / "schemas"
+        runs_dir = durable_root / "runs"
+
+    if plugin_root_str is None:
+        cache_key_script = CACHE_KEY_SCRIPT
+    else:
+        cache_key_script = Path(plugin_root_str).resolve() / "assets" / "scripts" / "cache_key.py"
+
+    return {
+        "durable_root": durable_root,
+        "schemas_dir": schemas_dir,
+        "runs_dir": runs_dir,
+        "cache_key_script": cache_key_script,
+    }
+
 SUBST_FIELDS = frozenset({
     "research_mode", "verse_policy", "source_lang", "target_lang",
-    "max_fix_rounds", "batch_agent_cap", "effort",
+    "max_fix_rounds", "batch_agent_cap", "max_codex_jobs_per_batch", "effort",
     # 1.16.1 (#347). It changes the prepare step's actual command line, so it
     # changes what a cached citation-review result MEANS: widening the list from
     # ["text/"] to ["text/", "application/pdf"] makes the boundary admit pages it
@@ -223,31 +281,57 @@ def _read_marker(path: Path, what: str) -> str:
     return value
 
 
-def _schemas_dir_hash() -> str:
-    if not SCHEMAS_DIR.is_dir():
-        raise ResumeSetupError(f"schemas directory not found: {SCHEMAS_DIR}")
-    files = sorted(SCHEMAS_DIR.glob("*.schema.json"), key=lambda p: p.name)
+def _schemas_dir_hash(schemas_dir: Path = SCHEMAS_DIR) -> str:
+    if not schemas_dir.is_dir():
+        raise ResumeSetupError(f"schemas directory not found: {schemas_dir}")
+    files = sorted(schemas_dir.glob("*.schema.json"), key=lambda p: p.name)
     if not files:
-        raise ResumeSetupError(f"no *.schema.json files found under {SCHEMAS_DIR}")
+        raise ResumeSetupError(f"no *.schema.json files found under {schemas_dir}")
     h = hashlib.sha256()
     for f in files:
         h.update(f.read_bytes())
     return h.hexdigest()
 
 
-def _cache_key_for_seg(seg: str) -> dict:
+def _cache_key_for_seg(
+    seg: str,
+    cache_key_script: Path = CACHE_KEY_SCRIPT,
+    durable_root: Path = DURABLE_ROOT,
+    durable_root_str=None,
+    plugin_root_str=None,
+) -> dict:
     """Shells out to cache_key.py --seg <id> -- the one shared hashing
     implementation, and the freshest possible source of truth (never a
-    caller-supplied, potentially-stale value)."""
-    if not CACHE_KEY_SCRIPT.is_file():
-        raise ResumeSetupError(f"{CACHE_KEY_SCRIPT} not found")
+    caller-supplied, potentially-stale value).
+
+    LT-409: `cache_key_script` is the resolved sibling path to shell out
+    against -- self-anchored by default, or resolve_dirs()'s own
+    --plugin-root-aware `{plugin_root}/assets/scripts/cache_key.py` (never
+    derived from durable_root; see resolve_dirs()'s own docstring for why).
+    `durable_root` is cache_key.py's DATA root (cwd for the subprocess).
+    `durable_root_str`/`plugin_root_str` are THIS script's own CLI values
+    (cache_key.py has no --plugin-root, being a leaf): `durable_root_str` is
+    forwarded verbatim as cache_key.py's own --durable-root when given; when
+    it is NOT given but `plugin_root_str` IS (meaning `cache_key_script` was
+    itself resolved via --plugin-root, so it no longer physically sits under
+    durable_root), `durable_root` is forwarded explicitly anyway -- otherwise
+    cache_key.py's own self-anchoring would silently resolve its data from
+    the plugin root instead of the real durable root.
+    """
+    if not cache_key_script.is_file():
+        raise ResumeSetupError(f"{cache_key_script} not found")
+    cmd = [sys.executable, str(cache_key_script), "--seg", seg]
+    if durable_root_str is not None:
+        cmd += ["--durable-root", durable_root_str]
+    elif plugin_root_str is not None:
+        cmd += ["--durable-root", str(durable_root)]
     try:
         proc = subprocess.run(
-            [sys.executable, str(CACHE_KEY_SCRIPT), "--seg", seg],
+            cmd,
             capture_output=True,
             text=True,
             timeout=120,
-            cwd=str(DURABLE_ROOT),
+            cwd=str(durable_root),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ResumeSetupError(f"could not run cache_key.py --seg {seg}: {exc}")
@@ -264,8 +348,8 @@ def _cache_key_for_seg(seg: str) -> dict:
     return result
 
 
-def _canon_hash() -> str:
-    canon_path = DURABLE_ROOT / "canon.json"
+def _canon_hash(durable_root: Path = DURABLE_ROOT) -> str:
+    canon_path = durable_root / "canon.json"
     if not canon_path.is_file():
         return "no-canon"
     return hashlib.sha256(canon_path.read_bytes()).hexdigest()
@@ -276,7 +360,19 @@ def _canon_hash() -> str:
 # ---------------------------------------------------------------------------
 
 
-def compute_input_digest(payload: dict) -> str:
+def compute_input_digest(
+    payload: dict, dirs: "dict | None" = None, durable_root_str=None, plugin_root_str=None
+) -> str:
+    """`dirs` (LT-409) is resolve_dirs()'s returned dict -- self-anchored
+    defaults, or the --durable-root/--plugin-root-resolved paths.
+    `durable_root_str`/`plugin_root_str` are forwarded to the cache_key.py
+    subprocess (kind="mass" only) -- see _cache_key_for_seg()'s own
+    docstring for the exact forwarding rule. `dirs` defaults to None,
+    resolved fresh at call time (never a bound default expression) so a
+    direct caller that monkeypatches this module's DURABLE_ROOT/RUNS_DIR/
+    etc. globals still observes the patched values."""
+    if dirs is None:
+        dirs = resolve_dirs(None)
     kind = payload.get("kind")
     if kind not in ("mass", "glossary"):
         raise ResumeSetupError(f"payload 'kind' must be 'mass' or 'glossary', got {kind!r}")
@@ -294,18 +390,32 @@ def compute_input_digest(payload: dict) -> str:
         segs = payload.get("segs")
         if not isinstance(segs, list) or not segs or not all(isinstance(s, str) for s in segs):
             raise ResumeSetupError("payload 'segs' must be a non-empty array of strings for kind='mass'")
-        domain = {seg: _cache_key_for_seg(seg) for seg in segs}
+        domain = {
+            seg: _cache_key_for_seg(
+                seg,
+                dirs["cache_key_script"],
+                dirs["durable_root"],
+                durable_root_str,
+                plugin_root_str,
+            )
+            for seg in segs
+        }
     else:
         if "glossary_rule" not in payload:
             raise ResumeSetupError("payload 'glossary_rule' is required for kind='glossary'")
-        domain = {"glossary_rule": payload.get("glossary_rule"), "canon_hash": _canon_hash()}
+        domain = {
+            "glossary_rule": payload.get("glossary_rule"),
+            "canon_hash": _canon_hash(dirs["durable_root"]),
+        }
 
     version = {
-        "plugin_bundle_hash": _read_marker(RUNS_DIR / ".plugin_bundle_hash", "plugin_bundle_hash"),
-        "orchestration_bundle_hash": _read_marker(
-            RUNS_DIR / ".orchestration_bundle_hash", "orchestration_bundle_hash"
+        "plugin_bundle_hash": _read_marker(
+            dirs["runs_dir"] / ".plugin_bundle_hash", "plugin_bundle_hash"
         ),
-        "schemas": _schemas_dir_hash(),
+        "orchestration_bundle_hash": _read_marker(
+            dirs["runs_dir"] / ".orchestration_bundle_hash", "orchestration_bundle_hash"
+        ),
+        "schemas": _schemas_dir_hash(dirs["schemas_dir"]),
     }
 
     digest_input = {
@@ -323,20 +433,25 @@ def compute_input_digest(payload: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def resolve_run(payload: dict) -> "tuple[str, bool, str]":
+def resolve_run(
+    payload: dict, dirs: "dict | None" = None, durable_root_str=None, plugin_root_str=None
+) -> "tuple[str, bool, str]":
     """Returns (run_id, resume, input_digest). MATCH against a caller-
     supplied resume_from_run_id's own recorded digest -> resume with that
     same id. MISMATCH, absent candidate digest, or no candidate at all ->
     a fresh RUN_ID, never resumed -- and the candidate's own input.digest
-    (if any) is NEVER overwritten."""
-    input_digest = compute_input_digest(payload)
+    (if any) is NEVER overwritten. `dirs` defaults to None, resolved fresh
+    at call time (see write_run_dir()'s own docstring for why)."""
+    if dirs is None:
+        dirs = resolve_dirs(None)
+    input_digest = compute_input_digest(payload, dirs, durable_root_str, plugin_root_str)
     resume_from = payload.get("resume_from_run_id")
 
     if resume_from is not None:
         err = validate_run_id(resume_from)
         if err:
             raise ResumeSetupError(f"payload 'resume_from_run_id' is invalid: {err}")
-        candidate_digest_path = RUNS_DIR / resume_from / "input.digest"
+        candidate_digest_path = dirs["runs_dir"] / resume_from / "input.digest"
         if candidate_digest_path.is_file():
             prior_digest = candidate_digest_path.read_text(encoding="utf-8").strip()
             if prior_digest == input_digest:
@@ -346,7 +461,7 @@ def resolve_run(payload: dict) -> "tuple[str, bool, str]":
 
     for _ in range(RUN_ID_RETRY_LIMIT):
         candidate = fresh_run_id()
-        if not (RUNS_DIR / candidate).exists():
+        if not (dirs["runs_dir"] / candidate).exists():
             return candidate, False, input_digest
         time.sleep(1)  # extremely unlikely same-second collision; retry once
     raise ResumeSetupError(
@@ -463,8 +578,17 @@ def _wipe_stale_glossary_fragments(glossary_run_dir: Path, resume: bool) -> None
             entry.unlink()
 
 
-def write_run_dir(run_id: str, resume: bool, input_digest: str, kind: str, payload: dict) -> Path:
-    run_dir = RUNS_DIR / run_id
+def write_run_dir(
+    run_id: str, resume: bool, input_digest: str, kind: str, payload: dict, dirs: "dict | None" = None
+) -> Path:
+    """`dirs` defaults to None (self-anchored, resolved fresh at call time
+    via resolve_dirs(None) -- NOT a bound default expression, so a caller
+    that monkeypatches this module's DURABLE_ROOT/RUNS_DIR globals directly
+    and then calls write_run_dir() with no explicit `dirs` still observes
+    the patched values, preserving every pre-LT-409 direct-call test)."""
+    if dirs is None:
+        dirs = resolve_dirs(None)
+    run_dir = dirs["runs_dir"] / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     digest_path = run_dir / "input.digest"
 
@@ -493,7 +617,7 @@ def write_run_dir(run_id: str, resume: bool, input_digest: str, kind: str, paylo
         # a content no-op. If that derivation ever stops being deterministic,
         # gate this on a fresh run. (This subsystem is pilot-gated / not yet
         # source-proven end to end.)
-        glossary_run_dir = DURABLE_ROOT / "glossary" / "runs" / run_id
+        glossary_run_dir = dirs["durable_root"] / "glossary" / "runs" / run_id
         glossary_run_dir.mkdir(parents=True, exist_ok=True)
         _wipe_stale_glossary_fragments(glossary_run_dir, resume)
         write_glossary_manifests(glossary_run_dir, payload.get("batches"))
@@ -514,6 +638,37 @@ def build_arg_parser():
         metavar="PATH",
         help="Path to a JSON payload file -- see module docstring for the exact shape.",
     )
+    parser.add_argument(
+        "--durable-root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LT-409: use PATH as the DATA root instead of this script's own "
+            "self-anchored location -- replaces where schemas/ and runs/ "
+            "are found (including the cache_key.py subprocess's own data, "
+            "for kind=\"mass\"), forwarded to it as its own --durable-root. "
+            "Optional; omit for today's self-anchored behavior. Independent "
+            "of --plugin-root below -- never affects where the SIBLING "
+            "SCRIPT itself is found."
+        ),
+    )
+    parser.add_argument(
+        "--plugin-root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LT-409: use PATH (the plugin's own install root, i.e. "
+            "{{PLUGIN_ROOT}}) to resolve the sibling cache_key.py script "
+            "this script shells out to for kind=\"mass\", as "
+            "{PATH}/assets/scripts/cache_key.py -- deliberately NEVER "
+            "derived from --durable-root, because ${durable_root}/scripts/ "
+            "is writable by the codex process this resume-integrity gate "
+            "protects (codex_job.py grants --write over the whole durable "
+            "root), so resolving the checker from inside the thing it "
+            "checks would let a tampered copy pass itself. Optional; omit "
+            "for today's self-anchored sibling lookup."
+        ),
+    )
     return parser
 
 
@@ -521,6 +676,8 @@ def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 
     try:
+        dirs = resolve_dirs(args.durable_root, args.plugin_root)
+
         payload_path = Path(args.payload_file)
         if not payload_path.is_file():
             raise ResumeSetupError(f"payload file not found: {payload_path}")
@@ -540,10 +697,12 @@ def main(argv=None) -> int:
             # a malformed batch list aborts with nothing on disk at all.
             validate_glossary_batches_shape(payload.get("batches"))
 
-        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        dirs["runs_dir"].mkdir(parents=True, exist_ok=True)
 
-        run_id, resume, input_digest = resolve_run(payload)
-        run_dir = write_run_dir(run_id, resume, input_digest, kind, payload)
+        run_id, resume, input_digest = resolve_run(
+            payload, dirs, args.durable_root, args.plugin_root
+        )
+        run_dir = write_run_dir(run_id, resume, input_digest, kind, payload, dirs)
 
         result = {
             "success": True,

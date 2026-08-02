@@ -136,6 +136,7 @@ BASE_SUBST = {
     "target_lang": "en",
     "max_fix_rounds": 3,
     "batch_agent_cap": 5,
+    "max_codex_jobs_per_batch": 400,
     "effort": "high",
     # 1.16.1 (#347). Empty = fetch_citation.py's shipped default list. REQUIRED
     # even when empty: the value is what the template actually burned in, and a

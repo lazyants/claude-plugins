@@ -43,9 +43,14 @@ Usage
         the context of segment <id>. A superset convenience on top of the
         two documented invocations above -- never required, always safe.
 
-Self-anchoring: this script always lives at
+Self-anchoring by default: this script always lives at
 ``${durable_root}/scripts/cache_key.py`` and derives durable_root from its
-own path -- it never assumes cwd and never takes a --durable-root flag.
+own path -- it never assumes cwd. LT-409: an explicit ``--durable-root
+PATH`` overrides this, REPLACING the self-anchored root entirely (every
+compute_*() function below already takes durable_root as an explicit
+parameter, so this only changes what main() passes in -- never what gets
+hashed for a given set of on-disk inputs). Omitting the flag reproduces
+today's self-anchored behavior byte-for-byte.
 """
 
 import argparse
@@ -675,6 +680,16 @@ def main() -> int:
         help="Print just this one field's current value instead of the "
         "full JSON object.",
     )
+    parser.add_argument(
+        "--durable-root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LT-409: use PATH as the durable root instead of this script's "
+            "own self-anchored location. Optional; omit for today's "
+            "self-anchored behavior."
+        ),
+    )
     args = parser.parse_args()
 
     if args.seg is None and args.field is None:
@@ -685,7 +700,7 @@ def main() -> int:
         if seg_error is not None:
             fail(seg_error)
 
-    durable_root = DURABLE_ROOT
+    durable_root = Path(args.durable_root).resolve() if args.durable_root else DURABLE_ROOT
 
     # profile.yml is only loaded lazily, on first actual need -- some
     # per-segment fields (input_sha1, verse_map_hash, note_map_hash) don't

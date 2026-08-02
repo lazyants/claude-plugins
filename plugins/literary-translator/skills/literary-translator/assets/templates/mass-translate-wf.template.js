@@ -84,6 +84,18 @@
 //                                          preflight estimator below needs this value and this
 //                                          script has no filesystem access with which to read
 //                                          profile.yml itself.
+//   {{MAX_CODEX_JOBS_PER_BATCH}}          -- engine.max_codex_jobs_per_batch, substituted as a BARE
+//                                          integer literal, same style as {{BATCH_AGENT_CAP}} above.
+//                                          #409 stage 0: a SECOND, independent preflight cap sized
+//                                          against real codex dispatches rather than Workflow
+//                                          agent() calls (see the "max_codex_jobs_per_batch
+//                                          preflight" block below). Unlike {{BATCH_AGENT_CAP}},
+//                                          engine.max_codex_jobs_per_batch is OPTIONAL in
+//                                          profile.schema.json -- when absent, the orchestrating
+//                                          session substitutes the schema field's own documented
+//                                          "default" (400) here, mirroring how {{MODEL}} falls back
+//                                          to its own documented empty-string default when
+//                                          engine.model is unset.
 //   {{CODEX_COMPANION_PATH_JSON}}         -- resolved codex-companion.mjs path, substituted as a
 //                                          strict json.dumps JS STRING LITERAL (i.e. WITH its own
 //                                          surrounding quotes -- the token sits OUTSIDE quotes in
@@ -319,6 +331,7 @@ const SOURCE_LANG = "{{SOURCE_LANG}}";
 const TARGET_LANG = "{{TARGET_LANG}}";
 const MAXFIX = {{MAX_FIX_ROUNDS}};
 const BATCH_AGENT_CAP = {{BATCH_AGENT_CAP}};
+const MAX_CODEX_JOBS_PER_BATCH = {{MAX_CODEX_JOBS_PER_BATCH}};
 // #197 -- engine.effort/engine.model. EFFORT drives both the codex_job.py
 // --effort flag (translate/review launches below) and the Claude fix step's
 // agent() effort option, always from this one value. MODEL is the empty
@@ -1755,6 +1768,78 @@ if (estimatedCalls > BATCH_AGENT_CAP) {
     " for " + SEGS.length + " segment(s) at max_fix_rounds=" + MAXFIX + "."
   );
   return { converged: [], failed: [], reason: "batch-too-large", estimatedCalls: estimatedCalls, cap: BATCH_AGENT_CAP };
+}
+
+// ---------------------------------------------------------------------------
+// max_codex_jobs_per_batch preflight (#409 stage 0, issue #402) -- a SECOND,
+// INDEPENDENT preflight, run in addition to the batch_agent_cap estimator
+// directly above (batch_agent_cap is not removed or replaced -- it still
+// governs this same template's own agent()-call budget, and it remains the
+// shared knob for the glossary-pass and skeptic-pass preflights elsewhere).
+// That estimator sizes Workflow agent() calls, a proxy that does not name
+// the resource an operator actually spends money/time on. This gate sizes
+// the real thing directly: codex dispatches (one detached codex_job.py
+// launch per translate, per review, and per fix round). Must run, and must
+// be able to return, BEFORE pipeline() is ever called below -- same
+// placement contract as the estimator directly above, so a refusal from
+// EITHER gate stays "before any work" rather than mid-batch. Issue #402's
+// complaint was that a preflight refusal did not name its own culprit
+// clearly enough for an operator to act on -- the message below names the
+// knob, the computed need, the effective limit, and the segment count.
+//
+// Deliberately placed AFTER the batch_agent_cap check above rather than
+// before it: both gates return before any dispatch, so either ordering
+// satisfies "refuses before any work" identically, and this ordering keeps
+// this file's own top-level `const estimatedCalls` marker (see
+// tests/draft_path_convention.test.py's `_JS_CUT_MARKER`, which slices the
+// raw template at that exact string to extract only its function
+// declarations) as the FIRST top-level `return`-bearing statement in the
+// file -- unchanged from before this gate existed.
+//
+// Per segment, worst case (every round non-clean, so every fix round
+// actually fires):
+//   1 translate job
+// + (MAXFIX + 1) review jobs      -- one per normal round, plus the one
+//                                    mandatory final confirming review
+// = MAXFIX + 2 codex jobs per segment.
+//
+// The MAXFIX fix rounds are deliberately NOT counted here. callFix() is a
+// plain Workflow agent() call -- the CLAUDE fix step -- and never launches
+// codex_job.py. This file has exactly two launch sites, the dispatch shells
+// built in translateDrivePrompt and reviewDrivePrompt; nothing else spawns a
+// driver. A review round cannot re-dispatch either: its retry path
+// (readAndCheck) re-reads the artifact codex already wrote rather than
+// starting a second job.
+//
+// Counting the fix calls made this gate measure a different resource from the
+// one its name, this comment, and the operator-facing refusal all describe --
+// it over-counted by MAXFIX per segment and refused batches that were in fact
+// within engine.max_codex_jobs_per_batch. Concretely, at MAXFIX=4 a
+// 41-segment batch launches 246 codex jobs but was computed as 410 and
+// rejected against the default cap of 400.
+// ---------------------------------------------------------------------------
+const CODEX_JOBS_PER_SEG = MAXFIX + 2;
+const estimatedCodexJobs = SEGS.length * CODEX_JOBS_PER_SEG;
+if (estimatedCodexJobs > MAX_CODEX_JOBS_PER_BATCH) {
+  // Deliberately says "the effective ... limit", never "engine.max_codex_
+  // jobs_per_batch=N" as if N were necessarily something the operator
+  // wrote. This value is substituted at instantiation time either way
+  // (profile.yml's own value, or the schema's documented default when the
+  // profile omits the key) -- the two cases are byte-identical here, so the
+  // message must stay true under BOTH without claiming which one applied.
+  // "Raise it in profile.yml" is the correct next step regardless: it works
+  // whether the operator is editing an existing value or adding the key
+  // for the first time.
+  log(
+    "Batch too large: this batch needs estimatedCodexJobs=" + estimatedCodexJobs +
+    " for " + SEGS.length + " segment(s) at max_fix_rounds=" + MAXFIX +
+    ", over the effective engine.max_codex_jobs_per_batch limit of " + MAX_CODEX_JOBS_PER_BATCH +
+    ". Raise it in profile.yml under engine: to allow a larger batch."
+  );
+  return {
+    converged: [], failed: [], reason: "batch-too-large-codex-jobs",
+    estimatedCodexJobs: estimatedCodexJobs, codexJobsCap: MAX_CODEX_JOBS_PER_BATCH,
+  };
 }
 
 const results = await pipeline(SEGS, translateStage, reviewFixLoop);

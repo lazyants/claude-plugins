@@ -581,6 +581,151 @@ def test_js_side_accepts_genuine_matching_stdout(tmp_path):
     assert js_result["raw"]["status"] == "in_progress"
 
 
+# ---------------------------------------------------------------------------
+# 9. --durable-root PATH (LT-409): an explicit, caller-supplied root that
+#    REPLACES self-anchoring when given, byte-identical to today's
+#    self-anchored behavior when omitted.
+# ---------------------------------------------------------------------------
+
+def run_ledger_update_from(script_path, seg, payload_path, *extra_args):
+    return subprocess.run(
+        [sys.executable, str(script_path), seg, "--payload-file", str(payload_path), *extra_args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def write_segpack_fixture(root, seg):
+    (root / "segments" / f"segpack_{seg}.json").write_text(
+        json.dumps({"blocks": [{"id": "b1"}], "footnotes": [], "verses": []}),
+        encoding="utf-8",
+    )
+
+
+def write_draft_fixture(root, seg, dispatch_token=None):
+    doc = {"seg": seg, "blocks": {"b1": "hello"}}
+    if dispatch_token is not None:
+        doc["dispatch_token"] = dispatch_token
+    (root / "segments" / f"{seg}.draft.json").write_text(json.dumps(doc), encoding="utf-8")
+    # Independent (not-reimplemented-from-the-script) canonical content sha1,
+    # matching draft_sha1.py's/ledger_update.py's own dispatch_token-excluded
+    # algorithm -- mirrors draft_sha1.test.py's own canonical_expected_sha1().
+    projected = {k: v for k, v in doc.items() if k != "dispatch_token"}
+    canonical = json.dumps(
+        projected, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha1(canonical).hexdigest()
+
+
+def write_review_fixture(root, seg, draft_sha1_value):
+    (root / "segments" / f"{seg}.review.json").write_text(
+        json.dumps({"draft_sha1": draft_sha1_value}), encoding="utf-8"
+    )
+
+
+def test_durable_root_flag_redirects_in_progress_write(tmp_path):
+    """ledger_update.py's own copy lives ALONE -- no schemas/, no runs/, no
+    segments/ anywhere near it -- self-anchoring alone cannot possibly
+    succeed. --durable-root pointing at a SEPARATE, real fixture root must
+    make the write land at THAT root's runs/ledger.d/{seg}.json."""
+    real_root = make_durable_root(tmp_path)
+    seg = "segRedirect"
+    payload_path = write_payload(real_root, "pRedirect", {"status": "in_progress"})
+
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "ledger_update.py"
+    shutil.copy2(SCRIPT_SRC, orphan_script)
+
+    result = run_ledger_update_from(
+        orphan_script, seg, payload_path, "--durable-root", str(real_root)
+    )
+
+    assert result.returncode == 0, (
+        f"--durable-root must redirect path resolution to the given root, "
+        f"regardless of the script's own on-disk location -- got rc="
+        f"{result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    stdout = json.loads(result.stdout.strip())
+    assert stdout["success"] is True
+    fragment = read_fragment(real_root, seg)
+    assert fragment["status"] == "in_progress"
+
+
+def test_durable_root_flag_redirects_converged_enrich(tmp_path):
+    """The 'converged' status path (enrich_converged_fields) reads THREE
+    separate on-disk files -- segpack, draft, review -- all via paths this
+    script derives from its durable_root. This is the function with the
+    most path derivation, so it gets its own dedicated redirect proof
+    rather than trusting the simpler in_progress case above to cover it."""
+    real_root = make_durable_root(tmp_path)
+    seg = "segConverged"
+    write_segpack_fixture(real_root, seg)
+    draft_sha1_value = write_draft_fixture(real_root, seg)
+    write_review_fixture(real_root, seg, draft_sha1_value)
+    payload_path = write_payload(
+        real_root,
+        "pConverged",
+        {"status": "converged", "cache_key": FULL_CACHE_KEY, "rounds": 1},
+    )
+
+    orphan_dir = tmp_path / "orphan_location2" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "ledger_update.py"
+    shutil.copy2(SCRIPT_SRC, orphan_script)
+
+    result = run_ledger_update_from(
+        orphan_script, seg, payload_path, "--durable-root", str(real_root)
+    )
+
+    assert result.returncode == 0, (
+        f"converged status via --durable-root must read segpack/draft/review "
+        f"from the GIVEN root -- got rc={result.returncode}\nstdout:\n"
+        f"{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    stdout = json.loads(result.stdout.strip())
+    assert stdout["success"] is True
+    assert stdout["status"] == "converged"
+    fragment = read_fragment(real_root, seg)
+    assert fragment["reviewed_draft_sha1"] == draft_sha1_value
+    assert fragment["n_blocks"] == 1
+    assert fragment["n_footnotes"] == 0
+    assert fragment["n_verses"] == 0
+
+
+def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
+    """Negative control: the orphan copy, invoked WITHOUT --durable-root,
+    cannot succeed via self-anchoring (no schemas/ dir to load from)."""
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "ledger_update.py"
+    shutil.copy2(SCRIPT_SRC, orphan_script)
+    payload_path = orphan_dir.parent / "scratch_payload.json"
+    payload_path.write_text(json.dumps({"status": "in_progress"}), encoding="utf-8")
+
+    result = run_ledger_update_from(orphan_script, "segX", payload_path)
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout.strip())
+    assert payload["success"] is False
+
+
+def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility: the ordinary in-place fixture, invoked with
+    no --durable-root at all, behaves exactly as before."""
+    root = make_durable_root(tmp_path)
+    seg = "segNoFlag"
+    payload_path = write_payload(root, "pNoFlag", {"status": "in_progress"})
+
+    result = run_ledger_update(root, seg, payload_path)
+
+    assert result.returncode == 0
+    stdout = json.loads(result.stdout.strip())
+    assert stdout["success"] is True
+    assert read_fragment(root, seg)["status"] == "in_progress"
+
+
 if __name__ == "__main__":
     import pytest as _pytest
 
