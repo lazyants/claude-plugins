@@ -266,5 +266,56 @@ def test_durable_root_flag_combines_with_candidate_file(tmp_path):
     assert "[seg01] READY" in result.stdout
 
 
+# ---------------------------------------------------------------------------
+# --expect-token TOK -- 1.2.0 addition, closes the stale/straggler-draft-
+# from-a-different-run gap (module docstring). Previously untested anywhere:
+# this file never passed the flag at all, and codex_job_driver.test.py's own
+# --expect-token uses go through a FAKE draft_ready.py stub, never the real
+# script. Confirmed by mutation: `if token != args.expect_token:` -> `if
+# False:` in main() survives the whole battery. The fixtures below reuse
+# clean_segpack()/clean_draft() UNCHANGED -- the exact pair
+# test_clean_baseline_is_ready above already proves passes every OTHER gate
+# (schema shape, seg==seg, key sets) -- so --expect-token is the ONLY
+# variable between this section's tests and that proven-clean baseline.
+# ---------------------------------------------------------------------------
+
+
+def test_expect_token_mismatch_is_not_ready(tmp_path):
+    """PROOF. clean_draft() carries no dispatch_token field at all, so
+    draft.get("dispatch_token") is None -- which cannot equal any
+    --expect-token value. Isolates the token check as the ONLY thing
+    deciding: every other gate is satisfied identically to
+    test_clean_baseline_is_ready's own proven-passing fixture."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+
+    result = run_draft_ready(root, "seg01", "--expect-token", "RUN1:seg01")
+
+    assert result.returncode == 1, (
+        f"a draft with no dispatch_token cannot satisfy --expect-token -- "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "dispatch_token mismatch" in result.stdout
+    assert "RUN1:seg01" in result.stdout
+
+
+def test_expect_token_match_is_ready(tmp_path):
+    """Pairing for the PROOF above: the SAME clean fixture, draft's
+    dispatch_token now set to EXACTLY the value --expect-token names.
+    Without this, the mismatch test alone could not distinguish "the check
+    fires on any given token" from "the check always refuses" -- a mutation
+    to `if True:` would pass the mismatch test just as wrongly as `if
+    False:` passes it today."""
+    root = make_durable_root(tmp_path)
+    draft = clean_draft()
+    draft["dispatch_token"] = "RUN1:seg01"
+    write_segment(root, "seg01", clean_segpack(), draft)
+
+    result = run_draft_ready(root, "seg01", "--expect-token", "RUN1:seg01")
+
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "[seg01] READY" in result.stdout
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

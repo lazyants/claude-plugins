@@ -227,6 +227,60 @@ def test_empty_footnote_fails_gate(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 1b. _diff_report()'s own coverage/bijection MISSING and EXTRA branches
+# (check 4/5's "footnotes|blocks|verses MISSING/EXTRA" reports). Previously
+# untested anywhere in this file: no existing fixture ever DROPS or ADDS a
+# key (as opposed to blanking an existing one's VALUE, which
+# test_empty_footnote_fails_gate above already covers) -- a whole-file grep
+# for "MISSING"/"EXTRA"/"del "/".pop(" all return zero hits. Confirmed by
+# mutation: `if missing:` in _diff_report() -> `if False:` survives the
+# whole battery.
+# ---------------------------------------------------------------------------
+
+def test_dropped_footnote_key_fails_gate_with_missing_report(tmp_path):
+    """PROOF for the `if missing:` branch. Drops the footnote key ENTIRELY
+    (not merely blanking its value), which removes it from BOTH src_fn's and
+    ru_fn's intersection -- so none of the per-key content checks (empty
+    translation, placeholder mismatch, sentinel) ever see it either,
+    isolating the MISSING report as the ONLY defect this fixture can
+    produce."""
+    root = make_durable_root(tmp_path)
+    draft = clean_draft()
+    del draft["footnotes"]["1"]  # injected defect: DROPPED key, not blanked
+
+    write_segment(root, "seg01", clean_segpack(), draft)
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 1, (
+        f"a draft missing a required footnote key must fail the gate, got "
+        f"rc={result.returncode}\nstdout:\n{result.stdout}"
+    )
+    assert "footnotes MISSING: ['1']" in result.stdout
+    assert defect_count(result.stdout) == 1
+
+
+def test_extra_footnote_key_fails_gate_with_extra_report(tmp_path):
+    """Companion for _diff_report()'s sibling `if extra:` branch -- same
+    "no fixture ever injects this defect" gap, also zero hits for "EXTRA"
+    anywhere in this file. A draft carrying a footnote key the segpack never
+    declared; the per-key content loop only iterates the SHARED key set, so
+    the undeclared key contributes nothing else."""
+    root = make_durable_root(tmp_path)
+    draft = clean_draft()
+    draft["footnotes"]["99"] = "A translated note with no source footnote."
+
+    write_segment(root, "seg01", clean_segpack(), draft)
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 1, (
+        f"a draft carrying an undeclared footnote key must fail the gate, "
+        f"got rc={result.returncode}\nstdout:\n{result.stdout}"
+    )
+    assert "footnotes EXTRA: ['99']" in result.stdout
+    assert defect_count(result.stdout) == 1
+
+
+# ---------------------------------------------------------------------------
 # 2. Swapped verse placeholder -- breaks the per-block parent_block
 #    bijection (check 3). A flat set-membership check would still see both
 #    placeholders as members of the source's global placeholder set and
