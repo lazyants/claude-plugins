@@ -1223,9 +1223,32 @@ def append_journal(durable_root: Path, session_id: str, event: dict) -> None:
     exception types now, not a bare `except Exception` -- this function's
     claim is specifically about WRITE failures (I/O and the one confirmed
     encoding failure), not an invitation to swallow every possible bug a
-    future caller's payload could trigger."""
+    future caller's payload could trigger.
+
+    Review-bot finding: `path.parent.mkdir()` used to sit OUTSIDE the try
+    below -- a genuinely different failure (the journal's HOME cannot be
+    created at all: an unwritable runs/ directory, a permissions problem
+    on the session subdirectory, or -- reproduced directly by the test
+    for this -- a plain FILE already occupying where a directory needs
+    to exist) escaped this function as a raw OSError, the same "aborts
+    the driver" outcome the encoding fix above closed for the write
+    itself. Given its own try/except rather than folded into the write's:
+    the two failures are different in KIND (home missing vs. write to an
+    existing home failing) and an operator debugging one should not be
+    told about the other. mkdir() raises only OSError and its subclasses
+    for this -- no encoding failure is possible here, `session_id` is
+    never attacker-controlled free text in the way a review finding's
+    `issue`/`suggest` text is -- so this one stays a plain `except
+    OSError`, not the pair the write below needs."""
     path = journal_path(durable_root, session_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(
+            f"segment_dispatch_driver.py: warning: could not create journal directory "
+            f"{path.parent}: {exc}", file=sys.stderr,
+        )
+        return
     entry = {"ts": _utc_now_iso(), **event}
     line = json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n"
     try:

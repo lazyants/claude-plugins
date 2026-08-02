@@ -2047,6 +2047,36 @@ def test_append_journal_survives_a_lone_surrogate_in_the_payload(tmp_path, capsy
     )
 
 
+def test_append_journal_survives_an_unwritable_journal_directory(tmp_path, capsys):
+    """Review-bot finding (PR #418): `path.parent.mkdir(parents=True,
+    exist_ok=True)` used to sit OUTSIDE the try below -- an OSError
+    creating runs/<session_id>/ escaped this function as a raw
+    exception, the same "aborts the driver" outcome the sibling test
+    above closed for the write itself. Reproduced with a real, portable
+    OS error needing no permission bits: a plain FILE already occupying
+    the exact path a directory needs to exist at, so mkdir()'s own
+    exist_ok=True cannot help (it only forgives an EXISTING DIRECTORY,
+    never a non-directory file at the same path) and a genuine
+    FileExistsError (an OSError subclass) is raised. Distinct message
+    from the write-failure case above -- "could not create journal
+    directory", not "could not write journal entry" -- since an operator
+    debugging one should not be misdirected toward the other."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+
+    session_dir = root / "runs" / "test-session"
+    session_dir.parent.mkdir(parents=True, exist_ok=True)
+    session_dir.write_text("occupies the path a directory needs to exist at\n", encoding="utf-8")
+
+    driver_mod.append_journal(root, "test-session", {"type": "irrelevant"})
+
+    captured = capsys.readouterr()
+    assert "could not create journal directory" in captured.err, captured.err
+    assert session_dir.is_file() and not session_dir.is_dir(), (
+        "setup check: the blocking file must still be exactly what was written, untouched"
+    )
+
+
 def test_run_one_codex_job_reports_the_real_dispatch_failure_not_the_journals(tmp_path, monkeypatch):
     """The end-to-end consequence of the bug above, through the REAL call
     site: run_one_codex_job()'s own two append_journal() calls
