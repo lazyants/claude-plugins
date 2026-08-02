@@ -24,6 +24,7 @@ import {
   assertNoUnknownKeywords,
   enumerateSchemaNodes,
   getNodeAtSteps,
+  SchemaEvaluationError,
 } from './profile-schema-evaluator.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -128,9 +129,13 @@ test('profile-schema-evaluator: GENERATED fail-closed sweep — every schema nod
     const kw1 = rotation[i % rotation.length];
     const singleMutant = clone(schema);
     getNodeAtSteps(singleMutant, steps)[kw1] = true;
+    // [round 7] `undefined` in the error-position is a no-op check (equivalent to omitting the
+    // argument) — assertNoUnknownKeywords has one dedicated exported class for exactly this failure
+    // (SchemaEvaluationError, profile-schema-evaluator.mjs:32/83); pin it so a mutant that throws a
+    // plain Error/TypeError instead is caught, not just "threw something".
     assert.throws(
       () => assertNoUnknownKeywords(singleMutant),
-      undefined,
+      SchemaEvaluationError,
       `node ${path}: inserting a single unrecognized keyword '${kw1}' was not caught`,
     );
     single += 1;
@@ -145,7 +150,7 @@ test('profile-schema-evaluator: GENERATED fail-closed sweep — every schema nod
     target[kwB] = true;
     assert.throws(
       () => assertNoUnknownKeywords(doubleMutant),
-      undefined,
+      SchemaEvaluationError,
       `node ${path}: inserting two unrecognized keywords '${kwA}'+'${kwB}' together was not caught`,
     );
     double += 1;

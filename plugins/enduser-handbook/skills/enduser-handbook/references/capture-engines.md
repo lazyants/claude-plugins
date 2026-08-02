@@ -14,6 +14,18 @@ against current vendor documentation (see [Sources](#sources)) but not run in th
 Do not extend these recipes from memory; re-verify against vendor docs before you rely on
 an API this file does not already cite.
 
+## Build-identity resolution is engine-independent
+
+`capture.build_identity` (added 1.12.0 — see `assets/handbook.profile.example.yml`) is not an
+engine-specific field like `page_identity_signal` above it or `capture.command` itself: its
+`command` sub-field, when set, runs at THREE points, the same way regardless of which of the four
+`capture.engine` values the profile selects — twice inside W2's `openCaptureRun` /
+`closeCaptureRun` pair (once before `capture.command`, once after, so a build changed mid-capture
+is caught), and again in W6's `buildProvenanceReport`, which resolves the CURRENT build identity to
+classify it against each chapter's recorded one. None of the three runs the capture engine at
+all — `page_identity_signal`, the guard, and every per-engine recipe below are about
+`capture.command`'s own driver glue, not the identity command.
+
 ## The contract is engine-agnostic; the driver glue is not
 
 [capture-spec-helpers.md](capture-spec-helpers.md), [page-identity.md](page-identity.md),
@@ -170,6 +182,11 @@ precondition still holds before the shot. Screenshots still land at
 `<group>/` segment — see references/manifest-discipline.md), and the operator is
 responsible for `capture.locale` / fresh-profile discipline that a container run
 would otherwise enforce automatically.
+
+Because the automated flow halts on `engine: manual` before W2 ever opens a capture run, no run
+or chapter provenance record is ever produced through the runtime path for a manual-engine
+profile — W6's report reads `record_absent` for every chapter, indefinitely. That is the expected
+report for this engine value's halt boundary, not a provenance defect to chase.
 
 ## Sources
 

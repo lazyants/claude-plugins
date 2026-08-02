@@ -198,6 +198,13 @@ of throwing away wrong capture code dwarfs the cost of one extra review round.
 - Not a substitute for the live-action and PII rules in
   `references/capture-safety.md`. The manifest lists *what* you capture; the
   safety reference governs *what you must not* trigger while capturing.
+- Not where build provenance lives. The per-chapter build-identity record (added
+  1.12.0 — *which build of the software this chapter's screenshots came from*)
+  is a separate durable artifact under the plugin-owned provenance root, keyed
+  by the entry's `group`/`slug`, not a field on the manifest entry above — no
+  manifest field carries it and none should be added for it. See
+  `references/container-isolation.md` (where the records live) and
+  `references/revalidation.md` (how a group migration moves them).
 - Not auto-generated. A script that scrapes routes and emits a manifest skips
   the entire point of human review. The manifest is something you draft by
   reading the running UI and then ask a human to bless.
