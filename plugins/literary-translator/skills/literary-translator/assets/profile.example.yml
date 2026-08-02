@@ -246,8 +246,9 @@ engine:
     # CODEX-JOB-COUNT preflight,
     # independent of batch_agent_cap above. batch_agent_cap estimates Workflow agent() calls; this knob
     # estimates the OTHER consumable resource a
-    # mass-translate batch spends: real codex dispatches (one detached codex_job.py launch per translate, per
-    # review, and per fix round). The refusal fires BEFORE the first job launches, at the exact same preflight
+    # mass-translate batch spends: real codex dispatches (one detached codex_job.py launch per translate and
+    # per review -- NOT per fix; see the per-segment count below). The refusal fires BEFORE the first job
+    # launches, at the exact same preflight
     # site batch_agent_cap's own check sits at, so a batch too large for EITHER resource refuses before any work
     # starts, never mid-batch.
     #

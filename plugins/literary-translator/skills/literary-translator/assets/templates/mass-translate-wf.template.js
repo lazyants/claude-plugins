@@ -1854,7 +1854,8 @@ if (estimatedCalls > BATCH_AGENT_CAP) {
 // That estimator sizes Workflow agent() calls, a proxy that does not name
 // the resource an operator actually spends money/time on. This gate sizes
 // the real thing directly: codex dispatches (one detached codex_job.py
-// launch per translate, per review, and per fix round). Must run, and must
+// launch per translate and per review -- NOT per fix; see CODEX_JOBS_PER_SEG
+// below and the comment above it for why). Must run, and must
 // be able to return, BEFORE pipeline() is ever called below -- same
 // placement contract as the estimator directly above, so a refusal from
 // EITHER gate stays "before any work" rather than mid-batch. Issue #402's
