@@ -276,7 +276,7 @@ python3 {{PLUGIN_ROOT}}/assets/scripts/scaffold_setup.py --durable-root ${durabl
 ```
 
 It writes `${durable_root}/runs/.plugin_bundle_hash` (sha1 over the sorted
-concatenated bytes of the 14 `PLUGIN_BUNDLE_MEMBERS` under `scripts/` — read by
+concatenated bytes of the 15 `PLUGIN_BUNDLE_MEMBERS` under `scripts/` — read by
 `cache_key.py` rather than re-hashing the bundle per segment) and
 `${durable_root}/runs/.orchestration_bundle_hash` (sha1 over the four
 orchestration-only scripts — non-gating for convergence, never part of the
@@ -289,6 +289,37 @@ Last action: the deferred `particle_config` existence check — resolve
 `source.language.particle_config` as `${durable_root}/languages/<value>`
 (bare filename, exactly one `languages/` segment) and halt (field-named) if
 it still doesn't resolve to a real file.
+
+**#409 upgrade note — mandatory, not optional, on a RESUMED project
+(outcome 2 above):** this release added `segment_dispatch_driver.py` to
+`PLUGIN_BUNDLE_MEMBERS` (now 15 members, above), which moves
+`plugin_bundle_hash` for every project on upgrade. A moved
+`plugin_bundle_hash` makes every already-converged segment's cache key
+mismatch, reclassifying it `stale` — dispatch-eligible again.
+`select_segments.py`'s Step 1 gate (see the `--allow-retranslate-converged`
+flag, W5 below) refuses that using the durable
+`${durable_root}/segments/.ever_converged.{seg}` sentinel — but a project
+that converged segments on an OLDER version of this plugin, before that
+sentinel existed, has NO sentinels at all, so the gate has nothing to
+refuse with: the very first W5 dispatch after upgrading would sail through
+ungated and silently retranslate the whole book. Before the first W5
+dispatch on any project this plugin has touched before it had
+`segment_dispatch_driver.py`, run (dry run by default — zero filesystem
+writes):
+
+```
+python3 ${durable_root}/scripts/backfill_ever_converged.py
+```
+
+and read the printed JSON's `missing_sentinels`/`counts` fields — a
+non-empty `missing_sentinels` means this project needs backfilling before
+W5 runs; a genuinely fresh project that has never converged anything
+reports zero and needs no action. Re-run with `--apply` to actually write
+the missing sentinels (add `--allow-merge` too if the dry run refused for
+lack of an existing `runs/ledger.json`; `--allow-empty` to confirm a
+genuinely zero-segment result is expected rather than a broken read). See
+`backfill_ever_converged.py`'s own module docstring for the full mechanism
+and CLI contract.
 
 ## Step 0b — Resolve verse-policy adapter
 
@@ -1381,6 +1412,16 @@ is called. It:
   confirmation run).
 - Every invocation logs requested `--only-segs` IDs alongside
   actually-emitted `SEGS` IDs side by side.
+- **#409:** `--allow-retranslate-converged` (optional) — without it,
+  `select_segments.py` FATALs if the emitted `SEGS` would include any
+  segment that has EVER converged before (a durable per-segment sentinel,
+  not the ledger status, which is overwritten to `in_progress` before a
+  re-dispatch and so would not catch this). A converged segment turns
+  dispatch-eligible again as soon as any cache-key field moves — a plugin
+  upgrade moves `plugin_bundle_hash` for every segment at once — so
+  without this gate a routine upgrade would silently re-translate
+  finished, paid-for work. Passing the flag authorizes exactly that
+  dispatch; it does not delete the sentinel.
 
 **1.2.0: the deterministic pre-workflow step, after `SEGS` and before
 `pipeline()`.** With `SEGS` finalized, invoke `resume_setup.py` (kind
@@ -1396,9 +1437,10 @@ that candidate; MISMATCH on every candidate, or none offered → fresh
 `RUN_ID`), and creates `runs/<RUN_ID>/` — aborting before any dispatch on
 failure. The payload's `args` field is PINNED to the literal empty object
 `{}` for `kind="mass"` (`resume_setup.py` rejects any other value) — it is
-NOT `SEGS`, and NOT the driver's own `--only-segs`/`--allow-retranslate-
-converged`/`--allow-empty` scoping flags, since those govern Step 1's own
-gating and must not also gate resume. `segs` is likewise no longer read by
+NOT `SEGS`, and NOT `select_segments.py`'s own
+`--only-segs`/`--allow-retranslate-converged`/`--allow-empty` scoping
+flags, since those govern Step 1's own gating and must not also gate
+resume. `segs` is likewise no longer read by
 `resume_setup.py` at all (accepted-but-ignored for one release only). See
 `resume_setup.py`'s own module docstring for the full payload contract.
 Only then is `mass-translate-wf.template.js` instantiated (fresh from the
@@ -1465,6 +1507,61 @@ substitution is not a neutral default: it leaves the pre-#412
 vulnerability open** — a codex-tampered copy of any of those three gate
 scripts sitting in `${durable_root}/scripts/` would validate its own bad
 output, and nothing downstream would catch it. Always substitute it.
+
+**Optional dispatch path — `segment_dispatch_driver.py` (#409).** Everything
+above (`mass-translate-wf.template.js` instantiation, `pipeline()`, the
+DISPATCH/WAIT/CONSUME chunking apparatus) remains W5's DEFAULT dispatch
+mechanism. `segment_dispatch_driver.py` — copied into
+`${durable_root}/scripts/` at Step 0a like every other bundle member — is an
+ALTERNATIVE, not a replacement: it runs the identical per-segment
+translate/review loop as a detached local process instead of inside the
+Workflow tool, eliminating the WAIT-polling chunking apparatus entirely.
+Switching W5 over to it by default is deferred to a later step (the fix step
+below still needs a Claude turn today, and nothing currently automates the
+hand-off — see below); until then, use it only if you deliberately choose
+to, and never against the same `durable_root` as a concurrent `pipeline()`
+run — nothing in either path guards against that (the driver's own
+project-wide lock, `runs/.driver.lock`, only serializes two driver launches
+against each other, never a driver against a Workflow-driven run).
+
+Launch it as an ORDINARY FOREGROUND Bash tool call — NEVER `run_in_background`
+(a recorded anti-pattern here: its poll gets harness-stopped mid-wait while
+the spawned worker keeps running, producing a false "completed"):
+
+```
+nohup python3 {durable_root}/scripts/segment_dispatch_driver.py \
+    [--only-segs SEG1,SEG2,...] [--allow-retranslate-converged] \
+    > {durable_root}/runs/driver.<SESSION_ID>.log 2>&1 < /dev/null & disown
+```
+
+(`<SESSION_ID>` here is a caller-chosen label for this one log file — e.g. a
+timestamp — distinct from the session id the driver generates internally for
+its own journal directory.) Full CLI: `--durable-root PATH`/`--plugin-root
+PATH` (this driver's own sibling-script resolution — data root vs. install
+root, same split as every other #409 script — also threaded through to
+`select_segments.py`'s identical flags), `--only-segs SEG1,SEG2,...`/
+`--allow-retranslate-converged`/`--allow-empty` (forwarded verbatim to
+`select_segments.py`'s own flags of the same name, above),
+`--max-concurrent-codex-jobs N` (default 40), `--node BIN`. Exit 0 means the
+per-segment loop ran to completion — NOT that every segment converged; read
+the printed JSON's `summary.failed`/`summary.needs_fix`. Exit 1 means a gate
+refused before any dispatch (lock contention, the Step 1 re-translate gate,
+the volume cap). Exit 2 is a usage/environment error.
+
+**The driver cannot perform the fix step, and nothing today automates the
+hand-off.** When a segment's review comes back not-clean, the driver stops
+at that segment and returns `outcome: "needs_fix"` — the round label, the
+findings, and the exact rendered fix prompt — then moves on/exits without
+fixing it (applying findings to a draft is a real LLM content-editing turn a
+plain Python process cannot perform). Someone — a human, or an orchestrating
+session — must notice this in the driver's own JSON output or its redirected
+log (`runs/driver.<SESSION_ID>.log`, per the launch command above), perform
+ONE Claude turn using that exact fix prompt to rewrite the draft, and
+re-invoke the driver to resume. No script or template anywhere in this
+plugin currently reads `needs_fix`, the driver's stdout, or its own journal
+(`runs/<internal-session-id>/driver_journal.jsonl`) on the driver's behalf.
+Do not launch this driver unattended expecting it to complete a batch
+end-to-end — a `needs_fix` segment sits stalled until someone checks.
 
 **W6 Consistency pass** — cross-segment sweep using `consistency_issues.md`
 as a lightweight, hand-maintained tracker after every batch, before the next
