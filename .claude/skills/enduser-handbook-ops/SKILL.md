@@ -5,6 +5,13 @@ description: Working ON the enduser-handbook plugin — use when modifying its s
 
 The `enduser-handbook` plugin is a **contract-dense reference-doc skill**: the same rule is stated in several `references/*.md` files plus `SKILL.md`, the docs are hard-wrapped, and the runtime steps (`Step 0b`, `W5`) must agree with the prose. Recurring traps, the review discipline that catches them, and a technique for designing convergence checks on manual-work recipes.
 
+Read the reference file that matches the task:
+
+- **`references/wikilink-resolution-ground-truth.md`** — read when writing, validating or specifying ANY `[[…]]` target: measured Obsidian/Quartz resolution tiers, the vault-root-relative rule, and how to re-derive both.
+- **`references/reference-assets-suite-output.md`** — read when capturing or reading a `reference-assets.test.sh` run: `bad()` prints each failing check's NAME to stderr, while stdout carries the ~700 passing `ok` lines AND the `TOTAL:` summary — which is why a bare `tail` (even with `2>&1`) shows the count but loses the failing check's name.
+- **`references/skill-parameterization.md`** — read when adding, renaming or removing a profile key: the every-key-needs-a-consumer audit and the two dead-key examples it came from (the general per-project-parameterization mechanism lives in `plugin-repo-mechanics`).
+- **`references/manual-work-convergence-facts.md`** — read when designing or reviewing a completion check for a halt-driven manual-work recipe (see §12).
+
 ## 1. Publish-target adapter resolution drifts across ~5 surfaces
 
 The skill resolves a publish-target adapter **filename** from `publish.target` by **lowercasing and replacing `_` with `-`**:

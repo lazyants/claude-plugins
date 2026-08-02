@@ -6,7 +6,53 @@ The **generalized** config-dir architecture — the per-profile plugin-store mod
 
 ## Refresh the installed copy after merge (publish ≠ ship)
 
-The four synced surfaces + merge-to-main is the *publish*, not the *ship*. The INSTALLED plugin stays stale until you pull the marketplace cache and update the plugin — always do this last step. **Post-2026-07-21 this is PER-PROFILE** (stores are independent now): run it for each profile you want the update in, e.g. `CLAUDE_CONFIG_DIR=/Users/moi/.claude-bm claude plugin marketplace update lazyants` (for the app), then update the plugin from the `lazyants` marketplace; repeat with `CLAUDE_CONFIG_DIR=/Users/moi/.claude` (and `.claude2`/`.claude3`) for the CLI profiles you actually use. (Note: `lazyants` is the GitHub marketplace name — distinct from the `lazy-ants` directory marketplace.)
+The four synced surfaces + merge-to-main is the *publish*, not the *ship*. The INSTALLED plugin stays stale until you pull the marketplace cache and update the plugin — always do this last step. **Post-2026-07-21 this is PER-PROFILE** (stores are independent now): run it for each profile you want the update in, e.g. `CLAUDE_CONFIG_DIR=/Users/moi/.claude-bm claude plugin marketplace update lazyants` (for the app), then update the plugin from the `lazyants` marketplace; repeat with `CLAUDE_CONFIG_DIR=/Users/moi/.claude` (and `.claude2`/`.claude3`) for the CLI profiles you actually use. (Note: `lazyants` is the GitHub marketplace name — distinct from the `lazy-ants` directory marketplace.) The exact two-command form, the marketplace-qualified update id, and the restart caveat are in the next section.
+
+## Read an installed version with `claude plugin list` — NEVER from a `plugins/cache/` path
+
+`<profile>/plugins/cache/<marketplace>/<plugin>/` holds **one subdirectory per version ever
+installed**, not just the active one (10–13 versioned dirs per profile on this machine). So
+
+```
+find "$d/plugins/cache/lazyants" -name plugin.json -path '*literary-translator*' | head -1
+```
+
+returns whichever versioned dir the filesystem happened to list first — a stale one, with no error
+and no clue that it is stale. There is no ordering guarantee at all: nothing sorts, so the answer is
+not the highest version, not the lowest, and not stable between runs.
+
+Measured 2026-08-02 while verifying a release: that glob reported
+`.claude 1.15.0 / .claude2 1.8.0 / .claude3 1.16.2 / .claude-bm 1.15.0`, and those numbers went to
+the user as the basis for a decision. `claude plugin list` reported the truth: **1.16.2 in all four**.
+The "1.8.0" profile did not exist; the whole "nine-minor jump, could disturb in-flight work" framing
+was an artifact of `head -1`. Re-running the same glob later that day gave four *different* wrong
+answers (`1.14.1 / 1.15.2 / 1.10.0 / 1.16.2`) against a true `1.17.0` everywhere — and note that
+across those eight readings exactly one happened to be right, which is the trap: a glob that is
+sometimes accidentally correct reads as a working accessor.
+
+**Ask the owning accessor instead:**
+
+```
+CLAUDE_CONFIG_DIR=$d claude plugin list      # authoritative installed version
+```
+
+The id it prints is **marketplace-qualified** (`literary-translator@lazyants`), and `claude plugin
+update` needs that form — an unqualified name fails with `Plugin "literary-translator" not found`.
+Release refresh is therefore two steps per profile:
+
+```
+claude plugin marketplace update <marketplace>
+claude plugin update <plugin>@<marketplace>
+```
+
+and the update prints `Restart to apply changes` — the running session keeps the old copy, so a
+post-update `plugin list` in the same session is not evidence the new code is loaded. See
+[[feedback-publish-refresh-installed]].
+
+This is the plugin-cache instance of the standing global rule: locating an artifact by a path you
+CONSTRUCTED, instead of asking for it by id, renders staleness and absence identically to fact. The
+damage was not a wrong number in a log — it was a wrong state read that became a decision input the
+user acted on ([[feedback-askuserquestion-cost-model]]).
 
 ## Switching a marketplace SOURCE (directory ↔ github) — EDIT the registry, never `marketplace remove`
 
