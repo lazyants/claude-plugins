@@ -112,7 +112,9 @@ the real fixture `003 Chapter Two.md` into **three** non-existent paths (`./003`
 **Assert a file-count floor.** Count the records inside the snapshot and refuse an implausibly small
 one (`[ "$N" -lt 200 ] && exit 3`); a count you only remember to eyeball is one you forget on the run
 that needed it — same failure shape as [[gotcha-zsh-no-word-splitting]]. Count NUL records, not
-lines: a path with a space is one record but two lines.
+lines: a path containing a NEWLINE is one record but two lines, and a path containing a SPACE is one
+record that `xargs` splits into several ARGUMENTS — exactly the `003 Chapter Two.md` → three
+non-existent paths failure above.
 
 **Wait on the COMPLETION criterion, never on stability.** "All N target files contain X" beats
 "nothing changed for 90s", which is satisfied by any pause.
@@ -168,5 +170,5 @@ usual capture shows the count and hides the name. Capture it with:
 2>&1 | grep -E '^  FAIL |^TOTAL:'
 ```
 
-See (→skill:enduser-handbook-ops). With the failing test's NAME in hand, all three of these would
-have been one lookup instead of an inference chain.
+See (→skill:enduser-handbook-ops), `references/reference-assets-suite-output.md`. With the failing
+test's NAME in hand, all three of these would have been one lookup instead of an inference chain.

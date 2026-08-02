@@ -18,8 +18,8 @@ find "$d/plugins/cache/lazyants" -name plugin.json -path '*literary-translator*'
 ```
 
 returns whichever versioned dir the filesystem happened to list first — a stale one, with no error
-and no clue that it is stale. Lexical ordering makes it worse rather than merely arbitrary: `1.9.0`
-sorts *after* `1.17.0`, so a profile holding both hands back `1.10.0`.
+and no clue that it is stale. There is no ordering guarantee at all: nothing sorts, so the answer is
+not the highest version, not the lowest, and not stable between runs.
 
 Measured 2026-08-02 while verifying a release: that glob reported
 `.claude 1.15.0 / .claude2 1.8.0 / .claude3 1.16.2 / .claude-bm 1.15.0`, and those numbers went to
