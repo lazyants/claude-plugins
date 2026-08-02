@@ -4938,6 +4938,44 @@ test('the open -> close seam: a redirect DEEPER along the absent tail, still ins
   });
 });
 
+// [round 42] The anchor must be recorded in the SAME representation everything else uses. The climb
+// walked the raw configured path while `canonicalizeForComparison` and `chapterAssetDir` normalize
+// `..` lexically first, so the two disagreed about which directory the anchor was: the kernel reads
+// `a/link/..` as the parent of link's TARGET, lexical normalization reads it as `a`. Nothing bad has
+// been observed to reach a record — the configured-vs-resolved bracket refuses the topologies that
+// would express it — so this asserts the recorded observation itself rather than a halt, which is
+// the honest level for a fix whose consequence is currently masked by another guard.
+test('an absent root\'s anchor is recorded lexically, matching the directory the walk actually visits', () => {
+  withTempDir((dir) => {
+    const real = nodeFs.realpathSync(dir);
+    nodeFs.mkdirSync(join(real, 'a'), { recursive: true });
+    nodeFs.mkdirSync(join(real, 'b'), { recursive: true });
+    nodeFs.mkdirSync(join(real, 'handbook'), { recursive: true });
+    // `link` leaves its own parent, which is what makes the two readings of `..` differ at all.
+    nodeFs.symlinkSync(join(real, 'b'), join(real, 'a', 'link'));
+    const profile = {
+      // Concatenated, not `join`ed: `join` would normalize the `..` away before the module sees it,
+      // and a profile file supplies this string verbatim.
+      capture: { output_dir: `${real}/a/link/../assets`, build_identity: { ui_read: false } },
+      publish: { chapters_dir: join(real, 'handbook'), target: 'static_md' },
+    };
+
+    const opened = CR.openCaptureRun(profile, [{ slug: 'items' }], null, stubDepsNoIdentity());
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    const anchor = opened.runState.output_root.anchor;
+    assert.equal(anchor.path, join(real, 'a'),
+      `the anchor must be the lexically normalized ancestor, not the raw one: ${anchor.path}`);
+    // The identity is the load-bearing half: the raw climb recorded the identity of `b`'s PARENT
+    // here, which is neither the directory the canonical path names nor the one the walk visits.
+    assert.equal(anchor.identity, identityOf(join(real, 'a')),
+      'the anchor must identify the directory lexical normalization names');
+    assert.notEqual(anchor.identity, identityOf(real),
+      'and specifically not the object the kernel reaches by following the link before the ..');
+    assert.equal(opened.runState.output_root.canonical, join(real, 'a', 'assets'),
+      'the canonical path is the lexical one, which is the whole reason the anchor must be too');
+  });
+});
+
 // [round 40] The same defect class one branch HIGHER than round 39 closed it. `ownership.skip` is
 // decided from the CURRENT profile and returns before the runState or the token is looked at, so a
 // profile edited between open and close — to an overlapping topology with no `build_identity` —

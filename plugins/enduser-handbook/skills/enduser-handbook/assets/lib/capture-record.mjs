@@ -2193,7 +2193,18 @@ function directAbsenceConfirmed(absPath, containmentRoot, deps) {
   // built from it — and prefixing `/` onto its segments would probe a completely different tree,
   // climb it to `/`, and report direct absence for a path this walk never looked at.
   const absolute = isAbsolutePath(absPath);
-  const segs = rawSegments(absPath);
+  // [round 42] LEXICALLY NORMALIZED, the same representation `canonicalizeForComparison` and
+  // `chapterAssetDir` use — and the same one the walk therefore actually visits. The climb used the
+  // RAW segments, so a `..` in `capture.output_dir` put the anchor in a different coordinate system
+  // from the canonical path recorded beside it: the kernel reads `a/link/..` as link's target's
+  // parent, lexical normalization reads it as `a`, and those are different directories whenever
+  // `link` leaves its own parent. Measured: the anchor came back as the base directory while the
+  // canonical path resolved under `a`, so open and close disagreed about which object the anchor
+  // even was. Nothing bad has been observed to reach a record — the round-34
+  // configured-vs-resolved bracket refuses the topologies that would express it — but a guard whose
+  // correctness rests on a DIFFERENT guard catching its inputs first is the arrangement this module
+  // has been bitten by repeatedly, and the two representations agreeing costs one call.
+  const segs = normalizeSegments(rawSegments(absPath), absolute);
   // [round 28] The climb starts at the TIP, and the round-27 version started at its parent. That
   // was a check which did not test the fact it claimed: this runs AFTER the listing has already
   // failed, so the root can come back — populated — in between, and a helper that only ever looked
