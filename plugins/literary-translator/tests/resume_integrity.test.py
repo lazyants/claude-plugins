@@ -1263,3 +1263,107 @@ def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
 
     assert_setup_success(proc, parsed)
     assert parsed.get("resume") is False
+
+
+# ---------------------------------------------------------------------------
+# payload['plugin_root'] (#412): a TOP-LEVEL, optional field -- the SAME
+# value the orchestrating session substitutes into the Workflow template's
+# own {{PLUGIN_ROOT}} token, recorded here for the producer-side contract but
+# deliberately NEVER folded into input_digest. See the module docstring's
+# payload-shape block and SUBST_FIELDS's own comment for the full reasoning
+# (a filesystem path is not a semantic value, and hashing a raw absolute
+# path would make the digest non-portable across two operators' checkouts).
+# ---------------------------------------------------------------------------
+def test_payload_plugin_root_field_omitted_preserves_todays_behavior(tmp_path):
+    """A payload built before #412 (no 'plugin_root' key at all) must keep
+    working unchanged -- this field is optional, defaulting to ""."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    assert "plugin_root" not in payload  # fixture sanity: genuinely absent
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert_setup_success(proc, parsed)
+
+
+def test_payload_plugin_root_field_accepted_when_present(tmp_path):
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["plugin_root"] = "/some/plugin/install/root"
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert_setup_success(proc, parsed)
+
+
+def test_payload_plugin_root_field_wrong_type_rejected(tmp_path):
+    """Fail loudly (never silently coerced or ignored) on a malformed
+    'plugin_root' -- e.g. a caller that accidentally sends a number or an
+    object instead of a path string."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload = mass_base_payload()
+    payload["plugin_root"] = 12345
+
+    proc, parsed = run_resume_setup(root, payload)
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+    assert "plugin_root" in (parsed.get("error") or ""), (
+        f"error message should name the offending field; got: {parsed}"
+    )
+
+
+def test_payload_plugin_root_field_never_changes_input_digest(tmp_path):
+    """The load-bearing property of the SUBST_FIELDS exclusion decision:
+    two payloads, identical in every OTHER respect, differing ONLY in
+    'plugin_root', must produce the EXACT SAME input_digest -- proving this
+    field is genuinely excluded from hashing, not merely undocumented."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    payload_a = mass_base_payload()
+    payload_a["plugin_root"] = "/path/one/install"
+    payload_b = mass_base_payload()
+    payload_b["plugin_root"] = "/completely/different/path/two"
+
+    proc_a, parsed_a = run_resume_setup(root, payload_a)
+    # A fresh root for the second call -- run_resume_setup's own root already
+    # recorded run_dir/input.digest for payload_a's (matching) digest, and a
+    # SECOND resolve_run against the SAME root with an identical digest would
+    # resume rather than compute a fresh one to compare -- this test wants
+    # two INDEPENDENT digest computations, not a resume decision.
+    root_b = make_resume_setup_root(tmp_path, name="durable_root_b")
+    write_fixture_cache_keys(root_b, mass_base_cache_keys())
+    proc_b, parsed_b = run_resume_setup(root_b, payload_b)
+
+    assert_setup_success(proc_a, parsed_a)
+    assert_setup_success(proc_b, parsed_b)
+    assert parsed_a["input_digest"] == parsed_b["input_digest"], (
+        f"plugin_root must never affect input_digest -- got "
+        f"{parsed_a['input_digest']!r} vs {parsed_b['input_digest']!r}"
+    )
+
+
+def test_payload_plugin_root_absent_and_empty_produce_the_same_digest(tmp_path):
+    """Companion to the above: omitting 'plugin_root' entirely and setting
+    it to "" explicitly (both mean 'no redirect') must ALSO produce
+    identical digests -- the field's absence is not itself a distinct value
+    from its documented default."""
+    root_a = make_resume_setup_root(tmp_path, name="durable_root_omitted")
+    write_fixture_cache_keys(root_a, mass_base_cache_keys())
+    payload_omitted = mass_base_payload()
+    assert "plugin_root" not in payload_omitted
+
+    root_b = make_resume_setup_root(tmp_path, name="durable_root_empty")
+    write_fixture_cache_keys(root_b, mass_base_cache_keys())
+    payload_empty = mass_base_payload()
+    payload_empty["plugin_root"] = ""
+
+    proc_a, parsed_a = run_resume_setup(root_a, payload_omitted)
+    proc_b, parsed_b = run_resume_setup(root_b, payload_empty)
+
+    assert_setup_success(proc_a, parsed_a)
+    assert_setup_success(proc_b, parsed_b)
+    assert parsed_a["input_digest"] == parsed_b["input_digest"]

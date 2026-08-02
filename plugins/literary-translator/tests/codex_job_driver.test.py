@@ -82,8 +82,13 @@ p = argparse.ArgumentParser()
 p.add_argument("seg")
 p.add_argument("--expect-token", dest="tok", default=None)
 p.add_argument("--candidate-file", dest="cf", default=None)
+# #412: accept (and use if given) --durable-root -- codex_job.py's _gate() now
+# forwards it to draft_ready.py too (it joined lane A's --durable-root contract
+# alongside review_ready.py); the stub must not choke on an unrecognized flag
+# the same way the real draft_ready.py must not.
+p.add_argument("--durable-root", dest="dr", default=None)
 a = p.parse_args()
-root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+root = os.path.abspath(a.dr) if a.dr else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 path = a.cf if a.cf else os.path.join(root, "segments", a.seg + ".draft.json")
 try:
     d = json.load(open(path, encoding="utf-8"))
@@ -101,8 +106,10 @@ import argparse, json, os, sys
 p = argparse.ArgumentParser()
 p.add_argument("seg")
 p.add_argument("--candidate-file", dest="cf", default=None)
+# #412: same --durable-root adoption as STUB_DRAFT_READY above.
+p.add_argument("--durable-root", dest="dr", default=None)
 a = p.parse_args()
-root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+root = os.path.abspath(a.dr) if a.dr else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 path = a.cf if a.cf else os.path.join(root, "segments", a.seg + ".draft.json")
 try:
     d = json.load(open(path, encoding="utf-8"))
@@ -496,20 +503,22 @@ def test_trusted_scripts_dir_defaults_to_module_scripts_dir(tmp_path):
     assert job._trusted_scripts_dir() == codex_job.SCRIPTS_DIR
 
 
-def test_durable_root_args_only_for_contract_scripts(tmp_path):
-    """review_ready.py is confirmed under lane A's --durable-root contract;
-    draft_ready.py/validate_draft.py are NOT (yet) -- passing the flag to a script that
-    never declared it would error on an unrecognized argument, so it must stay [] there."""
+def test_durable_root_args_for_all_three_contract_scripts(tmp_path):
+    """#412: draft_ready.py/validate_draft.py joined review_ready.py under lane A's
+    --durable-root contract (the OTHER agent landed --durable-root support on both,
+    67 tests green) -- this driver adopting the redirect required it: moving
+    _trusted_scripts_dir() to the plugin install path only works if every script it
+    resolves from there can still find the real durable_root's segments/ (see the
+    seam comment above _DURABLE_ROOT_CONTRACT_SCRIPTS). All three now get it."""
     job = _mkjob(tmp_path)
     assert job._durable_root_args("review_ready.py") == ["--durable-root", job.root]
-    assert job._durable_root_args("draft_ready.py") == []
-    assert job._durable_root_args("validate_draft.py") == []
+    assert job._durable_root_args("draft_ready.py") == ["--durable-root", job.root]
+    assert job._durable_root_args("validate_draft.py") == ["--durable-root", job.root]
 
 
-def test_gate_forwards_durable_root_only_to_review_ready(tmp_path, monkeypatch):
+def test_gate_forwards_durable_root_to_all_three_contract_scripts(tmp_path, monkeypatch):
     """End-to-end through _gate() (not the raw helper): the argv actually built for
-    review_ready.py carries --durable-root <job.root>; the argv for draft_ready.py does
-    not carry it at all."""
+    each of the three contract scripts carries --durable-root <job.root>."""
     job = _mkjob(tmp_path)
     captured = {}
 
@@ -518,14 +527,11 @@ def test_gate_forwards_durable_root_only_to_review_ready(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="")
     monkeypatch.setattr(job, "_run", fake_run)
 
-    job._gate(["review_ready.py", job.seg, "--expect-token", job.tok], 10)
-    rr = captured["review_ready.py"]
-    assert "--durable-root" in rr
-    assert rr[rr.index("--durable-root") + 1] == job.root
-
-    job._gate(["draft_ready.py", job.seg, "--expect-token", job.tok], 10)
-    dr = captured["draft_ready.py"]
-    assert "--durable-root" not in dr
+    for script in ("review_ready.py", "draft_ready.py", "validate_draft.py"):
+        job._gate([script, job.seg, "--expect-token", job.tok], 10)
+        argv = captured[script]
+        assert "--durable-root" in argv, f"{script} must carry --durable-root"
+        assert argv[argv.index("--durable-root") + 1] == job.root
 
 
 def test_preflight_same_device_passes_on_real_layout(tmp_path):
@@ -2127,6 +2133,189 @@ def test_probe_reports_git_absent_distinctly(tmp_path, monkeypatch):
     monkeypatch.setattr(codex_job.subprocess, "run", _enoent)
     assert job._probe_enclosing_repo(str(tmp_path)) == codex_job.CodexJob._PROBE_GIT_ABSENT
     assert job._sandbox_is_confined(str(tmp_path)) is True
+
+
+# --------------------------------------------------------------------------- #
+# #412: --plugin-root redirect -- the poisoned-sibling property. The module
+# docstring's own seam comment (above _DURABLE_ROOT_CONTRACT_SCRIPTS) states
+# the vulnerability: ${durable_root}/scripts/ (this fixture's own
+# root/scripts/) is codex-writable (--write over the whole durable root), so
+# a codex-tampered copy of a gate script there could validate its own bad
+# output. This section proves BOTH halves, per the dispatch brief -- neither
+# alone proves anything:
+#   1. --plugin-root pointing at a SEPARATE, trusted location bypasses a
+#      poisoned durable-root sibling entirely (without this half, the
+#      redirect could just be silently ignored).
+#   2. Omitting --plugin-root genuinely falls prey to the poisoned copy
+#      (without this half, "the redirect works" could be true merely
+#      because the poisoned stub itself is broken/inert some other way,
+#      never actually exercised).
+# One test per gate script _gate() invokes, each isolating ONLY that gate's
+# own defect (the other gate in a two-gate check, e.g. draft_ready.py
+# alongside validate_draft.py, is left un-poisoned and passing, so a false
+# pass/fail can only be attributed to the ONE gate under test).
+# --------------------------------------------------------------------------- #
+POISONED_GATE_SRC = '''#!/usr/bin/env python3
+import sys
+print("[POISONED] always OK -- ignores its own --candidate-file content")
+sys.exit(0)
+'''
+
+
+def _poison_durable_root_gate(root, script_name):
+    """Overwrites root/scripts/<script_name> (this fixture's own durable-root
+    COPY -- exactly where the module docstring's seam comment says codex's
+    own --write access reaches) with a stub that ALWAYS exits 0 regardless
+    of its --candidate-file's actual content, simulating a codex-tampered
+    gate designed to validate anything, including its own bad output."""
+    (root / "scripts" / script_name).write_text(POISONED_GATE_SRC, encoding="utf-8")
+
+
+def _make_trusted_plugin_root(tmp_path, name="trusted_plugin_root"):
+    """A SEPARATE physical location holding the REAL (test-stub) gate
+    scripts at the {plugin_root}/assets/scripts/ layout SKILL.md documents
+    for the plugin-anchored scripts -- mirrors
+    tests/resume_integrity.test.py's own make_trusted_plugin_root() for the
+    identical concept, one seam over (that file's redirect protects
+    cache_key.py; this one protects the three candidate-file gates)."""
+    plugin_root = tmp_path / name
+    plugin_scripts_dir = plugin_root / "assets" / "scripts"
+    plugin_scripts_dir.mkdir(parents=True)
+    (plugin_scripts_dir / "draft_ready.py").write_text(STUB_DRAFT_READY, encoding="utf-8")
+    (plugin_scripts_dir / "validate_draft.py").write_text(STUB_VALIDATE_DRAFT, encoding="utf-8")
+    (plugin_scripts_dir / "review_ready.py").write_text(STUB_REVIEW_READY, encoding="utf-8")
+    return plugin_root
+
+
+def test_plugin_root_redirect_bypasses_poisoned_draft_ready(tmp_path):
+    """draft_ready.py half: a WRONG-TOKEN attempt (structure_ok/quality_ok
+    both True -- the ONLY defect is the dispatch_token, which ONLY
+    draft_ready.py checks; validate_draft.py's own stub would pass this
+    candidate regardless, isolating this test to draft_ready.py alone)."""
+    root, companion, node = build_root(tmp_path)
+    _poison_durable_root_gate(root, "draft_ready.py")
+    plugin_root = _make_trusted_plugin_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    state = base_state(seg, tok, "translate", attempt_mode="invalid_token", status_seq=["completed"])
+
+    proc_poisoned = spawn_driver(root, companion, node, seg, tok, "translate", "D1", state)
+    line_poisoned = parse_line(proc_poisoned)
+    proc_trusted = spawn_driver(root, companion, node, seg, tok, "translate", "D2", state,
+                                extra_args=["--plugin-root", str(plugin_root)])
+    line_trusted = parse_line(proc_trusted)
+
+    assert line_poisoned["ok"] is True, (
+        f"FAIL-SAFE CONTROL: without --plugin-root, the poisoned durable-root "
+        f"draft_ready.py must genuinely be consulted and WRONGLY accept a "
+        f"wrong-token attempt -- got {line_poisoned}"
+    )
+    assert line_trusted["ok"] is False, (
+        f"--plugin-root must bypass the poisoned durable-root sibling "
+        f"entirely and use the TRUSTED copy, which correctly REJECTS a "
+        f"wrong-token attempt -- got {line_trusted}"
+    )
+
+
+def test_plugin_root_redirect_bypasses_poisoned_validate_draft(tmp_path):
+    """validate_draft.py half: a quality-defective attempt (structure_ok/
+    token both correct -- the ONLY defect is quality_ok, which ONLY
+    validate_draft.py checks; draft_ready.py's own (un-poisoned, trusted-by-
+    construction here) stub would pass this candidate regardless)."""
+    root, companion, node = build_root(tmp_path)
+    _poison_durable_root_gate(root, "validate_draft.py")
+    plugin_root = _make_trusted_plugin_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    state = base_state(seg, tok, "translate", attempt_mode="invalid_quality", status_seq=["completed"])
+
+    proc_poisoned = spawn_driver(root, companion, node, seg, tok, "translate", "D1", state)
+    line_poisoned = parse_line(proc_poisoned)
+    proc_trusted = spawn_driver(root, companion, node, seg, tok, "translate", "D2", state,
+                                extra_args=["--plugin-root", str(plugin_root)])
+    line_trusted = parse_line(proc_trusted)
+
+    assert line_poisoned["ok"] is True, (
+        f"FAIL-SAFE CONTROL: without --plugin-root, the poisoned durable-root "
+        f"validate_draft.py must genuinely be consulted and WRONGLY accept a "
+        f"quality-defective attempt -- got {line_poisoned}"
+    )
+    assert line_trusted["ok"] is False, (
+        f"--plugin-root must bypass the poisoned durable-root sibling "
+        f"entirely and use the TRUSTED copy, which correctly REJECTS a "
+        f"quality-defective attempt -- got {line_trusted}"
+    )
+
+
+def test_plugin_root_redirect_bypasses_poisoned_review_ready(tmp_path):
+    """review_ready.py half: kind="review"'s own SOLE gate (no second check
+    to isolate against, unlike translate's draft_ready.py+validate_draft.py
+    pair) -- a schema-defective attempt."""
+    root, companion, node = build_root(tmp_path)
+    _poison_durable_root_gate(root, "review_ready.py")
+    plugin_root = _make_trusted_plugin_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    state = base_state(seg, tok, "review", attempt_mode="invalid_schema", status_seq=["completed"])
+
+    proc_poisoned = spawn_driver(root, companion, node, seg, tok, "review", "D1", state)
+    line_poisoned = parse_line(proc_poisoned)
+    proc_trusted = spawn_driver(root, companion, node, seg, tok, "review", "D2", state,
+                                extra_args=["--plugin-root", str(plugin_root)])
+    line_trusted = parse_line(proc_trusted)
+
+    assert line_poisoned["ok"] is True, (
+        f"FAIL-SAFE CONTROL: without --plugin-root, the poisoned durable-root "
+        f"review_ready.py must genuinely be consulted and WRONGLY accept a "
+        f"schema-defective attempt -- got {line_poisoned}"
+    )
+    assert line_trusted["ok"] is False, (
+        f"--plugin-root must bypass the poisoned durable-root sibling "
+        f"entirely and use the TRUSTED copy, which correctly REJECTS a "
+        f"schema-defective attempt -- got {line_trusted}"
+    )
+
+
+def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility for the redirect itself: a driver invoked with
+    NO --plugin-root at all (not even an empty string -- the flag genuinely
+    absent from argv) behaves exactly as before #412, using the CLEAN
+    (un-poisoned) durable-root copy successfully."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="valid",
+                                   status_seq=["completed"]))
+    line = parse_line(proc)
+    assert proc.returncode == 0 and line["ok"] is True
+
+
+def test_plugin_root_misconfigured_fails_loudly_at_usage_time(tmp_path):
+    """A --plugin-root that does not resolve to a directory containing
+    assets/scripts/ must fail LOUDLY at usage time (exit 2, no stdout JSON
+    line at all) rather than silently falling through _gate()'s own
+    OSError->None handling later, which would be indistinguishable from an
+    ordinary 'gate ran out of budget' case."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    bogus_plugin_root = str(tmp_path / "does_not_exist_at_all")
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="valid",
+                                   status_seq=["completed"]),
+                        extra_args=["--plugin-root", bogus_plugin_root])
+    assert proc.returncode == 2, (
+        f"a misconfigured --plugin-root must fail at usage time (exit 2), "
+        f"not silently degrade -- rc={proc.returncode}\nstdout={proc.stdout!r}\n"
+        f"stderr:\n{proc.stderr}"
+    )
+    assert not proc.stdout.strip(), "a usage error must print NO stdout JSON line"
+    # Specifically THIS validation, not merely argparse rejecting an
+    # unrecognized --plugin-root flag on a pre-#412 driver (which would
+    # ALSO exit 2 with no stdout, for a completely different reason --
+    # vacuously satisfying the two asserts above without ever exercising
+    # main()'s own resolved-directory check).
+    assert "assets/scripts" in proc.stderr, (
+        f"expected this driver's OWN --plugin-root resolution error "
+        f"(naming assets/scripts/), not a generic argparse rejection; "
+        f"stderr:\n{proc.stderr}"
+    )
 
 
 if __name__ == "__main__":

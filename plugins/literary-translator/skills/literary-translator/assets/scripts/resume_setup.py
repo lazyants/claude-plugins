@@ -65,6 +65,8 @@ path. Payload shape:
                                                  # "" when the profile key is
                                                  # absent, but REQUIRED even then
       },
+      "plugin_root": "<absolute path>" | "",     # #412; optional, defaults to "" --
+                                                 # see the dedicated paragraph below
       "resume_from_run_id": "<candidate RUN_ID>" | null,   # optional
       "segs": ["seg01", "seg02", ...],           # required for kind="mass"
       "glossary_rule": <any JSON value>,         # required for kind="glossary"
@@ -85,6 +87,39 @@ trusted from the caller, closing a staleness/TOCTOU gap a pre-computed
 caller-supplied value would leave open. For kind="glossary", canon_hash is
 likewise computed here (sha1 of the current canon.json's raw bytes, or the
 literal string "no-canon" if canon.json does not exist yet).
+
+`plugin_root` (#412) is the SAME value the orchestrating session substitutes
+into the Workflow template's own `{{PLUGIN_ROOT}}` token (see
+mass-translate-wf.template.js's header comment) -- recorded here as a
+TOP-LEVEL field, deliberately NOT inside `subst` and NOT a member of
+SUBST_FIELDS, so it is accepted, type-checked, and documented as part of
+this script's producer-side contract, but NEVER folded into `input_digest`.
+Two independent reasons, not one:
+  1. It is a filesystem PATH (an install LOCATION), not a profile-derived
+     semantic/behavioral value the way every `subst` field is -- it does not
+     itself describe what a cached agent result MEANS. The signal for "did
+     the plugin's actual CONTENT change" already exists and is already
+     hashed: `plugin_bundle_hash` (below), a marker Step 0a stamps once from
+     the plugin's own bytes.
+  2. Hashing a raw absolute path would make `input_digest` NON-PORTABLE for
+     a reason that has nothing to do with translation semantics: two
+     operators running the IDENTICAL plugin version, with every OTHER subst
+     field identical, would get a spurious digest MISMATCH purely because
+     their local checkouts sit at different paths -- exactly the kind of
+     false invalidation this digest exists to avoid (contrast with
+     `source_lang`/`verse_policy`/etc., which are meant to be portable,
+     stable values). This is worse than the "NOT model" precedent
+     immediately below -- that one was a false DEPENDENCY on an unrelated
+     digest; this one is a false dependency on the OPERATOR'S OWN
+     filesystem layout.
+This script performs NO resolution/derivation on `plugin_root` (unlike
+RUN_ID) -- it is a straight, optional pass-through the caller already knows
+before ever invoking this script (mirroring how every `subst` field's VALUE
+is also caller-resolved, never derived here). It is independent of this
+script's OWN pre-existing `--plugin-root` CLI flag below (which governs
+ONLY where the cache_key.py SIBLING SCRIPT is resolved from, kind="mass"
+only) -- the two seams are never collapsed, even though an orchestrating
+session will typically pass the SAME underlying value to both.
 
 On success, prints one JSON line:
 
@@ -207,6 +242,14 @@ SUBST_FIELDS = frozenset({
 # segment's own cache_key/agent_config_hash; the glossary pass has no model
 # knob at all, so folding model into this SHARED digest would be a false
 # dependency (a model pin would spuriously stale the glossary run too).
+#
+# NOT "plugin_root" either (#412) -- accepted as its own TOP-LEVEL payload
+# field (see the module docstring's payload-shape block for the full
+# reasoning), never a member of this set: it is a filesystem PATH, not a
+# profile-derived semantic value, and hashing it would make input_digest
+# spuriously non-portable across two operators' otherwise-identical
+# checkouts. plugin_bundle_hash (below) already owns "did the plugin's
+# actual content change".
 
 # ${durable_root}/runs/<RUN_ID>/ -- the same hardened allowlist the
 # {{RUN_ID}} substitution token itself is validated against (references/
@@ -498,6 +541,22 @@ def validate_glossary_batches_shape(batches) -> None:
             )
 
 
+def validate_plugin_root_field(payload: dict) -> None:
+    """#412: pure validation of payload['plugin_root'] -- no I/O, no writes,
+    kind-independent (unlike validate_glossary_batches_shape). Called BEFORE
+    resolve_run()/any directory creation, matching that function's own
+    fail-before-any-write discipline. Optional (default ""): a payload built
+    before #412 landed, or an orchestrating session not yet opting into the
+    redirect, must keep working unchanged. When present, must be a string --
+    never folded into input_digest, see SUBST_FIELDS's own comment and the
+    module docstring's payload-shape block for why."""
+    plugin_root = payload.get("plugin_root", "")
+    if not isinstance(plugin_root, str):
+        raise ResumeSetupError(
+            f"payload 'plugin_root' must be a string when present, got {plugin_root!r}"
+        )
+
+
 def write_glossary_manifests(glossary_run_dir: Path, batches) -> None:
     """Atomically writes manifest_{index}.json (per batch, deduped) and the
     aggregate manifest_all.json (union of every batch, deduped). Assumes
@@ -696,6 +755,9 @@ def main(argv=None) -> int:
             # Validated BEFORE any directory is created / RUN_ID resolved --
             # a malformed batch list aborts with nothing on disk at all.
             validate_glossary_batches_shape(payload.get("batches"))
+
+        # #412: kind-independent, same fail-before-any-write discipline.
+        validate_plugin_root_field(payload)
 
         dirs["runs_dir"].mkdir(parents=True, exist_ok=True)
 

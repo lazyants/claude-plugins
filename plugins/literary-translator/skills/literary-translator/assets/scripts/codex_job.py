@@ -53,6 +53,7 @@ CLI (canonical path is DERIVED, never caller-supplied):
       --expect-token <RUN_ID:seg|RUN_ID:seg:r<label>> --disp <per-dispatch nonce>
       --deadline-sec <int> [--poll-sec <int default 15>]
       [--write] [--fresh] [--effort high] [--model <model>] [--node <exe default "node">]
+      [--plugin-root <plugin install root, #412>]
 
 Exit codes: 0 = promoted (or adopted) a validated artifact; 1 = launch/run/validate failure
 (recoverable, wrote an empty fail sentinel); 2 = usage/env error.
@@ -186,7 +187,7 @@ def _silent_unlinkat(dir_fd, name):
 
 class CodexJob:
     def __init__(self, kind, seg, tok, disp, root, companion, prompt_text, prompt_file,
-                 deadline_sec, poll_sec, effort, node, model=None):
+                 deadline_sec, poll_sec, effort, node, model=None, plugin_root=None):
         self.kind = kind
         self.seg = seg
         self.tok = tok
@@ -199,6 +200,12 @@ class CodexJob:
         self.effort = effort
         self.node = node
         self.model = model
+        # #412: the plugin's own install root -- realpath'd at construction
+        # (matching self.root's own treatment) so a symlink cannot be swapped
+        # underneath an already-resolved trust decision. None/falsy means
+        # "not given" and _trusted_scripts_dir() falls back to its
+        # pre-#412 default -- see that method's own docstring.
+        self.plugin_root = os.path.realpath(plugin_root) if plugin_root else None
 
         self.inv = os.urandom(8).hex()
         self.segdir = os.path.join(self.root, "segments")
@@ -270,36 +277,42 @@ class CodexJob:
             return None
 
     # TWO INDEPENDENT SEAMS (lane A's relayed contract) -- never collapse them, even
-    # though both happen to resolve to the SAME durable_root-derived value today:
+    # though both CAN resolve to the SAME durable_root-derived value:
     #   - _durable_root_args(): the DATA root a gate script should read segments/,
     #     schemas/, canon.json, etc. from -- confirmed contract: `--durable-root PATH`,
     #     optional, byte-identical to self-anchored behavior when omitted.
     #   - _trusted_scripts_dir(): the TRUSTED location _gate() itself resolves gate
-    #     EXECUTABLES from. Today this is SCRIPTS_DIR (codex_job.py's own directory),
-    #     which in production IS the durable-root copy Step 0a makes -- i.e. today's
-    #     value is the SAME vulnerability class #409 exists to close, just on the
-    #     driver's own gate-invocation path rather than codex's.
+    #     EXECUTABLES from. WITHOUT --plugin-root this is still SCRIPTS_DIR
+    #     (codex_job.py's own directory), which in production IS the durable-root
+    #     copy Step 0a makes -- the SAME vulnerability class #409 exists to close,
+    #     just on the driver's own gate-invocation path rather than codex's.
     #
-    #     DO NOT read _setup_sandbox() as closing this. The sandbox confines only the
-    #     codex processes THIS driver launches. Other shipped passes still hand codex
-    #     write access over the whole durable root -- the glossary and skeptic passes
-    #     dispatch `agentType: "codex:codex-rescue"` whose job is to WRITE a fragment
-    #     under ${durable_root}/..., and the sanctioned manual W5 drive launches
-    #     codex-companion with `--write` and cwd = durable_root. ${durable_root}/scripts/
-    #     sits inside every one of those write roots, and the glossary pass runs BEFORE
-    #     W5 in the same project, so a gate script tampered with there is exactly what
-    #     _gate() would execute later. This is a LIVE residual, not defense-in-depth.
+    #     DO NOT read _setup_sandbox() as closing this by itself. The sandbox confines
+    #     only the codex processes THIS driver launches. Other shipped passes still
+    #     hand codex write access over the whole durable root -- the glossary and
+    #     skeptic passes dispatch `agentType: "codex:codex-rescue"` whose job is to
+    #     WRITE a fragment under ${durable_root}/..., and the sanctioned manual W5
+    #     drive launches codex-companion with `--write` and cwd = durable_root.
+    #     ${durable_root}/scripts/ sits inside every one of those write roots, and the
+    #     glossary pass runs BEFORE W5 in the same project, so a gate script tampered
+    #     with there is exactly what _gate() would execute later.
     #
-    #     Closing it is NOT a one-line change (an earlier version of this comment said
-    #     it was): there is no {{PLUGIN_ROOT}} substitution token, so a new field has to
-    #     be threaded resume_setup.py -> template -> this driver's argparse. And moving
-    #     this to the plugin install path ALSO requires draft_ready.py and
-    #     validate_draft.py to adopt --durable-root first -- both are __file__-anchored
-    #     at parents[1] and explicitly take no root flag, so they would otherwise start
-    #     looking for segments/ inside the plugin. Precedent for the destination is
-    #     SKILL.md's never-copied plugin-path scripts (profile_validate.py,
-    #     validate_extraction.py, glossary_preflight.py, resolve_codex_companion.py).
-    _DURABLE_ROOT_CONTRACT_SCRIPTS = frozenset({"review_ready.py"})
+    #     #412: CLOSED, but opt-in, not forced. `--plugin-root PATH` (threaded
+    #     resume_setup.py -> the `{{PLUGIN_ROOT}}` template token -> this driver's own
+    #     argparse -- see mass-translate-wf.template.js's header token doc for the
+    #     exact substitution shape) redirects _trusted_scripts_dir() to
+    #     `{plugin_root}/assets/scripts/`, the SAME layout SKILL.md's never-copied
+    #     plugin-path scripts already use (profile_validate.py, validate_extraction.py,
+    #     glossary_preflight.py, resolve_codex_companion.py) -- a location the codex
+    #     process this driver launches cannot write to. Omitting --plugin-root
+    #     reproduces the pre-#412 vulnerability unchanged (byte-identical default);
+    #     closing it for a given dispatch requires the ORCHESTRATING SESSION to
+    #     actually pass the flag, which is outside this file's own scope. Moving the
+    #     redirect destination required draft_ready.py and validate_draft.py to adopt
+    #     --durable-root FIRST (both were __file__-anchored at parents[1] with no root
+    #     flag, so they would otherwise start looking for segments/ inside the plugin
+    #     once resolved from there) -- landed, see _DURABLE_ROOT_CONTRACT_SCRIPTS below.
+    _DURABLE_ROOT_CONTRACT_SCRIPTS = frozenset({"review_ready.py", "draft_ready.py", "validate_draft.py"})
 
     def _durable_root_args(self, script_name):
         """`--durable-root <resolved self.root>` for scripts confirmed under lane A's
@@ -313,10 +326,15 @@ class CodexJob:
 
     def _trusted_scripts_dir(self):
         """Where _gate() resolves gate EXECUTABLES from -- see the seam note above for
-        why this is a LIVE residual and why redirecting it is not a one-line change.
-        Returns today's byte-identical default (SCRIPTS_DIR), never a value derived
-        from self.root: the data root must not be able to decide which executable
-        validates it."""
+        the full rationale. #412: when self.plugin_root is given, returns
+        `{plugin_root}/assets/scripts/` -- a location the codex process this driver
+        launches cannot write to, unlike SCRIPTS_DIR. Falls back to today's
+        byte-identical default (SCRIPTS_DIR, never a value derived from self.root) when
+        self.plugin_root is None -- the data root must not be able to decide which
+        executable validates it, and omitting --plugin-root must reproduce today's
+        exact behavior."""
+        if self.plugin_root:
+            return os.path.join(self.plugin_root, "assets", "scripts")
         return SCRIPTS_DIR
 
     def _gate(self, args, timeout):
@@ -1023,6 +1041,13 @@ def _build_parser():
     p.add_argument("--effort", default="high")
     p.add_argument("--model", default=None)
     p.add_argument("--node", default="node")
+    # #412: the plugin's own install root -- see _trusted_scripts_dir()'s own
+    # docstring and the seam comment above _DURABLE_ROOT_CONTRACT_SCRIPTS for
+    # why gate EXECUTABLES must be resolvable from somewhere the codex
+    # process this driver launches cannot write to. Optional; omitting it
+    # reproduces today's pre-#412 default (SCRIPTS_DIR) byte-for-byte -- this
+    # is opt-in hardening, not a forced migration.
+    p.add_argument("--plugin-root", default=None, dest="plugin_root")
     return p
 
 
@@ -1042,6 +1067,20 @@ def main(argv=None):
     if not os.path.isfile(args.companion):
         print("Error: --companion not found: %s" % args.companion, file=sys.stderr)
         return 2
+    if args.plugin_root is not None:
+        # #412: fail loudly at usage time on a misconfigured --plugin-root
+        # (e.g. a typo, or a plugin layout that predates assets/scripts/)
+        # rather than silently falling through _gate()'s own OSError->None
+        # handling later, which would otherwise be indistinguishable from an
+        # ordinary "gate ran out of budget" case.
+        plugin_scripts_dir = os.path.join(os.path.realpath(args.plugin_root), "assets", "scripts")
+        if not os.path.isdir(plugin_scripts_dir):
+            print(
+                "Error: --plugin-root %s does not resolve to a directory containing "
+                "assets/scripts/ (resolved: %s)" % (args.plugin_root, plugin_scripts_dir),
+                file=sys.stderr,
+            )
+            return 2
     try:
         prompt_text = open(args.prompt_file, "r", encoding="utf-8").read()
     except OSError as exc:
@@ -1056,7 +1095,7 @@ def main(argv=None):
         kind=args.kind, seg=args.seg, tok=args.expect_token, disp=args.disp, root=args.cwd,
         companion=args.companion, prompt_text=prompt_text, prompt_file=args.prompt_file,
         deadline_sec=args.deadline_sec, poll_sec=poll_sec, effort=args.effort, node=args.node,
-        model=args.model,
+        model=args.model, plugin_root=args.plugin_root,
     )
     return job.run()
 

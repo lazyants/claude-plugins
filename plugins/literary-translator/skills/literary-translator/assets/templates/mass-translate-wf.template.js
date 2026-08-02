@@ -107,6 +107,25 @@
 //                                          newline, so the resulting COMPANION value is always safe
 //                                          to splice into the driver launch below as a SINGLE-QUOTED
 //                                          bash argument (space/unicode paths included).
+//   {{PLUGIN_ROOT}}                       -- #412: the plugin's own install root (NEVER
+//                                          {{DURABLE_ROOT}}/scripts/, the Step-0a COPY the codex
+//                                          process this driver launches can write to), or an EMPTY
+//                                          STRING when this dispatch does not opt into the redirect.
+//                                          Same substitution shape as {{CODEX_COMPANION_PATH_JSON}}
+//                                          immediately above (a strict json.dumps JS STRING LITERAL,
+//                                          WITH its own surrounding quotes, sitting OUTSIDE quotes in
+//                                          `const PLUGIN_ROOT = {{PLUGIN_ROOT}};`) and the SAME safety
+//                                          contract: the orchestrating session is responsible for a
+//                                          value that is always safe to splice as a SINGLE-QUOTED bash
+//                                          argument (no single quote / control char / newline). Threads
+//                                          to the two detached codex_job.py launches below
+//                                          (translate/review) as an optional single-quoted
+//                                          --plugin-root argument, omitted entirely from the launch
+//                                          command when this value is empty (same conditional-omission
+//                                          shape as {{MODEL}}/MODEL_ARG above) -- codex_job.py's own
+//                                          _trusted_scripts_dir() then falls back to its pre-#412
+//                                          default unchanged. Never threaded to the Claude fix step
+//                                          (it launches no codex_job.py of its own).
 //
 // W5 dispatch model (#198 -- codex is no longer fire-and-forget from a
 // Workflow agent turn): every codex translate/review is launched by the
@@ -370,6 +389,33 @@ const VERSE_POLICY_INSTRUCTION_BLOCK = "{{VERSE_POLICY_INSTRUCTION_BLOCK}}";
 // rejects a path with a quote/control/newline, so single-quoting is safe for
 // space/unicode paths and injection-proof).
 const COMPANION = {{CODEX_COMPANION_PATH_JSON}};
+
+// #412 -- the plugin's own install root (see the header comment's
+// {{PLUGIN_ROOT}} entry), or "" when this dispatch does not opt into the
+// redirect. Same JS-string-literal substitution shape as COMPANION above,
+// but unlike COMPANION there is no dedicated resolver script
+// (resolve_codex_companion.py's own counterpart) to lean on, so this file
+// re-checks it itself -- mirroring EFFORT_RE/MODEL_RE above -- before it
+// ever reaches the codex_job.py dispatch SHELL command: empty is valid (the
+// redirect opt-out), a non-empty value must contain no single quote or
+// control character -- the exact class that would break out of the
+// SINGLE-QUOTED bash splice below.
+const PLUGIN_ROOT = {{PLUGIN_ROOT}};
+const PLUGIN_ROOT_UNSAFE_RE = /['\x00-\x1f\x7f]/;
+if (PLUGIN_ROOT !== "" && PLUGIN_ROOT_UNSAFE_RE.test(PLUGIN_ROOT)) {
+  // #412: this message deliberately names the concept ("plugin_root"), never
+  // the literal double-brace token spelling -- writing the token's own
+  // syntax into a runtime string here would make it a SECOND substitution
+  // site, silently corrupted by the very instantiation step this check
+  // exists to guard against (see EFFORT_RE/MODEL_RE above, which name
+  // "engine.effort"/"engine.model" for the identical reason).
+  throw new Error("Unsafe plugin_root value " + JSON.stringify(PLUGIN_ROOT) + ": must not contain a single quote or control character");
+}
+// PLUGIN_ROOT_ARG single-quoted, appended only when truthy -- same
+// conditional-omission shape as MODEL_ARG above; a bare --plugin-root flag
+// with no value is never emitted (codex_job.py's own argparse default,
+// None, is reserved for "flag omitted entirely", not an empty string).
+const PLUGIN_ROOT_ARG = PLUGIN_ROOT ? " --plugin-root '" + PLUGIN_ROOT + "'" : "";
 
 // #198 -- driver/poll timing constants, mirroring codex_job.py's own
 // constants (documented in the header comment's W5 dispatch model). Only the
@@ -925,7 +971,7 @@ function translateDrivePrompt(seg) {
     "cat > \"$TASKFILE\" <<'LT_CODEX_TASK_EOF'\n" +
     codexTask + "\n" +
     "LT_CODEX_TASK_EOF\n" +
-    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind translate --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + " </dev/null >/dev/null 2>&1 &\n" +
+    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind translate --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + PLUGIN_ROOT_ARG + " </dev/null >/dev/null 2>&1 &\n" +
     "echo \"DISPATCHED " + seg + " $DISP\"";
   const lines = [];
   lines.push("Effort: low. You are DISPATCHING a background codex translation job for segment " + seg + " -- you do NOT translate anything yourself, and you do NOT wait for the job to finish.");
@@ -987,7 +1033,7 @@ function reviewDrivePrompt(seg, roundLabel) {
     "cat > \"$TASKFILE\" <<'LT_CODEX_TASK_EOF'\n" +
     codexTask + "\n" +
     "LT_CODEX_TASK_EOF\n" +
-    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind review --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + " </dev/null >/dev/null 2>&1 &\n" +
+    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind review --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + PLUGIN_ROOT_ARG + " </dev/null >/dev/null 2>&1 &\n" +
     "echo \"DISPATCHED " + seg + " $DISP\"";
   const lines = [];
   lines.push("Effort: low. You are DISPATCHING a background codex review job for segment " + seg + " (round " + roundLabel + ") -- you do NOT review anything yourself, and you do NOT wait for the job to finish.");
