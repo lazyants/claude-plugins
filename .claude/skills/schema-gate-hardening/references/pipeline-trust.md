@@ -84,6 +84,24 @@ Three things this lens gets wrong when applied half-way:
   instead — in the measured case the reported field was one of five, and two of the others (the
   entries re-gated after validation, and the run id written into the committed record) had no test
   until the mutation matrix said so, because nobody had thought to attack them.
+  - **Widen "the seam" past the state object: enumerate every INPUT the same caller supplies.** The
+    three bullets here are all about one caller-held state object, and that framing is itself a place
+    to get stuck. A function usually takes a second caller-supplied argument — a profile, a config, an
+    options bag — and a branch that decides on THAT is unauthenticated in exactly the same way, while
+    reading nothing from the object everyone is busy hardening. Measured: after the state object was
+    fully materialized, a short-circuit branch still concluded "this run was skipped" from the CURRENT
+    profile and returned success for a genuinely open run; the fix for that then looked for the
+    reservation at a path derived from the same edited profile, so relocating it hid the reservation
+    and the false success returned. Two consecutive rounds of rework, both avoidable by listing the
+    arguments once. Ask of each input, not each field: what does this decide, and what authenticates it?
+  - **When every input is caller-supplied, there may be no by-value fix, and that is a finding too.**
+    Once the caller owns both the state and the config, any reflective test you add is a question the
+    caller answers — a `Proxy` traps `ownKeys`, `getOwnPropertyDescriptor` and `get` together, so
+    "shape" checks are forgeable by construction. At that point stop adding gates and bound the
+    guarantee instead: say what the component AUTHENTICATES (what it records) versus what it merely
+    accepts (a claim that there is nothing to record), and check whether the unforgeable outcome is
+    already acceptable — a caller who can only force a no-op has achieved what not calling the
+    function achieves. See review-loop-discipline's impossible-guarantee trap for the general form.
 - **A value outside the verified payload needs its own single read.** An id compared against a token
   but not covered by the digest is authenticated by that comparison alone, so the comparison and every
   later use must read one local, not the property twice.
