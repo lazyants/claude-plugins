@@ -388,15 +388,21 @@ def with_resume_from(payload, run_id):
 
 
 def assert_setup_success(proc, parsed):
+    """Returns `parsed`, narrowed to non-None (pyright cannot see the
+    `assert parsed is not None` below across a function-call boundary, so
+    every caller reassigns its own `parsed` variable to this return value
+    -- `parsedN = assert_setup_success(procN, parsedN)` -- rather than
+    subscripting the pre-call, still-Optional variable)."""
     assert proc.returncode == 0, (
         f"setup should succeed: rc={proc.returncode}\nstdout={proc.stdout}\nstderr={proc.stderr}"
     )
     assert parsed is not None, f"expected one JSON line on stdout, got: {proc.stdout!r}"
     assert parsed.get("success") is True, f"expected success:true, got: {parsed}"
+    return parsed
 
 
 def assert_resumes(proc, parsed, prior_run_id):
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
     assert parsed.get("resume") is True, f"expected resume:true on a digest MATCH, got {parsed}"
     assert parsed.get("effectiveRunId") == prior_run_id, (
         f"a digest MATCH must reuse the exact prior run id -- got "
@@ -405,7 +411,7 @@ def assert_resumes(proc, parsed, prior_run_id):
 
 
 def assert_fresh_no_resume(proc, parsed, prior_run_id):
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
     assert parsed.get("resume") is False, f"expected resume:false on a digest mismatch, got {parsed}"
     assert parsed.get("effectiveRunId") != prior_run_id, (
         f"a digest MISMATCH must produce a FRESH run id, never reuse the "
@@ -446,7 +452,7 @@ def test_case1_metadata_only_candidate_change_forces_fresh_run(tmp_path):
         "batches": [{"index": 0, "names": ["Alice Smith"]}],
     }
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     assert parsed0["resume"] is False  # first-ever run, nothing to resume
     run_id = parsed0["effectiveRunId"]
 
@@ -472,7 +478,7 @@ def test_case2_changed_segment_cache_key_composite_forces_fresh_run(tmp_path):
     base_payload = mass_base_payload()
 
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     proc1, parsed1 = run_resume_setup(root, with_resume_from(base_payload, run_id))
@@ -493,7 +499,7 @@ def test_case3_changed_plugin_bundle_hash_forces_fresh_run(tmp_path):
     base_payload = mass_base_payload()
 
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     proc1, parsed1 = run_resume_setup(root, with_resume_from(base_payload, run_id))
@@ -518,7 +524,7 @@ def test_case4_changed_orchestration_bundle_hash_forces_fresh_run(tmp_path):
     base_payload = mass_base_payload()
 
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     proc1, parsed1 = run_resume_setup(root, with_resume_from(base_payload, run_id))
@@ -539,7 +545,7 @@ def test_case5_schema_only_edit_forces_fresh_run(tmp_path):
     base_payload = mass_base_payload()
 
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     proc1, parsed1 = run_resume_setup(root, with_resume_from(base_payload, run_id))
@@ -565,7 +571,7 @@ def test_case6_research_mode_flip_forces_fresh_run_no_byte_change(tmp_path):
     base_payload["subst"]["research_mode"] = "live"
 
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     proc1, parsed1 = run_resume_setup(root, with_resume_from(base_payload, run_id))
@@ -596,7 +602,7 @@ def test_case6b_citation_content_types_change_forces_fresh_run_no_byte_change(tm
     base_payload["subst"]["citation_content_types"] = "text/"
 
     proc0, parsed0 = run_resume_setup(root, base_payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     proc1, parsed1 = run_resume_setup(root, with_resume_from(base_payload, run_id))
@@ -1135,8 +1141,17 @@ def run_resume_setup_from(script_path, payload_obj, tmp_dir, *extra_args, timeou
 
 def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     """Negative control: an orphan copy invoked WITHOUT --durable-root
-    cannot succeed via self-anchoring (no runs/ dir to even create, no
-    plugin_bundle_hash marker to read)."""
+    cannot succeed via self-anchoring -- it self-anchors to a location with
+    no manifest.json, no runs/ dir, no plugin_bundle_hash marker. Asserts
+    the SPECIFIC reason (manifest.json, the first of those
+    compute_input_digest()'s mass branch reads as of LT-409 -- earlier it
+    was the plugin_bundle_hash marker, moved here when the digest domain
+    moved to manifest.json), not merely that some failure occurred: a bare
+    "it failed" assertion cannot tell a correct self-anchoring refusal
+    apart from an unrelated crash, so a future defect that broke the
+    orphan-copy path for the WRONG reason would pass this test silently.
+    See resume_integrity.test.py's own review history for why this
+    specificity matters here."""
     orphan_dir = tmp_path / "orphan_location" / "scripts"
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "resume_setup.py"
@@ -1146,6 +1161,12 @@ def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
 
     assert proc.returncode != 0
     assert parsed is not None and parsed.get("success") is False
+    assert "manifest.json" in (parsed.get("error") or ""), (
+        f"expected the orphan copy to fail specifically on its missing "
+        f"manifest.json -- got a different reason, which means either the "
+        f"validation order changed (update this assertion to match) or "
+        f"something else broke the orphan-copy path: {parsed}"
+    )
 
 
 def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
@@ -1156,7 +1177,7 @@ def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
 
     proc, parsed = run_resume_setup(root, mass_base_payload())
 
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
     assert parsed.get("resume") is False
 
 
@@ -1216,8 +1237,8 @@ def test_plugin_root_flag_bypasses_a_tampered_durable_root_sibling(tmp_path):
     proc_poisoned, parsed_poisoned = run_resume_setup(root, payload)  # no --plugin-root
 
     assert proc_trusted.returncode == 0, f"stdout={proc_trusted.stdout}\nstderr={proc_trusted.stderr}"
-    assert_setup_success(proc_trusted, parsed_trusted)
-    assert_setup_success(proc_poisoned, parsed_poisoned)
+    parsed_trusted = assert_setup_success(proc_trusted, parsed_trusted)
+    parsed_poisoned = assert_setup_success(proc_poisoned, parsed_poisoned)
     assert parsed_trusted["input_digest"] != parsed_poisoned["input_digest"], (
         "the trusted plugin-root cache_key.py must have produced a "
         "DIFFERENT digest than the poisoned durable-root sibling -- if "
@@ -1259,7 +1280,7 @@ def test_durable_root_and_plugin_root_are_independently_resolved(tmp_path):
         f"independently -- got rc={proc.returncode}\nstdout:\n{proc.stdout}\n"
         f"stderr:\n{proc.stderr}"
     )
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
     assert (data_root / "runs" / parsed["effectiveRunId"] / "input.digest").is_file()
     assert not (plugin_root / "runs").exists()
 
@@ -1278,7 +1299,7 @@ def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
         "--durable-root", str(root),
     )
 
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
     assert parsed.get("resume") is False
 
 
@@ -1301,7 +1322,7 @@ def test_payload_plugin_root_field_omitted_preserves_todays_behavior(tmp_path):
 
     proc, parsed = run_resume_setup(root, payload)
 
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
 
 
 def test_payload_plugin_root_field_accepted_when_present(tmp_path):
@@ -1312,7 +1333,7 @@ def test_payload_plugin_root_field_accepted_when_present(tmp_path):
 
     proc, parsed = run_resume_setup(root, payload)
 
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
 
 
 def test_payload_plugin_root_field_wrong_type_rejected(tmp_path):
@@ -1355,8 +1376,8 @@ def test_payload_plugin_root_field_never_changes_input_digest(tmp_path):
     write_fixture_cache_keys(root_b, mass_base_cache_keys())
     proc_b, parsed_b = run_resume_setup(root_b, payload_b)
 
-    assert_setup_success(proc_a, parsed_a)
-    assert_setup_success(proc_b, parsed_b)
+    parsed_a = assert_setup_success(proc_a, parsed_a)
+    parsed_b = assert_setup_success(proc_b, parsed_b)
     assert parsed_a["input_digest"] == parsed_b["input_digest"], (
         f"plugin_root must never affect input_digest -- got "
         f"{parsed_a['input_digest']!r} vs {parsed_b['input_digest']!r}"
@@ -1381,8 +1402,8 @@ def test_payload_plugin_root_absent_and_empty_produce_the_same_digest(tmp_path):
     proc_a, parsed_a = run_resume_setup(root_a, payload_omitted)
     proc_b, parsed_b = run_resume_setup(root_b, payload_empty)
 
-    assert_setup_success(proc_a, parsed_a)
-    assert_setup_success(proc_b, parsed_b)
+    parsed_a = assert_setup_success(proc_a, parsed_a)
+    parsed_b = assert_setup_success(proc_b, parsed_b)
     assert parsed_a["input_digest"] == parsed_b["input_digest"]
 
 
@@ -1442,7 +1463,7 @@ def test_mass_args_empty_object_accepted(tmp_path):
 
     proc, parsed = run_resume_setup(root, payload)
 
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
 
 
 def test_mass_segs_field_is_ignored_entirely(tmp_path):
@@ -1455,14 +1476,14 @@ def test_mass_segs_field_is_ignored_entirely(tmp_path):
     write_fixture_cache_keys(root, mass_base_cache_keys())
     payload_a = mass_base_payload()
     proc_a, parsed_a = run_resume_setup(root, payload_a)
-    assert_setup_success(proc_a, parsed_a)
+    parsed_a = assert_setup_success(proc_a, parsed_a)
 
     root_b = make_resume_setup_root(tmp_path, name="durable_root_b")
     write_fixture_cache_keys(root_b, mass_base_cache_keys())
     payload_b = mass_base_payload()
     payload_b["segs"] = []  # would have been rejected outright pre-LT-409
     proc_b, parsed_b = run_resume_setup(root_b, payload_b)
-    assert_setup_success(proc_b, parsed_b)
+    parsed_b = assert_setup_success(proc_b, parsed_b)
 
     assert parsed_a["input_digest"] == parsed_b["input_digest"], (
         "the deprecated 'segs' field must never affect input_digest"
@@ -1479,7 +1500,7 @@ def test_mass_segs_field_omitted_still_works(tmp_path):
 
     proc, parsed = run_resume_setup(root, payload)
 
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
 
 
 def test_mass_domain_now_comes_from_manifest_not_segs(tmp_path):
@@ -1495,7 +1516,7 @@ def test_mass_domain_now_comes_from_manifest_not_segs(tmp_path):
     payload = mass_base_payload()
     payload["segs"] = ["this-segment-does-not-exist-in-cache-keys"]  # ignored -> harmless
     proc0, parsed0 = run_resume_setup(root, payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     # Resume against the identical manifest -> matches.
@@ -1522,7 +1543,7 @@ def test_mass_domain_stable_when_only_segs_shrinks_not_manifest(tmp_path):
     write_fixture_cache_keys(root, mass_base_cache_keys())
     payload = mass_base_payload()
     proc0, parsed0 = run_resume_setup(root, payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     shrunk = copy.deepcopy(payload)
@@ -1561,7 +1582,7 @@ def test_resume_from_run_ids_plural_tries_each_in_order_until_match(tmp_path):
     write_fixture_cache_keys(root, mass_base_cache_keys())
     payload = mass_base_payload()
     proc0, parsed0 = run_resume_setup(root, payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     p = copy.deepcopy(payload)
@@ -1578,7 +1599,7 @@ def test_resume_from_run_ids_no_candidate_matches_mints_fresh(tmp_path):
 
     proc, parsed = run_resume_setup(root, payload)
 
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
     assert parsed.get("resume") is False
 
 
@@ -1590,7 +1611,7 @@ def test_resume_from_run_ids_empty_list_behaves_like_first_run(tmp_path):
 
     proc, parsed = run_resume_setup(root, payload)
 
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
     assert parsed.get("resume") is False
 
 
@@ -1629,7 +1650,7 @@ def test_resume_from_run_id_singular_still_works_alone(tmp_path):
     write_fixture_cache_keys(root, mass_base_cache_keys())
     payload = mass_base_payload()
     proc0, parsed0 = run_resume_setup(root, payload)
-    assert_setup_success(proc0, parsed0)
+    parsed0 = assert_setup_success(proc0, parsed0)
     run_id = parsed0["effectiveRunId"]
 
     proc1, parsed1 = run_resume_setup(root, with_resume_from(payload, run_id))
@@ -1668,7 +1689,7 @@ def test_resume_from_run_ids_computes_domain_exactly_once_regardless_of_candidat
 
     proc, parsed = run_resume_setup(root, payload)
 
-    assert_setup_success(proc, parsed)
+    parsed = assert_setup_success(proc, parsed)
     spawn_log = root / "spawn_count.log"
     lines = spawn_log.read_text(encoding="utf-8").splitlines() if spawn_log.is_file() else []
     assert len(lines) == 2, (

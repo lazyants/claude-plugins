@@ -537,8 +537,22 @@ def run_review_ready_from(script_path, seg, expect_token, *extra_args):
 
 def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     """Negative control: an orphan copy invoked WITHOUT --durable-root
-    cannot succeed via self-anchoring alone (no schemas/ dir to even load
-    review.schema.json from)."""
+    cannot succeed via self-anchoring alone. Asserts the SPECIFIC reason,
+    not merely that some failure occurred: a bare "it failed" cannot
+    distinguish this correct refusal from an unrelated crash, so a future
+    defect that broke the orphan-copy path for the WRONG reason would pass
+    this test silently.
+
+    CORRECTED (this docstring previously claimed the reason was "no
+    schemas/ dir to even load review.schema.json from" -- FALSE, and it was
+    already false before this fix, not a regression this branch caused):
+    review_ready.py's own main() (review_ready.py:319-349) checks the
+    review FILE's presence/non-emptiness at line 332, strictly BEFORE it
+    ever reaches `_load_review_schema()` at line 339 -- so the orphan
+    location's missing segments/{seg}.review.json is what's actually
+    reached first, never the missing schemas/ dir. Verified by running the
+    orphan copy directly and reading its real stdout, not by re-reading the
+    stale comment."""
     orphan_dir = tmp_path / "orphan_location" / "scripts"
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "review_ready.py"
@@ -549,6 +563,11 @@ def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     assert result.returncode == 1
     payload = json.loads(result.stdout.strip())
     assert payload["ready"] is False
+    assert "review file absent/empty" in (payload.get("reason") or ""), (
+        f"expected the orphan copy to fail specifically because its "
+        f"self-anchored segments/segRedirect.review.json does not exist; "
+        f"got a different reason: {payload}"
+    )
 
 
 def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
