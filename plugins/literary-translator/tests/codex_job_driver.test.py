@@ -1392,6 +1392,38 @@ def test_launch_argv_omits_model_when_unset(tmp_path, monkeypatch):
     assert "--model" not in captured["argv"]
 
 
+def test_launch_argv_passes_through_a_non_default_effort(tmp_path, monkeypatch):
+    """Coverage-gap fix: every OTHER --effort assertion in this file (see
+    test_default_launch_argv_is_write_and_high_effort_with_8_flags_only,
+    _mkjob's own effort="high" default, and every other _mkjob() caller)
+    uses "high" -- CodexJob's own CLI default (_build_parser()'s --effort
+    default="high") -- so none of them can tell self.effort being genuinely
+    FORWARDED apart from --effort "high" being hardcoded regardless of
+    self.effort's actual value. This is the identical "fixture value
+    byte-identical to the parameter's own default" shape already found
+    elsewhere in this branch (node_bin, current_draft_sha1's scripts_dir).
+    Confirmed by mutation: hardcoding launch()'s `argv += ["--effort",
+    self.effort]` to `argv += ["--effort", "high"]` survives every existing
+    effort assertion in this file; only a value that is neither "high" nor
+    None (unlike --model, which already has this exact pair) can catch it."""
+    job = _mkjob(tmp_path)
+    job.effort = "medium"
+    job.final_prompt = str(tmp_path / "fp.txt")
+    job.sandbox_dir = str(tmp_path / "sandbox")
+    captured = {}
+
+    def fake_run(argv, timeout):
+        captured["argv"] = argv
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"jobId": "j1"}))
+    monkeypatch.setattr(job, "_run", fake_run)
+    assert job.launch() is True
+    argv = captured["argv"]
+    assert argv[argv.index("--effort") + 1] == "medium", (
+        f"self.effort must be forwarded VERBATIM, not hardcoded to the "
+        f"CLI's own default -- argv: {argv}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # SUBPROCESS integration (fake node + stub gates)
 # --------------------------------------------------------------------------- #
@@ -2316,6 +2348,122 @@ def test_plugin_root_misconfigured_fails_loudly_at_usage_time(tmp_path):
         f"(naming assets/scripts/), not a generic argparse rejection; "
         f"stderr:\n{proc.stderr}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Trust-boundary fix: an EMPTY --plugin-root used to be silently treated as
+# "not given" (CodexJob.__init__ tested it for TRUTHINESS, `if plugin_root`,
+# so an is-not-None-but-falsy "" fell through to SCRIPTS_DIR -- the
+# self-anchored, codex-WRITABLE durable-root copy), even though main()'s own
+# pre-flight directory check operates on `os.path.realpath("")` (the CURRENT
+# WORKING DIRECTORY, a value distinct from the empty string actually passed)
+# and could pass. The two tests immediately above
+# (test_plugin_root_flag_omitted_preserves_todays_behavior /
+# test_plugin_root_misconfigured_fails_loudly_at_usage_time) do not cover
+# this: the first explicitly excludes "" from its own scope (see its own
+# docstring), and the second uses a NONEXISTENT path, which fails the
+# directory check for an unrelated reason. This is the missing axis.
+# --------------------------------------------------------------------------- #
+
+
+def test_plugin_root_empty_string_fails_loudly_rather_than_silently_using_poisoned_copy(tmp_path):
+    """PROOF, and the adversarial "attack it" case: reproduces the exact
+    exploit -- root's own draft_ready.py POISONED (per
+    test_plugin_root_redirect_bypasses_poisoned_draft_ready's own fixture),
+    root/assets/scripts/ present (so main()'s pre-#412-fix directory check
+    would have passed), --plugin-root passed as "". Confirmed pre-fix (this
+    exact fixture, against the parent commit's copy of the driver): exit 0,
+    ok=true -- the poisoned copy was silently consulted and wrongly accepted
+    a wrong-token attempt, exactly what --plugin-root exists to prevent.
+    Post-fix: exit 2, no stdout JSON, before any gate ever runs."""
+    root, companion, node = build_root(tmp_path)
+    _poison_durable_root_gate(root, "draft_ready.py")
+    (root / "assets" / "scripts").mkdir(parents=True)
+    seg, tok = "c001", "RUN:c001"
+    state = base_state(seg, tok, "translate", attempt_mode="invalid_token", status_seq=["completed"])
+
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1", state,
+                        extra_args=["--plugin-root", ""])
+
+    assert proc.returncode == 2, (
+        f"an empty --plugin-root must fail at usage time (exit 2), not "
+        f"silently fall back to the (here, POISONED) self-anchored copy -- "
+        f"rc={proc.returncode}\nstdout={proc.stdout!r}\nstderr:\n{proc.stderr}"
+    )
+    assert not proc.stdout.strip(), (
+        "a usage error must print NO stdout JSON line -- in particular "
+        "never an ok:true line, which would mean the poisoned gate ran"
+    )
+    assert "empty" in proc.stderr or "whitespace" in proc.stderr, (
+        f"expected the dedicated empty/whitespace error, not the generic "
+        f"'does not resolve to a directory' one (that message would be "
+        f"technically true here too, since main() resolves \"\" to cwd "
+        f"which DOES have assets/scripts/ -- the dedicated message is what "
+        f"proves this exact check fired); stderr:\n{proc.stderr}"
+    )
+
+
+def test_plugin_root_whitespace_only_also_fails_loudly(tmp_path):
+    """The `.strip()` half of the same check: a few spaces are just as
+    silently-falls-back-worthy as a bare empty string, and just as
+    plausible a template-substitution artifact."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="valid",
+                                   status_seq=["completed"]),
+                        extra_args=["--plugin-root", "   "])
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert not proc.stdout.strip()
+    assert "empty" in proc.stderr or "whitespace" in proc.stderr
+
+
+# --------------------------------------------------------------------------- #
+# Consistency fix: _write_joblog()'s os.write() return value used to be
+# discarded, unlike _publish_from_sandbox()'s own identically-shaped
+# temp-file write two functions away, which already checks it. POSIX
+# write() may write fewer bytes than requested; without the check, a short
+# write published a TRUNCATED, invalid-JSON joblog at the trusted final
+# name -- jobId/jobCwd are what hygiene()'s cancel-a-stale-prior-job path
+# (and a human debugging a crash) both read from there.
+# --------------------------------------------------------------------------- #
+
+
+def test_write_joblog_short_write_never_publishes_a_truncated_joblog(tmp_path, monkeypatch):
+    """Simulates a short write (one byte less than requested, the way an
+    interrupted/ENOSPC write would look) by monkeypatching codex_job.os.write.
+    Confirmed pre-fix (this exact fixture, against the parent commit's copy):
+    the joblog ends up on disk containing invalid, truncated JSON. Post-fix:
+    nothing is published at the final name, and the temp scratch file is
+    cleaned up."""
+    job = _mkjob(tmp_path)
+    real_write = codex_job.os.write
+
+    def short_write(fd, data):
+        return real_write(fd, data[:-1]) if len(data) > 1 else real_write(fd, data)
+
+    monkeypatch.setattr(codex_job.os, "write", short_write)
+    job._write_joblog({"jobId": "job-1", "kind": "translate", "seg": "c001", "status": "launched"})
+
+    assert not os.path.exists(job.joblog), (
+        "a short write must never leave anything at the final joblog name "
+        "-- hygiene()'s cancel-a-stale-prior-job path and a human reading "
+        "this file after a crash both trust it"
+    )
+    leftovers = list(Path(job.segdir).glob(".codex_job.*.tmp"))
+    assert leftovers == [], f"temp scratch file(s) left behind: {leftovers}"
+
+
+def test_write_joblog_succeeds_normally_when_the_write_is_not_short(tmp_path):
+    """False-positive bound for the fix above: an ordinary, unpatched write
+    still publishes correctly -- the new length check must not reject a
+    genuinely complete write."""
+    job = _mkjob(tmp_path)
+    job._write_joblog({"jobId": "job-1", "kind": "translate", "seg": "c001", "status": "launched"})
+
+    assert os.path.exists(job.joblog)
+    assert json.loads(Path(job.joblog).read_text(encoding="utf-8"))["jobId"] == "job-1"
 
 
 if __name__ == "__main__":

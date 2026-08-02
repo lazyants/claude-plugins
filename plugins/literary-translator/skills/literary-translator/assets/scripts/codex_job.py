@@ -202,10 +202,18 @@ class CodexJob:
         self.model = model
         # #412: the plugin's own install root -- realpath'd at construction
         # (matching self.root's own treatment) so a symlink cannot be swapped
-        # underneath an already-resolved trust decision. None/falsy means
-        # "not given" and _trusted_scripts_dir() falls back to its
-        # pre-#412 default -- see that method's own docstring.
-        self.plugin_root = os.path.realpath(plugin_root) if plugin_root else None
+        # underneath an already-resolved trust decision. Trust-boundary fix:
+        # "given" is tested as `is not None` here, matching main()'s own
+        # definition exactly -- a bare truthiness test (`if plugin_root`)
+        # used to treat an empty string as "not given" too, silently
+        # falling back to SCRIPTS_DIR (the codex-writable durable-root
+        # copy) even though main()'s own pre-flight check had validated
+        # `os.path.realpath("")` (the CURRENT WORKING DIRECTORY) as a real
+        # assets/scripts/ location -- an operator who passed the flag at
+        # all believed the redirect was active. `None` (the flag genuinely
+        # omitted) is the only value that reproduces the pre-#412 default;
+        # see _trusted_scripts_dir()'s own docstring.
+        self.plugin_root = os.path.realpath(plugin_root) if plugin_root is not None else None
 
         self.inv = os.urandom(8).hex()
         self.segdir = os.path.join(self.root, "segments")
@@ -662,7 +670,18 @@ class CodexJob:
             return None
 
     def _write_joblog(self, obj):
-        """Atomic never-torn write via O_EXCL/O_NOFOLLOW tmp + os.replace. Best-effort."""
+        """Atomic never-torn write via O_EXCL/O_NOFOLLOW tmp + os.replace. Best-effort.
+
+        Consistency fix: checks os.write()'s own return value against the
+        payload length before publishing, matching the short-write guard
+        _publish_from_sandbox() already applies to its own tmp-file write
+        (below) -- POSIX write() is permitted to write FEWER bytes than
+        requested. Without this check a short write left a TRUNCATED,
+        invalid-JSON temp file that os.replace() would still publish as the
+        joblog -- jobId/jobCwd are what hygiene()'s cancel-a-stale-prior-job
+        path and a human reading this file after a crash both trust; a
+        corrupt joblog is silently worse than a merely-missing one (which
+        is a value read_joblog() already handles as `None`)."""
         tmp = os.path.join(self.segdir, ".codex_job.%s.%s.tmp" % (self.seg, self.inv))
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | _O_CLOEXEC | _O_NOFOLLOW
         try:
@@ -670,9 +689,13 @@ class CodexJob:
         except OSError:
             return
         try:
-            os.write(fd, json.dumps(obj).encode("utf-8"))
+            data = json.dumps(obj).encode("utf-8")
+            written = os.write(fd, data)
         finally:
             os.close(fd)
+        if written != len(data):
+            _silent_remove(tmp)
+            return
         try:
             os.replace(tmp, self.joblog)
         except OSError:
@@ -1073,6 +1096,34 @@ def main(argv=None):
         # rather than silently falling through _gate()'s own OSError->None
         # handling later, which would otherwise be indistinguishable from an
         # ordinary "gate ran out of budget" case.
+        #
+        # Trust-boundary fix: an EMPTY or whitespace-only --plugin-root
+        # (e.g. a `{{PLUGIN_ROOT}}` template substitution that silently
+        # resolved to nothing) is rejected HERE, explicitly, rather than
+        # being let through to CodexJob.__init__ -- which used to test
+        # `plugin_root` for TRUTHINESS (`if plugin_root else None`), so an
+        # empty string (is-not-None, but falsy) was silently treated as
+        # "not given" and fell back to SCRIPTS_DIR, the self-anchored,
+        # codex-WRITABLE durable-root copy -- defeating this whole redirect
+        # while this very check below still validated (and passed for)
+        # `os.path.realpath("")`, which resolves to the CURRENT WORKING
+        # DIRECTORY, not the empty string the operator actually passed. A
+        # caller who set --plugin-root at all believed the redirect was
+        # active; silently discarding it is exactly the failure mode this
+        # flag exists to close. Confirmed exploitable: with the durable
+        # root's own draft_ready.py poisoned (a stub that accepts anything)
+        # and cwd/assets/scripts present, `--plugin-root ""` passed this
+        # directory check, then silently used the poisoned copy and wrongly
+        # promoted a wrong-token attempt.
+        if not args.plugin_root.strip():
+            print(
+                "Error: --plugin-root was given but is empty/whitespace-only "
+                "-- this usually means a {{PLUGIN_ROOT}} template "
+                "substitution did not happen. Omit the flag entirely for "
+                "today's self-anchored behavior, or pass a real path.",
+                file=sys.stderr,
+            )
+            return 2
         plugin_scripts_dir = os.path.join(os.path.realpath(args.plugin_root), "assets", "scripts")
         if not os.path.isdir(plugin_scripts_dir):
             print(
