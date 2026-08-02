@@ -122,14 +122,17 @@ if __name__ == "__main__":
 # Fixture harness
 # ---------------------------------------------------------------------------
 
-def make_durable_root(tmp_path):
+def make_durable_root(tmp_path, name="durable_root"):
     """Builds an isolated durable_root: copies the REAL ledger_merge.py and
     the REAL assets/schemas/*.schema.json files into {root}/scripts/ and
     {root}/schemas/ (so ledger_merge.py's self-anchored SCHEMAS_DIR resolves
     correctly), installs the fake cache_key.py stub alongside it, and
-    creates an empty runs/ledger.d/.
+    creates an empty runs/ledger.d/. `name` defaults to the pre-existing
+    fixed value -- a caller that needs the root at a specific relative
+    nested location (e.g. to exercise a caller-relative --durable-root end
+    to end) may pass e.g. name="projects/book".
     """
-    root = tmp_path / "durable_root"
+    root = tmp_path / name
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(SCRIPT_SRC, scripts_dir / "ledger_merge.py")
@@ -513,12 +516,18 @@ def test_expected_segs_and_stale_check_compose_in_one_run(tmp_path):
 # today's self-anchored behavior for both when both flags are omitted.
 # ---------------------------------------------------------------------------
 
-def run_merge_from(script_path, *extra_args, timeout=30):
+def run_merge_from(script_path, *extra_args, timeout=30, cwd=None):
+    """`cwd=None` (the default) preserves every pre-existing caller's
+    behavior exactly (subprocess.run() with no cwd= inherits the test
+    process's own cwd) -- only a caller that needs to control the
+    SUBPROCESS's own working directory (e.g. to exercise a caller-relative
+    --durable-root end to end) passes one explicitly."""
     return subprocess.run(
         [sys.executable, str(script_path), *extra_args],
         capture_output=True,
         text=True,
         timeout=timeout,
+        cwd=str(cwd) if cwd is not None else None,
     )
 
 
@@ -711,6 +720,163 @@ def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
     payload = parse_stdout(proc)
     assert payload["success"] is True
     assert payload["n_segments"] == 1
+
+
+# ---------------------------------------------------------------------------
+# A RELATIVE --durable-root must be resolved exactly ONCE (LT-409 post-review
+# fix, third instance of this shape -- resume_setup.py and select_segments.py
+# each had the identical bug in their own forward to cache_key.py).
+# resolve_dirs() already resolves it correctly against ledger_merge.py's OWN
+# cwd -- but _compute_stale_segments() then runs the cache_key.py subprocess
+# with cwd SET TO that already-resolved root while (pre-fix) forwarding the
+# ORIGINAL, still-relative string as the subprocess's own --durable-root.
+# cache_key.py resolves ITS --durable-root against ITS OWN cwd (the
+# already-resolved root) -- joining the relative fragment onto the root a
+# second time. Silent either way: the parent's own success/failure comes
+# from the child's stdout JSON and exit code, and a wrong-tree read that
+# still produces SOME JSON object looks exactly like a genuine one.
+# ---------------------------------------------------------------------------
+
+PATH_PROBE_CACHE_KEY_PY = """#!/usr/bin/env python3
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seg")
+    parser.add_argument("--field")
+    parser.add_argument("--durable-root", default=None)
+    args = parser.parse_args()
+    if args.durable_root:
+        resolved = Path(args.durable_root).resolve()
+    else:
+        resolved = Path(__file__).resolve().parent.parent
+    # Record what THIS invocation resolved --durable-root to. __file__ is
+    # this stub's own FIXED on-disk location, unaffected by any doubling bug
+    # in the --durable-root VALUE it receives, so the probe file's own path
+    # is trustworthy regardless of what is under test.
+    probe_path = Path(__file__).resolve().parent.parent / "cache_key_probe.jsonl"
+    with open(probe_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"seg": args.seg, "resolved_durable_root": str(resolved)}) + "\\n")
+    if not args.seg:
+        sys.stderr.write("path-probe cache_key.py: test stub requires --seg\\n")
+        return 1
+    # Always succeeds with a real-shaped (if fake) object, regardless of what
+    # it resolved -- decouples "did ledger_merge.py notice a problem" from
+    # "did cache_key.py read the RIGHT tree", so a doubled-path defect is
+    # caught by a direct path comparison even in a build where it happens not
+    # to crash (e.g. the doubled directory exists for an unrelated reason) --
+    # the more dangerous, silent failure mode.
+    print(json.dumps({"probe": True, "seg": args.seg}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
+
+
+def test_relative_durable_root_is_not_double_resolved_for_cache_key_subprocess(tmp_path):
+    """Caller runs from an outer cwd (e.g. `cd /repo`) with a RELATIVE
+    --durable-root (e.g. `projects/book`) -- the exact shape every real
+    caller of this script COULD use, even though every other test in this
+    file happens to pass an absolute one."""
+    outer = tmp_path  # stands in for the caller's own cwd, e.g. "/repo"
+    root = make_durable_root(outer, name="projects/book")
+    (root / "scripts" / "cache_key.py").write_text(PATH_PROBE_CACHE_KEY_PY, encoding="utf-8")
+    write_fragment(root, "seg01", converged_fragment(make_cache_key("s1")))
+    probe_path = root / "cache_key_probe.jsonl"
+    assert not probe_path.exists()  # fixture sanity: nothing recorded yet
+
+    proc = run_merge_from(
+        root / "scripts" / "ledger_merge.py",
+        "--durable-root", "projects/book",  # RELATIVE, relative to `outer`
+        cwd=outer,
+    )
+
+    assert probe_path.is_file(), (
+        f"the probe stub never ran -- ledger_merge.py must have failed "
+        f"before even shelling out to cache_key.py: rc={proc.returncode}\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    probe_lines = [
+        json.loads(ln) for ln in probe_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+    ]
+    assert probe_lines, "probe file exists but recorded no invocations"
+    for entry in probe_lines:
+        assert entry["resolved_durable_root"] == str(root), (
+            f"cache_key.py's own --durable-root resolution must land on the "
+            f"SAME root ledger_merge.py itself resolved ({root}) -- got "
+            f"{entry['resolved_durable_root']!r} for seg {entry['seg']!r}. A "
+            f"doubled path here (the relative fragment 'projects/book' "
+            f"joined onto root a second time) means the raw relative "
+            f"string was forwarded verbatim into a subprocess whose cwd is "
+            f"already that resolved root."
+        )
+
+    # The probe stub never fails, so ledger_merge.py itself must have
+    # reported success -- proving the wrong-tree read (pre-fix) would have
+    # been entirely SILENT: a caller reading only {"success": true, ...}
+    # would never learn its stale-check ran against the wrong directory.
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+
+
+def test_relative_plugin_root_resolves_against_the_invokers_cwd_not_the_childs(tmp_path):
+    """`--plugin-root` cannot suffer ledger_merge.py's OWN doubled-path bug
+    (cache_key.py "does not accept --plugin-root at all" -- module docstring
+    -- so the raw string is never forwarded to it as an argument); this
+    checks the DISTINCT defect the select_segments.py lane found on the same
+    flag elsewhere: resolve_dirs() resolves --plugin-root ITSELF, in THIS
+    process, against the invoker's own cwd -- `cache_key_script =
+    Path(plugin_root_str).resolve() / "assets" / "scripts" / "cache_key.py"`
+    (line ~162) -- and that resolved absolute Path object is what actually
+    gets used to invoke the subprocess (`subprocess.run([sys.executable,
+    str(cache_key_script), ...])`), never re-derived by the child. So a
+    relative --plugin-root, with no --durable-root of its own, must resolve
+    against THIS process's cwd (the invoker's) and reach the untampered
+    stub at that location.
+
+    Same poisoned-vs-trusted design as
+    test_plugin_root_flag_bypasses_a_tampered_durable_root_sibling above (a
+    RELATIVE echo of it, not a new mechanism) -- deliberately NOT "does the
+    call merely succeed", since a wrong-tree read that happens to crash
+    would look identical to a correct read that reports "not stale": the
+    durable-root sibling is POISONED to always claim a match (the dangerous
+    false-negative direction), so only the genuinely-mismatching TRUSTED
+    sibling running produces the observed `stale_segments == ["seg01"]` --
+    an ambiguous "it didn't crash" is never enough here."""
+    outer = tmp_path  # stands in for the caller's own cwd
+    root = make_durable_root(outer, name="projects/book")
+    stored_key = make_cache_key("stored")
+    current_key = make_cache_key("current")  # deliberately mismatches
+    write_fixture_cache_keys(root, {"seg01": current_key})
+    write_fragment(root, "seg01", converged_fragment(stored_key))
+    (root / "scripts" / "cache_key.py").write_text(
+        tampered_cache_key_py_src(stored_key), encoding="utf-8"
+    )
+
+    make_trusted_plugin_root(outer)  # writes {outer}/trusted_plugin_install/assets/scripts/cache_key.py
+
+    proc = run_merge_from(
+        root / "scripts" / "ledger_merge.py",
+        "--plugin-root", "trusted_plugin_install",  # RELATIVE, relative to `outer`
+        cwd=outer,
+    )
+
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["stale_segments"] == ["seg01"], (
+        "the relative --plugin-root must resolve, against the INVOKER's own "
+        "cwd, to the trusted sibling (which genuinely recomputes and reports "
+        "the real mismatch) -- a poisoned durable-root copy running instead "
+        f"would report NO staleness: {payload}"
+    )
 
 
 if __name__ == "__main__":

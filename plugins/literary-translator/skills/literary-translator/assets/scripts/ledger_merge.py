@@ -72,10 +72,11 @@ checker from inside the thing it checks would let a tampered copy pass
 itself. Only --durable-root is forwarded to the cache_key.py subprocess as
 its own same-named flag: cache_key.py is a LEAF with no siblings of its own
 to resolve, and does not accept --plugin-root at all, so passing it would
-simply make the invocation fail. When --plugin-root is given WITHOUT
---durable-root, a --durable-root synthesized from the resolved durable root
-is passed instead, because cache_key.py no longer physically sits under
-that root and would otherwise self-anchor against the wrong tree. Omitting
+simply make the invocation fail. Whenever either flag is given, the value
+forwarded is always the ALREADY-RESOLVED absolute durable root (post-review
+correction -- forwarding the raw --durable-root string used to double-
+resolve it against the subprocess's own cwd whenever it was relative; see
+_compute_stale_segments()'s own docstring for the exact scenario). Omitting
 BOTH reproduces today's self-anchored behavior byte-for-byte.
 
 Exit code 0 on success, 1 on failure. Either way, exactly one JSON line is
@@ -341,16 +342,33 @@ def _compute_stale_segments(
     against -- self-anchored by default, or resolve_dirs()'s own
     --plugin-root-aware `{plugin_root}/assets/scripts/cache_key.py` (never
     derived from durable_root; see resolve_dirs()'s own docstring for why).
-    `durable_root` is cache_key.py's DATA root (cwd for the subprocess).
+    `durable_root` is cache_key.py's DATA root (cwd for the subprocess) --
+    ALREADY resolve()'d by resolve_dirs(), so it is always an absolute path.
     `durable_root_str`/`plugin_root_str` are THIS script's own CLI values
     (cache_key.py has no --plugin-root, being a leaf with no siblings of its
-    own): `durable_root_str` is forwarded verbatim as cache_key.py's own
-    --durable-root when given; when it is NOT given but `plugin_root_str` IS
-    (meaning `cache_key_script` was itself resolved via --plugin-root, so it
-    no longer physically sits under durable_root), `durable_root` is
-    forwarded explicitly anyway -- otherwise cache_key.py's own
-    self-anchoring would silently resolve its data from the plugin root
-    instead of the real durable root.
+    own), used only to DECIDE whether a --durable-root should be forwarded
+    at all -- never their own string VALUE.
+
+    Post-review correction (third instance of this exact shape --
+    resume_setup.py and select_segments.py each had the identical bug in
+    their own forward to cache_key.py): whenever either flag is set, the
+    subprocess's own --durable-root is now the ALREADY-RESOLVED
+    `durable_root`, never the raw `durable_root_str`. Forwarding the raw
+    string used to double-resolve it whenever it was RELATIVE: the
+    subprocess below runs with cwd=str(durable_root) (an absolute path), so
+    a relative --durable-root VALUE would be resolved a SECOND time inside
+    cache_key.py, against that already-resolved cwd -- e.g. --durable-root
+    projects/book run from /repo resolves HERE to /repo/projects/book, then
+    cache_key.py resolves "projects/book" again against that cwd, landing
+    on /repo/projects/book/projects/book. Silent either way: this function's
+    own per-segment failure handling treats a non-zero cache_key.py exit as
+    a skip (segment left as-is, warning to stderr), so a wrong-tree read
+    that happens to produce SOME JSON object looks identical to a genuine
+    one, and one that crashes just quietly skips the stale-check for that
+    segment rather than failing the whole merge. Forwarding the resolved
+    path is a no-op for a caller that already passes an absolute path
+    (every existing caller does), and does not change cache_key.py's own
+    contract -- it already accepts an absolute --durable-root.
     """
     stale = set()
     if skip_stale_check:
@@ -376,9 +394,7 @@ def _compute_stale_segments(
             continue
 
         cmd = [sys.executable, str(cache_key_script), "--seg", seg]
-        if durable_root_str is not None:
-            cmd += ["--durable-root", durable_root_str]
-        elif plugin_root_str is not None:
+        if durable_root_str is not None or plugin_root_str is not None:
             cmd += ["--durable-root", str(durable_root)]
         try:
             proc = subprocess.run(
