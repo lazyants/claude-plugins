@@ -2,24 +2,33 @@
 """#409 Step 3 -- select_segments.py refuses when a prior RUN_ID dispatched
 work into a project WITHOUT the resume-integrity gate.
 
-## Which of these tests are PROOFS and which are BOUNDS
+## Which of these tests are PROOFS, BOUNDS, ACCEPTED GAPS, or PINS
 
-This distinction is load-bearing and must not be lost in a later edit.
+This distinction is load-bearing and must not be lost in a later edit. It was
+also caught DRIFTING once already: a mutation at
+`select_segments.py`'s `if runs_missing_digest and authorizes_dispatch:`
+(flipped to `if False:`) showed `test_the_retrofit_can_clear_every_refusal_
+the_gate_can_raise` staying GREEN while listed as a PROOF, and six further
+tests belonging to no listed category at all. Re-measured directly against
+that mutation before writing the corrected lists below -- every RED/GREEN
+verdict stated here is the actual pytest outcome under it, not a
+recollection. Every test in this file now appears in EXACTLY ONE of the four
+categories; "not in the BOUNDS list" must never again be read as "therefore
+a PROOF".
 
-PROOFS -- these go RED if the check is deleted or broken, and they are the
-only tests that may ever be cited as evidence the check works:
+PROOFS -- these go RED under that exact mutation, and they are the ONLY
+tests that may ever be cited as evidence the Step 3 refusal itself works:
 
   * test_refuses_when_a_dispatched_run_id_has_no_input_digest
   * test_acknowledged_run_stops_blocking_but_a_new_skip_still_fires
   * test_frontback_seg_id_attributes_to_the_right_run_id
   * test_workflow_dir_alone_is_enough_to_refuse
-  * test_the_retrofit_can_clear_every_refusal_the_gate_can_raise
 
 FALSE-POSITIVE BOUNDS -- these assert the check does NOT fire on a healthy
-project. Every one of them STAYS GREEN if the check is deleted entirely,
-because a deleted check also does not fire. They bound the damage; they
-prove nothing about detection, and citing them as evidence the gate works
-would be exactly the mistake this file exists to make impossible:
+project, and STAY GREEN under the same mutation, because a deleted check
+also does not fire. They bound the damage; they prove nothing about
+detection, and citing them as evidence the gate works would be exactly the
+mistake this file exists to make impossible:
 
   * test_allows_once_that_run_id_has_its_digest
   * test_does_not_fire_on_a_project_with_no_dispatched_drafts
@@ -32,13 +41,19 @@ that silently matched nothing -- wrong glob, wrong directory, a fixture that
 forgot the dispatch_token -- produces an empty list and would otherwise pass
 a "did it refuse?" assertion for entirely the wrong reason.
 
-ACCEPTED GAP -- a third category, distinct from both of the above. Not a
-proof the check works and not a bound on a false positive: it pins a
-confirmed false NEGATIVE as deliberately accepted rather than silently
-assumed correct. STAYS GREEN if the check is deleted (same as a BOUND), but
-unlike a BOUND it is not evidence of health -- it documents exactly where
-detection stops:
+ACCEPTED GAP -- a confirmed false NEGATIVE, pinned as deliberately accepted
+rather than silently assumed correct. STAYS GREEN under the mutation (same
+observable behavior as a BOUND), but licenses the OPPOSITE conclusion: not
+"the check is healthy here", but "detection provably stops here, on
+purpose, and the test says so in its own name and docstring rather than
+leaving that discovery to whoever deletes the check next":
 
+  * test_untokened_draft_is_unattributable_and_never_refuses --
+    `draft.schema.json` permits a draft with no `dispatch_token` at all;
+    such a draft is unattributable and contributes nothing to either scan.
+    RECLASSIFIED here (was previously unlisted): its own docstring already
+    said "a false NEGATIVE", which is this category's exact definition, not
+    a BOUND's.
   * test_driver_run_fully_overwritten_and_never_instantiated_is_undetectable
     -- the two one-way holes `scan_dispatching_run_ids()`'s own "KNOWN HOLE"
     paragraph and `scan_workflow_run_ids()`'s own docstring each document
@@ -48,16 +63,53 @@ detection stops:
     before/after asymmetry -- the SAME run id refuses while its draft still
     exists and passes silently the instant that draft is overwritten.
 
+COMPONENT & CONSISTENCY PINS -- test a NARROWER property than the Step 3
+refusal itself (a parser, one evidence-attribution detail, a round trip
+between this script and a sibling, or two independent copies of the same
+logic agreeing) in isolation from whether the refusal fires at all. ALL
+STAY GREEN under the same mutation -- that is expected and proves nothing
+about the refusal either way, in either direction: a passing pin is not
+evidence the refusal works, and a refusal deleted out from under a passing
+pin does not make the pin wrong. What licenses citing one is narrower and
+different: if a PIN itself goes red, that is evidence of a defect in the
+specific narrower thing it names, independent of the refusal's own health.
+
+  * test_draft_run_id_parses_the_shapes_that_actually_occur -- unit-level,
+    no subprocess at all; companion to the frontback PROOF above, pinning
+    the parser it depends on directly.
+  * test_a_run_with_both_evidence_halves_is_reported_as_both -- asserts
+    `run_id_evidence` attribution only; never asserts on `returncode`, so it
+    cannot be a PROOF regardless of what it sets up.
+  * test_the_retrofit_can_clear_every_refusal_the_gate_can_raise --
+    RECLASSIFIED here (previously mislabeled a PROOF; the mutation above is
+    what caught it). It drives `backfill_resume_gate_ack.py --apply`
+    against BOTH evidence shapes and asserts the evidence fields end up
+    correct -- a real property (the round trip must actually clear
+    everything the union can raise), but one that never once asserts the
+    Step 3 refusal itself fired, so it cannot detect that refusal's
+    deletion.
+  * test_both_copies_of_draft_run_id_agree -- drift pin, `select_segments.py`
+    vs. `backfill_resume_gate_ack.py`'s own `draft_run_id()`.
+  * test_both_copies_of_validate_run_id_agree -- drift pin, the same two
+    scripts' `validate_run_id()` (the #409 security fix below).
+  * test_both_copies_of_the_marker_paths_agree -- drift pin, both scripts'
+    `input_digest_path()`/`resume_gate_ack_path()`.
+  * test_the_reader_and_writer_agree_on_a_real_marker -- end-to-end pin: what
+    `backfill_resume_gate_ack.py` actually creates is what `select_segments.py`
+    actually looks for.
+
 ## Security fix -- unsafe RUN_ID validation
 
 `select_segments.py` built `runs/<RUN_ID>/input.digest` and
 `.resume_gate_ack` paths straight from a draft's `dispatch_token` with no
 shape check, while its sibling `backfill_resume_gate_ack.py` already
-validated the identical value and refused. Same PROOF/BOUND discipline
-applies to this sub-taxonomy:
+validated the identical value and refused. This sub-taxonomy is mutated and
+measured separately from the Step 3 gate above -- a different `if` (`if
+unsafe_run_ids and authorizes_dispatch:`), re-verified the same way
+(flipped to `if False:`) before these lists were written:
 
-PROOFS (go RED if `validate_run_id()` or its call site in `run()` is deleted
-or broken):
+PROOFS (go RED under that mutation, and license citing this check itself as
+working -- nothing broader):
 
   * test_refuses_when_a_traversing_run_id_is_present
   * test_refuses_on_an_absolute_path_run_id_and_never_reads_outside_runs_dir
@@ -70,7 +122,7 @@ or broken):
     identical shape and would refuse the same id (the "unclearable wedge"
     the union-of-evidence design exists to prevent, one layer deeper).
 
-BOUNDS (stay green if the new check is deleted -- deleting it just means
+BOUNDS (stay green under that same mutation -- deleting the check just means
 `unsafe_run_ids` is never populated, so an emptiness assertion still holds
 vacuously; they prove no false positive, nothing about detection):
 
@@ -80,6 +132,10 @@ vacuously; they prove no false positive, nothing about detection):
     (draft_run_id()'s own docstring) must still pass end to end.
   * the `unsafe_run_ids == {}` assertions added to the pre-existing
     false-positive bounds above.
+
+`test_both_copies_of_validate_run_id_agree` also belongs to this fix, but is
+a drift PIN rather than a PROOF or BOUND of it -- listed under COMPONENT &
+CONSISTENCY PINS above, not repeated here.
 
 ## The three real on-disk states these fixtures mirror
 
@@ -480,6 +536,10 @@ def test_workflow_dir_alone_is_enough_to_refuse(tmp_path):
 
 
 def test_a_run_with_both_evidence_halves_is_reported_as_both(tmp_path):
+    """COMPONENT & CONSISTENCY PIN, not a PROOF: asserts `run_id_evidence`
+    attribution only, and never checks `proc.returncode` -- so it cannot
+    detect the Step 3 refusal being deleted, only that the union correctly
+    tags a doubly-evidenced run id with BOTH sources rather than just one."""
     root = skipped_gate_project(tmp_path, run_id="BOTHRUN20260801")
     (root / "runs" / "workflows" / "BOTHRUN20260801").mkdir(parents=True)
 
@@ -730,15 +790,22 @@ def test_frontback_seg_full_flow_is_not_flagged_unsafe(tmp_path):
 
 
 # ===========================================================================
-# Drift pins -- the Step 3 primitives are duplicated between the READER
-# (select_segments.py) and the WRITER (backfill_resume_gate_ack.py) per this
-# project's "no shared lib between self-contained scripts" convention. These
-# are drift checks, not a second source of truth.
+# COMPONENT & CONSISTENCY PINS (continued) -- the Step 3 primitives are
+# duplicated between the READER (select_segments.py) and the WRITER
+# (backfill_resume_gate_ack.py) per this project's "no shared lib between
+# self-contained scripts" convention. These are drift checks, not a second
+# source of truth, and not proofs of the refusal itself -- see this file's
+# own module docstring for the category's license.
 # ===========================================================================
 
 
 def test_the_retrofit_can_clear_every_refusal_the_gate_can_raise(tmp_path):
-    """PROOF, and the one that guards the seam between the two scripts.
+    """COMPONENT & CONSISTENCY PIN -- the seam between the two scripts, NOT
+    a PROOF of the Step 3 refusal itself (mislabeled as one until a mutation
+    at the refusal's own `if` caught it staying green; see this file's own
+    module docstring for that history). Never asserts the "before" state
+    actually refused -- only that the EVIDENCE fields are correct and that
+    the round trip clears them.
 
     The gate blocks on the UNION of draft-derived and workflow-derived run
     ids. If the retrofit only ever acknowledged the draft-derived half, an
