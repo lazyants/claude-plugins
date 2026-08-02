@@ -519,5 +519,215 @@ def test_review_ready_candidate_file_absent_uses_canonical(tmp_path):
     assert json.loads(result.stdout.strip()) == {"ready": True}
 
 
+# ---------------------------------------------------------------------------
+# 7. --durable-root PATH (LT-409, post-review correction): an explicit,
+#    caller-supplied DATA root (segments/schemas) -- REPLACES self-anchoring
+#    for data when given. Deliberately does NOT redirect where the
+#    draft_sha1.py sibling script is found -- that is --plugin-root's own,
+#    independent concern (see the dedicated section below). Byte-identical
+#    to today's self-anchored behavior for both when both flags are omitted.
+# ---------------------------------------------------------------------------
+
+def run_review_ready_from(script_path, seg, expect_token, *extra_args):
+    return subprocess.run(
+        [sys.executable, str(script_path), seg, "--expect-token", expect_token, *extra_args],
+        capture_output=True, text=True, timeout=30,
+    )
+
+
+def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
+    """Negative control: an orphan copy invoked WITHOUT --durable-root
+    cannot succeed via self-anchoring alone (no schemas/ dir to even load
+    review.schema.json from)."""
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "review_ready.py"
+    shutil.copy2(REVIEW_READY_SRC, orphan_script)
+
+    result = run_review_ready_from(orphan_script, "segRedirect", "tok")
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout.strip())
+    assert payload["ready"] is False
+
+
+def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility: the ordinary in-place fixture (unchanged
+    from every other test in this file), invoked with no
+    --durable-root/--plugin-root at all, keeps behaving exactly as before."""
+    root = make_review_ready_root(tmp_path)
+    segments_dir = root / "segments"
+    seg = "segNoFlag"
+    token = "RUN1:segNoFlag:r1"
+    write_draft(segments_dir, seg, dispatch_token="RUN1:segNoFlag")
+    real_sha1 = real_draft_sha1(root, seg)
+    write_review(segments_dir, seg, draft_sha1_value=real_sha1, dispatch_token=token)
+
+    result = run_review_ready(root, seg, token)
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout.strip()) == {"ready": True}
+
+
+# ---------------------------------------------------------------------------
+# 8. --plugin-root PATH (LT-409, post-review correction): the SECURITY
+#    property this flag exists for. ${durable_root}/scripts/ is a Step-0a
+#    copy the codex process can write to (codex_job.py grants --write over
+#    the whole durable root), so a sibling script resolved FROM durable_root
+#    could be a tampered copy validating itself. --plugin-root is a
+#    SEPARATE, orthogonal input that must NEVER be derived from
+#    --durable-root.
+# ---------------------------------------------------------------------------
+
+_TAMPERED_DRAFT_SHA1_SRC = "#!/usr/bin/env python3\nprint('0' * 40)\n"
+
+
+def poison_durable_root_draft_sha1(root):
+    """Overwrites the durable-root copy of draft_sha1.py with a stand-in
+    for a codex-tampered script: it always prints a FIXED, wrong digest
+    regardless of the real draft content, rather than silently faking a
+    match -- so a test can tell whether THIS copy ran at all, in either
+    direction."""
+    (root / "scripts" / "draft_sha1.py").write_text(_TAMPERED_DRAFT_SHA1_SRC, encoding="utf-8")
+
+
+def make_trusted_plugin_root(tmp_path, name="trusted_plugin_install"):
+    """A SEPARATE physical location holding the REAL draft_sha1.py at the
+    {plugin_root}/assets/scripts/ layout SKILL.md documents for the
+    plugin-anchored scripts."""
+    plugin_root = tmp_path / name
+    plugin_scripts_dir = plugin_root / "assets" / "scripts"
+    plugin_scripts_dir.mkdir(parents=True)
+    shutil.copy2(DRAFT_SHA1_SRC, plugin_scripts_dir / "draft_sha1.py")
+    return plugin_root
+
+
+def test_plugin_root_flag_bypasses_a_tampered_durable_root_sibling(tmp_path):
+    """review_ready.py runs from its OWN in-place durable-root copy
+    (production's normal invocation shape) whose SIBLING draft_sha1.py has
+    been POISONED to always print a fixed, wrong digest. --plugin-root
+    pointing at a separate, untampered location must make it correctly
+    report READY for a genuinely fresh review -- success is possible ONLY
+    if the poisoned durable-root sibling was never executed."""
+    root = make_review_ready_root(tmp_path)
+    segments_dir = root / "segments"
+    seg = "segTamper"
+    token = "RUN1:segTamper:r1"
+    write_draft(segments_dir, seg, dispatch_token="RUN1:segTamper")
+    real_sha1 = real_draft_sha1(root, seg)
+    write_review(segments_dir, seg, draft_sha1_value=real_sha1, dispatch_token=token)
+    poison_durable_root_draft_sha1(root)
+
+    plugin_root = make_trusted_plugin_root(tmp_path)
+
+    result = run_review_ready_from(
+        root / "scripts" / "review_ready.py", seg, token, "--plugin-root", str(plugin_root)
+    )
+
+    assert result.returncode == 0, (
+        f"--plugin-root must bypass the poisoned durable-root draft_sha1.py "
+        f"and use the trusted copy instead -- got rc={result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert json.loads(result.stdout.strip()) == {"ready": True}
+
+
+def test_plugin_root_flag_absent_uses_the_poisoned_durable_root_sibling(tmp_path):
+    """Negative control, and backward-compat proof in one: the SAME
+    poisoned durable-root draft_sha1.py, invoked WITHOUT --plugin-root, is
+    exactly what today's self-anchored lookup finds -- unchanged. It
+    genuinely runs and produces a mismatch, proving the positive test's
+    success above is attributable to --plugin-root specifically."""
+    root = make_review_ready_root(tmp_path)
+    segments_dir = root / "segments"
+    seg = "segTamper2"
+    token = "RUN1:segTamper2:r1"
+    write_draft(segments_dir, seg, dispatch_token="RUN1:segTamper2")
+    real_sha1 = real_draft_sha1(root, seg)
+    write_review(segments_dir, seg, draft_sha1_value=real_sha1, dispatch_token=token)
+    poison_durable_root_draft_sha1(root)
+
+    result = run_review_ready(root, seg, token)  # no --plugin-root
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout.strip())
+    assert payload["ready"] is False
+    assert "sha" in payload["reason"].lower()
+
+
+def test_durable_root_and_plugin_root_are_independently_resolved(tmp_path):
+    """Orthogonality, end to end, from a fully orphan copy: --durable-root
+    points at a DATA-only fixture with NO scripts/ directory AT ALL,
+    --plugin-root points at a SEPARATE, scripts-only fixture with no data
+    of its own. Success proves the two concerns are genuinely resolved
+    independently, never conflated into one root."""
+    data_root = tmp_path / "data_only"
+    segments_dir = data_root / "segments"
+    schemas_dir = data_root / "schemas"
+    segments_dir.mkdir(parents=True)
+    schemas_dir.mkdir(parents=True)
+    shutil.copy2(REVIEW_SCHEMA_SRC, schemas_dir / "review.schema.json")
+    seg = "segOrtho"
+    token = "RUN1:segOrtho:r1"
+    write_draft(segments_dir, seg, dispatch_token="RUN1:segOrtho")
+
+    plugin_root = make_trusted_plugin_root(tmp_path, name="plugin_only")
+    # Compute the real sha1 via the TRUSTED draft_sha1.py directly (there is
+    # no scripts/ dir under data_root at all to run it from there).
+    sha1_proc = subprocess.run(
+        [
+            sys.executable,
+            str(plugin_root / "assets" / "scripts" / "draft_sha1.py"),
+            seg,
+            "--durable-root", str(data_root),
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert sha1_proc.returncode == 0, sha1_proc.stderr
+    real_sha1 = sha1_proc.stdout.strip()
+    write_review(segments_dir, seg, draft_sha1_value=real_sha1, dispatch_token=token)
+    assert not (data_root / "scripts").exists()
+
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "review_ready.py"
+    shutil.copy2(REVIEW_READY_SRC, orphan_script)
+
+    result = run_review_ready_from(
+        orphan_script,
+        seg,
+        token,
+        "--durable-root", str(data_root),
+        "--plugin-root", str(plugin_root),
+    )
+
+    assert result.returncode == 0, (
+        f"durable-root (data) and plugin-root (sibling) must resolve "
+        f"independently -- got rc={result.returncode}\nstdout:\n"
+        f"{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert json.loads(result.stdout.strip()) == {"ready": True}
+
+
+def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility for the split itself: --durable-root alone
+    (no --plugin-root) still resolves the sibling self-anchored, exactly as
+    before the split."""
+    root = make_review_ready_root(tmp_path)
+    segments_dir = root / "segments"
+    seg = "segNoFlag2"
+    token = "RUN1:segNoFlag2:r1"
+    write_draft(segments_dir, seg, dispatch_token="RUN1:segNoFlag2")
+    real_sha1 = real_draft_sha1(root, seg)
+    write_review(segments_dir, seg, draft_sha1_value=real_sha1, dispatch_token=token)
+
+    result = run_review_ready_from(
+        root / "scripts" / "review_ready.py", seg, token, "--durable-root", str(root)
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout.strip()) == {"ready": True}
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

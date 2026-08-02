@@ -83,11 +83,14 @@ FIXTURE_EFFORT = "xhigh"
 FIXTURE_MODEL = ""
 
 
-def instantiate(*, max_fix_rounds: int, batch_agent_cap: int,
+def instantiate(*, max_fix_rounds: int, batch_agent_cap: int, max_codex_jobs_per_batch: int = 100000,
                  effort: str = FIXTURE_EFFORT, model: str = FIXTURE_MODEL) -> str:
     """The exact one-time substitution the template's header documents
     (duplicated, not imported, so this file stays self-contained like every
-    sibling)."""
+    sibling). #409 stage 0 -- max_codex_jobs_per_batch defaults generously
+    (matching batch_agent_cap's own default below), same reasoning: this
+    file's smoke tests exercise the driver/convergence machinery, not either
+    preflight gate, so the new gate must never trip here."""
     text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
     text = text.replace("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT)
     text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
@@ -95,6 +98,7 @@ def instantiate(*, max_fix_rounds: int, batch_agent_cap: int,
     text = text.replace("{{TARGET_LANG}}", FIXTURE_TARGET_LANG)
     text = text.replace("{{MAX_FIX_ROUNDS}}", str(int(max_fix_rounds)))
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
+    text = text.replace("{{MAX_CODEX_JOBS_PER_BATCH}}", str(int(max_codex_jobs_per_batch)))
     text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", json.dumps(FIXTURE_VERSE_POLICY)[1:-1])
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH))
     text = text.replace("{{EFFORT}}", effort)

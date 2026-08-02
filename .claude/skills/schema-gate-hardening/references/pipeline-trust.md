@@ -1,6 +1,6 @@
 # Trust & isolation primitives in an agentic pipeline
 
-Two traps when a gate/check has to hold up against a semi-trusted (prompt-injectable) agent that shares the pipeline's filesystem, or when a marker must isolate one span of text from a later matching pass.
+Four traps when a gate/check has to hold up against a semi-trusted (prompt-injectable) agent that shares the pipeline's filesystem, when a marker must isolate one span of text from a later matching pass, or when the state a check verifies is supplied by its own caller.
 
 ## 1. Where the root-of-trust lives (co-located = defeated)
 
@@ -37,3 +37,67 @@ A fixed textual sentinel embedded in shared text, later found-and-restored via s
 - A residual, genuinely-unreachable edge (e.g. a zero-length span) that's provably impossible from BOTH real callers — because one input is a **hardcoded source-code literal, not data-driven** — is fine to ratify as a documented comment-only limitation. The distinction that matters is DATA-DRIVEN (free-form, could be anything) vs SOURCE-CODE-CONSTANT (length fixed at the code level, no external input changes it).
 
 **Variant — a control-flow sentinel WORD inside a schema-less agent reply.** A Workflow template gated its resume/wait step on a schema-LESS natural-language `agent()` reply via `precheck.indexOf("PRESENT") !== -1` / `ready.indexOf("READY") === -1`. A plausible FAILURE reply — `ABSENT 0 (fragment missing; not PRESENT)` or `TIMEOUT 0 (not READY)` — contains the sentinel word as a SUBSTRING, so the check falsely fires (a missing fragment marked ready, its repair skipped). No position to track here (it's a control DECISION, not spliced text), so the fix is the principle's other half: **EXACT-match the trimmed reply against a discriminator-carrying sentinel** (`String(precheck).trim() === "PRESENT " + batch.index`) — never substring-test a signal a free-text responder controls. When you fix one, grep the sibling templates — this exact substring pattern was cloned across three.
+
+## 3. A prompt's data boundary must be named STRUCTURALLY, never by ordinal position
+
+**When a prompt delimits untrusted input, never define the boundary POSITIONALLY.** An instruction such as "the report is delimited by the FIRST and LAST quotation mark below" is unverifiable from the template, because the template's own rules and framing prose contribute most of the delimiter characters at emit time — what the ordinal actually resolves to exists only in the emitted string.
+
+**Concrete:** measured against the ACTUAL emitted prompt — not the template source, since the whole defect is that the two differ — a FIRST..LAST quotation-mark rule guarding an attacker-authorable citation report "selects offsets 560..10248 of a ~10.3KB prompt: essentially the entire message, including the plugin's own canonicalization rules." Counted in that same emitted prompt: quotation marks in total **104**, quotes BEFORE the real opening delimiter **90**, quotes AFTER the real closing delimiter **10**, quotes inside the report's own paragraph that precede the report **2** (a quoted `[...truncated]` marker in the framing prose). Both ends were wrong.
+
+**Why the measurement has to be taken on the EMITTED prompt:** human and codex review "flagged only the leading `"[...truncated]"`. It is not the first offender but the 89th." A reviewer reading the TEMPLATE can only see the delimiters sitting beside the data slot; the offenders ahead of it are contributed by the rules and framing wrapped around that slot at emit time, so template review flags a token fraction of the real ones and comes back clean. Build the ACTUAL emitted string — with a hostile payload that itself contains the delimiter character and any marker prose the framing quotes — and COUNT occurrences on both sides of the real data span.
+
+**The fix is a re-wording, not another rule:** name the boundary structurally — "the report is the quoted span that CLOSES the paragraph immediately below; its final character is that paragraph's final character" — a description that stays true however many quotation marks the surrounding rules acquire later. Naming the traps you measured inline (the framing's own quoted marker, the report's inner quotes) is a useful supplement, never a substitute: it enumerates only the offenders that happened to be counted.
+
+**Note the failure DIRECTION explicitly, because it decides severity.** A WIDENED data region is harmless — attacker text still cannot escape the quoting — while a NARROWED one is a hole, since it leaves attacker-authored text outside the span the reader was told to treat as data. Either way it is a wrong instruction inside a security control and gets fixed; the direction is what says whether you are correcting the control's own description or repairing a breach of it.
+
+**How this differs from §2:** there a fixed marker COLLIDES with real content, and the fix is to stop matching content and track the real position. Here the marker is unambiguous and the DEFINITION is what fails — an ordinal evaluated over a body of text that is mostly the prompt's own rules and framing rather than the data it claims to bound. Same instinct applied in prompt space: describe the position structurally instead of asking the reader to find the Nth occurrence of a character the template itself emits everywhere.
+
+## 4. Verify a MATERIALIZATION, then consume that — re-reading the source checks a different read
+
+An integrity check over caller-supplied state (a digest, a signature, a schema pass, a token
+comparison) certifies the values it READ. If the consumer then reads those values off the original
+object again, the two reads are separate events and nothing forces them to agree — so the check
+covers a value that no longer has to be the one acted on.
+
+The enabling detail is that "is this a plain object" checks almost never exclude accessors.
+`value !== null && typeof value === 'object' && !Array.isArray(value)` is true of an object whose
+properties are getters, and a getter may return a different value each call. Measured 2026-07-31
+(`enduser-handbook` run provenance): a digest over the opening payload was recomputed and compared
+against an on-disk token, and passed; a downstream guard then re-read one field of the same
+caller-held object, an enumerable getter returned the authenticated value to the digest and a
+replaced directory's identity to the guard, and a foreign tree was committed as the run's own output
+with an empty hazard list.
+
+**Materialize once, verify the materialization, and pass THAT to everything downstream.** Where the
+check already canonicalizes (JCS, sorted-key JSON, a signed byte string), the canonical TEXT is the
+materialization: derive the digest from it and parse it back, and the object every consumer reads is
+by construction the bytes that were hashed — own DATA properties only, with no accessor left to
+re-evaluate. Do not re-derive it by canonicalizing a second time; that is another read. What the
+parse does NOT give you is a prototype-less object: `JSON.parse` yields ordinary objects carrying
+`Object.prototype`, so the guarantee is "no caller-controlled accessors", not "nothing inherited" —
+still enough for own-key reads, not enough for a consumer that reaches for `in`.
+
+Three things this lens gets wrong when applied half-way:
+
+- **It is a property of the SEAM, not of the field the reviewer found it on.** The instinct is to
+  harden the one field named in the finding. Enumerate every value the consumer reads after the check
+  instead — in the measured case the reported field was one of five, and two of the others (the
+  entries re-gated after validation, and the run id written into the committed record) had no test
+  until the mutation matrix said so, because nobody had thought to attack them.
+- **A value outside the verified payload needs its own single read.** An id compared against a token
+  but not covered by the digest is authenticated by that comparison alone, so the comparison and every
+  later use must read one local, not the property twice.
+- **"After every decision" is not the same as benign — the RETURN VALUE is an output too.** This
+  bullet used to say that building a result by spreading the caller's object touches its accessors
+  again "legitimately, after every decision is made". That was wrong, and it was refuted the same day
+  it was written, by an adversarial round asked to attack exactly that judgement. The returned object
+  is part of the contract: its declared type promises the authenticated fields, and the next stage is
+  driven off what it reads there — so a getter answering differently on that second read handed the
+  next stage a forged id while the committed record stayed correct, and the next stage refused an
+  intact run. A throwing field on the same path is worse: it turns a completed, committed operation
+  into an exception, on a contract whose every other failure is a returned value. Reconstruct the
+  result from the materialization and the verified locals; never spread the caller's object into it.
+  The genuinely benign re-read is the one whose result reaches no decision, no durable state, **and
+  no caller** — which in practice is almost none of them. Assert what the decisions, the durable
+  output and the returned value USED, not a read count — a count assertion on a path that halts early passes
+  for the wrong reason, and on a path that completes it fails on a benign read.

@@ -1,5 +1,129 @@
 # Changelog
 
+## 1.17.0 — 2026-08-02
+
+The scripts that decide whether a codex job's output is acceptable lived inside the directory
+that job can write. `codex_job.py` launches the companion with `--write` over the durable root,
+and Step 0a copies `assets/scripts/*.py` into `${durable_root}/scripts/`, so the checker and the
+checked shared one writable tree. Four successive guards were designed against this during
+planning and every one of them was bypassable.
+
+The reason is in the installed companion, read from source rather than reasoned about:
+
+```
+resolveWorkspaceRoot(cwd)  ->  ensureGitRepository(cwd)  ->  git rev-parse --show-toplevel
+                                                             (walks UP; falls back to cwd only on failure)
+```
+
+No placement of `--cwd` *inside* the durable root's repository ever narrowed anything — it
+resolves to the outer repository toplevel and hands the job write access to the whole tree. A
+by-path guard cannot close this, because the checked party shares the enforcement mechanism's
+access. Only a categorically different capability does.
+
+**1. A per-invocation write-isolated sandbox** (`codex_job.py`). Each dispatch gets a fresh
+`mkdtemp()` as its `--cwd`, checked to sit outside any git working tree by running the same
+`git rev-parse --show-toplevel` probe the companion's resolver runs, rather than by
+pattern-matching the path. If the probe reports an enclosing repository the driver refuses to
+dispatch at all (`reason=sandbox-not-isolated`), before the final prompt is written. Output
+leaves the sandbox through an fd-pinned, digest-verified copy: the source is opened
+`O_NOFOLLOW`, its identity is fstat'd and re-compared across the read, the content digest is
+re-verified after the write, and the destination directory is held as an `O_DIRECTORY` fd so
+nothing re-resolves by path between the check and the rename.
+
+The probe **fails closed**, which took a review round to get right. It originally routed
+through the driver's generic subprocess helper, which collapses "git ran and reported no
+repository", "git timed out" and "git could not be spawned" into one `None`. Everywhere else
+that collapse is safe, because `None` fails the gate closed — but here the polarity is
+inverted, since *absence* of a repository is the success condition, so every no-verdict probe
+scored as confined and dispatched. With `TMPDIR` inside a git working tree and a probe that
+merely timed out, the companion's own unbounded probe would still have found the enclosing
+repository and been handed write access to the very scripts this change protects. The four
+outcomes are now distinct and only two license a dispatch: git ran and found no repository, or
+git is not installed at all — the latter safe only because the companion's resolver degrades
+identically, so there is no enclosing root for it to find either. A timeout or a spawn error
+refuses. Each of the four is pinned by its own regression test, and the fail-open form was
+re-applied as a mutant to confirm the no-verdict cases genuinely go red.
+
+*Not implemented, and stated rather than quietly claimed:* process-group termination. The pid
+of the detached worker is never recorded where a killer could reach it, so
+`terminateProcessTree(job.pid ?? NaN)` no-ops. (`detached: true` in fact makes the worker a
+process-group leader, so a `killpg` would be deliverable if the pid were known — the defect is
+the missing pid, not an unreachable group.) What replaces it is isolation, not proof of death:
+the sandbox is single-use, never read after a timeout, and unconditionally `rmtree`'d.
+
+**2. `--durable-root` and `--plugin-root` as two orthogonal inputs.** `--durable-root` governs
+DATA (`manifest.json`, `segments/`, `schemas/`, `runs/`, `canon.json`); `--plugin-root` governs
+where a script's sibling *executables* resolve from, as `{plugin_root}/assets/scripts/<name>.py`.
+The second is deliberately never derived from the first: `${durable_root}/scripts/` is the
+Step-0a copy the gated codex process can write to, so resolving a checker from inside the thing
+it checks would let a tampered copy pass itself. A single root cannot serve both roles.
+
+The two flags do not propagate identically, and the asymmetry is deliberate. Within these four,
+`--durable-root` is forwarded to every subordinate call they make; `--plugin-root` reaches only a
+subordinate that resolves
+further siblings of its own — i.e. only another of `select_segments.py`, `ledger_merge.py`,
+`resume_setup.py`, `review_ready.py`. The leaves `cache_key.py`, `draft_sha1.py` and
+`ledger_update.py` accept the data-root override only, having no siblings to resolve; a flag
+accepted and never read would make callers and tests read as hardened while nothing changed.
+When `--plugin-root` is given without `--durable-root`, the caller synthesizes `--durable-root`
+for the leaf, which no longer physically sits under that root.
+
+Proven with poisoned-sibling fixtures: the durable root's copy of a sibling is replaced with a
+tampered stand-in, and each suite asserts both that `--plugin-root` bypasses it *and* that
+omitting the flag genuinely runs the poisoned copy. Without that second half the first is
+vacuous. Omitting both flags reproduces the previous self-anchored behavior byte-for-byte, so
+this is a widening rather than a breaking change.
+
+**3. `engine.max_codex_jobs_per_batch`**, a new optional profile knob defaulting to 400.
+Once translation is driven locally there is no agent graph for `batch_agent_cap` to estimate, so
+the consumable resource becomes codex *jobs*. The batch refuses before the first dispatch,
+naming the knob, the computed need, the effective limit and the segment count.
+
+Stated because it is not flattering: at shipped settings this gate is redundant at every row —
+`batch_agent_cap` binds first in all of them — and review made it strictly more so. The first
+revision counted the `max_fix_rounds` Claude fix rounds as codex jobs, but `callFix()` is a plain
+Workflow `agent()` call and never launches `codex_job.py`; the template has exactly two launch
+sites, and a review round's retry path re-reads the artifact codex already wrote rather than
+starting a second job. The true worst case is `max_fix_rounds + 2` per segment (1 translate plus
+`max_fix_rounds + 1` reviews), not `2*max_fix_rounds + 2`, so the gate had been measuring a
+different resource from the one its name and refusal describe and refusing batches genuinely
+within the cap. It is built ahead of the driver that will make it the only meaningful gate, not
+because it binds today.
+
+**Known residuals, not closed here — and the sandbox does NOT close them.** Three gate paths
+still resolve their executables from `${durable_root}/scripts/`, the copy Step 0a makes:
+`codex_job.py`'s `_trusted_scripts_dir()` (running `draft_ready.py`, `validate_draft.py`,
+`review_ready.py`), `canon_validate.py` invoking `cache_key.py` — which stamps the
+`generation_hashes` that later gate canon reuse — and `final_audit.py` invoking
+`select_segments.py` for the whole-project completeness gate its own docstring calls one that
+"cannot be silently skipped".
+
+It would be wrong to read change 1 as covering these. The sandbox confines only the codex
+processes *this driver* launches. Other shipped passes still hand codex write access over the
+whole durable root: the glossary and skeptic passes dispatch `agentType: "codex:codex-rescue"`
+whose purpose is to write a fragment under `${durable_root}/`, and the sanctioned manual W5
+drive launches the companion with `--write` and `cwd = durable_root`, bypassing this driver
+entirely. `${durable_root}/scripts/` sits inside every one of those write roots, and the
+glossary pass runs *before* W5 in the same project — so a gate script tampered with there is
+exactly what runs later. These are live residuals, not defense-in-depth.
+
+The same asymmetry bounds change 2's reach: seven scripts spawn a sibling from that directory,
+and four of them were hardened. `canon_validate.py` and `final_audit.py` are the other three
+paths' owners and take no `--plugin-root`.
+
+Closing this is not a one-line change. There is no `{{PLUGIN_ROOT}}` substitution token, so a
+new field has to be threaded through `resume_setup.py`, the template and the driver's argument
+parser — and `draft_ready.py` and `validate_draft.py` must adopt `--durable-root` first, since
+both are `__file__`-anchored at `parents[1]` and take no root flag today, so redirecting the
+executable root alone would send them looking for `segments/` inside the plugin.
+
+**Upgrade consequence.** Seven of the fourteen `PLUGIN_BUNDLE_MEMBERS` change bytes in this
+release — `cache_key.py`, `draft_sha1.py`, `ledger_update.py`, `review_ready.py`,
+`resume_setup.py`, `codex_job.py`, `mass-translate-wf.template.js`. `plugin_bundle_hash`
+therefore moves, and **every converged segment in every project is marked stale** on the next
+run. That is expected, not a defect: the bundle hash exists so that a change to any gating script
+invalidates results produced under the old one.
+
 ## 1.16.2 — 2026-07-30
 
 The 1.16.1 release fixed the W5 mass-translate wait, which spent a 3450 s budget inside one

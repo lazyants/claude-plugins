@@ -83,6 +83,12 @@ MASS_TRANSLATE_TOKENS = (
     "{{TARGET_LANG}}",
     "{{MAX_FIX_ROUNDS}}",
     "{{BATCH_AGENT_CAP}}",
+    # #409 stage 0 -- a SECOND, independent preflight cap sized against real
+    # codex dispatches rather than Workflow agent() calls. Unlike
+    # {{BATCH_AGENT_CAP}}, engine.max_codex_jobs_per_batch is OPTIONAL in
+    # profile.schema.json; the token itself is still always substituted
+    # (with the schema's own documented default when the profile omits it).
+    "{{MAX_CODEX_JOBS_PER_BATCH}}",
     "{{VERSE_POLICY_INSTRUCTION_BLOCK}}",
     # #198 -- resolved codex-companion.mjs path, substituted as a strict
     # json.dumps JS STRING LITERAL (WITH its own quotes -- the token sits
@@ -147,6 +153,12 @@ FIXTURE_SOURCE_LANG = "fr"
 FIXTURE_TARGET_LANG = "ru"
 FIXTURE_MAX_FIX_ROUNDS = 4
 FIXTURE_BATCH_AGENT_CAP = 1000
+# #409 stage 0. A value distinct from both FIXTURE_BATCH_AGENT_CAP and the
+# schema's own documented default (400), so a substitution that silently
+# no-ops (leaving the template's own literal token or the wrong constant)
+# would be caught by a positive landed-value assertion, same reasoning as
+# FIXTURE_EFFORT's non-default "xhigh" choice below.
+FIXTURE_MAX_CODEX_JOBS_PER_BATCH = 2500
 # #197 -- a non-default enum value (never the shipped "high" default) so a
 # substitution that silently no-ops (leaving the template's own literal
 # "high") would be caught by the positive landed-value assertions below.
@@ -187,6 +199,7 @@ def instantiate_mass_translate(
     max_fix_rounds: int,
     batch_agent_cap: int,
     verse_policy_instruction_block: str,
+    max_codex_jobs_per_batch: int = FIXTURE_MAX_CODEX_JOBS_PER_BATCH,
     companion_path: str = FIXTURE_COMPANION_PATH,
     effort: str = FIXTURE_EFFORT,
     model: str = FIXTURE_MODEL,
@@ -212,6 +225,9 @@ def instantiate_mass_translate(
     # never a quoted string.
     text = text.replace("{{MAX_FIX_ROUNDS}}", str(int(max_fix_rounds)))
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
+    # #409 stage 0 -- same bare-integer-literal contract as BATCH_AGENT_CAP
+    # above (`const MAX_CODEX_JOBS_PER_BATCH = {{MAX_CODEX_JOBS_PER_BATCH}};`).
+    text = text.replace("{{MAX_CODEX_JOBS_PER_BATCH}}", str(int(max_codex_jobs_per_batch)))
 
     # VERSE_POLICY_INSTRUCTION_BLOCK -- the header comment requires a
     # JSON-string-escaped form with the outer quotes stripped (the token
@@ -339,6 +355,10 @@ def test_mass_translate_template_instantiates_with_zero_unresolved_tokens():
     )
     assert f"const BATCH_AGENT_CAP = {FIXTURE_BATCH_AGENT_CAP};" in out, (
         "BATCH_AGENT_CAP must substitute as a bare integer literal, not a "
+        "quoted string"
+    )
+    assert f"const MAX_CODEX_JOBS_PER_BATCH = {FIXTURE_MAX_CODEX_JOBS_PER_BATCH};" in out, (
+        "MAX_CODEX_JOBS_PER_BATCH must substitute as a bare integer literal, not a "
         "quoted string"
     )
     assert f'const EFFORT = "{FIXTURE_EFFORT}";' in out

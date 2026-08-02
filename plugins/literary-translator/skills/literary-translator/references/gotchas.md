@@ -40,17 +40,21 @@ calibration, not a warning to work around.
    [`ledger-and-resumability.md`](./ledger-and-resumability.md) in full. The
    real project's only ledger-shaped artifact was a single
    human-readable `ledger.json` status report; the per-segment fragment
-   files, the atomic writer, the merge/stale materializer, the 15-field
-   composite cache key, and the derivation-state gate are all new.
+   files, the atomic writer, the merge/stale materializer, the composite
+   cache key (`cache_key.py`'s own `CACHE_KEY_FIELD_ORDER` — see §13 for
+   why that field list shouldn't be hand-counted here either), and the
+   derivation-state gate are all new.
 3. **`engine.batch_agent_cap`'s preflight call-count estimator.** The real
    reference script has no such estimator anywhere — it simply pipelines
    whatever `SEGS` it's given. (1.3.5: W3's glossary-pass template now shares
    this same cap with its own worst-case formula, smaller than
    mass-translate's — and mode-dependent since 1.16.0:
-   `3*BATCHES.length + 2` under `research_mode: offline`, plus the
-   citation-review retry ladder under `live`. See
-   `references/orchestration-and-batching.md`'s **Preflight cost cap** bullet
-   for both branches.)
+   `5*BATCHES.length + 2` under `research_mode: offline` as of 1.16.2/#352
+   (it was `3*BATCHES.length + 2` through 1.16.1 — the chunked wait now
+   costs more agent calls per batch), plus the citation-review retry ladder
+   under `live`. See `references/orchestration-and-batching.md`'s
+   **Preflight cost cap** bullet for both branches and the exact current
+   formula, rather than restating it here.)
 4. **The glossary-pass workflow template.** The real project ran its
    glossary pass as ad hoc `glossary/TASK.md` + codex batches producing
    `glossary/out_*.json` files — not a schema-validated Workflow script. The
@@ -132,18 +136,55 @@ of them drifts. (The regression-lock test counts writer+reader SITES, so its
 review-path site count is larger than the conceptual "readers" list above — that
 is expected, not a contradiction: the test locks every writer site too.)
 
-## 4. Every copied script self-anchors — never assumes cwd, never takes a flag
+## 4. Every copied script self-anchors — never assumes cwd
 
 Every script under `scripts/` derives its own working root via
 `Path(__file__).resolve().parents[1]` (it always lives at
 `${durable_root}/scripts/<name>.py`). Never assume `cwd == durable_root`.
-Never add a `--durable-root` flag — that is not the mechanism.
 
 There are two different halves of the reachability guarantee and they are
 easy to conflate: the `{{DURABLE_ROOT}}` template token is how an *agent*
 finds and invokes the script; `Path(__file__).resolve().parents[1]`
 self-anchoring is how the *script itself* finds everything else once it's
 running. Both are needed; neither substitutes for the other.
+
+**Two optional overrides exist (#409), and they are independent.** On
+`select_segments.py`, `ledger_merge.py`, `resume_setup.py` and
+`review_ready.py`, self-anchoring is the DEFAULT, not the only mechanism:
+
+- `--durable-root PATH` governs **data** — `manifest.json`, `segments/`,
+  `schemas/`, `runs/`, `canon.json`.
+- `--plugin-root PATH` governs **where sibling scripts are resolved from**;
+  a sibling becomes `{plugin_root}/assets/scripts/<name>.py`.
+
+**The two flags do not propagate the same way, and this asymmetry is
+deliberate.** `--durable-root` is forwarded to every subordinate call;
+`--plugin-root` is forwarded only to a subordinate that itself resolves
+further siblings — i.e. only to another of the four scripts above. The
+leaves `cache_key.py`, `draft_sha1.py` and `ledger_update.py` accept the
+data-root override *only*, having no siblings of their own to resolve, so
+passing them `--plugin-root` would simply make the invocation fail.
+(`draft_sha1.py` parses its arguments by hand rather than with argparse, to
+preserve its exact wrong-argc usage/exit-2 behavior.)
+
+One consequence worth knowing before editing a call site: when
+`--plugin-root` is given but `--durable-root` is not, the caller
+*synthesizes* `--durable-root` from its own resolved durable root before
+invoking a leaf. It has to — `--plugin-root` means the leaf no longer
+physically sits under the durable root, so its self-anchoring would
+otherwise resolve against the wrong tree.
+
+Omitting both is byte-identical to the old self-anchored behavior, so this
+is a widening, not a breaking change. Earlier revisions of this file said
+"never add a `--durable-root` flag — that is not the mechanism"; that is no
+longer true, and the reason it changed matters:
+
+**`--plugin-root` is deliberately NEVER derived from `--durable-root`.**
+`${durable_root}/scripts/` is a Step-0a copy that the codex process these
+scripts gate can write to. Resolving a checker from inside the tree it
+checks would let a tampered durable-root copy silently pass itself, so the
+trusted-script root must be a separate, independent input. A single root
+cannot serve both roles.
 
 Test discipline: invoke a representative script from a cwd that is neither
 `durable_root` nor the script's own directory, and assert it still correctly
@@ -437,8 +478,11 @@ unhandled `ImportError`/raw traceback.
   the full-replace property is still proven from fragment *content*
   (`rounds`, `cache_key`, `style_contract_hash`, `reviewed_draft_sha1`, plus
   a fresh `cache_key` recompute), which loses zero coverage. Unrelated to
-  `canon_adjudication_audit.py` (that gate's own 87 tests are
-  deterministic).
+  `canon_adjudication_audit.py` — that gate's own test suite
+  (`tests/canon_adjudication_audit*.test.py`) is deterministic; no analogous
+  clock-tick flake has been found there. Don't restate a test count here —
+  it has already drifted once; run `pytest --collect-only` on that glob for
+  the current figure.
 - **`basis:"sense_translated"` (1.4.0) structurally forbids `source`** — it is
   not a convention an agent is merely asked to follow; both
   `canon-entry.schema.json` and `canon-batch.schema.json`'s ACCEPTED branch

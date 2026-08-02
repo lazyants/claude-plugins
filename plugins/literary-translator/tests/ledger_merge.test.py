@@ -79,27 +79,33 @@ CACHE_KEY_FIELDS = [
 
 # A fixture stand-in for the real cache_key.py -- same `--seg <id>` -> JSON
 # object stdout interface, sourced from a test-controlled lookup file instead
-# of real profile.yml/canon.json/segpack machinery.
+# of real profile.yml/canon.json/segpack machinery. Accepts an OPTIONAL
+# --durable-root (LT-409), mirroring the real script's own contract: when
+# given, it locates test_fixture_cache_keys.json under THAT root instead of
+# its own self-anchored location -- so a test can prove ledger_merge.py
+# actually forwards the flag, not merely that it tolerates an unknown arg.
 FAKE_CACHE_KEY_PY = """#!/usr/bin/env python3
 import argparse
 import json
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-DURABLE_ROOT = HERE.parent
-KEYS_PATH = DURABLE_ROOT / "test_fixture_cache_keys.json"
-
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seg")
     parser.add_argument("--field")
+    parser.add_argument("--durable-root", default=None)
     args = parser.parse_args()
+    if args.durable_root:
+        durable_root = Path(args.durable_root).resolve()
+    else:
+        durable_root = Path(__file__).resolve().parent.parent
+    keys_path = durable_root / "test_fixture_cache_keys.json"
     if not args.seg:
         sys.stderr.write("fake cache_key.py: test stub requires --seg\\n")
         return 1
-    data = json.loads(KEYS_PATH.read_text(encoding="utf-8"))
+    data = json.loads(keys_path.read_text(encoding="utf-8"))
     if args.seg not in data:
         sys.stderr.write(f"fake cache_key.py: no fixture key for {args.seg}\\n")
         return 1
@@ -496,6 +502,207 @@ def test_expected_segs_and_stale_check_compose_in_one_run(tmp_path):
     # ledger.json should exist regardless of what the stale-check would have
     # found.
     assert not (root / "runs" / "ledger.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# --durable-root PATH (LT-409, post-review correction): an explicit,
+# caller-supplied DATA root (schemas/segments/runs) -- REPLACES self-
+# anchoring for data when given. Deliberately does NOT redirect where the
+# cache_key.py sibling script is found -- that is --plugin-root's own,
+# independent concern (see the dedicated section below). Byte-identical to
+# today's self-anchored behavior for both when both flags are omitted.
+# ---------------------------------------------------------------------------
+
+def run_merge_from(script_path, *extra_args, timeout=30):
+    return subprocess.run(
+        [sys.executable, str(script_path), *extra_args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
+    """Negative control: an orphan copy invoked WITHOUT --durable-root
+    cannot succeed via self-anchoring (no schemas/ dir to even load the
+    ledger schemas from)."""
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "ledger_merge.py"
+    shutil.copy2(SCRIPT_SRC, orphan_script)
+
+    proc = run_merge_from(orphan_script)
+
+    assert proc.returncode == 1
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+
+
+def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility: the ordinary in-place fixture, invoked with
+    no --durable-root/--plugin-root at all, behaves exactly as before."""
+    root = make_durable_root(tmp_path)
+    write_fragment(root, "seg01", pending_fragment())
+
+    proc = run_merge(root)
+
+    assert proc.returncode == 0
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["n_segments"] == 1
+
+
+# ---------------------------------------------------------------------------
+# --plugin-root PATH (LT-409, post-review correction): the SECURITY property
+# this flag exists for. ${durable_root}/scripts/ is a Step-0a copy that the
+# codex process can write to (codex_job.py grants --write over the whole
+# durable root), so a sibling script resolved FROM durable_root could be a
+# tampered copy validating itself. --plugin-root is a SEPARATE, orthogonal
+# input that must NEVER be derived from --durable-root.
+# ---------------------------------------------------------------------------
+
+def tampered_cache_key_py_src(fake_matching_key: dict) -> str:
+    """A fake cache_key.py that ALWAYS echoes back `fake_matching_key`
+    regardless of --seg/--durable-root, simulating a codex-tampered copy
+    designed to make every segment look converged (its output always equals
+    whatever the fragment's own STORED cache_key is) rather than genuinely
+    recomputing anything."""
+    return (
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        f"print(json.dumps({fake_matching_key!r}))\n"
+        "sys.exit(0)\n"
+    )
+
+
+def make_trusted_plugin_root(tmp_path, name="trusted_plugin_install"):
+    """A SEPARATE physical location holding the REAL (test-stub)
+    cache_key.py at the {plugin_root}/assets/scripts/ layout SKILL.md
+    documents for the plugin-anchored scripts."""
+    plugin_root = tmp_path / name
+    plugin_scripts_dir = plugin_root / "assets" / "scripts"
+    plugin_scripts_dir.mkdir(parents=True)
+    (plugin_scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
+    return plugin_root
+
+
+def test_plugin_root_flag_bypasses_a_tampered_durable_root_sibling(tmp_path):
+    """The core property: ledger_merge.py runs from its OWN in-place
+    durable-root copy (production's normal invocation shape) whose SIBLING
+    cache_key.py has been TAMPERED to always echo the fragment's own
+    STORED cache_key back (i.e. always "not stale", regardless of what
+    genuinely changed). --plugin-root pointing at a separate, untampered
+    location must make it use THAT cache_key.py instead -- the genuinely
+    mismatching current_key must be detected as stale, proving the
+    poisoned durable-root sibling was never consulted."""
+    root = make_durable_root(tmp_path)
+    stored_key = make_cache_key("stored")
+    current_key = make_cache_key("current")  # deliberately mismatches
+    write_fixture_cache_keys(root, {"seg01": current_key})
+    write_fragment(root, "seg01", converged_fragment(stored_key))
+    (root / "scripts" / "cache_key.py").write_text(
+        tampered_cache_key_py_src(stored_key), encoding="utf-8"
+    )
+
+    plugin_root = make_trusted_plugin_root(tmp_path)
+
+    proc = run_merge(root, "--plugin-root", str(plugin_root))
+
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["stale_segments"] == ["seg01"], (
+        "the trusted plugin-root cache_key.py must have run (reporting the "
+        f"genuine mismatch) -- a poisoned durable-root copy running instead "
+        f"would report NO staleness: {payload}"
+    )
+
+
+def test_plugin_root_flag_absent_uses_the_poisoned_durable_root_sibling(tmp_path):
+    """Negative control, and backward-compat proof in one: the SAME
+    poisoned durable-root cache_key.py, invoked WITHOUT --plugin-root, is
+    exactly what today's self-anchored lookup finds -- unchanged. It
+    genuinely runs and always reports "not stale", proving the positive
+    test's detection above is attributable to --plugin-root specifically."""
+    root = make_durable_root(tmp_path)
+    stored_key = make_cache_key("stored")
+    current_key = make_cache_key("current")
+    write_fixture_cache_keys(root, {"seg01": current_key})
+    write_fragment(root, "seg01", converged_fragment(stored_key))
+    (root / "scripts" / "cache_key.py").write_text(
+        tampered_cache_key_py_src(stored_key), encoding="utf-8"
+    )
+
+    proc = run_merge(root)  # no --plugin-root
+
+    assert proc.returncode == 0
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["stale_segments"] == [], (
+        f"without --plugin-root, the poisoned copy runs and always reports "
+        f"'not stale' -- got: {payload}"
+    )
+
+
+def test_durable_root_and_plugin_root_are_independently_resolved(tmp_path):
+    """Orthogonality, end to end, from a fully orphan copy: --durable-root
+    points at a DATA-only fixture with NO scripts/ directory AT ALL,
+    --plugin-root points at a SEPARATE, scripts-only fixture with no data
+    of its own. Success proves the two concerns are genuinely resolved
+    independently, never conflated into one root."""
+    data_root = tmp_path / "data_only"
+    data_root.mkdir()
+    schemas_dir = data_root / "schemas"
+    shutil.copytree(SCHEMAS_SRC, schemas_dir)
+    (data_root / "runs" / "ledger.d").mkdir(parents=True)
+    current_key = make_cache_key("current")
+    write_fixture_cache_keys(data_root, {"seg01": current_key})
+    write_fragment(data_root, "seg01", converged_fragment(dict(current_key)))
+    assert not (data_root / "scripts").exists(), (
+        "fixture bug: data_root must have NO scripts/ dir at all"
+    )
+
+    plugin_root = make_trusted_plugin_root(tmp_path, name="plugin_only")
+
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "ledger_merge.py"
+    shutil.copy2(SCRIPT_SRC, orphan_script)
+
+    proc = run_merge_from(
+        orphan_script,
+        "--durable-root", str(data_root),
+        "--plugin-root", str(plugin_root),
+    )
+
+    assert proc.returncode == 0, (
+        f"durable-root (data) and plugin-root (sibling) must resolve "
+        f"independently -- got rc={proc.returncode}\nstdout:\n{proc.stdout}\n"
+        f"stderr:\n{proc.stderr}"
+    )
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["n_segments"] == 1
+    assert payload["stale_segments"] == []  # matching key -> not stale
+    assert (data_root / "runs" / "ledger.json").is_file()
+    assert not (plugin_root / "runs").exists()
+
+
+def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility for the split itself: --durable-root alone
+    (no --plugin-root) still resolves the sibling self-anchored, exactly as
+    before the split -- an in-place fixture with an UNTAMPERED cache_key.py
+    still succeeds via --durable-root alone."""
+    root = make_durable_root(tmp_path)
+    write_fragment(root, "seg01", pending_fragment())
+
+    proc = run_merge(root, "--durable-root", str(root))
+
+    assert proc.returncode == 0
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["n_segments"] == 1
 
 
 if __name__ == "__main__":

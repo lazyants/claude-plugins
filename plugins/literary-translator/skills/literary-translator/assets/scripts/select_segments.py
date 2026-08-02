@@ -101,10 +101,33 @@ Every invocation logs the requested ids (or "<all candidates>" when
 --only-segs was omitted) alongside the actually-emitted SEGS ids, to
 stderr, for audit.
 
-Self-anchoring: this script always lives at
+Self-anchoring by default: this script always lives at
 ``${durable_root}/scripts/select_segments.py`` and derives durable_root
-from its own path -- it never assumes cwd and never takes a
---durable-root flag.
+from its own path -- it never assumes cwd. LT-409: two INDEPENDENT,
+orthogonal flags override this, deliberately kept separate:
+
+  --durable-root PATH   the DATA root (manifest.json, segments/, runs/).
+  --plugin-root PATH    where the SIBLING SCRIPTS this script shells out
+                         to (ledger_merge.py, cache_key.py) are resolved
+                         from, as ``{PATH}/assets/scripts/<name>.py``.
+
+A single root cannot serve both roles: ``${durable_root}/scripts/`` is a
+Step-0a copy that the codex process (via codex_job.py's ``--write`` over
+the whole durable root) can write to, so resolving the checker scripts
+FROM there would let a tampered copy validate itself -- exactly the
+vulnerability this flag split exists to close. The two flags do NOT
+propagate identically, and the asymmetry is deliberate: ``--durable-root``
+travels the whole subprocess chain (select_segments.py -> ledger_merge.py
+-> cache_key.py) as each sibling's own same-named flag, but
+``--plugin-root`` is passed only to ledger_merge.py, which resolves a
+further sibling of its own. cache_key.py is a LEAF -- it has no siblings to
+resolve and does not accept ``--plugin-root`` at all, so passing it would
+simply make the invocation fail. When ``--plugin-root`` is given WITHOUT
+``--durable-root``, a ``--durable-root`` synthesized from the resolved
+durable root is passed to the leaf instead, because the leaf no longer
+physically sits under that root and would otherwise self-anchor against the
+wrong tree. Omitting BOTH reproduces today's self-anchored behavior
+byte-for-byte.
 
 Output: exactly one JSON object on stdout. Success:
 {"success": true, "durable_root": ..., "segs": [...],
@@ -142,17 +165,87 @@ MANIFEST_PATH = DURABLE_ROOT / "manifest.json"
 LEDGER_MERGE_SCRIPT = SCRIPTS_DIR / "ledger_merge.py"
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
 
+
+def resolve_dirs(durable_root_str, plugin_root_str=None):
+    """LT-409: `durable_root_str` governs DATA (manifest.json) -- rebuilt
+    from that root when given, self-anchored DURABLE_ROOT/MANIFEST_PATH
+    otherwise.
+
+    `plugin_root_str` is a SEPARATE, independent input governing where the
+    SIBLING SCRIPTS this script shells out to (ledger_merge.py, cache_key.py)
+    are resolved from -- deliberately NEVER derived from `durable_root_str`.
+    `${durable_root}/scripts/` is copied there by Step 0a and is writable by
+    the codex process these scripts gate (codex_job.py runs it with --write
+    over the whole durable root) -- resolving the checker from inside the
+    thing it checks would let a tampered durable-root copy silently pass
+    itself. When given, a sibling resolves as
+    `{plugin_root}/assets/scripts/<name>.py` -- the SAME layout SKILL.md
+    documents for the plugin-anchored scripts (profile_validate.py etc.,
+    see SKILL.md's Step 0/W2 sections), NOT durable_root's own flattened
+    `scripts/<name>.py` copy layout (Step 0a strips the `assets/` prefix on
+    copy). `plugin_root_str=None` reproduces today's self-anchored sibling
+    lookup (`Path(__file__).resolve().parent`) unchanged.
+
+    Both None -> today's exact self-anchored values for both concerns.
+    """
+    if durable_root_str is None:
+        durable_root = DURABLE_ROOT
+        manifest_path = MANIFEST_PATH
+    else:
+        durable_root = Path(durable_root_str).resolve()
+        manifest_path = durable_root / "manifest.json"
+
+    if plugin_root_str is None:
+        ledger_merge_script = LEDGER_MERGE_SCRIPT
+        cache_key_script = CACHE_KEY_SCRIPT
+    else:
+        plugin_scripts_dir = Path(plugin_root_str).resolve() / "assets" / "scripts"
+        ledger_merge_script = plugin_scripts_dir / "ledger_merge.py"
+        cache_key_script = plugin_scripts_dir / "cache_key.py"
+
+    return {
+        "durable_root": durable_root,
+        "manifest_path": manifest_path,
+        "ledger_merge_script": ledger_merge_script,
+        "cache_key_script": cache_key_script,
+    }
+
+
+def _root_forward_args(dirs: dict, durable_root_str, plugin_root_str) -> list:
+    """LT-409: the exact --durable-root/--plugin-root pair to forward to a
+    sibling subprocess.
+
+    Whenever --plugin-root redirects where a sibling's OWN script file is
+    found, that sibling's self-anchored DATA resolution breaks too -- its
+    __file__ no longer sits under durable_root, so its own
+    Path(__file__).resolve().parents[1] would silently point at the plugin
+    root instead. So an explicit --durable-root MUST be forwarded whenever
+    --plugin-root is given, even if THIS script itself was never passed
+    --durable-root (and is itself self-anchored) -- using the resolved
+    dirs["durable_root"] as the value. Omitting BOTH flags never forwards
+    anything, preserving today's self-anchored behavior on both sides.
+    """
+    args = []
+    if durable_root_str is not None:
+        args += ["--durable-root", durable_root_str]
+    elif plugin_root_str is not None:
+        args += ["--durable-root", str(dirs["durable_root"])]
+    if plugin_root_str is not None:
+        args += ["--plugin-root", plugin_root_str]
+    return args
+
+
 # Canonical paths (references/ledger-and-resumability.md's "Canonical path
 # invariants" -- deliberately WITHOUT a target-language suffix, unlike the
 # real historiettes-t3 reference project's own .ru.draft.json naming).
 
 
-def draft_path(seg: str) -> Path:
-    return DURABLE_ROOT / "segments" / f"{seg}.draft.json"
+def draft_path(seg: str, durable_root: Path = DURABLE_ROOT) -> Path:
+    return durable_root / "segments" / f"{seg}.draft.json"
 
 
-def segpack_path(seg: str) -> Path:
-    return DURABLE_ROOT / "segments" / f"segpack_{seg}.json"
+def segpack_path(seg: str, durable_root: Path = DURABLE_ROOT) -> Path:
+    return durable_root / "segments" / f"segpack_{seg}.json"
 
 
 # The authoritative 15-field cache-key list (references/ledger-and-
@@ -304,7 +397,7 @@ def read_json(path: Path, what: str):
         fatal(f"{what} at {path} is not valid JSON: {exc}")
 
 
-def read_segpack_nonfatal(seg: str) -> "dict | str":
+def read_segpack_nonfatal(seg: str, durable_root: Path = DURABLE_ROOT) -> "dict | str":
     """Read segments/segpack_{seg}.json for the derivation-state gate,
     returning the parsed dict on success or a string error message on
     failure -- NEVER raising/exiting. A per-segment segpack gone unreadable
@@ -312,7 +405,7 @@ def read_segpack_nonfatal(seg: str) -> "dict | str":
     segment, never abort the whole W5 preflight -- matching
     compute_current_cache_key()'s isolation contract and this file's
     "a per-segment failure must never take down the whole run" rule."""
-    path = segpack_path(seg)
+    path = segpack_path(seg, durable_root)
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -374,16 +467,20 @@ def validate_seg(seg):
 # ---------------------------------------------------------------------------
 
 
-def run_ledger_merge() -> dict:
-    if not LEDGER_MERGE_SCRIPT.is_file():
-        fatal(f"ledger_merge.py not found at {LEDGER_MERGE_SCRIPT}")
+def run_ledger_merge(dirs: dict, durable_root_str=None, plugin_root_str=None) -> dict:
+    ledger_merge_script = dirs["ledger_merge_script"]
+    if not ledger_merge_script.is_file():
+        fatal(f"ledger_merge.py not found at {ledger_merge_script}")
+    cmd = [sys.executable, str(ledger_merge_script)] + _root_forward_args(
+        dirs, durable_root_str, plugin_root_str
+    )
     try:
         proc = subprocess.run(
-            [sys.executable, str(LEDGER_MERGE_SCRIPT)],
+            cmd,
             capture_output=True,
             text=True,
             timeout=300,
-            cwd=str(DURABLE_ROOT),
+            cwd=str(dirs["durable_root"]),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         fatal(f"could not run ledger_merge.py: {exc}")
@@ -406,8 +503,8 @@ def run_ledger_merge() -> dict:
     return payload
 
 
-def load_ledger_segments(merge_result: dict) -> dict:
-    ledger_path = Path(merge_result.get("ledger_path") or (DURABLE_ROOT / "runs" / "ledger.json"))
+def load_ledger_segments(merge_result: dict, durable_root: Path = DURABLE_ROOT) -> dict:
+    ledger_path = Path(merge_result.get("ledger_path") or (durable_root / "runs" / "ledger.json"))
     doc = read_json(ledger_path, "materialized ledger.json")
     segments = doc.get("segments")
     if not isinstance(segments, dict):
@@ -420,11 +517,11 @@ def load_ledger_segments(merge_result: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def load_candidate_segments() -> list:
-    manifest = read_json(MANIFEST_PATH, "manifest.json")
+def load_candidate_segments(manifest_path: Path = MANIFEST_PATH) -> list:
+    manifest = read_json(manifest_path, "manifest.json")
     segments = manifest.get("segments")
     if not isinstance(segments, list):
-        fatal(f"manifest.json at {MANIFEST_PATH} has no 'segments' array")
+        fatal(f"manifest.json at {manifest_path} has no 'segments' array")
 
     candidates = []
     for item in segments:
@@ -441,7 +538,7 @@ def load_candidate_segments() -> list:
         else:
             fatal(f"manifest.json: malformed segments[] entry: {item!r}")
     if not candidates:
-        fatal(f"manifest.json at {MANIFEST_PATH} has an empty 'segments' array")
+        fatal(f"manifest.json at {manifest_path} has an empty 'segments' array")
     return candidates
 
 
@@ -450,23 +547,50 @@ def load_candidate_segments() -> list:
 # ---------------------------------------------------------------------------
 
 
-def compute_current_cache_key(seg: str) -> "dict | str":
+def compute_current_cache_key(
+    seg: str,
+    cache_key_script: Path = CACHE_KEY_SCRIPT,
+    durable_root: Path = DURABLE_ROOT,
+    durable_root_str=None,
+    plugin_root_str=None,
+) -> "dict | str":
     """Runs cache_key.py --seg <id> and returns the parsed 15-field dict on
     success, or a string error message on failure (never raises/exits --
     a per-segment failure here becomes that segment's own human_escalation
     classification, it must never take down the whole run, matching
     ledger_merge.py's own "warn and continue" treatment of this exact
     subprocess call).
+
+    LT-409: `cache_key_script` is the resolved sibling path to shell out
+    against -- self-anchored by default, or resolve_dirs()'s own
+    --plugin-root-aware `{plugin_root}/assets/scripts/cache_key.py` (never
+    derived from durable_root; see resolve_dirs()'s own docstring for why).
+    `durable_root` is cache_key.py's DATA root (cwd for the subprocess).
+    `durable_root_str`/`plugin_root_str` are THIS script's own CLI values
+    (not cache_key.py's -- it has no --plugin-root, being a leaf with no
+    siblings of its own): `durable_root_str` is forwarded verbatim as
+    cache_key.py's own --durable-root when given; when it is NOT given but
+    `plugin_root_str` IS (meaning `cache_key_script` was itself resolved via
+    --plugin-root, so it no longer physically sits under durable_root),
+    `durable_root` is forwarded explicitly anyway -- otherwise cache_key.py's
+    own self-anchoring would silently resolve its data from the plugin root
+    instead of the real durable root.
     """
-    if not CACHE_KEY_SCRIPT.is_file():
-        return f"cache_key.py not found at {CACHE_KEY_SCRIPT}"
+    if not cache_key_script.is_file():
+        return f"cache_key.py not found at {cache_key_script}"
+    if durable_root_str is not None:
+        cmd_extra = ["--durable-root", durable_root_str]
+    elif plugin_root_str is not None:
+        cmd_extra = ["--durable-root", str(durable_root)]
+    else:
+        cmd_extra = []
     try:
         proc = subprocess.run(
-            [sys.executable, str(CACHE_KEY_SCRIPT), "--seg", seg],
+            [sys.executable, str(cache_key_script), "--seg", seg, *cmd_extra],
             capture_output=True,
             text=True,
             timeout=120,
-            cwd=str(DURABLE_ROOT),
+            cwd=str(durable_root),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"could not run cache_key.py --seg {seg}: {exc}"
@@ -485,13 +609,17 @@ def compute_current_cache_key(seg: str) -> "dict | str":
     return current_key
 
 
-def classify_converged_segment(seg: str, record: dict) -> dict:
+def classify_converged_segment(
+    seg: str, record: dict, dirs: dict, durable_root_str=None, plugin_root_str=None
+) -> dict:
     """A segment whose materialized status is 'converged' or 'stale' (the
     latter meaning: ledger_merge.py itself detected a cache-key mismatch
     against a fragment that was originally written as 'converged'). Returns
     a classification dict with a 'category' key plus supporting detail.
     """
-    current_key = compute_current_cache_key(seg)
+    current_key = compute_current_cache_key(
+        seg, dirs["cache_key_script"], dirs["durable_root"], durable_root_str, plugin_root_str
+    )
     if isinstance(current_key, str):
         return {
             "category": "human_escalation",
@@ -512,7 +640,7 @@ def classify_converged_segment(seg: str, record: dict) -> dict:
     mismatched = sorted(f for f in CACHE_KEY_FIELDS if stored_key.get(f) != current_key.get(f))
     cache_key_mismatch = bool(mismatched)
 
-    dp = draft_path(seg)
+    dp = draft_path(seg, dirs["durable_root"])
     current_draft_sha1 = None
     if dp.is_file():
         try:
@@ -542,7 +670,7 @@ def classify_converged_segment(seg: str, record: dict) -> dict:
     # the segpack itself hasn't caught up with yet.
     derivation_mismatched = [f for f in mismatched if f in DERIVATION_STATE_FIELDS]
     if derivation_mismatched:
-        sp = read_segpack_nonfatal(seg)
+        sp = read_segpack_nonfatal(seg, dirs["durable_root"])
         if isinstance(sp, str):
             return {
                 "category": "human_escalation",
@@ -587,7 +715,9 @@ def classify_converged_segment(seg: str, record: dict) -> dict:
     }
 
 
-def classify_segment(seg: str, ledger_segments: dict) -> dict:
+def classify_segment(
+    seg: str, ledger_segments: dict, dirs: dict, durable_root_str=None, plugin_root_str=None
+) -> dict:
     record = ledger_segments.get(seg)
     if record is None:
         return {"category": "not_started"}
@@ -595,7 +725,7 @@ def classify_segment(seg: str, ledger_segments: dict) -> dict:
     status = record.get("status")
 
     if status in WAS_CONVERGED_STATUSES:
-        return classify_converged_segment(seg, record)
+        return classify_converged_segment(seg, record, dirs, durable_root_str, plugin_root_str)
 
     if status in HUMAN_ESCALATION_STATUSES:
         return {
@@ -689,8 +819,8 @@ def select_only_segs(only_segs: list, classification: dict):
 # ---------------------------------------------------------------------------
 
 
-def run(args) -> dict:
-    candidates = load_candidate_segments()
+def run(args, dirs: dict) -> dict:
+    candidates = load_candidate_segments(dirs["manifest_path"])
     candidate_set = set(candidates)
 
     only_segs = None
@@ -707,10 +837,13 @@ def run(args) -> dict:
                 f"manifest.json's segments[]: {', '.join(unknown)}"
             )
 
-    merge_result = run_ledger_merge()
-    ledger_segments = load_ledger_segments(merge_result)
+    merge_result = run_ledger_merge(dirs, args.durable_root, args.plugin_root)
+    ledger_segments = load_ledger_segments(merge_result, dirs["durable_root"])
 
-    classification = {seg: classify_segment(seg, ledger_segments) for seg in candidates}
+    classification = {
+        seg: classify_segment(seg, ledger_segments, dirs, args.durable_root, args.plugin_root)
+        for seg in candidates
+    }
     observed_counts = Counter(entry["category"] for entry in classification.values())
     counts = {cat: observed_counts.get(cat, 0) for cat in ALL_CATEGORIES}
 
@@ -749,7 +882,7 @@ def run(args) -> dict:
 
     return {
         "success": True,
-        "durable_root": str(DURABLE_ROOT),
+        "durable_root": str(dirs["durable_root"]),
         "segs": segs,
         "requested_only_segs": only_segs,
         "classification": classification,
@@ -785,6 +918,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not fatally error if the emitted SEGS is empty.",
     )
+    parser.add_argument(
+        "--durable-root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LT-409: use PATH as the DATA root instead of this script's own "
+            "self-anchored location -- replaces where manifest.json (and "
+            "the ledger_merge.py/cache_key.py subprocesses' own data) are "
+            "found, forwarded down the subprocess chain as their own "
+            "--durable-root. Optional; omit for today's self-anchored "
+            "behavior. Independent of --plugin-root below -- this flag "
+            "never affects where the SIBLING SCRIPTS themselves are found."
+        ),
+    )
+    parser.add_argument(
+        "--plugin-root",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LT-409: use PATH (the plugin's own install root, i.e. "
+            "{{PLUGIN_ROOT}}) to resolve the sibling ledger_merge.py/"
+            "cache_key.py scripts this script shells out to, as "
+            "{PATH}/assets/scripts/<name>.py -- deliberately NEVER derived "
+            "from --durable-root, because ${durable_root}/scripts/ is "
+            "writable by the codex process these scripts gate (codex_job.py "
+            "grants --write over the whole durable root), so resolving a "
+            "checker from inside the thing it checks would let a tampered "
+            "copy pass itself. Passed on only to ledger_merge.py, which "
+            "resolves a further sibling of its own; the leaf cache_key.py "
+            "does not accept this flag and receives only --durable-root. "
+            "Optional; omit for today's self-anchored sibling lookup."
+        ),
+    )
     return parser
 
 
@@ -793,7 +959,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        result = run(args)
+        dirs = resolve_dirs(args.durable_root, args.plugin_root)
+        result = run(args, dirs)
     except FatalError as exc:
         print(str(exc), file=sys.stdout)
         return 1

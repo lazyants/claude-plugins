@@ -298,6 +298,10 @@ def instantiate() -> str:
         ("{{TARGET_LANG}}", "ru"),
         ("{{MAX_FIX_ROUNDS}}", "1"),
         ("{{BATCH_AGENT_CAP}}", "100000"),
+        # #409 stage 0 -- generously above any need in this file, same
+        # reasoning as BATCH_AGENT_CAP above: this file exercises sentinel/
+        # glue-character containment, not either preflight gate.
+        ("{{MAX_CODEX_JOBS_PER_BATCH}}", "100000"),
         ("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", "Render every verse literally."),
         ("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH)),
         ("{{EFFORT}}", "high"),

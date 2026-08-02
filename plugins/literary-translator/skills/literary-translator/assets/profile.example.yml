@@ -224,6 +224,36 @@ engine:
     # the same #352 change. Being opt-in and advisory does not exempt it: this is an OPERATOR-VISIBLE refusal
     # threshold moving under an existing cap, and skeptic_setup.py asserts the same number independently before
     # the Workflow starts, so an undersized cap refuses there first and writes nothing at all.
+  max_codex_jobs_per_batch: 400
+    # #409 stage 0. OPTIONAL, unlike batch_agent_cap above (many existing profiles predate this knob and must
+    # stay schema-valid without it) -- when absent, the orchestrating session substitutes this schema field's
+    # own documented "default": 400 into the template's {{MAX_CODEX_JOBS_PER_BATCH}} token, the same way
+    # {{MODEL}} falls back to its own documented empty-string default when engine.model is unset. The gate
+    # itself always runs regardless of where its value came from; the refusal message describes it as the
+    # EFFECTIVE limit rather than claiming it was set by the operator, since the two cases (profile-set vs
+    # schema-default) are byte-identical at instantiation time -- true either way, on purpose. A worst-case
+    # CODEX-JOB-COUNT preflight,
+    # independent of batch_agent_cap above. batch_agent_cap estimates Workflow agent() calls; this knob
+    # estimates the OTHER consumable resource a
+    # mass-translate batch spends: real codex dispatches (one detached codex_job.py launch per translate, per
+    # review, and per fix round). The refusal fires BEFORE the first job launches, at the exact same preflight
+    # site batch_agent_cap's own check sits at, so a batch too large for EITHER resource refuses before any work
+    # starts, never mid-batch.
+    #
+    # Per segment, worst case (every round non-clean, so every fix round actually fires):
+    #   1 translate job + (max_fix_rounds + 1) review jobs (one per normal round, plus the one mandatory final
+    #   confirming review)
+    #   = 1 + (max_fix_rounds + 1) = max_fix_rounds + 2.
+    # The max_fix_rounds FIX rounds are deliberately NOT counted: the fix step is a plain Workflow agent() call
+    # (callFix), never a codex_job.py launch. The template has exactly two launch sites, translate and review,
+    # and a review round's retry path re-reads the artifact codex already wrote rather than dispatching again.
+    # At the shipped max_fix_rounds: 4 that is 6 jobs/segment; a batch of N segments needs 6N codex jobs worst
+    # case, so the shipped default of 400 admits 66 segments (66*6 = 396).
+    # NOTE, so the two knobs are not mistaken for one envelope: they do NOT bind at the same batch size, and at
+    # every shipped setting batch_agent_cap binds FIRST (its own 3500 default admits 40 segments at
+    # max_fix_rounds:4, well below this knob's 66). This cap is therefore currently redundant; it is here for
+    # the local-driver work where it becomes the only meaningful gate. Splitting a batch that's too large into
+    # smaller ones is the operator's call, not automated in v1 (same policy as batch_agent_cap).
 
 footnotes:
   apparatus_policy: translate_all

@@ -780,6 +780,11 @@ def _instantiate_and_slice_js(durable_root_str):
         "{{TARGET_LANG}}": "ru",
         "{{MAX_FIX_ROUNDS}}": "3",
         "{{BATCH_AGENT_CAP}}": "999",
+        # #409 stage 0. Irrelevant to this file's draft_path/review_path
+        # prompt-builder assertions (this harness never runs the preflight
+        # gates at all, only slices out function declarations); it only
+        # needs to resolve so the no-leftover-token assertion below holds.
+        "{{MAX_CODEX_JOBS_PER_BATCH}}": "999",
         "{{VERSE_POLICY_INSTRUCTION_BLOCK}}": "Test verse policy instructions.",
         # 1.4.7 (#198): the driver's codex-companion path, substituted as a JSON
         # string literal directly into `const COMPANION = {{...}};`. The exact

@@ -3,6 +3,7 @@
 - [Healthy loop vs rabbit hole](#healthy-loop-vs-rabbit-hole)
 - [The deletion pivot](#the-deletion-pivot)
 - [A reviewer can misread — verify each finding](#a-reviewer-can-misread)
+- [A reviewer's proposed FIX is scoped to its own lane — reconcile across lanes before dispatching](#a-reviewers-proposed-fix-is-scoped-to-its-own-lane--reconcile-it-against-the-other-lanes-before-dispatching)
 - [Stopping a verifier / gate loop](#stopping-a-verifier--gate-loop)
 - [Mutation-completeness is a receding target](#mutation-completeness-is-a-receding-target)
 - [FREEZE the tree for the deciding round](#freeze-the-tree-for-the-deciding-round)
@@ -11,6 +12,7 @@
 - [Same mechanism patched a 3rd time → reach for the platform primitive](#same-mechanism-third-time)
 - [The loop's exit condition](#the-loops-exit-condition)
 - [When the classifier blocks codex](#when-the-classifier-blocks-codex)
+- [Name your own design's weakest joint IN the review prompt](#name-your-own-designs-weakest-joint-in-the-review-prompt)
 - [The contrivance gradient — when the evasions outrun the threat model](#the-contrivance-gradient--when-the-evasions-outrun-the-threat-model)
 - [Review rounds are non-monotonic](#review-rounds-are-non-monotonic)
 - [Non-convergent loops: exit, document, escalate](#non-convergent-loops-exit-document-escalate)
@@ -36,9 +38,21 @@ A fix round that DELETES code/complexity is converging; one that ADDS a normaliz
 
 **Sharper deletion signal — the reviewer is re-correcting YOUR OWN ADDITION, not the original artifact.** When the loop stops finding bugs in the code-under-review and instead keeps correcting a caveat/characterization YOU added, that addition is over-reaching → DELETE it, don't reword it (each reword is a new over-claim). Recognize it by the 2nd re-correction of the same addition, not the 3rd.
 
+**The AGGREGATE form of that signal, which the "same addition twice" trigger MISSES.** The tell above needs one addition corrected twice. The commoner and costlier shape is a stream of *different* additions each corrected *once*: every round the fix ships new justification prose, and the next round finds its defect there. No single addition repeats, so the 2nd-re-correction trigger never fires, and the loop can run indefinitely while the design underneath is stable. Diagnose it by asking each round **"was this finding against the artifact, or against prose a previous round added?"** — when that answer is "the prose" for ~3 rounds running while no finding touches the design, the argumentation has become the defect generator. The fix is not another careful sentence: **cut the accumulated justification** to spec + measured facts + obligations, archive the narrative verbatim as explicitly non-normative, and verify the cut dropped nothing load-bearing before continuing. Observed at scale on a plan review (31 rounds, ~26% of the document was round-by-round argumentation; the design had been untouched for 17 rounds).
+
 ## A reviewer can misread
 
 A reviewer's finding can be wrong (proposing a change the data doesn't support). Verify each finding against the source before fixing; a clarifying comment can be the correct answer to a misread, not a code change.
+
+## A reviewer's proposed FIX is scoped to its own lane — reconcile it against the other lanes before dispatching
+
+Verifying a finding against the source is not enough, because the finding can be entirely correct and its proposed fix still wrong. Parallel reviewers are independent BY DESIGN, so each one's fix proposal is blind to whatever the other lanes found. **Check each proposed fix against the constraints the OTHER reviewers discovered, not just against the code it touches** — that reconciliation is the lead's job and cannot be delegated to any single lane, because no lane can see it.
+
+**Two reviewers independently proposing the same fix is not corroboration when both are blind to the same constraint.** Neither is wrong; they are jointly incomplete, and the agreement raises confidence in exactly the wrong direction. Distinct from [[feedback-convergence-needs-two-sound-methods]] (one method unsound) and [[feedback-verification-sharing-a-blind-spot]] (a check sharing a seam with its target): here both checkers are sound and share a blind spot with *each other*.
+
+Verified 2026-07-25 (literary-translator 1.16.0): the security and correctness lanes each independently recommended widening a string split "for consistency" with its sibling function — a real, measured gap. The simplification lane had separately established that the same function is mirrored byte-for-byte across three workflow templates and pinned by a parity test. Applying the recommendation would have broken the pin, or forced the identical edit into two untouched templates, flipping their cache-bundle hashes and falsifying the release's own CHANGELOG promise that those domains were unaffected — for a gap both lanes had themselves shown to be fail-safe. The fix agent had already been dispatched with the proposal as written and needed an urgent correction.
+
+Two follow-throughs: **brief the fix agent with the declining constraint explicitly**, since it will otherwise implement the proposal as written and its own tests will not object; and **record the declined direction in the file itself**, or the next round's reviewer re-raises it (it did — a second lane proposed the same change after the first was overruled).
 
 ## Stopping a verifier / gate loop
 
@@ -105,6 +119,22 @@ is every statement, condition, operator, initialization and evaluation order. A 
 function implements" cannot cover it — verified when two survivors turned out to be statement
 deletions (a state reset, a control-flow `next`), invisible to a rules frame no matter how carefully
 each row was measured.
+
+**Those same two mutants are also the ones a first probe most easily declares DEAD: when a mutant
+corrupts STATE rather than an output, the first position where the state is WRONG is not the first
+position where it is OBSERVABLE.** Measured on the deletion of the fence-closer's `is_close = 0`
+reset — "a stale closer flag survives into the next block's FIRST content line, but that line is
+still swallowed by the in_fence branch's unconditional `next`, so a needle there stays hidden under
+the bug too. The needle must sit on the second content line of a second consecutive fence, where
+scanning has already wrongly fallen back to live-prose mode." An earlier probe placed on the first
+line reported a **false negative**, and that is the expensive failure signature: the fixture passes,
+the mutant looks already-guarded, the round moves on, and a live hole is left behind looking exactly
+like a genuine all-clear. **So before concluding a reset/clear/flag deletion is unkillable, trace
+forward to where the corrupted state first CHANGES an emitted decision** — an iteration, a line, or
+a whole block later than where it first goes wrong — and put the fixture THERE, not at the mutation
+site. This generalizes to any state machine, parser, streaming scanner or accumulator; mutants of a
+reset are the ones most likely to be dismissed on a first probe. It is also why the rules table is
+blind to this pair in the first place: "neither is a rule: one is state, one is control flow."
 
 Stop when the axes you can name are covered, and write the boundary INTO the file: what was hardened,
 along which axes, and that this is NOT a claim of mutation-completeness. State the distinction

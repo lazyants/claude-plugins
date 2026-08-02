@@ -5,6 +5,13 @@ description: Working ON the enduser-handbook plugin — use when modifying its s
 
 The `enduser-handbook` plugin is a **contract-dense reference-doc skill**: the same rule is stated in several `references/*.md` files plus `SKILL.md`, the docs are hard-wrapped, and the runtime steps (`Step 0b`, `W5`) must agree with the prose. Recurring traps, the review discipline that catches them, and a technique for designing convergence checks on manual-work recipes.
 
+Read the reference file that matches the task:
+
+- **`references/wikilink-resolution-ground-truth.md`** — read when writing, validating or specifying ANY `[[…]]` target: measured Obsidian/Quartz resolution tiers, the vault-root-relative rule, and how to re-derive both.
+- **`references/reference-assets-suite-output.md`** — read when capturing or reading a `reference-assets.test.sh` run: `bad()` prints each failing check's NAME to stderr, while stdout carries the ~700 passing `ok` lines AND the `TOTAL:` summary — which is why a bare `tail` (even with `2>&1`) shows the count but loses the failing check's name.
+- **`references/skill-parameterization.md`** — read when adding, renaming or removing a profile key: the every-key-needs-a-consumer audit and the two dead-key examples it came from (the general per-project-parameterization mechanism lives in `plugin-repo-mechanics`).
+- **`references/manual-work-convergence-facts.md`** — read when designing or reviewing a completion check for a halt-driven manual-work recipe (see §12).
+
 ## 1. Publish-target adapter resolution drifts across ~5 surfaces
 
 The skill resolves a publish-target adapter **filename** from `publish.target` by **lowercasing and replacing `_` with `-`**:
@@ -96,6 +103,33 @@ file over.
 `reference-assets.test.sh` has two needle-assertion helpers: `has` (whole-file — the phrase exists SOMEWHERE) and `has_in_section` (fence-aware, bound to a specific `##`/`###` heading). When a new test hardens a claim that's supposed to live at ONE normative site in a multi-section doc (the exact shape of #251/#252-style needle-pinning work), `has` is not sufficient even when the needle string is verified unique — a mutation that deletes the claim from its real site and pastes the identical text into a fenced code block under an UNRELATED heading still satisfies a plain `has`, because `has` never checks which section (or whether fenced-vs-live) the match sits in.
 
 **This survived TWO codex-rescue rounds before the `lazy-ants-reviewer` bot caught it** (2026-07-23, PR #316): both rounds were explicitly asked to verify needle uniqueness and load-bearingness against wording mutations, both confirmed uniqueness correctly, and neither one independently thought to test a *relocation* mutation (move the exact text to the wrong section) — uniqueness and section-binding are orthogonal properties, and a review checklist that only asks about one silently assumes the other. **When writing or reviewing a new needle-pinning assertion for a claim that has ONE correct normative location, default to `has_in_section`** — a doc having no other *legitimate* section for the phrase does NOT make plain `has` sufficient, since an illegitimate fenced copy pasted anywhere still satisfies a whole-file grep; `has_in_section`'s heading+fence binding is what actually rules that out, so plain `has` is essentially never the right choice for a single-normative-site claim. When reviewing (self or via codex), add "relocate the needle into a fenced block under a different heading, confirm the check now FAILS (goes red)" as its own mandatory probe alongside the wording-mutation probes — it is not implied by them, and the expected outcome is the opposite of the wording-mutation probes' baseline (there, an unrelated section passing is fine; here, a relocated needle passing IS the bug).
+
+**The direction flips for `hasnt` — scoping a NEGATIVE assertion WEAKENS it.** "More specific =
+stronger" is the default intuition for assertions and it is exactly backwards for absence claims:
+scoping a POSITIVE claim TIGHTENS it (the phrase must now hold under the right heading, not merely
+somewhere in the file), while scoping a NEGATIVE claim LOOSENS it (the forbidden text is now
+permitted everywhere except that one section). The same helper upgrade therefore hardens one family
+and loosens the other. When the section-bounded engine landed, the 24 existing whole-file `hasnt`
+assertions were deliberately left untouched: "section-scoped absence is a strictly weaker claim than
+whole-file absence, so converting them would have loosened those gates while appearing to harden
+them." The failure mode is the silent kind — the diff reads as a uniform hardening pass, the
+assertion COUNT is unchanged, the suite stays green, and 24 gates quietly stop covering the rest of
+the file. Adopt `hasnt_in_section` one genuine caller at a time; never sweep the existing whole-file
+`hasnt` calls into it.
+
+**Corollary: a helper whose call sites are ALL positive has an unguarded boundary.** Measured when
+`has_in_section`'s same-or-shallower heading rule was first guarded: every real call site was a
+positive assertion and all four of its self-tests placed the needle INSIDE the section under test,
+so DELETING the boundary check only WIDENED the scan and every assertion stayed green — confirmed
+by removing it, after which a W6-only phrase was accepted under the W1 heading. That is
+load-bearing because the W1 and W6 pins deliberately share one needle (`` MUST run
+`validateGroups(entries)` ``) and their independence comes ENTIRELY from section termination, so a
+regressed boundary lets W6's copy satisfy the W1 pin with no other gate noticing. The
+positive-reformulation trick that covers the other self-tests cannot rescue this one: "removing the
+boundary check ONLY adds false positives, never removes a true one, so there is no positive fact
+whose presence depends on the boundary holding." That is `hasnt_in_section`'s one legitimate caller
+and the shape to look for before adding a second — the reasoning is spelled out at its definition
+and its self-test block in `reference-assets.test.sh`.
 
 ## 6. A link-emission canon change has multiple write sites — including the manual-recipe prose, not just the machine canon
 

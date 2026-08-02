@@ -94,7 +94,7 @@ def read_template() -> str:
     return MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
 
 
-def instantiate(*, max_fix_rounds: int, batch_agent_cap: int,
+def instantiate(*, max_fix_rounds: int, batch_agent_cap: int, max_codex_jobs_per_batch: int = 100000,
                 effort: str = FIXTURE_EFFORT, model: str = FIXTURE_MODEL,
                 source: str | None = None) -> str:
     """The exact one-time substitution the template's header documents
@@ -105,7 +105,9 @@ def instantiate(*, max_fix_rounds: int, batch_agent_cap: int,
     concurrently running teammates, and an on-disk mutation would corrupt
     whatever suite they are running at that moment (mirrors
     tests/wait_chunking_batch_passes.test.py's own read_template(target)-or-
-    source convention)."""
+    source convention). #409 stage 0 -- max_codex_jobs_per_batch defaults
+    generously (matching batch_agent_cap's own default below): this file
+    exercises the wait/chunk machinery, not either preflight gate."""
     text = read_template() if source is None else source
     text = text.replace("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT)
     text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
@@ -113,6 +115,7 @@ def instantiate(*, max_fix_rounds: int, batch_agent_cap: int,
     text = text.replace("{{TARGET_LANG}}", FIXTURE_TARGET_LANG)
     text = text.replace("{{MAX_FIX_ROUNDS}}", str(int(max_fix_rounds)))
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
+    text = text.replace("{{MAX_CODEX_JOBS_PER_BATCH}}", str(int(max_codex_jobs_per_batch)))
     text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", json.dumps(FIXTURE_VERSE_POLICY)[1:-1])
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH))
     text = text.replace("{{EFFORT}}", effort)

@@ -859,3 +859,90 @@ def test_batch_agent_cap_excluded_and_never_invalidates_any_segment(tmp_path):
     ).hexdigest()
     assert baseline["agent_config_hash"] == expected_agent_config_hash
     assert after["agent_config_hash"] == expected_agent_config_hash
+
+
+# ---------------------------------------------------------------------------
+# 17. --durable-root PATH (LT-409): an explicit, caller-supplied root that
+#     REPLACES self-anchoring when given -- byte-identical to today's
+#     self-anchored behavior when omitted. Does NOT change any HASH VALUE
+#     computed for a given set of on-disk inputs, only where those inputs
+#     are looked up from.
+# ---------------------------------------------------------------------------
+
+
+def run_cache_key_from(script_path, args, timeout=30) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(script_path), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def test_durable_root_flag_redirects_away_from_self_anchored_location(tmp_path):
+    """cache_key.py's own copy lives ALONE -- no profile.yml, no schemas/,
+    no manifest.json, no segments/ anywhere near it -- self-anchoring alone
+    cannot possibly succeed. --durable-root pointing at a SEPARATE, real
+    fixture root must make every one of the 15 fields resolve there
+    instead, and must reproduce the EXACT SAME cache_key values the
+    in-place fixture would compute -- proving the flag only changes WHERE
+    inputs are read from, never what gets hashed."""
+    real_root = make_durable_root(tmp_path)
+    expected = full_key(real_root, seg="seg01")
+
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "cache_key.py"
+    shutil.copy2(SCRIPT_SRC, orphan_script)
+
+    proc = run_cache_key_from(orphan_script, ["--seg", "seg01", "--durable-root", str(real_root)])
+    assert proc.returncode == 0, (
+        f"--durable-root must redirect cache_key.py's path resolution to the "
+        f"given root, regardless of the script's own on-disk location -- got "
+        f"rc={proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    redirected = json.loads(proc.stdout)
+    assert redirected == expected, (
+        "cache_key.py invoked via --durable-root from an orphan location must "
+        "compute the IDENTICAL 15-field cache_key as the in-place fixture -- "
+        f"redirected={redirected}\nexpected={expected}"
+    )
+
+
+def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
+    """Negative control: the same orphan copy, invoked WITHOUT
+    --durable-root, cannot succeed via self-anchoring (no ownership marker,
+    no profile.yml anywhere it could find)."""
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "cache_key.py"
+    shutil.copy2(SCRIPT_SRC, orphan_script)
+
+    proc = run_cache_key_from(orphan_script, ["--seg", "seg01"])
+    assert proc.returncode != 0
+
+
+def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility: the ordinary in-place fixture, invoked with
+    no --durable-root at all, behaves exactly as before -- exercised via
+    one representative field (--field is the lighter-weight CLI form)."""
+    root = make_durable_root(tmp_path)
+    assert one_field(root, "pipeline_version") == "v1.2.3"
+
+
+def test_durable_root_flag_works_with_single_field_form(tmp_path):
+    """--durable-root composes with the --field single-value CLI form too,
+    not just the full --seg JSON form."""
+    real_root = make_durable_root(tmp_path)
+    set_profile_value(real_root, "project.pipeline_version", "v-redirected")
+
+    orphan_dir = tmp_path / "orphan_location2" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "cache_key.py"
+    shutil.copy2(SCRIPT_SRC, orphan_script)
+
+    proc = run_cache_key_from(
+        orphan_script, ["--field", "pipeline_version", "--durable-root", str(real_root)]
+    )
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert proc.stdout.rstrip("\n") == "v-redirected"

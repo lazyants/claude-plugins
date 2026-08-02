@@ -23,8 +23,19 @@ Red-before-green for a NEW module is carried by the discriminating assertions: a
 always-promote / never-sentinel driver fails these (invalid attempts are NOT promoted, a
 failure writes exactly the empty per-DISP sentinel, promotion is one atomic rename with no
 .bak.*, a lease-loser never clobbers the holder's joblog).
+
+#409 SANDBOX HARDENING: codex is now launched with `--cwd` pointed at a per-invocation
+write-isolated sandbox (never self.root/durable_root -- see codex_job.py's module
+docstring), so FAKE_NODE's `task`/`status`/`cancel` handlers below receive that sandbox
+path as `cwd`, not root. FAKE_NODE additionally enforces --cwd consistency between `task`
+and any later `status`/`cancel` for the SAME jobId (writing a small per-job marker at
+launch and checking it on lookup) -- this is what makes the SUBPROCESS suite actually
+exercise the real requirement (poll()/hygiene() MUST pass the exact --cwd the job was
+launched with, matching codex-companion's own workspaceRoot-keyed job store) rather than
+passing vacuously regardless of which cwd the driver happens to send.
 """
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -33,6 +44,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -107,8 +119,12 @@ p = argparse.ArgumentParser()
 p.add_argument("seg")
 p.add_argument("--expect-token", dest="tok", default=None)
 p.add_argument("--candidate-file", dest="cf", default=None)
+# LT-409: accept (and ignore, or use if given) --durable-root -- codex_job.py's _gate()
+# now forwards it to review_ready.py per lane A's confirmed contract; the stub must not
+# choke on an unrecognized flag the same way the real review_ready.py must not.
+p.add_argument("--durable-root", dest="dr", default=None)
 a = p.parse_args()
-root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+root = os.path.abspath(a.dr) if a.dr else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 path = a.cf if a.cf else os.path.join(root, "segments", a.seg + ".review.json")
 try:
     d = json.load(open(path, encoding="utf-8"))
@@ -150,6 +166,12 @@ def log(entry):
 
 cwd = opt("--cwd")
 
+# #409: mimic codex-companion's real workspaceRoot-keyed job store closely enough that a
+# status/cancel call with the WRONG --cwd genuinely fails to find the job -- otherwise this
+# stub would pass regardless of whether the driver propagates the sandbox cwd correctly.
+def job_cwd_marker(jid):
+    return os.environ["CJ_STATE"] + ".jobcwd." + jid
+
 if sub == "task":
     log({"sub": "task", "cwd": cwd, "prompt_file": opt("--prompt-file"),
          "write": "--write" in rest, "fresh": "--fresh" in rest, "effort": opt("--effort")})
@@ -162,7 +184,7 @@ if sub == "task":
     att = None
     if pf and os.path.exists(pf):
         text = open(pf, encoding="utf-8").read()
-        m = re.search(r"(/\S+\.att\.\S+\.json)", text)
+        m = re.search(r"(/\S+/attempt\.\S+\.json)", text)
         att = m.group(1) if m else None
 
     def payload(good_tok=True, quality=True, schema=True):
@@ -176,7 +198,11 @@ if sub == "task":
     if mode == "none":
         pass
     elif mode == "canonical_forge":
+        # #409: forges what it BELIEVES is the canonical, relative to its OWN --cwd (the
+        # only location a real write-confined codex could ever land a write) -- with cwd
+        # now the sandbox, this lands harmlessly inside it, nowhere near the real canonical.
         canon = os.path.join(cwd, "segments", "%s.%s.json" % (seg, ext))
+        os.makedirs(os.path.dirname(canon), exist_ok=True)
         json.dump(payload(), open(canon, "w", encoding="utf-8"))
     elif mode == "symlink" and att:
         target = att + ".target"
@@ -195,11 +221,22 @@ if sub == "task":
     if state.get("no_jobid"):
         print(json.dumps({"status": "queued"}))
         sys.exit(0)
-    print(json.dumps({"jobId": state.get("jobId", "job-1"), "status": "queued"}))
+    jid = state.get("jobId", "job-1")
+    with open(job_cwd_marker(jid), "w", encoding="utf-8") as f:
+        f.write(cwd or "")
+    print(json.dumps({"jobId": jid, "status": "queued"}))
     sys.exit(0)
 
 if sub == "status":
-    log({"sub": "status", "cwd": cwd, "jobId": positional()})
+    jid = positional()
+    log({"sub": "status", "cwd": cwd, "jobId": jid})
+    try:
+        launched_cwd = open(job_cwd_marker(jid), encoding="utf-8").read()
+    except OSError:
+        launched_cwd = None
+    if launched_cwd is not None and launched_cwd != cwd:
+        sys.stderr.write("No job found for \"%s\".\n" % jid)
+        sys.exit(1)
     sleep = float(state.get("status_sleep", 0) or 0)
     if sleep:
         time.sleep(sleep)
@@ -219,6 +256,13 @@ if sub == "status":
 if sub == "cancel":
     jid = positional()
     log({"sub": "cancel", "cwd": cwd, "jobId": jid})
+    try:
+        launched_cwd = open(job_cwd_marker(jid), encoding="utf-8").read()
+    except OSError:
+        launched_cwd = None
+    if launched_cwd is not None and launched_cwd != cwd:
+        sys.stderr.write("No active job found for \"%s\".\n" % jid)
+        sys.exit(1)
     cl = state.get("cancel_log")
     if cl:
         with open(cl, "a", encoding="utf-8") as f:
@@ -404,6 +448,125 @@ def _mkjob(tmp_path, kind="translate", seg="c001", tok="RUN:c001", disp="d1",
         poll_sec=poll, effort="high", node="node")
 
 
+def _seed_sandbox(tmp_path, job, content=None, mode="file"):
+    """#409: tests that used to write directly to job.attempt (the STAGING slot) now need
+    to seed job.sandbox_dir/job.sandbox_attempt instead -- codex's own output never lands
+    in staging directly anymore; validate_attempt()/_defer_attempt() PUBLISH it there via
+    the fd-pinned copy. Mirrors what CodexJob._setup_sandbox() does for real, just without
+    the git-confinement check (irrelevant to these white-box, non-dispatching tests)."""
+    sbx = tmp_path / ("sandbox_%s_%s" % (job.seg, job.inv))
+    sbx.mkdir(parents=True, exist_ok=True)
+    job.sandbox_dir = str(sbx)
+    ext = "draft" if job.kind == "translate" else "review"
+    job.sandbox_attempt = str(sbx / ("attempt.%s.json" % ext))
+    if mode == "file":
+        Path(job.sandbox_attempt).write_text(
+            "{}" if content is None else content, encoding="utf-8")
+    elif mode == "symlink":
+        target = Path(job.sandbox_attempt + ".target")
+        target.write_text("{}" if content is None else content, encoding="utf-8")
+        os.symlink(target, job.sandbox_attempt)
+    elif mode == "fifo":
+        os.mkfifo(job.sandbox_attempt)
+    elif mode == "absent":
+        pass
+    return job.sandbox_attempt
+
+
+# --------------------------------------------------------------------------- #
+# LT-409 relay: two independent seams in _gate() -- the DATA root
+# (_durable_root_args, lane A's confirmed --durable-root contract) and the TRUSTED
+# EXECUTABLE directory (_trusted_scripts_dir, lane A's pending mechanism). Never
+# collapse them even though they hold the same value today.
+# --------------------------------------------------------------------------- #
+def test_trusted_scripts_dir_defaults_to_module_scripts_dir(tmp_path):
+    job = _mkjob(tmp_path)
+    assert job._trusted_scripts_dir() == codex_job.SCRIPTS_DIR
+
+
+def test_durable_root_args_only_for_contract_scripts(tmp_path):
+    """review_ready.py is confirmed under lane A's --durable-root contract;
+    draft_ready.py/validate_draft.py are NOT (yet) -- passing the flag to a script that
+    never declared it would error on an unrecognized argument, so it must stay [] there."""
+    job = _mkjob(tmp_path)
+    assert job._durable_root_args("review_ready.py") == ["--durable-root", job.root]
+    assert job._durable_root_args("draft_ready.py") == []
+    assert job._durable_root_args("validate_draft.py") == []
+
+
+def test_gate_forwards_durable_root_only_to_review_ready(tmp_path, monkeypatch):
+    """End-to-end through _gate() (not the raw helper): the argv actually built for
+    review_ready.py carries --durable-root <job.root>; the argv for draft_ready.py does
+    not carry it at all."""
+    job = _mkjob(tmp_path)
+    captured = {}
+
+    def fake_run(argv, timeout):
+        captured[os.path.basename(argv[1])] = argv
+        return SimpleNamespace(returncode=0, stdout="")
+    monkeypatch.setattr(job, "_run", fake_run)
+
+    job._gate(["review_ready.py", job.seg, "--expect-token", job.tok], 10)
+    rr = captured["review_ready.py"]
+    assert "--durable-root" in rr
+    assert rr[rr.index("--durable-root") + 1] == job.root
+
+    job._gate(["draft_ready.py", job.seg, "--expect-token", job.tok], 10)
+    dr = captured["draft_ready.py"]
+    assert "--durable-root" not in dr
+
+
+def test_preflight_same_device_passes_on_real_layout(tmp_path):
+    """Positive control: segdir/attempt/pending are ONE directory today, so the real
+    os.stat()-based check must pass on an ordinary checkout."""
+    job = _mkjob(tmp_path)
+    assert job._preflight_same_device() is True
+
+
+def test_preflight_same_device_refuses_on_mismatch(tmp_path, monkeypatch):
+    """#409 property 3: a private-staging directory on a DIFFERENT filesystem than
+    segments/ must refuse before any dispatch -- a cross-device os.replace() at promote
+    time is not atomic. Hard to fabricate two REAL filesystems in a portable unit test, so
+    this pins the check's own logic by mocking os.stat's st_dev. segdir and
+    dirname(attempt)/dirname(pending) are literally the SAME path string in this fixture
+    (attempt/pending live directly in segdir), so the three os.stat() calls inside
+    _preflight_same_device cannot be told apart by PATH -- distinguish by CALL ORDER
+    instead (the method's own source stats segdir first, then attempt's dir, then
+    pending's dir) and bump only the first."""
+    job = _mkjob(tmp_path)
+    real_stat = os.stat
+    calls = {"n": 0}
+
+    def fake_stat(path, *a, **kw):
+        st = real_stat(path, *a, **kw)
+        calls["n"] += 1
+        if calls["n"] == 1:   # the segdir stat, per _preflight_same_device's own order
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev + 1, st.st_nlink,
+                                   st.st_uid, st.st_gid, st.st_size, st.st_atime,
+                                   st.st_mtime, st.st_ctime))
+        return st
+    monkeypatch.setattr(os, "stat", fake_stat)
+    assert job._preflight_same_device() is False
+    assert calls["n"] >= 1, "the check must actually call os.stat"
+
+
+def test_run_refuses_dispatch_on_device_mismatch(tmp_path, monkeypatch):
+    """End-to-end through run(): a device-mismatch preflight failure refuses BEFORE the
+    sandbox is even created (no real codex turn spent) -- reason is diagnosable, exit 1,
+    fail sentinel written, canonical never touched."""
+    job = _mkjob(tmp_path)
+    monkeypatch.setattr(job, "_preflight_same_device", lambda: False)
+    setup_called = {"v": False}
+    monkeypatch.setattr(job, "_setup_sandbox",
+                        lambda: setup_called.__setitem__("v", True) or True)
+    rc = job.run()
+    assert rc == 1
+    assert job.reason == "device-mismatch"
+    assert setup_called["v"] is False   # refused BEFORE even attempting the sandbox
+    assert os.path.exists(job.fail_sentinel)
+    assert not os.path.exists(job.canonical)
+
+
 def test_time_ceilings(tmp_path):
     job = _mkjob(tmp_path, deadline=100)
     assert 95 < job.poll_remaining() <= 100
@@ -434,8 +597,7 @@ def test_run_refuses_promote_when_budget_exhausted(tmp_path, monkeypatch):
     write an attempt). adopt_pending is monkeypatched to False so this test exercises the
     launch path deterministically regardless of adopt_pending's own real implementation."""
     job = _mkjob(tmp_path, deadline=5)
-    monkeypatch.setattr(job, "resolve_expected_ws_root", lambda: job.root)
-    monkeypatch.setattr(job, "hygiene", lambda ws: None)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
     monkeypatch.setattr(job, "safe_adopt", lambda: False)
     monkeypatch.setattr(job, "adopt_pending", lambda: False)
 
@@ -474,20 +636,20 @@ def _gate_none(args, timeout):
 
 def test_run_defers_completed_attempt_when_budget_exhausted(tmp_path, monkeypatch):
     """RED-before-green proof for #213. Mirrors test_run_refuses_promote_when_budget_exhausted
-    above, but fake_launch WRITES job.attempt (a completed, token-matching candidate) before
-    the finalize budget is exhausted -- so instead of discarding it, run() must DEFER it to
+    above, but fake_launch WRITES job.sandbox_attempt (a completed, token-matching candidate,
+    landed where codex's own output ACTUALLY lands under #409) before the finalize budget is
+    exhausted -- so instead of discarding it, run() must PUBLISH it out and DEFER it to
     job.pending for a future dispatch's adopt_pending() to validate + adopt. On the pre-#213
     driver this fails outright (no `job.pending` attribute) and, more importantly, would
     discard the completed work (finalize()'s _silent_remove(self.attempt))."""
     job = _mkjob(tmp_path, deadline=5)
-    monkeypatch.setattr(job, "resolve_expected_ws_root", lambda: job.root)
-    monkeypatch.setattr(job, "hygiene", lambda ws: None)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
     monkeypatch.setattr(job, "safe_adopt", lambda: False)
     monkeypatch.setattr(job, "adopt_pending", lambda: False)
 
     def fake_launch():
         job.jobId = "J"
-        Path(job.attempt).write_text(json.dumps(
+        Path(job.sandbox_attempt).write_text(json.dumps(
             {"dispatch_token": job.tok, "seg": job.seg, "structure_ok": True, "quality_ok": True}),
             encoding="utf-8")
         return True
@@ -584,11 +746,13 @@ def test_adopt_pending_forged_directory_cleared(tmp_path, monkeypatch):
 def test_defer_over_forged_directory_preserves_attempt(tmp_path):
     """MAJOR-2 guard, defer side: a forged directory at the deterministic pending slot must
     not brick deferral -- _defer_attempt() clears it first, so the completed attempt is
-    still preserved (no work loss) against an adversarial pre-existing dir."""
+    still preserved (no work loss) against an adversarial pre-existing dir. #409: the
+    completed candidate is seeded in the SANDBOX (where codex actually writes it now);
+    _defer_attempt() must PUBLISH it out before the existing pending-slot logic runs."""
     job = _mkjob(tmp_path, kind="translate")
     os.mkdir(job.pending)
     (Path(job.pending) / "child").write_text("junk", encoding="utf-8")
-    Path(job.attempt).write_text("{}", encoding="utf-8")
+    _seed_sandbox(tmp_path, job, content="{}")
     assert job._defer_attempt() is True
     assert not os.path.isdir(job.pending)
     assert os.path.isfile(job.pending)
@@ -598,10 +762,11 @@ def test_defer_over_forged_directory_preserves_attempt(tmp_path):
 def test_defer_supersedes_existing_pending_with_newer(tmp_path):
     """#213 review: the single per-seg/kind slot deliberately retains the MOST RECENT
     completed attempt (last-writer-wins) -- it never sticks on a stale/invalid pending.
-    Regression pin, not a RED proof (this is the driver's own restored behavior)."""
+    Regression pin, not a RED proof (this is the driver's own restored behavior). #409:
+    the "NEW" candidate is seeded in the sandbox, matching where codex actually writes it."""
     job = _mkjob(tmp_path, kind="translate")
     Path(job.pending).write_text(json.dumps({"marker": "OLD"}), encoding="utf-8")
-    Path(job.attempt).write_text(json.dumps({"marker": "NEW"}), encoding="utf-8")
+    _seed_sandbox(tmp_path, job, content=json.dumps({"marker": "NEW"}))
     assert job._defer_attempt() is True
     assert json.loads(Path(job.pending).read_text())["marker"] == "NEW"   # superseded
     assert not os.path.exists(job.attempt)          # moved into the slot
@@ -609,8 +774,7 @@ def test_defer_supersedes_existing_pending_with_newer(tmp_path):
 
 def test_run_adopts_pending_before_launch(tmp_path, monkeypatch):
     job = _mkjob(tmp_path, kind="translate", deadline=100)
-    monkeypatch.setattr(job, "resolve_expected_ws_root", lambda: job.root)
-    monkeypatch.setattr(job, "hygiene", lambda ws: None)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
     monkeypatch.setattr(job, "safe_adopt", lambda: False)
     Path(job.pending).write_text("{}", encoding="utf-8")
     gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
@@ -635,8 +799,7 @@ def test_run_no_budget_adopt_falls_through_to_launch(tmp_path, monkeypatch):
     preserved) must NOT starve launch() -- run() always falls through to attempt a fresh
     launch, so a zero-budget dispatch cannot wedge into a never-launch/never-adopt loop."""
     job = _mkjob(tmp_path, kind="translate", deadline=100)
-    monkeypatch.setattr(job, "resolve_expected_ws_root", lambda: job.root)
-    monkeypatch.setattr(job, "hygiene", lambda ws: None)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
     monkeypatch.setattr(job, "safe_adopt", lambda: False)
     Path(job.pending).write_text("{}", encoding="utf-8")
     monkeypatch.setattr(job, "adopt_pending", lambda: False)
@@ -656,8 +819,7 @@ def test_run_safe_adopt_cleans_stale_pending(tmp_path, monkeypatch):
     """A stale deferred pending is moot once safe_adopt() finds an already-valid canonical --
     it is removed so it never lingers to be (mis)adopted by a later run (leak-free)."""
     job = _mkjob(tmp_path, kind="translate", deadline=100)
-    monkeypatch.setattr(job, "resolve_expected_ws_root", lambda: job.root)
-    monkeypatch.setattr(job, "hygiene", lambda ws: None)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
     monkeypatch.setattr(job, "safe_adopt", lambda: True)
     Path(job.pending).write_text("{}", encoding="utf-8")
     rc = job.run()
@@ -682,16 +844,17 @@ def _gate_recorder(results):
 
 def test_validate_attempt_translate_pass(tmp_path, monkeypatch):
     job = _mkjob(tmp_path, kind="translate")
-    Path(job.attempt).write_text("{}", encoding="utf-8")
+    _seed_sandbox(tmp_path, job)
     gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
     monkeypatch.setattr(job, "_gate", gate)
     assert job.validate_attempt() is True
     assert calls == ["draft_ready.py", "validate_draft.py"]  # order: ready THEN quality
+    assert os.path.exists(job.attempt)          # PUBLISHED into staging before gating
 
 
 def test_validate_attempt_translate_wrong_token_short_circuits(tmp_path, monkeypatch):
     job = _mkjob(tmp_path, kind="translate")
-    Path(job.attempt).write_text("{}", encoding="utf-8")
+    _seed_sandbox(tmp_path, job)
     gate, calls = _gate_recorder({"draft_ready.py": 1})
     monkeypatch.setattr(job, "_gate", gate)
     assert job.validate_attempt() is False
@@ -700,7 +863,7 @@ def test_validate_attempt_translate_wrong_token_short_circuits(tmp_path, monkeyp
 
 def test_validate_attempt_translate_quality_defect(tmp_path, monkeypatch):
     job = _mkjob(tmp_path, kind="translate")
-    Path(job.attempt).write_text("{}", encoding="utf-8")
+    _seed_sandbox(tmp_path, job)
     gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 1})
     monkeypatch.setattr(job, "_gate", gate)
     assert job.validate_attempt() is False
@@ -709,27 +872,43 @@ def test_validate_attempt_translate_quality_defect(tmp_path, monkeypatch):
 
 def test_validate_attempt_review_uses_review_ready(tmp_path, monkeypatch):
     job = _mkjob(tmp_path, kind="review")
-    Path(job.attempt).write_text("{}", encoding="utf-8")
+    _seed_sandbox(tmp_path, job)
     gate, calls = _gate_recorder({"review_ready.py": 0})
     monkeypatch.setattr(job, "_gate", gate)
     assert job.validate_attempt() is True
     assert calls == ["review_ready.py"]
 
 
-def test_validate_attempt_symlink_refused(tmp_path, monkeypatch):
+def test_validate_attempt_no_sandbox_output_refused(tmp_path, monkeypatch):
+    """#409: nothing was ever written into the sandbox (e.g. codex crashed before writing
+    its attempt) -- _publish_from_sandbox must refuse cleanly, never crash, and no gate runs."""
     job = _mkjob(tmp_path)
-    target = Path(job.attempt + ".target")
-    target.write_text("{}", encoding="utf-8")
-    os.symlink(target, job.attempt)
+    _seed_sandbox(tmp_path, job, mode="absent")
+    gate, calls = _gate_recorder({})
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.validate_attempt() is False
+    assert calls == []
+    assert not os.path.exists(job.attempt)
+
+
+def test_validate_attempt_symlink_refused(tmp_path, monkeypatch):
+    """A symlink AT the sandbox attempt path -- even pointing at a sibling file still
+    INSIDE the sandbox -- is refused by _publish_from_sandbox's O_NOFOLLOW open. Write-
+    confinement stops WHERE codex can write, not what a symlink's target string names, so
+    this refusal is load-bearing (see the escape tests below for a target OUTSIDE the
+    sandbox, which is the sharper version of this same primitive)."""
+    job = _mkjob(tmp_path)
+    _seed_sandbox(tmp_path, job, mode="symlink")
     gate, calls = _gate_recorder({})
     monkeypatch.setattr(job, "_gate", gate)
     assert job.validate_attempt() is False   # O_NOFOLLOW open fails
     assert calls == []                       # no gate ever runs on a symlink
+    assert not os.path.exists(job.attempt)   # nothing published into staging
 
 
 def test_validate_attempt_non_regular_refused(tmp_path, monkeypatch):
     job = _mkjob(tmp_path)
-    os.mkfifo(job.attempt)
+    _seed_sandbox(tmp_path, job, mode="fifo")
     gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
     monkeypatch.setattr(job, "_gate", gate)
     assert job.validate_attempt() is False   # not S_ISREG
@@ -790,13 +969,18 @@ def test_poll_deadline_cancels_and_times_out(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# in-process white-box: hygiene guard (case v)
+# in-process white-box: hygiene guard (case v) -- #409: keyed by the prior joblog's OWN
+# recorded jobCwd (its per-invocation sandbox), never by self.root/durable_root.
 # --------------------------------------------------------------------------- #
-def _hygiene_job(tmp_path, prior_jobid="jobP", prior_status="launched"):
+def _hygiene_job(tmp_path, prior_jobid="jobP", prior_status="launched", prior_cwd="SET"):
     job = _mkjob(tmp_path)
-    Path(job.joblog).write_text(json.dumps(
-        {"jobId": prior_jobid, "status": prior_status}), encoding="utf-8")
-    return job
+    rec = {"jobId": prior_jobid, "status": prior_status}
+    if prior_cwd == "SET":
+        prior_cwd = str(tmp_path / "prior_sandbox")
+    if prior_cwd is not None:
+        rec["jobCwd"] = prior_cwd
+    Path(job.joblog).write_text(json.dumps(rec), encoding="utf-8")
+    return job, rec.get("jobCwd")
 
 
 def _hygiene_runner(status_ws, status_state, cancels):
@@ -813,53 +997,52 @@ def _hygiene_runner(status_ws, status_state, cancels):
 
 
 def test_hygiene_cancels_matching_ws_active(tmp_path, monkeypatch):
-    job = _hygiene_job(tmp_path)
+    job, prior_cwd = _hygiene_job(tmp_path)
     cancels = []
-    monkeypatch.setattr(job, "_run", _hygiene_runner(job.root, "running", cancels))
-    job.hygiene(job.root)
+    monkeypatch.setattr(job, "_run", _hygiene_runner(prior_cwd, "running", cancels))
+    job.hygiene()
     assert cancels == ["jobP"]
 
 
 def test_hygiene_skips_mismatched_ws(tmp_path, monkeypatch):
-    job = _hygiene_job(tmp_path)
+    job, prior_cwd = _hygiene_job(tmp_path)
     cancels = []
     monkeypatch.setattr(job, "_run", _hygiene_runner("/some/other/root", "running", cancels))
-    job.hygiene(job.root)
+    job.hygiene()
     assert cancels == []   # forged/cross-store jobId is never cancelled
 
 
 def test_hygiene_skips_inactive_job(tmp_path, monkeypatch):
-    job = _hygiene_job(tmp_path)
+    job, prior_cwd = _hygiene_job(tmp_path)
     cancels = []
-    monkeypatch.setattr(job, "_run", _hygiene_runner(job.root, "completed", cancels))
-    job.hygiene(job.root)
+    monkeypatch.setattr(job, "_run", _hygiene_runner(prior_cwd, "completed", cancels))
+    job.hygiene()
     assert cancels == []
 
 
 def test_hygiene_skips_terminal_joblog(tmp_path, monkeypatch):
-    job = _hygiene_job(tmp_path, prior_status="terminal")
+    job, prior_cwd = _hygiene_job(tmp_path, prior_status="terminal")
     cancels = []
-    monkeypatch.setattr(job, "_run", _hygiene_runner(job.root, "running", cancels))
-    job.hygiene(job.root)
+    monkeypatch.setattr(job, "_run", _hygiene_runner(prior_cwd, "running", cancels))
+    job.hygiene()
     assert cancels == []
 
 
-@pytest.mark.skipif(not _HAS_GIT, reason="git unavailable")
-def test_expected_ws_root_is_git_toplevel_not_durable_root(tmp_path):
-    """Nested-git regression: expected_ws_root is the git TOPLEVEL, not the durable_root
-    subdir -- the old `== durable_root` guard silently disabled hygiene here."""
-    repo = tmp_path / "repo"
-    (repo / "durable" / "segments").mkdir(parents=True)
-    (repo / "durable" / "scripts").mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    job = codex_job.CodexJob(
-        kind="translate", seg="c001", tok="RUN:c001", disp="d1",
-        root=str(repo / "durable"), companion=_companion_file(tmp_path),
-        prompt_text=PROMPT_ONE, prompt_file=_prompt_file(tmp_path), deadline_sec=60,
-        poll_sec=1, effort=None, node="node")
-    expected = job.resolve_expected_ws_root()
-    assert expected == os.path.realpath(str(repo))
-    assert expected != job.root   # NOT the durable_root subdir
+def test_hygiene_skips_missing_job_cwd(tmp_path, monkeypatch):
+    """#409: an old-format joblog (written before #409, or a prior run that never reached
+    launch()'s jobCwd write) has no recorded sandbox to query -- hygiene() cannot locate the
+    job at all, so it must NOT guess self.root or any other fallback; it just skips."""
+    job, _ = _hygiene_job(tmp_path, prior_cwd=None)
+    cancels = []
+    ran = {"v": False}
+
+    def _run(argv, timeout):
+        ran["v"] = True
+        return SimpleNamespace(returncode=0, stdout="{}")
+    monkeypatch.setattr(job, "_run", _run)
+    job.hygiene()
+    assert cancels == []
+    assert ran["v"] is False   # never even attempted a status lookup with no cwd to query
 
 
 # --------------------------------------------------------------------------- #
@@ -915,6 +1098,7 @@ def test_safe_adopt_absent_canonical(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_launch_no_jobid_returns_false(tmp_path, monkeypatch):
     job = _mkjob(tmp_path)
+    job.sandbox_dir = str(tmp_path / "sandbox")
     monkeypatch.setattr(job, "_run",
                         lambda argv, timeout: SimpleNamespace(returncode=0, stdout="{}"))
     assert job.launch() is False
@@ -922,12 +1106,14 @@ def test_launch_no_jobid_returns_false(tmp_path, monkeypatch):
 
 def test_launch_parses_jobid_and_writes_launched_joblog(tmp_path, monkeypatch):
     job = _mkjob(tmp_path)
+    job.sandbox_dir = str(tmp_path / "sandbox")
     monkeypatch.setattr(job, "_run", lambda argv, timeout: SimpleNamespace(
         returncode=0, stdout=json.dumps({"jobId": "job-77", "status": "queued"})))
     assert job.launch() is True
     assert job.jobId == "job-77"
     rec = json.loads(Path(job.joblog).read_text())
     assert rec["jobId"] == "job-77" and rec["status"] == "launched"
+    assert rec["jobCwd"] == job.sandbox_dir   # #409: recorded so hygiene() can find it later
 
 
 def test_default_launch_argv_is_write_and_high_effort_with_8_flags_only(tmp_path, monkeypatch):
@@ -944,6 +1130,7 @@ def test_default_launch_argv_is_write_and_high_effort_with_8_flags_only(tmp_path
     job = _mkjob(tmp_path)
     job.effort = args.effort
     job.final_prompt = str(tmp_path / "fp.txt")
+    job.sandbox_dir = str(tmp_path / "sandbox")
     captured = {}
 
     def fake_run(argv, timeout):
@@ -955,6 +1142,9 @@ def test_default_launch_argv_is_write_and_high_effort_with_8_flags_only(tmp_path
     assert "--write" in argv and "--fresh" in argv
     assert argv[argv.index("--effort") + 1] == "high"
     assert argv[2] == "task" and "--background" in argv and "--json" in argv
+    # #409: --cwd is the SANDBOX, never job.root/durable_root.
+    assert argv[argv.index("--cwd") + 1] == job.sandbox_dir
+    assert job.sandbox_dir != job.root
 
 
 def test_launch_argv_includes_model_when_set(tmp_path, monkeypatch):
@@ -963,6 +1153,7 @@ def test_launch_argv_includes_model_when_set(tmp_path, monkeypatch):
     job = _mkjob(tmp_path)
     job.model = "gpt-5.3-codex"
     job.final_prompt = str(tmp_path / "fp.txt")
+    job.sandbox_dir = str(tmp_path / "sandbox")
     captured = {}
 
     def fake_run(argv, timeout):
@@ -982,6 +1173,7 @@ def test_launch_argv_omits_model_when_unset(tmp_path, monkeypatch):
     job = _mkjob(tmp_path)
     assert job.model is None
     job.final_prompt = str(tmp_path / "fp.txt")
+    job.sandbox_dir = str(tmp_path / "sandbox")
     captured = {}
 
     def fake_run(argv, timeout):
@@ -1086,7 +1278,12 @@ def test_launch_no_jobid_subprocess(tmp_path):
 
 
 def test_cwd_binding_every_call(tmp_path):
-    """Run from an unrelated cwd; assert every fake-node call received --cwd <root>."""
+    """Run from an unrelated cwd; every fake-node (task/status/cancel) call for the SAME
+    job must be bound to the SAME --cwd (the job's own sandbox, #409) regardless of the
+    shell's actual cwd -- codex-companion's job store is keyed by exactly this value, so
+    any call using a DIFFERENT cwd would simply never find the job (see FAKE_NODE's own
+    jobCwd-marker enforcement). That sandbox is neither the shell's cwd NOR the durable
+    root -- the whole point of #409 is that it is NEITHER of those."""
     root, companion, node = build_root(tmp_path)
     other = tmp_path / "elsewhere"
     other.mkdir()
@@ -1098,7 +1295,11 @@ def test_cwd_binding_every_call(tmp_path):
     assert proc.returncode == 0
     calls = read_calls(root, "D1")
     assert calls, "expected fake-node calls to be logged"
-    assert all(c["cwd"] == str(root) for c in calls)
+    cwds = {c["cwd"] for c in calls}
+    assert len(cwds) == 1, "task/status/cancel for one job must share exactly one --cwd"
+    (job_cwd,) = cwds
+    assert job_cwd != str(other)
+    assert job_cwd != str(root)
 
 
 def test_internal_launch_always_write_and_effort_high(tmp_path):
@@ -1372,6 +1573,261 @@ def test_adopt_pending_review_real_gate_rejects_token_mismatch(tmp_path):
     assert job.adopt_pending() is False
     assert not os.path.exists(job.pending)         # gate RAN and REJECTED -> discarded
     assert not os.path.exists(job.canonical)
+
+
+# --------------------------------------------------------------------------- #
+# #409 ESCAPE TESTS -- each demonstrates a concrete escape, watches it succeed
+# UNCAUGHT against a naive/pre-#409 shape, then proves the real primitive closes it.
+# --------------------------------------------------------------------------- #
+def _sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def test_escape_A_naive_copy_follows_symlink_out_of_sandbox(tmp_path):
+    """ESCAPE A (property 1: fd-pinned, digest-verified copy, never a path re-checked-
+    then-reused). A malicious/buggy codex can WRITE a symlink at its own attempt path
+    (write-confinement restricts WHERE writes land, not what a symlink's target string
+    names) pointing at ANY file it can read elsewhere on the machine -- including, in this
+    repo, a driver-internal file like the joblog that must never be treated as "codex's own
+    output".
+
+    RED: a naive path-based copy (`shutil.copy`, gated only by `os.path.isfile` -- the
+    OLD shape, before the sandbox->staging copy existed at all) FOLLOWS the symlink and
+    happily lands the OUTSIDE file's content in staging, uncaught -- watch this actually
+    happen below.
+
+    GREEN: the real `_publish_from_sandbox` refuses outright (O_NOFOLLOW on the open),
+    and no destination file is ever created."""
+    job = _mkjob(tmp_path)
+    sbx = tmp_path / "sandbox"
+    sbx.mkdir()
+    job.sandbox_dir = str(sbx)
+    job.sandbox_attempt = str(sbx / "attempt.draft.json")
+
+    # A file OUTSIDE the sandbox that must NEVER be treated as codex's own output --
+    # standing in for something sensitive like this driver's own joblog.
+    outside_secret = tmp_path / "outside_secret.json"
+    outside_secret.write_text(json.dumps({"dispatch_token": job.tok, "seg": job.seg,
+                                          "structure_ok": True, "quality_ok": True,
+                                          "planted": "NOT codex's real output"}),
+                              encoding="utf-8")
+    os.symlink(outside_secret, job.sandbox_attempt)
+
+    # RED: prove the escape is REAL against a naive path-based copy -- this is exactly
+    # the shape codex_job.py would have used if the sandbox->staging step were built as
+    # a plain shutil.copy instead of _publish_from_sandbox.
+    naive_dst = tmp_path / "naive_staging.json"
+    assert os.path.isfile(job.sandbox_attempt)   # a naive isfile() check ALSO follows symlinks
+    shutil.copy(job.sandbox_attempt, naive_dst)  # <-- the escape: FOLLOWS the symlink
+    assert naive_dst.read_text() == outside_secret.read_text()
+    assert "NOT codex's real output" in naive_dst.read_text()   # uncaught exfiltration
+
+    # GREEN: the real primitive refuses.
+    assert job._publish_from_sandbox(job.sandbox_attempt, job.attempt) is False
+    assert not os.path.exists(job.attempt)
+    assert outside_secret.read_text()   # the outside file itself is untouched either way
+
+
+def test_escape_A_publish_refuses_mutation_between_fstats(tmp_path, monkeypatch):
+    """ESCAPE A, second half (property 1: identity+digest BEFORE as well as after). A
+    writer still mutating the sandbox attempt file underneath the read must not slip a
+    different digest through -- simulate it by having the SECOND fstat() inside
+    _publish_from_sandbox report a different size than the first (a writer appended/
+    truncated between the two checks), and require the publish refuse."""
+    job = _mkjob(tmp_path)
+    sbx = tmp_path / "sandbox"
+    sbx.mkdir()
+    job.sandbox_dir = str(sbx)
+    job.sandbox_attempt = str(sbx / "attempt.draft.json")
+    Path(job.sandbox_attempt).write_text("{}", encoding="utf-8")
+
+    real_fstat = os.fstat
+    calls = {"n": 0}
+
+    def flaky_fstat(fd):
+        calls["n"] += 1
+        st = real_fstat(fd)
+        if calls["n"] == 2:  # the SECOND fstat in the source fstat-sandwich
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                                   st.st_uid, st.st_gid, st.st_size + 1, st.st_atime,
+                                   st.st_mtime, st.st_ctime))
+        return st
+    monkeypatch.setattr(os, "fstat", flaky_fstat)
+    assert job._publish_from_sandbox(job.sandbox_attempt, job.attempt) is False
+    assert not os.path.exists(job.attempt)
+
+
+@pytest.mark.skipif(not _HAS_GIT, reason="git unavailable")
+def test_escape_B_sandbox_cwd_resolves_outside_git_root_resolves_inside(tmp_path):
+    """ESCAPE B (property 2/4: write-confinement by directory placement, categorically
+    different from a by-path gate). codex-companion resolves its OWN `workspace-write`
+    sandbox root by walking UP from `--cwd` looking for a git repo
+    (lib/workspace.mjs:resolveWorkspaceRoot / lib/git.mjs:ensureGitRepository -- read
+    directly from the installed companion, not assumed): `git -C <cwd> rev-parse
+    --show-toplevel`.
+
+    RED: nest durable_root inside a real git repo (the SUPPORTED durable_root==project_root
+    configuration, SKILL.md:192) and show that `--cwd durable_root` (the OLD design)
+    resolves to the OUTER repo toplevel -- i.e. codex would be granted workspace-write over
+    the WHOLE repo (scripts/, segments/, the lock, the joblog), not just durable_root.
+
+    GREEN: `_setup_sandbox()`'s chosen directory resolves to ITSELF -- no enclosing repo
+    at all -- so the real codex-companion sandbox this driver launches into is provably
+    confined to that one throwaway directory."""
+    repo = tmp_path / "repo"
+    (repo / "durable" / "segments").mkdir(parents=True)
+    (repo / "durable" / "scripts").mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
+    # RED: the OLD design's --cwd (durable_root) resolves to the OUTER repo.
+    old_style = subprocess.run(["git", "-C", str(repo / "durable"), "rev-parse",
+                                "--show-toplevel"], capture_output=True, text=True, timeout=30)
+    assert old_style.returncode == 0
+    assert os.path.realpath(old_style.stdout.strip()) == os.path.realpath(str(repo))
+    assert os.path.realpath(old_style.stdout.strip()) != os.path.realpath(str(repo / "durable"))
+    # i.e. resolveWorkspaceRoot(durable_root) != durable_root -- the vulnerability itself.
+
+    job = codex_job.CodexJob(
+        kind="translate", seg="c001", tok="RUN:c001", disp="d1",
+        root=str(repo / "durable"), companion=_companion_file(tmp_path),
+        prompt_text=PROMPT_ONE, prompt_file=_prompt_file(tmp_path), deadline_sec=60,
+        poll_sec=1, effort=None, node="node")
+    assert job._setup_sandbox() is True
+
+    # GREEN: the sandbox resolves to ITSELF.
+    new_style = subprocess.run(["git", "-C", job.sandbox_dir, "rev-parse", "--show-toplevel"],
+                               capture_output=True, text=True, timeout=30)
+    assert new_style.returncode != 0   # NOT inside any git repo at all
+    assert job.sandbox_dir != job.root
+    assert not job.sandbox_dir.startswith(job.root + os.sep)   # not even a subdirectory of it
+    shutil.rmtree(job.sandbox_dir, ignore_errors=True)
+
+
+def test_escape_B2_sandbox_inside_repo_would_be_refused(tmp_path):
+    """The confinement check ITSELF, isolated: if a sandbox candidate genuinely sits inside
+    a git working tree (the failure this whole mechanism exists to prevent -- e.g. a future
+    edit that carelessly nests the sandbox under durable_root again), _sandbox_is_confined
+    must say so, so _setup_sandbox refuses to dispatch rather than silently widening codex's
+    write access back to the whole repo."""
+    if not _HAS_GIT:
+        pytest.skip("git unavailable")
+    repo = tmp_path / "repo2"
+    nested = repo / "nested" / "sandbox"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    job = _mkjob(tmp_path)
+    assert job._sandbox_is_confined(str(nested)) is False
+
+
+def test_timeout_never_reads_stragglers_from_abandoned_sandbox(tmp_path, monkeypatch):
+    """#409 property 2 (isolation, not proof of kill): simulate a codex turn that outlives
+    our best-effort cancel and writes a LATE, fully-valid-looking attempt into the sandbox
+    AFTER poll() has already given up. run() must never come back and read it -- the
+    straggler is neutralised by finalize()'s unconditional sandbox rmtree, not by any
+    process-kill this driver cannot actually perform (the detached codex worker runs in its
+    own session; codex-companion's own cancel is best-effort, see the module docstring)."""
+    job = _mkjob(tmp_path, kind="translate", deadline=5)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    monkeypatch.setattr(job, "adopt_pending", lambda: False)
+
+    def fake_launch():
+        job.jobId = "J"
+        return True
+    monkeypatch.setattr(job, "launch", fake_launch)
+
+    def fake_poll():
+        # Simulate the straggler: AFTER giving up, something writes a late, valid-looking
+        # attempt into the sandbox -- exactly what a surviving zombie codex turn would do.
+        job.timed_out = True
+        job.job_status = None
+        Path(job.sandbox_attempt).write_text(json.dumps(
+            {"dispatch_token": job.tok, "seg": job.seg, "structure_ok": True,
+             "quality_ok": True}), encoding="utf-8")
+    monkeypatch.setattr(job, "poll", fake_poll)
+
+    sandbox_dir_seen = {}
+
+    real_finalize = job.finalize
+
+    def spy_finalize():
+        sandbox_dir_seen["dir"] = job.sandbox_dir
+        real_finalize()
+    monkeypatch.setattr(job, "finalize", spy_finalize)
+
+    rc = job.run()
+    assert rc == 1
+    assert job.reason == "timed-out"
+    assert job.promoted is False
+    assert not os.path.exists(job.canonical)      # the late write never got promoted
+    assert not os.path.exists(job.attempt)        # never even PUBLISHED into staging
+    assert sandbox_dir_seen["dir"], "sandbox was never set up"
+    assert not os.path.exists(sandbox_dir_seen["dir"])   # abandoned + removed, straggler moot
+
+
+# ---------------------------------------------------------------------------
+# #409: the confinement probe must FAIL CLOSED on a no-verdict result.
+#
+# The bug this pins: _sandbox_is_confined used to be `not _ok(self._run(...))`, and
+# _run() returns None for a timeout and for a spawn failure as well as for "git ran
+# and said no repository". Because absence-of-a-repository is the SUCCESS condition
+# here, that None collapsed every no-verdict probe into "confined" and dispatched --
+# handing codex the enclosing repository the check exists to deny, since the
+# companion's own probe is unbounded and would still find it.
+#
+# Each branch is asserted separately so a future collapse of the four outcomes back
+# into a boolean cannot pass: two of them mean "go", two mean "refuse", and a test
+# that only checked the happy path would not notice the difference.
+# ---------------------------------------------------------------------------
+
+
+def _probe_job(tmp_path, monkeypatch, outcome):
+    job = _mkjob(tmp_path)
+    monkeypatch.setattr(codex_job.CodexJob, "_probe_enclosing_repo",
+                        lambda self, path: outcome)
+    return job
+
+
+@pytest.mark.parametrize("outcome,expected_confined", [
+    (codex_job.CodexJob._PROBE_STANDALONE, True),    # git ran, no repo -> safe
+    (codex_job.CodexJob._PROBE_GIT_ABSENT, True),    # companion degrades identically
+    (codex_job.CodexJob._PROBE_ENCLOSED, False),     # an enclosing repo exists
+    (codex_job.CodexJob._PROBE_NO_VERDICT, False),   # THE REGRESSION: no verdict -> refuse
+])
+def test_confinement_scores_each_probe_outcome(tmp_path, monkeypatch, outcome, expected_confined):
+    job = _probe_job(tmp_path, monkeypatch, outcome)
+    assert job._sandbox_is_confined(str(tmp_path)) is expected_confined, (
+        f"probe outcome {outcome!r} must score confined={expected_confined}"
+    )
+
+
+def test_probe_reports_no_verdict_on_timeout_and_on_skip(tmp_path, monkeypatch):
+    """A timed-out probe must be distinguishable from 'git said no repository' --
+    the whole point of not routing this through _run()."""
+    job = _mkjob(tmp_path)
+
+    def _boom(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=0.01)
+
+    monkeypatch.setattr(codex_job.subprocess, "run", _boom)
+    assert job._probe_enclosing_repo(str(tmp_path)) == codex_job.CodexJob._PROBE_NO_VERDICT
+    assert job._sandbox_is_confined(str(tmp_path)) is False
+
+    monkeypatch.setattr(codex_job.CodexJob, "poll_timeout", lambda self: 0)
+    assert job._probe_enclosing_repo(str(tmp_path)) == codex_job.CodexJob._PROBE_NO_VERDICT
+
+
+def test_probe_reports_git_absent_distinctly(tmp_path, monkeypatch):
+    """git-not-installed is the ONE no-result case that still licenses a dispatch, and
+    only because the companion's resolver degrades the same way."""
+    job = _mkjob(tmp_path)
+
+    def _enoent(*a, **kw):
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(codex_job.subprocess, "run", _enoent)
+    assert job._probe_enclosing_repo(str(tmp_path)) == codex_job.CodexJob._PROBE_GIT_ABSENT
+    assert job._sandbox_is_confined(str(tmp_path)) is True
 
 
 if __name__ == "__main__":

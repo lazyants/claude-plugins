@@ -201,6 +201,7 @@ BASE_SUBST = {
     "target_lang": "en",
     "max_fix_rounds": 3,
     "batch_agent_cap": 5,
+    "max_codex_jobs_per_batch": 400,
     "effort": "high",
     # 1.16.1 (#347). Empty = fetch_citation.py's shipped default list. REQUIRED
     # even when empty: the value is what the template actually burned in, and a
@@ -299,18 +300,21 @@ import json
 import sys
 from pathlib import Path
 
-DURABLE_ROOT = Path(__file__).resolve().parents[1]
-KEYS_PATH = DURABLE_ROOT / "test_fixture_cache_keys.json"
-
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seg")
+    parser.add_argument("--durable-root", default=None)
     args, _ = parser.parse_known_args()
+    if args.durable_root:
+        durable_root = Path(args.durable_root).resolve()
+    else:
+        durable_root = Path(__file__).resolve().parent.parent
+    keys_path = durable_root / "test_fixture_cache_keys.json"
     if not args.seg:
         sys.stderr.write("fake cache_key.py: test stub requires --seg\\n")
         return 1
-    data = json.loads(KEYS_PATH.read_text(encoding="utf-8"))
+    data = json.loads(keys_path.read_text(encoding="utf-8"))
     if args.seg not in data:
         sys.stderr.write(f"fake cache_key.py: no fixture key for {args.seg}\\n")
         return 1
@@ -323,8 +327,10 @@ if __name__ == "__main__":
 """
 
 
-def make_resume_setup_root(tmp_path, plugin_bundle_hash="pbh-v1", orchestration_bundle_hash="obh-v1"):
-    root = tmp_path / "durable_root"
+def make_resume_setup_root(
+    tmp_path, plugin_bundle_hash="pbh-v1", orchestration_bundle_hash="obh-v1", name="durable_root"
+):
+    root = tmp_path / name
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(RESUME_SETUP_SRC, scripts_dir / "resume_setup.py")
@@ -1084,3 +1090,176 @@ def test_case12_stale_token_pair_surfaces_in_missing_segments(tmp_path):
         f"a stale/foreign-token segment should be folded into "
         f"missing_segments per the brief's pinned packaging, got: {stdout}"
     )
+
+
+# ===========================================================================
+# --durable-root PATH (LT-409, post-review correction): an explicit,
+# caller-supplied DATA root (schemas/runs) -- REPLACES self-anchoring for
+# data when given. Deliberately does NOT redirect where the cache_key.py
+# sibling script is found -- that is --plugin-root's own, independent
+# concern (see the dedicated section below). Byte-identical to today's
+# self-anchored behavior for both when both flags are omitted.
+# ===========================================================================
+
+def run_resume_setup_from(script_path, payload_obj, tmp_dir, *extra_args, timeout=30):
+    payload_path = tmp_dir / "scratch_resume_payload.json"
+    write_json(payload_path, payload_obj)
+    cmd = [sys.executable, str(script_path), "--payload-file", str(payload_path), *extra_args]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    parsed = None
+    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    if len(lines) == 1:
+        try:
+            parsed = json.loads(lines[0])
+        except json.JSONDecodeError:
+            parsed = None
+    return proc, parsed
+
+
+def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
+    """Negative control: an orphan copy invoked WITHOUT --durable-root
+    cannot succeed via self-anchoring (no runs/ dir to even create, no
+    plugin_bundle_hash marker to read)."""
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "resume_setup.py"
+    shutil.copy2(RESUME_SETUP_SRC, orphan_script)
+
+    proc, parsed = run_resume_setup_from(orphan_script, mass_base_payload(), tmp_path)
+
+    assert proc.returncode != 0
+    assert parsed is not None and parsed.get("success") is False
+
+
+def test_durable_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility: the ordinary in-place fixture, invoked with
+    no --durable-root/--plugin-root at all, behaves exactly as before."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+
+    proc, parsed = run_resume_setup(root, mass_base_payload())
+
+    assert_setup_success(proc, parsed)
+    assert parsed.get("resume") is False
+
+
+# ---------------------------------------------------------------------------
+# --plugin-root PATH (LT-409, post-review correction): the SECURITY property
+# this flag exists for. ${durable_root}/scripts/ is a Step-0a copy that the
+# codex process can write to (codex_job.py grants --write over the whole
+# durable root), so a sibling script resolved FROM durable_root could be a
+# tampered copy validating itself. --plugin-root is a SEPARATE, orthogonal
+# input that must NEVER be derived from --durable-root.
+# ---------------------------------------------------------------------------
+
+def tampered_cache_key_py_src(fixed_key: dict) -> str:
+    """A fake cache_key.py that ALWAYS echoes back `fixed_key` regardless of
+    --seg/--durable-root, simulating a codex-tampered copy designed to
+    report a constant value rather than genuinely recomputing anything."""
+    return (
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        f"print(json.dumps({fixed_key!r}))\n"
+        "sys.exit(0)\n"
+    )
+
+
+def make_trusted_plugin_root(tmp_path, name="trusted_plugin_install"):
+    """A SEPARATE physical location holding the REAL (test-stub)
+    cache_key.py at the {plugin_root}/assets/scripts/ layout SKILL.md
+    documents for the plugin-anchored scripts."""
+    plugin_root = tmp_path / name
+    plugin_scripts_dir = plugin_root / "assets" / "scripts"
+    plugin_scripts_dir.mkdir(parents=True)
+    (plugin_scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
+    return plugin_root
+
+
+def test_plugin_root_flag_bypasses_a_tampered_durable_root_sibling(tmp_path):
+    """resume_setup.py runs from its OWN in-place durable-root copy
+    (production's normal invocation shape) whose SIBLING cache_key.py has
+    been TAMPERED to always report a FIXED, wrong composite key regardless
+    of the real segpack/canon state -- simulating a codex-compromised copy.
+    --plugin-root pointing at a separate, untampered location must make the
+    resulting input_digest reflect the REAL fixture keys instead -- proving
+    the poisoned durable-root sibling was never consulted."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+    poisoned_key = make_cache_key_composite("POISONED")
+    (root / "scripts" / "cache_key.py").write_text(
+        tampered_cache_key_py_src(poisoned_key), encoding="utf-8"
+    )
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    payload = mass_base_payload()
+
+    proc_trusted, parsed_trusted = run_resume_setup_from(
+        root / "scripts" / "resume_setup.py", payload, tmp_path, "--plugin-root", str(plugin_root)
+    )
+    proc_poisoned, parsed_poisoned = run_resume_setup(root, payload)  # no --plugin-root
+
+    assert proc_trusted.returncode == 0, f"stdout={proc_trusted.stdout}\nstderr={proc_trusted.stderr}"
+    assert_setup_success(proc_trusted, parsed_trusted)
+    assert_setup_success(proc_poisoned, parsed_poisoned)
+    assert parsed_trusted["input_digest"] != parsed_poisoned["input_digest"], (
+        "the trusted plugin-root cache_key.py must have produced a "
+        "DIFFERENT digest than the poisoned durable-root sibling -- if "
+        "they matched, the poisoned copy's constant answer was used either "
+        f"way: trusted={parsed_trusted}\npoisoned={parsed_poisoned}"
+    )
+
+
+def test_durable_root_and_plugin_root_are_independently_resolved(tmp_path):
+    """Orthogonality, end to end, from a fully orphan copy: --durable-root
+    points at a DATA-only fixture with NO scripts/ directory AT ALL,
+    --plugin-root points at a SEPARATE, scripts-only fixture with no data
+    of its own. Success proves the two concerns are genuinely resolved
+    independently, never conflated into one root."""
+    data_root = make_resume_setup_root(tmp_path, name="data_only")
+    write_fixture_cache_keys(data_root, mass_base_cache_keys())
+    # Remove the scripts/ dir make_resume_setup_root created -- this fixture
+    # must have NO sibling scripts of its own at all.
+    shutil.rmtree(data_root / "scripts")
+    assert not (data_root / "scripts").exists()
+
+    plugin_root = make_trusted_plugin_root(tmp_path, name="plugin_only")
+
+    orphan_dir = tmp_path / "orphan_location" / "scripts"
+    orphan_dir.mkdir(parents=True)
+    orphan_script = orphan_dir / "resume_setup.py"
+    shutil.copy2(RESUME_SETUP_SRC, orphan_script)
+
+    proc, parsed = run_resume_setup_from(
+        orphan_script,
+        mass_base_payload(),
+        tmp_path,
+        "--durable-root", str(data_root),
+        "--plugin-root", str(plugin_root),
+    )
+
+    assert proc.returncode == 0, (
+        f"durable-root (data) and plugin-root (sibling) must resolve "
+        f"independently -- got rc={proc.returncode}\nstdout:\n{proc.stdout}\n"
+        f"stderr:\n{proc.stderr}"
+    )
+    assert_setup_success(proc, parsed)
+    assert (data_root / "runs" / parsed["effectiveRunId"] / "input.digest").is_file()
+    assert not (plugin_root / "runs").exists()
+
+
+def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
+    """Backward compatibility for the split itself: --durable-root alone
+    (no --plugin-root) still resolves the sibling self-anchored, exactly as
+    before the split."""
+    root = make_resume_setup_root(tmp_path)
+    write_fixture_cache_keys(root, mass_base_cache_keys())
+
+    proc, parsed = run_resume_setup_from(
+        root / "scripts" / "resume_setup.py",
+        mass_base_payload(),
+        tmp_path,
+        "--durable-root", str(root),
+    )
+
+    assert_setup_success(proc, parsed)
+    assert parsed.get("resume") is False

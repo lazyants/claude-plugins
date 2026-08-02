@@ -340,7 +340,8 @@ function log(msg) { logLines.push(String(msg)); }
 """
 
 
-def instantiate_mass_translate(*, batch_agent_cap: int, effort: str = "high", model: str = "") -> str:
+def instantiate_mass_translate(*, batch_agent_cap: int, max_codex_jobs_per_batch: int = 1_000_000,
+                                effort: str = "high", model: str = "") -> str:
     """Same one-time substitution contract every sibling test file
     re-implements. `batch_agent_cap` is the value the SEG-guard tests care
     about -- deliberately set to 0 by the "safe id" tests below so the
@@ -360,6 +361,12 @@ def instantiate_mass_translate(*, batch_agent_cap: int, effort: str = "high", mo
     text = text.replace("{{TARGET_LANG}}", "ru")
     text = text.replace("{{MAX_FIX_ROUNDS}}", "2")
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
+    # #409 stage 0 -- placed AFTER batch_agent_cap in the template itself, so
+    # with this file's default batch_agent_cap=0 the OLDER gate always trips
+    # first and this token's value is never actually reached by any SEG-guard
+    # test below; it only needs to resolve so the "no leftover {{...}}"
+    # assertion stays meaningful.
+    text = text.replace("{{MAX_CODEX_JOBS_PER_BATCH}}", str(int(max_codex_jobs_per_batch)))
     text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", "Render literally.")
     # 1.4.7 (#198): the driver's codex-companion path, spliced into
     # `const COMPANION = {{...}};` as a JSON string literal. This file's

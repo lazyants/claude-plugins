@@ -7,15 +7,21 @@ stdlib hashlib/json only.
 
 CLI:
 
-    python3 draft_sha1.py {seg}
+    python3 draft_sha1.py {seg} [--durable-root PATH]
 
 Prints a sha1 hex digest of
 
     {durable_root}/segments/{seg}.draft.json
 
 to stdout (bare hex string, newline-terminated), where {durable_root} is
-this script's own grandparent directory (self-anchored, never cwd, never
-a --durable-root flag).
+this script's own grandparent directory by default (self-anchored, never
+cwd) -- OR, when --durable-root PATH is given (LT-409), PATH itself
+(resolved to an absolute path), REPLACING the self-anchored root entirely.
+--durable-root may appear before or after the positional {seg}. Omitting
+it reproduces today's self-anchored behavior byte-for-byte -- this is a
+strict backward-compatible addition, never a required flag. Parsed by
+hand (never argparse) so this script's exact wrong-argc Usage/exit-2
+contract, and its stdlib-minimal dependency footprint, stay unchanged.
 
 Canonical path (load-bearing, see ledger-and-resumability.md):
 
@@ -65,11 +71,23 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Self-anchoring: this script always lives at {durable_root}/scripts/<name>.py.
-# It never assumes cwd == durable_root, and never takes a --durable-root flag.
+# Self-anchoring (default): this script always lives at
+# {durable_root}/scripts/<name>.py. It never assumes cwd == durable_root.
+# LT-409: an explicit --durable-root PATH overrides this at runtime (see
+# _resolve_durable_root() below) -- these module-level constants remain the
+# fallback used whenever the flag is omitted.
 # ---------------------------------------------------------------------------
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 SEGMENTS_DIR = DURABLE_ROOT / "segments"
+
+_USAGE = (
+    "Usage: python3 draft_sha1.py {seg} [--durable-root PATH]\n"
+    "  seg: segment identifier (matches manifest.json's "
+    "segments[]/frontback[] id).\n"
+    "  --durable-root PATH: use PATH as the durable root instead of this "
+    "script's own self-anchored location (optional; may appear before or "
+    "after seg; omit for today's behavior)."
+)
 
 # Canonical segment-id safety contract. A seg id is either an ordinary body
 # id (e.g. "seg01", "seg05_blocked_regen", "segAnchor") or a translate-decision
@@ -96,8 +114,8 @@ def validate_seg(seg):
     return None
 
 
-def draft_path(seg: str) -> Path:
-    return SEGMENTS_DIR / f"{seg}.draft.json"
+def draft_path(seg: str, segments_dir: Path = SEGMENTS_DIR) -> Path:
+    return segments_dir / f"{seg}.draft.json"
 
 
 def draft_content_sha1(path: Path) -> str:
@@ -124,23 +142,44 @@ def draft_content_sha1(path: Path) -> str:
     return hashlib.sha1(canonical).hexdigest()
 
 
+def _parse_argv(argv):
+    """Hand-rolled parse of {seg} [--durable-root PATH], the flag accepted
+    in either position relative to seg. Returns (seg, durable_root_str) on
+    success, or (None, None) to signal a usage error (caller prints _USAGE
+    and exits 2) -- never raises."""
+    durable_root_str = None
+    positional = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--durable-root":
+            if i + 1 >= len(argv):
+                return None, None
+            durable_root_str = argv[i + 1]
+            i += 2
+        else:
+            positional.append(argv[i])
+            i += 1
+    if len(positional) != 1:
+        return None, None
+    return positional[0], durable_root_str
+
+
 def main() -> int:
-    if len(sys.argv) != 2:
-        print(
-            "Usage: python3 draft_sha1.py {seg}\n"
-            "  seg: segment identifier (matches manifest.json's "
-            "segments[]/frontback[] id).",
-            file=sys.stderr,
-        )
+    seg, durable_root_str = _parse_argv(sys.argv[1:])
+    if seg is None:
+        print(_USAGE, file=sys.stderr)
         return 2
 
-    seg = sys.argv[1]
     _seg_err = validate_seg(seg)
     if _seg_err:
         print(f"Error: {_seg_err}", file=sys.stderr)
         return 2
 
-    path = draft_path(seg)
+    segments_dir = SEGMENTS_DIR
+    if durable_root_str is not None:
+        segments_dir = Path(durable_root_str).resolve() / "segments"
+
+    path = draft_path(seg, segments_dir)
     if not path.is_file():
         print(f"Error: draft not found for segment '{seg}' at {path}", file=sys.stderr)
         return 1

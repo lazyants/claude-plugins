@@ -267,6 +267,7 @@ def instantiate_mass_translate(
     *,
     max_fix_rounds: int,
     batch_agent_cap: int,
+    max_codex_jobs_per_batch: int = 1_000_000_000,
     durable_root: str = FIXTURE_DURABLE_ROOT,
     source_lang: str = FIXTURE_SOURCE_LANG,
     target_lang: str = FIXTURE_TARGET_LANG,
@@ -280,7 +281,13 @@ def instantiate_mass_translate(
     Deliberately does NOT substitute {{RUN_ID}} -- this file's mock never
     inspects prompt text (only opts.label), so RUN_ID's exact value is
     irrelevant to the call-counting this file cares about; it is left
-    unresolved on purpose and simply never asserted against."""
+    unresolved on purpose and simply never asserted against.
+
+    #409 stage 0 -- max_codex_jobs_per_batch defaults to a value no fixture
+    in this file could ever reach, so the NEW, independent codex-jobs
+    preflight (which runs and can return BEFORE the batch_agent_cap gate
+    this whole file exists to exercise) never trips here and never shadows
+    what every fixture below is actually testing."""
     text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
     text = text.replace("{{DURABLE_ROOT}}", durable_root)
     text = text.replace("{{RUN_ID}}", "fixture-run-id")
@@ -288,6 +295,7 @@ def instantiate_mass_translate(
     text = text.replace("{{TARGET_LANG}}", target_lang)
     text = text.replace("{{MAX_FIX_ROUNDS}}", str(int(max_fix_rounds)))
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
+    text = text.replace("{{MAX_CODEX_JOBS_PER_BATCH}}", str(int(max_codex_jobs_per_batch)))
     escaped_verse_block = json.dumps(verse_policy_instruction_block)[1:-1]
     text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", escaped_verse_block)
     # #198 -- CODEX_COMPANION_PATH_JSON: a strict json.dumps JS string literal
