@@ -50,6 +50,7 @@ fragment_sha1 claim without this independent check" discipline.
 """
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -813,6 +814,54 @@ def test_sentinel_write_failure_refuses_to_record_convergence(tmp_path):
         "sentinel is exactly the unprotected state this fix closes"
     )
     assert not (segments_dir / f".ever_converged.{seg}").exists()
+
+    # Post-review correction: the STDERR warning from mark_ever_converged()
+    # itself must describe what NOW happens (refused, nothing lost), never
+    # the pre-correction fail-open story -- an operator reads stderr first,
+    # during the incident, at the moment they're deciding whether anything
+    # needs recovering. The message used to say the opposite of what this
+    # test's own assertions above just proved.
+    stderr_lower = result.stderr.lower()
+    assert "was not recorded" in stderr_lower, result.stderr
+    assert "nothing on disk was lost" in stderr_lower, result.stderr
+    assert "convergence is recorded" not in stderr_lower, (
+        f"stderr must not claim convergence IS recorded -- that was the "
+        f"pre-correction fail-open story this fix exists to prevent, and "
+        f"telling an operator their work is safely recorded when the ledger "
+        f"write was actually refused is worse than saying nothing: "
+        f"{result.stderr!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 11. now_iso8601()'s exact output shape -- the "house format" other scripts'
+#     own copies are named after (e.g. backfill_resume_gate_ack.py), pinned
+#     here since nothing else in this file asserts on the timestamp field's
+#     format at all: a mutation widening timespec to milliseconds would pass
+#     every other test silently (still schema-valid ISO-8601, nothing
+#     downstream refuses it).
+# ---------------------------------------------------------------------------
+
+_ISO8601_WHOLE_SECOND_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+def test_fragment_timestamp_is_whole_second_iso8601_with_bare_z(tmp_path):
+    """Pins now_iso8601()'s exact shape via the real fragment it writes:
+    whole-second precision (timespec='seconds', no fractional digits) and a
+    bare 'Z' suffix (never a '+00:00' offset)."""
+    root = make_durable_root(tmp_path)
+    seg = "segTimestampFormat"
+    payload_path = write_payload(root, "pTimestampFormat", {"status": "in_progress"})
+
+    result = run_ledger_update(root, seg, payload_path)
+
+    assert result.returncode == 0
+    fragment = read_fragment(root, seg)
+    assert _ISO8601_WHOLE_SECOND_Z_RE.match(fragment["timestamp"]), (
+        f"fragment timestamp {fragment['timestamp']!r} must be exactly "
+        f"whole-second ISO-8601 with a bare 'Z' suffix -- the house format "
+        f"other scripts' own now_iso8601() copies are named after"
+    )
 
 
 if __name__ == "__main__":

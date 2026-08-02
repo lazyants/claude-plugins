@@ -198,8 +198,13 @@ def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
     except OSError as exc:
         sys.stderr.write(
             f"warning: could not create the ever-converged sentinel at {path}: "
-            f"{exc}. Convergence IS recorded; a later re-translate of this "
-            f"segment will not be refused by the #409 gate.\n"
+            f"{exc}. Convergence was NOT recorded for this segment -- the "
+            f"ledger write is refused without its protecting sentinel, so "
+            f"the segment stays whatever status it already had. Nothing on "
+            f"disk was lost: the draft and review artifacts both survive "
+            f"untouched; only the ledger's own 'converged' verdict is "
+            f"withheld. Retry once the underlying OS problem (permissions/"
+            f"quota/I/O) is fixed.\n"
         )
         return False
     try:
