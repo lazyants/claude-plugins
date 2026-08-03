@@ -87,6 +87,25 @@ Removing a wrong term X can INTRODUCE a new inaccuracy. A blanket replacement ca
   summary POINT at the reference instead of restating its conclusion; where it must restate, the
   correction is not finished until the router has been re-read.
 
+- **The trigger is ANY change to a reference, and ADDING a case is the reading that gets missed.**
+  Everything above is written around a summary that went STALE — it asserts something the reference
+  now refutes, so there is a false sentence to find. Widening a reference fails differently and more
+  quietly: the router entry stays perfectly TRUE, merely narrower than what now sits behind it, so
+  the new case has no entry point and is never selected. Nothing is stale, nothing is false, every
+  file is internally coherent, and no check fires — frontmatter parses, the description is under
+  cap, the markdown is valid, `git diff --check` is clean. The only symptom is that the added rule
+  never loads for the situation it was written for, which is indistinguishable from never having
+  written it. Verified 2026-08-02, and the sharpest available demonstration that the narrow trigger
+  is the problem: three references were widened in one change while all three router entries kept
+  their old scope, and the bullet you are reading now was OPEN IN THE EDITOR at the time — it did
+  not fire, because its own trigger says "refuted or corrected" and that change was an addition. A
+  reviewer caught it, and the commit documenting "a rule existed and did not fire" had reproduced
+  that failure inside itself. **Whenever a reference gains a case, widen its router entry in the
+  SAME commit, then re-read the entry and ask the routing question directly: would a task about
+  this new case have any reason to open this file?** If the entry does not name the new trigger,
+  the case is unreachable. Progressive disclosure means the router is not documentation of the
+  reference — it is the only thing that can select it.
+
 ## A rebuild can regress
 
 **This fires for replacing a MECHANISM or a documented RECIPE, not just a data-producing artifact.** The trigger is any wholesale swap made to close a review finding — the replacement silently inherits the obligation to handle every input state the original handled, and the states the old mechanism covered for free are the ones you will forget — a state the old one absorbed implicitly will never appear in the finding you are fixing, which is exactly why the every-dimension diff below has to be the thing that catches it. Verified 2026-07-25: a `git stash push`/`pop` recipe was replaced with a `git diff` + `git apply` patch flow to close a foreign-stash hazard. `stash` covers staged *and* unstaged content; `git diff` is the worktree-vs-index delta, so it silently omits the index — a peer's STAGED edit was destroyed by the following `git checkout HEAD --`, and the patch was non-empty, so the recipe sailed past its own emptiness check. The fix traded a loud shared-stack hazard for a silent data-loss one and needed a whole extra review round.
