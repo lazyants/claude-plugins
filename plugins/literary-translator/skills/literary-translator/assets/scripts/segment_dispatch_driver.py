@@ -1265,6 +1265,283 @@ def _utc_now_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
+# #409 track B -- durable per-segment transaction counters.
+#
+# TWO counters, deliberately separate, because identity and terminality are
+# different jobs and one number cannot do both:
+#
+#   <seg>.attempts      monotonic, UNBOUNDED, never deleted for the life of
+#                       the RUN_ID. Its only job is to make each transaction
+#                       attempt's id unique. Bounding it would break valid
+#                       projects: it advances on every intent INCLUDING
+#                       successful ones, and engine.max_fix_rounds has no
+#                       schema maximum, so a legitimate max_fix_rounds >= 7
+#                       would exhaust a ceiling of 6 on the NORMAL path.
+#
+#   <seg>.txn_failures  advances ONLY on a refused transaction. This is what
+#                       a ceiling may bound.
+#
+# Neither lives inside the intent file: the intent is deleted on refusal and
+# after commit, so a counter kept there would have no durable allocation
+# source at all and a replacement driver would reissue an id already used.
+# ---------------------------------------------------------------------------
+
+
+def _fsync_dir(directory: Path) -> bool:
+    """fsync a directory so a rename inside it survives a system crash.
+
+    Split out because it is needed on TWO paths: after a fresh write, and
+    again when replaying a charge that a previous run left visible but
+    unconfirmed."""
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+    except OSError as exc:
+        print(
+            f"segment_dispatch_driver.py: warning: could not open {directory} to fsync it: {exc}",
+            file=sys.stderr,
+        )
+        return False
+    ok = True
+    try:
+        os.fsync(dir_fd)
+    except OSError as exc:
+        print(
+            f"segment_dispatch_driver.py: warning: could not fsync {directory}: {exc}",
+            file=sys.stderr,
+        )
+        ok = False
+    # close(2) CAN report an error, and a close in `finally` outside the
+    # handler would escape as an exception rather than a False. That matters
+    # because charge_txn_failure() calls this helper on the replay path,
+    # OUTSIDE _atomic_write_json()'s own try -- so an escaping OSError would
+    # crash the driver mid-batch instead of refusing the round, contradicting
+    # the contract every other durability failure here follows. A failed close
+    # also leaves the preceding fsync unconfirmed, so it fails the call.
+    try:
+        os.close(dir_fd)
+    except OSError as exc:
+        print(
+            f"segment_dispatch_driver.py: warning: could not close the fd for {directory}: {exc}",
+            file=sys.stderr,
+        )
+        ok = False
+    return ok
+
+
+def _atomic_write_json(path: Path, obj) -> bool:
+    """Durably replace `path` with `obj` as JSON: temp file -> fsync(temp) ->
+    os.replace() -> fsync(PARENT DIRECTORY).
+
+    The directory fsync is not decoration. Without it the rename itself may
+    not survive a system crash, so a "durable" counter would be durable only
+    against process death -- which is the failure this whole mechanism is
+    least worried about. Returns False rather than raising: every caller here
+    is on a path where the correct response is to refuse the round, not to
+    crash the driver mid-batch."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, ensure_ascii=False, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        # NOTE the ordering hazard this creates and that the caller must know
+        # about: os.replace() has ALREADY made the new bytes visible by now, so
+        # a False from here does NOT mean "nothing changed" -- it means "the
+        # change is visible but not confirmed durable".
+        return _fsync_dir(path.parent)
+    except (OSError, TypeError, ValueError) as exc:
+        print(
+            f"segment_dispatch_driver.py: warning: could not durably write {path}: {exc}",
+            file=sys.stderr,
+        )
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def _is_counter_int(value) -> bool:
+    """A usable counter value: a non-negative int that is NOT a bool.
+
+    The bool exclusion is load-bearing, not pedantry -- `isinstance(False, int)`
+    is True in Python and `False >= 0` holds, so {"count": false} would read as
+    a legitimate zero and re-authorise a segment whose refusals were already
+    exhausted."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _attempt_seq_of(parsed):
+    """The `attempt_seq` of a parsed attempts file, or None for any shape that
+    does not carry one."""
+    if not isinstance(parsed, dict):
+        return None
+    return parsed.get("attempt_seq")
+
+
+def _read_counter(path: Path):
+    """Read a counter file. Returns ("absent", None), ("ok", <parsed>), or
+    ("corrupt", None).
+
+    ABSENCE AND CORRUPTION ARE NOT THE SAME STATE, and collapsing them --
+    which an earlier version of this did, treating "nothing recorded yet" as
+    the conservative reading -- destroys both invariants these counters
+    exist for. An unreadable `<seg>.attempts` would restart allocation at 1
+    and hand out a transaction id already in use; an unreadable
+    `<seg>.txn_failures` would forget the idempotence history AND reset an
+    already-exhausted ceiling, silently re-authorising work that was refused.
+    Absence may safely initialise an empty counter, because nothing has been
+    promised yet. An existing counter that cannot be trusted must fail
+    CLOSED."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ("absent", None)
+    except (OSError, UnicodeDecodeError):
+        return ("corrupt", None)
+    try:
+        return ("ok", json.loads(raw))
+    except (ValueError, TypeError):
+        return ("corrupt", None)
+
+
+def next_attempt_seq(txn_dir: Path, seg: str) -> int:
+    """Allocate the next attempt number for `seg`, durably, BEFORE any intent
+    is written. Monotonic and never reset. Returns 0 if the allocation could
+    not be made durable -- callers must treat 0 as "do not start a
+    transaction", because an id that is not durably reserved can be handed
+    out twice."""
+    path = txn_dir / f"{seg}.attempts"
+    status, current = _read_counter(path)
+    if status == "absent":
+        # Nothing promised yet, so a fresh sequence is safe here and ONLY here.
+        return 1 if _atomic_write_json(path, {"attempt_seq": 1}) else 0
+    if status == "corrupt" or not _is_counter_int(_attempt_seq_of(current)):
+        # UNPARSEABLE AND PARSEABLE-BUT-WRONG-SHAPE ARE THE SAME HAZARD. `{}`,
+        # `[]`, `null` and {"attempt_seq": "bad"} all parse cleanly, so keying
+        # this on json.loads() succeeding would let them fall through to a
+        # fresh sequence -- reissuing an id the corrupted file had already
+        # allocated. Only a mapping carrying a non-negative, non-bool integer
+        # may continue the sequence; every other EXISTING shape refuses.
+        print(
+            f"segment_dispatch_driver.py: refusing to allocate an attempt id for {seg}: "
+            f"{path} exists but does not carry a usable attempt_seq; restarting the "
+            f"sequence would reuse an id already issued",
+            file=sys.stderr,
+        )
+        return 0
+    nxt = _attempt_seq_of(current) + 1
+    if not _atomic_write_json(path, {"attempt_seq": nxt}):
+        return 0
+    return nxt
+
+
+def make_txn_id(run_id: str, seg: str, round_label, attempt_seq: int) -> str:
+    """`RUN_ID:seg:round_label:attempt_seq`.
+
+    Deliberately NOT derived from the staged output hashes: two attempts that
+    happen to produce identical bytes would then collide, and a truncated hash
+    can collide outright -- either one breaks any rule keyed on transaction
+    identity. Discovery does not need derivability, because the intent is
+    found by its fixed PATH; a replacement driver READS this id rather than
+    recomputing it."""
+    return f"{run_id}:{seg}:{round_label}:{attempt_seq}"
+
+
+def read_txn_failures(txn_dir: Path, seg: str):
+    """`{"count": int, "charged": [txn_id, ...]}` normalised, or **None** when
+    the file exists but cannot be trusted.
+
+    None is not "zero". Callers must treat it as "refuse", never as an empty
+    counter -- see _read_counter for why the two must stay distinguishable."""
+    status, raw = _read_counter(txn_dir / f"{seg}.txn_failures")
+    if status == "corrupt":
+        return None
+    if status == "absent":
+        return {"count": 0, "charged": []}
+    if not isinstance(raw, dict):
+        return None
+    count = raw.get("count")
+    charged = raw.get("charged")
+    if not _is_counter_int(count):
+        return None
+    if not isinstance(charged, list) or any(not isinstance(c, str) for c in charged):
+        return None
+    return {"count": count, "charged": list(charged)}
+
+
+def txn_failures_exhausted(txn_dir: Path, seg: str, ceiling: int) -> bool:
+    """True when a further transaction must NOT be started for `seg`.
+
+    `>=`, not `>`: with `>` the knob named max_txn_failures_per_segment would
+    permit failure number ceiling+1, which is not what the name says.
+
+    An undecodable counter returns True -- fail CLOSED. Reading it as zero
+    would re-authorise a segment whose refusals were already exhausted."""
+    state = read_txn_failures(txn_dir, seg)
+    if state is None:
+        return True
+    return state["count"] >= ceiling
+
+
+def charge_txn_failure(txn_dir: Path, seg: str, txn_id: str, ceiling: int) -> dict:
+    """Charge ONE failure against `seg`, idempotently, keyed on `txn_id`.
+
+    Exactly-once here is a property of IDEMPOTENCE, not of write ordering, and
+    that distinction is the whole point: cleanup deletes staging and the
+    intent, so with a plain counter, incrementing first and crashing before
+    the deletes double-charges the same transaction, while deleting first and
+    crashing before the increment never charges it at all. No ordering of two
+    writes fixes that. Because the charge is a no-op when `txn_id` is already
+    recorded, the caller may safely charge FIRST and delete afterwards, and a
+    replayed recovery of the same transaction changes nothing.
+
+    `charged` is truncated to the most recent `ceiling + 1` ids: that is all
+    the history any decision here needs, and an evicted id cannot come back,
+    because a segment has at most one live intent and no new transaction is
+    started once the count has reached the ceiling.
+
+    Returns the resulting state, or **None** when the charge could not be
+    made durable -- either because the existing counter cannot be decoded or
+    because the write failed. None must abort the cleanup that would otherwise
+    follow: this function's whole contract is "charge first, then delete", so
+    a caller that deletes the intent after an undurable charge loses the
+    refusal entirely, which is precisely the double-/never-charge hazard the
+    idempotence was introduced to remove. Returning the incremented in-memory
+    state here regardless -- as an earlier version did, discarding
+    _atomic_write_json()'s own False -- reports a durability the disk does not
+    have."""
+    state = read_txn_failures(txn_dir, seg)
+    if state is None:
+        print(
+            f"segment_dispatch_driver.py: refusing to charge a transaction failure for {seg}: "
+            f"the existing counter cannot be decoded",
+            file=sys.stderr,
+        )
+        return None
+    if txn_id in state["charged"]:
+        # ALREADY CHARGED IS NOT AUTOMATICALLY ALREADY DURABLE. _atomic_write_json
+        # can fail AFTER os.replace() has made the new counter visible -- the
+        # directory fsync is the step that confirms the rename, and it is the
+        # step most likely to fail on its own. A previous run can therefore have
+        # left this txn_id visible in `charged` while returning failure. Simply
+        # returning success here would tell the caller the refusal is recorded,
+        # it would delete the live intent, and a later system crash could drop
+        # the rename and lose the refusal permanently. So the replay path
+        # re-establishes the durability barrier and still reports failure if it
+        # cannot.
+        if not _fsync_dir(txn_dir):
+            return None
+        return state
+    state["count"] += 1
+    state["charged"] = (state["charged"] + [txn_id])[-(max(ceiling, 0) + 1):]
+    if not _atomic_write_json(txn_dir / f"{seg}.txn_failures", state):
+        return None
+    return state
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 -- profile-derived substitution values mass-translate-wf.template.js
 # itself needs to instantiate ({{TOKEN}} contract, see that file's own header
 # comment) plus resume_setup.py's SUBST_FIELDS. Independent of
