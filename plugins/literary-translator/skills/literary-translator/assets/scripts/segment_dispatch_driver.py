@@ -1542,58 +1542,121 @@ def publish_txn(txn_dir: Path, seg: str, segments_dir: Path, decision: dict,
     begins -- the same LAST / ONLY-IF / DURABLY-BEFORE distinction cleanup_txn
     needed, applied where the cost of getting it wrong is the user's text.
 
+    ONE REVALIDATION PER RENAME, NOT ONE PER PUBLICATION. An earlier version
+    revalidated once and then performed both renames, which left the widest
+    window of all between the two: it spans a directory fsync, so the canonical
+    draft's observation was already stale by the time the draft was replaced.
+    Every iteration below re-observes, so the barrier is no longer inside any
+    artifact's exposure window.
+
     Refuses (returning False) rather than continuing if any staged source is
     missing or any rename fails, leaving whatever has already been published
     in place: it is a consistent prefix by construction, and the recovery
-    procedure recognises it on the next pass."""
-    order = decision.get("publish") or []
+    procedure recognises it on the next pass.
+
+    WHAT THIS STILL DOES NOT CLOSE, stated because an overstated mitigation
+    reads as caution and then never gets attacked:
+
+    * The final gap between the last read of a file and the os.replace that
+      destroys it cannot be closed at all. POSIX has no compare-and-rename,
+      there is no rename-if-fd, and RENAME_EXCHANGE/RENAME_NOREPLACE are Linux
+      only and unexposed in Python. A writer landing in that gap is overwritten
+      silently and this function still returns True. The gap is now a few
+      microseconds of pure bytecode rather than the duration of an fsync plus a
+      payload-sized hash, but a smaller target is not no target -- and the
+      thread can be preempted inside it, so it is not bounded in wall clock.
+    * A refusal AFTER the review rename leaves a canonical review describing a
+      draft that was never published. That is a THIRD state, distinct from both
+      pairs the ordering argument reasons about, and the next recovery answers
+      preimage-diverged with cleanup, which DISCARDS the staged fixed draft --
+      the round's work must be redone, not merely resumed. It is still strictly
+      better than the alternative, because a review is regenerable and the
+      user's destroyed text is not.
+    * The real-world writer this exists to survive is not another driver -- the
+      project lease already excludes that. It is the fix step itself, a Claude
+      agent instructed to rewrite segments/<seg>.draft.json in a separate
+      process holding no lock, plus a human editor and a sync daemon. No
+      advisory lock reaches any of them."""
+    order = list(decision.get("publish") or [])
     if not order:
         return True
 
-    # RE-DERIVE THE DECISION HERE, AT THE MOMENT OF PUBLICATION.
-    #
-    # `decision` was computed from a snapshot taken earlier, and between then
-    # and now the canonical draft can have been edited -- by a concurrent
-    # driver, by a surviving codex job, or by a person. Acting on the stale
-    # decision would overwrite that newer text, which is precisely what the
-    # CAS exists to prevent: the check was performed, but not at the moment of
-    # use. Re-reading only the intent (as an earlier version did) does not
-    # help, because the intent is not what changed.
-    #
-    # Revalidation goes through classify_txn_recovery() rather than a
-    # hand-rolled comparison, so publication cannot drift from the rules
-    # recovery enforces -- a second implementation of "is this still safe"
-    # would be a second thing to keep in step.
-    fresh = classify_txn_recovery(
-        gather_txn_observed(seg, txn_dir, segments_dir, scripts_dir))
-    if (fresh.get("publish") or []) != list(order):
+    # THE DECISION MUST CARRY ITS OWN PREMISE, AND ONLY classify CAN MINT ONE.
+    # A caller cannot hand-build a decision that publishes, because it cannot
+    # produce a binding that will match the one re-derived below.
+    expected = decision.get("binding")
+    if expected is None:
         print(
-            f"segment_dispatch_driver.py: refusing to publish for {seg!r}: the on-disk state "
-            f"changed since it was classified (expected {list(order)}, now "
-            f"{fresh.get('publish') or []} / {fresh.get('outcome')})",
+            f"segment_dispatch_driver.py: refusing to publish for {seg!r}: the decision "
+            f"carries no transaction identity, so it did not come from "
+            f"classify_txn_recovery()",
             file=sys.stderr,
         )
         return False
 
-    round_label = None
-    status, parsed = _read_counter(txn_intent_path(txn_dir, seg))
-    if status == "ok" and _is_valid_intent(parsed):
-        round_label = parsed["round_label"]
-    if round_label is None:
-        print(
-            f"segment_dispatch_driver.py: refusing to publish for {seg!r}: no interpretable "
-            f"intent names the staging to publish",
-            file=sys.stderr,
-        )
-        return False
-
-    staged = staged_paths(txn_dir, seg, round_label)
     canonical = {
         "draft": segments_dir / f"{seg}.draft.json",
         "review": segments_dir / f"{seg}.review.json",
     }
+    observed_key = {
+        "draft": "canonical_draft_sha256",
+        "review": "canonical_review_sha256",
+    }
+    staged_key = {
+        "draft": "staged_draft_sha256",
+        "review": "staged_review_sha256",
+    }
 
-    for what in order:
+    for index, what in enumerate(order):
+        remaining = order[index:]
+        observed = gather_txn_observed(seg, txn_dir, segments_dir, scripts_dir)
+        fresh = classify_txn_recovery(observed)
+
+        # COMPARED AGAINST THE REMAINING TAIL, NOT THE WHOLE LIST. After the
+        # review rename the classifier legitimately answers ["draft"], because
+        # that is exactly the roll-forward state it is built to recognise;
+        # comparing against the original list would refuse the second half of
+        # every publication this function performs.
+        if (fresh.get("publish") or []) != remaining:
+            print(
+                f"segment_dispatch_driver.py: refusing to publish {what} for {seg!r}: the "
+                f"on-disk state changed since it was classified (expected {remaining}, now "
+                f"{fresh.get('publish') or []} / {fresh.get('outcome')})",
+                file=sys.stderr,
+            )
+            return False
+
+        # THE PART THE PUBLISH LIST CANNOT DO. Only three lists are ever
+        # emitted, so shape alone admits a different, fully valid transaction
+        # that happens to need the same work.
+        if fresh.get("binding") != expected:
+            print(
+                f"segment_dispatch_driver.py: refusing to publish {what} for {seg!r}: the "
+                f"transaction on disk is no longer the one this decision was made for",
+                file=sys.stderr,
+            )
+            return False
+
+        # The round label comes from the intent THIS pass validated. A separate
+        # _read_counter here -- which is what the previous version did -- renames
+        # the staging named by one read while having validated the staging named
+        # by another, and that second read was the widest window in the function.
+        #
+        # A matching non-None binding already implies _is_valid_intent(intent),
+        # since txn_binding() returns None for anything else. That is a chain of
+        # three inferences across two functions, so it is asserted here rather
+        # than relied upon: if the chain is ever broken by a change elsewhere,
+        # this refuses instead of indexing None.
+        intent = observed.get("intent")
+        if not _is_valid_intent(intent):
+            print(
+                f"segment_dispatch_driver.py: refusing to publish {what} for {seg!r}: the "
+                f"intent that carried this transaction's identity is no longer interpretable",
+                file=sys.stderr,
+            )
+            return False
+        staged = staged_paths(txn_dir, seg, intent["round_label"])
+
         if what not in staged:
             print(
                 f"segment_dispatch_driver.py: refusing to publish {what!r} for {seg!r}: "
@@ -1609,8 +1672,55 @@ def publish_txn(txn_dir: Path, seg: str, segments_dir: Path, decision: dict,
                 file=sys.stderr,
             )
             return False
+
+        # A SYMLINK IS NOT A REGULAR FILE AND os.replace WOULD REPLACE THE LINK.
+        # The confirm below hashes what the path RESOLVES to, so without this
+        # the two would be talking about different inodes: we would approve the
+        # target's bytes and then destroy the link. Refuse instead of guessing
+        # which the operator meant.
+        destination = canonical[what]
         try:
-            os.replace(source, canonical[what])
+            if destination.is_symlink():
+                print(
+                    f"segment_dispatch_driver.py: refusing to publish {what} for {seg!r}: "
+                    f"{destination} is a symlink, and replacing it would not replace the "
+                    f"file that was checked",
+                    file=sys.stderr,
+                )
+                return False
+        except OSError as exc:
+            print(
+                f"segment_dispatch_driver.py: refusing to publish {what} for {seg!r}: could "
+                f"not stat {destination}: {exc}",
+                file=sys.stderr,
+            )
+            return False
+
+        # LAST THING READ IS THE FILE THE RENAME DESTROYS. gather reads five
+        # artifacts in a fixed order, so the canonical draft -- read first and
+        # renamed last -- carries the oldest observation of all. This is not a
+        # second copy of the recovery rules: it asserts that the premise those
+        # rules just consumed is still true for this one file, and it can only
+        # refuse, never authorise. The staged source is confirmed too, so bytes
+        # nothing validated cannot reach a canonical name.
+        if _sha256_of(source) != observed.get(staged_key[what]):
+            print(
+                f"segment_dispatch_driver.py: refusing to publish {what} for {seg!r}: the "
+                f"staged bytes changed after they were validated",
+                file=sys.stderr,
+            )
+            return False
+        if _sha256_of(destination) != observed.get(observed_key[what]):
+            print(
+                f"segment_dispatch_driver.py: refusing to publish {what} for {seg!r}: "
+                f"{destination} changed after it was classified; publishing would destroy "
+                f"the newer content",
+                file=sys.stderr,
+            )
+            return False
+
+        try:
+            os.replace(source, destination)
         except OSError as exc:
             print(
                 f"segment_dispatch_driver.py: could not publish {what} for {seg!r}: {exc}",
@@ -1848,6 +1958,26 @@ def _draft_observation(seg: str, draft_path: Path, segments_dir: Path, scripts_d
     return (hashlib.sha256(before).hexdigest(), content_sha1, token)
 
 
+def txn_binding(observed: dict):
+    """The identity of the transaction `observed` describes, or None.
+
+    WHY A DECISION MUST CARRY ITS OWN PREMISE. classify_txn_recovery emits only
+    three publish lists -- (), ("draft",) and ("review", "draft") -- so the list
+    identifies the SHAPE of the work and nothing else. Two entirely different
+    transactions, different round, different staged bytes, produce the same
+    list; comparing lists therefore cannot tell "the state is unchanged" from
+    "the state was replaced by another valid transaction of the same shape".
+    Publishing then applies one transaction's decision to another's staging.
+
+    Derived from `observed` and never from an argument, so what a decision
+    carries is always the identity the rules were actually applied to. Pure."""
+    intent = observed.get("intent")
+    if not _is_valid_intent(intent):
+        return None
+    return (intent["txn_id"], intent["round_label"], intent["phase"],
+            intent["staged_draft_sha256"], intent["staged_review_sha256"])
+
+
 def classify_txn_recovery(observed: dict) -> dict:
     """Decide what to do about a segment's transaction, from observed state.
 
@@ -1861,16 +1991,28 @@ def classify_txn_recovery(observed: dict) -> dict:
       canonical_draft_token  the canonical draft's dispatch_token, or None
 
     Returns {"outcome": <one of the constants>, "publish": [...],
-             "commit_intent": bool, "cleanup": bool}.
+             "commit_intent": bool, "cleanup": bool, "binding": <tuple|None>}.
     `publish` lists which artifacts still need renaming, in the order they
     must be renamed -- review first, always, because review_ready.py compares
     a candidate review against the CURRENT canonical draft, so "old draft +
     new review" is a SHA-consistent intermediate state and "new draft + old
     review" is not.
+
+    `binding` is txn_binding(observed) -- the identity of the transaction these
+    rules were applied to. NOTHING HERE DECIDES DIFFERENTLY BECAUSE OF IT: no
+    predicate reads it, no ordering depends on it, no outcome changes. The
+    classifier simply stops discarding a premise it had already read, so that
+    publish_txn can assert at the point of use that it is acting on the same
+    transaction this decision described. Every return path carries it,
+    including the unobservable one below, so that a binding-less decision is
+    unspellable rather than merely discouraged.
     """
+    binding = txn_binding(observed)
+
     def decision(outcome, publish=(), commit_intent=False, cleanup=False):
         return {"outcome": outcome, "publish": list(publish),
-                "commit_intent": commit_intent, "cleanup": cleanup}
+                "commit_intent": commit_intent, "cleanup": cleanup,
+                "binding": binding}
 
     intent = observed.get("intent")
     # A TRANSIENT READ FAILURE IS NOT AN OBSERVATION. Every decision below
@@ -1881,8 +2023,11 @@ def classify_txn_recovery(observed: dict) -> dict:
     if any(observed.get(k) == TXN_UNREADABLE for k in (
             "staged_draft_sha256", "staged_review_sha256",
             "canonical_draft_sha256", "canonical_review_sha256")):
-        return {"outcome": TXN_UNOBSERVABLE, "publish": [],
-                "commit_intent": False, "cleanup": False}
+        # Routed through decision() like every other path. Built as a dict
+        # literal it would be the one return that carries no `binding`, and a
+        # single binding-less decision is all publish_txn's identity check
+        # needs to be bypassable.
+        return decision(TXN_UNOBSERVABLE)
     sd = observed.get("staged_draft_sha256")
     sr = observed.get("staged_review_sha256")
     cd = observed.get("canonical_draft_sha256")
