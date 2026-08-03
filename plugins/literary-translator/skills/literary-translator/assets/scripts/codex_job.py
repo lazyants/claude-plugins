@@ -405,6 +405,12 @@ class CodexJob:
         # delete. Empty on every path that never quarantines, so the check below
         # costs nothing for the other kinds.
         self.quarantine_stuck = set()
+        # dst_path -> the sha256 _publish_from_sandbox VERIFIED had landed there.
+        # Keyed by path rather than kept as one "last digest" so two publications
+        # in one run (fixreview stages a draft AND a review) cannot be confused,
+        # and so the value cannot silently belong to a different file than the
+        # caller thinks.
+        self.published_digests = {}
         self.timed_out = False
         self.holds_lock = False
         self.jobId = None
@@ -1042,6 +1048,13 @@ class CodexJob:
             except OSError:
                 _silent_unlinkat(segdir_fd, tmp_name)
                 return False
+            # Recorded, not recomputed later. This value has been through step 3
+            # (hashed off the pinned source fd, with an identity re-check around
+            # the read) and step 5 (re-read from disk and required to match), so
+            # it is the only digest in this file that provably describes the bytes
+            # now at dst_path. Anything that re-hashes the path afterwards is
+            # describing a later, unverified moment.
+            self.published_digests[dst_path] = digest
             return True
         finally:
             if src_fd is not None:
@@ -1353,6 +1366,31 @@ class CodexJob:
         except OSError:
             pass  # best-effort (e.g. an existing symlink -> ELOOP under O_NOFOLLOW)
 
+    def _staged_still_matches(self, draft_digest, review_digest):
+        """Both staged files are still exactly the bytes _publish_from_sandbox
+        verified, and the gates therefore validated.
+
+        Fails CLOSED on every uncertainty: a digest that was never captured (so
+        nothing can be compared), an unreadable file, or a mismatch. Reporting a
+        staging the transaction layer would then bind an intent to is the one
+        outcome worth refusing over, because the intent's staged_*_sha256 fields
+        are what let publish_txn believe the bytes were checked."""
+        for what, path, expected in (("draft", self.attempt, draft_digest),
+                                     ("review", self.attempt_review, review_digest)):
+            if expected is None:
+                sys.stderr.write(
+                    "codex_job.py: refusing to report a staging for %s: no verified "
+                    "digest was captured for the %s candidate\n" % (self.seg, what))
+                return False
+            actual = _sha256_path(path)
+            if actual != expected:
+                sys.stderr.write(
+                    "codex_job.py: refusing to report a staging for %s: the %s candidate "
+                    "changed after it was validated (%s -> %s)\n"
+                    % (self.seg, what, expected, actual))
+                return False
+        return True
+
     def finalize(self):
         self.ok = self.promoted or self.adopted or self.staged
         if not self.ok:
@@ -1421,11 +1459,29 @@ class CodexJob:
             # staged_draft_sha256/staged_review_sha256 line up 1:1 with that intent's
             # own required fields of the same name. All four are None/absent-shaped
             # when self.staged is False (nothing was validated well enough to stage).
+            #
+            # THE DIGEST MUST BE OF THE BYTES THE GATES VALIDATED, not of whatever
+            # is at the path when this line is written. Re-hashing here -- which is
+            # what this did -- reports a digest for bytes nothing checked, and the
+            # transaction layer then binds its intent to it: a rewrite landing after
+            # gate 4 and before this read would be staged under a digest that makes
+            # it look validated. _publish_from_sandbox already computes the digest of
+            # what it verified landed, so the value is CAPTURED there and confirmed
+            # here; a mismatch means the staged file moved under us after validation,
+            # and the honest answer is then not to report a staging at all.
+            draft_digest = self.published_digests.get(self.attempt)
+            review_digest = self.published_digests.get(self.attempt_review)
+            if self.staged and not self._staged_still_matches(draft_digest, review_digest):
+                self.staged = False
+                self.ok = self.promoted or self.adopted
+                self.reason = "staged-digest-drifted"
+                line["ok"] = self.ok
+                line["reason"] = self.reason
             line["staged"] = self.staged
             line["staged_draft_path"] = self.attempt if self.staged else None
             line["staged_review_path"] = self.attempt_review if self.staged else None
-            line["staged_draft_sha256"] = _sha256_path(self.attempt) if self.staged else None
-            line["staged_review_sha256"] = _sha256_path(self.attempt_review) if self.staged else None
+            line["staged_draft_sha256"] = draft_digest if self.staged else None
+            line["staged_review_sha256"] = review_digest if self.staged else None
         sys.stdout.write(json.dumps(line) + "\n")
         sys.stdout.flush()
 

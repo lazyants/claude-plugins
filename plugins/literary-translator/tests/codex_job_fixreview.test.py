@@ -26,13 +26,22 @@ does NOT re-test any of that: it targets exactly what --kind fixreview adds on t
 Like the sibling file, STUB gate scripts (not the real draft_ready.py/validate_draft.py/
 review_ready.py) drive the subprocess-level tests for gates 1-3 -- the driver only depends on
 the FROZEN candidate-file CLI contract, and real-gate end-to-end coverage lives elsewhere in
-this suite. Gate 4 (matchedVerdict) is the ONE gate that MUST run against the real shipped
-template, everywhere it is exercised -- a stub would defeat the entire point of that gate's
-own "never transcribed" design, so this file drives it two ways: directly (_matched_verdict()
-called on the loaded module, no subprocess dispatch needed) and, where node is available, via
-a real end-to-end subprocess dispatch through a small JS fake companion (never the Python
-FAKE_NODE the sibling file uses for task/status/cancel -- that stub cannot execute real JS, so
-reaching gate 4 for real requires a real node interpreter end to end).
+this suite. Gate 4 (matchedVerdict) is driven two ways: directly (_matched_verdict() called on
+the loaded module) and via a real end-to-end subprocess dispatch through a small JS fake
+companion (never the Python FAKE_NODE the sibling file uses for task/status/cancel -- that stub
+cannot execute real JS, so reaching gate 4 for real requires a real node interpreter end to end).
+
+WITHOUT node ON PATH, GATE 4 IS NOT EXERCISED AGAINST THE REAL TEMPLATE AT ALL. Both of those
+ways need node, so both are @skip_no_node, and every remaining test that touches gate 4
+substitutes _matched_verdict_stub. Measured, not assumed: with a PATH carrying only python3 this
+file exits 0 with the nine tests NODE_GATED_TESTS names skipped -- a full green that proves
+nothing about the gate whose whole design is "never transcribed". (The count of skips is stated,
+not the count of passes: a pass total rots on the next added test and would then be one more
+number in this file that is confidently wrong.) An earlier version of this docstring claimed gate 4 "MUST
+run against the real shipped template, everywhere it is exercised", which was true of the intent
+and false of the suite; the skip is the repo-wide convention (see the ~10 sibling files that
+skipif on shutil.which("node")) and is kept, but the claim is corrected and
+test_the_node_gated_set_is_exactly_this pins the set so it cannot grow silently.
 """
 
 import hashlib
@@ -73,7 +82,28 @@ except ImportError:  # pragma: no cover - non-POSIX
 skip_no_flock = pytest.mark.skipif(not _HAS_FLOCK, reason="fcntl.flock unavailable")
 
 _NODE = shutil.which("node")
-skip_no_node = pytest.mark.skipif(_NODE is None, reason="node not on PATH")
+skip_no_node = pytest.mark.skipif(
+    _NODE is None,
+    reason="node not on PATH -- gate 4 is NOT exercised against the real template in this run")
+
+#: Every test that cannot run without node, named explicitly.
+#:
+#: A skip is invisible in a green run: nine tests vanishing takes the suite from
+#: 48 to 39 and prints nine dots' worth of 's'. Pinning the set by name means a
+#: tenth one cannot join it silently -- someone adding a stubbed gate-4 test and
+#: marking it skip_no_node has to come here and say so, which is the moment to
+#: ask whether the real-template counterpart exists.
+NODE_GATED_TESTS = frozenset({
+    "test_matched_verdict_real_template_accepts_clean_review",
+    "test_matched_verdict_real_template_accepts_authentic_loc",
+    "test_matched_verdict_real_template_rejects_fabricated_loc",
+    "test_matched_verdict_real_template_rejects_colonless_holistic_loc",
+    "test_matched_verdict_missing_template_reports_error_not_crash",
+    "test_matched_verdict_stale_truncate_marker_reports_error",
+    "test_e2e_fixreview_stages_valid_pair",
+    "test_e2e_fixreview_bad_draft_token_quarantines",
+    "test_e2e_fixreview_fabricated_loc_review_quarantines_despite_valid_draft",
+})
 
 
 # --------------------------------------------------------------------------- #
@@ -835,6 +865,79 @@ def test_finalize_stdout_reports_staged_paths_and_matching_digests(tmp_path, mon
     assert line["staged_review_sha256"] == hashlib.sha256(Path(job.attempt_review).read_bytes()).hexdigest()
 
 
+def test_the_reported_digest_is_the_VALIDATED_one_not_a_later_re_read(tmp_path, monkeypatch, capsys):
+    """The digest the transaction layer binds its intent to must describe the
+    bytes the four gates checked.
+
+    Re-hashing the path in finalize -- which is what this used to do -- reports a
+    digest for whatever is there at report time. A rewrite landing after gate 4
+    would then be handed on under a digest that makes it look validated, and
+    publish_txn's own staged-source confirm would happily agree, because both
+    sides would be describing the same unvalidated bytes.
+
+    Here the staged draft is rewritten after validation. The run must refuse to
+    report a staging at all rather than report the new bytes, or the old digest
+    against the new file."""
+    job = _mkjob(tmp_path, deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "_preflight_same_device", lambda: True)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+
+    def fake_launch():
+        _seed_fixreview_sandbox(tmp_path, job)
+        Path(job.sandbox_attempt).write_text(_draft_payload(job.tok), encoding="utf-8")
+        Path(job.sandbox_attempt_review).write_text(_review_payload(job.review_tok), encoding="utf-8")
+        return True
+    monkeypatch.setattr(job, "launch", fake_launch)
+    monkeypatch.setattr(job, "poll", lambda: setattr(job, "job_status", "completed"))
+    gate, _ = _gate_recorder({})
+    monkeypatch.setattr(job, "_gate", gate)
+    mv, _ = _matched_verdict_stub(({"status": "ok"}, None))
+
+    def validate_then_tamper(review_obj, timeout):
+        result = mv(review_obj, timeout)
+        # Lands after every gate has passed, before finalize reports.
+        Path(job.attempt).write_text('{"rewritten":"after the gates"}', encoding="utf-8")
+        return result
+    monkeypatch.setattr(job, "_matched_verdict", validate_then_tamper)
+
+    job.run()
+    line = _run_line(capsys.readouterr().out)
+
+    assert line["staged"] is False, "a post-validation rewrite must not be reported as staged"
+    assert line["staged_draft_sha256"] is None
+    assert line["staged_draft_path"] is None
+    assert line["reason"] == "staged-digest-drifted"
+    assert line["ok"] is False
+
+
+def test_a_staging_with_no_captured_digest_is_refused_not_reported_as_null(tmp_path, capsys):
+    """Fail CLOSED when there is nothing to compare.
+
+    A digest is captured only by _publish_from_sandbox, which is the step that
+    verifies the bytes landed. If self.staged is somehow true without one, the
+    honest answer is that this run cannot vouch for the bytes -- not to report
+    the staging with a null digest, which downstream reads as "staged, digest
+    unknown" and is exactly what write_txn_intent would then record.
+
+    Mutation is why this test exists: turning the missing-digest branch into a
+    `continue` left the whole suite green, so nothing held the fail-closed half
+    of a guard whose other half was covered."""
+    job = _mkjob(tmp_path)
+    Path(job.attempt).write_text('{"marker":"draft"}', encoding="utf-8")
+    Path(job.attempt_review).write_text('{"marker":"review"}', encoding="utf-8")
+    job.staged = True
+    assert job.published_digests == {}, "premise: nothing verified these bytes"
+
+    job.finalize()
+    line = _run_line(capsys.readouterr().out)
+
+    assert line["staged"] is False
+    assert line["staged_draft_sha256"] is None
+    assert line["staged_draft_path"] is None
+    assert line["reason"] == "staged-digest-drifted"
+
+
 def test_finalize_stdout_fields_absent_shaped_when_not_staged(tmp_path, monkeypatch, capsys):
     job = _mkjob(tmp_path)
     monkeypatch.setattr(job, "_preflight_same_device", lambda: False)
@@ -1101,3 +1204,30 @@ def test_e2e_fixreview_fabricated_loc_review_quarantines_despite_valid_draft(tmp
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_the_node_gated_set_is_exactly_this():
+    """Always runs, with or without node, so the coverage this file loses on a
+    node-less machine is stated rather than merely skipped.
+
+    Derived from the decorated functions themselves -- reading the markers off
+    the module -- not from a hand-kept list compared against another hand-kept
+    list, which would agree with itself while both drifted from the code."""
+    import inspect
+    import sys as _sys
+
+    module = _sys.modules[__name__]
+    marked = set()
+    for name, obj in inspect.getmembers(module, inspect.isfunction):
+        if not name.startswith("test_"):
+            continue
+        for mark in getattr(obj, "pytestmark", []):
+            if mark.name == "skipif" and "node not on PATH" in str(mark.kwargs.get("reason", "")):
+                marked.add(name)
+
+    assert marked == set(NODE_GATED_TESTS), (
+        "the node-gated set changed. Added tests: %s. Removed: %s. If a new gate-4 "
+        "test is stubbed, say so here and check that a real-template counterpart "
+        "exists -- a skip is invisible in a green run."
+        % (sorted(marked - set(NODE_GATED_TESTS)), sorted(set(NODE_GATED_TESTS) - marked))
+    )
