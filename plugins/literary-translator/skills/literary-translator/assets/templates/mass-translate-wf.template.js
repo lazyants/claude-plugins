@@ -1814,18 +1814,27 @@ async function translateStage(seg) {
 // reduces to 8 + 2 + MAXFIX*7 = 10 + 7*MAXFIX, the pre-#348 formula verbatim.
 //
 // OPERATIONAL CONSEQUENCE, stated rather than hidden: at WAIT_CALLS = 9 and
-// MAXFIX = 4 a segment budgets 86 calls, up from 38. At the shipped
-// engine.batch_agent_cap: 3500 a normal batch therefore drops from 92 segments
-// to 40 -- both re-derived here rather than quoted: 1 + 92*38 = 3497 and
-// 1 + 40*86 = 3441, with 93 and 41 the first values to exceed the cap.
+// MAXFIX = 4 a segment budgets 86 calls, up from 38. What that costs in
+// SEGMENTS depends on engine.batch_agent_cap, whose shipped value is owned by
+// assets/profile.example.yml -- read it there, do not restate it here. (At the
+// then-shipped 3500 the batch dropped from 92 segments to 40: 1 + 92*38 = 3497
+// and 1 + 40*86 = 3441, with 93 and 41 the first values to exceed it. #409
+// step 2 has since raised the shipped default again, so those two segment
+// counts are HISTORY, not current capacity -- and the new value is deliberately
+// not named here either, since naming it is what goes stale.)
 // This said "~78 segments" until round 5. That number is a batch SIZE, not a
 // ceiling: it is the ~78-segment repro in
 // references/orchestration-and-batching.md's note on 1.3.5 raising this cap
 // from 1000, where the whole point is that 1 + 78*38 = 2965 fitted under 3500
 // WITH HEADROOM. Quoting it here turned a repro size into a capacity and then
 // compared it against a real ceiling.
-// profile.example.yml states the post-#348 figure (40, and 26 at cap 1000);
-// neither it nor references/orchestration-and-batching.md ever carried a
+// profile.example.yml carries the post-#348 arithmetic for the CURRENT
+// shipped cap -- do not restate a figure here, read it there. (This comment
+// used to cite "40, and 26 at cap 1000"; #409 step 2 then raised the shipped
+// default again, so both numbers and the cap they were quoted at are
+// gone from that file. A restated capacity goes stale the moment the knob
+// moves, which is exactly what happened -- hence the pointer, not a number.)
+// Neither it nor references/orchestration-and-batching.md ever carried a
 // before/after capacity pair, so the claim that they "carry the same
 // arithmetic" was describing agreement that did not exist.
 //

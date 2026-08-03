@@ -1451,7 +1451,8 @@ NOT `SEGS`, and NOT `select_segments.py`'s own
 `--only-segs`/`--allow-retranslate-converged`/`--allow-empty` scoping
 flags, since those govern Step 1's own gating and must not also gate
 resume. `segs` is likewise no longer read by
-`resume_setup.py` at all (accepted-but-ignored for one release only). See
+`resume_setup.py` at all, and its one-release compatibility window covered
+1.18.0 and is now spent -- do not send it. See
 `resume_setup.py`'s own module docstring for the full payload contract.
 Only then is `mass-translate-wf.template.js` instantiated (fresh from the
 plugin's current copy every run — never reuse a stale generated copy),

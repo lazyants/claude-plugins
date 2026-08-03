@@ -4011,12 +4011,15 @@ def test_resumable_run_id_candidates_excludes_names_containing_double_dot(tmp_pa
 
 
 def test_resume_setup_ignores_segs_entirely_for_kind_mass(tmp_path):
-    """resume_setup.py's own module docstring: 'segs' is DEPRECATED for
-    kind="mass" and now IGNORED entirely -- never read, validated, or
-    otherwise inspected, even when present. This driver's own
-    resolve_run_id() still SENDS it (see that function's own docstring for
-    why -- backward compatibility for one release), so this contract must
-    actually hold or that reliance is unsafe. Proven two ways: (1) the
+    """'segs' was REMOVED from the kind="mass" contract after 1.18.0: never
+    read, validated, or otherwise inspected, even when present. This
+    driver deliberately does NOT send it (resolve_run_id()'s own
+    docstring), so nothing here relies on the field -- the value of this
+    test is that it pins the INERTNESS a payload from any older
+    hand-built caller depends on, given the payload has no key allowlist.
+    (This docstring previously claimed the driver still sends it for
+    backward compatibility; that contradicted the driver's own docstring
+    and the omission assertion in this same file.) Proven two ways: (1) the
     computed input_digest is IDENTICAL across calls whose 'segs' values
     genuinely differ; (2) a structurally INVALID 'segs' (not even an
     array, or null) does not cause a failure -- proving it is not merely

@@ -1590,10 +1590,11 @@ def resolve_run_id(dirs: dict, *, translate_cfg: dict,
     still_works proves omission is accepted for kind="mass" specifically,
     not merely inferred from the module docstring. This driver ships in
     the SAME release as that exact resume_setup.py commit, so it carries
-    no pre-8815800 caller to stay backward-compatible with (the field's
-    one-release acceptance window in resume_setup.py's own docstring
-    exists for OTHER, separately-versioned callers, not this one) --
-    sending it would only reintroduce dead code with nothing on the
+    no pre-8815800 caller to stay backward-compatible with. That window --
+    which existed in resume_setup.py's docstring for OTHER,
+    separately-versioned callers -- covered 1.18.0 and is now spent; the field is gone
+    from the contract entirely, inert only because the payload has no key
+    allowlist. Sending it would reintroduce dead code with nothing on the
     receiving end to read it.
 
     The #392 defect this domain choice closes is still worth carrying

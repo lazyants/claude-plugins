@@ -197,9 +197,14 @@ def _run_resume_setup(root: Path, payload_obj: dict, timeout: int = 30):
 
 def _mass_base_payload() -> dict:
     """LT-409: `args` is PINNED to {} for kind="mass" (resume_setup.py hard-
-    rejects anything else); `segs` is kept, unread, to prove the
-    deprecated-but-accepted field does nothing -- the digest domain now
-    comes from manifest.json (written by _make_resume_setup_root())."""
+    rejects anything else). `segs` -- removed from the contract after 1.18.0,
+    inert only because the payload has no key allowlist -- is carried here
+    so these fixtures exercise the shape an older hand-built caller would
+    still send. It is NOT varied by this file, so nothing here proves the
+    field is unread; that proof lives in resume_integrity.test.py's
+    test_mass_segs_field_is_ignored_entirely /
+    test_mass_segs_field_omitted_still_works, which compare digests across
+    differing and absent values."""
     return {
         "kind": "mass",
         "args": {},

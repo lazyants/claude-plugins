@@ -49,10 +49,12 @@ written; this revision drives their REAL, on-disk interfaces instead
     `--kind/--args-file/--resume-from-run-id` three-flag shape. The single
     payload JSON file carries `kind`, `args`, `subst` (all 6 fields
     required), `resume_from_run_id` (optional/nullable), and kind-specific
-    fields: `segs` (mass -- a list of segment ids; resume_setup.py computes
-    each one's 15-field composite itself by shelling to `cache_key.py
-    --seg <id>`, never trusting a caller-supplied composite) or
-    `glossary_rule` + `batches` (glossary). Prints
+    fields: for mass, NOTHING beyond the common fields -- the digest
+    domain comes from manifest.json's own segments[], and resume_setup.py
+    computes each id's 15-field composite by shelling to `cache_key.py
+    --seg <id>`, never trusting a caller-supplied composite. (`segs` used
+    to be that mass field; removed from the contract after 1.18.0.) For
+    glossary: `glossary_rule` + `batches`. Prints
     `{"success": true, "effectiveRunId": ..., "resume": true|false,
     "run_dir": ..., "input_digest": ...}` on success or
     `{"success": false, "error": ...}` on failure; exit 0/1 respectively,
@@ -425,9 +427,11 @@ def mass_base_payload():
     """LT-409: `args` is now PINNED to {} for kind="mass" -- resume_setup.py
     hard-rejects anything else (see its own module docstring's `args`
     paragraph). `segs` is kept here, unread, purely to prove the
-    DEPRECATED-but-still-accepted field genuinely does nothing -- the
+    field REMOVED from the contract after 1.18.0 genuinely does nothing -- the
     digest domain comes from manifest.json instead (written by
-    make_resume_setup_root(), matching this exact seg01/seg02 pair)."""
+    make_resume_setup_root(), matching this exact seg01/seg02 pair). It is
+    inert rather than rejected because the payload has no key allowlist, so
+    this doubles as the guard that an UNKNOWN key cannot move the digest."""
     return {
         "kind": "mass",
         "args": {},
@@ -1575,7 +1579,7 @@ def test_mass_args_empty_object_accepted(tmp_path):
 
 
 def test_mass_segs_field_is_ignored_entirely(tmp_path):
-    """The deprecated 'segs' field must not affect input_digest AT ALL --
+    """The removed 'segs' field must not affect input_digest AT ALL --
     proven by setting it to something the PRE-LT-409 code would have
     rejected outright (an empty list) in one payload, and confirming setup
     still succeeds with the exact SAME digest as an ordinary payload whose
@@ -1594,13 +1598,15 @@ def test_mass_segs_field_is_ignored_entirely(tmp_path):
     parsed_b = assert_setup_success(proc_b, parsed_b)
 
     assert parsed_a["input_digest"] == parsed_b["input_digest"], (
-        "the deprecated 'segs' field must never affect input_digest"
+        "the removed 'segs' field must never affect input_digest"
     )
 
 
 def test_mass_segs_field_omitted_still_works(tmp_path):
-    """'segs' is optional now -- omitting it entirely behaves identically
-    to supplying it (both backward- and forward-compatible)."""
+    """Omitting 'segs' entirely behaves identically to supplying it -- and
+    "identically" is asserted on the DIGEST, not merely on exit status.
+    Asserting success alone would pass even if omission silently changed
+    the digest domain, which is the whole property this test exists for."""
     root = make_resume_setup_root(tmp_path)
     write_fixture_cache_keys(root, mass_base_cache_keys())
     payload = mass_base_payload()
@@ -1609,6 +1615,17 @@ def test_mass_segs_field_omitted_still_works(tmp_path):
     proc, parsed = run_resume_setup(root, payload)
 
     parsed = assert_setup_success(proc, parsed)
+
+    # The digest must equal that of an otherwise-identical payload that DOES
+    # carry the field. Separate root so the two runs cannot resume each other.
+    root_with = make_resume_setup_root(tmp_path, name="durable_root_with_segs")
+    write_fixture_cache_keys(root_with, mass_base_cache_keys())
+    proc_with, parsed_with = run_resume_setup(root_with, mass_base_payload())
+    parsed_with = assert_setup_success(proc_with, parsed_with)
+
+    assert parsed["input_digest"] == parsed_with["input_digest"], (
+        "omitting 'segs' must not move input_digest"
+    )
 
 
 def test_mass_domain_now_comes_from_manifest_not_segs(tmp_path):

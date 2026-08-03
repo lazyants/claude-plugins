@@ -79,10 +79,6 @@ path. Payload shape:
                                                  # kept for one release; see below.
                                                  # Mutually exclusive with the plural
                                                  # field above (both present -> error).
-      "segs": ["seg01", "seg02", ...],           # DEPRECATED for kind="mass", IGNORED
-                                                 # entirely -- see the dedicated
-                                                 # paragraph below. Accepted-but-unread
-                                                 # for one release only.
       "glossary_rule": <any JSON value>,         # required for kind="glossary"
       "batches": [                               # required for kind="glossary"
         {"index": 0, "names": ["Alice", "Bob"]},
@@ -113,9 +109,9 @@ structurally. For kind="glossary", `args` keeps its pre-existing meaning
 (the full ordered args this invocation was given, e.g. the candidate
 list) and is hashed verbatim, unchanged by this fix.
 
-`segs` -- DEPRECATED for kind="mass" as of LT-409, and now IGNORED
-entirely: never read, validated, or otherwise inspected, even when
-present. Before this fix the mass-kind digest domain was built directly
+`segs` -- REMOVED from the kind="mass" contract. It is never read,
+validated, or otherwise inspected, even when present. The history is kept
+below because it explains why the digest domain lives where it does. Before this fix the mass-kind digest domain was built directly
 from this caller-supplied list, and two callers disagreed about what to
 pass it: the SHRINKING post-`select_segments.py` eligible list (shrinks by
 one entry every time a segment converges) versus the FULL, stable
@@ -132,10 +128,13 @@ does not change just because its ledger status did), so the digest stays
 stable across exactly the case the whole resumability story exists to
 survive, while still changing, correctly, when the manifest itself
 changes (a real W2/W3 re-run) or any segment's cache_key does (a real
-profile/source/derivation change). `segs`, when present, is accepted
-purely so an already-deployed caller built against the pre-LT-409 contract
-does not fail outright for one release -- the NEXT release should stop
-sending it, and this script should stop documenting it as accepted. The
+profile/source/derivation change). The one-release compatibility window for `segs` COVERED 1.18.0 and is now
+spent -- that release was the one release, and this is the next one -- so it
+is no longer part of this contract and is not documented as accepted. It
+is not rejected either, and that is not an oversight: this payload has no
+key allowlist -- every field is read with `.get()` -- so a stray `segs`
+from an old caller is inert exactly like any other unknown key. Removing
+"acceptance" was therefore a documentation change, never a code one. The
 "non-empty array of strings" structural validation this field used to
 carry has NOT vanished -- it now lives in `_load_manifest_seg_ids()`,
 gating the manifest's own `segments[]` instead (and is in fact stricter:
@@ -693,7 +692,8 @@ def compute_input_digest(
                 "payload 'args' must be the literal empty object {} for kind='mass' "
                 f"(it governs Step 1's own gating, not resume-integrity); got {mass_args!r}"
             )
-        # `segs` (deprecated, LT-409) is deliberately NEVER read here -- see
+        # `segs` (removed from the contract after 1.18.0) is deliberately NEVER
+        # read here -- see
         # the module docstring's own `segs` paragraph. The domain now comes
         # from manifest.json's full candidate set, which does not shrink as
         # segments converge.

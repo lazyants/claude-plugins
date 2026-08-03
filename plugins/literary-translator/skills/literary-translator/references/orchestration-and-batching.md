@@ -607,17 +607,20 @@ polices every individual artifact even when resuming is in principle safe).
 Before `pipeline()` is ever called, the workflow template computes a
 worst-case estimate of how many total `agent()` calls this batch could make,
 and refuses to start if that estimate exceeds `engine.batch_agent_cap`
-(`profile.yml`'s `engine.batch_agent_cap: 3500` in the shipped example — see
-`assets/profile.example.yml`). 1.3.5 raised this default from 1000, which the
-then-current `1 + N*38`-at-`max_fix_rounds:4` formula made refuse any mass batch
-over 26 segments; 3500 admitted the issue's ~78-segment repro,
-`1 + 78*38 = 2965`, with headroom. **1.16.1 (#348) more than doubled the
+(the shipped value lives in `assets/profile.example.yml` — **read it there;
+this page deliberately does not restate it**, because every restatement of it
+here has gone stale within a release). **1.16.1 (#348) more than doubled the
 per-segment cost:** a WAIT is now up to 9 calls rather than 1, so the formula
-below yields `1 + N*86` at `max_fix_rounds:4`, and the SAME 3500 cap now admits
-at most **40 segments** (`1 + 40*86 = 3441`; 41 segments would need 3527 and the
-run refuses to start). A 40-segment book batch therefore now sits just under the
-ceiling, where before #348 the same batch carried roughly 2000 calls of margin
-(`1 + 40*38 = 1521`). Whether to raise the cap for a given project is the
+below yields `1 + N*86` at `max_fix_rounds:4`, up from `1 + N*38`.
+
+The capacity history, kept because it explains the formula and not because any
+of these numbers is current: the default was 1000 (refusing any mass batch over
+26 segments under `1 + N*38`), then 1.3.5 raised it to 3500 (admitting the
+issue's ~78-segment repro, `1 + 78*38 = 2965`, with headroom), where #348's
+`1 + N*86` then admitted only **40 segments** — a book batch sitting just under
+the ceiling that had carried roughly 2000 calls of margin before (`1 + 40*38 =
+1521`). #409 step 2 raised the shipped default again. **Every segment count in
+this paragraph is historical; `profile.example.yml` owns the current one.** Whether to raise the cap for a given project is the
 operator's call, not this plugin's. **This estimator is new plugin hardening, not
 itself source-proven** — the real reference script has no such check
 anywhere; it simply pipelines whatever `SEGS` it's given. Treat it with the
@@ -1037,7 +1040,8 @@ inside it:
   At the shipped `WAIT_CALLS = 3` and `MAX_CITATION_RETRIES = 2` that is
   **`19 * BATCHES.length + 2` live** and **`5 * BATCHES.length + 2`
   offline**, so a `batch_agent_cap` of 3500 admits ~184 live batches or ~699
-  offline ones. The parameterized form is **provably a generalisation rather
+  offline ones (3500 as a worked EXAMPLE — it is no longer the shipped default;
+  `profile.example.yml` owns that). The parameterized form is **provably a generalisation rather
   than a rewrite**: substituting `WAIT_CALLS = 1` collapses the two branches
   to `1 + 4*(MAX_CITATION_RETRIES+1) == 13` and to `3`, which are exactly the
   1.16.1 formulas.
