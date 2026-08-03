@@ -1522,6 +1522,86 @@ def commit_txn_intent(txn_dir: Path, seg: str) -> bool:
     return _atomic_write_json(path, parsed)
 
 
+def publish_txn(txn_dir: Path, seg: str, segments_dir: Path, decision: dict) -> bool:
+    """Perform the renames a recovery decision prescribes. Nothing else.
+
+    THIS IS THE ONLY FUNCTION IN THE TRANSACTION LAYER THAT TOUCHES WORK THE
+    USER OWNS, which is why it does as little as possible: it renames what
+    `decision["publish"]` names, in the order given, and neither decides nor
+    cleans up. The decision comes from classify_txn_recovery(), so every
+    refusal has already happened before control reaches here.
+
+    REVIEW BEFORE DRAFT, AND DURABLY SO. review_ready.py compares a candidate
+    review against the CURRENT canonical draft, so "old draft + new review" is
+    a SHA-consistent intermediate state and "new draft + old review" is not.
+    Ordering the two renames is not enough to guarantee that: without a
+    barrier between them a crash can persist the draft rename and lose the
+    review rename, which materialises precisely the inconsistent pair the
+    order exists to avoid. Each rename is therefore flushed before the next
+    begins -- the same LAST / ONLY-IF / DURABLY-BEFORE distinction cleanup_txn
+    needed, applied where the cost of getting it wrong is the user's text.
+
+    Refuses (returning False) rather than continuing if any staged source is
+    missing or any rename fails, leaving whatever has already been published
+    in place: it is a consistent prefix by construction, and the recovery
+    procedure recognises it on the next pass."""
+    order = decision.get("publish") or []
+    if not order:
+        return True
+
+    round_label = None
+    status, parsed = _read_counter(txn_intent_path(txn_dir, seg))
+    if status == "ok" and _is_valid_intent(parsed):
+        round_label = parsed["round_label"]
+    if round_label is None:
+        print(
+            f"segment_dispatch_driver.py: refusing to publish for {seg!r}: no interpretable "
+            f"intent names the staging to publish",
+            file=sys.stderr,
+        )
+        return False
+
+    staged = staged_paths(txn_dir, seg, round_label)
+    canonical = {
+        "draft": segments_dir / f"{seg}.draft.json",
+        "review": segments_dir / f"{seg}.review.json",
+    }
+
+    for what in order:
+        if what not in staged:
+            print(
+                f"segment_dispatch_driver.py: refusing to publish {what!r} for {seg!r}: "
+                f"unknown artifact",
+                file=sys.stderr,
+            )
+            return False
+        source = staged[what]
+        if not source.is_file():
+            print(
+                f"segment_dispatch_driver.py: refusing to publish {what} for {seg!r}: "
+                f"{source} is missing",
+                file=sys.stderr,
+            )
+            return False
+        try:
+            os.replace(source, canonical[what])
+        except OSError as exc:
+            print(
+                f"segment_dispatch_driver.py: could not publish {what} for {seg!r}: {exc}",
+                file=sys.stderr,
+            )
+            return False
+        # Barrier BETWEEN the renames, not merely after both.
+        if not _fsync_dir(segments_dir):
+            print(
+                f"segment_dispatch_driver.py: published {what} for {seg!r} but could not make "
+                f"it durable; stopping before the next rename",
+                file=sys.stderr,
+            )
+            return False
+    return True
+
+
 def cleanup_txn(txn_dir: Path, seg: str, round_label: str) -> bool:
     """Remove the staging files and then the intent, in that order.
 
