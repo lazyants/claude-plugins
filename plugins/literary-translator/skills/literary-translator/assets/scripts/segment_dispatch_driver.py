@@ -360,6 +360,7 @@ import fcntl
 import importlib.util
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -369,7 +370,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NoReturn, Optional
+from typing import NoReturn, Optional, TypeGuard
 
 try:
     import yaml
@@ -843,6 +844,175 @@ MAX_STALE_REDISPATCHES_PER_ROUND = 1            # R_stale
 MAX_FABRICATED_LOC_RETRIES = 1                  # R_final -- the existing one-retry bound
 DEFAULT_MAX_TXN_FAILURES_PER_SEGMENT = 3
 
+# #409 track B, "the size fallback" (R_size = 0 falls back to handoff). A
+# --fix-mode=codex fixreview call has to fit inside the model's real context
+# window, and references/orchestration-and-batching.md's own §6 measured
+# that the largest real segment does NOT fit with the required margin -- so
+# a segment whose estimated cost is unobservable or over budget falls back
+# to `handoff` for itself alone, silently, never as a batch failure or a
+# truncated job. See fixreview_context_estimate()/effective_fix_mode() below
+# (defined once DispatchContext exists, since both take a `ctx` and read
+# ctx.segments_dir / ctx.dirs["durable_root"]) for the mechanism; this block
+# is only the numbers it runs on.
+#
+# EVERY CONSTANT BELOW IS MEASURED AGAINST ONE NAMED MODEL, `gpt-5.6-sol` --
+# the model ~/.codex/config.toml pins at measurement time, per ~/.codex/
+# models_cache.json (S6-TOKEN-MARGIN-RESULTS.md §8.1). THIS BUDGET DOES NOT
+# ADAPT TO engine.model. profile.schema.json documents engine.model as
+# OPTIONAL -- unset (the common case) resolves to whatever ~/.codex/
+# config.toml's own default is at RUN time, which this file never reads,
+# and a profile MAY pin it to a different model outright. In either case,
+# if the real model in use has a smaller context window than gpt-5.6-sol's,
+# this gate measures against the WRONG ceiling and reports a margin that
+# is not the margin actually available -- a comfortable-looking pass that
+# is not one. Deliberately NOT auto-resolved here: doing so would mean
+# either hardcoding a model->window catalog that goes stale the moment a
+# new model ships, or reading ~/.codex/models_cache.json at dispatch time,
+# coupling this plugin to Codex's own private cache layout for a value it
+# has no other reason to depend on. Until one of those is judged worth
+# building, an operator pinning engine.model to a smaller-window model
+# MUST lower engine.max_fixreview_context_tokens by hand to match.
+#
+# TOKENIZER: cl100k_base throughout, the CONSERVATIVE (higher tokens-per-byte)
+# of the two plausible tokenizers §6 measured against (the other being
+# o200k_base). No public tokenizer spec exists for gpt-5.6-sol itself (the
+# model ~/.codex/config.toml pins) -- cl100k_base is a defensible stand-in
+# precisely because it is the one that reports LESS margin, not more; a
+# budget sized against it fails closed rather than optimistic. Confirmed on
+# base_instructions below too: cl100k gives 3,576 tokens against o200k's
+# 3,552 -- cl100k is again the higher (more conservative) figure.
+#
+# TOKEN BUDGET, NOT A BYTE BUDGET, AND THAT DISTINCTION IS LOAD-BEARING. An
+# earlier draft of this gate compared one blended byte SUM against a single
+# byte threshold (423,297 B, the byte-domain equivalent of the token budget
+# below at this formula's own per-component ratios). Across the 207 real
+# segments measured, the two formulations agree on the verdict for every
+# one today -- but 75% of real segments already sit past the ratio SKEW
+# boundary between the segpack/draft/prose terms (a 33.63% draft-byte
+# fraction is where a single blended ratio stops describing the actual mix),
+# and the corpus's second-largest segment has only 72,276 B of headroom
+# before the two formulations would disagree -- 29% less headroom than an
+# earlier, less conservative version of this budget had. Where they would
+# ever disagree, the byte sum errs in the EXPENSIVE direction: it can admit
+# a call the real, per-component token estimate below would have refused,
+# letting an oversized job fail only after it has already been paid for.
+# Summing PER-COMPONENT token estimates (each divided by ITS OWN measured
+# ratio, never one blended figure) is what removes that failure mode.
+FIXREVIEW_CONTEXT_WINDOW_TOKENS = 272_000
+# gpt-5.6-sol's own `context_window`, per ~/.codex/models_cache.json -- the
+# cache the codex runtime itself resolves against (orchestration-and-
+# batching.md §6). Describes the MODEL, not any one project; not itself
+# profile-configurable.
+FIXREVIEW_EFFECTIVE_CONTEXT_WINDOW_PERCENT = 0.95
+# The SAME model record's `effective_context_window_percent` field -- easy
+# to miss sitting next to `context_window` above, and missing it already
+# flipped a verdict once during this feature's own measurement pass. The
+# window this mode may actually plan against is 272,000 * 0.95 = 258,400
+# tokens, not the raw 272,000 -- the model reserves the remaining 5% for
+# itself, and this gate has no visibility into what for.
+FIXREVIEW_REQUIRED_MARGIN = 0.25
+# The margin bar §6 states this mode must clear to be considered safely
+# within budget, applied to the EFFECTIVE window above, not the raw one.
+# Feeds ONLY the default below -- profile.yml may override the resulting
+# token count directly via engine.max_fixreview_context_tokens, without
+# either ratio above ever being re-consulted.
+DEFAULT_MAX_FIXREVIEW_CONTEXT_TOKENS = int(
+    FIXREVIEW_CONTEXT_WINDOW_TOKENS * FIXREVIEW_EFFECTIVE_CONTEXT_WINDOW_PERCENT
+    * (1 - FIXREVIEW_REQUIRED_MARGIN))
+# = 258400 * 0.75 = 193800. Keep profile.schema.json's own "default"
+# annotation (documentation only -- nothing fills it in at validation time,
+# see _optional_engine_int()'s own docstring) numerically equal to this by
+# hand; every other OPTIONAL engine.* knob in this file already carries
+# that same obligation.
+
+# bytes-per-token ratios, MEASURED under cl100k_base on the real corpora
+# (orchestration-and-batching.md §6) -- divide an observed byte count by the
+# matching ratio to get an estimated token count.
+FIXREVIEW_SEGPACK_BYTES_PER_TOKEN = 3.0376
+# Measured on real segpack_<seg>.json content (source text + canon_map)
+# across the live corpora.
+FIXREVIEW_DRAFT_BYTES_PER_TOKEN = 3.4155
+# Measured on real <seg>.draft.json content, same corpora and tokenizer.
+# Differs from the segpack ratio above because the draft carries the
+# TARGET-language text (this project's case: Cyrillic), whose cl100k_base
+# encoding density differs from the segpack's mostly-source-language
+# content -- a real difference in what is being measured, not rounding
+# noise on the same quantity. This is also the term fixreview_context_
+# estimate() below DOUBLES (the draft is read once as input, rewritten once
+# as output), so the density difference and the doubling compound rather
+# than offset.
+FIXREVIEW_PROSE_BYTES_PER_TOKEN = 3.403
+# style_bible.md and review_TASK.md are ordinary English project prose --
+# but carrying non-Latin TARGET-language excerpts, which is why this ratio
+# sits well below base_instructions' own ~5.0 B/token pure-English figure.
+# 3.403 is the WORST (lowest, i.e. most token-dense) of eight real
+# measurements across four books, cl100k_base throughout: style_bible.md
+# ranged 3.459-4.042 B/token, review_TASK.md 3.403-4.114 B/token. Taking the
+# worst rather than an average is what keeps this safe: every real ratio
+# observed is HIGHER than 3.403, so dividing by 3.403 always estimates AT
+# OR ABOVE the true token count for any of the eight measured files, and
+# the gate can only over-reserve budget, never under-reserve it -- the
+# correct direction for a guard whose failure mode is letting an oversized
+# call through onto paid work.
+#
+# MEASURED PER PROJECT AT RUNTIME, NEVER BAKED IN, AND THIS IS WHY: total
+# per-project overhead from style_bible.md + review_TASK.md alone measured
+# 13,756 / 13,814 / 14,428 / 17,956 tokens across four real books -- a ~30%
+# spread from style-guide length alone, before anyone writes a longer one.
+# A 200 KB style_bible.md (this ratio applied) would alone consume roughly
+# a third of the whole budget below. A module constant could never have
+# known any one project's own style_bible.md size in advance; only
+# stat()-ing it fresh, every call, catches this (see
+# fixreview_context_estimate()'s own docstring).
+FIXREVIEW_BASE_INSTRUCTIONS_TOKENS = 3_576
+# Codex's OWN fixed agent system prompt (`base_instructions`), shipped on
+# EVERY call regardless of project or segment -- measured at 17,766 bytes,
+# 3,576 tokens under cl100k_base (o200k_base gives 3,552; cl100k is again
+# the conservative, higher figure -- see the tokenizer note above). Plain
+# English prose at ~5.0 B/token -- denser than it looks by byte count
+# alone, which is why it is shipped here as a directly measured TOKEN
+# count rather than a byte figure divided by any of this file's own
+# ratios (none of which describe Codex's own prompt text).
+FIXREVIEW_DISPATCH_PROMPT_TOKENS = 1_508
+# fixReviewDispatchPrompt()'s own rendered length (mass-translate-wf.
+# template.js), directly measured in tokens -- FIXED, because the prompt
+# embeds no segment content, only a path-based instruction to go read the
+# four files this estimate sizes separately, at runtime (orchestration-
+# and-batching.md §6: both real rendered prompts measured exactly 6,489
+# bytes; the byte figure is offered here only as provenance -- 6489 divided
+# by neither ratio above lands on 1,508, because this is an independent
+# direct token measurement of the SAME text, not a byte-ratio conversion).
+FIXREVIEW_WORST_CASE_REVIEW_OUTPUT_TOKENS = 2_408
+# STEP 1's own review JSON output (the findings[] array the call must emit
+# BEFORE it rewrites the draft), directly measured worst case -- the draft
+# rewrite itself is already counted by the "2 *" term on
+# FIXREVIEW_DRAFT_BYTES_PER_TOKEN in fixreview_context_estimate() below;
+# this is the review verdict alone.
+#
+# THE BUDGET THIS ALL ADDS UP TO, AS A DERIVATION (not itself computed this
+# way in code -- the code computes ONE estimate and compares it against the
+# budget constant above; this is the same arithmetic read the other way,
+# for a reader checking the numbers):
+#   usable window   (272,000 * 0.95)                 = 258,400
+#   * 0.75 (the 25% margin reserved)                 = 193,800  <- the budget
+#     - FIXREVIEW_BASE_INSTRUCTIONS_TOKENS               3,576
+#     - FIXREVIEW_DISPATCH_PROMPT_TOKENS                 1,508
+#     - style_bible.md + review_TASK.md      (per-project, measured above)
+#     - FIXREVIEW_WORST_CASE_REVIEW_OUTPUT_TOKENS        2,408
+#   = what remains for segpack_bytes + 2 * draft_bytes, at their own ratios.
+#
+# WHAT THIS BUYS, MEASURED: across the 207 real segments, exactly ONE falls
+# back under this budget, and it fails by 39.2% -- not a knife's-edge
+# margin. The next-largest segment clears by +17.0%, and the one after that
+# by +50.5%: a real gap between the one failure and everything else, not a
+# threshold that happens to sit in the middle of a cluster. That one
+# segment's own four real inputs total 599,128 B and fail the margin under
+# BOTH plausible tokenizers -- under the conservative one (cl100k_base,
+# used throughout this file) it does not fit the window AT ALL. This gate
+# is not a precaution against a hypothetical; it is what keeps a real,
+# existing segment from being dispatched into a merged round it cannot
+# complete.
+
 
 def codex_jobs_per_segment(
     max_fix_rounds: int,
@@ -893,7 +1063,7 @@ def codex_jobs_per_segment(
 # silently shrink the moment either gained or lost an unrelated field.
 _SHARED_PROFILE_KEYS = (
     "max_fix_rounds", "max_codex_jobs_per_batch", "max_rejected_candidates_per_round",
-    "max_txn_failures_per_segment",
+    "max_txn_failures_per_segment", "max_fixreview_context_tokens",
 )
 
 
@@ -1073,6 +1243,18 @@ def load_engine_config(durable_root: Path) -> dict:
         "max_txn_failures_per_segment": _optional_engine_int(
             engine, "max_txn_failures_per_segment",
             DEFAULT_MAX_TXN_FAILURES_PER_SEGMENT, 0, profile_path),
+        # #409 track B, the size fallback. Not itself a term of any admission
+        # formula below (codex_jobs_per_segment/check_volume_cap do not need
+        # it -- a fallback changes what KIND a round dispatches, never how
+        # MANY iterations a segment may spend), but read here anyway, by the
+        # same discipline as its two siblings above: both profile loaders
+        # resolving one OPTIONAL knob from the same key with the same default
+        # is what lets profile_snapshots_disagree() catch a mid-startup edit
+        # for the WHOLE engine block, not a subset of it carved out because
+        # one knob happens not to feed admission math today.
+        "max_fixreview_context_tokens": _optional_engine_int(
+            engine, "max_fixreview_context_tokens",
+            DEFAULT_MAX_FIXREVIEW_CONTEXT_TOKENS, 0, profile_path),
     }
 
 
@@ -1554,13 +1736,20 @@ def _atomic_write_json(path: Path, obj) -> bool:
         return False
 
 
-def _is_counter_int(value) -> bool:
+def _is_counter_int(value) -> TypeGuard[int]:
     """A usable counter value: a non-negative int that is NOT a bool.
 
     The bool exclusion is load-bearing, not pedantry -- `isinstance(False, int)`
     is True in Python and `False >= 0` holds, so {"count": false} would read as
     a legitimate zero and re-authorise a segment whose refusals were already
-    exhausted."""
+    exhausted.
+
+    Typed as a TypeGuard (matching _is_valid_intent()'s own reasoning above)
+    so a True result narrows `value` to int for the caller -- needed at
+    next_attempt_seq()'s own call site, where the value being checked is
+    bound to a local BEFORE the check, specifically so this narrowing has
+    something to attach to (a TypeGuard on a repeated function-call
+    expression does not narrow across the two separate calls)."""
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
@@ -1751,11 +1940,15 @@ def publish_txn(txn_dir: Path, seg: str, segments_dir: Path, decision: dict,
     * The final gap between the last read of a file and the os.replace that
       destroys it cannot be closed at all. POSIX has no compare-and-rename,
       there is no rename-if-fd, and RENAME_EXCHANGE/RENAME_NOREPLACE are Linux
-      only and unexposed in Python. A writer landing in that gap is overwritten
-      silently and this function still returns True. The gap is now a few
-      microseconds of pure bytecode rather than the duration of an fsync plus a
-      payload-sized hash, but a smaller target is not no target -- and the
-      thread can be preempted inside it, so it is not bounded in wall clock.
+      only and unexposed in Python. What the gap COSTS has changed -- the pin
+      below preserves the replaced bytes and refuses rather than reporting
+      success over them -- but the gap itself is still there, and it is not
+      bounded in wall clock because the thread can be preempted inside it.
+      The pin's own coverage is asymmetric and the weaker half is the one to
+      remember: an IN-PLACE writer shares the pinned inode and is always
+      caught; a RENAME-BASED writer that swaps the name between the link and
+      the replace is not caught and cannot be. Only that interleaving is still
+      lost silently.
     * A refusal AFTER the review rename leaves a canonical review describing a
       draft that was never published. That is a THIRD state, distinct from both
       pairs the ordering argument reasons about, and the next recovery answers
@@ -1764,10 +1957,20 @@ def publish_txn(txn_dir: Path, seg: str, segments_dir: Path, decision: dict,
       better than the alternative, because a review is regenerable and the
       user's destroyed text is not.
     * The real-world writer this exists to survive is not another driver -- the
-      project lease already excludes that. It is the fix step itself, a Claude
-      agent instructed to rewrite segments/<seg>.draft.json in a separate
-      process holding no lock, plus a human editor and a sync daemon. No
-      advisory lock reaches any of them."""
+      project lease already excludes that. It is the fix step itself: on
+      --fix-mode=handoff, a Claude agent told to rewrite
+      segments/<seg>.draft.json from a separate process holding no lock (see
+      callFix() in mass-translate-wf.template.js), plus a human editor and a
+      sync daemon.
+
+      A per-segment lease DOES now reach some of them, and saying "no advisory
+      lock reaches any of them" would be wrong: segment_lease() takes
+      codex_job.py's OWN .codex_job.<seg>.lock by exact path, so every
+      in-product writer of a canonical draft -- both codex_job.py promote
+      paths and this publication -- is mutually excluded. What it does not
+      reach is precisely the list above, none of which takes a lock at all.
+      That is the population the pin exists for, and it is also why the pin
+      is not redundant with the lease."""
     order = list(decision.get("publish") or [])
     if not order:
         return True
@@ -2432,7 +2635,7 @@ def classify_txn_recovery(observed: dict) -> dict:
     return decision(TXN_STAGING_LOST, cleanup=True)
 
 
-def _is_valid_intent(intent) -> bool:
+def _is_valid_intent(intent) -> TypeGuard[dict]:
     """A durable intent is trustworthy only when its whole shape is
     recognised: the right schema version, every required field present, and a
     KNOWN phase.
@@ -2441,7 +2644,15 @@ def _is_valid_intent(intent) -> bool:
     value arrives from JSON on disk, so "any mapping is fine" lets a truncated
     write, a hand-edit, or a record written by a FUTURE schema reach a publish
     decision -- and publishing on an intent this code does not understand is
-    the one outcome no recovery path may risk."""
+    the one outcome no recovery path may risk.
+
+    Typed as a TypeGuard (matching canon_adjudication_audit.py's own
+    _risk_accepted()) so a True result narrows the checked value to dict for
+    every caller's own follow-on field reads -- this is what a `_read_counter()`
+    result's loosely-typed (status, parsed) pair cannot give the type checker
+    on its own: `status == "ok"` and `parsed` are two independent variables
+    to it, so narrowing has to come from checking `parsed` itself, through
+    this function, not from checking `status`."""
     if not isinstance(intent, dict):
         return False
     # `!= TXN_SCHEMA_VERSION` alone is NOT enough, for the third time in this
@@ -2529,7 +2740,13 @@ def next_attempt_seq(txn_dir: Path, seg: str) -> int:
     if status == "absent":
         # Nothing promised yet, so a fresh sequence is safe here and ONLY here.
         return 1 if _atomic_write_json(path, {"attempt_seq": 1}) else 0
-    if status == "corrupt" or not _is_counter_int(_attempt_seq_of(current)):
+    # Bound ONCE, then checked and reused from this one local -- not two
+    # separate _attempt_seq_of(current) calls. A TypeGuard narrows the
+    # EXPRESSION it is applied to; a second, syntactically fresh call is not
+    # the same expression to the type checker (or, in general, provably the
+    # same VALUE -- it only is here because _attempt_seq_of() is pure).
+    seq = _attempt_seq_of(current)
+    if status == "corrupt" or not _is_counter_int(seq):
         # UNPARSEABLE AND PARSEABLE-BUT-WRONG-SHAPE ARE THE SAME HAZARD. `{}`,
         # `[]`, `null` and {"attempt_seq": "bad"} all parse cleanly, so keying
         # this on json.loads() succeeding would let them fall through to a
@@ -2543,7 +2760,7 @@ def next_attempt_seq(txn_dir: Path, seg: str) -> int:
             file=sys.stderr,
         )
         return 0
-    nxt = _attempt_seq_of(current) + 1
+    nxt = seq + 1
     if not _atomic_write_json(path, {"attempt_seq": nxt}):
         return 0
     return nxt
@@ -2769,6 +2986,13 @@ def load_translate_config(durable_root: Path) -> dict:
         "max_txn_failures_per_segment": _optional_engine_int(
             engine, "max_txn_failures_per_segment",
             DEFAULT_MAX_TXN_FAILURES_PER_SEGMENT, 0, profile_path),
+        # #409 track B, the size fallback -- the ONE value effective_fix_mode()
+        # actually reads at runtime (via ctx.translate_cfg). See
+        # load_engine_config()'s own copy of this same key for why it is read
+        # there too even though admission math never consumes it.
+        "max_fixreview_context_tokens": _optional_engine_int(
+            engine, "max_fixreview_context_tokens",
+            DEFAULT_MAX_FIXREVIEW_CONTEXT_TOKENS, 0, profile_path),
         "effort": engine["effort"],
         "model": engine.get("model") or "",
         "source_lang": source_lang,
@@ -3978,10 +4202,18 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
     # either sha1) stays conservative -- report needs_fix rather than
     # silently advancing.
     if draft_matches_review or current_sha1 is None or reviewed_sha1 is None:
-        if ctx.fix_mode == FIX_MODE_CODEX:
+        if effective_fix_mode(ctx, seg) == FIX_MODE_CODEX:
             # THE MODE BRANCH SITS HERE, not as a blanket replacement of this
             # return, because the handoff branch below has to stay live -- it
             # is the default and the whole of 1.18.0's behaviour.
+            #
+            # effective_fix_mode(), NOT ctx.fix_mode directly (#409 track B,
+            # the size fallback): a segment whose merged fixreview call is
+            # unobservable or over engine.max_fixreview_context_tokens must
+            # fall to THIS branch's sibling below (needs_fix) instead of
+            # merged_fix, even though the RUN is configured --fix-mode=codex
+            # -- see effective_fix_mode()'s own docstring for why it fails
+            # closed rather than proceeding on an unobservable size.
             #
             # On the ordinary codex path this state is not reached at all: a
             # fixreview round publishes a review bound to the PRE-edit draft
@@ -4438,7 +4670,12 @@ def advance_txn(ctx: "DispatchContext", seg: str, round_label=None) -> dict:
     charged = None
     failed = (not published) or outcome in (TXN_PREIMAGE_DIVERGED, TXN_STAGING_LOST)
     charge_required = failed and isinstance(txn_id, str) and bool(txn_id)
-    if charge_required:
+    # `charge_required` already guarantees `isinstance(txn_id, str)` -- but it
+    # is a SEPARATE bool variable, and a type checker cannot narrow txn_id
+    # from a check it performed on a DIFFERENT name. Repeating the isinstance
+    # here, directly on txn_id, is redundant at runtime (charge_required is
+    # already False otherwise) but gives the narrowing something to attach to.
+    if charge_required and isinstance(txn_id, str):
         charged = charge_txn_failure(txn_dir, seg, txn_id, _txn_failure_ceiling(ctx))
 
     committed = None
@@ -4826,6 +5063,139 @@ def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
                   charged=advanced["charged"], charge_lost=advanced["charge_lost"])
 
 
+def _size_of(path: Path):
+    """Byte size of `path`, or None when it is absent OR cannot be read
+    (any OSError -- including a dangling symlink, whose stat() raises
+    FileNotFoundError exactly like a genuinely absent path).
+
+    Unlike _sha256_of() above, this collapses absent and unreadable into ONE
+    outcome rather than three, because every caller here
+    (fixreview_context_estimate()) already fails CLOSED on either: an absent
+    draft (segment not translated yet) and an unreadable one both mean "this
+    size cannot be trusted right now", and both must produce the identical
+    None the caller falls back on. A richer three-way split would only
+    invite a caller to treat one of them as safe to proceed on, which is
+    exactly what effective_fix_mode() below must never do."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def fixreview_context_estimate(ctx: "DispatchContext", seg: str):
+    """Estimated INPUT+OUTPUT token cost of ONE --fix-mode=codex fixreview
+    dispatch for `seg` -- the merged review+fix call fixReviewDispatchPrompt()
+    describes (mass-translate-wf.template.js). None when ANY of the four
+    real inputs that call reads cannot be sized right now; see
+    effective_fix_mode() below for why that must fall back rather than
+    proceed as if the call were known to fit.
+
+    THE PROMPT ITSELF IS NOT ONE OF THE FOUR. fixReviewDispatchPrompt()
+    embeds no segment content -- it is a FIXED instruction telling the model
+    to go read review_TASK.md, style_bible.md, the segpack, and the draft BY
+    PATH (orchestration-and-batching.md §6). Its own fixed length is
+    counted as FIXREVIEW_DISPATCH_PROMPT_TOKENS above, a module constant,
+    never a function of `seg`.
+
+    THE DRAFT IS COUNTED TWICE. It is read once as the pre-edit INPUT the
+    call reviews and rewritten once as the fixed OUTPUT (fixReviewDispatch
+    Prompt()'s own STEP 2) -- both inside the SAME context window. A single
+    count of it under-counts every real segment; measured, it would have
+    caught ZERO of 207 real segments, including the one that motivated this
+    whole mechanism.
+
+    style_bible.md and review_TASK.md are read from the durable root and are
+    PER PROJECT -- sized fresh here, every call, never baked into a module
+    constant: a 200 KB style_bible.md alone can consume a real fraction of
+    the budget, and a constant could never see that."""
+    segpack_bytes = _size_of(ctx.segments_dir / f"segpack_{seg}.json")
+    draft_bytes = _size_of(ctx.segments_dir / f"{seg}.draft.json")
+    style_bible_bytes = _size_of(ctx.dirs["durable_root"] / "style_bible.md")
+    review_task_bytes = _size_of(ctx.dirs["durable_root"] / "review_TASK.md")
+    # Four SEPARATE `is None` checks, not `None in (...)`: the `in` form
+    # reads identically to a human but does not narrow any of the four
+    # names for the type checker, so every arithmetic use below would still
+    # be flagged as possibly-None despite this guard already having
+    # returned for exactly that case.
+    if (segpack_bytes is None or draft_bytes is None
+            or style_bible_bytes is None or review_task_bytes is None):
+        return None
+    estimate = (
+        segpack_bytes / FIXREVIEW_SEGPACK_BYTES_PER_TOKEN
+        + 2 * draft_bytes / FIXREVIEW_DRAFT_BYTES_PER_TOKEN
+        + (style_bible_bytes + review_task_bytes) / FIXREVIEW_PROSE_BYTES_PER_TOKEN
+        + FIXREVIEW_DISPATCH_PROMPT_TOKENS
+        + FIXREVIEW_BASE_INSTRUCTIONS_TOKENS
+        + FIXREVIEW_WORST_CASE_REVIEW_OUTPUT_TOKENS
+    )
+    return math.ceil(estimate)
+
+
+def effective_fix_mode(ctx: "DispatchContext", seg: str) -> str:
+    """ctx.fix_mode, EXCEPT for one case: the configured mode is `codex` and
+    THIS segment's merged fixreview call is -- or might be -- too big for
+    engine.max_fixreview_context_tokens. In that one case, this segment
+    alone falls back to FIX_MODE_HANDOFF; every other segment in the same
+    run is unaffected, and nothing here ever mutates ctx.fix_mode itself
+    (DispatchContext is read-only after construction, shared across worker
+    threads -- see its own docstring).
+
+    FAIL CLOSED: fixreview_context_estimate() returning None (any of the
+    four real inputs could not be sized) is treated EXACTLY like an
+    over-budget estimate, never as "unknown, so proceed". An unobservable
+    size most commonly means the segment has no draft yet (nothing has been
+    translated), which is completely ordinary -- but ordinary is not the
+    same as SAFE to assume small, and this function has no way to tell "not
+    yet written" apart from "could not be read" (see _size_of()'s own
+    docstring for why it does not try to).
+
+    EVALUATE FRESH, EVERY CALL, NEVER CACHE. The four sizes the estimate
+    depends on can change between iterations of process_segment()'s own
+    loop -- the draft grows across fix rounds, and style_bible.md/
+    review_TASK.md can be edited out-of-band -- so a decision cached from an
+    earlier iteration could authorize a call the CURRENT state would refuse.
+    Every one of this function's own callers calls it again rather than
+    reusing an old answer, exactly like every other per-iteration decision
+    derive_next_action() and its neighbours make from durable disk state,
+    never from an in-memory assumption about what an earlier read saw."""
+    if ctx.fix_mode != FIX_MODE_CODEX:
+        return ctx.fix_mode
+    budget = ctx.translate_cfg.get(
+        "max_fixreview_context_tokens", DEFAULT_MAX_FIXREVIEW_CONTEXT_TOKENS)
+    estimate = fixreview_context_estimate(ctx, seg)
+    if estimate is None or estimate > budget:
+        return FIX_MODE_HANDOFF
+    return ctx.fix_mode
+
+
+def _journal_fixreview_size_fallback(ctx: "DispatchContext", seg: str, round_label) -> None:
+    """Appends ONE `fixreview_size_fallback` journal event -- the visibility
+    #409 track B's size fallback needs. An operator watching a project run
+    --fix-mode=codex who sees a `needs_fix` handoff, or a plain `review`
+    dispatch where a `fixreview` was expected, has no other way to learn
+    THIS is why: effective_fix_mode() returns a plain string, and the two
+    process_segment() call sites that act on a fallen-back decision (the
+    needs_fix return, and the review-action dispatch-kind branch) are the
+    only places that know BOTH what was configured and what actually ran.
+
+    Recomputes fixreview_context_estimate() itself rather than accepting it
+    as a parameter -- this function is called only after a caller has
+    already established (via effective_fix_mode()) that a fallback is
+    happening, so the extra stat() calls are spent on an iteration that is
+    about to make one real codex dispatch decision anyway; see
+    effective_fix_mode()'s own docstring for why re-deriving rather than
+    threading a cached value through is this file's standing discipline."""
+    append_journal(ctx.dirs["durable_root"], ctx.session_id, {
+        "type": "fixreview_size_fallback",
+        "seg": seg,
+        "round_label": round_label,
+        "configured_fix_mode": ctx.fix_mode,
+        "estimated_tokens": fixreview_context_estimate(ctx, seg),
+        "budget_tokens": ctx.translate_cfg.get(
+            "max_fixreview_context_tokens", DEFAULT_MAX_FIXREVIEW_CONTEXT_TOKENS),
+    })
+
+
 def _dispatch_kind_for_round(fix_mode: str, round_label: str) -> str:
     """Which codex job kind a `review` action dispatches.
 
@@ -5070,6 +5440,21 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
     max_fix_rounds = ctx.translate_cfg["max_fix_rounds"]
     max_rejected = ctx.translate_cfg.get("max_rejected_candidates_per_round",
                                          DEFAULT_MAX_REJECTED_CANDIDATES_PER_ROUND)
+    # DELIBERATELY ctx.fix_mode HERE, NOT effective_fix_mode(ctx, seg)
+    # (#409 track B, the size fallback). This sizes the LOOP'S OWN iteration
+    # cap for the whole segment, decided ONCE before the loop starts -- and
+    # at that point the segment may not even have a draft yet, so its own
+    # fixreview estimate is not just unknown but UNKNOWABLE this early.
+    # Over-reserving iteration budget for a segment that later falls back to
+    # handoff for some or all of its rounds is SAFE: handoff's own
+    # per-segment bound (codex_jobs_per_segment's own `base` term) is
+    # strictly smaller than codex mode's, so a cap sized for codex mode is
+    # never tighter than what a fallen-back round actually needs.
+    # Under-reserving would do the opposite -- size the cap for the cheaper
+    # mode and then let a segment that stays in codex mode the whole way
+    # through exhaust it early. See effective_fix_mode()'s own docstring for
+    # the PER-ROUND decision this one-time, per-segment cap does not need to
+    # track.
     max_iterations = codex_jobs_per_segment(
         max_fix_rounds, ctx.fix_mode, max_rejected_candidates_per_round=max_rejected)
     fabricated_loc_retries = 0
@@ -5165,7 +5550,7 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
         # propagate through this loop exactly as before; only genuine
         # per-segment worker failures are absorbed.
         try:
-            if ctx.fix_mode == FIX_MODE_CODEX:
+            if effective_fix_mode(ctx, seg) == FIX_MODE_CODEX:
                 # RECOVERY BEFORE THE READ, UNDER THE LEASE THAT PROTECTS THE
                 # WRITE. derive_next_action() is itself the read of canonical
                 # state, so recovery cannot be an action it returns -- by then
@@ -5176,6 +5561,17 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 # recover and its control flow is deliberately untouched by
                 # this release; taking a lease it never needed would be a
                 # behaviour change on the default path.
+                #
+                # effective_fix_mode(), NOT ctx.fix_mode directly (#409 track
+                # B, the size fallback): a segment whose merged fixreview
+                # call is unobservable or over budget takes the handoff-style
+                # `else` branch below for this WHOLE iteration -- no lease,
+                # no recovery, no transaction premise -- exactly as if the
+                # run itself were configured --fix-mode=handoff. There is
+                # nothing for the lease/recovery machinery to protect for a
+                # round this iteration will dispatch as a plain review (or
+                # hand off as needs_fix) rather than publish through the
+                # transaction layer.
                 with segment_lease(ctx.segments_dir, seg) as leased:
                     if not leased:
                         # A codex_job.py child (very likely a predecessor
@@ -5248,6 +5644,16 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
 
             if action["action"] == "needs_fix":
                 round_label = action["round_label"]
+                if ctx.fix_mode == FIX_MODE_CODEX:
+                    # #409 track B, the size fallback, made VISIBLE. This
+                    # action shape is --fix-mode=handoff's own; a run
+                    # genuinely configured codex returns "review" with
+                    # cause="merged_fix" for the identical not-clean state
+                    # instead (derive_next_action()'s own branch just above
+                    # this one). So reaching needs_fix while ctx.fix_mode is
+                    # STILL configured codex is itself proof
+                    # effective_fix_mode() fell back for this segment/round.
+                    _journal_fixreview_size_fallback(ctx, seg, round_label)
                 review_obj = _read_review_obj(ctx, seg, fallback_findings=action.get("findings"))
                 fix_prompt = render_fix_prompt(ctx, seg, int(round_label), review_obj)
                 return {
@@ -5271,7 +5677,21 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
 
             if action["action"] == "review":
                 round_label = action["round_label"]
-                kind = _dispatch_kind_for_round(ctx.fix_mode, round_label)
+                # effective_fix_mode(), NOT ctx.fix_mode directly (#409
+                # track B, the size fallback) -- see effective_fix_mode()'s
+                # own docstring and the lease branch above for why this
+                # segment's iteration must be judged against ITS OWN
+                # estimate, not the run's configured mode, at every site
+                # that acts on ctx.fix_mode.
+                effective_mode = effective_fix_mode(ctx, seg)
+                if ctx.fix_mode == FIX_MODE_CODEX and effective_mode != FIX_MODE_CODEX:
+                    # Made VISIBLE: without this, a downgraded fixreview ->
+                    # review dispatch is silent -- the round still converges
+                    # normally, just one codex call poorer, and nothing else
+                    # in this file's output distinguishes it from an
+                    # ordinary handoff-mode review.
+                    _journal_fixreview_size_fallback(ctx, seg, round_label)
+                kind = _dispatch_kind_for_round(effective_mode, round_label)
                 if kind == "fixreview":
                     # EVERY TERMINAL CHECK HAPPENS BEFORE THE DISPATCH, not
                     # after it. Checking afterwards still spends the job whose
@@ -5333,6 +5753,34 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                     # (there is no single canonical path for two artifacts).
                     # Publication is this driver's, through the transaction.
                     #
+                    # PREMISE MUST BE A REAL TUPLE HERE, and this is checked
+                    # explicitly rather than assumed, because it is
+                    # REACHABLE, not hypothetical, for it to be None: this
+                    # ONE iteration calls effective_fix_mode(ctx, seg) THREE
+                    # separate times (the lease-branch check above,
+                    # derive_next_action()'s own internal check, and this
+                    # `kind` computed a few lines above) -- and each is a
+                    # fresh read of the four sized files, not a cached value.
+                    # If the lease-branch call read HANDOFF (taking the
+                    # `else` branch above, which sets premise = None on
+                    # purpose -- a genuine handoff-style iteration has no
+                    # transaction premise to carry), and the four files then
+                    # changed before the LATER two calls, `kind` can still
+                    # come out "fixreview" on a `premise` that was never
+                    # captured. publish_fixreview_pair() would in fact refuse
+                    # this safely today anyway -- premise_is_observable(None)
+                    # reads True (TXN_UNREADABLE not in ()), but its own
+                    # `now != premise` compares a real tuple against None and
+                    # is never equal -- but that safety is INCIDENTAL to
+                    # those two functions' own unrelated logic, not asserted
+                    # here. Refusing explicitly, with the SAME reason that
+                    # incidental path would have produced, rather than
+                    # depending on it staying true if either function's
+                    # internals ever change.
+                    if premise is None:
+                        return {"seg": seg, "converged": False, "outcome": "failed",
+                                "stage": "publish", "round_label": round_label,
+                                "reason": "txn-decision-stale"}
                     # UNDER THE LEASE, and the child has exited by now (the
                     # dispatch blocks), so it is free to take. The renames
                     # themselves cannot be made atomic -- POSIX has no

@@ -87,6 +87,40 @@ def _write_canonical(ctx, *, draft_body="old", review=None):
     return draft
 
 
+def _seed_fixreview_inputs(ctx):
+    """Writes small, real placeholder content for the FOUR files
+    DRIVER.fixreview_context_estimate() sizes -- the segpack, the draft (only
+    if no test-specific draft is already there -- never clobbers one
+    _write_canonical() already wrote), style_bible.md, and review_TASK.md --
+    comfortably within DRIVER.DEFAULT_MAX_FIXREVIEW_CONTEXT_TOKENS.
+
+    #409 track B, the size fallback (R_size). This helper exists because
+    that fallback is FAIL CLOSED: a codex-mode ctx whose four inputs are not
+    all present now falls back to handoff for every decision
+    (DRIVER.effective_fix_mode()), which is correct in PRODUCTION -- a
+    segment never reaches a review/needs_fix decision before its segpack and
+    the project's style_bible.md/review_TASK.md exist -- but is a real
+    behaviour change for every test in this file that drives
+    process_segment()/derive_next_action() in --fix-mode=codex through a
+    STUBBED derive_next_action/decision_premise without also creating real
+    backing files. Call this explicitly wherever a test needs codex mode to
+    actually stay in effect; never from _ctx() itself, since several tests
+    below (e.g. test_a_genuinely_absent_draft_stays_observable,
+    test_an_absent_segpack_or_profile_is_stable_rather_than_flapping) depend
+    on _ctx() leaving the draft/segpack genuinely absent."""
+    if not (ctx.segments_dir / f"{SEG}.draft.json").exists():
+        _write_canonical(ctx)
+    segpack = ctx.segments_dir / f"segpack_{SEG}.json"
+    if not segpack.exists():
+        segpack.write_text('{"blocks": {"b": "source"}}', encoding="utf-8")
+    style_bible = ctx.dirs["durable_root"] / "style_bible.md"
+    if not style_bible.exists():
+        style_bible.write_text("# Style Bible\n\nPlaceholder for tests.\n", encoding="utf-8")
+    review_task = ctx.dirs["durable_root"] / "review_TASK.md"
+    if not review_task.exists():
+        review_task.write_text("# Review Task\n\nPlaceholder for tests.\n", encoding="utf-8")
+
+
 def _stage_candidates(ctx, *, draft_body="fixed", clean=False, round_label="1"):
     """What a completed --kind fixreview leaves behind: two validated
     candidates at private per-invocation paths, plus the five staged_* fields
@@ -138,6 +172,22 @@ def _canonical(ctx, what):
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
+def _canonical_present(ctx, what) -> dict:
+    """_canonical(), narrowed. Every call site below that reads a specific
+    field off the result (as opposed to comparing the whole object, or
+    checking `is None` for absence) asserts the file exists first --
+    pyright otherwise treats every one of those reads as subscripting
+    Optional[dict], since _canonical() itself returns None on a genuinely
+    absent file. Kept as a SEPARATE function rather than narrowing
+    _canonical() itself: several call sites in this file use _canonical()
+    specifically to assert ABSENCE (e.g. "no review was ever published"),
+    and this helper's own assertion would make those fail for the wrong
+    reason."""
+    result = _canonical(ctx, what)
+    assert result is not None, f"expected {what}.json to exist for {SEG}"
+    return result
+
+
 # ---------------------------------------------------------------------------
 # which kind a round dispatches
 # ---------------------------------------------------------------------------
@@ -180,6 +230,11 @@ def test_a_not_clean_current_review_is_needs_fix_under_handoff_and_a_merged_roun
 
     handoff = DRIVER.derive_next_action(SEG, ctx)
     codex_ctx = _ctx(tmp_path, fix_mode=DRIVER.FIX_MODE_CODEX)
+    # #409 track B, the size fallback: codex_ctx's own merged_fix branch is
+    # only reachable when effective_fix_mode() reads real codex mode, which
+    # needs the segpack/style_bible.md/review_TASK.md this shares tmp_path's
+    # draft with -- see _seed_fixreview_inputs()'s own docstring.
+    _seed_fixreview_inputs(codex_ctx)
     codex = DRIVER.derive_next_action(SEG, codex_ctx)
 
     assert handoff["action"] == "needs_fix"
@@ -251,8 +306,8 @@ def test_a_validated_pair_is_published_and_the_transaction_is_cleaned_up(tmp_pat
     txn = _publish(ctx, "1", result)
 
     assert txn["ok"] is True, txn
-    assert _canonical(ctx, "draft")["blocks"]["b"] == "fixed"
-    assert _canonical(ctx, "review")["dispatch_token"] == f"{RUN}:{SEG}:r1"
+    assert _canonical_present(ctx, "draft")["blocks"]["b"] == "fixed"
+    assert _canonical_present(ctx, "review")["dispatch_token"] == f"{RUN}:{SEG}:r1"
     assert not DRIVER.txn_intent_path(ctx.txn_dir, SEG).exists()
     slots = DRIVER.staged_paths(ctx.txn_dir, SEG, "1")
     assert not slots["draft"].exists() and not slots["review"].exists()
@@ -340,7 +395,7 @@ def test_a_competing_write_between_staging_and_publication_refuses_and_charges(t
 
     assert txn["ok"] is False
     assert txn["outcome"] == DRIVER.TXN_PREIMAGE_DIVERGED
-    assert _canonical(ctx, "draft")["blocks"]["b"] == "somebody-elses-edit"
+    assert _canonical_present(ctx, "draft")["blocks"]["b"] == "somebody-elses-edit"
     assert _canonical(ctx, "review") is None
     assert DRIVER.read_txn_failures(ctx.txn_dir, SEG)["count"] == 1
 
@@ -361,7 +416,7 @@ def test_staged_bytes_that_do_not_match_the_validated_digest_never_reach_an_inte
     assert txn["ok"] is False
     assert txn["reason"] == "txn-staging-copy-failed"
     assert not DRIVER.txn_intent_path(ctx.txn_dir, SEG).exists()
-    assert _canonical(ctx, "draft")["blocks"]["b"] == "old"
+    assert _canonical_present(ctx, "draft")["blocks"]["b"] == "old"
 
 
 @pytest.mark.parametrize("missing", [
@@ -407,7 +462,7 @@ def test_an_intent_that_appeared_since_recovery_is_not_published_over(tmp_path):
     assert txn["reason"] == "txn-intent-already-present"
     on_disk = json.loads(DRIVER.txn_intent_path(ctx.txn_dir, SEG).read_text(encoding="utf-8"))
     assert on_disk["txn_id"] == "SOMEBODY-ELSES-TXN", "the other transaction's record must survive"
-    assert _canonical(ctx, "draft")["blocks"]["b"] == "old"
+    assert _canonical_present(ctx, "draft")["blocks"]["b"] == "old"
     assert _canonical(ctx, "review") == {"old": "review"}
 
 
@@ -467,6 +522,7 @@ def test_a_write_landing_DURING_the_decision_makes_the_round_re_derive(tmp_path,
     writes from inside derive."""
     ctx = _ctx(tmp_path)
     _write_canonical(ctx)
+    _seed_fixreview_inputs(ctx)
     dispatched = []
     writes = []
 
@@ -516,7 +572,7 @@ def test_a_round_decided_against_state_somebody_else_has_since_replaced_is_refus
     assert txn["ok"] is False
     assert txn["reason"] == "txn-decision-stale"
     assert _canonical(ctx, "review") == {"somebody": "else"}
-    assert _canonical(ctx, "draft")["blocks"]["b"] == "old"
+    assert _canonical_present(ctx, "draft")["blocks"]["b"] == "old"
     # Refused BEFORE anything durable was allocated: no attempt_seq burned, no
     # intent, no staging, and nothing to charge -- no transaction ever began.
     assert not (ctx.txn_dir / f"{SEG}.attempts").exists()
@@ -829,6 +885,7 @@ def test_candidates_abandoned_on_lease_contention_are_KEPT(tmp_path, monkeypatch
     paid-for work a human could still recover, in order to avoid litter."""
     ctx = _ctx(tmp_path)
     _write_canonical(ctx)
+    _seed_fixreview_inputs(ctx)
     held = {}
 
     def _job_that_keeps_the_lease(c, *, kind, seg, round_label=None):
@@ -864,6 +921,7 @@ def test_an_intent_recovery_could_not_resolve_stops_the_segment_before_it_pays(
     Found by codex review, which reproduced it with a pure probe."""
     ctx = _ctx(tmp_path)
     _write_canonical(ctx)
+    _seed_fixreview_inputs(ctx)
     ctx.txn_dir.mkdir(parents=True)
     # An intent this module's own validator refuses to understand: retained,
     # never cleaned up, and publication will refuse to publish over it.
@@ -963,6 +1021,7 @@ def test_an_empty_recovery_result_clears(tmp_path):
 def test_an_unobservable_premise_stops_the_round_before_it_dispatches(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _write_canonical(ctx)
+    _seed_fixreview_inputs(ctx)
     dispatched = []
     monkeypatch.setattr(DRIVER, "derive_next_action",
                         lambda seg, c: {"action": "review", "round_label": "1"})
@@ -1048,7 +1107,7 @@ def test_recovery_deletes_orphaned_staging_left_by_a_crash_before_the_intent(tmp
 
     assert DRIVER.TXN_ABORTED_PREPARE in outcomes
     assert not slots["draft"].exists() and not slots["review"].exists()
-    assert _canonical(ctx, "draft")["blocks"]["b"] == "old"
+    assert _canonical_present(ctx, "draft")["blocks"]["b"] == "old"
 
 
 def test_recovery_over_a_quiet_segment_touches_nothing(tmp_path):
@@ -1058,7 +1117,7 @@ def test_recovery_over_a_quiet_segment_touches_nothing(tmp_path):
     results = DRIVER.recover_segment_txns(ctx, SEG)
 
     assert [r["outcome"] for r in results] == [DRIVER.TXN_PROCEED]
-    assert _canonical(ctx, "draft")["blocks"]["b"] == "old"
+    assert _canonical_present(ctx, "draft")["blocks"]["b"] == "old"
     assert _canonical(ctx, "review") == {"old": "review"}
 
 
@@ -1111,8 +1170,8 @@ def test_a_crash_between_the_two_renames_is_rolled_FORWARD_not_back(tmp_path, mo
     monkeypatch.undo()
 
     assert first["ok"] is False
-    assert _canonical(ctx, "review")["dispatch_token"] == f"{RUN}:{SEG}:r1"
-    assert _canonical(ctx, "draft")["blocks"]["b"] == "old", "draft must not be published yet"
+    assert _canonical_present(ctx, "review")["dispatch_token"] == f"{RUN}:{SEG}:r1"
+    assert _canonical_present(ctx, "draft")["blocks"]["b"] == "old", "draft must not be published yet"
     # The refusal is charged, even though the very next pass completes the
     # transaction. That is the conservative direction on purpose: the counter
     # bounds ATTEMPTS at a transaction that has already failed once, and a
@@ -1123,7 +1182,7 @@ def test_a_crash_between_the_two_renames_is_rolled_FORWARD_not_back(tmp_path, mo
     outcomes = [r["outcome"] for r in DRIVER.recover_segment_txns(ctx, SEG)]
 
     assert DRIVER.TXN_ROLL_FORWARD_DRAFT in outcomes
-    assert _canonical(ctx, "draft")["blocks"]["b"] == "fixed"
+    assert _canonical_present(ctx, "draft")["blocks"]["b"] == "fixed"
     assert not DRIVER.txn_intent_path(ctx.txn_dir, SEG).exists()
     assert DRIVER.read_txn_failures(ctx.txn_dir, SEG)["count"] == 1, "not charged twice"
 
@@ -1236,7 +1295,16 @@ def test_an_aborted_prepare_is_still_cleaned_up_though_it_charges_nothing(tmp_pa
 def _loop(monkeypatch, ctx, actions, job_results=None, publish=None):
     """Drive process_segment() over a scripted sequence of actions, recording
     every dispatch. The two collaborators are replaced rather than simulated
-    end to end, so what is under test is the loop's own control flow."""
+    end to end, so what is under test is the loop's own control flow.
+
+    Seeds the four fixreview inputs (see _seed_fixreview_inputs()) before
+    driving anything: every caller here is, by construction, simulating a
+    segment already past translate (a scripted "review" or "needs_fix"
+    action), so a real draft/segpack/style_bible.md/review_TASK.md already
+    existing is the correct baseline -- without it, #409 track B's size
+    fallback would silently downgrade every one of these codex-mode
+    scenarios to handoff for reasons the test never intended to exercise."""
+    _seed_fixreview_inputs(ctx)
     dispatched = []
     remaining = list(actions)
 
@@ -1429,6 +1497,7 @@ def test_publication_happens_UNDER_the_lease_not_merely_after_it(tmp_path, monke
     which is exactly the shape of a child that has not let go."""
     ctx = _ctx(tmp_path)
     _write_canonical(ctx)
+    _seed_fixreview_inputs(ctx)
     held = {}
 
     def _job_that_keeps_the_lease(c, *, kind, seg, round_label=None):
@@ -1448,7 +1517,7 @@ def test_publication_happens_UNDER_the_lease_not_merely_after_it(tmp_path, monke
 
     assert result["stage"] == "publish"
     assert result["reason"] == "segment-busy"
-    assert _canonical(ctx, "draft")["blocks"]["b"] == "old", "nothing may have been published"
+    assert _canonical_present(ctx, "draft")["blocks"]["b"] == "old", "nothing may have been published"
     # What happens to the validated pair here is asserted by
     # test_candidates_abandoned_on_lease_contention_are_KEPT, which owns that
     # question; this test owns only "the lease is taken before publishing".
@@ -1465,6 +1534,7 @@ def test_the_renames_themselves_run_while_the_lease_is_HELD(tmp_path, monkeypatc
     with the driver's own hold just as another process would."""
     ctx = _ctx(tmp_path)
     _write_canonical(ctx)
+    _seed_fixreview_inputs(ctx)
     observed = {}
     real_publish = DRIVER.publish_txn
 
@@ -1493,7 +1563,7 @@ def test_the_renames_themselves_run_while_the_lease_is_HELD(tmp_path, monkeypatc
     assert observed.get("lease_was_free") is False, (
         "the canonical renames ran with the per-segment lease NOT held -- the "
         "driver's own publication was racing the children it launches")
-    assert _canonical(ctx, "draft")["blocks"]["b"] == "fixed"
+    assert _canonical_present(ctx, "draft")["blocks"]["b"] == "fixed"
 
 
 def test_handoff_takes_no_lease_at_all(tmp_path, monkeypatch):
@@ -1575,6 +1645,7 @@ def test_two_profile_reads_that_disagree_refuse_the_run():
 EXPECTED_SHARED_PROFILE_KEYS = (
     "max_fix_rounds", "max_codex_jobs_per_batch",
     "max_rejected_candidates_per_round", "max_txn_failures_per_segment",
+    "max_fixreview_context_tokens",
 )
 
 
@@ -1625,6 +1696,408 @@ def test_a_non_integer_knob_is_refused_not_coerced(tmp_path, value):
     root = _profile_root(tmp_path, f"  max_rejected_candidates_per_round: {value}\n")
     with pytest.raises(DRIVER.DriverError):
         DRIVER.load_engine_config(root)
+
+
+# ---------------------------------------------------------------------------
+# #409 track B -- the size fallback (R_size). effective_fix_mode()/
+# fixreview_context_estimate() -- see segment_dispatch_driver.py's own
+# module-level comment block above FIXREVIEW_CONTEXT_WINDOW_TOKENS for the
+# formula and the provenance of every constant it sums.
+# ---------------------------------------------------------------------------
+
+
+def test_a_normal_sized_segment_still_takes_the_codex_path(tmp_path):
+    """THE CONTROL. Without this, "an oversized segment falls back" could be
+    passing because effective_fix_mode() falls back UNCONDITIONALLY, size be
+    damned -- this proves the ordinary, comfortably-within-budget case is
+    unaffected: a --fix-mode=codex ctx with real, modestly sized inputs
+    stays codex."""
+    ctx = _ctx(tmp_path)
+    _seed_fixreview_inputs(ctx)
+    assert ctx.fix_mode == DRIVER.FIX_MODE_CODEX
+    assert DRIVER.effective_fix_mode(ctx, SEG) == DRIVER.FIX_MODE_CODEX
+
+
+def test_an_oversized_segment_falls_back_to_handoff_while_configured_mode_stays_codex(tmp_path):
+    """The RUN's own configured mode is never touched -- only THIS segment's
+    decision changes. engine.max_fixreview_context_tokens=1 is smaller than
+    even the FIXED per-call overhead (the dispatch prompt + agent preamble +
+    worst-case review output, none of which depend on any file's content),
+    so the fallback is guaranteed regardless of how small the four real
+    files are -- the point here is the MODE distinction, not a close
+    numeric call (test_the_budget_boundary_is_exercised_on_both_sides below
+    owns that)."""
+    ctx = _ctx(tmp_path, max_fixreview_context_tokens=1)
+    _seed_fixreview_inputs(ctx)
+
+    assert ctx.fix_mode == DRIVER.FIX_MODE_CODEX, "the RUN stays configured codex"
+    assert DRIVER.effective_fix_mode(ctx, SEG) == DRIVER.FIX_MODE_HANDOFF
+
+
+def test_an_unobservable_size_fails_closed_rather_than_proceeding(tmp_path):
+    """No draft has been written at all -- one of the four sizes
+    (fixreview_context_estimate()'s own contract) is unobservable.
+    Proceeding as if an unobservable size were small would be exactly the
+    silent under-estimate this mechanism exists to prevent; the contract is
+    fall back, never guess "probably fine"."""
+    ctx = _ctx(tmp_path)
+    assert DRIVER.fixreview_context_estimate(ctx, SEG) is None
+    assert DRIVER.effective_fix_mode(ctx, SEG) == DRIVER.FIX_MODE_HANDOFF
+
+
+def test_effective_fix_mode_is_inert_under_handoff(tmp_path):
+    """No estimate, no budget check, no file reads at all -- ctx.fix_mode is
+    returned verbatim. A run never configured codex has nothing to fall
+    back FROM."""
+    ctx = _ctx(tmp_path, fix_mode=DRIVER.FIX_MODE_HANDOFF)
+    assert DRIVER.effective_fix_mode(ctx, SEG) == DRIVER.FIX_MODE_HANDOFF
+
+
+def test_the_budget_boundary_is_exercised_on_both_sides(tmp_path):
+    """Built from REAL file sizes, never by mocking fixreview_context_
+    estimate() itself -- a test that mocks the thing under test proves
+    nothing about the comparison it performs. segpack_<seg>.json/
+    style_bible.md/review_TASK.md are held at the SAME tiny size on both
+    sides; only the draft's own byte count is computed (from the driver's
+    own published ratios, used here only to size an INPUT file -- the
+    assertions below are a plain mode comparison, never a numeric equality
+    against a production constant) to land the estimate just under, then
+    just over, one fixed budget."""
+    ctx = _ctx(tmp_path, max_fixreview_context_tokens=10_000)
+    _seed_fixreview_inputs(ctx)
+    fixed_overhead = (DRIVER.FIXREVIEW_DISPATCH_PROMPT_TOKENS
+                      + DRIVER.FIXREVIEW_BASE_INSTRUCTIONS_TOKENS
+                      + DRIVER.FIXREVIEW_WORST_CASE_REVIEW_OUTPUT_TOKENS)
+    other_tokens = (
+        (ctx.segments_dir / f"segpack_{SEG}.json").stat().st_size
+        / DRIVER.FIXREVIEW_SEGPACK_BYTES_PER_TOKEN
+        + ((ctx.dirs["durable_root"] / "style_bible.md").stat().st_size
+           + (ctx.dirs["durable_root"] / "review_TASK.md").stat().st_size)
+          / DRIVER.FIXREVIEW_PROSE_BYTES_PER_TOKEN
+    )
+    draft_budget_tokens = 10_000 - fixed_overhead - other_tokens
+    # estimate's draft term is 2 * draft_bytes / RATIO -- solved for the
+    # byte count that alone would spend exactly the remaining budget.
+    draft_bytes_at_boundary = int(draft_budget_tokens * DRIVER.FIXREVIEW_DRAFT_BYTES_PER_TOKEN / 2)
+    draft_path = ctx.segments_dir / f"{SEG}.draft.json"
+
+    draft_path.write_bytes(b"x" * max(draft_bytes_at_boundary - 200, 0))
+    assert DRIVER.effective_fix_mode(ctx, SEG) == DRIVER.FIX_MODE_CODEX, "just UNDER the budget"
+
+    draft_path.write_bytes(b"x" * (draft_bytes_at_boundary + 200))
+    assert DRIVER.effective_fix_mode(ctx, SEG) == DRIVER.FIX_MODE_HANDOFF, "just OVER the budget"
+
+
+def test_a_realistically_oversized_segment_fails_unambiguously(tmp_path):
+    """THE CORPUS-SHAPED CASE, kept deliberately SEPARATE from the knife-edge
+    boundary test above, and deliberately NOT knife-edge itself. Measured on
+    the real 207-segment corpus this budget was set against: exactly ONE
+    segment falls back, and it fails by 39.2% over budget -- not a marginal
+    call. The next-largest segment clears by +17.0%, the one after that by
+    +50.5%: a genuine gap between the single failure and everything else,
+    not a threshold sitting in the middle of a cluster. This test reproduces
+    that SHAPE (a real segment sized well past the budget) rather than the
+    exact corpus bytes, which are not available in this sandbox -- if this
+    test ever needed knife-edge byte tuning to pass, that would itself be a
+    sign it was measuring the arithmetic rather than the behaviour."""
+    ctx = _ctx(tmp_path)
+    _seed_fixreview_inputs(ctx)
+    budget = DRIVER.DEFAULT_MAX_FIXREVIEW_CONTEXT_TOKENS
+    assert ctx.translate_cfg.get("max_fixreview_context_tokens", budget) == budget
+
+    # Size the draft alone so the estimate lands at ~1.392x budget, the same
+    # margin the one real failing corpus segment fails by -- comfortably,
+    # unambiguously over, never adjacent to the line.
+    fixed_overhead = (DRIVER.FIXREVIEW_DISPATCH_PROMPT_TOKENS
+                      + DRIVER.FIXREVIEW_BASE_INSTRUCTIONS_TOKENS
+                      + DRIVER.FIXREVIEW_WORST_CASE_REVIEW_OUTPUT_TOKENS)
+    target_tokens = budget * 1.392
+    draft_tokens_needed = target_tokens - fixed_overhead
+    draft_bytes = int(draft_tokens_needed * DRIVER.FIXREVIEW_DRAFT_BYTES_PER_TOKEN / 2)
+    (ctx.segments_dir / f"{SEG}.draft.json").write_bytes(b"x" * draft_bytes)
+
+    estimate = DRIVER.fixreview_context_estimate(ctx, SEG)
+    assert estimate > budget * 1.3, (
+        f"expected an unambiguous ~39% overage, got estimate={estimate} budget={budget}")
+    assert DRIVER.effective_fix_mode(ctx, SEG) == DRIVER.FIX_MODE_HANDOFF
+
+
+def test_gate_b_differential_check_against_the_real_corpus_measurement(tmp_path):
+    """Ties the gate to S6-TOKEN-MARGIN-RESULTS.md's own independently
+    tokenized ground truth (real tiktoken counts against real, on-disk
+    files -- a SEPARATE measurement pass, not this formula run twice) rather
+    than only to itself. This is the check that catches a constant that is
+    individually plausible but collectively wrong: with an earlier, too
+    generous budget (204,000) seg66's verdict came out right for the wrong
+    reason -- only the margin figures this test checks exposed that.
+
+    Byte sizes below are PINNED AS LITERALS, read once (read-only, via
+    `stat -f %z`) from the real seg66/seg27 files at
+    /Users/moi/lazy-ants/development/claude-plugins-runs/lt-409-stepB/
+    s6-measure-root (an APFS copy-on-write clone of the live tome1 book) --
+    confirmed to match the doc's own §10.1/§10.2/§10.4 tables exactly. This
+    test does NOT depend on that clone existing at test time; nothing here
+    reads from it.
+
+    seg66 (doc §10.3): the corpus's LARGEST real segment -- gate_b_tokens=
+    269,781 against the doc's EXACT tokenization, 39.2% OVER the 193,800
+    budget, the single outlier of 207 real eligible segments. MUST fall
+    back.
+
+    seg27 (doc §10.4): the corpus's SECOND-largest real segment, same book
+    (same style_bible.md/review_TASK.md as seg66) -- gate_b_tokens=160,799
+    against the doc's exact tokenization, margin +17.0% (33,001 tokens of
+    headroom). MUST stay codex -- comfortable, not a near-miss.
+
+    THIS FORMULA'S OWN ESTIMATE IS DELIBERATELY NOT EXPECTED TO MATCH THOSE
+    TWO NUMBERS EXACTLY, and asserting equality would be the wrong check.
+    fixreview_context_estimate() applies ONE conservative prose ratio
+    (FIXREVIEW_PROSE_BYTES_PER_TOKEN, the WORST of eight real per-file
+    measurements) uniformly to style_bible.md + review_TASK.md, precisely
+    so the driver never needs a tiktoken dependency at runtime (doc §10.5's
+    own defended trade-off) -- the doc's §10 figures instead tokenize EACH
+    file exactly (tome1's style_bible.md at its own real ~3.6 B/token,
+    review_TASK.md at its own real ~4.1 B/token), which is why they read
+    LOWER. What must match is the VERDICT on both segments, and this
+    formula's estimate must never read BELOW the doc's exact figure --
+    over-reserving is the only direction it is allowed to be wrong in."""
+    ctx = _ctx(tmp_path)
+    budget = ctx.translate_cfg.get(
+        "max_fixreview_context_tokens", DRIVER.DEFAULT_MAX_FIXREVIEW_CONTEXT_TOKENS)
+    assert budget == 193_800, "this check is calibrated against the FINAL budget; update it if that moves"
+
+    # tome1's own style_bible.md/review_TASK.md -- SAME for both segments below,
+    # since seg66 and seg27 are both tome1 segments (doc §10.1/§10.2).
+    style_bible_bytes = 29_684   # tome1/style_bible.md, real, read-only clone
+    review_task_bytes = 9_158    # tome1/review_TASK.md, real, read-only clone
+    (ctx.dirs["durable_root"] / "style_bible.md").write_bytes(b"x" * style_bible_bytes)
+    (ctx.dirs["durable_root"] / "review_TASK.md").write_bytes(b"x" * review_task_bytes)
+
+    # seg66 -- tome1's largest real segment (doc §10.1, §3 Case A). Written
+    # under this file's own fixed test SEG id ("seg01"), not the real
+    # segment name -- only the BYTE SIZES are the real corpus's own.
+    (ctx.segments_dir / f"segpack_{SEG}.json").write_bytes(b"x" * 297_469)
+    (ctx.segments_dir / f"{SEG}.draft.json").write_bytes(b"x" * 262_817)
+    seg66_estimate = DRIVER.fixreview_context_estimate(ctx, SEG)
+    assert seg66_estimate is not None
+    assert seg66_estimate >= 269_781, (
+        f"this formula's conservative prose ratio must never read BELOW the "
+        f"doc's exact tokenization (269,781) -- got {seg66_estimate}, which "
+        f"would mean this formula can under-reserve budget")
+    assert DRIVER.effective_fix_mode(ctx, SEG) == DRIVER.FIX_MODE_HANDOFF, (
+        "seg66 is the corpus's one real, 39.2%-over outlier -- must fall back")
+
+    # seg27 -- tome1's second-largest real segment, same book (doc §10.4).
+    (ctx.segments_dir / f"segpack_{SEG}.json").write_bytes(b"x" * 157_383)
+    (ctx.segments_dir / f"{SEG}.draft.json").write_bytes(b"x" * 155_459)
+    seg27_estimate = DRIVER.fixreview_context_estimate(ctx, SEG)
+    assert seg27_estimate is not None
+    assert seg27_estimate >= 160_799, (
+        f"this formula must never read BELOW the doc's exact tokenization "
+        f"(160,799) -- got {seg27_estimate}")
+    assert DRIVER.effective_fix_mode(ctx, SEG) == DRIVER.FIX_MODE_CODEX, (
+        "seg27 has +17.0% real margin (33,001 tokens headroom) -- must stay codex, "
+        "not a near-miss")
+
+
+def test_the_fallback_is_recorded_in_the_journal(tmp_path, monkeypatch):
+    """An operator watching a --fix-mode=codex project who sees a plain
+    `review` dispatch where a merged `fixreview` was expected (or a
+    `needs_fix` handoff) has no other way to learn WHY -- see
+    _journal_fixreview_size_fallback()'s own docstring in the driver."""
+    ctx = _ctx(tmp_path, max_fixreview_context_tokens=1)
+    monkeypatch.setattr(DRIVER, "write_ledger", lambda *a, **k: {"success": True})
+    dispatched = _loop(monkeypatch, ctx,
+                       [{"action": "review", "round_label": "1"},
+                        {"action": "cap_reached", "findings": []}])
+
+    DRIVER.process_segment(SEG, ctx)
+
+    assert [d["kind"] for d in dispatched] == ["review"], (
+        "a budget of 1 token must have downgraded fixreview -> review")
+    journal = DRIVER.journal_path(ctx.dirs["durable_root"], ctx.session_id)
+    events = [json.loads(ln) for ln in journal.read_text(encoding="utf-8").splitlines()]
+    fallbacks = [e for e in events if e.get("type") == "fixreview_size_fallback"]
+    assert len(fallbacks) == 1, fallbacks
+    assert fallbacks[0]["seg"] == SEG
+    assert fallbacks[0]["round_label"] == "1"
+    assert fallbacks[0]["configured_fix_mode"] == DRIVER.FIX_MODE_CODEX
+    assert fallbacks[0]["budget_tokens"] == 1
+
+
+def test_a_large_style_bible_pushes_an_otherwise_fine_segment_over_budget(tmp_path):
+    """THE TEST THAT PROVES THE OVERHEAD IS MEASURED PER PROJECT, NOT BAKED
+    IN. Same ctx, same segpack, same draft, same review_TASK.md throughout
+    -- the ONLY thing that changes is style_bible.md's own size, read fresh
+    at runtime by fixreview_context_estimate() every call. A module
+    constant could never have known this project's own style_bible.md size
+    in advance; only measuring it, per project, at the moment of the
+    decision, catches this."""
+    ctx = _ctx(tmp_path)
+    _seed_fixreview_inputs(ctx)
+    assert DRIVER.effective_fix_mode(ctx, SEG) == DRIVER.FIX_MODE_CODEX, (
+        "control: a small style_bible.md leaves this otherwise-tiny segment in budget")
+
+    (ctx.dirs["durable_root"] / "style_bible.md").write_bytes(b"x" * 900_000)
+
+    assert DRIVER.effective_fix_mode(ctx, SEG) == DRIVER.FIX_MODE_HANDOFF, (
+        "a 900 KB style_bible.md alone must push this segment over the default budget")
+
+
+def test_both_loaders_read_max_fixreview_context_tokens(tmp_path):
+    """#409 track B, the size fallback. Mirrors test_both_loaders_read_the_
+    two_new_knobs above: BOTH loaders resolve this key from the same
+    profile with the same default -- see load_engine_config()'s own comment
+    on this key for why it is read there too even though nothing in
+    admission math consumes it."""
+    root = _profile_root(tmp_path, "  max_fixreview_context_tokens: 12345\n")
+    for loader in ("load_engine_config", "load_translate_config"):
+        cfg = getattr(DRIVER, loader)(root)
+        assert cfg["max_fixreview_context_tokens"] == 12345
+
+
+def test_both_loaders_apply_the_max_fixreview_context_tokens_default(tmp_path):
+    """profile.schema.json documents 193800 as the default: the pinned codex
+    model's own context_window (272,000) times effective_context_window_
+    percent (95 -- easy to miss next to the first field, and both matter)
+    gives the 258,400-token window this mode may actually plan against,
+    times 0.75 (the 25% margin bar this mode must clear) gives 193,800.
+    Written here literally, not imported from the production constant, so
+    this test would notice either side drifting from the other."""
+    root = _profile_root(tmp_path)
+    for loader in ("load_engine_config", "load_translate_config"):
+        cfg = getattr(DRIVER, loader)(root)
+        assert cfg["max_fixreview_context_tokens"] == 193800
+
+
+# ---------------------------------------------------------------------------
+# The publication P1 -- reproduced against the REAL publish_txn(), not the
+# probe's stand-ins (claude-plugins-runs/lt-409-stepB/
+# probe_nondestructive_publish.py), which fix-codexjob found model the
+# shipped code badly in at least two ways. Everything below is built from
+# reading publish_txn() itself: the `expected_destination is not None`
+# branch (segment_dispatch_driver.py, os.link()/os.replace() pair) and the
+# `except FileExistsError` reconciliation right after it -- verified at the
+# source, not taken on relay.
+# ---------------------------------------------------------------------------
+
+_P1_RACER_BYTES = b'{"racer": "content a user typed and would lose"}'
+
+
+def _p1_setup(ctx, *, round_label="1"):
+    """A state publish_txn() could ACTUALLY be handed: a real canonical
+    draft+review pair, real staged "new" content at publish_txn()'s own
+    staged_paths(), and a real, _is_valid_intent()-passing intent -- the
+    same shape tests/txn_publish.test.py's own _setup()/_intent() build,
+    reproduced here because that file is not mine to touch for this test
+    and publish_txn() must be driven by an authentic intent, never a
+    hand-built decision (classify_txn_recovery() is what mints a `binding`;
+    publish_txn() refuses anything without one)."""
+    _write_canonical(ctx, draft_body="old", review={"old": "review"})
+    draft_path = ctx.segments_dir / f"{SEG}.draft.json"
+    review_path = ctx.segments_dir / f"{SEG}.review.json"
+    ctx.txn_dir.mkdir(parents=True, exist_ok=True)
+
+    paths = DRIVER.staged_paths(ctx.txn_dir, SEG, round_label)
+    paths["draft"].write_text(json.dumps({"seg": SEG, "dispatch_token": DRAFT_TOKEN,
+                                          "blocks": {"b": "new"}}), encoding="utf-8")
+    paths["review"].write_text(json.dumps({"new": "review"}), encoding="utf-8")
+
+    def _h(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    ok = DRIVER.write_txn_intent(ctx.txn_dir, SEG, {
+        "txn_schema": DRIVER.TXN_SCHEMA_VERSION,
+        "txn_id": f"{RUN}:{SEG}:{round_label}:1",
+        "phase": "prepared",
+        "round_label": round_label,
+        "pre_edit_draft_sha1": DRAFT_SHA1.draft_content_sha1(draft_path),
+        "pre_edit_draft_token": DRAFT_TOKEN,
+        "staged_draft_sha256": _h(paths["draft"]),
+        "staged_review_sha256": _h(paths["review"]),
+        "review_preimage": {"sha256": _h(review_path)},
+    })
+    assert ok, "fixture's own intent must be valid, or nothing below tests publish_txn() at all"
+    return paths
+
+
+def _p1_decide(ctx):
+    """The REAL decision, from the REAL classifier -- never a literal dict.
+    Matches tests/txn_publish.test.py's own _decide(): a hand-built decision
+    cannot mint the `binding` publish_txn() requires, so it would refuse
+    for a reason that has nothing to do with the race under test."""
+    observed = DRIVER.gather_txn_observed(SEG, ctx.txn_dir, ctx.segments_dir,
+                                          ctx.dirs["scripts_dir"])
+    return DRIVER.classify_txn_recovery(observed)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#409 track B, the publication P1. os.link()'s pin captures whatever inode is "
+        "CURRENT at the destination -- it cannot capture bytes a rename-based racer "
+        "installs AFTER the pin, and os.replace() a few lines later destroys them with "
+        "no trace. strict=True so this flips to an unexpected PASS (and the suite says "
+        "so loudly) the moment the publish-boundary redesign lands, instead of going "
+        "quietly green."
+    ),
+)
+def test_a_rename_based_racer_between_the_link_pin_and_the_replace_survives_or_refuses(
+        tmp_path, monkeypatch):
+    """THE RACE: publish_txn() pins whatever inode is CURRENTLY at the
+    canonical destination with os.link(destination, pinned), then a few
+    lines later replaces it with os.replace(source, destination). A
+    RENAME-BASED writer (stage a temp file, os.rename() it over the
+    canonical name -- exactly what the handoff fix step, a sync daemon, or
+    any editor that saves via rename would do) that lands in that window
+    swaps a NEW inode onto `destination` AFTER the pin already captured the
+    OLD one. os.replace() then destroys whatever the racer just installed;
+    the post-replace check (`_sha256_of(pinned) != expected_destination`)
+    compares the OLD content against itself, matches, and nothing refuses.
+    publish_txn() returns True.
+
+    ACCEPTANCE CRITERION, matching the probe's own verdict shape exactly
+    (`ok is False and survived` in probe_nondestructive_publish.py's own
+    run_case()) rather than one invented for this test: the racer's bytes
+    must EITHER stop the publish (a refusal) OR survive somewhere findable
+    on disk. Today's shipped publish_txn() satisfies NEITHER half -- this
+    is the P1, reproduced against the real function."""
+    ctx = _ctx(tmp_path)
+    paths = _p1_setup(ctx)
+    decision = _p1_decide(ctx)
+    assert decision["publish"] == ["review", "draft"], "fixture must reach the publishing state"
+
+    real_link = DRIVER.os.link
+
+    def _racing_link(src, dst):
+        # THE PIN, unmodified -- captures whatever is at `src` RIGHT NOW.
+        real_link(src, dst)
+        # THE RACE, injected immediately after: only on the DRAFT's own pin
+        # (review is renamed first, per the "review before draft" order
+        # publish_txn()'s own docstring states, and is already durably
+        # published by the time this fires) -- a rename-based writer swaps
+        # a NEW inode onto the canonical name between the pin above and the
+        # os.replace() a few lines later in publish_txn() itself.
+        if str(src) == str(paths_dst := ctx.segments_dir / f"{SEG}.draft.json"):
+            racer_tmp = paths_dst.with_name(paths_dst.name + ".racer-tmp")
+            racer_tmp.write_bytes(_P1_RACER_BYTES)
+            DRIVER.os.rename(str(racer_tmp), str(paths_dst))
+
+    monkeypatch.setattr(DRIVER.os, "link", _racing_link)
+
+    result = DRIVER.publish_txn(ctx.txn_dir, SEG, ctx.segments_dir, decision,
+                                ctx.dirs["scripts_dir"])
+
+    racer_survived = any(
+        p.is_file() and p.read_bytes() == _P1_RACER_BYTES
+        for p in ctx.segments_dir.iterdir()
+    )
+    assert result is False and racer_survived, (
+        f"publish_txn() returned {result!r}; racer bytes survived on disk: {racer_survived} -- "
+        f"today's os.link-pin design cannot catch a rename-based racer landing between the "
+        f"link and the replace, and it is not supposed to be able to (see this test's own "
+        f"docstring); expected to stay xfail until the publish-boundary redesign lands"
+    )
 
 
 if __name__ == "__main__":

@@ -332,6 +332,46 @@ engine:
     # SCOPE: this ceiling is per round WITHIN ONE DRIVER INVOCATION. The counter lives in memory, so
     # re-running the driver gives the same round its full allowance again. Only max_txn_failures_per_segment
     # above is durable across invocations.
+  max_fixreview_context_tokens: 193800
+    # #409 track B, the size fallback. OPTIONAL, like its two siblings above. The per-segment TOKEN BUDGET
+    # for ONE merged --fix-mode=codex fixreview call (fixReviewDispatchPrompt() in mass-translate-wf.template.js)
+    # -- the ONE codex call that reviews AND fixes a segment's draft in a single context. That call has to fit
+    # inside the model's own context window, and measurement on the real corpora
+    # (references/orchestration-and-batching.md's own §6) found the largest real segment does NOT fit with
+    # the required margin -- so segment_dispatch_driver.py checks THIS budget per segment
+    # (fixreview_context_estimate()/effective_fix_mode()) before every fixreview dispatch, and silently falls
+    # back that ONE segment to --fix-mode=handoff's plain review + external Claude fix turn when the estimate
+    # is over budget OR could not even be computed (fail CLOSED, never proceed on an unobservable size). The
+    # fallback never fails the run and never truncates a job; it costs one extra Claude fix turn for that
+    # segment instead of a merged codex call.
+    #
+    # THE ESTIMATE COUNTS FOUR REAL INPUTS THE CALL ACTUALLY READS, NOT THE PROMPT: fixReviewDispatchPrompt()
+    # embeds no segment content at all -- it is a FIXED instruction telling the model to go read
+    # review_TASK.md, style_bible.md, the segpack, and the draft BY PATH. Gating on prompt length would gate
+    # on nothing; the load is those four files, sized fresh at runtime -- never baked-in constants, because
+    # style_bible.md in particular is per PROJECT, and a large one can by itself consume a real fraction of
+    # this budget (measured: 13,756-17,956 tokens of style_bible.md + review_TASK.md overhead across four real
+    # books, a ~30% spread from style-guide length alone). The draft is counted TWICE -- once as the input the
+    # call reviews, once as the output it rewrites -- because both live in the SAME context; a naive single
+    # count of it would under-estimate every real segment.
+    #
+    # The default (193800) is derived from TWO measured fields of ONE NAMED MODEL's own record in
+    # ~/.codex/models_cache.json, not one -- gpt-5.6-sol, the model ~/.codex/config.toml pinned at measurement
+    # time: context_window (272,000) AND effective_context_window_percent (95, easy to miss next to the first
+    # field -- omitting it already flipped a verdict once during this feature's own measurement pass). 272,000
+    # * 0.95 = 258,400 is the window this mode may actually plan against; * 0.75 (the 25% margin bar §6 sets
+    # for this mode to be considered safely within budget) = 193,800.
+    #
+    # THIS DEFAULT DOES NOT ADAPT TO engine.model ABOVE. engine.model is itself OPTIONAL -- unset (the common
+    # case) resolves to whatever ~/.codex/config.toml's own default is at RUN time, and this file is never
+    # read back to check it. If the model actually in use (pinned here, or resolved by the codex config) has
+    # a SMALLER context window than gpt-5.6-sol's, this budget is measuring against the wrong ceiling and will
+    # report a comfortable-looking margin that is not the margin actually available. Lower this value by hand
+    # to match a smaller-window model; there is no automatic adjustment.
+    #
+    # Lowering it makes MORE segments fall back to handoff (safer, more external fix turns); raising it risks
+    # a merged call that does not actually fit. Set to 0 to force EVERY --fix-mode=codex segment through
+    # handoff regardless of size -- a legitimate, if extreme, operator choice.
 
 footnotes:
   apparatus_policy: translate_all

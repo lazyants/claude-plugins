@@ -35,10 +35,12 @@ launched with, matching codex-companion's own workspaceRoot-keyed job store) rat
 passing vacuously regardless of which cwd the driver happens to send.
 """
 
+import ast
 import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import signal
 import stat
@@ -2695,6 +2697,107 @@ def test_poll_sec_zero_is_clamped_rather_than_busy_looping(tmp_path):
         f"unclamped=143, for this identical fixture)."
     )
     assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+# --------------------------------------------------------------------------- #
+# self.canonical_unreadable's own comment cites a count of self.reason
+# assignment sites -- a bare number nobody re-derives on every future edit.
+# A prior version of this exact number ("fourteen") was wrong when it shipped
+# and was never checked -- see the commit-message prose audit -- so this test
+# exists to make the NEXT wrong number fail CI instead of quietly rotting.
+# --------------------------------------------------------------------------- #
+_REASON_OTHER_BRANCHES_RE = re.compile(
+    r"a string that (\w+) other branches also assign")
+
+#: English number words this test can parse out of the comment. Extending the
+#: codebase past twenty self.reason branches is not expected soon, but if it
+#: happens, a KeyError below is the correct failure -- refuse rather than
+#: silently accept a word this table does not know.
+_NUMBER_WORDS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19, "twenty": 20,
+}
+
+
+def _live_other_reason_assignment_count():
+    """AST count of `self.reason = ...` assignment STATEMENTS in codex_job.py,
+    excluding exactly the two classes the comment's "OTHER branches" phrasing
+    excludes:
+
+      - the __init__ default (`self.reason = None`) -- it always runs first,
+        before every other assignment in the object's lifetime, so it can
+        never be the branch that clobbers a LATER refusal's own record of
+        itself; it is not a competing narrator in the sense the comment means.
+      - every site that assigns the literal "canonical-unreadable" -- those
+        are self.canonical_unreadable's OWN concept, restated at whichever
+        call sites currently refuse for that reason. They are the ONE thing
+        the flag exists to protect, not an "other" branch it needs protecting
+        FROM, no matter how many call sites currently express that one
+        concept.
+
+    Everything else -- every other literal reason string, and the two dynamic
+    ones (`"job-%s" % ...`, `"error: %r" % ...`) -- counts, because any of
+    them is exactly the kind of branch that overwrote self.reason in the bug
+    this flag was built to survive."""
+    tree = ast.parse(DRIVER_SRC.read_text(encoding="utf-8"))
+    count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not (isinstance(target, ast.Attribute) and target.attr == "reason"
+                    and isinstance(target.value, ast.Name) and target.value.id == "self"):
+                continue
+            value = node.value
+            if isinstance(value, ast.Constant) and value.value is None:
+                continue  # the __init__ default -- always first, never a clobberer
+            if isinstance(value, ast.Constant) and value.value == "canonical-unreadable":
+                continue  # the flag's own concept, not an "other" branch
+            count += 1
+    return count
+
+
+def test_reason_other_branches_count_matches_the_comment_it_documents():
+    """codex_job.py's own comment on self.canonical_unreadable states how many
+    OTHER places assign self.reason -- the exact fragility the flag exists to
+    survive (self.reason is reassigned by whatever the run does next; a
+    dedicated flag cannot be). A bare number in a comment is a claim nobody
+    re-derives on the next edit; this test re-derives it every run so an
+    added/removed self.reason branch fails CI instead of leaving the comment
+    quietly wrong, which is exactly what happened to the number this test
+    replaces (see the commit-message prose audit: the comment said "fourteen",
+    a live count said otherwise, and nothing had ever checked)."""
+    # The sentence wraps across a `#` comment continuation line in the source
+    # ("...via a\n        # string that..."), so a plain read of the file
+    # never matches word-adjacent regexes -- normalize comment-continuation
+    # newlines and collapsed runs of spaces/tabs to single spaces first.
+    text = DRIVER_SRC.read_text(encoding="utf-8")
+    normalized = re.sub(r"\n\s*#", " ", text)
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    m = _REASON_OTHER_BRANCHES_RE.search(normalized)
+    assert m is not None, (
+        "could not find the \"a string that <N> other branches also assign\" "
+        "sentence in codex_job.py at all -- refusing to silently pass; either "
+        "the comment was reworded (update this regex) or removed (update or "
+        "delete this test)"
+    )
+    word = m.group(1)
+    assert word in _NUMBER_WORDS, (
+        f"the comment's count-word {word!r} is not in this test's number-word "
+        f"table -- extend _NUMBER_WORDS, do not let this pass silently"
+    )
+    documented = _NUMBER_WORDS[word]
+    live = _live_other_reason_assignment_count()
+    assert documented == live, (
+        f"codex_job.py's own comment says self.reason is assigned in "
+        f"{word!r} ({documented}) other branches, but a live AST count "
+        f"(excluding the __init__ default and the canonical-unreadable "
+        f"sites) finds {live} -- the comment has rotted; update the WORD in "
+        f"the comment, not this test"
+    )
 
 
 if __name__ == "__main__":

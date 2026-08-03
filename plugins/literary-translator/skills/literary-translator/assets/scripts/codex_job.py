@@ -408,7 +408,7 @@ class CodexJob:
         # KEEP self.attempt on disk must survive that reassignment. A name describes what
         # was decided, never what actually happened -- self.reason is for the joblog/stdout
         # narrative; this flag is for the one thing that must not be reasoned about via a
-        # string that fourteen other branches also assign.
+        # string that sixteen other branches also assign.
         self.canonical_unreadable = False
         # Slots a quarantine move failed on, which finalize() must therefore NOT
         # delete. Empty on every path that never quarantines, so the check below
