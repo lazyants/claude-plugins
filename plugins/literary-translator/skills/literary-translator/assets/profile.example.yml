@@ -269,6 +269,43 @@ engine:
     # therefore no longer redundant with batch_agent_cap above for an ordinary book in the 67-116 segment
     # range: it is the gate that actually refuses first. Splitting a batch that's too large into
     # smaller ones is the operator's call, not automated in v1 (same policy as batch_agent_cap).
+  max_txn_failures_per_segment: 3
+    # #409 track B. OPTIONAL, like max_codex_jobs_per_batch above -- many existing profiles/fixtures predate
+    # this knob and must stay schema-valid without it. Bounds `<seg>.txn_failures`, the durable per-segment
+    # count of REFUSED fixreview transactions (segment_dispatch_driver.py's charge_txn_failure/
+    # txn_failures_exhausted): once the count reaches this ceiling, a further transaction for that segment is
+    # refused. Only failures are charged -- a transaction that runs to a successful commit never advances this
+    # counter, so a segment that keeps converging normally is never at risk of tripping it.
+    #
+    # DELIBERATELY separate from `<seg>.attempts`, the sibling counter that exists solely so every transaction
+    # attempt gets a unique id: that one is monotonic and UNBOUNDED, advancing on every intent INCLUDING
+    # successful ones, and engine.max_fix_rounds carries no schema maximum -- so a legitimate max_fix_rounds >= 7
+    # would exhaust a ceiling of 6 on the ordinary, all-success path if the two counters were conflated.
+    #
+    # The comparison is `>=`, not `>`: reaching the ceiling refuses the NEXT transaction, it does not require
+    # exceeding it -- with `>` this knob would silently permit one extra failure past its own stated name.
+    # Refusal here is a ceiling on transaction ATTEMPTS, not durable terminality for the segment: the segment
+    # itself stays selectable by the dispatch loop and will be refused again on its next attempt, not
+    # permanently retired.
+    #
+    # NOT YET READ FROM THIS FILE. As of this release the ceiling reaches txn_failures_exhausted() as a plain
+    # in-process `ceiling` argument, and nothing anywhere resolves it from `engine.max_txn_failures_per_segment`
+    # -- so setting it here changes the SHAPE contract only, and does not change behaviour. Same footing as the
+    # output.* knobs further down whose adapters ship in a later phase. Said out loud because this repo's own
+    # stated anti-goal (see citation_content_types in resume_setup.py's SUBST_FIELDS) is a profile setting that
+    # silently does not take effect, and prose describing enforcement that is not wired IS that anti-goal.
+  max_rejected_candidates_per_round: 2
+    # #409 track B. OPTIONAL, like max_codex_jobs_per_batch above. Bounds how many codex-produced candidates
+    # (an attempt artifact that failed its post-launch validation gate -- see codex_job.py's own candidate-gate
+    # design) a single numeric fix-review round may accumulate as REJECTED before the round gives up. Mirrors
+    # max_txn_failures_per_segment's failures-only counting discipline: only rejected candidates are charged
+    # against this cap, never a candidate that passes its gate and is promoted, and the count is scoped to one
+    # round -- it does not carry over into the next round_label.
+    #
+    # NOT YET READ FROM THIS FILE, and one step earlier than its sibling above: no enforcement code exists at
+    # all yet, not even a `ceiling` parameter waiting for a value. The description says WHAT this bounds, never
+    # WHERE it is enforced, because that place does not exist. Declared now so the key is schema-valid when the
+    # round-level gate lands, on the same footing as the output.* knobs whose adapters ship in a later phase.
 
 footnotes:
   apparatus_policy: translate_all
