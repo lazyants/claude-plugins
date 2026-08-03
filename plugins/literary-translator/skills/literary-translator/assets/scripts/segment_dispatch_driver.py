@@ -1406,6 +1406,217 @@ def _read_counter(path: Path):
         return ("corrupt", None)
 
 
+# ---------------------------------------------------------------------------
+# #409 track B -- recovery classification for the paired-publication
+# transaction.
+#
+# Deliberately PURE: it takes an already-gathered `observed` mapping and
+# returns a decision, so every reachable state can be exercised without
+# staging real files, real crashes, or a real codex job. The I/O that
+# gathers `observed` is a separate, thin layer; keeping them apart is what
+# makes the state space testable at all.
+#
+# An ORDERED PROCEDURE, not a table: predicates are evaluated top-down and
+# the first match wins, so disjointness is structural rather than promised.
+# A table of independent rows is what this was first written as, and its
+# rows overlapped -- "the review matches the staged review" could hold at
+# the same time as "draft staging is missing" and as "the draft matches
+# neither preimage nor postimage", with different rows prescribing
+# different actions for one state.
+# ---------------------------------------------------------------------------
+
+TXN_PROCEED = "proceed"                          # nothing in flight
+TXN_ABORTED_PREPARE = "txn-aborted-prepare"      # staging without an intent
+TXN_COMMITTED_CLEANED = "txn-committed-cleaned"  # committed, cleanup only
+TXN_ROLLED_FORWARD_TAIL = "txn-rolled-forward-tail"  # both renamed already
+TXN_ROLL_FORWARD_DRAFT = "txn-rolled-forward"    # review renamed; draft to go
+TXN_ROLL_FORWARD_BOTH = "txn-rolled-forward"     # neither renamed yet
+TXN_PREIMAGE_DIVERGED = "txn-preimage-diverged"  # CAS refusal
+TXN_STAGING_LOST = "txn-staging-lost"            # unrecoverable, publish nothing
+TXN_INTENT_INVALID = "txn-intent-invalid"        # intent present but untrustworthy
+
+TXN_SCHEMA_VERSION = 1
+_TXN_PHASES = ("prepared", "committed")
+_TXN_REQUIRED_FIELDS = (
+    "txn_id", "phase", "pre_edit_draft_sha1", "pre_edit_draft_token",
+    "staged_draft_sha256", "staged_review_sha256", "review_preimage",
+)
+
+
+def classify_txn_recovery(observed: dict) -> dict:
+    """Decide what to do about a segment's transaction, from observed state.
+
+    `observed` keys:
+      intent                 the intent mapping, or None when absent
+      staged_draft_sha256    sha256 of the staged draft on disk, or None
+      staged_review_sha256   sha256 of the staged review on disk, or None
+      canonical_draft_sha256 sha256 of the canonical draft bytes, or None
+      canonical_review_sha256 sha256 of the canonical review bytes, or None
+      canonical_draft_content_sha1  the draft's CONTENT sha1 (token-excluded)
+      canonical_draft_token  the canonical draft's dispatch_token, or None
+
+    Returns {"outcome": <one of the constants>, "publish": [...],
+             "commit_intent": bool, "cleanup": bool}.
+    `publish` lists which artifacts still need renaming, in the order they
+    must be renamed -- review first, always, because review_ready.py compares
+    a candidate review against the CURRENT canonical draft, so "old draft +
+    new review" is a SHA-consistent intermediate state and "new draft + old
+    review" is not.
+    """
+    def decision(outcome, publish=(), commit_intent=False, cleanup=False):
+        return {"outcome": outcome, "publish": list(publish),
+                "commit_intent": commit_intent, "cleanup": cleanup}
+
+    intent = observed.get("intent")
+    sd = observed.get("staged_draft_sha256")
+    sr = observed.get("staged_review_sha256")
+    cd = observed.get("canonical_draft_sha256")
+    cr = observed.get("canonical_review_sha256")
+
+    # --- 0. no intent -------------------------------------------------------
+    if intent is None:
+        if sd is not None or sr is not None:
+            # Reachable BY CONSTRUCTION: staging is written before the intent
+            # is made durable, so a crash in between leaves exactly this.
+            return decision(TXN_ABORTED_PREPARE, cleanup=True)
+        return decision(TXN_PROCEED)
+
+    # --- 0b. an intent that exists but cannot be trusted ---------------------
+    # ABSENT and INVALID are different states here for the same reason they are
+    # for the counters, and getting it wrong is worse on this path: treating a
+    # non-mapping intent as absence returns cleanup=True and DELETES the only
+    # recovery evidence, while letting any mapping through means an unknown
+    # `phase` or a missing `txn_schema` can reach a publish decision. Refuse
+    # with neither publication NOR cleanup -- an operator can inspect what is
+    # left, which is impossible once it has been deleted.
+    if not _is_valid_intent(intent):
+        return decision(TXN_INTENT_INVALID)
+
+    want_draft = intent.get("staged_draft_sha256")
+    want_review = intent.get("staged_review_sha256")
+
+    # --- 1. already committed ----------------------------------------------
+    if intent.get("phase") == "committed":
+        return decision(TXN_COMMITTED_CLEANED, cleanup=True)
+
+    # --- 2. both destinations already renamed ------------------------------
+    # Staging is legitimately GONE here; treating that as staging-loss (which
+    # an earlier table did) would refuse a transaction that in fact succeeded.
+    if cd is not None and cr is not None and cd == want_draft and cr == want_review:
+        return decision(TXN_ROLLED_FORWARD_TAIL, commit_intent=True, cleanup=True)
+
+    preimage_intact = (
+        observed.get("canonical_draft_content_sha1") == intent.get("pre_edit_draft_sha1")
+        and observed.get("canonical_draft_token") == intent.get("pre_edit_draft_token")
+    )
+    review_is_preimage = _review_matches_preimage(cr, intent.get("review_preimage"))
+    review_is_postimage = cr is not None and cr == want_review
+
+    # --- 3. review renamed, draft still to go ------------------------------
+    if (review_is_postimage and preimage_intact
+            and sd is not None and sd == want_draft):
+        return decision(TXN_ROLL_FORWARD_DRAFT, publish=("draft",),
+                        commit_intent=True, cleanup=True)
+
+    # --- 4. nothing renamed yet --------------------------------------------
+    if (review_is_preimage and preimage_intact
+            and sd is not None and sd == want_draft
+            and sr is not None and sr == want_review):
+        return decision(TXN_ROLL_FORWARD_BOTH, publish=("review", "draft"),
+                        commit_intent=True, cleanup=True)
+
+    # --- 5. CAS refusal -----------------------------------------------------
+    # ORDERED ABOVE step 6 deliberately: a diverged preimage must never be
+    # read as mere staging loss, or a roll-forward could overwrite an
+    # unrelated newer draft. The `review_is_postimage` disjunct is required --
+    # without it, "this transaction already renamed the review but its draft
+    # staging is gone" fails step 3 on the missing staging and lands here,
+    # reporting a divergence THIS transaction itself produced as somebody
+    # else's.
+    if not preimage_intact or not (review_is_preimage or review_is_postimage):
+        return decision(TXN_PREIMAGE_DIVERGED, cleanup=True)
+
+    # --- 6. staging unusable ------------------------------------------------
+    return decision(TXN_STAGING_LOST, cleanup=True)
+
+
+def _is_valid_intent(intent) -> bool:
+    """A durable intent is trustworthy only when its whole shape is
+    recognised: the right schema version, every required field present, and a
+    KNOWN phase.
+
+    Validating the phase against a closed set is the load-bearing part. This
+    value arrives from JSON on disk, so "any mapping is fine" lets a truncated
+    write, a hand-edit, or a record written by a FUTURE schema reach a publish
+    decision -- and publishing on an intent this code does not understand is
+    the one outcome no recovery path may risk."""
+    if not isinstance(intent, dict):
+        return False
+    # `!= TXN_SCHEMA_VERSION` alone is NOT enough, for the third time in this
+    # file: `True == 1` in Python, so {"txn_schema": true} would pass as
+    # schema 1 and, with matching hashes, authorise BOTH publications. The
+    # same trap was fixed for the counters in _is_counter_int() and did not
+    # propagate here just because the two sit side by side.
+    schema = intent.get("txn_schema")
+    if isinstance(schema, bool) or not isinstance(schema, int) or schema != TXN_SCHEMA_VERSION:
+        return False
+    if any(field not in intent for field in _TXN_REQUIRED_FIELDS):
+        return False
+    if intent.get("phase") not in _TXN_PHASES:
+        return False
+    if not isinstance(intent.get("txn_id"), str) or not intent["txn_id"]:
+        return False
+    # The comparison fields are matched against values derived from REAL files,
+    # so a non-string here is the same class as the bool schema above: it
+    # cannot legitimately equal a hash or a token, and typing it keeps the
+    # refusal at the boundary instead of relying on a comparison to fail.
+    for field in ("pre_edit_draft_sha1", "pre_edit_draft_token",
+                  "staged_draft_sha256", "staged_review_sha256"):
+        if not isinstance(intent.get(field), str) or not intent[field]:
+            return False
+    if not _is_valid_review_preimage(intent.get("review_preimage")):
+        return False
+    return True
+
+
+def _is_valid_review_preimage(preimage) -> bool:
+    """`review_preimage` is a TAGGED UNION with exactly two recognised shapes:
+    {"absent": true} or {"sha256": "<hex>"}. Validate it HERE rather than
+    letting _review_matches_preimage() simply return False for anything else.
+
+    The difference is not cosmetic and is the same fail-closed rule one level
+    down: an unrecognised nested shape that merely fails to MATCH is reported
+    as a preimage divergence, and divergence licenses cleanup -- so the caller
+    would delete the staging and the intent, destroying the only durable
+    evidence for a record whose shape this schema does not understand. An
+    unrecognised shape must be INVALID (refuse, keep everything), never
+    DIVERGED (refuse, delete)."""
+    if not isinstance(preimage, dict):
+        return False
+    has_absent = "absent" in preimage
+    has_sha = "sha256" in preimage
+    if has_absent == has_sha:
+        return False  # neither tag, or both at once
+    if has_absent:
+        return preimage["absent"] is True
+    return isinstance(preimage["sha256"], str) and bool(preimage["sha256"])
+
+
+def _review_matches_preimage(canonical_review_sha256, preimage) -> bool:
+    """`review_preimage` is {"absent": true} or {"sha256": "<hex of the RAW
+    canonical review bytes>"}. Raw bytes, not parsed-JSON equality: it is
+    cheap and unambiguous, and it is deliberately sensitive to key order and
+    formatting, because a competing rewrite -- even a purely cosmetic one --
+    must invalidate a stale transaction exactly like any other concurrent
+    publication."""
+    if not isinstance(preimage, dict):
+        return False
+    if preimage.get("absent") is True:
+        return canonical_review_sha256 is None
+    want = preimage.get("sha256")
+    return isinstance(want, str) and canonical_review_sha256 == want
+
+
 def next_attempt_seq(txn_dir: Path, seg: str) -> int:
     """Allocate the next attempt number for `seg`, durably, BEFORE any intent
     is written. Monotonic and never reset. Returns 0 if the allocation could
