@@ -744,6 +744,230 @@ and a refusal against it is a correct refusal. What the mode-awareness still pre
 thing that would break the principle: a MODE-BLIND estimate charging an
 offline project the live `19N + 2` for a ladder it can never execute.
 
+## `segment_dispatch_driver.py`'s own volume admission — `--fix-mode` and the per-segment job bound
+
+`segment_dispatch_driver.py` (the optional dispatch path — see SKILL.md's own
+section on it) does not read `batch_agent_cap` above at all: that knob counts
+Workflow `agent()` calls, and the driver's dispatch path makes zero of those
+(it calls `codex_job.py` directly via `Popen`, with no wait-chunking
+apparatus — see the driver's own module docstring, "Property 7 in detail").
+It instead gates against `engine.max_codex_jobs_per_batch`, the SAME knob
+`mass-translate-wf.template.js`'s own preflight already reads
+(`profile.example.yml`'s own comment block under that key), from a second,
+independent entry point counting a DIFFERENT loop — exactly how
+`skeptic_setup.py`'s own preflight duplicates its Workflow template's
+estimator for the identical reason.
+
+**A numeric round is one dispatch in both modes, but a different KIND of job
+under `codex`.** `_dispatch_kind_for_round()` returns `review` for the
+mandatory final round in BOTH modes — that round edits nothing, and merging
+it would let the run's last word be spoken by the same call that wrote the
+text it judges — and `fixreview` for every other round under
+`--fix-mode=codex`. A `fixreview` job reviews the draft it finds AND applies
+its own findings in the same call, producing two artifacts (a candidate
+draft and a candidate review) where `handoff` produces one.
+
+**The per-segment job bound, `codex_jobs_per_segment()`:**
+
+```
+handoff: M + 3
+codex:   M + 3 + M*(R_reject + R_stale) + R_final
+```
+
+where `M = engine.max_fix_rounds`, `R_reject =
+engine.max_rejected_candidates_per_round` (default 2), `R_stale = 1`
+(fixed, `MAX_STALE_REDISPATCHES_PER_ROUND`), and `R_final = 1` (fixed,
+`MAX_FABRICATED_LOC_RETRIES` — the same one-retry bound `handoff` already
+had for a fabricated finding). This is deliberately the SAME number as the
+loop's own iteration cap inside `process_segment()` — one expression serves
+both, so admission and spend can never disagree on what the bound is.
+`handoff`'s `M + 3` is itself a correction this release makes, not a new
+allowance: the loop's real iteration cap has always been one higher than the
+normal-path job count, because the persistently-stale-review path can spend
+every iteration on a dispatch; the admission used to check `M + 2` and was
+therefore smaller than what the loop actually permitted.
+`mass-translate-wf.template.js`'s own preflight above keeps `M + 2` on
+purpose — it describes the WORKFLOW's round structure, where a fix is a
+plain `agent()` call and never a codex job, and the two numbers have never
+measured the same loop.
+
+**The operator-visible consequence: raising `R_reject` raises what each
+segment may cost, and therefore LOWERS how many segments a fixed
+`max_codex_jobs_per_batch` admits into a batch — it does not raise it.**
+`check_volume_cap()` computes `estimated = n_segs *
+codex_jobs_per_segment(...)` and refuses the WHOLE batch before any dispatch
+if that exceeds the cap, per mode (refusing a `codex`-mode batch against
+`handoff`'s much smaller number would let a run start that its own loop is
+permitted to overspend by a factor of roughly four). A larger `R_reject`
+shrinks the batch size that clears preflight under the same cap — the same
+one-number-controls-both-consumers relationship `max_codex_jobs_per_batch`
+already has with `max_fix_rounds` above.
+
+**The two `engine.*` keys `--fix-mode=codex` reads, and only one survives a
+re-run:**
+
+- `engine.max_rejected_candidates_per_round` (default 2) bounds how many
+  `fixreview` candidates one numeric round may accumulate as rejected
+  (failed one of `codex_job.py`'s four validation gates) before that round
+  gives up (`outcome: "failed", reason: "rejected-candidates-exhausted"`).
+  The counter lives IN MEMORY, keyed by round, for the one driver invocation
+  that is running — re-running the driver gives the same round its full
+  allowance again.
+- `engine.max_txn_failures_per_segment` (default 3) bounds how many refused
+  publish transactions one segment may accumulate before a further
+  transaction is refused (`reason: "txn-failures-exhausted"`). This one IS
+  durable across invocations — a real on-disk counter,
+  `runs/<RUN_ID>/txn/<seg>.txn_failures` — and it is a ceiling on
+  transaction ATTEMPTS, not durable terminality: the segment stays
+  selectable and is retried on the next invocation exactly like any other
+  recoverable failure.
+
+Both are OPTIONAL, like `max_codex_jobs_per_batch` itself — a profile
+predating #409 stays schema-valid without them, and the loader applies the
+defaults above.
+
+**What `--fix-mode=codex` does NOT close.** Stated plainly, because an
+overstated mitigation reads as caution and stops being questioned:
+
+- **The publish is RECOVERABLE, now NON-DESTRUCTIVE too — but still not
+  ATOMIC.** `publish_txn()` renames the staged review, flushes that durably,
+  then renames the staged draft, so a crash between the two leaves a
+  consistent PREFIX a later recovery pass can classify and complete. Before
+  each individual rename it also hard-links the CURRENT destination inode to
+  `<name>.superseded-<txn_id>` and, after the rename, hashes that pin against
+  what it observed before renaming — a mismatch means a writer landed inside
+  the window, and `publish_txn()` refuses instead of reporting success over
+  destroyed content; the replaced bytes survive at the pin for a human to
+  look at.
+
+  The two writer shapes this covers are covered DIFFERENTLY, and the weaker
+  half is the one worth stating plainly rather than letting a reader assume
+  it away: an IN-PLACE writer (an editor, a shell redirect, the handoff fix
+  step's rewrite of the canonical draft) shares the pinned inode, so its
+  bytes appear in the pin whenever they land, before or after the link, and
+  the hash always catches them. A RENAME-BASED writer — every publisher in
+  this codebase, including this one — installs a NEW inode at the name: a
+  swap landing before the link is caught, because the pin then holds the
+  racer's inode, but a swap landing between the link and the rename itself is
+  NOT caught and cannot be — two adjacent syscalls with no I/O between them,
+  and nothing portable fuses them. That is what remains genuinely unclosed:
+  the gap is now a few microseconds of pure bytecode rather than the
+  duration of an fsync plus a payload-sized hash — smaller, not absent — and
+  the thread can still be preempted inside it.
+
+  **Which writer is actually outside the lease, named rather than gestured
+  at:** every in-product writer of a canonical draft takes the same
+  `.codex_job.<seg>.lock` — both `codex_job.py`'s own promote paths and the
+  driver's own publication above. What it does NOT cover is a writer that
+  takes no lock at all: a human hand-editing `segments/<seg>.draft.json`, a
+  sync daemon, or the handoff fix step itself,
+  `mass-translate-wf.template.js`'s `callFix()`, which dispatches a Claude
+  `agent()` turn (`fixPrompt()`'s own instruction is literally "Rewrite
+  {ROOT}/segments/{seg}.draft.json with your fixes") that rewrites the
+  canonical draft directly and holds no lock at all. The hash-pin above is
+  what now stands between those three writers and unrecoverable loss; before
+  it, a race with any of them was silent.
+- **A durable intent this driver cannot interpret fails closed, with no
+  repair path documented yet.** An intent that is present but fails its own
+  validation (unknown schema, unknown phase, a malformed `review_preimage`)
+  is refused with NEITHER publication NOR cleanup, on purpose, so an
+  operator can inspect what is on disk instead of it being silently deleted
+  — but nothing in this plugin today reads or explains that file to the
+  operator; the documented recovery is "a human looks." A transaction whose
+  staging is genuinely unusable (`txn-staging-lost`) IS cleaned up and
+  reported as a failed outcome, discarding the round's staged work — the
+  round has to be redone, not resumed.
+- **A degraded call that changes nothing and reports clean passes every
+  gate.** The sha1 binding stops a `fixreview` call from blessing its OWN
+  edit — a round's review is bound to the pre-edit draft, so it judges the
+  PREVIOUS round's edit and never its own — but it cannot detect a call that
+  copies the draft byte-for-byte and reports `clean: true` with no findings.
+  That converges, and nothing downstream catches it. It is the same
+  under-reporting risk every reviewer in this pipeline has always carried,
+  not a new one this mode introduces.
+
+**§6 — the margin verdict this section originally gave was computed against
+the wrong budget; corrected below, along with two numbers that are now
+settled and one that still isn't:**
+
+- **Context window, and the budget actually usable.** `gpt-5.6-sol` — the
+  model `~/.codex/config.toml` pins — has a `context_window` of 272,000
+  tokens per `~/.codex/models_cache.json`, the cache the codex runtime
+  resolves against. That same record also carries
+  `effective_context_window_percent: 95`, so the budget any one call
+  actually has to work with is `272,000 × 95% = 258,400` tokens, not the
+  raw 272,000 — every figure below is measured against that smaller number.
+- **The prompt carries no segment content, but the agent's own system
+  prompt is real overhead the earlier version of this section left out.**
+  `fixReviewDispatchPrompt()` is a fixed instruction to go read four files
+  by path (`review_TASK.md`, `style_bible.md`, the segpack, the draft) — it
+  embeds none of them, and both real rendered prompts measured exactly
+  6,489 bytes. That is why a prompt-length guard would be useless: the
+  prompt's own length does not track what the call costs. What DOES count
+  against the budget on every call is `base_instructions` — the Codex
+  agent's own system prompt, `17,766` bytes in the same model record — which
+  comes out to only 3,552 tokens under `o200k_base` / 3,576 under
+  `cl100k_base` (roughly 5.0 bytes/token: plain English prose, denser than
+  the JSON and Cyrillic content that dominates everything else measured
+  here — smaller than an earlier 4,400–5,100-token estimate for this same
+  field, so this is one place the correction below runs in the OPTIMISTIC
+  direction).
+- **Margin on the largest real segpack, remeasured against the corrected
+  budget:**
+
+  | encoding | total consumed | margin at 258,400 |
+  |---|---:|---:|
+  | `o200k_base` | 198,391 | +23.2% |
+  | `cl100k_base` | 258,599 | −0.1% |
+
+  **The largest real segpack fails the 25%-margin bar under BOTH
+  tokenizers once the model's real usable window and its own
+  system-prompt overhead are both accounted for — under `cl100k_base` it
+  does not fit in the window at all, and under the more favourable
+  `o200k_base` it still falls 1.8 points short.** An earlier version of
+  this section computed 28.4%/6.2% against the raw 272,000 window with
+  `base_instructions` uncounted; both figures were overstated and are
+  superseded by the table above.
+- **The size-based fallback this margin failure motivates is being
+  implemented for this same release — not yet shipped as of this
+  section.** Its gate estimates a call's token cost from the four files the
+  job actually reads: `segpack_bytes/3.0376 + 2×draft_bytes/3.4155 +
+  (style_bible_bytes + review_TASK_bytes)/3.403 + fixed overheads`, checked
+  against a 193,800-token budget. `3.403` is the WORST (lowest) of eight
+  real bytes/token measurements taken across four real books, chosen
+  precisely because it is the worst: dividing by it can only ever estimate
+  at or above a segment's true token count, so the gate can only
+  over-reserve, never quietly under-reserve and let an oversized call
+  through. `base_instructions` is not estimated by a ratio at all — it is
+  folded into "fixed overheads" as its own exact, fixed **3,576 tokens**
+  (the `cl100k_base` count from the bullet above). A segment the estimate
+  clears still runs under `--fix-mode=codex`; one that fails it falls back
+  to `handoff` (`R_size = 0`). The `style_bible`/`review_TASK` term is
+  measured PER PROJECT at runtime, deliberately, rather than assumed as a
+  constant, because it varies too much for a fixed number to be honest:
+  across the four real books it measured at 13,756 / 13,814 / 14,428 /
+  17,956 tokens — roughly a 30% spread from style-guide length alone,
+  before anyone writes a longer one than these four happen to have.
+- **What the gate does to the real corpus, and why that supports shipping
+  `--fix-mode=codex` as opt-in.** Swept over 207 real segments across the
+  same four real books: exactly ONE falls back — the largest, at 39.2%
+  over the 193,800-token budget — the next-largest clears by +17.0%, and
+  the one after that by +50.5%. That is a wide gap to the next segment
+  down, not a corpus clustered near the limit, so the honest description is
+  "a guard that fires on a single real outlier," not "a mode that barely
+  fits its corpus." On this evidence `--fix-mode=codex` is shippable as an
+  opt-in, because the fallback is a guard rather than a broad behaviour
+  change most segments are expected to trigger — stated scoped to the
+  evidence actually gathered (207 segments across four real books), not as
+  a general property of arbitrary corpora.
+
+TODO(#409 §6): the finalisation-round timing budget is still unmeasured and
+needs live paid dispatches to measure — no timing figure is stated here. It
+cannot be measured on the largest segment in the corpus: the size fallback
+above makes that segment fall back to `handoff` by construction, so the
+measurement has to run on the largest segment the gate still admits into
+`codex` mode.
+
 ## The glossary-pass template — a second, smaller `pipeline()` call
 
 `glossary-pass-wf.template.js` runs once during W3, bootstrap, before the

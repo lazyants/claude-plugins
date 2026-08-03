@@ -1558,26 +1558,48 @@ root, same split as every other #409 script — also threaded through to
 `select_segments.py`'s identical flags), `--only-segs SEG1,SEG2,...`/
 `--allow-retranslate-converged`/`--allow-empty` (forwarded verbatim to
 `select_segments.py`'s own flags of the same name, above),
-`--max-concurrent-codex-jobs N` (default 40), `--node BIN`. Exit 0 means the
+`--max-concurrent-codex-jobs N` (default 40), `--node BIN`, `--fix-mode
+{handoff,codex}` (default `handoff` — see below). Exit 0 means the
 per-segment loop ran to completion — NOT that every segment converged; read
 the printed JSON's `summary.failed`/`summary.needs_fix`. Exit 1 means a gate
 refused before any dispatch (lock contention, the Step 1 re-translate gate,
 the volume cap). Exit 2 is a usage/environment error.
 
-**The driver cannot perform the fix step, and nothing today automates the
-hand-off.** When a segment's review comes back not-clean, the driver stops
-at that segment and returns `outcome: "needs_fix"` — the round label, the
-findings, and the exact rendered fix prompt — then moves on/exits without
-fixing it (applying findings to a draft is a real LLM content-editing turn a
-plain Python process cannot perform). Someone — a human, or an orchestrating
-session — must notice this in the driver's own JSON output or its redirected
-log (`runs/driver.<SESSION_ID>.log`, per the launch command above), perform
-ONE Claude turn using that exact fix prompt to rewrite the draft, and
-re-invoke the driver to resume. No script or template anywhere in this
-plugin currently reads `needs_fix`, the driver's stdout, or its own journal
-(`runs/<internal-session-id>/driver_journal.jsonl`) on the driver's behalf.
-Do not launch this driver unattended expecting it to complete a batch
-end-to-end — a `needs_fix` segment sits stalled until someone checks.
+**On the default `--fix-mode=handoff`, the driver cannot perform the fix
+step, and nothing today automates the hand-off.** When a segment's review
+comes back not-clean, the driver stops at that segment and returns `outcome:
+"needs_fix"` — the round label, the findings, and the exact rendered fix
+prompt — then moves on/exits without fixing it (applying findings to a draft
+is a real LLM content-editing turn a plain Python process cannot perform).
+Someone — a human, or an orchestrating session — must notice this in the
+driver's own JSON output or its redirected log (`runs/driver.<SESSION_ID>.log`,
+per the launch command above), perform ONE Claude turn using that exact fix
+prompt to rewrite the draft, and re-invoke the driver to resume. No script or
+template anywhere in this plugin currently reads `needs_fix`, the driver's
+stdout, or its own journal (`runs/<internal-session-id>/driver_journal.jsonl`)
+on the driver's behalf. Do not launch this driver unattended expecting it to
+complete a batch end-to-end on `handoff` — a `needs_fix` segment sits stalled
+until someone checks.
+
+**`--fix-mode=codex` (#409 track B, opt-in — NOT the default) closes that
+hand-off for a numeric round, at a cost.** Instead of stopping at
+`needs_fix`, a not-clean numeric round dispatches ONE `--kind fixreview`
+codex call that reviews the draft it finds and applies its own findings,
+producing a candidate draft and a candidate review the driver publishes
+itself through its transaction layer — no Claude turn, no stall. The
+mandatory final round stays a plain review in both modes. This is reachable,
+but flipping the default is a deliberate release decision, not merely an
+unfinished one: it moves who edits the user's text from a Claude turn the
+operator can see to a codex call the driver runs unattended, and it costs
+more codex jobs per segment than `handoff` (the not-clean round can now
+spend its own redispatch allowances before giving up). Reach for it when the
+fix-step hand-off is the thing stalling an otherwise-unattended batch and you
+accept that trade; stay on `handoff` when you want every edit to a draft to
+pass through a visible Claude turn. See
+`references/orchestration-and-batching.md`'s own section on the driver's
+volume admission for the per-segment job-count formula, the two `engine.*`
+keys the mode reads, and — read this before pointing it at a real book —
+what its publish path does and does not guarantee.
 
 **W6 Consistency pass** — cross-segment sweep using `consistency_issues.md`
 as a lightweight, hand-maintained tracker after every batch, before the next
