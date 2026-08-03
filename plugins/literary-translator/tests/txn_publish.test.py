@@ -634,3 +634,179 @@ def test_a_symlinked_canonical_destination_is_refused(dirs):
     assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"], decision) is False
     assert draft_path.is_symlink(), "the link itself must be left alone"
     assert json.loads(real_target.read_text()) == OLD_DRAFT
+
+
+# ---------------------------------------------------------------------------
+# NON-DESTRUCTIVE, NOT ATOMIC -- the os.link pin at the check/replace boundary
+#
+# POSIX has no compare-and-rename, so the confirm above and the os.replace
+# below still resolve the same NAME twice with a gap between them. What the
+# pin changes is what happens INSIDE that gap: instead of "the newer bytes
+# are gone", a writer landing there gets "the newer bytes are on disk under
+# another name and the transaction refused". These tests are the entire
+# specification of that mechanism -- nothing above exercises os.link at all,
+# so a publish_txn that never called it passed every test above already.
+# ---------------------------------------------------------------------------
+
+
+def test_the_happy_path_leaves_no_superseded_litter(dirs):
+    """Every rename in the loop links, hashes the pin, and -- when the pin
+    still holds the preimage it was taken to protect -- discards it. If the
+    discard branch ever regressed, no test above would notice: they only ever
+    look at return values and canonical content, never at what ELSE is sitting
+    in the segments directory afterward. Glob for the pattern rather than one
+    predicted name, since either artifact's pin would be litter."""
+    _setup(dirs)
+    decision = _decide(dirs)
+    assert decision["publish"] == ["review", "draft"]
+    assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"], decision) is True
+    litter = list(dirs["segments"].glob("*.superseded-*"))
+    assert litter == [], f"an ordinary publish must leave no pin behind, found {litter}"
+
+
+def test_a_write_landing_between_the_check_and_the_link_is_preserved_and_refused(
+        dirs, monkeypatch):
+    """The race the pin exists for. `_sha256_of(destination) != expected` was
+    just confirmed true (the destination still holds the preimage), so between
+    that confirm and os.link a writer -- the fix step, an editor, a sync
+    daemon -- rewrites the canonical review IN PLACE, on the same inode. Only
+    os.link, called immediately after, can still see it: it pins whatever is
+    at that name RIGHT NOW, which is the racer's bytes, not the ones the
+    confirm approved a moment earlier.
+
+    Driven by monkeypatching os.link on the module publish_txn actually calls
+    through -- the driver imports `os` at module scope, so `module.os.link` is
+    the same name space the function reads from -- with a wrapper that writes
+    the racer's content into the link's source path (the canonical
+    destination) before delegating to the real os.link. That is the shape of
+    the race, reproduced without needing two real threads."""
+    module = _load_module(DRIVER_SRC, "driver_publish_race_link")
+    _setup(dirs)
+    decision = _decide(dirs, module)
+    assert decision["publish"] == ["review", "draft"]
+
+    injected = {"seg": SEG, "raced": "WRITER LANDED BETWEEN THE CHECK AND THE LINK"}
+    real_link = module.os.link
+    state = {"calls": 0}
+
+    def racing_link(src, dst, *args, **kwargs):
+        state["calls"] += 1
+        Path(src).write_text(json.dumps(injected), encoding="utf-8")
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", racing_link)
+
+    assert module.publish_txn(dirs["txn"], SEG, dirs["segments"], decision) is False
+    assert state["calls"] == 1, (
+        "os.link was never called -- either this publish_txn does not pin at all, or the "
+        "race never landed, and this test proved nothing either way"
+    )
+
+    pins = list(dirs["segments"].glob(f"{SEG}.review.json.superseded-*"))
+    assert len(pins) == 1, f"expected exactly one preserved pin, found {pins}"
+    assert json.loads(pins[0].read_text()) == injected, (
+        "the preserved bytes must be the racer's, not the preimage the confirm approved -- "
+        "a design that merely refused without capturing them would pass the two assertions "
+        "above and lose the data anyway"
+    )
+
+
+def test_a_preexisting_pin_holding_the_same_preimage_does_not_block_publication(dirs):
+    """The FileExistsError branch's "ours, carries nothing new" case: a pin
+    already sits at this transaction's exact name (same destination, same
+    txn_id) and holds the SAME bytes the confirm just approved. That can only
+    be this transaction's own earlier attempt, so it must not stop the
+    publish, and once the rename lands it is a duplicate of a preimage the
+    intent already records by digest -- discarded like any other pin that
+    turned out to match."""
+    _setup(dirs)
+    review_path = dirs["segments"] / f"{SEG}.review.json"
+    pin_path = review_path.with_name(f"{review_path.name}.superseded-RUN:seg01:1:1")
+    pin_path.write_bytes(review_path.read_bytes())
+
+    decision = _decide(dirs)
+    assert decision["publish"] == ["review", "draft"]
+    assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"], decision) is True
+
+    assert _canonical(dirs, "review") == {"new": "review"}
+    assert _canonical(dirs, "draft") == {"new": "draft"}
+    assert list(dirs["segments"].glob("*.superseded-*")) == [], (
+        "a pin that turned out to hold the same preimage is a duplicate, not evidence, and "
+        "must be discarded rather than left behind"
+    )
+
+
+def test_a_preexisting_pin_holding_different_content_refuses_and_is_left_untouched(dirs):
+    """The other half of the FileExistsError branch: a pin at this exact name
+    that does NOT hold the recorded preimage can only be somebody else's
+    evidence -- a previous refusal that already parked a race's bytes there.
+    Overwriting it would destroy the one thing this mechanism exists to
+    protect, so publication refuses before touching anything, including the
+    pin itself."""
+    _setup(dirs)
+    review_path = dirs["segments"] / f"{SEG}.review.json"
+    pin_path = review_path.with_name(f"{review_path.name}.superseded-RUN:seg01:1:1")
+    evidence = b'{"somebody_elses_evidence": true}'
+    pin_path.write_bytes(evidence)
+
+    decision = _decide(dirs)
+    assert decision["publish"] == ["review", "draft"]
+    assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"], decision) is False
+
+    assert pin_path.read_bytes() == evidence, "somebody else's evidence must be left exactly as found"
+    assert _canonical(dirs, "review") == OLD_REVIEW
+    assert _canonical(dirs, "draft") == OLD_DRAFT
+
+
+def test_a_destination_that_does_not_exist_is_not_pinned(dirs, monkeypatch):
+    """The guard is `if expected_destination is not None:` -- when a canonical
+    review has never existed for this segment, there is nothing to preserve
+    and os.link must never even be attempted for it. The canonical draft in
+    this same fixture DOES exist, so the two renames in one publication take
+    different branches: draft still pins (and, matching, discards), review
+    never does. Recording every os.link call's SOURCE name is what tells the
+    two apart -- a "no litter afterward" assertion alone cannot, because a
+    pin that was created and then discarded looks identical to one that was
+    never created."""
+    module = _load_module(DRIVER_SRC, "driver_publish_absent_dest")
+    paths = module.staged_paths(dirs["txn"], SEG, ROUND)
+    paths["draft"].write_text(json.dumps({"new": "draft"}), encoding="utf-8")
+    paths["review"].write_text(json.dumps({"new": "review"}), encoding="utf-8")
+
+    draft_path = dirs["segments"] / f"{SEG}.draft.json"
+    draft_path.write_text(json.dumps(OLD_DRAFT), encoding="utf-8")
+    review_path = dirs["segments"] / f"{SEG}.review.json"
+    assert not review_path.exists(), "the fixture's premise: no review has ever been published"
+
+    def _h(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    authority = _load_module(SCRIPTS_SRC_DIR / "draft_sha1.py", "draft_sha1_for_no_dest_fixture")
+    module.write_txn_intent(dirs["txn"], SEG, _intent(
+        pre_edit_draft_sha1=authority.draft_content_sha1(draft_path),
+        pre_edit_draft_token="RUN:seg01",
+        staged_draft_sha256=_h(paths["draft"]),
+        staged_review_sha256=_h(paths["review"]),
+        review_preimage={"absent": True},
+    ))
+
+    decision = _decide(dirs, module)
+    assert decision["publish"] == ["review", "draft"], "fixture must reach the publishing state"
+
+    real_link = module.os.link
+    calls = []
+
+    def recording_link(src, dst, *args, **kwargs):
+        calls.append(Path(src).name)
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", recording_link)
+
+    assert module.publish_txn(dirs["txn"], SEG, dirs["segments"], decision) is True
+    assert calls == [f"{SEG}.draft.json"], (
+        "os.link must be attempted for the existing draft destination and never for the "
+        f"review destination, which never existed; calls were {calls}"
+    )
+    assert _canonical(dirs, "review") == {"new": "review"}
+    assert _canonical(dirs, "draft") == {"new": "draft"}
+    assert list(dirs["segments"].glob("*.superseded-*")) == []

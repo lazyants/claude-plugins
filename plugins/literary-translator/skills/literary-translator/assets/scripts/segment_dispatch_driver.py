@@ -116,9 +116,17 @@ what keeps the driver alive past this Bash call's own return).
    process lifetime, never a pid file** -- `acquire_driver_lock()` below,
    on `runs/.driver.lock`. Per-segment leases already exist
    (`codex_job.py`'s own `.codex_job.<seg>.lock`, acquired inside `run()`
-   after hygiene); there is no project-level one today (confirmed by
-   `git grep -rn LOCK_EX` across `assets/scripts/*.py`: exactly one
-   call site, `codex_job.py`'s per-segment lease). Without it, two
+   after hygiene); there was no project-level one before this lock.
+   `git grep -rn LOCK_EX` across `assets/scripts/*.py` now returns FOUR
+   call sites, and they are three different locks: `codex_job.py`'s
+   per-segment lease, this project lock plus its own self-test, and
+   `segment_lease()` below -- which is not a fourth lock at all, but
+   this driver taking `codex_job.py`'s per-segment lease file by exact
+   path, so that reading canonical state and writing it happen under one
+   boundary. (This sentence used to claim "exactly one call site". It was
+   already wrong when written and the count moved again afterwards; a
+   claim that cites a command has to be re-run, not re-read.) Without
+   the project lock, two
    drivers on one project each try to lease every segment `codex_job.py`
    already protects individually, but nothing stops both from reaching
    `select_segments.py` and the volume check redundantly, or from
@@ -1893,7 +1901,8 @@ def publish_txn(txn_dir: Path, seg: str, segments_dir: Path, decision: dict,
                 file=sys.stderr,
             )
             return False
-        if _sha256_of(destination) != observed.get(observed_key[what]):
+        expected_destination = observed.get(observed_key[what])
+        if _sha256_of(destination) != expected_destination:
             print(
                 f"segment_dispatch_driver.py: refusing to publish {what} for {seg!r}: "
                 f"{destination} changed after it was classified; publishing would destroy "
@@ -1902,14 +1911,92 @@ def publish_txn(txn_dir: Path, seg: str, segments_dir: Path, decision: dict,
             )
             return False
 
+        # NON-DESTRUCTIVE, WHICH IS NOT THE SAME AS ATOMIC, AND THE DIFFERENCE
+        # IS THE WHOLE POINT. The check above and the rename below are two
+        # operations resolving the same NAME twice, and POSIX offers nothing
+        # that fuses them: renameat2(RENAME_EXCHANGE) is Linux-only and not
+        # exposed in Python. So the window cannot be closed -- but what happens
+        # inside it can be changed from "the newer bytes are gone" to "the newer
+        # bytes are on disk under another name and we refused".
+        #
+        # os.link() pins the INODE currently at the name, and the two writer
+        # shapes are covered DIFFERENTLY. Stating which is which, because the
+        # weaker half is the one a reader will otherwise assume away:
+        #
+        #   IN-PLACE writer -- an editor, a shell redirect, the handoff fix
+        #   step's rewrite of the canonical draft. The pin SHARES that inode,
+        #   so the racer's bytes appear in the pin whenever they land, before
+        #   or after the link, and the hash below always catches them.
+        #
+        #   RENAME-BASED writer -- every publisher in this codebase, this one
+        #   included. The swap installs a NEW inode at the name. A swap before
+        #   the link is caught, because the pin then holds the racer's inode. A
+        #   swap between the link and the rename is NOT caught and cannot be:
+        #   those are two adjacent syscalls with no I/O between them, and
+        #   nothing portable fuses them.
+        #
+        # Whenever the mismatch is detectable at all, the bytes that were
+        # replaced survive at `pinned` and we refuse, so the operator finds out
+        # instead of losing the content silently.
+        #
+        # THE LEASE IS THE OTHER HALF, and it covers more than this does: every
+        # in-product writer of a canonical draft takes the same
+        # `.codex_job.<seg>.lock` (both codex_job.py promote paths and this
+        # publication). What it does NOT cover is a writer that takes no lock --
+        # a human with an editor, or the handoff fix step in
+        # mass-translate-wf.template.js's callFix(), which rewrites the canonical
+        # draft directly. This pin is what stands between that writer and
+        # unrecoverable loss.
+        pinned = None
+        if expected_destination is not None:
+            pinned = destination.with_name(
+                f"{destination.name}.superseded-{intent['txn_id']}")
+            try:
+                os.link(destination, pinned)
+            except FileExistsError:
+                # Our own earlier attempt at THIS transaction, or somebody
+                # else's evidence. Same preimage -> it is ours and carries
+                # nothing new. Different -> it is evidence, and overwriting
+                # evidence is the one thing this block exists to prevent.
+                if _sha256_of(pinned) != expected_destination:
+                    print(
+                        f"segment_dispatch_driver.py: refusing to publish {what} for "
+                        f"{seg!r}: {pinned} already holds superseded content that is not "
+                        f"this transaction's preimage; a human has to look at it first",
+                        file=sys.stderr,
+                    )
+                    return False
+            except OSError as exc:
+                print(
+                    f"segment_dispatch_driver.py: refusing to publish {what} for {seg!r}: "
+                    f"could not preserve {destination} before replacing it: {exc}",
+                    file=sys.stderr,
+                )
+                return False
+
         try:
             os.replace(source, destination)
         except OSError as exc:
+            _discard_superseded_pin(pinned)
             print(
                 f"segment_dispatch_driver.py: could not publish {what} for {seg!r}: {exc}",
                 file=sys.stderr,
             )
             return False
+
+        if pinned is not None:
+            if _sha256_of(pinned) != expected_destination:
+                print(
+                    f"segment_dispatch_driver.py: published {what} for {seg!r} over content "
+                    f"that changed after it was checked; the replaced bytes are preserved at "
+                    f"{pinned} and nothing was lost, but this transaction is refused so the "
+                    f"race is not silent",
+                    file=sys.stderr,
+                )
+                return False
+            # Byte-identical to the preimage the intent already records by
+            # digest, so it is a duplicate rather than evidence.
+            _discard_superseded_pin(pinned)
         # Barrier BETWEEN the renames, not merely after both.
         if not _fsync_dir(segments_dir):
             print(
@@ -2002,6 +2089,45 @@ def cleanup_txn(txn_dir: Path, seg: str, round_label: str) -> bool:
     return _fsync_dir(txn_dir) and ok
 
 
+def _discard_superseded_pin(pinned):
+    """Remove a hard link that existed only to make a rename non-destructive.
+
+    Best-effort, and deliberately quiet: the pin is byte-identical to a preimage
+    the intent already records by digest, so failing to remove it leaves litter
+    and never a correctness problem. It is NEVER called on a pin that turned out
+    to hold content the preimage check did not approve -- that one is evidence
+    of a concurrent writer and is kept on purpose."""
+    if pinned is None:
+        return
+    try:
+        os.unlink(pinned)
+    except OSError:
+        pass
+
+
+def _entry_is_absent(path: Path) -> bool:
+    """True only when the namespace positively says there is no entry at `path`.
+
+    os.lstat, never Path.exists(). exists() RESOLVES the link, so it cannot tell
+    a missing file from a self-referential symlink (ELOOP), from a permission
+    error on the parent directory, or from any other lookup failure -- it
+    answers False for every one of them. Callers use this answer to decide
+    whether it is safe to PROCEED, so a lookup that merely failed must read as
+    "present". Only ENOENT is an absence."""
+    try:
+        os.lstat(path)
+        return False
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        print(
+            f"segment_dispatch_driver.py: warning: could not stat {path}: {exc}; "
+            f"treating the entry as present",
+            file=sys.stderr,
+        )
+        return False
+
+
 def _sha256_of(path: Path):
     """sha256 of a file's RAW bytes, None when it is absent, and
     TXN_UNREADABLE when it is present but could not be read.
@@ -2015,10 +2141,28 @@ def _sha256_of(path: Path):
     not None because absence and unreadability are different observations --
     absence licenses deleting staging, unreadability licenses nothing -- and
     callers that compare two of these must reject the sentinel explicitly,
-    since it compares equal to itself (see premise_is_observable())."""
+    since it compares equal to itself (see premise_is_observable()).
+
+    "Absent" means NO DIRECTORY ENTRY, and that is established with lexists()
+    rather than with the read's own errno -- a dangling symlink fails the read
+    with ENOENT while still being an entry somebody owns."""
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except FileNotFoundError:
+        # ENOENT IS NOT "NO DIRECTORY ENTRY". Reading through a DANGLING SYMLINK
+        # raises FileNotFoundError while os.lstat() on the link itself succeeds:
+        # an entry exists and something owns it. Reporting that as None would be
+        # reporting the one observation that licenses REPLACING the path --
+        # os.replace() needs write permission on the DIRECTORY, not on the entry,
+        # so the link would be destroyed exactly like a readable file would.
+        # lexists() asks about the LINK and never about its target.
+        if os.path.lexists(path):
+            print(
+                f"segment_dispatch_driver.py: warning: {path} is a dangling symlink; "
+                f"treating it as unreadable rather than as absent",
+                file=sys.stderr,
+            )
+            return TXN_UNREADABLE
         return None
     except OSError as exc:
         print(
@@ -4254,7 +4398,11 @@ def advance_txn(ctx: "DispatchContext", seg: str, round_label=None) -> dict:
     durable failure when it refuses.
 
     Returns {"outcome": <TXN_* constant>, "published": bool, "txn_id": str|None,
-    "charged": dict|None}. Never raises; every refusal is a return value,
+    "charged": dict|None, "charge_lost": bool, "commit_failed": bool,
+    "cleanup_failed": bool}. The last two exist because commit_txn_intent() and
+    cleanup_txn() both report durability failure by returning False, and a
+    DISCARDED False is exactly the shape of a segment that reads terminal and
+    is not. Never raises; every refusal is a return value,
     because this runs inside per-segment work whose failures must not discard
     other segments' results.
 
@@ -4293,8 +4441,9 @@ def advance_txn(ctx: "DispatchContext", seg: str, round_label=None) -> dict:
     if charge_required:
         charged = charge_txn_failure(txn_dir, seg, txn_id, _txn_failure_ceiling(ctx))
 
+    committed = None
     if published and decision["commit_intent"]:
-        commit_txn_intent(txn_dir, seg)
+        committed = commit_txn_intent(txn_dir, seg)
     # AN UNCHARGED REFUSAL MAY NOT DELETE ITS OWN EVIDENCE. "Charge first, then
     # clean" is only idempotent while the charge actually lands: charging is
     # keyed by txn_id, so a second pass over the same intent does not
@@ -4306,8 +4455,14 @@ def advance_txn(ctx: "DispatchContext", seg: str, round_label=None) -> dict:
     # more classification next time; losing the charge costs the only
     # cross-invocation bound this mode has.
     charge_lost = charge_required and charged is None
+    cleaned = None
     if published and decision["cleanup"] and isinstance(label, str) and not charge_lost:
-        cleanup_txn(txn_dir, seg, label)
+        cleaned = cleanup_txn(txn_dir, seg, label)
+
+    # `is False`, not `not committed`: None means the step was NOT REQUIRED by
+    # this decision, and "was not asked for" must never read as "failed".
+    commit_failed = committed is False
+    cleanup_failed = cleaned is False
 
     append_journal(ctx.dirs["durable_root"], ctx.session_id, {
         "type": "txn_recovery", "seg": seg, "txn_id": txn_id,
@@ -4315,9 +4470,11 @@ def advance_txn(ctx: "DispatchContext", seg: str, round_label=None) -> dict:
         "publish": decision["publish"],
         "txn_failures": (charged or {}).get("count"),
         "charge_lost": charge_lost,
+        "commit_failed": commit_failed, "cleanup_failed": cleanup_failed,
     })
     return {"outcome": outcome, "published": published, "txn_id": txn_id,
-            "charged": charged, "charge_lost": charge_lost}
+            "charged": charged, "charge_lost": charge_lost,
+            "commit_failed": commit_failed, "cleanup_failed": cleanup_failed}
 
 
 def orphaned_staging_labels(txn_dir: Path, seg: str) -> list:
@@ -4382,10 +4539,29 @@ def recovery_left_the_segment_blocked(ctx: "DispatchContext", seg: str, results)
     intent that will refuse my publication", and that is a fact about a file.
     `results` is still consulted for the one thing the file cannot show -- a
     failure whose charge did not go durable, which must block even in the
-    window where the intent has been removed."""
-    if txn_intent_path(ctx.txn_dir, seg).exists():
+    window where the intent has been removed.
+
+    NOT Path.exists(). exists() follows the link and answers False for a
+    self-referential symlink (ELOOP) exactly as it does for a missing file, and
+    it swallows every other stat error the same way -- so the single question
+    that decides whether a PAID dispatch may proceed would read "clear" from a
+    lookup that merely failed. _entry_is_absent() asks lstat about the ENTRY and
+    treats anything that is not ENOENT as present.
+
+    The filesystem answers "will an intent refuse my publication". It cannot
+    answer "did the commit and the cleanup this decision required actually
+    succeed", so those are carried positively in the results and checked here
+    too: a discarded False from commit_txn_intent()/cleanup_txn() is exactly the
+    shape of a segment that reads clear and is not."""
+    if not _entry_is_absent(txn_intent_path(ctx.txn_dir, seg)):
         return True
-    return any((result or {}).get("charge_lost") for result in results or ())
+    for result in results or ():
+        result = result or {}
+        if result.get("charge_lost"):
+            return True
+        if result.get("commit_failed") or result.get("cleanup_failed"):
+            return True
+    return False
 
 
 def owner_profile_path(durable_root: Path):
@@ -5214,12 +5390,16 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                         "reason": "invalid-post-fix-draft"}
 
             # Still genuinely unreachable: derive_next_action()'s own return
-            # contract (see its docstring) is EXHAUSTIVELY one of the 6 actions
+            # contract (see its docstring) is EXHAUSTIVELY one of the 7 actions
             # checked above (translate/review/needs_fix/cap_reached/
-            # already_converged/invalid_post_fix_draft) -- nothing in this
-            # release added a 7th, so nothing can reach this line. Unlike the
-            # loop-exhaustion fallback below, this one is not made reachable
-            # by anything shipped so far.
+            # already_converged/invalid_post_fix_draft/unreadable_draft), so
+            # nothing can reach this line. Unlike the loop-exhaustion fallback
+            # below, this one is not made reachable by anything shipped so far.
+            #
+            # This count is load-bearing and has already been wrong once: the
+            # unreadable_draft handler above was added while this comment still
+            # said "6 ... nothing in this release added a 7th". Adding an action
+            # means editing this line in the same commit.
             return {"seg": seg, "converged": None, "outcome": "failed",
                     "reason": f"unknown-action:{action['action']}"}  # pragma: no cover
         except Exception as exc:

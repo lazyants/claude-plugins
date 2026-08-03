@@ -682,6 +682,97 @@ def test_an_unreadable_draft_dispatches_NOTHING_in_either_mode(tmp_path, monkeyp
     assert "converged" in result and result["converged"] is False
 
 
+def test_a_DANGLING_SYMLINK_is_not_hashed_as_absent(tmp_path):
+    """ENOENT from the read is not the same observation as "no directory entry".
+
+    Reading through a dangling symlink raises FileNotFoundError, exactly like a
+    path with nothing at it -- but os.lstat() on the link succeeds, so an entry
+    exists and somebody owns it. Reporting None there reports the ONE
+    observation that licenses replacing the path.
+
+    No chmod, so unlike the mode-000 tests in this file this one cannot silently
+    skip itself for a user who can read anything."""
+    link = tmp_path / "link.json"
+    os.symlink(tmp_path / "target-that-does-not-exist.json", link)
+
+    assert os.path.lexists(link), "the entry exists"
+    assert not os.path.exists(link), "and resolving it fails, which is the trap"
+    assert DRIVER._sha256_of(link) == DRIVER.TXN_UNREADABLE
+    # Control: a real absence must still read as absence, or every fresh
+    # segment becomes permanently undispatchable.
+    assert DRIVER._sha256_of(tmp_path / "nothing-at-all.json") is None
+
+
+@pytest.mark.parametrize("mode", [DRIVER.FIX_MODE_HANDOFF, DRIVER.FIX_MODE_CODEX])
+def test_a_dangling_canonical_draft_dispatches_NOTHING_in_either_mode(
+        tmp_path, monkeypatch, mode):
+    """The same hazard as the mode-000 draft, reached through a different errno.
+
+    A `<seg>.draft.json` that is a symlink to a target on an unmounted volume
+    reads as ENOENT; the old classification called that absence, derived
+    `translate`, and renamed a fresh attempt over the LINK the operator owns.
+
+    Found by codex review round 5."""
+    ctx = _ctx(tmp_path, fix_mode=mode)
+    _write_canonical(ctx)
+    draft_path = ctx.segments_dir / f"{SEG}.draft.json"
+    draft_path.unlink()
+    os.symlink(ctx.segments_dir / f"{SEG}.draft.json.target-is-gone", draft_path)
+
+    dispatched = []
+    monkeypatch.setattr(DRIVER, "run_one_codex_job",
+                        lambda c, **k: dispatched.append(k) or {"ok": True, "reason": "promoted"})
+    monkeypatch.setattr(DRIVER, "write_ledger", lambda *a, **k: {"success": True})
+
+    result = DRIVER.process_segment(SEG, ctx)
+
+    assert result["reason"] == "unreadable-draft"
+    assert result["outcome"] == "failed"
+    assert dispatched == [], "a translate here is what destroys the operator's link"
+    assert os.path.lexists(draft_path), "the entry must still be there afterwards"
+
+
+def test_an_intent_whose_LOOKUP_FAILS_reads_as_present_not_as_clear(tmp_path):
+    """Path.exists() resolves the link, so a self-referential symlink (ELOOP)
+    answers False -- byte-identical to "there is no intent". That answer decides
+    whether a PAID dispatch may proceed, and the intent it missed then refuses
+    every publication with `txn-intent-already-present`, forever, charging
+    nothing because the id was already charged once.
+
+    This was introduced by the previous round's own fix, which replaced an
+    outcome-name allow-list with a filesystem question and picked the accessor
+    that cannot tell a failed lookup from an absence. Found by codex review
+    round 5."""
+    ctx = _ctx(tmp_path)
+    intent_path = DRIVER.txn_intent_path(ctx.txn_dir, SEG)
+    intent_path.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(intent_path.name, intent_path)  # points at itself -> ELOOP
+
+    assert os.path.lexists(intent_path), "the entry exists"
+    assert not os.path.exists(intent_path), (
+        "and exists() reports False for it -- the whole defect in one line")
+    assert DRIVER.recovery_left_the_segment_blocked(ctx, SEG, []) is True
+
+
+@pytest.mark.parametrize("field", ["commit_failed", "cleanup_failed"])
+def test_a_DISCARDED_durability_failure_blocks_the_segment(tmp_path, field):
+    """commit_txn_intent() and cleanup_txn() both report durability failure by
+    returning False, and both returns were discarded. Asking the filesystem
+    answers "will an intent refuse my publication" but cannot answer "did the
+    steps this decision required actually land", so those are carried
+    positively."""
+    ctx = _ctx(tmp_path)
+    ctx.txn_dir.mkdir(parents=True, exist_ok=True)
+
+    # Control first: with no intent on disk and nothing failed, the segment is
+    # clear. Without this the test below could pass for the wrong reason.
+    assert DRIVER.recovery_left_the_segment_blocked(
+        ctx, SEG, [{"outcome": "whatever", "published": True}]) is False
+
+    assert DRIVER.recovery_left_the_segment_blocked(
+        ctx, SEG, [{"outcome": "whatever", "published": True, field: True}]) is True
+
+
 def test_a_genuinely_absent_draft_still_translates(tmp_path, monkeypatch):
     """The other direction, and it has to be exercised through the real loop:
     refusing absence would make every fresh segment permanently undispatchable,
