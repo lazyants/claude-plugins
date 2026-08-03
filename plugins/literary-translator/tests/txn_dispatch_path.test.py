@@ -529,15 +529,18 @@ def test_the_premise_covers_the_draft_TOKEN_and_the_review_not_only_content(tmp_
     ctx = _ctx(tmp_path)
     _write_canonical(ctx, review={"old": "review"})
     premise = DRIVER.decision_premise(ctx, SEG)
+    before_content = DRAFT_SHA1.draft_content_sha1(ctx.segments_dir / f"{SEG}.draft.json")
 
     (ctx.segments_dir / f"{SEG}.draft.json").write_text(json.dumps(
         {"seg": SEG, "dispatch_token": "SOME-OTHER-RUN:seg01", "blocks": {"b": "old"}}),
         encoding="utf-8")
     after = DRIVER.decision_premise(ctx, SEG)
 
-    # index 1 is the CONTENT sha1 (index 0 is the raw file hash, which a token
-    # change does move) -- the point is that the content-only view is blind here.
-    assert after[1] == premise[1], "content sha1 is unchanged -- that is the point"
+    # Asserted through the OWNING function, not a tuple index: draft_content_sha1
+    # is what "content only" means here, and it is deliberately blind to the
+    # token. An index would have to be renumbered every time the premise grows,
+    # and silently asserts the wrong field when it is not.
+    assert DRAFT_SHA1.draft_content_sha1(ctx.segments_dir / f"{SEG}.draft.json") == before_content
     assert after != premise, "the token change must still invalidate the premise"
 
 
@@ -638,6 +641,63 @@ def test_an_unreadable_canonical_DRAFT_is_not_mistaken_for_an_absent_one(tmp_pat
         assert DRIVER.premise_is_observable(premise) is False
     finally:
         draft_path.chmod(0o644)
+
+
+@pytest.mark.parametrize("mode", [DRIVER.FIX_MODE_HANDOFF, DRIVER.FIX_MODE_CODEX])
+def test_an_unreadable_draft_dispatches_NOTHING_in_either_mode(tmp_path, monkeypatch, mode):
+    """THE ONE THAT MATTERS ON THE DEFAULT PATH, and the reason it is checked
+    in derive_next_action() rather than only in the premise.
+
+    handoff passes premise=None and never reaches decide_under_premise(), so
+    every protection built for the merged round is bypassed on the mode that
+    is actually the default. The sequence: the draft exists and cannot be read,
+    the gates fail on it, derive answers "translate", codex_job.py cannot adopt
+    it either, and its fresh attempt is os.replace()d over the top. Replacing
+    needs write permission on the DIRECTORY, not the file, so an unreadable
+    draft is fully replaceable -- and the only copy of text nobody in this
+    pipeline ever read is gone, unnoticed and unrecoverable.
+
+    Found by codex review round 4. NOT a regression from this branch -- handoff
+    has always behaved this way -- and fixed anyway, because "no worse than
+    before" is a poor answer when the cost is destroyed source text."""
+    ctx = _ctx(tmp_path, fix_mode=mode)
+    _write_canonical(ctx)
+    draft_path = ctx.segments_dir / f"{SEG}.draft.json"
+    dispatched = []
+    monkeypatch.setattr(DRIVER, "run_one_codex_job",
+                        lambda c, **k: dispatched.append(k) or {"ok": True, "reason": "promoted"})
+    monkeypatch.setattr(DRIVER, "write_ledger", lambda *a, **k: {"success": True})
+    draft_path.chmod(0o000)
+    try:
+        if os.access(str(draft_path), os.R_OK):
+            pytest.skip("cannot make a file unreadable as this user")
+        result = DRIVER.process_segment(SEG, ctx)
+    finally:
+        draft_path.chmod(0o644)
+
+    assert result["reason"] == "unreadable-draft"
+    assert result["outcome"] == "failed"
+    assert dispatched == [], "a translate here is what destroys the file"
+    # No terminal ledger row: the segment stays recoverable and a human looks.
+    assert "converged" in result and result["converged"] is False
+
+
+def test_a_genuinely_absent_draft_still_translates(tmp_path, monkeypatch):
+    """The other direction, and it has to be exercised through the real loop:
+    refusing absence would make every fresh segment permanently undispatchable,
+    which is a far bigger failure than the one being prevented."""
+    ctx = _ctx(tmp_path, fix_mode=DRIVER.FIX_MODE_HANDOFF)
+    dispatched = []
+    monkeypatch.setattr(DRIVER, "_run_gate",
+                        lambda script, argv_rest, c, *, supports_plugin_root: False)
+    monkeypatch.setattr(DRIVER, "write_ledger", lambda *a, **k: {"success": True})
+    monkeypatch.setattr(DRIVER, "run_one_codex_job",
+                        lambda c, **k: dispatched.append(k) or {"ok": False, "reason": "timed-out",
+                                                                "error_detail": None})
+
+    DRIVER.process_segment(SEG, ctx)
+
+    assert [d["kind"] for d in dispatched] == ["translate"]
 
 
 def test_a_genuinely_absent_draft_stays_observable(tmp_path):
@@ -748,31 +808,65 @@ def test_a_cleanly_recovered_segment_is_NOT_blocked(tmp_path, monkeypatch):
     assert [d["kind"] for d in dispatched] == ["review"]
 
 
-@pytest.mark.parametrize("outcome,blocked", [
-    (DRIVER.TXN_PROCEED, False),
-    (DRIVER.TXN_ABORTED_PREPARE, False),
-    (DRIVER.TXN_COMMITTED_CLEANED, False),
-    (DRIVER.TXN_ROLLED_FORWARD_TAIL, False),
-    (DRIVER.TXN_ROLL_FORWARD_DRAFT, False),
-    (DRIVER.TXN_PREIMAGE_DIVERGED, False),
-    (DRIVER.TXN_STAGING_LOST, False),
-    (DRIVER.TXN_INTENT_INVALID, True),
-    (DRIVER.TXN_UNOBSERVABLE, True),
+# An OUTCOME NAME describes what the classifier decided, never what happened
+# afterwards -- a roll-forward whose publication then failed reports a
+# roll-forward name and leaves the intent in place. So these assert the
+# OBSERVATION, and deliberately pair each case with the outcome name that would
+# have given the opposite answer under the old name-matching version.
+@pytest.mark.parametrize("outcome", [
+    DRIVER.TXN_ROLL_FORWARD_BOTH, DRIVER.TXN_ROLLED_FORWARD_TAIL,
+    DRIVER.TXN_COMMITTED_CLEANED, DRIVER.TXN_PREIMAGE_DIVERGED,
 ])
-def test_which_recovery_outcomes_clear_the_segment_is_exactly_this(outcome, blocked):
-    """Named one by one rather than asserted as a set membership, so adding a
-    tenth outcome cannot silently default to `clears`. The two refusals that DO
-    clear are the ones that clean up after themselves AND charge -- the segment
-    is genuinely free to be retried under the ceiling."""
-    assert DRIVER.recovery_left_the_segment_blocked([{"outcome": outcome}]) is blocked
+def test_an_intent_still_on_disk_blocks_whatever_outcome_was_reported(tmp_path, outcome):
+    ctx = _ctx(tmp_path)
+    ctx.txn_dir.mkdir(parents=True)
+    DRIVER.txn_intent_path(ctx.txn_dir, SEG).write_text("{}", encoding="utf-8")
 
-
-def test_a_recovery_whose_charge_was_lost_also_blocks():
-    """It cleaned up nothing and charged nothing, so the intent is still there
-    to be refused -- exactly the retained-intent case, arriving by a different
-    route."""
     assert DRIVER.recovery_left_the_segment_blocked(
-        [{"outcome": DRIVER.TXN_PREIMAGE_DIVERGED, "charge_lost": True}]) is True
+        ctx, SEG, [{"outcome": outcome, "published": True}]) is True
+
+
+@pytest.mark.parametrize("outcome", [
+    DRIVER.TXN_PROCEED, DRIVER.TXN_INTENT_INVALID, DRIVER.TXN_UNOBSERVABLE,
+])
+def test_no_intent_on_disk_clears_whatever_outcome_was_reported(tmp_path, outcome):
+    """Including the two that USED to block by name: if the record is gone,
+    nothing will refuse the next publication, and refusing to dispatch would
+    strand the segment forever over a name."""
+    ctx = _ctx(tmp_path)
+    assert DRIVER.recovery_left_the_segment_blocked(
+        ctx, SEG, [{"outcome": outcome}]) is False
+
+
+def test_a_failed_publication_under_a_success_shaped_outcome_still_blocks(tmp_path):
+    """The exact sequence the name-matching version got wrong: recovery
+    classifies a roll-forward, publication fails, the charge lands, and the
+    intent stays. Reported as a roll-forward, it read as cleared -- and the
+    loop then paid for a round whose publication refused
+    txn-intent-already-present, every invocation, charging nothing more
+    because that transaction id had already been charged once."""
+    ctx = _ctx(tmp_path)
+    ctx.txn_dir.mkdir(parents=True)
+    DRIVER.txn_intent_path(ctx.txn_dir, SEG).write_text("{}", encoding="utf-8")
+
+    assert DRIVER.recovery_left_the_segment_blocked(
+        ctx, SEG,
+        [{"outcome": DRIVER.TXN_ROLL_FORWARD_BOTH, "published": False,
+          "charge_lost": False}]) is True
+
+
+def test_a_recovery_whose_charge_was_lost_also_blocks(tmp_path):
+    """The one thing the filesystem cannot show: a failure whose charge did not
+    go durable must block even in the window where the intent is already gone."""
+    ctx = _ctx(tmp_path)
+    assert DRIVER.recovery_left_the_segment_blocked(
+        ctx, SEG, [{"outcome": DRIVER.TXN_PREIMAGE_DIVERGED, "charge_lost": True}]) is True
+
+
+def test_an_empty_recovery_result_clears(tmp_path):
+    ctx = _ctx(tmp_path)
+    assert DRIVER.recovery_left_the_segment_blocked(ctx, SEG, []) is False
+    assert DRIVER.recovery_left_the_segment_blocked(ctx, SEG, None) is False
 
 
 def test_an_unobservable_premise_stops_the_round_before_it_dispatches(tmp_path, monkeypatch):
@@ -1383,11 +1477,25 @@ def test_two_profile_reads_that_disagree_refuse_the_run():
     assert refusal["admissionValue"] == 2 and refusal["dispatchValue"] == 9
 
 
-@pytest.mark.parametrize("key", list(DRIVER._SHARED_PROFILE_KEYS))
+# HARD-CODED, never derived from the production tuple. Parametrising over
+# DRIVER._SHARED_PROFILE_KEYS made the test self-fulfilling: deleting a key
+# from the contract deleted its own test case along with it, so the coverage
+# and the thing covered could only ever agree.
+EXPECTED_SHARED_PROFILE_KEYS = (
+    "max_fix_rounds", "max_codex_jobs_per_batch",
+    "max_rejected_candidates_per_round", "max_txn_failures_per_segment",
+)
+
+
+def test_the_shared_profile_key_contract_is_exactly_this():
+    assert tuple(DRIVER._SHARED_PROFILE_KEYS) == EXPECTED_SHARED_PROFILE_KEYS
+
+
+@pytest.mark.parametrize("key", list(EXPECTED_SHARED_PROFILE_KEYS))
 def test_every_shared_profile_key_is_actually_compared(key):
     """Named one at a time. A key silently dropped from the comparison is the
     one an edit would then be free to split."""
-    engine = {k: 1 for k in DRIVER._SHARED_PROFILE_KEYS}
+    engine = {k: 1 for k in EXPECTED_SHARED_PROFILE_KEYS}
     assert DRIVER.profile_snapshots_disagree(engine, dict(engine, **{key: 2})) is not None
 
 

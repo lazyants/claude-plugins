@@ -890,8 +890,13 @@ _SHARED_PROFILE_KEYS = (
 
 
 def profile_snapshots_disagree(engine_cfg: dict, translate_cfg: dict):
-    """None if the two independent reads of profile.yml agree on every key they
-    share, else a refusal dict naming the first disagreement.
+    """None if the two independent reads of profile.yml agree on every key in
+    _SHARED_PROFILE_KEYS, else a refusal dict naming the first disagreement.
+
+    An explicit list, not "every key both happen to return": the two loaders
+    return overlapping-but-different shapes, so an intersection would shrink
+    the moment either gained or lost an unrelated field -- and the shrinking
+    would look exactly like agreement.
 
     TWO READS OF ONE FILE, AND THE BOUND LIVES IN BOTH. The volume admission
     resolves its numbers from load_engine_config(); the dispatch loop resolves
@@ -3568,12 +3573,41 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
       {"action": "invalid_post_fix_draft"} -- codex round-3 MAJOR, see the
         `if not draft_ok:` branch below for the full reasoning: an invalid
         draft is NOT always safe to re-translate.
+      {"action": "unreadable_draft"} -- the canonical draft EXISTS and its
+        bytes cannot be read. Distinct from absent, and refused in BOTH modes:
+        see the check at the top of this function.
     """
     dirs = ctx.dirs
     durable_root = dirs["durable_root"]
     segments_dir = durable_root / "segments"
     run_id = ctx.run_id
     max_fix_rounds = ctx.translate_cfg["max_fix_rounds"]
+
+    # A CANONICAL DRAFT THAT EXISTS AND CANNOT BE READ IS NOT A MISSING ONE,
+    # AND THE DIFFERENCE IS THE USER'S TEXT.
+    #
+    # Checked here, before the gates and in BOTH modes, because it is the
+    # DEFAULT handoff path that has no other protection: the gates fail on a
+    # file they cannot read, this function answers "translate", codex_job.py
+    # cannot adopt it either, and its fresh attempt is os.replace()d over the
+    # top. Replacing a file needs write permission on the DIRECTORY, not on
+    # the file, so an unreadable draft is fully replaceable -- and the only
+    # copy of text nobody in this pipeline ever managed to read is gone.
+    # Nothing downstream can recover it and nothing upstream noticed.
+    #
+    # Absence is deliberately NOT this case: no draft yet is the ordinary
+    # state of a fresh segment, and refusing it would make translation
+    # impossible. The discriminator is the sentinel _sha256_of() returns for
+    # present-but-unreadable, never a truthiness test that collapses the two.
+    #
+    # Deliberately conservative on a codex round-4 finding whose severity I
+    # would otherwise have argued down: it is NOT a regression from this
+    # branch -- handoff has always behaved this way -- but "no worse than
+    # before" is a poor answer when the cost is destroyed source text and the
+    # observation needed to prevent it is already being computed two functions
+    # away.
+    if _sha256_of(segments_dir / f"{seg}.draft.json") == TXN_UNREADABLE:
+        return {"action": "unreadable_draft"}
 
     draft_ok = (
         _run_gate(dirs["draft_ready_script"],
@@ -4192,10 +4226,13 @@ def _discard_unpublished_candidates(result: dict) -> None:
     """Remove codex_job.py's two private per-invocation candidates.
 
     Best effort by design: a failed unlink is litter, never a reason to fail an
-    otherwise valid publication. Callers use this for BOTH of the states in
-    which the pair has stopped being the record -- consumed into transaction
-    staging, or abandoned unpublishable -- because the files are identical and
-    so is the reason they must not stay."""
+    otherwise valid publication.
+
+    ONE CALLER, and deliberately so. This runs only once the durable intent
+    owns the bytes. An earlier revision also called it when the publication
+    lease could not be taken; that was removed, because the dispatch journal
+    records those paths and deleting them destroyed recoverable work in order
+    to avoid leaving litter."""
     for key in ("staged_draft_path", "staged_review_path"):
         path = result.get(key)
         if not isinstance(path, str) or not path:
@@ -4325,36 +4362,30 @@ def recover_segment_txns(ctx: "DispatchContext", seg: str) -> list:
     return results
 
 
-# Outcomes after which the segment is clear to be dispatched again: nothing was
-# in flight, or the transaction reached a terminal state and cleaned up.
-_TXN_RECOVERY_CLEARS_SEGMENT = frozenset((
-    TXN_PROCEED, TXN_ABORTED_PREPARE, TXN_COMMITTED_CLEANED,
-    TXN_ROLLED_FORWARD_TAIL, TXN_ROLL_FORWARD_DRAFT, TXN_ROLL_FORWARD_BOTH,
-    TXN_PREIMAGE_DIVERGED, TXN_STAGING_LOST,
-))
+def recovery_left_the_segment_blocked(ctx: "DispatchContext", seg: str, results) -> bool:
+    """True when a transaction intent is STILL ON DISK after recovery ran.
 
+    OBSERVED, NOT INFERRED, and that is the entire point of the signature. An
+    earlier version decided this from the outcome NAMES recovery reported,
+    against an allow-list of outcomes that "clean up after themselves" -- and
+    an outcome name describes what the classifier DECIDED, never what actually
+    happened afterwards. A roll-forward whose publication then failed reports a
+    roll-forward name with published=False; commit_txn_intent() and
+    cleanup_txn() both return a bool that was discarded. Every one of those
+    leaves the intent in place while reading as cleared, and the loop then
+    derives, dispatches and PAYS for a round whose publication refuses
+    `txn-intent-already-present` -- on every invocation, charging nothing,
+    because charging is idempotent per transaction id and that id was already
+    charged once.
 
-def recovery_left_the_segment_blocked(results) -> bool:
-    """True when recovery deliberately RETAINED an intent it could not resolve.
-
-    Recovery keeps, rather than deletes, an intent that is invalid, one whose
-    state could not be observed, and one whose failure charge would not go
-    durable -- each for a good reason, and each leaving a record that
-    publication will refuse to publish over. Ignoring that was a real cost, not
-    a tidiness point: the loop went on to derive, dispatch and PAY for a full
-    fixreview round, whose publication then refused `txn-intent-already-present`
-    -- and the same retained intent produced the same wasted round on every
-    later invocation, without ever charging the failure counter that is
-    supposed to bound exactly this.
-
-    The two refusal outcomes ARE cleared: they clean up after themselves and
-    charge, so the segment is genuinely free to be retried under the ceiling."""
-    for result in results or ():
-        if result.get("outcome") not in _TXN_RECOVERY_CLEARS_SEGMENT:
-            return True
-        if result.get("charge_lost"):
-            return True
-    return False
+    Asking the filesystem removes the whole class: the question is "is there an
+    intent that will refuse my publication", and that is a fact about a file.
+    `results` is still consulted for the one thing the file cannot show -- a
+    failure whose charge did not go durable, which must block even in the
+    window where the intent has been removed."""
+    if txn_intent_path(ctx.txn_dir, seg).exists():
+        return True
+    return any((result or {}).get("charge_lost") for result in results or ())
 
 
 def owner_profile_path(durable_root: Path):
@@ -4373,9 +4404,13 @@ def owner_profile_path(durable_root: Path):
 
 def decision_premise(ctx: "DispatchContext", seg: str) -> tuple:
     """Everything derive_next_action()'s answer and the round's validation both
-    depend on, as a comparable tuple: the draft's CONTENT sha1, the draft's
-    dispatch_token, the raw sha256 of the canonical review (None when absent),
-    the raw sha256 of the segpack, and the raw sha256 of the owning profile.
+    depend on, as a comparable tuple of EIGHT fields in this order: the raw
+    sha256 of the canonical draft, its CONTENT sha1, its dispatch_token, then
+    the raw sha256 of the canonical review, the segpack, the owning profile,
+    review_TASK.md and style_bible.md (None for any that is absent). Compared
+    as a WHOLE and never by position -- an index into this is a shifting
+    target, as its growth from three fields to five to eight across three
+    review rounds shows.
 
     Captured around the DECIDE step under the per-segment lease and re-asserted
     at PUBLISH time. The transaction's own CAS is not a substitute: it binds the
@@ -4543,15 +4578,14 @@ def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
         # {"absent": true} would let a later pass "confirm" a preimage nobody
         # ever saw.
         #
-        # KNOWINGLY SHADOWED, AND NO TEST CAN HOLD IT. The premise check a few
-        # lines above rejects an unreadable review or draft for every caller
-        # that reaches here, so disabling this branch changes no observable
-        # behaviour and a mutant of it survives by construction -- verified,
-        # not assumed. It stays because it guards a different moment (the WRITE
-        # of the preimage, not the decision) and because the two would have to
-        # be removed together for the shadowing argument to still hold. Saying
-        # so beats leaving a future reader to rediscover that its coverage gap
-        # is redundancy rather than an oversight.
+        # SHADOWED FOR THE ORDINARY PATH, BUT GENUINELY REACHABLE. The premise
+        # check a few lines above rejects an unreadable review or draft, so a
+        # mutant of this branch survives -- verified, not assumed. It is NOT
+        # dead: readability can change between that check and this read, which
+        # is a real window rather than a rhetorical one, and this guards a
+        # different moment (the WRITE of the preimage, not the decision). An
+        # earlier version of this comment called it untestable; the true
+        # statement is narrower -- no test here reproduces that window today.
         return refuse("txn-preimage-unreadable")
     review_preimage = {"absent": True} if review_sha256 is None else {"sha256": review_sha256}
 
@@ -4975,7 +5009,7 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                         return {"seg": seg, "converged": False, "outcome": "failed",
                                 "reason": "segment-busy"}
                     recovery = recover_segment_txns(ctx, seg)
-                    if recovery_left_the_segment_blocked(recovery):
+                    if recovery_left_the_segment_blocked(ctx, seg, recovery):
                         # Recovery kept an intent it could not resolve, and
                         # publication will refuse to publish over it. Deriving
                         # from here dispatches and PAYS for a round that cannot
@@ -4988,10 +5022,20 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                     # premise only afterwards made the guard agree with itself.
                     action, premise = decide_under_premise(ctx, seg)
                 if action is None:
-                    # Something wrote while the decision was being read. Nothing
-                    # was dispatched, so this costs one iteration of the bounded
-                    # loop and no codex job; re-derive against whatever is there
-                    # now rather than act on a decision whose premise moved.
+                    # An unreadable canonical draft makes the premise
+                    # unobservable too, so it lands here BEFORE derive's own
+                    # `unreadable_draft` answer can be used -- and retrying it
+                    # to the loop cap would report the generic exhaustion
+                    # reason for a condition that has a precise name and needs
+                    # a human. Named here so both modes say the same thing.
+                    if _sha256_of(ctx.segments_dir / f"{seg}.draft.json") == TXN_UNREADABLE:
+                        return {"seg": seg, "converged": False, "outcome": "failed",
+                                "reason": "unreadable-draft"}
+                    # Otherwise: something wrote while the decision was being
+                    # read. Nothing was dispatched, so this costs one iteration
+                    # of the bounded loop and no codex job; re-derive against
+                    # whatever is there now rather than act on a decision whose
+                    # premise moved.
                     continue
             else:
                 action = derive_next_action(seg, ctx)
@@ -5144,6 +5188,14 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                 "stage": "publish", "round_label": round_label,
                                 "reason": txn["reason"]}
                 continue  # re-derive from the freshly promoted canonical review
+
+            if action["action"] == "unreadable_draft":
+                # Terminal for this invocation, in BOTH modes, and with NO
+                # ledger write -- the segment stays recoverable and a human
+                # has to look at why a file in segments/ cannot be read.
+                # Dispatching anything here is what destroys it.
+                return {"seg": seg, "converged": False, "outcome": "failed",
+                        "reason": "unreadable-draft"}
 
             if action["action"] == "invalid_post_fix_draft":
                 # codex round-3 MAJOR: see derive_next_action()'s own
