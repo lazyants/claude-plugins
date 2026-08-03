@@ -1034,12 +1034,23 @@ function reviewDispatchPrompt(seg, roundLabel) {
 // draft_sha1 describes the PRE-edit draft, so a merged call that edits anything
 // emits a review whose binding no longer matches the draft it publishes, and the
 // driver cannot read that as convergence (segment_dispatch_driver.py's own
-// clean-but-stale branch). Convergence therefore requires a round that changed
-// nothing -- which is exactly a round that needed no fix. The reviewer half still
-// judges the PREVIOUS round's edit; its own edit is judged by the next round.
+// clean-but-stale branch). The reviewer half therefore judges the PREVIOUS
+// round's edit and never its own: by the time a round converges it changed
+// nothing, and what it approved was written by a different call.
 // review_ready.py enforces the same thing mechanically at gate 3: it compares the
 // candidate review's draft_sha1 against the CURRENT canonical draft, which is
 // still the pre-edit one at validation time.
+//
+// WHAT THIS DOES NOT CLOSE, said plainly because an overstated mitigation is
+// never attacked: "changed nothing" is not the same claim as "needed no fix".
+// A degraded call that copies the draft byte for byte and reports clean:true
+// with no findings passes all four gates and converges, and nothing downstream
+// detects it. That is the ordinary under-reporting risk every reviewer in this
+// pipeline has always carried -- the binding removes the NEW risk the merged
+// shape introduces (a call blessing its own edit) and does not touch the old
+// one. Nor does gate 4 help here: matchedVerdict() checks the SHAPE of a
+// finding's loc, never whether the location exists, and a clean review has no
+// findings to check at all.
 function fixReviewDispatchPrompt(seg, roundLabel) {
   const reviewToken = RUN_ID + ":" + seg + ":r" + roundLabel;
   const draftToken = RUN_ID + ":" + seg;
@@ -1055,7 +1066,7 @@ function fixReviewDispatchPrompt(seg, roundLabel) {
   lines.push("STEP 1 -- REVIEW, before you change a single character. Check the draft against the source for: full accuracy (no omissions or distortions), word-sense and realia fidelity for the source era and context -- ask explicitly whether each notable word means what it meant in that period and context, not what it means today -- name/canon fidelity, placeholder sentinel fidelity, verse per the policy above, and literary quality (register, idiom, natural seams, rhythm).");
   lines.push("Canon-name fidelity specifically: the segpack's canon_map gives each already-canonized name's frozen canonical target form. Flag a canon name ONLY if the draft renders a different name, a different transliteration of the canonical stem, leaves a canonical name untranslated, or swaps an epithet for a real surname -- a correctly inflected/declined form of the canonical stem is CORRECT and must NOT be flagged.");
   lines.push("A canon_map target form is authoritative as given. Never flag a canon name merely because its frozen canonical target form is lexically unrelated to the SOURCE form -- for a sense-translated speaking name (basis:\"sense_translated\") that is expected and correct. The deviation triggers above still apply. Correctness of the frozen canon decision itself is out of scope for this review -- a suspected error is reopened via the glossary/adjudication route, never flagged here.");
-  lines.push("Every finding's loc must name a real location you can point at in the draft or segpack (a block key, a footnote key, a \"VERSE:{vid}\" for a verse-specific finding). A finding whose loc names nothing real -- a task label, a section of this prompt, an invented key -- causes this entire round to be thrown away, INCLUDING the draft you edit in step 2, because there is no way to tell which of your edits followed it.");
+  lines.push("Every finding's loc must name a real location you can point at in the draft or segpack: a block key, a footnote key, or \"VERSE:{vid}\" for a verse-specific finding. Never write a task label, a section of this prompt, or a key you did not read in the segpack. A finding nobody can locate cannot be checked against the text, and the edit you make for it cannot be judged by the next round -- so an unlocatable finding does not merely waste a line, it lets an unreviewable edit through.");
   lines.push("Build a JSON object with exactly these five fields: clean (true only if there are no findings that require a fix round), coverage_ok (true only if the deterministic gate above printed OK), findings (an array of objects with loc/severity/issue/suggest), draft_sha1 (the value you computed before reading the draft, above), and dispatch_token (exactly this literal string: " + JSON.stringify(reviewToken) + ").");
   lines.push("Write that exact object as JSON to the output path ⟦JOB_OUT_REVIEW⟧ (an isolated attempt path this run supplies) and nothing else.");
   lines.push("STEP 2 -- FIX, using the findings you just wrote as the authoritative list. Apply every entry in that findings[] array, in full, to the draft you read. Never touch a placeholder sentinel (e.g. ⟦FNREF_...⟧, ⟦VERSE_...⟧) -- copy each one byte for byte in place. Keep the verse policy above. Never change the set of block, footnote, or verse keys -- they must stay exactly 1:1 with the segpack. The draft carries a dispatch_token top-level field -- copy its existing value byte for byte into the draft you write, unchanged; never invent, drop, or recompute it.");

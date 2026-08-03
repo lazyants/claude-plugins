@@ -124,6 +124,15 @@ def _capture_intent(monkeypatch):
     return captured
 
 
+def _publish(ctx, round_label, result, premise=None):
+    """publish_fixreview_pair() with the premise its caller captures under the
+    lease. Defaulted to "the state right now" so each test states only what it
+    actually varies -- a test that wants a STALE premise passes one."""
+    if premise is None:
+        premise = DRIVER.decision_premise(ctx, SEG)
+    return DRIVER.publish_fixreview_pair(ctx, SEG, round_label, result, premise)
+
+
 def _canonical(ctx, what):
     path = ctx.segments_dir / f"{SEG}.{what}.json"
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
@@ -239,7 +248,7 @@ def test_a_validated_pair_is_published_and_the_transaction_is_cleaned_up(tmp_pat
     _write_canonical(ctx, review={"old": "review"})
     result = _stage_candidates(ctx)
 
-    txn = DRIVER.publish_fixreview_pair(ctx, SEG, "1", result)
+    txn = _publish(ctx, "1", result)
 
     assert txn["ok"] is True, txn
     assert _canonical(ctx, "draft")["blocks"]["b"] == "fixed"
@@ -255,12 +264,12 @@ def test_the_attempt_counter_survives_a_successful_transaction(tmp_path):
     transaction reuses the same txn_id."""
     ctx = _ctx(tmp_path)
     _write_canonical(ctx)
-    assert DRIVER.publish_fixreview_pair(ctx, SEG, "1", _stage_candidates(ctx))["ok"]
+    assert _publish(ctx, "1", _stage_candidates(ctx))["ok"]
     assert json.loads((ctx.txn_dir / f"{SEG}.attempts").read_text())["attempt_seq"] == 1
 
     _stage_candidates(ctx, draft_body="fixed2", round_label="2")
     result2 = _stage_candidates(ctx, draft_body="fixed2", round_label="2")
-    assert DRIVER.publish_fixreview_pair(ctx, SEG, "2", result2)["ok"]
+    assert _publish(ctx, "2", result2)["ok"]
     assert json.loads((ctx.txn_dir / f"{SEG}.attempts").read_text())["attempt_seq"] == 2
 
 
@@ -269,7 +278,7 @@ def test_a_successful_transaction_charges_no_failure(tmp_path):
     correctly-configured project trip its own ceiling on the ordinary path."""
     ctx = _ctx(tmp_path)
     _write_canonical(ctx)
-    assert DRIVER.publish_fixreview_pair(ctx, SEG, "1", _stage_candidates(ctx))["ok"]
+    assert _publish(ctx, "1", _stage_candidates(ctx))["ok"]
     assert DRIVER.read_txn_failures(ctx.txn_dir, SEG)["count"] == 0
 
 
@@ -280,7 +289,7 @@ def test_the_review_preimage_records_ABSENT_when_there_is_no_canonical_review(tm
     ctx = _ctx(tmp_path)
     _write_canonical(ctx)  # no review
     captured = _capture_intent(monkeypatch)
-    assert DRIVER.publish_fixreview_pair(ctx, SEG, "1", _stage_candidates(ctx))["ok"]
+    assert _publish(ctx, "1", _stage_candidates(ctx))["ok"]
     assert captured["review_preimage"] == {"absent": True}
 
 
@@ -291,7 +300,7 @@ def test_the_intent_binds_the_draft_TOKEN_as_well_as_its_content(tmp_path, monke
     ctx = _ctx(tmp_path)
     _write_canonical(ctx)
     captured = _capture_intent(monkeypatch)
-    DRIVER.publish_fixreview_pair(ctx, SEG, "1", _stage_candidates(ctx))
+    _publish(ctx, "1", _stage_candidates(ctx))
     assert captured["pre_edit_draft_token"] == DRAFT_TOKEN
     assert captured["pre_edit_draft_sha1"] != DRAFT_TOKEN
     assert len(captured["pre_edit_draft_sha1"]) == 40
@@ -305,7 +314,7 @@ def test_the_preimage_describes_the_draft_BEFORE_the_edit_not_after(tmp_path, mo
     _write_canonical(ctx, draft_body="old")
     pre = DRAFT_SHA1.draft_content_sha1(ctx.segments_dir / f"{SEG}.draft.json")
     captured = _capture_intent(monkeypatch)
-    DRIVER.publish_fixreview_pair(ctx, SEG, "1", _stage_candidates(ctx, draft_body="fixed"))
+    _publish(ctx, "1", _stage_candidates(ctx, draft_body="fixed"))
     assert captured["pre_edit_draft_sha1"] == pre
     post = DRAFT_SHA1.draft_content_sha1(ctx.segments_dir / f"{SEG}.draft.json")
     assert post != pre, "the fixture must actually change the draft, or this proves nothing"
@@ -327,7 +336,7 @@ def test_a_competing_write_between_staging_and_publication_refuses_and_charges(t
         return ok
 
     monkeypatch.setattr(DRIVER, "write_txn_intent", _write_then_race)
-    txn = DRIVER.publish_fixreview_pair(ctx, SEG, "1", result)
+    txn = _publish(ctx, "1", result)
 
     assert txn["ok"] is False
     assert txn["outcome"] == DRIVER.TXN_PREIMAGE_DIVERGED
@@ -347,7 +356,7 @@ def test_staged_bytes_that_do_not_match_the_validated_digest_never_reach_an_inte
     result = _stage_candidates(ctx)
     Path(result["staged_draft_path"]).write_text('{"tampered": true}', encoding="utf-8")
 
-    txn = DRIVER.publish_fixreview_pair(ctx, SEG, "1", result)
+    txn = _publish(ctx, "1", result)
 
     assert txn["ok"] is False
     assert txn["reason"] == "txn-staging-copy-failed"
@@ -365,7 +374,7 @@ def test_an_outcome_missing_any_staged_field_is_refused_before_anything_is_touch
     result = _stage_candidates(ctx)
     result[missing] = None
 
-    txn = DRIVER.publish_fixreview_pair(ctx, SEG, "1", result)
+    txn = _publish(ctx, "1", result)
 
     assert txn["ok"] is False
     assert txn["reason"] == "txn-staged-fields-missing"
@@ -392,7 +401,7 @@ def test_an_intent_that_appeared_since_recovery_is_not_published_over(tmp_path):
     }
     assert DRIVER.write_txn_intent(ctx.txn_dir, SEG, other) is True
 
-    txn = DRIVER.publish_fixreview_pair(ctx, SEG, "1", _stage_candidates(ctx))
+    txn = _publish(ctx, "1", _stage_candidates(ctx))
 
     assert txn["ok"] is False
     assert txn["reason"] == "txn-intent-already-present"
@@ -413,13 +422,92 @@ def test_an_unreadable_canonical_review_is_not_recorded_as_ABSENT(tmp_path):
     try:
         if os.access(str(review_path), os.R_OK):  # running as root -- the chmod bought nothing
             pytest.skip("cannot make a file unreadable as this user")
-        txn = DRIVER.publish_fixreview_pair(ctx, SEG, "1", _stage_candidates(ctx))
+        txn = _publish(ctx, "1", _stage_candidates(ctx))
     finally:
         review_path.chmod(0o644)
 
     assert txn["ok"] is False
     assert txn["reason"] == "txn-preimage-unreadable"
     assert not DRIVER.txn_intent_path(ctx.txn_dir, SEG).exists()
+
+
+def test_a_round_decided_against_state_somebody_else_has_since_replaced_is_refused(tmp_path):
+    """THE LEASE HANDOFF WINDOW. The parent decides under the lease, releases
+    it to launch the child, and the child takes it -- so a writer can land in
+    between. The transaction's own CAS does NOT catch that: it binds the state
+    observed AFTER the job returns, so the competitor's publication becomes
+    part of the premise instead of invalidating it, and the round would
+    overwrite a review it never saw.
+
+    Found by codex review. The premise captured at decide time is what makes
+    the window a refusal instead of a silent overwrite."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx, review={"old": "review"})
+    premise = DRIVER.decision_premise(ctx, SEG)  # what derive_next_action saw
+    result = _stage_candidates(ctx)
+
+    # ... and now somebody else publishes a review for this segment.
+    (ctx.segments_dir / f"{SEG}.review.json").write_text(
+        '{"somebody": "else"}', encoding="utf-8")
+
+    txn = _publish(ctx, "1", result, premise=premise)
+
+    assert txn["ok"] is False
+    assert txn["reason"] == "txn-decision-stale"
+    assert _canonical(ctx, "review") == {"somebody": "else"}
+    assert _canonical(ctx, "draft")["blocks"]["b"] == "old"
+    # Refused BEFORE anything durable was allocated: no attempt_seq burned, no
+    # intent, no staging, and nothing to charge -- no transaction ever began.
+    assert not (ctx.txn_dir / f"{SEG}.attempts").exists()
+    assert not DRIVER.txn_intent_path(ctx.txn_dir, SEG).exists()
+
+
+def test_the_premise_covers_the_draft_TOKEN_and_the_review_not_only_content(tmp_path):
+    """A competitor can leave the draft's content identical and change only its
+    token, or touch only the review -- and derive_next_action() reads both."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx, review={"old": "review"})
+    premise = DRIVER.decision_premise(ctx, SEG)
+
+    (ctx.segments_dir / f"{SEG}.draft.json").write_text(json.dumps(
+        {"seg": SEG, "dispatch_token": "SOME-OTHER-RUN:seg01", "blocks": {"b": "old"}}),
+        encoding="utf-8")
+    after = DRIVER.decision_premise(ctx, SEG)
+
+    assert after[0] == premise[0], "content sha1 is unchanged -- that is the point"
+    assert after != premise, "the token change must still invalidate the premise"
+
+
+def test_the_private_candidates_are_removed_once_the_transaction_owns_copies(tmp_path):
+    """codex_job.py deliberately KEEPS its two per-invocation candidates when
+    it reports `staged` -- they are the only pointer to the work and it cannot
+    know whether the driver consumed them. Nobody else ever deletes them, so
+    without this they accumulate one draft-sized pair per round, forever, in
+    the segments directory."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    result = _stage_candidates(ctx)
+    assert Path(result["staged_draft_path"]).exists()
+
+    assert _publish(ctx, "1", result)["ok"] is True
+
+    assert not Path(result["staged_draft_path"]).exists()
+    assert not Path(result["staged_review_path"]).exists()
+
+
+def test_the_private_candidates_SURVIVE_a_refusal_before_they_are_copied(tmp_path):
+    """Deleting them on a path that published nothing would destroy the only
+    copy of a validated pair over a transient refusal."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    result = _stage_candidates(ctx)
+    (ctx.segments_dir / f"{SEG}.review.json").write_text('{"raced": true}', encoding="utf-8")
+
+    txn = _publish(ctx, "1", result, premise=("stale", "stale", None))
+
+    assert txn["reason"] == "txn-decision-stale"
+    assert Path(result["staged_draft_path"]).exists()
+    assert Path(result["staged_review_path"]).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -494,7 +582,7 @@ def test_a_hand_built_partial_publish_list_is_refused_by_the_tail_check(tmp_path
                             scripts_dir)
 
     monkeypatch.setattr(DRIVER, "publish_txn", _ask_for_half)
-    txn = DRIVER.publish_fixreview_pair(ctx, SEG, "1", result)
+    txn = _publish(ctx, "1", result)
 
     assert seen["asked"] == ["review", "draft"]
     assert txn["ok"] is False
@@ -520,7 +608,7 @@ def test_a_crash_between_the_two_renames_is_rolled_FORWARD_not_back(tmp_path, mo
         return False
 
     monkeypatch.setattr(DRIVER, "publish_txn", _rename_the_review_then_die)
-    first = DRIVER.publish_fixreview_pair(ctx, SEG, "1", result)
+    first = _publish(ctx, "1", result)
     monkeypatch.undo()
 
     assert first["ok"] is False
@@ -550,7 +638,7 @@ def test_one_failed_transaction_is_charged_ONCE_however_often_recovery_runs(tmp_
     result = _stage_candidates(ctx)
 
     monkeypatch.setattr(DRIVER, "publish_txn", lambda *a, **k: False)
-    DRIVER.publish_fixreview_pair(ctx, SEG, "1", result)
+    _publish(ctx, "1", result)
     monkeypatch.undo()
     assert DRIVER.read_txn_failures(ctx.txn_dir, SEG)["count"] == 1
 
@@ -560,6 +648,85 @@ def test_one_failed_transaction_is_charged_ONCE_however_often_recovery_runs(tmp_
         DRIVER.advance_txn(ctx, SEG)
     failures = DRIVER.read_txn_failures(ctx.txn_dir, SEG)
     assert failures["count"] == 1, failures
+
+
+def test_a_refusal_whose_charge_could_not_be_made_durable_keeps_its_own_evidence(
+        tmp_path, monkeypatch):
+    """"Charge first, then clean" is idempotent only while the charge lands.
+    The counter is keyed by txn_id, so a second pass over the same intent does
+    not double-count -- but if the charge could not be made durable and cleanup
+    runs anyway, the intent carrying that id is gone and NO later pass can ever
+    charge it. The segment then fails transactions without limit across
+    invocations while its ceiling reads zero.
+
+    Found by codex review: on a CAS refusal `published` stays True (nothing was
+    asked to be renamed), so the cleanup branch fired regardless of the charge."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx, draft_body="old")
+    result = _stage_candidates(ctx)
+
+    original = DRIVER.write_txn_intent
+
+    def _write_then_race(txn_dir, seg, intent):
+        ok = original(txn_dir, seg, intent)
+        _write_canonical(ctx, draft_body="somebody-elses-edit")
+        return ok
+
+    monkeypatch.setattr(DRIVER, "write_txn_intent", _write_then_race)
+    # ...and the charge cannot be made durable.
+    monkeypatch.setattr(DRIVER, "charge_txn_failure", lambda *a, **k: None)
+
+    txn = _publish(ctx, "1", result)
+
+    assert txn["ok"] is False
+    assert txn["outcome"] == DRIVER.TXN_PREIMAGE_DIVERGED
+    intent_path = DRIVER.txn_intent_path(ctx.txn_dir, SEG)
+    assert intent_path.exists(), (
+        "an uncharged refusal must keep the intent -- it is the only record of "
+        "the txn_id a later pass could charge")
+    slots = DRIVER.staged_paths(ctx.txn_dir, SEG, "1")
+    assert slots["draft"].exists() and slots["review"].exists()
+
+
+def test_a_refusal_whose_charge_DID_land_is_cleaned_up_normally(tmp_path, monkeypatch):
+    """The other half, so the fix above is a condition rather than a blanket
+    'never clean up after a refusal' -- which would leave every CAS refusal's
+    staging on disk forever."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx, draft_body="old")
+    result = _stage_candidates(ctx)
+    original = DRIVER.write_txn_intent
+
+    def _write_then_race(txn_dir, seg, intent):
+        ok = original(txn_dir, seg, intent)
+        _write_canonical(ctx, draft_body="somebody-elses-edit")
+        return ok
+
+    monkeypatch.setattr(DRIVER, "write_txn_intent", _write_then_race)
+    txn = _publish(ctx, "1", result)
+
+    assert txn["outcome"] == DRIVER.TXN_PREIMAGE_DIVERGED
+    assert txn["charge_lost"] is False
+    assert DRIVER.read_txn_failures(ctx.txn_dir, SEG)["count"] == 1
+    assert not DRIVER.txn_intent_path(ctx.txn_dir, SEG).exists()
+    slots = DRIVER.staged_paths(ctx.txn_dir, SEG, "1")
+    assert not slots["draft"].exists() and not slots["review"].exists()
+
+
+def test_an_aborted_prepare_is_still_cleaned_up_though_it_charges_nothing(tmp_path):
+    """The charge-durability gate must not block cleanup on a path with no
+    transaction to charge: orphaned staging has no intent and therefore no
+    txn_id, and leaving it would make the fix above a permanent leak."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    ctx.txn_dir.mkdir(parents=True)
+    slots = DRIVER.staged_paths(ctx.txn_dir, SEG, "1")
+    slots["draft"].write_text("{}", encoding="utf-8")
+
+    outcomes = [r["outcome"] for r in DRIVER.recover_segment_txns(ctx, SEG)]
+
+    assert DRIVER.TXN_ABORTED_PREPARE in outcomes
+    assert not slots["draft"].exists()
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +917,39 @@ def test_a_busy_segment_is_reported_recoverable_and_dispatches_nothing(tmp_path,
     assert result == {"seg": SEG, "converged": False, "outcome": "failed",
                       "reason": "segment-busy"}
     assert dispatched == []
+
+
+def test_publication_happens_UNDER_the_lease_not_merely_after_it(tmp_path, monkeypatch):
+    """The renames cannot be made atomic -- POSIX has no compare-and-rename --
+    but holding the lease across them at least excludes every writer that
+    honours it, which is every codex_job.py in the system. Publishing outside
+    it would leave the driver's own renames racing the very children it
+    launches.
+
+    The lease is free when derive runs and taken by the time publication does,
+    which is exactly the shape of a child that has not let go."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    held = {}
+
+    def _job_that_keeps_the_lease(c, *, kind, seg, round_label=None):
+        path = ctx.segments_dir / f".codex_job.{seg}.lock"
+        held["fd"] = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(held["fd"], fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return dict(_stage_candidates(ctx), kind=kind, seg=seg, round_label=round_label)
+
+    monkeypatch.setattr(DRIVER, "derive_next_action",
+                        lambda seg, c: {"action": "review", "round_label": "1"})
+    monkeypatch.setattr(DRIVER, "run_one_codex_job", _job_that_keeps_the_lease)
+    try:
+        result = DRIVER.process_segment(SEG, ctx)
+    finally:
+        fcntl.flock(held["fd"], fcntl.LOCK_UN)
+        os.close(held["fd"])
+
+    assert result["stage"] == "publish"
+    assert result["reason"] == "segment-busy"
+    assert _canonical(ctx, "draft")["blocks"]["b"] == "old", "nothing may have been published"
 
 
 def test_handoff_takes_no_lease_at_all(tmp_path, monkeypatch):

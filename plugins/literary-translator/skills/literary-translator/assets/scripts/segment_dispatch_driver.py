@@ -44,13 +44,17 @@ own findings, producing TWO artifacts. The self-attestation that ordering
 invites is prevented STRUCTURALLY rather than by prompt wording: the
 review is bound to the sha1 of the PRE-edit draft, so a round that changed
 anything publishes a pair whose review no longer describes the draft, and
-convergence -- which requires those to match -- is only reachable by a
-round that changed nothing, i.e. one that needed no fix. The review half of
-round N still judges round N-1's edit; its own edit is judged by N+1. Two
-artifacts have no single canonical path, so `codex_job.py` validates and
-STAGES them and never promotes; this driver publishes the pair through the
-transaction layer below (durable intent, review renamed first, roll-forward
-on recovery). The mandatory final round stays a plain review in both modes.
+convergence requires those to match. The review half of round N therefore
+judges round N-1's edit and never its own; its own edit is judged by N+1.
+What that does NOT buy -- stated because an overstated mitigation stops
+being questioned -- is any defence against a call that copies the draft
+unchanged and reports it clean. That converges, and nothing detects it; it
+is the same under-reporting risk a plain review round has always carried,
+untouched by this change rather than introduced by it. Two artifacts have no
+single canonical path, so `codex_job.py` validates and STAGES them and never
+promotes; this driver publishes the pair through the transaction layer below
+(durable intent, review renamed first, roll-forward on recovery). The
+mandatory final round stays a plain review in both modes.
 
 This driver's OWN contribution is eliminating the WAIT-polling agent()
 calls around translate/review (#348's chunking apparatus) -- "B only pays
@@ -4181,12 +4185,24 @@ def advance_txn(ctx: "DispatchContext", seg: str, round_label=None) -> dict:
 
     charged = None
     failed = (not published) or outcome in (TXN_PREIMAGE_DIVERGED, TXN_STAGING_LOST)
-    if failed and isinstance(txn_id, str) and txn_id:
+    charge_required = failed and isinstance(txn_id, str) and bool(txn_id)
+    if charge_required:
         charged = charge_txn_failure(txn_dir, seg, txn_id, _txn_failure_ceiling(ctx))
 
     if published and decision["commit_intent"]:
         commit_txn_intent(txn_dir, seg)
-    if published and decision["cleanup"] and isinstance(label, str):
+    # AN UNCHARGED REFUSAL MAY NOT DELETE ITS OWN EVIDENCE. "Charge first, then
+    # clean" is only idempotent while the charge actually lands: charging is
+    # keyed by txn_id, so a second pass over the same intent does not
+    # double-count -- but if charge_txn_failure() could not make the count
+    # durable it returns None, and cleaning up regardless removes the intent
+    # that carries the id. There is then nothing left for any later pass to
+    # charge, and the segment can fail transactions without limit across
+    # invocations while the ceiling reads zero. Keeping the intent costs one
+    # more classification next time; losing the charge costs the only
+    # cross-invocation bound this mode has.
+    charge_lost = charge_required and charged is None
+    if published and decision["cleanup"] and isinstance(label, str) and not charge_lost:
         cleanup_txn(txn_dir, seg, label)
 
     append_journal(ctx.dirs["durable_root"], ctx.session_id, {
@@ -4194,8 +4210,10 @@ def advance_txn(ctx: "DispatchContext", seg: str, round_label=None) -> dict:
         "outcome": outcome, "published": published,
         "publish": decision["publish"],
         "txn_failures": (charged or {}).get("count"),
+        "charge_lost": charge_lost,
     })
-    return {"outcome": outcome, "published": published, "txn_id": txn_id, "charged": charged}
+    return {"outcome": outcome, "published": published, "txn_id": txn_id,
+            "charged": charged, "charge_lost": charge_lost}
 
 
 def orphaned_staging_labels(txn_dir: Path, seg: str) -> list:
@@ -4240,8 +4258,27 @@ def recover_segment_txns(ctx: "DispatchContext", seg: str) -> list:
     return results
 
 
+def decision_premise(ctx: "DispatchContext", seg: str) -> tuple:
+    """The canonical state derive_next_action() based its answer on, as a
+    comparable tuple: the draft's CONTENT sha1, the draft's dispatch_token, and
+    the raw sha256 of the canonical review (None when absent).
+
+    Captured under the per-segment lease at DECIDE time and re-asserted at
+    PUBLISH time. The transaction's own CAS is not a substitute: it binds the
+    state observed AFTER the codex job returns, so a competing publication that
+    lands in the gap between the parent releasing the lease and the child
+    taking it becomes part of the transaction's premise instead of
+    invalidating it -- and the round then publishes work that, on the state now
+    on disk, would never have been dispatched."""
+    draft_path = ctx.segments_dir / f"{seg}.draft.json"
+    _, content_sha1, token = _draft_observation(
+        seg, draft_path, ctx.segments_dir, ctx.dirs["scripts_dir"])
+    review_sha256 = _sha256_of(ctx.segments_dir / f"{seg}.review.json")
+    return (content_sha1, token, review_sha256)
+
+
 def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
-                           result: dict) -> dict:
+                           result: dict, premise: tuple) -> dict:
     """Stage, record the intent, and publish ONE validated fixreview pair.
 
     `result` is run_one_codex_job()'s outcome for a --kind fixreview dispatch,
@@ -4261,8 +4298,9 @@ def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
     txn_dir = ctx.txn_dir
     segments_dir = ctx.segments_dir
 
-    def refuse(reason, outcome=None, charged=None):
-        return {"ok": False, "reason": reason, "outcome": outcome, "charged": charged}
+    def refuse(reason, outcome=None, charged=None, charge_lost=False):
+        return {"ok": False, "reason": reason, "outcome": outcome,
+                "charged": charged, "charge_lost": charge_lost}
 
     for field in ("staged_draft_path", "staged_review_path",
                   "staged_draft_sha256", "staged_review_sha256"):
@@ -4276,6 +4314,17 @@ def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
     except OSError as exc:
         print(f"segment_dispatch_driver.py: could not create {txn_dir}: {exc}", file=sys.stderr)
         return refuse("txn-dir-unavailable")
+
+    # THE DECISION'S PREMISE, RE-ASSERTED BEFORE THE TRANSACTION IS STARTED.
+    # Read first, so a stale round is refused before an attempt_seq is burned
+    # or a byte is staged. What this catches is precisely the handoff window:
+    # the parent released the lease to launch the child, and something else
+    # published in between. Without it the pre-image below simply records the
+    # competitor's state and the CAS then confirms it happily -- the round
+    # would overwrite a review it never saw, with work dispatched against a
+    # state that no longer exists.
+    if decision_premise(ctx, seg) != premise:
+        return refuse("txn-decision-stale")
 
     pre = gather_txn_observed(seg, txn_dir, segments_dir, ctx.dirs["scripts_dir"],
                               round_label=round_label)
@@ -4317,6 +4366,21 @@ def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
         cleanup_txn(txn_dir, seg, round_label)
         return refuse("txn-staging-copy-failed")
 
+    # NOBODY ELSE EVER DELETES THESE. codex_job.py deliberately KEEPS its two
+    # private per-invocation candidates when it reports `staged` -- they are
+    # the only pointer to the work, and it has no way to know whether the
+    # driver consumed them. It is this consumption that makes them redundant:
+    # both are now copied, fsynced and digest-confirmed in the transaction's
+    # own staging, which is the record recovery reads. Left in place they
+    # accumulate one draft-sized pair per round per invocation, in the
+    # segments directory, forever. Best effort: a failed unlink is litter, not
+    # a reason to refuse a validated pair.
+    for path in (result["staged_draft_path"], result["staged_review_path"]):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
     intent = {
         "txn_schema": TXN_SCHEMA_VERSION,
         "txn_id": txn_id,
@@ -4342,9 +4406,9 @@ def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
     if advanced["published"] and advanced["outcome"] in (
             TXN_ROLL_FORWARD_BOTH, TXN_ROLL_FORWARD_DRAFT, TXN_ROLLED_FORWARD_TAIL):
         return {"ok": True, "reason": None, "outcome": advanced["outcome"],
-                "charged": advanced["charged"]}
+                "charged": advanced["charged"], "charge_lost": advanced["charge_lost"]}
     return refuse(advanced["outcome"], outcome=advanced["outcome"],
-                  charged=advanced["charged"])
+                  charged=advanced["charged"], charge_lost=advanced["charge_lost"])
 
 
 def _dispatch_kind_for_round(fix_mode: str, round_label: str) -> str:
@@ -4707,8 +4771,13 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                 "reason": "segment-busy"}
                     recover_segment_txns(ctx, seg)
                     action = derive_next_action(seg, ctx)
+                    # Captured HERE, inside the lease, together with the read
+                    # it describes -- see decision_premise(). Taken after
+                    # derive so it describes the state derive actually saw.
+                    premise = decision_premise(ctx, seg)
             else:
                 action = derive_next_action(seg, ctx)
+                premise = None
 
             if action["action"] == "already_converged":
                 # A review already landed clean+coverage_ok but the convergence
@@ -4825,7 +4894,22 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                     # published yet: codex_job.py never promotes this kind
                     # (there is no single canonical path for two artifacts).
                     # Publication is this driver's, through the transaction.
-                    txn = publish_fixreview_pair(ctx, seg, round_label, result)
+                    #
+                    # UNDER THE LEASE, and the child has exited by now (the
+                    # dispatch blocks), so it is free to take. The renames
+                    # themselves cannot be made atomic -- POSIX has no
+                    # compare-and-rename, and publish_txn says so plainly --
+                    # but holding the lease across them at least excludes
+                    # every writer that DOES honour it, which is every
+                    # codex_job.py in the system. It leaves exactly the
+                    # writers the lease never reached: a fix agent in another
+                    # process, a human editor, a sync daemon.
+                    with segment_lease(ctx.segments_dir, seg) as leased:
+                        if not leased:
+                            return {"seg": seg, "converged": False, "outcome": "failed",
+                                    "stage": "publish", "round_label": round_label,
+                                    "reason": "segment-busy"}
+                        txn = publish_fixreview_pair(ctx, seg, round_label, result, premise)
                     if not txn["ok"]:
                         return {"seg": seg, "converged": False, "outcome": "failed",
                                 "stage": "publish", "round_label": round_label,
