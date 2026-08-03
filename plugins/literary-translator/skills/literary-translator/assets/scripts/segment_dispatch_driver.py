@@ -1426,6 +1426,18 @@ def _read_counter(path: Path):
 # different actions for one state.
 # ---------------------------------------------------------------------------
 
+# --fix-mode. `handoff` is 1.18.0's behaviour verbatim: a not-clean numeric
+# round returns needs_fix and the caller performs the edit. `codex` dispatches
+# --kind fixreview -- one codex call producing BOTH a fixed draft and its
+# review -- and publishes the pair through the transaction layer below.
+#
+# handoff is the DEFAULT, and that is a deliberate release decision rather than
+# caution: this release makes the codex path reachable, not active. Flipping the
+# default is a separate change, because it moves who edits the user's text.
+FIX_MODE_HANDOFF = "handoff"
+FIX_MODE_CODEX = "codex"
+FIX_MODES = (FIX_MODE_HANDOFF, FIX_MODE_CODEX)
+
 TXN_PROCEED = "proceed"                          # nothing in flight
 TXN_ABORTED_PREPARE = "txn-aborted-prepare"      # staging without an intent
 TXN_COMMITTED_CLEANED = "txn-committed-cleaned"  # committed, cleanup only
@@ -3100,7 +3112,8 @@ def task_file_path(durable_root: Path, kind: str, seg: str, disp: str) -> Path:
 
 def build_codex_job_argv(*, kind: str, seg: str, companion_path: str, durable_root: Path,
                           prompt_file: Path, expect_token: str, disp: str, deadline_sec: int,
-                          effort: str, model: str, plugin_root_str, node_bin: str = "node") -> list:
+                          effort: str, model: str, plugin_root_str, node_bin: str = "node",
+                          expect_review_token: "str | None" = None) -> list:
     """The exact codex_job.py argv this driver Popens, built from the SAME
     field values translateDrivePrompt/reviewDrivePrompt splice into their
     own nohup shell command (--kind/--companion/--cwd/--seg/--prompt-file/
@@ -3114,7 +3127,19 @@ def build_codex_job_argv(*, kind: str, seg: str, companion_path: str, durable_ro
     same as this driver's own --node default) -- it is appended only when
     the caller passed something other than codex_job.py's own "node"
     default, so the equivalence test's default-args comparison still
-    matches byte for byte."""
+    matches byte for byte.
+
+    `expect_review_token` is the ONE field with no counterpart in the template,
+    and deliberately so: --kind fixreview does not exist there at all. It is
+    required exactly for that kind (codex_job.py refuses the kind without it and
+    refuses the flag for every other kind), so it is emitted iff a value is
+    given, and the equivalence test's translate/review comparisons never see it."""
+    if kind == "fixreview" and not expect_review_token:
+        fatal("--kind fixreview requires a review token; refusing to launch a job "
+              "codex_job.py will reject", exit_code=2)
+    if kind != "fixreview" and expect_review_token:
+        fatal(f"a review token was supplied for --kind {kind}, which does not accept one",
+              exit_code=2)
     argv = [
         "--kind", kind,
         "--companion", companion_path,
@@ -3126,6 +3151,8 @@ def build_codex_job_argv(*, kind: str, seg: str, companion_path: str, durable_ro
         "--deadline-sec", str(deadline_sec),
         "--effort", effort,
     ]
+    if expect_review_token:
+        argv += ["--expect-review-token", expect_review_token]
     if model:
         argv += ["--model", model]
     if plugin_root_str:
@@ -3220,7 +3247,8 @@ class DispatchContext:
     construction (safe to share across ThreadPoolExecutor workers)."""
 
     def __init__(self, *, dirs, run_id, translate_cfg, companion_path,
-                 durable_root_str, plugin_root_str, node_bin, session_id):
+                 durable_root_str, plugin_root_str, node_bin, session_id,
+                 fix_mode=FIX_MODE_HANDOFF):
         self.dirs = dirs
         self.run_id = run_id
         self.translate_cfg = translate_cfg
@@ -3229,6 +3257,26 @@ class DispatchContext:
         self.plugin_root_str = plugin_root_str
         self.node_bin = node_bin
         self.session_id = session_id
+        # `handoff` reproduces 1.18.0 exactly: a not-clean numeric round stops
+        # and hands the fix out to the caller. `codex` dispatches --kind
+        # fixreview instead and publishes the pair through the transaction
+        # layer. The DEFAULT is deliberately the old behaviour -- this release
+        # makes the new path reachable, not active.
+        self.fix_mode = fix_mode
+
+    @property
+    def txn_dir(self) -> Path:
+        """runs/<RUN_ID>/txn/ -- per RUN, not per durable root.
+
+        Scoping it to the run is what keeps a transaction from a previous,
+        abandoned run from being recovered into this one: recovery discovers by
+        a fixed intent PATH, so two runs sharing a directory would have their
+        intents collide on the same name."""
+        return self.dirs["runs_dir"] / self.run_id / "txn"
+
+    @property
+    def segments_dir(self) -> Path:
+        return self.dirs["durable_root"] / "segments"
 
 
 def _run_gate(script: Path, argv_rest: list, ctx: "DispatchContext", *, supports_plugin_root: bool) -> bool:
@@ -3646,13 +3694,25 @@ def _codex_job_outcome(dispatch_result: dict) -> dict:
         except (json.JSONDecodeError, IndexError):
             line = None
         if isinstance(line, dict) and "ok" in line:
-            return {
+            outcome = {
                 "ok": bool(line.get("ok")),
                 "reason": line.get("reason"),
                 "error_detail": line.get("error_detail"),
                 "job_status": line.get("job_status"),
                 "adopted": line.get("adopted"),
             }
+            # THE STAGED FIELDS ARE THE ONLY POINTER TO THE CANDIDATES.
+            # --kind fixreview never promotes; it leaves both artifacts at
+            # private per-invocation paths whose `inv` component is random and
+            # reported ONLY here. Dropping these -- which this function did,
+            # returning a fixed five-key dict -- loses the files entirely: no
+            # deterministic slot exists to find them again, and nothing sweeps
+            # for them. Copied verbatim, never re-derived.
+            for field in ("staged", "staged_draft_path", "staged_review_path",
+                          "staged_draft_sha256", "staged_review_sha256"):
+                if field in line:
+                    outcome[field] = line[field]
+            return outcome
     return {
         "ok": False,
         "reason": "driver-no-parseable-stdout",
@@ -4276,6 +4336,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         metavar="BIN",
         help="Node binary to invoke for both codex_job.py's own launches and this driver's template-execution harness. Default 'node' (resolved via PATH).",
     )
+    parser.add_argument(
+        "--fix-mode",
+        choices=list(FIX_MODES),
+        default=FIX_MODE_HANDOFF,
+        help=(
+            "Who performs the fix on a not-clean NUMERIC round. 'handoff' (default) "
+            "reproduces 1.18.0: the driver stops at that segment and returns needs_fix "
+            "with the rendered fix prompt for the caller to run as an agent turn. "
+            "'codex' dispatches --kind fixreview instead -- one codex call producing "
+            "both a fixed draft and its review -- and publishes the pair through the "
+            "durable-intent transaction. The FINAL round is a plain review in both "
+            "modes; there is no fix after it."
+        ),
+    )
     return parser
 
 
@@ -4389,6 +4463,7 @@ def run(args, dirs: dict) -> dict:
             dirs=dirs, run_id=run_id, translate_cfg=translate_cfg, companion_path=companion_path,
             durable_root_str=args.durable_root, plugin_root_str=args.plugin_root,
             node_bin=args.node, session_id=session_id,
+            fix_mode=getattr(args, "fix_mode", FIX_MODE_HANDOFF),
         )
 
         append_journal(
