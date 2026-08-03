@@ -324,9 +324,14 @@ engine:
     # produced a bad candidate at all.
     #
     # It is ALSO a term of the per-segment codex-job bound the volume admission checks
-    # (codex_jobs_per_segment), so raising it raises BOTH the retries allowed per round and the number of
-    # segments a batch is admitted for. Deliberately one number: a retry allowance the admission did not know
-    # about would let a batch start that its own loop is entitled to overspend.
+    # (codex_jobs_per_segment), so raising it raises what each segment may COST and therefore LOWERS the
+    # number of segments a fixed max_codex_jobs_per_batch admits -- not raises it. Deliberately one number:
+    # a retry allowance the admission did not know about would let a batch start that its own loop is
+    # entitled to overspend.
+    #
+    # SCOPE: this ceiling is per round WITHIN ONE DRIVER INVOCATION. The counter lives in memory, so
+    # re-running the driver gives the same round its full allowance again. Only max_txn_failures_per_segment
+    # above is durable across invocations.
 
 footnotes:
   apparatus_policy: translate_all

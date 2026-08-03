@@ -879,6 +879,50 @@ def codex_jobs_per_segment(
     return base + max_fix_rounds * per_round_redispatches + MAX_FABRICATED_LOC_RETRIES
 
 
+# The keys BOTH profile loaders read, and therefore the ones a mid-startup edit
+# can split. Named as a tuple rather than derived from a dict intersection: the
+# two loaders return overlapping-but-different shapes, and an intersection would
+# silently shrink the moment either gained or lost an unrelated field.
+_SHARED_PROFILE_KEYS = (
+    "max_fix_rounds", "max_codex_jobs_per_batch", "max_rejected_candidates_per_round",
+    "max_txn_failures_per_segment",
+)
+
+
+def profile_snapshots_disagree(engine_cfg: dict, translate_cfg: dict):
+    """None if the two independent reads of profile.yml agree on every key they
+    share, else a refusal dict naming the first disagreement.
+
+    TWO READS OF ONE FILE, AND THE BOUND LIVES IN BOTH. The volume admission
+    resolves its numbers from load_engine_config(); the dispatch loop resolves
+    its own from load_translate_config(), separately and later. An edit landing
+    between them lets the SMALLER number admit the batch while the loop runs on
+    the LARGER one -- which defeats precisely the "admission and cap are one
+    number" property this release rests on, and defeats it invisibly, because
+    both reads are individually valid.
+
+    Refusing is cheap and right: nothing has been dispatched at that point, and
+    a profile edited mid-startup is a state the operator wants named rather
+    than one for this script to pick a winner for. Pure, so the comparison can
+    be tested without racing a real file."""
+    for key in _SHARED_PROFILE_KEYS:
+        if key not in engine_cfg or key not in translate_cfg:
+            continue
+        if engine_cfg[key] != translate_cfg[key]:
+            return {
+                "key": key,
+                "admissionValue": engine_cfg[key],
+                "dispatchValue": translate_cfg[key],
+                "message": (
+                    f"profile.yml changed while this driver was starting: "
+                    f"engine.{key} read as {engine_cfg[key]!r} for the volume "
+                    f"admission and {translate_cfg[key]!r} for the dispatch loop. "
+                    f"Nothing has been dispatched; re-run once the profile is settled."
+                ),
+            }
+    return None
+
+
 def check_volume_cap(n_segs: int, max_fix_rounds: int, max_codex_jobs_per_batch: int,
                      fix_mode: str = FIX_MODE_HANDOFF, *,
                      max_rejected_candidates_per_round: int = DEFAULT_MAX_REJECTED_CANDIDATES_PER_ROUND):
@@ -1954,14 +1998,19 @@ def cleanup_txn(txn_dir: Path, seg: str, round_label: str) -> bool:
 
 
 def _sha256_of(path: Path):
-    """sha256 of a file's RAW bytes, or None when it is absent.
+    """sha256 of a file's RAW bytes, None when it is absent, and
+    TXN_UNREADABLE when it is present but could not be read.
 
     Raw bytes, deliberately: the comparison must be sensitive to key order and
     formatting, so that a competing rewrite -- even a purely cosmetic one --
     invalidates a stale transaction exactly like any other concurrent
-    publication. An unreadable-but-present file returns None rather than
-    raising: the classifier's refusal paths are the correct response, and this
-    gather step must not crash the driver mid-batch."""
+    publication. An unreadable-but-present file returns the sentinel rather
+    than raising: the classifier's refusal paths are the correct response, and
+    this gather step must not crash the driver mid-batch. It is a SENTINEL and
+    not None because absence and unreadability are different observations --
+    absence licenses deleting staging, unreadability licenses nothing -- and
+    callers that compare two of these must reject the sentinel explicitly,
+    since it compares equal to itself (see premise_is_observable())."""
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except FileNotFoundError:
@@ -4276,6 +4325,38 @@ def recover_segment_txns(ctx: "DispatchContext", seg: str) -> list:
     return results
 
 
+# Outcomes after which the segment is clear to be dispatched again: nothing was
+# in flight, or the transaction reached a terminal state and cleaned up.
+_TXN_RECOVERY_CLEARS_SEGMENT = frozenset((
+    TXN_PROCEED, TXN_ABORTED_PREPARE, TXN_COMMITTED_CLEANED,
+    TXN_ROLLED_FORWARD_TAIL, TXN_ROLL_FORWARD_DRAFT, TXN_ROLL_FORWARD_BOTH,
+    TXN_PREIMAGE_DIVERGED, TXN_STAGING_LOST,
+))
+
+
+def recovery_left_the_segment_blocked(results) -> bool:
+    """True when recovery deliberately RETAINED an intent it could not resolve.
+
+    Recovery keeps, rather than deletes, an intent that is invalid, one whose
+    state could not be observed, and one whose failure charge would not go
+    durable -- each for a good reason, and each leaving a record that
+    publication will refuse to publish over. Ignoring that was a real cost, not
+    a tidiness point: the loop went on to derive, dispatch and PAY for a full
+    fixreview round, whose publication then refused `txn-intent-already-present`
+    -- and the same retained intent produced the same wasted round on every
+    later invocation, without ever charging the failure counter that is
+    supposed to bound exactly this.
+
+    The two refusal outcomes ARE cleared: they clean up after themselves and
+    charge, so the segment is genuinely free to be retried under the ceiling."""
+    for result in results or ():
+        if result.get("outcome") not in _TXN_RECOVERY_CLEARS_SEGMENT:
+            return True
+        if result.get("charge_lost"):
+            return True
+    return False
+
+
 def owner_profile_path(durable_root: Path):
     """The profile.yml this durable root is owned by, per its ownership marker,
     or None if the marker cannot be read. Never fatals: this is used to HASH
@@ -4315,18 +4396,51 @@ def decision_premise(ctx: "DispatchContext", seg: str) -> tuple:
     cache key is computed from the NEW segpack, marking work derived from the
     old one reusable under it.
 
-    Any component that could not be read comes back as None or TXN_UNREADABLE
-    and simply fails to compare equal, which refuses the round -- the correct
-    direction, since an unreadable authority is not an observation that it is
-    unchanged."""
+    A component that could not be read comes back as TXN_UNREADABLE, and
+    COMPARING TWO PREMISES IS NOT ENOUGH TO CATCH THAT: TXN_UNREADABLE equals
+    itself, so two failed reads of the same file agree perfectly and the round
+    proceeds having confirmed nothing. Callers must reject an unobservable
+    premise explicitly -- premise_is_observable() below -- rather than rely on
+    the comparison. ABSENT is different and must stay so: None equals None on
+    purpose, because a segment with no review yet, or a project with no
+    segpack, is a real and stable state, not a failure to look."""
     draft_path = ctx.segments_dir / f"{seg}.draft.json"
-    _, content_sha1, token = _draft_observation(
+    # THE RAW DRAFT HASH IS IN HERE, not only its content sha1 and token.
+    # _draft_observation() reports an unreadable draft as (TXN_UNREADABLE,
+    # None, None) -- the sentinel is in the RAW slot, and the two derived
+    # slots are indistinguishable from "no draft at all". Dropping the raw
+    # value made a draft that exists and cannot be read look absent to
+    # premise_is_observable(), so the round proceeded, the gates failed on it,
+    # derive answered "translate", and the replacement was renamed over content
+    # nobody had ever read.
+    draft_sha256, content_sha1, token = _draft_observation(
         seg, draft_path, ctx.segments_dir, ctx.dirs["scripts_dir"])
     review_sha256 = _sha256_of(ctx.segments_dir / f"{seg}.review.json")
     segpack_sha256 = _sha256_of(ctx.segments_dir / f"segpack_{seg}.json")
     profile_path = owner_profile_path(ctx.dirs["durable_root"])
     profile_sha256 = _sha256_of(profile_path) if profile_path is not None else None
-    return (content_sha1, token, review_sha256, segpack_sha256, profile_sha256)
+    # The two files the merged child is told to read that are NOT the segpack:
+    # the round's task contract and the style contract it judges against.
+    # Same argument as the segpack -- authority, not context.
+    task_sha256 = _sha256_of(ctx.dirs["durable_root"] / "review_TASK.md")
+    style_sha256 = _sha256_of(ctx.dirs["durable_root"] / "style_bible.md")
+    return (draft_sha256, content_sha1, token, review_sha256, segpack_sha256,
+            profile_sha256, task_sha256, style_sha256)
+
+
+def premise_is_observable(premise) -> bool:
+    """False if any component of `premise` is a file that EXISTS but could not
+    be read.
+
+    This exists because equality cannot express it. A premise is used by
+    comparing two of them, and TXN_UNREADABLE compares equal to TXN_UNREADABLE
+    -- so a segpack whose permissions broke reads as "unchanged" on both looks
+    and the round proceeds having verified nothing about the authority it was
+    judged against. Absence is deliberately NOT treated this way: None equals
+    None because "there is no review yet" is a real, stable state, whereas
+    "there is a review and I could not read it" is the absence of an
+    observation."""
+    return TXN_UNREADABLE not in tuple(premise or ())
 
 
 def decide_under_premise(ctx: "DispatchContext", seg: str):
@@ -4350,7 +4464,7 @@ def decide_under_premise(ctx: "DispatchContext", seg: str):
     before = decision_premise(ctx, seg)
     action = derive_next_action(seg, ctx)
     after = decision_premise(ctx, seg)
-    if before != after:
+    if before != after or not premise_is_observable(after):
         return None, None
     return action, after
 
@@ -4401,7 +4515,13 @@ def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
     # competitor's state and the CAS then confirms it happily -- the round
     # would overwrite a review it never saw, with work dispatched against a
     # state that no longer exists.
-    if decision_premise(ctx, seg) != premise:
+    now = decision_premise(ctx, seg)
+    if not premise_is_observable(premise) or not premise_is_observable(now):
+        # Checked on BOTH sides. An unreadable component makes the comparison
+        # below agree with itself (see premise_is_observable), so without this
+        # the guard would report a match it never made.
+        return refuse("txn-premise-unobservable")
+    if now != premise:
         return refuse("txn-decision-stale")
 
     pre = gather_txn_observed(seg, txn_dir, segments_dir, ctx.dirs["scripts_dir"],
@@ -4422,6 +4542,16 @@ def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
         # observation, never an observation of absence -- recording it as
         # {"absent": true} would let a later pass "confirm" a preimage nobody
         # ever saw.
+        #
+        # KNOWINGLY SHADOWED, AND NO TEST CAN HOLD IT. The premise check a few
+        # lines above rejects an unreadable review or draft for every caller
+        # that reaches here, so disabling this branch changes no observable
+        # behaviour and a mutant of it survives by construction -- verified,
+        # not assumed. It stays because it guards a different moment (the WRITE
+        # of the preimage, not the decision) and because the two would have to
+        # be removed together for the shadowing argument to still hold. Saying
+        # so beats leaving a future reader to rediscover that its coverage gap
+        # is redundancy rather than an oversight.
         return refuse("txn-preimage-unreadable")
     review_preimage = {"absent": True} if review_sha256 is None else {"sha256": review_sha256}
 
@@ -4444,18 +4574,6 @@ def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
         cleanup_txn(txn_dir, seg, round_label)
         return refuse("txn-staging-copy-failed")
 
-    # NOBODY ELSE EVER DELETES THESE. codex_job.py deliberately KEEPS its two
-    # private per-invocation candidates when it reports `staged` -- they are
-    # the only pointer to the work, and it has no way to know whether the
-    # driver consumed them. It is this consumption that makes them redundant:
-    # both are now copied, fsynced and digest-confirmed in the transaction's
-    # own staging, which is the record recovery reads. Left in place they
-    # accumulate one draft-sized pair per round per invocation, in the
-    # segments directory, forever. Reached ONLY after both staging copies
-    # succeeded -- every earlier refusal returns above, leaving the
-    # candidates intact for a path that has not consumed them.
-    _discard_unpublished_candidates(result)
-
     intent = {
         "txn_schema": TXN_SCHEMA_VERSION,
         "txn_id": txn_id,
@@ -4476,6 +4594,18 @@ def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
     if not write_txn_intent(txn_dir, seg, intent):
         cleanup_txn(txn_dir, seg, round_label)
         return refuse("txn-intent-write-failed")
+
+    # ONLY NOW. codex_job.py deliberately KEEPS its two private per-invocation
+    # candidates when it reports `staged` -- they are the only pointer to the
+    # work and it cannot know whether the driver consumed them; nobody else
+    # ever removes them, so leaving them accumulates a draft-sized pair per
+    # round forever. But they may not go until something durable OWNS the
+    # bytes, and staging alone is not that: an intent write that fails takes
+    # the staging with it on the line above, and a crash before the intent
+    # lands leaves staging that the next recovery classifies as an aborted
+    # prepare and deletes. Unlinked at either of those moments, no copy would
+    # survive at all. The durable intent is what makes the staging the record.
+    _discard_unpublished_candidates(result)
 
     advanced = advance_txn(ctx, seg, round_label=round_label)
     if advanced["published"] and advanced["outcome"] in (
@@ -4844,7 +4974,15 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                         # write, so it stays recoverable next invocation.
                         return {"seg": seg, "converged": False, "outcome": "failed",
                                 "reason": "segment-busy"}
-                    recover_segment_txns(ctx, seg)
+                    recovery = recover_segment_txns(ctx, seg)
+                    if recovery_left_the_segment_blocked(recovery):
+                        # Recovery kept an intent it could not resolve, and
+                        # publication will refuse to publish over it. Deriving
+                        # from here dispatches and PAYS for a round that cannot
+                        # land -- every invocation, forever, charging nothing.
+                        return {"seg": seg, "converged": False, "outcome": "failed",
+                                "reason": "recovery-blocked",
+                                "detail": [r.get("outcome") for r in recovery]}
                     # Decided and premised in one bracketed read, inside the
                     # lease -- see decide_under_premise() for why capturing the
                     # premise only afterwards made the guard agree with itself.
@@ -4986,15 +5124,17 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                     # process, a human editor, a sync daemon.
                     with segment_lease(ctx.segments_dir, seg) as leased:
                         if not leased:
-                            # The pair is validated but can never be published
-                            # or found again: its paths carry a random
-                            # per-invocation component, nothing sweeps for
-                            # them, and only this run's journal records them.
-                            # Between leaking one draft-sized pair per
-                            # occurrence forever and discarding work that is
-                            # already unreachable, discard -- the round
-                            # re-runs next invocation.
-                            _discard_unpublished_candidates(result)
+                            # THE CANDIDATES ARE LEFT ALONE HERE, deliberately,
+                            # and this is a reversal: an earlier revision
+                            # deleted them, on the argument that their random
+                            # per-invocation paths make them unreachable
+                            # anyway. They are not unreachable -- the dispatch
+                            # journal records both paths -- so deleting was
+                            # destroying validated, paid-for work that a human
+                            # can still recover, to avoid leaving litter. The
+                            # trade is not close. What stays is a known leak:
+                            # one draft-sized pair per occurrence, traceable
+                            # through the journal, with no automatic sweep.
                             return {"seg": seg, "converged": False, "outcome": "failed",
                                     "stage": "publish", "round_label": round_label,
                                     "reason": "segment-busy"}
@@ -5309,6 +5449,21 @@ def run(args, dirs: dict) -> dict:
             return result
 
         translate_cfg = load_translate_config(durable_root)
+        # TWO INDEPENDENT READS OF ONE FILE, AND THE BOUND LIVES IN BOTH.
+        # Admission (engine_cfg, above) and execution (translate_cfg, here)
+        # each open profile.yml. An edit landing between them lets the smaller
+        # number admit the batch while the loop runs on the larger one --
+        # exactly the "admission and cap are one number" property this release
+        # rests on, defeated by a file that moved. Refusing is right and
+        # cheap: nothing has been dispatched yet, and a profile edited
+        # mid-startup is a state the operator wants to know about, not one to
+        # silently pick a winner for.
+        disagreement = profile_snapshots_disagree(engine_cfg, translate_cfg)
+        if disagreement is not None:
+            append_journal(durable_root, session_id,
+                           {"type": "profile_changed_during_startup", **disagreement})
+            fatal(disagreement["message"], exit_code=2,
+                  reason="profile-changed-during-startup")
         run_result = resolve_run_id(
             dirs, translate_cfg=translate_cfg,
             plugin_root_str=args.plugin_root, durable_root_str=args.durable_root,

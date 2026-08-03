@@ -411,6 +411,22 @@ def test_an_intent_that_appeared_since_recovery_is_not_published_over(tmp_path):
     assert _canonical(ctx, "review") == {"old": "review"}
 
 
+def test_an_absent_canonical_draft_is_refused_at_the_preimage_not_published_over(tmp_path):
+    """The case the preimage check still owns on its own. An ABSENT draft is a
+    legal, stable observation, so the premise comparison waves it through --
+    but there is nothing to record as pre_edit_draft_sha1, and a transaction
+    with no preimage has no CAS."""
+    ctx = _ctx(tmp_path)
+    (ctx.segments_dir / f"{SEG}.review.json").write_text('{"old": "review"}', encoding="utf-8")
+    result = _stage_candidates(ctx)
+
+    txn = _publish(ctx, "1", result)
+
+    assert txn["ok"] is False
+    assert txn["reason"] == "txn-preimage-unreadable"
+    assert not DRIVER.txn_intent_path(ctx.txn_dir, SEG).exists()
+
+
 def test_an_unreadable_canonical_review_is_not_recorded_as_ABSENT(tmp_path):
     """A file that exists but cannot be read is the ABSENCE OF AN OBSERVATION,
     never an observation of absence. Recording {"absent": true} here would let
@@ -427,7 +443,12 @@ def test_an_unreadable_canonical_review_is_not_recorded_as_ABSENT(tmp_path):
         review_path.chmod(0o644)
 
     assert txn["ok"] is False
-    assert txn["reason"] == "txn-preimage-unreadable"
+    # The premise's own observability check fires FIRST for this state --
+    # earlier and more general than the preimage check that used to catch it.
+    # Both refuse; what matters is that an unreadable review never becomes
+    # {"absent": true} in a durable intent, which is what would let a later
+    # pass "confirm" a preimage nobody ever saw.
+    assert txn["reason"] == "txn-premise-unobservable"
     assert not DRIVER.txn_intent_path(ctx.txn_dir, SEG).exists()
 
 
@@ -514,7 +535,9 @@ def test_the_premise_covers_the_draft_TOKEN_and_the_review_not_only_content(tmp_
         encoding="utf-8")
     after = DRIVER.decision_premise(ctx, SEG)
 
-    assert after[0] == premise[0], "content sha1 is unchanged -- that is the point"
+    # index 1 is the CONTENT sha1 (index 0 is the raw file hash, which a token
+    # change does move) -- the point is that the content-only view is blind here.
+    assert after[1] == premise[1], "content sha1 is unchanged -- that is the point"
     assert after != premise, "the token change must still invalidate the premise"
 
 
@@ -561,7 +584,212 @@ def test_an_absent_segpack_or_profile_is_stable_rather_than_flapping(tmp_path):
     is a different observation -- _sha256_of returns a distinct sentinel."""
     ctx = _ctx(tmp_path)
     _write_canonical(ctx)
-    assert DRIVER.decision_premise(ctx, SEG) == DRIVER.decision_premise(ctx, SEG)
+    premise = DRIVER.decision_premise(ctx, SEG)
+    assert premise == DRIVER.decision_premise(ctx, SEG)
+    assert DRIVER.premise_is_observable(premise) is True
+
+
+def test_an_UNREADABLE_component_is_refused_though_it_compares_equal_to_itself(tmp_path):
+    """EQUALITY CANNOT EXPRESS THIS, which is why it needs its own check. A
+    premise is used by comparing two of them, and TXN_UNREADABLE equals
+    TXN_UNREADABLE -- so a segpack whose permissions broke reads as "unchanged"
+    on both looks and the round proceeds having verified nothing about the
+    authority it was judged against. My own docstring claimed the comparison
+    handled it; it does not."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    segpack = ctx.segments_dir / f"segpack_{SEG}.json"
+    segpack.write_text('{"blocks": {}}', encoding="utf-8")
+    segpack.chmod(0o000)
+    try:
+        if os.access(str(segpack), os.R_OK):  # root -- the chmod bought nothing
+            pytest.skip("cannot make a file unreadable as this user")
+        premise = DRIVER.decision_premise(ctx, SEG)
+        assert premise == DRIVER.decision_premise(ctx, SEG), (
+            "the two failed reads agree -- that is exactly the problem")
+        assert DRIVER.premise_is_observable(premise) is False
+        txn = _publish(ctx, "1", _stage_candidates(ctx), premise=premise)
+    finally:
+        segpack.chmod(0o644)
+
+    assert txn["ok"] is False
+    assert txn["reason"] == "txn-premise-unobservable"
+
+
+def test_an_unreadable_canonical_DRAFT_is_not_mistaken_for_an_absent_one(tmp_path):
+    """The sentinel for an unreadable draft arrives in the RAW hash slot;
+    _draft_observation()'s two derived slots come back (None, None), which is
+    byte-identical to "there is no draft". Dropping the raw value made an
+    unreadable draft look absent, so the round proceeded, the gates failed on
+    it, derive answered "translate", and the replacement was renamed over
+    content nobody had ever read -- directory write permission is all that
+    rename needs.
+
+    Found by codex review, in the fix for the previous round's finding."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    draft_path = ctx.segments_dir / f"{SEG}.draft.json"
+    draft_path.chmod(0o000)
+    try:
+        if os.access(str(draft_path), os.R_OK):
+            pytest.skip("cannot make a file unreadable as this user")
+        premise = DRIVER.decision_premise(ctx, SEG)
+        assert premise == DRIVER.decision_premise(ctx, SEG), "two failed reads agree"
+        assert DRIVER.premise_is_observable(premise) is False
+    finally:
+        draft_path.chmod(0o644)
+
+
+def test_a_genuinely_absent_draft_stays_observable(tmp_path):
+    """The other half: a segment before its translate has no draft, and that is
+    a real state the loop must be able to act on. Refusing it would make every
+    fresh segment unrunnable."""
+    ctx = _ctx(tmp_path)
+    premise = DRIVER.decision_premise(ctx, SEG)
+    assert DRIVER.premise_is_observable(premise) is True
+
+
+def test_the_private_candidates_SURVIVE_until_the_intent_is_durable(tmp_path, monkeypatch):
+    """They may not be removed until something DURABLE owns the bytes, and
+    transaction staging alone is not that: a failed intent write takes the
+    staging with it, and a crash before the intent lands leaves staging that
+    the next recovery classifies as an aborted prepare and deletes. Unlinked
+    at either moment, no copy of a validated pair would survive anywhere.
+
+    Found by codex review: the happy-path test could not tell deletion before
+    the intent from deletion after it."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    result = _stage_candidates(ctx)
+    monkeypatch.setattr(DRIVER, "write_txn_intent", lambda *a, **k: False)
+
+    txn = _publish(ctx, "1", result)
+
+    assert txn["reason"] == "txn-intent-write-failed"
+    assert Path(result["staged_draft_path"]).exists(), (
+        "the intent never became durable, so these are still the only copy")
+    assert Path(result["staged_review_path"]).exists()
+
+
+def test_candidates_abandoned_on_lease_contention_are_KEPT(tmp_path, monkeypatch):
+    """A reversal of an earlier revision, which deleted them on the argument
+    that their random per-invocation paths make them unreachable. They are not:
+    the dispatch journal records both paths, so deleting destroyed validated,
+    paid-for work a human could still recover, in order to avoid litter."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    held = {}
+
+    def _job_that_keeps_the_lease(c, *, kind, seg, round_label=None):
+        path = ctx.segments_dir / f".codex_job.{seg}.lock"
+        held["fd"] = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(held["fd"], fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return dict(_stage_candidates(ctx), kind=kind, seg=seg, round_label=round_label)
+
+    monkeypatch.setattr(DRIVER, "derive_next_action",
+                        lambda seg, c: {"action": "review", "round_label": "1"})
+    monkeypatch.setattr(DRIVER, "run_one_codex_job", _job_that_keeps_the_lease)
+    try:
+        result = DRIVER.process_segment(SEG, ctx)
+    finally:
+        fcntl.flock(held["fd"], fcntl.LOCK_UN)
+        os.close(held["fd"])
+
+    assert result["reason"] == "segment-busy"
+    assert (ctx.segments_dir / f".att.{SEG}.abcd.draft.json").exists()
+    assert (ctx.segments_dir / f".att.{SEG}.abcd.review.json").exists()
+
+
+def test_an_intent_recovery_could_not_resolve_stops_the_segment_before_it_pays(
+        tmp_path, monkeypatch):
+    """Recovery deliberately RETAINS an intent it cannot resolve -- invalid,
+    unobservable, or one whose failure charge would not go durable. Ignoring
+    that was not a tidiness point: the loop went on to derive, dispatch and PAY
+    for a full fixreview round whose publication then refused
+    `txn-intent-already-present`, and the same retained intent reproduced that
+    wasted round on every later invocation without ever charging the counter
+    that is supposed to bound exactly this.
+
+    Found by codex review, which reproduced it with a pure probe."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    ctx.txn_dir.mkdir(parents=True)
+    # An intent this module's own validator refuses to understand: retained,
+    # never cleaned up, and publication will refuse to publish over it.
+    DRIVER.txn_intent_path(ctx.txn_dir, SEG).write_text(
+        json.dumps({"txn_schema": 99, "txn_id": "FROM-THE-FUTURE"}), encoding="utf-8")
+    dispatched = []
+    monkeypatch.setattr(DRIVER, "derive_next_action",
+                        lambda seg, c: {"action": "review", "round_label": "1"})
+    monkeypatch.setattr(DRIVER, "run_one_codex_job",
+                        lambda c, **k: dispatched.append(k) or {"ok": True, "reason": "staged"})
+
+    result = DRIVER.process_segment(SEG, ctx)
+
+    assert result["reason"] == "recovery-blocked"
+    assert dispatched == [], "a segment recovery could not clear must cost nothing"
+    assert DRIVER.txn_intent_path(ctx.txn_dir, SEG).exists(), "and the record stays"
+
+
+def test_a_cleanly_recovered_segment_is_NOT_blocked(tmp_path, monkeypatch):
+    """The other direction, or `recovery-blocked` would fire on every ordinary
+    round and the mode would never dispatch anything at all."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    dispatched = []
+    monkeypatch.setattr(DRIVER, "derive_next_action",
+                        lambda seg, c: {"action": "review", "round_label": "final"})
+    monkeypatch.setattr(DRIVER, "run_one_codex_job",
+                        lambda c, **k: dispatched.append(k) or {"ok": False, "reason": "timed-out",
+                                                                "error_detail": None})
+
+    DRIVER.process_segment(SEG, ctx)
+
+    assert [d["kind"] for d in dispatched] == ["review"]
+
+
+@pytest.mark.parametrize("outcome,blocked", [
+    (DRIVER.TXN_PROCEED, False),
+    (DRIVER.TXN_ABORTED_PREPARE, False),
+    (DRIVER.TXN_COMMITTED_CLEANED, False),
+    (DRIVER.TXN_ROLLED_FORWARD_TAIL, False),
+    (DRIVER.TXN_ROLL_FORWARD_DRAFT, False),
+    (DRIVER.TXN_PREIMAGE_DIVERGED, False),
+    (DRIVER.TXN_STAGING_LOST, False),
+    (DRIVER.TXN_INTENT_INVALID, True),
+    (DRIVER.TXN_UNOBSERVABLE, True),
+])
+def test_which_recovery_outcomes_clear_the_segment_is_exactly_this(outcome, blocked):
+    """Named one by one rather than asserted as a set membership, so adding a
+    tenth outcome cannot silently default to `clears`. The two refusals that DO
+    clear are the ones that clean up after themselves AND charge -- the segment
+    is genuinely free to be retried under the ceiling."""
+    assert DRIVER.recovery_left_the_segment_blocked([{"outcome": outcome}]) is blocked
+
+
+def test_a_recovery_whose_charge_was_lost_also_blocks():
+    """It cleaned up nothing and charged nothing, so the intent is still there
+    to be refused -- exactly the retained-intent case, arriving by a different
+    route."""
+    assert DRIVER.recovery_left_the_segment_blocked(
+        [{"outcome": DRIVER.TXN_PREIMAGE_DIVERGED, "charge_lost": True}]) is True
+
+
+def test_an_unobservable_premise_stops_the_round_before_it_dispatches(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    dispatched = []
+    monkeypatch.setattr(DRIVER, "derive_next_action",
+                        lambda seg, c: {"action": "review", "round_label": "1"})
+    monkeypatch.setattr(DRIVER, "run_one_codex_job",
+                        lambda c, **k: dispatched.append(k) or {"ok": True, "reason": "staged"})
+    monkeypatch.setattr(DRIVER, "decision_premise",
+                        lambda c, seg: ("a", "b", None, DRIVER.TXN_UNREADABLE, None))
+
+    result = DRIVER.process_segment(SEG, ctx)
+
+    assert dispatched == []
+    assert result["reason"] == "loop-exhausted-without-terminal-state"
 
 
 def test_the_private_candidates_are_removed_once_the_transaction_owns_copies(tmp_path):
@@ -1036,12 +1264,9 @@ def test_publication_happens_UNDER_the_lease_not_merely_after_it(tmp_path, monke
     assert result["stage"] == "publish"
     assert result["reason"] == "segment-busy"
     assert _canonical(ctx, "draft")["blocks"]["b"] == "old", "nothing may have been published"
-    # The validated pair is unreachable from here on -- random per-invocation
-    # paths, nothing sweeps for them, only this run's journal names them. Leave
-    # them and every occurrence leaks a draft-sized pair forever; the round
-    # itself re-runs next invocation either way.
-    assert not (ctx.segments_dir / f".att.{SEG}.abcd.draft.json").exists()
-    assert not (ctx.segments_dir / f".att.{SEG}.abcd.review.json").exists()
+    # What happens to the validated pair here is asserted by
+    # test_candidates_abandoned_on_lease_contention_are_KEPT, which owns that
+    # question; this test owns only "the lease is taken before publishing".
 
 
 def test_the_renames_themselves_run_while_the_lease_is_HELD(tmp_path, monkeypatch):
@@ -1137,6 +1362,39 @@ def _profile_root(tmp_path, engine_extra=""):
     (root / ".literary-translator-root.json").write_text(
         json.dumps({"owner_profile_path": str(profile)}), encoding="utf-8")
     return root
+
+
+def test_two_profile_reads_that_disagree_refuse_the_run():
+    """The admission and the loop each open profile.yml, separately and at
+    different moments. An edit landing between them lets the SMALLER number
+    admit the batch while the loop runs on the LARGER one -- which defeats
+    exactly the "admission and cap are one number" property, and defeats it
+    invisibly, because both reads are individually valid.
+
+    Found by codex review."""
+    engine = {"max_fix_rounds": 2, "max_codex_jobs_per_batch": 400,
+              "max_rejected_candidates_per_round": 2, "max_txn_failures_per_segment": 3}
+    assert DRIVER.profile_snapshots_disagree(engine, dict(engine)) is None
+
+    grown = dict(engine, max_fix_rounds=9)
+    refusal = DRIVER.profile_snapshots_disagree(engine, grown)
+    assert refusal is not None
+    assert refusal["key"] == "max_fix_rounds"
+    assert refusal["admissionValue"] == 2 and refusal["dispatchValue"] == 9
+
+
+@pytest.mark.parametrize("key", list(DRIVER._SHARED_PROFILE_KEYS))
+def test_every_shared_profile_key_is_actually_compared(key):
+    """Named one at a time. A key silently dropped from the comparison is the
+    one an edit would then be free to split."""
+    engine = {k: 1 for k in DRIVER._SHARED_PROFILE_KEYS}
+    assert DRIVER.profile_snapshots_disagree(engine, dict(engine, **{key: 2})) is not None
+
+
+def test_a_key_only_one_loader_returns_is_not_a_disagreement():
+    """The two loaders return overlapping-but-different shapes; a key absent
+    from one is not evidence the file moved."""
+    assert DRIVER.profile_snapshots_disagree({"max_fix_rounds": 2}, {}) is None
 
 
 @pytest.mark.parametrize("loader", ["load_engine_config", "load_translate_config"])
