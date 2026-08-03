@@ -47,6 +47,7 @@ def _intent(phase="prepared", review_preimage=None):
         "txn_schema": 1,
         "txn_id": "RUN:seg01:1:1",
         "phase": phase,
+        "round_label": "1",
         "pre_edit_draft_sha1": PRE_SHA1,
         "pre_edit_draft_token": PRE_TOKEN,
         "staged_draft_sha256": STAGED_DRAFT,
@@ -137,6 +138,35 @@ def test_an_unknown_phase_never_reaches_a_publish_decision(phase):
     d = DRIVER.classify_txn_recovery(_observed(intent=_intent(phase=phase)))
     assert d["outcome"] == DRIVER.TXN_INTENT_INVALID
     assert d["publish"] == []
+
+
+@pytest.mark.parametrize("label", [None, "", "0", "01", "final ", "FINAL", "1.0",
+                                   1, True, "None", "r1", [], {}])
+def test_an_unusable_round_label_refuses_without_cleanup(label):
+    """round_label DERIVES the staging paths. An unusable one makes gathering
+    hash `<seg>.None.staged.*`, miss the real staging, and answer
+    STAGING_LOST -- which licenses cleanup and deletes staging that was there
+    all along. This file already closed that exact class once as the `rNone`
+    defect."""
+    bad = _intent()
+    if label is None:
+        del bad["round_label"]
+    else:
+        bad["round_label"] = label
+    d = DRIVER.classify_txn_recovery(_observed(intent=bad))
+    assert d["outcome"] == DRIVER.TXN_INTENT_INVALID
+    assert d["publish"] == [] and d["cleanup"] is False
+
+
+@pytest.mark.parametrize("slot", ["staged_draft_sha256", "staged_review_sha256",
+                                  "canonical_draft_sha256", "canonical_review_sha256"])
+def test_an_unreadable_artifact_refuses_without_cleanup(slot):
+    """A transient permission/IO failure is the ABSENCE of an observation, not
+    an observation of absence. Deciding STAGING_LOST or DIVERGED from a missing
+    premise deletes evidence over a blip."""
+    d = DRIVER.classify_txn_recovery(_observed(**{slot: DRIVER.TXN_UNREADABLE}))
+    assert d["outcome"] == DRIVER.TXN_UNOBSERVABLE
+    assert d["publish"] == [] and d["cleanup"] is False and d["commit_intent"] is False
 
 
 @pytest.mark.parametrize("preimage", [
@@ -336,7 +366,7 @@ _ALL_OUTCOMES = {
     DRIVER.TXN_PROCEED, DRIVER.TXN_ABORTED_PREPARE, DRIVER.TXN_COMMITTED_CLEANED,
     DRIVER.TXN_ROLLED_FORWARD_TAIL, DRIVER.TXN_ROLL_FORWARD_DRAFT,
     DRIVER.TXN_PREIMAGE_DIVERGED, DRIVER.TXN_STAGING_LOST,
-    DRIVER.TXN_INTENT_INVALID,
+    DRIVER.TXN_INTENT_INVALID, DRIVER.TXN_UNOBSERVABLE,
 }
 
 

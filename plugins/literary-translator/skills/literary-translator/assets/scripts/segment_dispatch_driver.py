@@ -321,6 +321,7 @@ stdout either way; all human-readable detail on stderr.
 import argparse
 import fcntl
 import importlib.util
+import hashlib
 import json
 import os
 import re
@@ -1438,9 +1439,164 @@ TXN_INTENT_INVALID = "txn-intent-invalid"        # intent present but untrustwor
 TXN_SCHEMA_VERSION = 1
 _TXN_PHASES = ("prepared", "committed")
 _TXN_REQUIRED_FIELDS = (
-    "txn_id", "phase", "pre_edit_draft_sha1", "pre_edit_draft_token",
+    "txn_id", "phase", "round_label", "pre_edit_draft_sha1", "pre_edit_draft_token",
     "staged_draft_sha256", "staged_review_sha256", "review_preimage",
 )
+# The producer's own shape: `"final" if n == max_fix_rounds + 1 else str(n)`
+# (_matched_review_round_label). A STRING, never an int and never None.
+_TXN_ROUND_LABEL_RE = re.compile(r"^([1-9][0-9]*|final)$")
+
+# A hash slot whose file EXISTS but could not be read. Distinct from None,
+# which means "absent": absence is an observation, a read failure is the
+# ABSENCE OF ONE, and only the first may license deleting anything.
+TXN_UNREADABLE = "<unreadable>"
+TXN_UNOBSERVABLE = "txn-unobservable"
+
+
+def _sha256_of(path: Path):
+    """sha256 of a file's RAW bytes, or None when it is absent.
+
+    Raw bytes, deliberately: the comparison must be sensitive to key order and
+    formatting, so that a competing rewrite -- even a purely cosmetic one --
+    invalidates a stale transaction exactly like any other concurrent
+    publication. An unreadable-but-present file returns None rather than
+    raising: the classifier's refusal paths are the correct response, and this
+    gather step must not crash the driver mid-batch."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        print(
+            f"segment_dispatch_driver.py: warning: could not read {path} to hash it: {exc}",
+            file=sys.stderr,
+        )
+        return TXN_UNREADABLE
+
+
+_TXN_INTENT_UNREADABLE = "<unreadable-intent>"
+
+
+def gather_txn_observed(seg: str, txn_dir: Path, segments_dir: Path,
+                        scripts_dir: Path = SCRIPTS_DIR, round_label=None) -> dict:
+    """Collect the on-disk state classify_txn_recovery() decides from.
+
+    READ-ONLY BY CONSTRUCTION: this function opens files and hashes them and
+    does nothing else. It is split from the classifier so the decision can be
+    tested over the whole state space without a filesystem, and split from
+    publication so that reading can never be the thing that mutates.
+
+    An intent file that exists but cannot be decoded is reported as a
+    NON-None sentinel, never as None. None means "absent", which licenses
+    deleting staging; an unreadable intent must instead reach the classifier's
+    invalid branch, which refuses without deleting anything.
+
+    The draft's CONTENT sha1 comes from current_draft_sha1(), i.e. from
+    draft_sha1.py's own draft_content_sha1() -- the module that owns this
+    operation -- never from a hash computed here. A missing or malformed draft
+    yields None, which cannot match any recorded preimage, so the classifier
+    refuses rather than this layer deciding anything."""
+    intent_path = txn_dir / f"{seg}.intent.json"
+    status, parsed = _read_counter(intent_path)
+    if status == "absent":
+        intent = None
+    elif status == "corrupt":
+        intent = _TXN_INTENT_UNREADABLE
+    else:
+        intent = parsed
+
+    # THE DURABLE INTENT IS THE SOLE AUTHORITY ON THE ROUND ONCE IT EXISTS.
+    # A caller-supplied label that disagrees would hash one round's staging
+    # while _is_valid_intent() blesses another's, so real, correct staging
+    # reads as missing and the classifier answers STAGING_LOST -- which
+    # licenses deleting it. The argument survives only for the no-intent case,
+    # where there is nothing to disagree with.
+    if isinstance(intent, dict):
+        durable = intent.get("round_label")
+        if round_label is not None and round_label != durable:
+            return {"intent": _TXN_INTENT_UNREADABLE,
+                    "staged_draft_sha256": None, "staged_review_sha256": None,
+                    "canonical_draft_sha256": None, "canonical_review_sha256": None,
+                    "canonical_draft_content_sha1": None, "canonical_draft_token": None}
+        label = durable
+    else:
+        label = round_label
+
+    staged_draft = txn_dir / f"{seg}.{label}.staged.draft.json"
+    staged_review = txn_dir / f"{seg}.{label}.staged.review.json"
+
+    draft_path = segments_dir / f"{seg}.draft.json"
+    draft_sha256, content_sha1, draft_token = _draft_observation(
+        seg, draft_path, segments_dir, scripts_dir)
+
+    return {
+        "intent": intent,
+        "staged_draft_sha256": _sha256_of(staged_draft),
+        "staged_review_sha256": _sha256_of(staged_review),
+        "canonical_draft_sha256": draft_sha256,
+        "canonical_review_sha256": _sha256_of(segments_dir / f"{seg}.review.json"),
+        "canonical_draft_content_sha1": content_sha1,
+        "canonical_draft_token": draft_token,
+    }
+
+
+def _draft_observation(seg: str, draft_path: Path, segments_dir: Path, scripts_dir: Path):
+    """The draft's (raw sha256, content sha1, dispatch_token) from ONE snapshot.
+
+    All three feed the CAS, so reading the file three times lets a competing
+    rewrite between reads synthesise an observation that never existed on disk
+    -- `preimage_intact` computed from the OLD content while the newer bytes
+    sit there, and the classifier then authorises publication over exactly the
+    edit the CAS exists to protect.
+
+    The token is taken from the SAME buffer as the raw hash, and the authority
+    call (draft_sha1.py owns content hashing; it takes a path, so it cannot be
+    handed a buffer) is BRACKETED by two raw reads. If the bytes moved at any
+    point across that window the observation is discarded as unreadable, which
+    the classifier turns into a refusal that touches nothing. Detecting the
+    race is enough here; winning it is not required."""
+    try:
+        before = draft_path.read_bytes()
+    except FileNotFoundError:
+        return (None, None, None)
+    except OSError:
+        return (TXN_UNREADABLE, None, None)
+
+    content_sha1 = None
+    try:
+        content_sha1 = current_draft_sha1(seg, segments_dir, scripts_dir)
+    except DriverError:
+        content_sha1 = None
+
+    try:
+        after = draft_path.read_bytes()
+    except OSError:
+        return (TXN_UNREADABLE, None, None)
+    if after != before:
+        print(
+            f"segment_dispatch_driver.py: the draft for {seg!r} changed while it was being "
+            f"observed; refusing to decide from a composite snapshot",
+            file=sys.stderr,
+        )
+        return (TXN_UNREADABLE, None, None)
+
+    token = None
+    try:
+        parsed = json.loads(before.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        parsed = None
+    if isinstance(parsed, dict):
+        raw_token = parsed.get("dispatch_token")
+        token = raw_token if isinstance(raw_token, str) else None
+
+    return (hashlib.sha256(before).hexdigest(), content_sha1, token)
+
+
+def _read_json_or_none(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, TypeError):
+        return None
 
 
 def classify_txn_recovery(observed: dict) -> dict:
@@ -1468,6 +1624,16 @@ def classify_txn_recovery(observed: dict) -> dict:
                 "commit_intent": commit_intent, "cleanup": cleanup}
 
     intent = observed.get("intent")
+    # A TRANSIENT READ FAILURE IS NOT AN OBSERVATION. Every decision below
+    # reasons about what the artifacts ARE; if any of them could not be read,
+    # the premise is missing, and answering STAGING_LOST or DIVERGED from a
+    # missing premise deletes evidence over a permission blip. Refuse without
+    # touching anything and let the next invocation look again.
+    if any(observed.get(k) == TXN_UNREADABLE for k in (
+            "staged_draft_sha256", "staged_review_sha256",
+            "canonical_draft_sha256", "canonical_review_sha256")):
+        return {"outcome": TXN_UNOBSERVABLE, "publish": [],
+                "commit_intent": False, "cleanup": False}
     sd = observed.get("staged_draft_sha256")
     sr = observed.get("staged_review_sha256")
     cd = observed.get("canonical_draft_sha256")
@@ -1575,6 +1741,15 @@ def _is_valid_intent(intent) -> bool:
         if not isinstance(intent.get(field), str) or not intent[field]:
             return False
     if not _is_valid_review_preimage(intent.get("review_preimage")):
+        return False
+    # round_label DERIVES THE STAGING PATHS, so an unusable one is not a
+    # cosmetic gap: gathering would hash `<seg>.None.staged.*`, miss the real
+    # staging, and the classifier would answer STAGING_LOST -- which licenses
+    # cleanup and deletes the staging that was there all along. This file has
+    # already closed exactly this failure class once, as the `rNone` defect
+    # that review_dispatch_token() now refuses explicitly.
+    label = intent.get("round_label")
+    if not isinstance(label, str) or not _TXN_ROUND_LABEL_RE.match(label):
         return False
     return True
 
