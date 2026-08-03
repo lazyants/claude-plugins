@@ -1522,7 +1522,8 @@ def commit_txn_intent(txn_dir: Path, seg: str) -> bool:
     return _atomic_write_json(path, parsed)
 
 
-def publish_txn(txn_dir: Path, seg: str, segments_dir: Path, decision: dict) -> bool:
+def publish_txn(txn_dir: Path, seg: str, segments_dir: Path, decision: dict,
+                scripts_dir: Path = SCRIPTS_DIR) -> bool:
     """Perform the renames a recovery decision prescribes. Nothing else.
 
     THIS IS THE ONLY FUNCTION IN THE TRANSACTION LAYER THAT TOUCHES WORK THE
@@ -1548,6 +1549,31 @@ def publish_txn(txn_dir: Path, seg: str, segments_dir: Path, decision: dict) -> 
     order = decision.get("publish") or []
     if not order:
         return True
+
+    # RE-DERIVE THE DECISION HERE, AT THE MOMENT OF PUBLICATION.
+    #
+    # `decision` was computed from a snapshot taken earlier, and between then
+    # and now the canonical draft can have been edited -- by a concurrent
+    # driver, by a surviving codex job, or by a person. Acting on the stale
+    # decision would overwrite that newer text, which is precisely what the
+    # CAS exists to prevent: the check was performed, but not at the moment of
+    # use. Re-reading only the intent (as an earlier version did) does not
+    # help, because the intent is not what changed.
+    #
+    # Revalidation goes through classify_txn_recovery() rather than a
+    # hand-rolled comparison, so publication cannot drift from the rules
+    # recovery enforces -- a second implementation of "is this still safe"
+    # would be a second thing to keep in step.
+    fresh = classify_txn_recovery(
+        gather_txn_observed(seg, txn_dir, segments_dir, scripts_dir))
+    if (fresh.get("publish") or []) != list(order):
+        print(
+            f"segment_dispatch_driver.py: refusing to publish for {seg!r}: the on-disk state "
+            f"changed since it was classified (expected {list(order)}, now "
+            f"{fresh.get('publish') or []} / {fresh.get('outcome')})",
+            file=sys.stderr,
+        )
+        return False
 
     round_label = None
     status, parsed = _read_counter(txn_intent_path(txn_dir, seg))

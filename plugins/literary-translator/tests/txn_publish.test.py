@@ -13,6 +13,7 @@ around one property above all others:
   materialising exactly the inconsistent pair the order exists to avoid.
 """
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -38,6 +39,11 @@ DRIVER = _load_module(DRIVER_SRC, "segment_dispatch_driver_txn_publish")
 SEG = "seg01"
 ROUND = "1"
 
+# What _setup writes as the PRE-publication canonical pair. Named, so an
+# assertion cannot drift from the fixture the way the literals first did.
+OLD_DRAFT = {"seg": SEG, "dispatch_token": "RUN:seg01", "blocks": {"b": "old"}}
+OLD_REVIEW = {"old": "review"}
+
 
 @pytest.fixture()
 def dirs(tmp_path):
@@ -61,13 +67,38 @@ def _intent(**over):
 
 
 def _setup(dirs, *, staged=("draft", "review"), canonical=True):
-    DRIVER.write_txn_intent(dirs["txn"], SEG, _intent())
+    """Build a state that could ACTUALLY OCCUR.
+
+    The first version of this helper recorded placeholder strings ("sd"/"sr")
+    as the staged hashes and a bare {"absent": true} review preimage while
+    writing a canonical review to disk -- a combination no real transaction
+    ever produces. Every test passed anyway, because publish_txn() did not yet
+    revalidate. Adding the revalidation turned three of them red, which is the
+    fixtures being wrong rather than the fix: a test built on an impossible
+    state cannot be evidence about a real one."""
     paths = DRIVER.staged_paths(dirs["txn"], SEG, ROUND)
     for what in staged:
         paths[what].write_text(json.dumps({"new": what}), encoding="utf-8")
+
+    draft_path = dirs["segments"] / f"{SEG}.draft.json"
+    review_path = dirs["segments"] / f"{SEG}.review.json"
     if canonical:
-        (dirs["segments"] / f"{SEG}.draft.json").write_text('{"old": "draft"}', encoding="utf-8")
-        (dirs["segments"] / f"{SEG}.review.json").write_text('{"old": "review"}', encoding="utf-8")
+        draft_path.write_text(
+            json.dumps({"seg": SEG, "dispatch_token": "RUN:seg01", "blocks": {"b": "old"}}),
+            encoding="utf-8")
+        review_path.write_text('{"old": "review"}', encoding="utf-8")
+
+    def _h(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+
+    authority = _load_module(SCRIPTS_SRC_DIR / "draft_sha1.py", "draft_sha1_for_publish_fixture")
+    DRIVER.write_txn_intent(dirs["txn"], SEG, _intent(
+        pre_edit_draft_sha1=authority.draft_content_sha1(draft_path) if canonical else "none",
+        pre_edit_draft_token="RUN:seg01",
+        staged_draft_sha256=_h(paths["draft"]) or "absent",
+        staged_review_sha256=_h(paths["review"]) or "absent",
+        review_preimage={"sha256": _h(review_path)} if canonical else {"absent": True},
+    ))
     return paths
 
 
@@ -127,7 +158,7 @@ def test_a_crash_after_the_review_rename_leaves_the_CONSISTENT_pair(dirs, monkey
                               {"publish": ["review", "draft"]}) is False
 
     assert _canonical(dirs, "review") == {"new": "review"}
-    assert _canonical(dirs, "draft") == {"old": "draft"}, (
+    assert _canonical(dirs, "draft") == OLD_DRAFT, (
         "the surviving pair must be old-draft + new-review, never the reverse"
     )
 
@@ -154,7 +185,7 @@ def test_the_barrier_sits_BETWEEN_the_renames(dirs, monkeypatch):
     assert module.publish_txn(dirs["txn"], SEG, dirs["segments"],
                               {"publish": ["review", "draft"]}) is False
 
-    assert _canonical(dirs, "draft") == {"old": "draft"}, (
+    assert _canonical(dirs, "draft") == OLD_DRAFT, (
         "the draft must not be published while the review rename is not durable"
     )
 
@@ -167,22 +198,22 @@ def test_the_barrier_sits_BETWEEN_the_renames(dirs, monkeypatch):
 def test_an_empty_publish_list_is_a_no_op(dirs):
     _setup(dirs)
     assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"], {"publish": []}) is True
-    assert _canonical(dirs, "draft") == {"old": "draft"}
-    assert _canonical(dirs, "review") == {"old": "review"}
+    assert _canonical(dirs, "draft") == OLD_DRAFT
+    assert _canonical(dirs, "review") == OLD_REVIEW
 
 
 @pytest.mark.parametrize("decision", [{}, {"publish": None}])
 def test_a_decision_naming_nothing_publishes_nothing(dirs, decision):
     _setup(dirs)
     assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"], decision) is True
-    assert _canonical(dirs, "draft") == {"old": "draft"}
+    assert _canonical(dirs, "draft") == OLD_DRAFT
 
 
 def test_a_missing_staged_source_refuses_without_touching_canonical(dirs):
     _setup(dirs, staged=("review",))
     assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"],
                               {"publish": ["draft"]}) is False
-    assert _canonical(dirs, "draft") == {"old": "draft"}
+    assert _canonical(dirs, "draft") == OLD_DRAFT
 
 
 @pytest.mark.parametrize("body", ["}{", "[]", '{"txn_schema": 1}'])
@@ -193,8 +224,8 @@ def test_an_uninterpretable_intent_refuses(dirs, body):
     DRIVER.txn_intent_path(dirs["txn"], SEG).write_text(body, encoding="utf-8")
     assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"],
                               {"publish": ["review", "draft"]}) is False
-    assert _canonical(dirs, "draft") == {"old": "draft"}
-    assert _canonical(dirs, "review") == {"old": "review"}
+    assert _canonical(dirs, "draft") == OLD_DRAFT
+    assert _canonical(dirs, "review") == OLD_REVIEW
 
 
 def test_an_absent_intent_refuses(dirs):
@@ -202,14 +233,14 @@ def test_an_absent_intent_refuses(dirs):
     DRIVER.txn_intent_path(dirs["txn"], SEG).unlink()
     assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"],
                               {"publish": ["review"]}) is False
-    assert _canonical(dirs, "review") == {"old": "review"}
+    assert _canonical(dirs, "review") == OLD_REVIEW
 
 
 def test_an_unknown_artifact_name_refuses(dirs):
     _setup(dirs)
     assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"],
                               {"publish": ["canon"]}) is False
-    assert _canonical(dirs, "draft") == {"old": "draft"}
+    assert _canonical(dirs, "draft") == OLD_DRAFT
 
 
 def test_publish_uses_the_DURABLE_round_not_a_guess(dirs):
@@ -222,7 +253,7 @@ def test_publish_uses_the_DURABLE_round_not_a_guess(dirs):
 
     assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"],
                               {"publish": ["review"]}) is False
-    assert _canonical(dirs, "review") == {"old": "review"}
+    assert _canonical(dirs, "review") == OLD_REVIEW
 
 
 # ---------------------------------------------------------------------------
@@ -246,3 +277,51 @@ def test_publish_leaves_another_segment_alone(dirs):
     other.write_text('{"other": true}', encoding="utf-8")
     DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"], {"publish": ["review", "draft"]})
     assert json.loads(other.read_text()) == {"other": True}
+
+
+# ---------------------------------------------------------------------------
+# The CAS at the publication boundary
+# ---------------------------------------------------------------------------
+
+
+def test_a_canonical_edit_after_classification_is_not_overwritten(dirs):
+    """THE reason this boundary revalidates. The decision was computed from an
+    earlier snapshot; if the canonical draft is edited between then and the
+    rename, acting on the stale decision destroys that newer text -- the exact
+    loss the CAS exists to prevent, arriving through the gap between the check
+    and the use rather than through a missing check."""
+    _setup(dirs)
+    decision = DRIVER.classify_txn_recovery(
+        DRIVER.gather_txn_observed(SEG, dirs["txn"], dirs["segments"], SCRIPTS_SRC_DIR))
+    assert decision["publish"] == ["review", "draft"]
+
+    newer = {"seg": SEG, "dispatch_token": "RUN:seg01", "blocks": {"b": "EDITED BY SOMEONE ELSE"}}
+    (dirs["segments"] / f"{SEG}.draft.json").write_text(json.dumps(newer), encoding="utf-8")
+
+    assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"], decision) is False
+    assert _canonical(dirs, "draft") == newer, "the newer edit must survive"
+    assert _canonical(dirs, "review") == OLD_REVIEW, "and nothing else may be published either"
+
+
+def test_a_staged_file_changed_after_gathering_is_not_published(dirs):
+    """The same gap from the other side: staging whose bytes no longer match
+    the hash the intent recorded must not reach the canonical tree."""
+    paths = _setup(dirs)
+    decision = DRIVER.classify_txn_recovery(
+        DRIVER.gather_txn_observed(SEG, dirs["txn"], dirs["segments"], SCRIPTS_SRC_DIR))
+
+    paths["draft"].write_text(json.dumps({"new": "TAMPERED"}), encoding="utf-8")
+
+    assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"], decision) is False
+    assert _canonical(dirs, "draft") == OLD_DRAFT
+    assert _canonical(dirs, "review") == OLD_REVIEW
+
+
+def test_an_unchanged_state_still_publishes(dirs):
+    """The revalidation must not be so strict that the normal path stops
+    working -- a refusal that fires on everything is not a guard."""
+    _setup(dirs)
+    decision = DRIVER.classify_txn_recovery(
+        DRIVER.gather_txn_observed(SEG, dirs["txn"], dirs["segments"], SCRIPTS_SRC_DIR))
+    assert DRIVER.publish_txn(dirs["txn"], SEG, dirs["segments"], decision) is True
+    assert _canonical(dirs, "draft") == {"new": "draft"}
