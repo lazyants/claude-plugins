@@ -1453,6 +1453,156 @@ TXN_UNREADABLE = "<unreadable>"
 TXN_UNOBSERVABLE = "txn-unobservable"
 
 
+def txn_intent_path(txn_dir: Path, seg: str) -> Path:
+    """ONE path per segment, so discovery is deterministic. A replacement
+    driver finds the intent by this path and READS its txn_id from it -- the
+    id never has to be recomputed, which is why it does not need to be
+    derivable."""
+    return txn_dir / f"{seg}.intent.json"
+
+
+def staged_paths(txn_dir: Path, seg: str, round_label: str) -> dict:
+    return {
+        "draft": txn_dir / f"{seg}.{round_label}.staged.draft.json",
+        "review": txn_dir / f"{seg}.{round_label}.staged.review.json",
+    }
+
+
+def write_txn_intent(txn_dir: Path, seg: str, intent: dict) -> bool:
+    """Publish the pre-commit intent durably, in `prepared` phase.
+
+    REFUSES to write an intent this module's own recovery could not later
+    interpret. Writing one would be strictly worse than not starting the
+    transaction: recovery would find a record it must classify as invalid,
+    and an invalid intent is deliberately never cleaned up, so it would sit
+    there blocking the segment until a human removed it."""
+    if intent.get("phase") != "prepared":
+        print(
+            f"segment_dispatch_driver.py: refusing to write an intent for {seg!r} in phase "
+            f"{intent.get('phase')!r}: an intent is always published as 'prepared'",
+            file=sys.stderr,
+        )
+        return False
+    if not _is_valid_intent(intent):
+        print(
+            f"segment_dispatch_driver.py: refusing to write an intent for {seg!r} that this "
+            f"module's own recovery would classify as invalid",
+            file=sys.stderr,
+        )
+        return False
+    return _atomic_write_json(txn_intent_path(txn_dir, seg), intent)
+
+
+def commit_txn_intent(txn_dir: Path, seg: str) -> bool:
+    """Flip a durable `prepared` intent to `committed`.
+
+    Reads what is on disk and rewrites it rather than taking the caller's
+    copy: the caller's mapping may be stale, and the whole point of the phase
+    flip is that it describes the state the DISK is in. Refuses on anything it
+    cannot interpret, and is idempotent -- committing an already-committed
+    intent is a no-op success, because recovery replays this."""
+    path = txn_intent_path(txn_dir, seg)
+    status, parsed = _read_counter(path)
+    if status != "ok" or not _is_valid_intent(parsed):
+        print(
+            f"segment_dispatch_driver.py: refusing to commit the intent for {seg!r}: "
+            f"it is absent or cannot be interpreted",
+            file=sys.stderr,
+        )
+        return False
+    if parsed.get("phase") == "committed":
+        # ALREADY VISIBLE IS NOT ALREADY DURABLE -- the same post-os.replace()
+        # hazard charge_txn_failure() already handles, and it did not
+        # propagate here on its own. A first commit can publish `committed`
+        # and still report failure because the directory fsync failed, so a
+        # retry that returns True on sight of the phase claims a durability
+        # nothing confirmed.
+        return _fsync_dir(txn_dir)
+    parsed["phase"] = "committed"
+    return _atomic_write_json(path, parsed)
+
+
+def cleanup_txn(txn_dir: Path, seg: str, round_label: str) -> bool:
+    """Remove the staging files and then the intent, in that order.
+
+    ORDER MATTERS AND IS NOT ARBITRARY: the intent is the record that a
+    transaction was in flight, so it is removed LAST. Crashing after the
+    staging is gone but before the intent leaves a state recovery recognises
+    (intent present, staging missing) rather than orphan staging nobody can
+    explain. Touches ONLY the transaction directory -- never a canonical
+    draft or review.
+
+    Absent files are success: this runs on a replay path."""
+    def _remove(path: Path) -> bool:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            print(
+                f"segment_dispatch_driver.py: warning: could not remove {path}: {exc}",
+                file=sys.stderr,
+            )
+            return False
+        return True
+
+    # THE DURABLE INTENT OWNS THE ROUND HERE TOO. gather_txn_observed() already
+    # treats it as the sole authority; cleanup going back to the caller's label
+    # recreates the orphan state this helper exists to prevent -- with a
+    # round-1 intent and round-1 staging, a caller passing "2" removes nothing
+    # (absent files count as removed), deletes the intent, and leaves the real
+    # staging behind. A replacement driver on a different round is exactly the
+    # case that produces it.
+    intent_path = txn_intent_path(txn_dir, seg)
+    status, parsed = _read_counter(intent_path)
+    if status == "ok" and _is_valid_intent(parsed):
+        label = parsed["round_label"]
+    elif status == "absent":
+        label = round_label  # aborted-prepare: no intent to disagree with
+    else:
+        print(
+            f"segment_dispatch_driver.py: refusing to clean up {seg!r}: an intent exists but "
+            f"cannot be interpreted, so its staging cannot be identified",
+            file=sys.stderr,
+        )
+        return False
+
+    paths = staged_paths(txn_dir, seg, label)
+    staging_gone = _remove(paths["draft"])
+    # Both are attempted even if the first failed -- removing what can be
+    # removed is useful -- but the INTENT is gated on both succeeding.
+    staging_gone = _remove(paths["review"]) and staging_gone
+
+    if not staging_gone:
+        # LAST is not the same as ONLY-IF, and only the second gives the
+        # invariant. Deleting the intent here would leave staging on disk with
+        # no durable record explaining it -- precisely the orphan state the
+        # ordering exists to avoid, reached through the failure path instead
+        # of through a crash. Keep the intent so recovery can still classify
+        # this, and still flush whatever did change.
+        _fsync_dir(txn_dir)
+        return False
+
+    # ...and ONLY-IF is not the same as DURABLY-BEFORE, which is the third and
+    # last form this ordering needs. Unlinking the intent and flushing once at
+    # the end makes the order process-visible but not crash-durable: nothing
+    # persists the staging removals ahead of the intent removal, so a crash
+    # can preserve the intent deletion while losing one or both staging
+    # deletions -- orphan staging with no record, arrived at through the
+    # durability layer this time. Barrier FIRST, so the staging removals are
+    # on disk before the record explaining them can go.
+    if not _fsync_dir(txn_dir):
+        print(
+            f"segment_dispatch_driver.py: refusing to remove the intent for {seg!r}: the "
+            f"staging removals could not be made durable first",
+            file=sys.stderr,
+        )
+        return False
+
+    ok = _remove(intent_path)
+    return _fsync_dir(txn_dir) and ok
+
+
 def _sha256_of(path: Path):
     """sha256 of a file's RAW bytes, or None when it is absent.
 
