@@ -261,6 +261,16 @@ engine:
     # and a review round's retry path re-reads the artifact codex already wrote rather than dispatching again.
     # At the shipped max_fix_rounds: 4 that is 6 jobs/segment; a batch of N segments needs 6N codex jobs worst
     # case, so the shipped default of 400 admits 66 segments (66*6 = 396).
+    # THE TWO CONSUMERS OF THIS KNOB COUNT DIFFERENTLY, and both counts are correct for their own loop.
+    # The figures above describe the Workflow template's round structure, where a fix is an agent() call and
+    # never a codex job. segment_dispatch_driver.py runs its own loop and admits against ITS OWN cap, which
+    # is max_fix_rounds + 3 per segment even on the default --fix-mode=handoff: the extra one is not a fix
+    # round but the loop's real upper bound, since the persistently-stale-review path can dispatch on every
+    # iteration (the earlier M+2 was the NORMAL-path count being used as if it were a bound). So at
+    # max_fix_rounds: 4 the driver admits 57 segments against the same 400 (57*7 = 399).
+    # Under --fix-mode=codex the driver's per-segment bound is larger again -- it adds this round's
+    # rejected-candidate and stale-redispatch allowances (see max_rejected_candidates_per_round below) --
+    # so the same 400 admits proportionally fewer segments per batch in that mode.
     # NOTE, so the two knobs are not mistaken for one envelope: they do NOT bind at the same batch size, and
     # WHICH ONE binds first depends on both shipped values, not fixed. #409 step 2 raised batch_agent_cap's
     # shipped default from 3500 (admitted 40 segments) to 10000 (admits 116, see above) without touching this
@@ -288,12 +298,15 @@ engine:
     # itself stays selectable by the dispatch loop and will be refused again on its next attempt, not
     # permanently retired.
     #
-    # NOT YET READ FROM THIS FILE. As of this release the ceiling reaches txn_failures_exhausted() as a plain
-    # in-process `ceiling` argument, and nothing anywhere resolves it from `engine.max_txn_failures_per_segment`
-    # -- so setting it here changes the SHAPE contract only, and does not change behaviour. Same footing as the
-    # output.* knobs further down whose adapters ship in a later phase. Said out loud because this repo's own
-    # stated anti-goal (see citation_content_types in resume_setup.py's SUBST_FIELDS) is a profile setting that
-    # silently does not take effect, and prose describing enforcement that is not wired IS that anti-goal.
+    # READ AND ENFORCED as of this release. Both of segment_dispatch_driver.py's profile loaders resolve it --
+    # both, from this same key with this same default, because the volume admission and the loop cap have to
+    # agree about a number that is supposed to be one number. The default is applied by the loaders themselves:
+    # a schema `default` is documentation-only and nothing fills it in at validation time.
+    # process_segment() checks the counter against this ceiling immediately BEFORE dispatching a numeric
+    # fixreview round, so an exhausted segment costs no codex job at all -- checking afterwards would still
+    # spend the job the ceiling exists to refuse. Checked at that callsite ONLY: a translate is not
+    # transactional and the final round is a plain review, so gating either on transaction failures would
+    # refuse legitimate work those paths cannot cause.
   max_rejected_candidates_per_round: 2
     # #409 track B. OPTIONAL, like max_codex_jobs_per_batch above. Bounds how many codex-produced candidates
     # (an attempt artifact that failed its post-launch validation gate -- see codex_job.py's own candidate-gate
@@ -302,10 +315,18 @@ engine:
     # against this cap, never a candidate that passes its gate and is promoted, and the count is scoped to one
     # round -- it does not carry over into the next round_label.
     #
-    # NOT YET READ FROM THIS FILE, and one step earlier than its sibling above: no enforcement code exists at
-    # all yet, not even a `ceiling` parameter waiting for a value. The description says WHAT this bounds, never
-    # WHERE it is enforced, because that place does not exist. Declared now so the key is schema-valid when the
-    # round-level gate lands, on the same footing as the output.* knobs whose adapters ship in a later phase.
+    # READ AND ENFORCED as of this release, by the same two loaders as its sibling above. The gate is in
+    # process_segment(): a fixreview dispatch that comes back rejected by one of codex_job.py's four gates is
+    # charged to the round it belongs to and retried, and on reaching this ceiling the round terminates with no
+    # ledger write (nothing was published by any rejected candidate -- a rejected pair is quarantined). An
+    # infrastructure failure is NOT charged here: retrying a dead companion is not meaningful the way retrying
+    # a rejected candidate is, and spending the round's allowance on it would refuse a round that never
+    # produced a bad candidate at all.
+    #
+    # It is ALSO a term of the per-segment codex-job bound the volume admission checks
+    # (codex_jobs_per_segment), so raising it raises BOTH the retries allowed per round and the number of
+    # segments a batch is admitted for. Deliberately one number: a retry allowance the admission did not know
+    # about would let a batch start that its own loop is entitled to overspend.
 
 footnotes:
   apparatus_policy: translate_all

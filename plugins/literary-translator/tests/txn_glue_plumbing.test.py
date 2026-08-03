@@ -13,9 +13,11 @@ not "the connector is missing" but "both endpoints are unreachable":
     and nothing sweeps for them) -- so even a correct dispatch lost its output;
   * no txn_dir was resolved anywhere in production code.
 
-This file covers exactly that plumbing. It deliberately does NOT cover the
-transaction sequence itself (tests/txn_publish.test.py and its siblings own
-that) nor the dispatch branch's prompt rendering.
+This file covers exactly that plumbing, and only that. The renames belong to
+tests/txn_publish.test.py; everything between the two -- which kind a round
+dispatches, the pre-derive recovery phase and its lease, minting an intent
+from real pre-image state, and the per-round bounds -- belongs to
+tests/txn_dispatch_path.test.py.
 
 --fix-mode DEFAULTS TO handoff, and that is asserted here rather than assumed:
 the default is what decides whether this release changes behaviour for existing

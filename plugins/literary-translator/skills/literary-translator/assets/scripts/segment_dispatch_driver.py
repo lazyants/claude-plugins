@@ -22,25 +22,40 @@ ledger_update.py/cache_key.py (no agent() indirection -- this mechanical
 bookkeeping never needed judgment, only a shell call, which is exactly
 what this driver has natively).
 
-One capability this driver genuinely does NOT have: performing the FIX
-step. Applying review findings to a draft is a real LLM content-editing
-turn (mass-translate-wf.template.js's own `callFix`/`fixPrompt`, dispatched
-via a Claude `agent()` call today) -- a plain Python process has no
-equivalent capability, and PLAN.md's own step order defers redesigning fix
-as a codex_job.py dispatch to a LATER phase (step 5, track B), explicitly
-because it only pays off once this driver already exists. So when a
-segment's review comes back not-clean, `process_segment()` below stops at
-that segment and returns a `needs_fix` result carrying the round label,
-the findings, AND the exact fix prompt text (rendered the same
-executed-template way as every other prompt) -- the caller (today: the
-orchestrating Claude session running W5, exactly as PLAN.md's own step
-order anticipates) performs ONE Claude fix turn using that prompt, then
-re-invokes this driver, which re-derives the segment's state from durable
-disk facts (see `derive_next_action()`) and picks up at the next review
-round. This driver's OWN contribution is eliminating the WAIT-polling
-agent() calls around translate/review (#348's chunking apparatus) -- "B
-only pays off after the driver removes the wait agents" is the project's
-own framing for exactly this split.
+THE FIX STEP HAS TWO SHAPES NOW, chosen by `--fix-mode`, and the DEFAULT
+is still the one this driver cannot perform itself.
+
+`--fix-mode=handoff` (DEFAULT, and the previous release's behaviour
+verbatim): applying review findings to a draft is a real LLM
+content-editing turn (mass-translate-wf.template.js's own
+`callFix`/`fixPrompt`, dispatched via a Claude `agent()` call), and a plain
+Python process has no equivalent capability. So when a segment's review
+comes back not-clean, `process_segment()` below stops at that segment and
+returns a `needs_fix` result carrying the round label, the findings, AND
+the exact fix prompt text (rendered the same executed-template way as every
+other prompt) -- the caller (the orchestrating Claude session running W5)
+performs ONE Claude fix turn using that prompt, then re-invokes this
+driver, which re-derives the segment's state from durable disk facts (see
+`derive_next_action()`) and picks up at the next review round.
+
+`--fix-mode=codex` (#409 track B): a numeric round becomes ONE `--kind
+fixreview` codex job that reviews the draft it finds and then applies its
+own findings, producing TWO artifacts. The self-attestation that ordering
+invites is prevented STRUCTURALLY rather than by prompt wording: the
+review is bound to the sha1 of the PRE-edit draft, so a round that changed
+anything publishes a pair whose review no longer describes the draft, and
+convergence -- which requires those to match -- is only reachable by a
+round that changed nothing, i.e. one that needed no fix. The review half of
+round N still judges round N-1's edit; its own edit is judged by N+1. Two
+artifacts have no single canonical path, so `codex_job.py` validates and
+STAGES them and never promotes; this driver publishes the pair through the
+transaction layer below (durable intent, review renamed first, roll-forward
+on recovery). The mandatory final round stays a plain review in both modes.
+
+This driver's OWN contribution is eliminating the WAIT-polling agent()
+calls around translate/review (#348's chunking apparatus) -- "B only pays
+off after the driver removes the wait agents" is the project's own framing
+for exactly this split.
 
 Filename note: NOT `mass_translate_driver.py` -- `git grep -ln
 mass_translate_driver` already returns 7 files (all `tests/*.test.py`
@@ -192,19 +207,24 @@ be checking the wrong number, not merely a redundant one.
 `engine.max_codex_jobs_per_batch` (#409 stage 0, already shipped --
 `profile.schema.json`'s own field, already a `resume_setup.SUBST_FIELDS`
 member alongside `batch_agent_cap`) measures the resource the driver DOES
-spend: real codex dispatches. `check_volume_cap()` below reproduces
-`mass-translate-wf.template.js`'s own already-shipped preflight for this
-exact knob (`CODEX_JOBS_PER_SEG = max_fix_rounds + 2`,
-`estimatedCodexJobs = len(SEGS) * CODEX_JOBS_PER_SEG`), the SAME formula,
-because it is the SAME resource under the SAME cap, just measured from a
-second, independent entry point -- exactly how `skeptic_setup.py`'s own
-preflight duplicates its Workflow template's estimator for the identical
-reason (two entry points into one resource, each needing its own gate).
-`max_fix_rounds` fix rounds are deliberately NOT counted as codex jobs:
-today the fix step is a plain Workflow `agent()` call, never a
-`codex_job.py` launch -- this is CURRENT reality, not yet the
-codex-as-fixer redesign (a later phase), and counting fixes now would
-measure a resource this driver does not spend yet either.
+spend: real codex dispatches. `check_volume_cap()` below gates the SAME
+resource under the SAME cap as `mass-translate-wf.template.js`'s own
+already-shipped preflight, from a second, independent entry point --
+exactly how `skeptic_setup.py`'s own preflight duplicates its Workflow
+template's estimator for the identical reason (two entry points into one
+resource, each needing its own gate).
+
+THE PER-SEGMENT NUMBER IS NOT SHARED WITH THE TEMPLATE, and this used to
+claim it was. The template counts `max_fix_rounds + 2`: its own round
+structure, where a fix is a plain Workflow `agent()` call and never a
+`codex_job.py` launch. This driver runs its own loop, and admits against
+the number that loop is actually capped at -- see
+`codex_jobs_per_segment()`, which is `max_fix_rounds + 3` on the default
+`--fix-mode=handoff` and larger under `codex`, where a numeric round IS a
+codex job (`--kind fixreview`) and the per-round redispatch allowances are
+terms of the bound. Two consumers of one knob, each counting its own loop;
+copying the template's figure here made the admission smaller than the
+spend it was admitting.
 `batch_agent_cap` itself is untouched and unremoved -- it keeps doing its
 own job for the glossary/skeptic Workflow passes and for
 `resume_setup.SUBST_FIELDS`'s existing required-field contract; this
@@ -213,9 +233,13 @@ batch never triggers the resource it measures.
 
 ## What this driver deliberately does NOT implement (say so, not stub it)
 
-- The FIX step -- see the STATUS section above. `process_segment()`
-  returns `needs_fix` (round label, findings, and the exact fix prompt
-  text) instead of performing it.
+- The FIX step, ON THE DEFAULT `--fix-mode=handoff` -- see the STATUS
+  section above. `process_segment()` returns `needs_fix` (round label,
+  findings, and the exact fix prompt text) instead of performing it.
+  `--fix-mode=codex` DOES perform it, as half of a merged `--kind
+  fixreview` call whose two artifacts this driver publishes through the
+  transaction layer; that mode is reachable but not the default, because
+  turning it on moves who edits the user's text.
 - `mass-translate-wf.template.js`'s own W6 (`log(...)`d final summary) /
   batch-level `mergeLedgerPrompt` completeness check. This driver reports
   its own per-segment results (`run()`'s returned `summary`); the batch-
@@ -319,6 +343,7 @@ stdout either way; all human-readable detail on stderr.
 """
 
 import argparse
+import contextlib
 import fcntl
 import importlib.util
 import hashlib
@@ -781,20 +806,91 @@ def release_driver_lock(fd) -> None:
 # ---------------------------------------------------------------------------
 
 
-def codex_jobs_per_segment(max_fix_rounds: int) -> int:
-    """1 translate job + (max_fix_rounds + 1) review jobs (one per normal
-    round, plus the one mandatory final confirming review). Fix rounds are
-    NOT counted -- see module docstring."""
-    return max_fix_rounds + 2
+# --fix-mode. `handoff` is 1.18.0's behaviour verbatim: a not-clean numeric
+# round returns needs_fix and the caller performs the edit. `codex` dispatches
+# --kind fixreview -- one codex call producing BOTH a fixed draft and its
+# review -- and publishes the pair through the transaction layer further down.
+#
+# handoff is the DEFAULT, and that is a deliberate release decision rather than
+# caution: this release makes the codex path reachable, not active. Flipping the
+# default is a separate change, because it moves who edits the user's text.
+#
+# Declared HERE, well above the transaction layer that is the mode's real
+# subject matter, because the volume admission immediately below is already
+# per-mode and evaluates these at def time.
+FIX_MODE_HANDOFF = "handoff"
+FIX_MODE_CODEX = "codex"
+FIX_MODES = (FIX_MODE_HANDOFF, FIX_MODE_CODEX)
+
+# --fix-mode=codex's three per-round redispatch allowances (#409 track B).
+# Each is a term of the K below, and each has to be a NUMBER rather than the
+# word "bounded": a redispatch family with no count is exactly how the
+# clean-but-stale path came to have no bound of its own.
+DEFAULT_MAX_REJECTED_CANDIDATES_PER_ROUND = 2   # R_reject, engine-overridable
+MAX_STALE_REDISPATCHES_PER_ROUND = 1            # R_stale
+MAX_FABRICATED_LOC_RETRIES = 1                  # R_final -- the existing one-retry bound
+DEFAULT_MAX_TXN_FAILURES_PER_SEGMENT = 3
 
 
-def check_volume_cap(n_segs: int, max_fix_rounds: int, max_codex_jobs_per_batch: int):
+def codex_jobs_per_segment(
+    max_fix_rounds: int,
+    fix_mode: str = FIX_MODE_HANDOFF,
+    *,
+    max_rejected_candidates_per_round: int = DEFAULT_MAX_REJECTED_CANDIDATES_PER_ROUND,
+) -> int:
+    """The per-segment upper bound on codex jobs for ONE driver invocation --
+    which is the SAME number as process_segment()'s own iteration cap, by
+    construction: that loop launches at most one job per iteration, so
+    bounding the iterations bounds the jobs and one expression serves both.
+
+    Keeping them one number is not tidiness. Track B's earlier drafts carried
+    an admission estimate and a loop cap derived separately, and then had to
+    assert "estimate <= cap" -- an inequality no configuration could satisfy
+    once any redispatch term was positive, because the cap WAS the base term.
+
+      handoff: M + 3   -- unchanged control flow, but see the correction below
+      codex:   M + 3 + M*(R_reject + R_stale) + R_final
+
+    THE HANDOFF VALUE IS M+3, NOT THE M+2 THIS FUNCTION USED TO RETURN, and
+    that is a correction rather than a new allowance. M+2 counts the NORMAL
+    path (one translate, M reviews, one mandatory final review) and was being
+    used as if it were an upper bound; the live iteration cap has always been
+    M+3, and the persistent-staleness path really can spend every one of those
+    iterations on a dispatch (the loop's own regression test asserts
+    len(dispatches) == max_iterations). So the admission was under-counting by
+    one job per segment -- N jobs per run -- against a bound the loop never
+    promised. Nothing about handoff's BEHAVIOUR changes here; only the number
+    the admission checks stops being smaller than what the loop permits.
+
+    mass-translate-wf.template.js's own preflight keeps its M+2: that estimate
+    describes the WORKFLOW's round structure (where fixes are separate
+    agent() calls, not codex jobs), not this driver's loop, and the two have
+    never been the same quantity."""
+    if fix_mode not in FIX_MODES:
+        fatal(f"internal error: unknown fix mode {fix_mode!r}", exit_code=2)
+    base = max_fix_rounds + 3
+    if fix_mode == FIX_MODE_HANDOFF:
+        return base
+    per_round_redispatches = max_rejected_candidates_per_round + MAX_STALE_REDISPATCHES_PER_ROUND
+    return base + max_fix_rounds * per_round_redispatches + MAX_FABRICATED_LOC_RETRIES
+
+
+def check_volume_cap(n_segs: int, max_fix_rounds: int, max_codex_jobs_per_batch: int,
+                     fix_mode: str = FIX_MODE_HANDOFF, *,
+                     max_rejected_candidates_per_round: int = DEFAULT_MAX_REJECTED_CANDIDATES_PER_ROUND):
     """Returns None if `n_segs` is within the cap, or a refusal dict
     (mirrors mass-translate-wf.template.js's own `{reason,
     estimatedCodexJobs, codexJobsCap}` result shape) otherwise. Never
     raises -- this is a pure, side-effect-free check the caller decides
-    what to do with."""
-    per_seg = codex_jobs_per_segment(max_fix_rounds)
+    what to do with.
+
+    Admission is PER MODE because the bound is: refusing a codex-mode batch
+    against handoff's much smaller number would let a run start that its own
+    loop is permitted to overspend by a factor of roughly four."""
+    per_seg = codex_jobs_per_segment(
+        max_fix_rounds, fix_mode,
+        max_rejected_candidates_per_round=max_rejected_candidates_per_round,
+    )
     estimated = n_segs * per_seg
     if estimated <= max_codex_jobs_per_batch:
         return None
@@ -817,6 +913,31 @@ def check_volume_cap(n_segs: int, max_fix_rounds: int, max_codex_jobs_per_batch:
 # convention (matches validate_draft.py's/cache_key.py's own load_profile()
 # shape). Only the two fields this script actually needs are read.
 # ---------------------------------------------------------------------------
+
+
+def _optional_engine_int(engine: dict, key: str, default: int, minimum: int, profile_path) -> int:
+    """One OPTIONAL integer engine knob, resolved and range-checked.
+
+    Shared by this file's TWO profile loaders because they must agree: they
+    read the same profile and feed the same run, so a knob honoured by one and
+    defaulted by the other would make the admission check and the loop cap
+    disagree about the very number that is supposed to be one number.
+
+    profile.schema.json's `"default"` annotation is documentation-only --
+    nothing fills it in at validation time -- so every consumer applies it
+    independently, exactly as max_codex_jobs_per_batch already does.
+
+    `isinstance(value, bool)` is rejected explicitly: bool IS an int subclass
+    in Python, so `max_rejected_candidates_per_round: true` would otherwise
+    resolve to 1 rather than being refused."""
+    value = engine.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        fatal(
+            f"profile.yml at {profile_path}: engine.{key} must be an integer "
+            f">= {minimum} (per profile.schema.json), got {value!r}",
+            exit_code=2,
+        )
+    return value
 
 
 def load_engine_config(durable_root: Path) -> dict:
@@ -882,7 +1003,16 @@ def load_engine_config(durable_root: Path) -> dict:
             f"must be a positive integer, got {max_codex_jobs_per_batch!r}",
             exit_code=2,
         )
-    return {"max_fix_rounds": max_fix_rounds, "max_codex_jobs_per_batch": max_codex_jobs_per_batch}
+    return {
+        "max_fix_rounds": max_fix_rounds,
+        "max_codex_jobs_per_batch": max_codex_jobs_per_batch,
+        "max_rejected_candidates_per_round": _optional_engine_int(
+            engine, "max_rejected_candidates_per_round",
+            DEFAULT_MAX_REJECTED_CANDIDATES_PER_ROUND, 0, profile_path),
+        "max_txn_failures_per_segment": _optional_engine_int(
+            engine, "max_txn_failures_per_segment",
+            DEFAULT_MAX_TXN_FAILURES_PER_SEGMENT, 0, profile_path),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1425,18 +1555,6 @@ def _read_counter(path: Path):
 # neither preimage nor postimage", with different rows prescribing
 # different actions for one state.
 # ---------------------------------------------------------------------------
-
-# --fix-mode. `handoff` is 1.18.0's behaviour verbatim: a not-clean numeric
-# round returns needs_fix and the caller performs the edit. `codex` dispatches
-# --kind fixreview -- one codex call producing BOTH a fixed draft and its
-# review -- and publishes the pair through the transaction layer below.
-#
-# handoff is the DEFAULT, and that is a deliberate release decision rather than
-# caution: this release makes the codex path reachable, not active. Flipping the
-# default is a separate change, because it moves who edits the user's text.
-FIX_MODE_HANDOFF = "handoff"
-FIX_MODE_CODEX = "codex"
-FIX_MODES = (FIX_MODE_HANDOFF, FIX_MODE_CODEX)
 
 TXN_PROCEED = "proceed"                          # nothing in flight
 TXN_ABORTED_PREPARE = "txn-aborted-prepare"      # staging without an intent
@@ -2440,6 +2558,15 @@ def load_translate_config(durable_root: Path) -> dict:
         "max_fix_rounds": max_fix_rounds,
         "batch_agent_cap": engine["batch_agent_cap"],
         "max_codex_jobs_per_batch": max_codex_jobs_per_batch,
+        # Read by BOTH loaders from the same key with the same default, so
+        # process_segment()'s loop cap and run()'s admission cannot disagree
+        # about the bound -- see _optional_engine_int()'s own docstring.
+        "max_rejected_candidates_per_round": _optional_engine_int(
+            engine, "max_rejected_candidates_per_round",
+            DEFAULT_MAX_REJECTED_CANDIDATES_PER_ROUND, 0, profile_path),
+        "max_txn_failures_per_segment": _optional_engine_int(
+            engine, "max_txn_failures_per_segment",
+            DEFAULT_MAX_TXN_FAILURES_PER_SEGMENT, 0, profile_path),
         "effort": engine["effort"],
         "model": engine.get("model") or "",
         "source_lang": source_lang,
@@ -2868,6 +2995,7 @@ def resolve_companion_path(dirs: dict, *, node_bin: str) -> str:
 TEMPLATE_EXPORTED_FUNCTIONS = (
     "translatePrompt", "translateDrivePrompt",
     "reviewDispatchPrompt", "reviewDrivePrompt",
+    "fixReviewDispatchPrompt",  # #409 track B -- the merged review+fix prompt, driver-only
     "fixPrompt", "parseDisp",
     "matchedVerdict",  # codex round 2, item 8 -- the fabricated-finding gate, see derive_next_action()
 )
@@ -3106,7 +3234,12 @@ def task_file_path(durable_root: Path, kind: str, seg: str, disp: str) -> Path:
     """Mirrors translateDrivePrompt's/reviewDrivePrompt's own TASKFILE
     naming: `segments/.codex_task.<kind>.<seg>.<DISP>` -- kind spelled
     "translate"/"review", matching the template's own taskFile prefix
-    exactly (not codex_job.py's own draft/review extension spelling)."""
+    exactly (not codex_job.py's own draft/review extension spelling).
+
+    "fixreview" has no template counterpart to mirror (the Workflow never
+    dispatches that kind), so it simply continues the same scheme -- and gets
+    its OWN prefix rather than borrowing "review"'s, so a stale task file can
+    always be attributed to the dispatch that wrote it."""
     return durable_root / "segments" / f".codex_task.{kind}.{seg}.{disp}"
 
 
@@ -3369,7 +3502,14 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         fabricated (inauthentic) finding rather than a stale/absent
         review or a round advance -- see process_segment()'s own retry
         counter, which this marker exists for.
+      {"action": "review", "round_label": ..., "cause": "clean_stale"} -- a
+        re-review at the SAME label because a clean review's draft_sha1 no
+        longer describes the draft. Same dispatch, its own counter.
+      {"action": "review", "round_label": ..., "cause": "merged_fix",
+       "findings": [...]} -- --fix-mode=codex only: the state that returns
+        needs_fix under handoff. Dispatch is a fixreview at the SAME label.
       {"action": "needs_fix", "round_label": ..., "findings": [...]}
+        -- --fix-mode=handoff only.
       {"action": "cap_reached", "findings": [...]}
       {"action": "already_converged", "round_label": "1".."<max_fix_rounds>"|"final"}
       {"action": "invalid_post_fix_draft"} -- codex round-3 MAJOR, see the
@@ -3584,7 +3724,20 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         # through needs_fix either -- the only correct move is a fresh
         # review of the current draft, at the SAME round label (a genuine
         # re-check of what changed, not a new round spent).
-        return {"action": "review", "round_label": matched_round_label}
+        #
+        # `cause: "clean_stale"` is a marker for process_segment()'s own
+        # per-round counter, exactly like "fabricated_loc" above, and it is
+        # what makes the codex-mode bound real rather than asserted. This
+        # branch re-dispatches at the SAME label with no bound of its own, so
+        # a draft edited out-of-band on every iteration re-fires it until the
+        # loop's cap -- which is fine for handoff (the cap IS the bound there,
+        # and the loop's own docstring says so), but codex mode's K claims a
+        # SPECIFIC per-round allowance for staleness, and a claimed allowance
+        # nothing counts is just the old unbounded path with a number written
+        # next to it. Without a distinguishable cause, process_segment() cannot
+        # tell this re-dispatch from an ordinary round advance and has nothing
+        # to count.
+        return {"action": "review", "round_label": matched_round_label, "cause": "clean_stale"}
 
     if matched_round_label == "final":
         return {"action": "cap_reached", "findings": review_obj.get("findings") or []}
@@ -3594,6 +3747,30 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
     # either sha1) stays conservative -- report needs_fix rather than
     # silently advancing.
     if draft_matches_review or current_sha1 is None or reviewed_sha1 is None:
+        if ctx.fix_mode == FIX_MODE_CODEX:
+            # THE MODE BRANCH SITS HERE, not as a blanket replacement of this
+            # return, because the handoff branch below has to stay live -- it
+            # is the default and the whole of 1.18.0's behaviour.
+            #
+            # On the ordinary codex path this state is not reached at all: a
+            # fixreview round publishes a review bound to the PRE-edit draft
+            # together with the edited draft, so the review and the draft
+            # never match unless the round changed nothing, and a round that
+            # changed nothing is convergence, handled above. What DOES reach
+            # here is a project switched from handoff to codex mid-flight,
+            # carrying a canonical not-clean review from its previous run --
+            # plus the ambiguous sub-case where neither sha1 could be
+            # computed.
+            #
+            # The answer for both is a fixreview at the SAME label rather than
+            # the next one. There is no separate fix dispatcher in this mode,
+            # so the pending findings can only be applied by a merged call;
+            # dispatching the next label instead would advance the round
+            # counter over findings nobody applied, and the fresh review would
+            # simply rediscover them one round poorer. Re-reviewing costs one
+            # round's judgment and keeps the round counter honest.
+            return {"action": "review", "round_label": matched_round_label,
+                    "cause": "merged_fix", "findings": review_obj.get("findings") or []}
         return {"action": "needs_fix", "round_label": matched_round_label, "findings": review_obj.get("findings") or []}
 
     return {"action": "review", "round_label": _next_round_label(matched_round_label, max_fix_rounds)}
@@ -3647,6 +3824,22 @@ def render_review_prompt(ctx: "DispatchContext", seg: str, round_label: str) -> 
     out = call_template_functions(
         ctx.dirs, _template_subst(ctx),
         [{"key": "text", "fn": "reviewDispatchPrompt", "args": [seg, round_label]}],
+        node_bin=ctx.node_bin,
+    )
+    return out["text"]
+
+
+def render_fixreview_prompt(ctx: "DispatchContext", seg: str, round_label: str) -> str:
+    """The merged review+fix prompt for --kind fixreview (#409 track B),
+    sourced the same executed-template way as every other prompt here.
+
+    Only ever rendered for a NUMERIC round: the mandatory final round stays a
+    plain review that edits nothing (see the dispatch table in the plan's §4.1,
+    and run_one_codex_job()'s own kind selection), so there is no "final"
+    spelling of this prompt to render."""
+    out = call_template_functions(
+        ctx.dirs, _template_subst(ctx),
+        [{"key": "text", "fn": "fixReviewDispatchPrompt", "args": [seg, round_label]}],
         node_bin=ctx.node_bin,
     )
     return out["text"]
@@ -3723,17 +3916,17 @@ def _codex_job_outcome(dispatch_result: dict) -> dict:
 
 
 def run_one_codex_job(ctx: "DispatchContext", *, kind: str, seg: str, round_label: "str | None" = None) -> dict:
-    """Dispatches ONE codex_job.py invocation for `seg` (translate, or one
-    review round) and returns codex_job.py's OWN reported outcome (see
-    _codex_job_outcome()) plus the {kind, seg, round_label, disp} this
-    dispatch used. Writes the task-file, builds the argv via
+    """Dispatches ONE codex_job.py invocation for `seg` (translate, one
+    review round, or one merged fixreview round) and returns codex_job.py's
+    OWN reported outcome (see _codex_job_outcome()) plus the {kind, seg,
+    round_label, disp} this dispatch used. Writes the task-file, builds the argv via
     build_codex_job_argv(), and blocks via dispatch_codex_job() -- every
     property (start_new_session, no polling) that primitive already closes.
 
     round_label is genuinely optional for kind="translate" (there is no
-    round for a translate dispatch) but REQUIRED for kind="review" --
-    render_review_prompt()/review_dispatch_token() both declare it `str`,
-    never `Optional`. Checked explicitly here rather than left implicit:
+    round for a translate dispatch) but REQUIRED for kind="review" and
+    kind="fixreview" -- render_review_prompt()/review_dispatch_token() both
+    declare it `str`, never `Optional`. Checked explicitly here rather than left implicit:
     an unchecked None reaching review_dispatch_token()'s f-string would not
     crash -- it would silently build "<run_id>:<seg>:rNone", a
     syntactically fine but semantically orphaned token no real round label
@@ -3743,9 +3936,26 @@ def run_one_codex_job(ctx: "DispatchContext", *, kind: str, seg: str, round_labe
     assumes it cannot" class as the `rounds: null` defect fixed earlier."""
     dirs = ctx.dirs
     durable_root = dirs["durable_root"]
+    expect_review_token = None
     if kind == "translate":
         prompt_text = render_translate_prompt(ctx, seg)
         expect_token = translate_dispatch_token(ctx.run_id, seg)
+    elif kind == "fixreview":
+        if round_label is None:
+            fatal(f"internal error: round_label is required for kind={kind!r}, got None", exit_code=2)
+        # THE TWO TOKENS ARE NOT INTERCHANGEABLE AND NEITHER IS OPTIONAL.
+        # A fixreview call writes a DRAFT and a REVIEW, and each is gated
+        # against its own kind's token: --expect-token carries the draft's
+        # (the run-and-segment token every draft in this run already
+        # carries, which the call copies through unchanged), while
+        # --expect-review-token carries THIS round's review token. Handing
+        # either one the other's value is not a mismatch codex_job.py can
+        # report usefully -- draft_ready.py and review_ready.py would each
+        # reject a perfectly good artifact for carrying the token it is
+        # supposed to carry.
+        prompt_text = render_fixreview_prompt(ctx, seg, round_label)
+        expect_token = translate_dispatch_token(ctx.run_id, seg)
+        expect_review_token = review_dispatch_token(ctx.run_id, seg, round_label)
     else:
         if round_label is None:
             fatal(f"internal error: round_label is required for kind={kind!r}, got None", exit_code=2)
@@ -3762,7 +3972,7 @@ def run_one_codex_job(ctx: "DispatchContext", *, kind: str, seg: str, round_labe
         prompt_file=task_file, expect_token=expect_token, disp=disp,
         deadline_sec=CODEX_DEADLINE_SEC, effort=ctx.translate_cfg["effort"],
         model=ctx.translate_cfg["model"], plugin_root_str=ctx.plugin_root_str,
-        node_bin=ctx.node_bin,
+        node_bin=ctx.node_bin, expect_review_token=expect_review_token,
     )
     append_journal(durable_root, ctx.session_id, {
         "type": "codex_dispatch_started", "seg": seg, "kind": kind,
@@ -3809,6 +4019,344 @@ def _read_review_obj(ctx: "DispatchContext", seg: str, fallback_findings=None) -
     except (OSError, json.JSONDecodeError):
         pass
     return {"findings": fallback_findings}
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 -- driving the paired publication (#409 track B).
+#
+# The transaction LAYER (write_txn_intent / gather_txn_observed /
+# classify_txn_recovery / publish_txn / cleanup_txn / the two counters) sits
+# far above, deliberately I/O-thin and pure where it can be. What follows is
+# the part that USES it: staging a validated pair, minting the intent, and
+# taking a transaction to a terminal state.
+#
+# THE FORWARD PATH AND THE RECOVERY PATH ARE THE SAME CODE, and that is the
+# design rather than a convenience. Immediately after the intent is made
+# durable, the on-disk state IS the classifier's "nothing renamed yet" case --
+# so publishing a fresh pair is literally the act of recovering a transaction
+# that has just been prepared. Any state the forward path can produce is
+# therefore a state the recovery path has already been made to understand;
+# there is no second implementation to drift.
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def segment_lease(segments_dir: Path, seg: str):
+    """Hold codex_job.py's OWN per-segment flock for the duration of the block.
+
+    Yields True if the lease was taken, False if another process holds it.
+
+    THE POINT IS TO READ CANONICAL STATE UNDER THE SAME LEASE THAT PROTECTS
+    WRITING IT. derive_next_action() reads the draft and the review from
+    outside any lease, while the pair is published by a child that holds this
+    one -- so a driver whose predecessor died with a child still running can
+    observe "review published, draft not yet" and act on it. Recovery has to
+    happen before that read, under this lease, which is why it cannot be an
+    action derive_next_action() returns: derive IS the read.
+
+    NON-BLOCKING ON PURPOSE. The alternative -- waiting -- serialises the whole
+    batch behind whichever segment holds the longest-running codex job, and
+    buys nothing: while a child holds the lease the segment is genuinely not
+    actionable, and the next driver invocation picks it up. The caller reports
+    a recoverable failure and writes no terminal ledger row.
+
+    The lock file is codex_job.py's, by exact path (`.codex_job.<seg>.lock` in
+    the segments directory) and is never unlinked -- a second lock file of this
+    driver's own would be an independent lease excluding nobody."""
+    lock_path = segments_dir / f".codex_job.{seg}.lock"
+    fd = None
+    held = False
+    try:
+        try:
+            segments_dir.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as exc:
+            print(f"segment_dispatch_driver.py: warning: could not open the per-segment "
+                  f"lease at {lock_path}: {exc}", file=sys.stderr)
+            yield False
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held = True
+        except OSError:
+            held = False
+        yield held
+    finally:
+        if fd is not None:
+            if held:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _stage_candidate(source: Path, destination: Path, expected_sha256) -> bool:
+    """Copy ONE validated candidate into the transaction's own staging slot,
+    durably, and only if its bytes still hash to what codex_job.py reported.
+
+    Re-hashing here is not a duplicate of codex_job.py's own check. That digest
+    describes the bytes its four gates validated; this one describes the bytes
+    that will actually be renamed over the user's text. Between the two the
+    file has been sitting at a private path in the segments directory, reachable
+    by anything with write access to it. Copying without re-hashing would carry
+    the VALIDATED digest into the intent while the STAGED bytes are something
+    else -- and every later check compares against the intent, so the swap would
+    be invisible from that point on."""
+    try:
+        data = source.read_bytes()
+    except OSError as exc:
+        print(f"segment_dispatch_driver.py: could not read the staged candidate "
+              f"{source}: {exc}", file=sys.stderr)
+        return False
+    digest = hashlib.sha256(data).hexdigest()
+    if not isinstance(expected_sha256, str) or digest != expected_sha256:
+        print(f"segment_dispatch_driver.py: refusing to stage {source}: its bytes hash to "
+              f"{digest}, not to the {expected_sha256!r} codex_job.py validated",
+              file=sys.stderr)
+        return False
+    tmp = destination.with_name(destination.name + ".tmp")
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(str(tmp), str(destination))
+    except OSError as exc:
+        print(f"segment_dispatch_driver.py: could not stage {destination}: {exc}", file=sys.stderr)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+    return _fsync_dir(destination.parent)
+
+
+def _txn_failure_ceiling(ctx: "DispatchContext") -> int:
+    return ctx.translate_cfg.get("max_txn_failures_per_segment",
+                                 DEFAULT_MAX_TXN_FAILURES_PER_SEGMENT)
+
+
+def advance_txn(ctx: "DispatchContext", seg: str, round_label=None) -> dict:
+    """Take ONE segment's transaction to a terminal state: observe, classify,
+    publish whatever the decision prescribes, commit, clean up -- charging a
+    durable failure when it refuses.
+
+    Returns {"outcome": <TXN_* constant>, "published": bool, "txn_id": str|None,
+    "charged": dict|None}. Never raises; every refusal is a return value,
+    because this runs inside per-segment work whose failures must not discard
+    other segments' results.
+
+    CHARGE FIRST, THEN CLEAN. The counter is keyed by txn_id and skips an id it
+    has already charged, so charging before cleanup is safe in both crash
+    directions: crash after charging and the next pass sees the same id and
+    does not double-charge; crash after cleanup and there was nothing left to
+    charge for. No ORDERING of a bare increment and a delete has that property
+    -- one order double-charges, the other never charges -- which is why the
+    counter records the ids rather than only a number.
+
+    A FAILED PUBLICATION IS NOT CLEANED UP. publish_txn leaves a consistent
+    prefix behind on refusal and the next pass classifies it; deleting the
+    staging here would turn a resumable half-publication into lost work."""
+    txn_dir = ctx.txn_dir
+    segments_dir = ctx.segments_dir
+    scripts_dir = ctx.dirs["scripts_dir"]
+
+    observed = gather_txn_observed(seg, txn_dir, segments_dir, scripts_dir,
+                                   round_label=round_label)
+    decision = classify_txn_recovery(observed)
+    outcome = decision["outcome"]
+    intent = observed.get("intent")
+    txn_id = intent.get("txn_id") if isinstance(intent, dict) else None
+    # The label to clean up under is the intent's OWN, never the caller's guess
+    # -- the same rule gather_txn_observed applies when it hashes staging.
+    label = intent.get("round_label") if isinstance(intent, dict) else round_label
+
+    published = True
+    if decision["publish"]:
+        published = publish_txn(txn_dir, seg, segments_dir, decision, scripts_dir)
+
+    charged = None
+    failed = (not published) or outcome in (TXN_PREIMAGE_DIVERGED, TXN_STAGING_LOST)
+    if failed and isinstance(txn_id, str) and txn_id:
+        charged = charge_txn_failure(txn_dir, seg, txn_id, _txn_failure_ceiling(ctx))
+
+    if published and decision["commit_intent"]:
+        commit_txn_intent(txn_dir, seg)
+    if published and decision["cleanup"] and isinstance(label, str):
+        cleanup_txn(txn_dir, seg, label)
+
+    append_journal(ctx.dirs["durable_root"], ctx.session_id, {
+        "type": "txn_recovery", "seg": seg, "txn_id": txn_id,
+        "outcome": outcome, "published": published,
+        "publish": decision["publish"],
+        "txn_failures": (charged or {}).get("count"),
+    })
+    return {"outcome": outcome, "published": published, "txn_id": txn_id, "charged": charged}
+
+
+def orphaned_staging_labels(txn_dir: Path, seg: str) -> list:
+    """The round labels this segment has staging for, discovered by GLOB.
+
+    Needed because the one state with no intent to read the label from --
+    staging written, then a crash before the intent was made durable -- is
+    exactly the state the recovery procedure's step 0 exists for. Guessing a
+    label there would answer "nothing in flight" for real orphaned files and
+    leave them to be mistaken for a later round's staging."""
+    labels = set()
+    try:
+        entries = list(txn_dir.glob(f"{seg}.*.staged.draft.json"))
+        entries += list(txn_dir.glob(f"{seg}.*.staged.review.json"))
+    except OSError:
+        return []
+    for path in entries:
+        rest = path.name[len(seg) + 1:]
+        for suffix in (".staged.draft.json", ".staged.review.json"):
+            if rest.endswith(suffix):
+                label = rest[: -len(suffix)]
+                if _TXN_ROUND_LABEL_RE.match(label):
+                    labels.add(label)
+    return sorted(labels)
+
+
+def recover_segment_txns(ctx: "DispatchContext", seg: str) -> list:
+    """The pre-derive recovery phase for ONE segment. MUST run holding the
+    per-segment lease and BEFORE derive_next_action() reads canonical state.
+
+    Runs advance_txn() once for the segment's intent (if any), then once per
+    orphaned staging label -- the intentless leftovers a crash between staging
+    and the durable intent produces, which have no intent to name their round.
+
+    ONE ATTEMPT PER TRANSACTION PER INVOCATION. Retrying inside one invocation
+    would re-run the identical observation against the identical state; the
+    bound that matters is the durable failure counter, not a loop here."""
+    results = [advance_txn(ctx, seg)]
+    if results[0]["outcome"] == TXN_PROCEED:
+        for label in orphaned_staging_labels(ctx.txn_dir, seg):
+            results.append(advance_txn(ctx, seg, round_label=label))
+    return results
+
+
+def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
+                           result: dict) -> dict:
+    """Stage, record the intent, and publish ONE validated fixreview pair.
+
+    `result` is run_one_codex_job()'s outcome for a --kind fixreview dispatch,
+    carrying the five staged_* fields verbatim (their per-invocation paths are
+    the ONLY pointer to the candidates -- nothing sweeps for them).
+
+    Returns {"ok": bool, "reason": str|None, "outcome": <TXN_* or None>,
+    "charged": dict|None}.
+
+    THE PRE-IMAGE IS READ BEFORE ANYTHING IS STAGED, and it binds more than
+    content. pre_edit_draft_sha1 comes from draft_sha1.py, which deliberately
+    EXCLUDES dispatch_token from the hash, while derive_next_action() reads
+    both the draft and the review. So a competing writer can leave the content
+    identical and the token different, or leave the draft alone and replace the
+    review -- and a CAS over content alone would wave both through. The intent
+    therefore records the token and the review's identity as well."""
+    txn_dir = ctx.txn_dir
+    segments_dir = ctx.segments_dir
+
+    def refuse(reason, outcome=None, charged=None):
+        return {"ok": False, "reason": reason, "outcome": outcome, "charged": charged}
+
+    for field in ("staged_draft_path", "staged_review_path",
+                  "staged_draft_sha256", "staged_review_sha256"):
+        if not isinstance(result.get(field), str) or not result[field]:
+            return refuse("txn-staged-fields-missing")
+    if result.get("staged") is not True:
+        return refuse("txn-staged-fields-missing")
+
+    try:
+        txn_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"segment_dispatch_driver.py: could not create {txn_dir}: {exc}", file=sys.stderr)
+        return refuse("txn-dir-unavailable")
+
+    pre = gather_txn_observed(seg, txn_dir, segments_dir, ctx.dirs["scripts_dir"],
+                              round_label=round_label)
+    if pre.get("intent") is not None:
+        # Recovery ran under the lease moments ago and left nothing behind, so
+        # an intent here means one appeared since. Refuse rather than start a
+        # second transaction over it -- the fixed draft is still staged at its
+        # private path and the next invocation re-derives from scratch.
+        return refuse("txn-intent-already-present")
+    pre_sha1 = pre.get("canonical_draft_content_sha1")
+    pre_token = pre.get("canonical_draft_token")
+    review_sha256 = pre.get("canonical_review_sha256")
+    if not isinstance(pre_sha1, str) or not isinstance(pre_token, str) or not pre_token:
+        return refuse("txn-preimage-unreadable")
+    if TXN_UNREADABLE in (review_sha256, pre.get("canonical_draft_sha256")):
+        # A file that exists but could not be read is the ABSENCE of an
+        # observation, never an observation of absence -- recording it as
+        # {"absent": true} would let a later pass "confirm" a preimage nobody
+        # ever saw.
+        return refuse("txn-preimage-unreadable")
+    review_preimage = {"absent": True} if review_sha256 is None else {"sha256": review_sha256}
+
+    attempt_seq = next_attempt_seq(txn_dir, seg)
+    if attempt_seq == 0:
+        return refuse("txn-attempt-seq-unavailable")
+    txn_id = make_txn_id(ctx.run_id, seg, round_label, attempt_seq)
+
+    slots = staged_paths(txn_dir, seg, round_label)
+    staged_ok = (
+        _stage_candidate(Path(result["staged_draft_path"]), slots["draft"],
+                         result["staged_draft_sha256"])
+        and _stage_candidate(Path(result["staged_review_path"]), slots["review"],
+                             result["staged_review_sha256"])
+    )
+    if not staged_ok:
+        # No intent exists yet, so this leaves at most orphaned staging -- the
+        # classifier's step 0, which the next recovery pass deletes. Removing
+        # it here too is belt and braces, not the mechanism.
+        cleanup_txn(txn_dir, seg, round_label)
+        return refuse("txn-staging-copy-failed")
+
+    intent = {
+        "txn_schema": TXN_SCHEMA_VERSION,
+        "txn_id": txn_id,
+        "attempt_seq": attempt_seq,
+        "seg": seg,
+        "round_label": round_label,
+        "phase": "prepared",
+        "draft_token": translate_dispatch_token(ctx.run_id, seg),
+        "review_token": review_dispatch_token(ctx.run_id, seg, round_label),
+        "pre_edit_draft_sha1": pre_sha1,
+        "pre_edit_draft_token": pre_token,
+        "review_preimage": review_preimage,
+        "staged_draft_sha256": result["staged_draft_sha256"],
+        "staged_review_sha256": result["staged_review_sha256"],
+        "dest_draft_path": str(segments_dir / f"{seg}.draft.json"),
+        "dest_review_path": str(segments_dir / f"{seg}.review.json"),
+    }
+    if not write_txn_intent(txn_dir, seg, intent):
+        cleanup_txn(txn_dir, seg, round_label)
+        return refuse("txn-intent-write-failed")
+
+    advanced = advance_txn(ctx, seg, round_label=round_label)
+    if advanced["published"] and advanced["outcome"] in (
+            TXN_ROLL_FORWARD_BOTH, TXN_ROLL_FORWARD_DRAFT, TXN_ROLLED_FORWARD_TAIL):
+        return {"ok": True, "reason": None, "outcome": advanced["outcome"],
+                "charged": advanced["charged"]}
+    return refuse(advanced["outcome"], outcome=advanced["outcome"],
+                  charged=advanced["charged"])
+
+
+def _dispatch_kind_for_round(fix_mode: str, round_label: str) -> str:
+    """Which codex job kind a `review` action dispatches.
+
+    The mandatory final round stays a plain review in BOTH modes: it is the
+    confirming round that edits nothing, and turning it into a merged call
+    would let the run's last word be spoken by the same call that wrote the
+    text it judges."""
+    if fix_mode == FIX_MODE_CODEX and round_label != "final":
+        return "fixreview"
+    return "review"
 
 
 def process_segment(seg: str, ctx: "DispatchContext") -> dict:
@@ -3960,38 +4508,97 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               -- it is "nothing else
                                               terminated in time".
 
-    The iteration cap (codex_jobs_per_segment(max_fix_rounds) -- one
-    translate plus every review round this segment could ever legitimately
-    need -- PLUS ONE, see the codex round-4 MINOR fix below) bounds the
-    LOOP overall; `fabricated_loc_retries` is a SEPARATE, narrower counter
+      outcome="failed", reason=
+        "segment-busy"                    -- --fix-mode=codex only: another
+                                              process holds the per-segment
+                                              lease, so canonical state cannot
+                                              be recovered and read safely
+                                              right now. Not a defect and not
+                                              terminal; no ledger write.
+      outcome="failed", reason=
+        "rejected-candidates-exhausted"   -- --fix-mode=codex only: this
+                                              numeric round produced
+                                              engine.max_rejected_candidates_
+                                              per_round candidates that failed
+                                              codex_job.py's four gates.
+                                              Nothing was published by any of
+                                              them (a rejected pair is
+                                              quarantined, never promoted), so
+                                              no ledger write.
+      outcome="failed", reason=
+        "stale-redispatch-exhausted"      -- --fix-mode=codex only: the draft
+                                              kept changing under a clean
+                                              review for this round more times
+                                              than the per-round allowance.
+                                              This path has no bound of its own
+                                              in handoff, where the loop cap is
+                                              the bound; codex needs a real
+                                              counter because its own per-mode
+                                              bound claims a specific one.
+      outcome="failed", reason=
+        "txn-failures-exhausted"          -- --fix-mode=codex only, and the one
+                                              CROSS-INVOCATION bound here: this
+                                              segment has accumulated
+                                              engine.max_txn_failures_per_
+                                              segment refused transactions in
+                                              its durable counter. A ceiling on
+                                              transaction attempts, NOT durable
+                                              terminality -- the segment stays
+                                              selectable and will be refused
+                                              again next invocation, which is
+                                              exactly why no ledger row is
+                                              written.
+      outcome="failed", stage="publish"   -- --fix-mode=codex only: the pair
+                                              validated and staged, but the
+                                              transaction refused to publish it
+                                              (`reason` is the TXN_* outcome).
+                                              Whether anything reached a
+                                              canonical name depends on the
+                                              outcome; recovery classifies it
+                                              on the next pass.
+
+    The iteration cap comes from codex_jobs_per_segment(max_fix_rounds,
+    fix_mode) -- see that function for why the two modes get different
+    numbers and why the cap and the volume admission are deliberately one
+    expression. `fabricated_loc_retries` is a SEPARATE, narrower counter
     (never reusing the loop's own iteration count) so an expected
     condition (a reviewer emitting a fabricated finding, which the
     template's own comment above AUTHENTIC_LOC_RE says a HEALTHY reviewer
     can do) is bounded and reported on its OWN terms, one retry, rather
     than silently spending the whole per-segment budget and then being
-    reported as if the defensive backstop itself had fired.
+    reported as if the defensive backstop itself had fired. The two
+    per-round counters (`rejected_candidates`, `stale_redispatches`) exist
+    for the same reason and are keyed BY ROUND, not by segment.
 
-    codex round-4 MINOR: the `+1` above is load-bearing, not padding.
-    Recognizing "the one permitted retry ALSO came back fabricated" costs
-    a full extra LOOP ITERATION beyond the raw dispatch count -- the
-    retry's own review must be DISPATCHED (one iteration) before its
-    result can be RE-READ and classified (a SEPARATE, later iteration,
-    even though that one dispatches nothing new). At max_fix_rounds=1,
-    codex_jobs_per_segment() = 3 (translate + review r1 + the one retry),
-    which is exactly enough budget for the three DISPATCHES but leaves no
-    iteration left to make the classification -- the loop hits its raw
-    cap and falls through to the generic "loop-exhausted-without-
-    terminal-state" reason on the SAME iteration that should have
-    produced "review-fabricated-loc" instead. The segment still correctly
-    terminates either way (no data loss, no wrong dispatch) -- only the
-    reported REASON was wrong, silently relabeling an identified,
-    expected condition as the generic defensive backstop. The existing
-    test for this path passed only because its fixture uses
-    max_fix_rounds=2 (budget 4), which happens to leave the needed spare
-    iteration; it never exercised the boundary.
+    The cap is one MORE than the normal path's job count, and that extra
+    iteration is load-bearing rather than padding. Recognizing "the one
+    permitted retry ALSO came back fabricated" costs a full extra LOOP
+    ITERATION beyond the raw dispatch count -- the retry's own review must be
+    DISPATCHED (one iteration) before its result can be RE-READ and classified
+    (a SEPARATE, later iteration, even though that one dispatches nothing
+    new). At max_fix_rounds=1 the normal path is 3 jobs (translate + review r1
+    + the one retry), which is exactly enough budget for the three DISPATCHES
+    but leaves no iteration to make the classification -- the loop would hit
+    its cap and fall through to the generic "loop-exhausted-without-terminal-
+    state" reason on the SAME iteration that should have produced
+    "review-fabricated-loc". The segment terminates correctly either way (no
+    data loss, no wrong dispatch); only the reported REASON was wrong, quietly
+    relabeling an identified, expected condition as the defensive backstop.
+    The existing test for this path passed only because its fixture uses
+    max_fix_rounds=2, which happens to leave the needed spare iteration; it
+    never exercised the boundary.
     """
-    max_iterations = codex_jobs_per_segment(ctx.translate_cfg["max_fix_rounds"]) + 1
+    max_fix_rounds = ctx.translate_cfg["max_fix_rounds"]
+    max_rejected = ctx.translate_cfg.get("max_rejected_candidates_per_round",
+                                         DEFAULT_MAX_REJECTED_CANDIDATES_PER_ROUND)
+    max_iterations = codex_jobs_per_segment(
+        max_fix_rounds, ctx.fix_mode, max_rejected_candidates_per_round=max_rejected)
     fabricated_loc_retries = 0
+    # Per-NUMERIC-ROUND, never per-segment: each is a term the per-mode bound
+    # multiplies by max_fix_rounds, so pooling them across rounds would let one
+    # bad round spend every other round's allowance and still be "within" it.
+    rejected_candidates = {}
+    stale_redispatches = {}
     for _ in range(max_iterations):
         # codex round-3 BLOCKER, corrected after an initial fix was itself
         # wrong. The worker subtree below `derive_next_action()` (this
@@ -4079,7 +4686,29 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
         # propagate through this loop exactly as before; only genuine
         # per-segment worker failures are absorbed.
         try:
-            action = derive_next_action(seg, ctx)
+            if ctx.fix_mode == FIX_MODE_CODEX:
+                # RECOVERY BEFORE THE READ, UNDER THE LEASE THAT PROTECTS THE
+                # WRITE. derive_next_action() is itself the read of canonical
+                # state, so recovery cannot be an action it returns -- by then
+                # the intermediate state has already been acted on. Both happen
+                # inside one lease so nothing can publish between them.
+                #
+                # Gated on the mode because handoff has no transactions to
+                # recover and its control flow is deliberately untouched by
+                # this release; taking a lease it never needed would be a
+                # behaviour change on the default path.
+                with segment_lease(ctx.segments_dir, seg) as leased:
+                    if not leased:
+                        # A codex_job.py child (very likely a predecessor
+                        # driver's) holds the lease: the segment is not
+                        # actionable now and is not broken. No terminal ledger
+                        # write, so it stays recoverable next invocation.
+                        return {"seg": seg, "converged": False, "outcome": "failed",
+                                "reason": "segment-busy"}
+                    recover_segment_txns(ctx, seg)
+                    action = derive_next_action(seg, ctx)
+            else:
+                action = derive_next_action(seg, ctx)
 
             if action["action"] == "already_converged":
                 # A review already landed clean+coverage_ok but the convergence
@@ -4135,8 +4764,32 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
 
             if action["action"] == "review":
                 round_label = action["round_label"]
+                kind = _dispatch_kind_for_round(ctx.fix_mode, round_label)
+                if kind == "fixreview":
+                    # EVERY TERMINAL CHECK HAPPENS BEFORE THE DISPATCH, not
+                    # after it. Checking afterwards still spends the job whose
+                    # spend the bound exists to refuse -- the bound would be
+                    # reporting overspend rather than preventing it.
+                    if action.get("cause") == "clean_stale":
+                        if stale_redispatches.get(round_label, 0) >= MAX_STALE_REDISPATCHES_PER_ROUND:
+                            return {"seg": seg, "converged": False, "outcome": "failed",
+                                    "reason": "stale-redispatch-exhausted",
+                                    "round_label": round_label}
+                        stale_redispatches[round_label] = stale_redispatches.get(round_label, 0) + 1
+                    # The durable, CROSS-INVOCATION bound, and the only one
+                    # here that is: it counts refused transactions in
+                    # runs/<RUN_ID>/txn/<seg>.txn_failures, so a segment cannot
+                    # be retried forever by relaunching the driver. Deliberately
+                    # only on this callsite -- translate is not transactional
+                    # and the final round is a plain review, so checking it at
+                    # either would refuse legitimate work over transaction
+                    # failures those paths cannot cause.
+                    if txn_failures_exhausted(ctx.txn_dir, seg, _txn_failure_ceiling(ctx)):
+                        return {"seg": seg, "converged": False, "outcome": "failed",
+                                "reason": "txn-failures-exhausted",
+                                "round_label": round_label}
                 if action.get("cause") == "fabricated_loc":
-                    if fabricated_loc_retries >= 1:
+                    if fabricated_loc_retries >= MAX_FABRICATED_LOC_RETRIES:
                         # Already retried once -- the reviewer is persistently
                         # emitting fabricated locs (within its own documented
                         # latitude, not a fault of its own). Terminate NOW,
@@ -4146,11 +4799,37 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                         return {"seg": seg, "converged": False, "outcome": "failed",
                                 "reason": "review-fabricated-loc"}
                     fabricated_loc_retries += 1
-                result = run_one_codex_job(ctx, kind="review", seg=seg, round_label=round_label)
+                result = run_one_codex_job(ctx, kind=kind, seg=seg, round_label=round_label)
                 if not result["ok"]:
-                    return {"seg": seg, "converged": False, "outcome": "failed", "stage": "review",
+                    if kind == "fixreview" and result.get("reason") == "validate-failed":
+                        # A candidate REJECTED by one of the four gates -- not
+                        # an infrastructure failure. Nothing was published and
+                        # both candidates are quarantined, so another attempt
+                        # at this round is meaningful in a way that retrying a
+                        # dead companion is not. Bounded per round, because
+                        # "the model keeps emitting a fabricated loc" is a
+                        # condition that reproduces rather than resolves.
+                        seen = rejected_candidates.get(round_label, 0) + 1
+                        rejected_candidates[round_label] = seen
+                        if seen >= max_rejected:
+                            return {"seg": seg, "converged": False, "outcome": "failed",
+                                    "stage": kind, "round_label": round_label,
+                                    "reason": "rejected-candidates-exhausted",
+                                    "error_detail": result["error_detail"]}
+                        continue
+                    return {"seg": seg, "converged": False, "outcome": "failed", "stage": kind,
                              "round_label": round_label,
                              "reason": result["reason"], "error_detail": result["error_detail"]}
+                if kind == "fixreview":
+                    # The pair is validated and staged, and NOTHING has been
+                    # published yet: codex_job.py never promotes this kind
+                    # (there is no single canonical path for two artifacts).
+                    # Publication is this driver's, through the transaction.
+                    txn = publish_fixreview_pair(ctx, seg, round_label, result)
+                    if not txn["ok"]:
+                        return {"seg": seg, "converged": False, "outcome": "failed",
+                                "stage": "publish", "round_label": round_label,
+                                "reason": txn["reason"]}
                 continue  # re-derive from the freshly promoted canonical review
 
             if action["action"] == "invalid_post_fix_draft":
@@ -4414,8 +5093,15 @@ def run(args, dirs: dict) -> dict:
         )
 
         engine_cfg = load_engine_config(durable_root)
+        # Admission is checked against the SAME per-segment bound the loop is
+        # capped at, for the SAME mode -- see codex_jobs_per_segment(). Passing
+        # handoff's number while running codex would admit a batch its own loop
+        # is entitled to overspend several times over.
+        fix_mode = getattr(args, "fix_mode", FIX_MODE_HANDOFF)
         volume_refusal = check_volume_cap(
-            len(segs), engine_cfg["max_fix_rounds"], engine_cfg["max_codex_jobs_per_batch"]
+            len(segs), engine_cfg["max_fix_rounds"], engine_cfg["max_codex_jobs_per_batch"],
+            fix_mode,
+            max_rejected_candidates_per_round=engine_cfg["max_rejected_candidates_per_round"],
         )
         if volume_refusal is not None:
             append_journal(durable_root, session_id, {"type": "volume_check_refused", **volume_refusal})
@@ -4431,8 +5117,11 @@ def run(args, dirs: dict) -> dict:
             durable_root, session_id,
             {
                 "type": "volume_check_passed",
-                "estimatedCodexJobs": len(segs) * codex_jobs_per_segment(engine_cfg["max_fix_rounds"]),
+                "estimatedCodexJobs": len(segs) * codex_jobs_per_segment(
+                    engine_cfg["max_fix_rounds"], fix_mode,
+                    max_rejected_candidates_per_round=engine_cfg["max_rejected_candidates_per_round"]),
                 "codexJobsCap": engine_cfg["max_codex_jobs_per_batch"],
+                "fixMode": fix_mode,
             },
         )
 
@@ -4463,7 +5152,7 @@ def run(args, dirs: dict) -> dict:
             dirs=dirs, run_id=run_id, translate_cfg=translate_cfg, companion_path=companion_path,
             durable_root_str=args.durable_root, plugin_root_str=args.plugin_root,
             node_bin=args.node, session_id=session_id,
-            fix_mode=getattr(args, "fix_mode", FIX_MODE_HANDOFF),
+            fix_mode=fix_mode,
         )
 
         append_journal(

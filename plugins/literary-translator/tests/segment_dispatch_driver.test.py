@@ -671,43 +671,101 @@ def test_relative_durable_root_does_not_resolve_twice(tmp_path):
 
 # ===========================================================================
 # Property 7 -- the volume refusal, engine.max_codex_jobs_per_batch.
-# Formula and boundary must match mass-translate-wf.template.js's own
-# preflight for this SAME knob exactly: CODEX_JOBS_PER_SEG = max_fix_rounds
-# + 2, estimated = N * CODEX_JOBS_PER_SEG, refuse iff estimated > cap
-# (strictly greater -- estimated == cap must NOT trip the gate).
+#
+# The boundary shape matches mass-translate-wf.template.js's own preflight for
+# this SAME knob: estimated = N * <per-segment jobs>, refuse iff estimated >
+# cap (strictly greater -- estimated == cap must NOT trip the gate).
+#
+# THE PER-SEGMENT NUMBER IS THIS DRIVER'S OWN AND IS NOT THE TEMPLATE'S. The
+# template counts max_fix_rounds + 2, its normal-path round structure, where a
+# fix is an agent() call rather than a codex job. This driver admits against
+# the very cap its own loop is bounded by -- max_fix_rounds + 3 on handoff,
+# more on codex (see codex_jobs_per_segment) -- because the number that admits
+# a batch and the number that bounds its spend have to be one number for the
+# admission to mean anything. The template's own preflight test keeps M+2 and
+# is deliberately not rewritten per-mode: there is no --fix-mode there.
 # ===========================================================================
 
 
 def test_codex_jobs_per_segment_formula():
-    assert DRIVER.codex_jobs_per_segment(0) == 2
-    assert DRIVER.codex_jobs_per_segment(3) == 5
-    assert DRIVER.codex_jobs_per_segment(4) == 6
+    """handoff is M+3, not the M+2 that describes the normal path only: the
+    loop's cap has always been M+3 and the persistently-stale path really can
+    dispatch on every one of those iterations (see the loop-exhaustion test
+    below, which asserts exactly that)."""
+    assert DRIVER.codex_jobs_per_segment(0) == 3
+    assert DRIVER.codex_jobs_per_segment(3) == 6
+    assert DRIVER.codex_jobs_per_segment(4) == 7
+    # Explicit mode argument agrees with the default.
+    assert DRIVER.codex_jobs_per_segment(4, DRIVER.FIX_MODE_HANDOFF) == 7
+
+
+def test_codex_mode_adds_its_per_round_allowances_to_the_same_bound():
+    """K = M+3 + M*(R_reject + R_stale) + R_final. Spelled out here rather
+    than recomputed from the constants, so a change to any allowance has to be
+    made deliberately in two places instead of silently agreeing with itself."""
+    # M=2, R_reject=2, R_stale=1, R_final=1 -> 5 + 2*3 + 1 = 12
+    assert DRIVER.codex_jobs_per_segment(2, DRIVER.FIX_MODE_CODEX) == 12
+    # M=4 -> 7 + 4*3 + 1 = 20
+    assert DRIVER.codex_jobs_per_segment(4, DRIVER.FIX_MODE_CODEX) == 20
+    # The rejected-candidate allowance is engine-configurable and really is a
+    # term of the bound, not a decoration alongside it.
+    assert DRIVER.codex_jobs_per_segment(
+        2, DRIVER.FIX_MODE_CODEX, max_rejected_candidates_per_round=0) == 8
+
+
+def test_codex_mode_never_admits_fewer_segments_than_handoff():
+    """The mode that can dispatch strictly more jobs must never be admitted
+    against a smaller bound -- an inverted comparison here would let a codex
+    batch start that handoff would have refused."""
+    for max_fix_rounds in range(1, 8):
+        assert (DRIVER.codex_jobs_per_segment(max_fix_rounds, DRIVER.FIX_MODE_CODEX)
+                > DRIVER.codex_jobs_per_segment(max_fix_rounds, DRIVER.FIX_MODE_HANDOFF))
+
+
+def test_an_unknown_fix_mode_is_refused_rather_than_treated_as_handoff():
+    """Defaulting an unrecognised mode to handoff would admit a batch against
+    the SMALLER of the two bounds -- fail-safe in name only."""
+    with pytest.raises(DRIVER.DriverError):
+        DRIVER.codex_jobs_per_segment(2, "merged")
 
 
 def test_check_volume_cap_boundary_is_strictly_greater_than():
-    # 10 segments * (2 + 2) = 40 -- exactly at the cap must NOT refuse.
-    assert DRIVER.check_volume_cap(10, 2, 40) is None
-    # One more segment -> 44 > 40 -- must refuse.
-    refusal = DRIVER.check_volume_cap(11, 2, 40)
+    # 10 segments * (2 + 3) = 50 -- exactly at the cap must NOT refuse.
+    assert DRIVER.check_volume_cap(10, 2, 50) is None
+    # One more segment -> 55 > 50 -- must refuse.
+    refusal = DRIVER.check_volume_cap(11, 2, 50)
     assert refusal is not None
-    assert refusal["estimatedCodexJobs"] == 44
-    assert refusal["codexJobsCap"] == 40
+    assert refusal["estimatedCodexJobs"] == 55
+    assert refusal["codexJobsCap"] == 50
     assert refusal["reason"] == "batch-too-large-codex-jobs"
-    assert "estimatedCodexJobs=44" in refusal["message"]
+    assert "estimatedCodexJobs=55" in refusal["message"]
     assert "11 segment(s)" in refusal["message"]
     assert "max_fix_rounds=2" in refusal["message"]
-    assert "engine.max_codex_jobs_per_batch limit of 40" in refusal["message"]
+    assert "engine.max_codex_jobs_per_batch limit of 50" in refusal["message"]
+
+
+def test_check_volume_cap_refuses_a_codex_batch_handoff_would_admit():
+    """The reason admission is per-mode at all. Same segments, same cap, same
+    profile -- only the mode differs, and the codex loop is entitled to spend
+    more than twice as much."""
+    assert DRIVER.check_volume_cap(10, 2, 50, DRIVER.FIX_MODE_HANDOFF) is None
+    refusal = DRIVER.check_volume_cap(10, 2, 50, DRIVER.FIX_MODE_CODEX)
+    assert refusal is not None
+    assert refusal["estimatedCodexJobs"] == 120
 
 
 def test_check_volume_cap_matches_the_shipped_default_cap_boundary():
-    """The shipped schema default (400) admits exactly 66 segments at
-    max_fix_rounds=4 -- the SAME figure profile.example.yml's own comment
-    documents (66*6=396<=400; 67*6=402>400) and the SAME figure the
-    max_codex_jobs_per_batch task's own report measured independently."""
-    assert DRIVER.check_volume_cap(66, 4, 400) is None
-    refusal = DRIVER.check_volume_cap(67, 4, 400)
+    """The shipped schema default (400) admits 57 segments at max_fix_rounds=4
+    for THIS driver (57*7=399<=400; 58*7=406>400).
+
+    profile.example.yml's own comment documents 66 as well, and that figure is
+    not stale: it is the WORKFLOW's count at the same setting (66*6=396). Two
+    consumers of one knob, each counting its own loop -- the comment now names
+    both, and this test pins the driver's."""
+    assert DRIVER.check_volume_cap(57, 4, 400) is None
+    refusal = DRIVER.check_volume_cap(58, 4, 400)
     assert refusal is not None
-    assert refusal["estimatedCodexJobs"] == 402
+    assert refusal["estimatedCodexJobs"] == 406
 
 
 def test_volume_cap_refuses_end_to_end(tmp_path):
@@ -715,7 +773,7 @@ def test_volume_cap_refuses_end_to_end(tmp_path):
         tmp_path,
         profile_yaml="engine:\n  max_fix_rounds: 1\n  max_codex_jobs_per_batch: 5\n",
     )
-    # 3 not_started segments * (1+2)=3 jobs/seg = 9 > 5.
+    # 3 not_started segments * (1+3)=4 jobs/seg = 12 > 5.
     write_manifest(root, ["seg01", "seg02", "seg03"])
 
     proc = run_driver(root, "--allow-empty")
@@ -724,8 +782,33 @@ def test_volume_cap_refuses_end_to_end(tmp_path):
     payload = parse_stdout(proc)
     assert payload["success"] is False
     assert payload["reason"] == "batch-too-large-codex-jobs"
-    assert payload["estimatedCodexJobs"] == 9
+    assert payload["estimatedCodexJobs"] == 12
     assert payload["codexJobsCap"] == 5
+
+
+def test_volume_cap_refuses_end_to_end_under_fix_mode_codex(tmp_path):
+    """The per-mode bound reaches the real CLI, not just the pure function --
+    the flag has to travel from argparse into check_volume_cap for the
+    admission to be the mode's own."""
+    root = make_durable_root(
+        tmp_path,
+        profile_yaml="engine:\n  max_fix_rounds: 1\n  max_codex_jobs_per_batch: 12\n",
+    )
+    write_manifest(root, ["seg01", "seg02", "seg03"])
+
+    # handoff: 3 * 4 = 12, exactly at the cap -> the volume gate does NOT
+    # trip. (This minimal profile is missing fields a real dispatch needs, so
+    # the run still fails further along -- which is fine and is the point:
+    # what is asserted is that it does not fail HERE.)
+    handoff = run_driver(root, "--allow-empty")
+    assert "batch-too-large-codex-jobs" not in (handoff.stdout or ""), handoff.stdout
+
+    # codex: 3 * (4 + 1*3 + 1) = 24 > 12 -> refused, on the same fixture.
+    proc = run_driver(root, "--allow-empty", "--fix-mode", "codex")
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["reason"] == "batch-too-large-codex-jobs"
+    assert payload["estimatedCodexJobs"] == 24
 
 
 def test_volume_cap_default_when_profile_omits_the_key(tmp_path):
@@ -2154,7 +2237,7 @@ def test_a_clean_review_stale_against_an_edited_draft_re_reviews_instead_of_live
     (root / "segments" / "seg01.review.json").write_text(json.dumps(review, ensure_ascii=False), encoding="utf-8")
 
     action = driver_mod.derive_next_action("seg01", ctx)
-    assert action == {"action": "review", "round_label": "1"}, (
+    assert action == {"action": "review", "round_label": "1", "cause": "clean_stale"}, (
         f"a clean review stale against the current draft must trigger a fresh "
         f"re-review, never already_converged (ledger_update.py would refuse "
         f"that write and this would repeat forever) -- got {action}"
@@ -3695,21 +3778,27 @@ def test_a_persistently_stale_clean_review_exhausts_the_loop_without_terminal_st
     dispatch-count assertion fails, confirming the loop's OWN iteration
     cap -- and nothing else -- is what bounds this path today.
 
-    codex round-4 MINOR: process_segment()'s own max_iterations is now
-    codex_jobs_per_segment(max_fix_rounds) + 1 -- one spare iteration
-    reserved so the fabricated-loc retry bound can always classify its
-    own boundary case (see process_segment()'s own docstring for why that
-    +1 costs a full loop iteration on its own). This path's own bound
-    (the "clean but stale" branch has none of its own) is therefore ALSO
-    one iteration longer than the raw dispatch-count formula -- updated
-    here to match, not because this test is about the fabricated-loc
-    fix, but because both paths share the same max_iterations value."""
+    process_segment()'s max_iterations IS codex_jobs_per_segment(max_fix_
+    rounds, fix_mode) -- the spare iteration the fabricated-loc retry bound
+    needs to classify its own boundary case is inside that function now,
+    rather than being added by every caller (see its own docstring for why
+    that iteration costs a full loop pass). This path's own bound -- the
+    "clean but stale" branch has none of its own under handoff -- is
+    therefore whatever that function returns, read from it rather than
+    re-derived here.
+
+    THE CAP IS READ FROM THE PRODUCTION FUNCTION, WITH THE MODE, deliberately.
+    An earlier version added its own `+ 1` on top, which agreed with the
+    implementation only for as long as both spelled the correction the same
+    way; when the +1 moved inside, this test asserted a cap one higher than
+    the loop's and failed on a change that was correct."""
     root = phase2_project(tmp_path, n=1)
     write_codex_scenario(root, {
         "review:seg01": {"review_clean": True, "review_coverage_ok": True, "review_draft_sha1": "0" * 40},
     })
     driver_mod, ctx = _fixture_ctx(root, "20260101T000000Z")
-    max_iterations = driver_mod.codex_jobs_per_segment(ctx.translate_cfg["max_fix_rounds"]) + 1
+    max_iterations = driver_mod.codex_jobs_per_segment(
+        ctx.translate_cfg["max_fix_rounds"], ctx.fix_mode)
 
     result = driver_mod.process_segment("seg01", ctx)
 

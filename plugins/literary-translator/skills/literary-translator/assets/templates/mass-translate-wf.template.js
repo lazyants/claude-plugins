@@ -1016,6 +1016,56 @@ function reviewDispatchPrompt(seg, roundLabel) {
   return lines.join("\n");
 }
 
+// #409 track B -- the MERGED review+fix prompt, dispatched ONLY by
+// segment_dispatch_driver.py under --fix-mode=codex, as --kind fixreview. This
+// Workflow never calls it: runRound's own review/fix split is unchanged, and no
+// runner below dispatches this kind. It lives here anyway, alongside every other
+// prompt builder, because the driver EXECUTES this file's builders rather than
+// keeping a second copy of the text (see the driver's render_fixreview_prompt()).
+//
+// Two output placeholders, exactly one occurrence each -- codex_job.py counts
+// them and refuses the job otherwise. ⟦JOB_OUT⟧ is the candidate DRAFT (same
+// slot every kind's single output uses) and ⟦JOB_OUT_REVIEW⟧ is the candidate
+// REVIEW. Neither is a canonical path: this kind never promotes, and the driver's
+// transaction layer publishes the validated pair afterwards.
+//
+// THE ORDER "review the draft you found, THEN edit it" IS THE WHOLE POINT, and
+// the sha1 binding -- not this prose -- is what enforces it. The review's
+// draft_sha1 describes the PRE-edit draft, so a merged call that edits anything
+// emits a review whose binding no longer matches the draft it publishes, and the
+// driver cannot read that as convergence (segment_dispatch_driver.py's own
+// clean-but-stale branch). Convergence therefore requires a round that changed
+// nothing -- which is exactly a round that needed no fix. The reviewer half still
+// judges the PREVIOUS round's edit; its own edit is judged by the next round.
+// review_ready.py enforces the same thing mechanically at gate 3: it compares the
+// candidate review's draft_sha1 against the CURRENT canonical draft, which is
+// still the pre-edit one at validation time.
+function fixReviewDispatchPrompt(seg, roundLabel) {
+  const reviewToken = RUN_ID + ":" + seg + ":r" + roundLabel;
+  const draftToken = RUN_ID + ":" + seg;
+  const lines = [];
+  lines.push("Effort: " + EFFORT + ". ONE call that does TWO things for segment " + seg + " (" + SOURCE_LANG + " to " + TARGET_LANG + "), round " + roundLabel + ": FIRST you review the draft exactly as you find it, THEN you apply your own findings to it. Both outputs are always required, even when you find nothing to fix.");
+  lines.push("This prompt is self-contained and supersedes " + ROOT + "/review_TASK.md for the field contract and for BOTH write destinations below. Read review_TASK.md for narrative guidance only -- it predates this merged call, names neither output path, and its own field list must never override the fields spelled out here.");
+  lines.push("First run the deterministic gate: " + PY + " " + ROOT + "/scripts/validate_draft.py " + seg + " -- remember whether it printed OK or FAIL, and any defects it named.");
+  lines.push("Before reading the draft, compute its current sha1 by running: " + PY + " " + ROOT + "/scripts/draft_sha1.py " + seg + " -- this becomes your draft_sha1 value below, and it must be computed BEFORE you read the draft file itself.");
+  lines.push("That draft_sha1 describes the draft AS YOU FOUND IT and must never be recomputed after you edit anything. It is what binds your verdict to the draft you actually judged: a review carrying the sha1 of your own edited draft would be attesting your own edit, and this run rejects it.");
+  lines.push("Then read: " + ROOT + "/review_TASK.md ; " + ROOT + "/style_bible.md ; " + ROOT + "/segments/segpack_" + seg + ".json ; " + ROOT + "/segments/" + seg + ".draft.json.");
+  lines.push("As soon as you read the draft, check its own dispatch_token field: it must equal exactly this literal string: " + JSON.stringify(draftToken) + ". If it does not match exactly, STOP here -- this draft belongs to a different, stale run. Do not review it and do not edit it, write NEITHER output file, and return exactly the line: DRAFT_TOKEN_MISMATCH " + seg + " instead of the FIXREVIEWED line below.");
+  lines.push("Verse policy for this project: " + VERSE_POLICY_INSTRUCTION_BLOCK);
+  lines.push("STEP 1 -- REVIEW, before you change a single character. Check the draft against the source for: full accuracy (no omissions or distortions), word-sense and realia fidelity for the source era and context -- ask explicitly whether each notable word means what it meant in that period and context, not what it means today -- name/canon fidelity, placeholder sentinel fidelity, verse per the policy above, and literary quality (register, idiom, natural seams, rhythm).");
+  lines.push("Canon-name fidelity specifically: the segpack's canon_map gives each already-canonized name's frozen canonical target form. Flag a canon name ONLY if the draft renders a different name, a different transliteration of the canonical stem, leaves a canonical name untranslated, or swaps an epithet for a real surname -- a correctly inflected/declined form of the canonical stem is CORRECT and must NOT be flagged.");
+  lines.push("A canon_map target form is authoritative as given. Never flag a canon name merely because its frozen canonical target form is lexically unrelated to the SOURCE form -- for a sense-translated speaking name (basis:\"sense_translated\") that is expected and correct. The deviation triggers above still apply. Correctness of the frozen canon decision itself is out of scope for this review -- a suspected error is reopened via the glossary/adjudication route, never flagged here.");
+  lines.push("Every finding's loc must name a real location you can point at in the draft or segpack (a block key, a footnote key, a \"VERSE:{vid}\" for a verse-specific finding). A finding whose loc names nothing real -- a task label, a section of this prompt, an invented key -- causes this entire round to be thrown away, INCLUDING the draft you edit in step 2, because there is no way to tell which of your edits followed it.");
+  lines.push("Build a JSON object with exactly these five fields: clean (true only if there are no findings that require a fix round), coverage_ok (true only if the deterministic gate above printed OK), findings (an array of objects with loc/severity/issue/suggest), draft_sha1 (the value you computed before reading the draft, above), and dispatch_token (exactly this literal string: " + JSON.stringify(reviewToken) + ").");
+  lines.push("Write that exact object as JSON to the output path ⟦JOB_OUT_REVIEW⟧ (an isolated attempt path this run supplies) and nothing else.");
+  lines.push("STEP 2 -- FIX, using the findings you just wrote as the authoritative list. Apply every entry in that findings[] array, in full, to the draft you read. Never touch a placeholder sentinel (e.g. ⟦FNREF_...⟧, ⟦VERSE_...⟧) -- copy each one byte for byte in place. Keep the verse policy above. Never change the set of block, footnote, or verse keys -- they must stay exactly 1:1 with the segpack. The draft carries a dispatch_token top-level field -- copy its existing value byte for byte into the draft you write, unchanged; never invent, drop, or recompute it.");
+  lines.push("Write the resulting draft to the output path ⟦JOB_OUT⟧ and nothing else.");
+  lines.push("If your review came out clean and you have nothing to apply, you STILL write both outputs: write the draft you read to that path byte for byte unchanged. An unchanged draft is how this round reports convergence -- omitting the draft output fails the round instead.");
+  lines.push("Those two output paths SUPERSEDE " + ROOT + "/review_TASK.md for the write destinations: write ONLY to them, even if review_TASK.md names " + ROOT + "/segments/" + seg + ".review.json or another segments/ path. Never write the canonical " + ROOT + "/segments/" + seg + ".draft.json or " + ROOT + "/segments/" + seg + ".review.json yourself, and create no other file under " + ROOT + "/segments/. Those two paths are the only segments-area files you may write; this run validates both and publishes them together.");
+  lines.push("Return exactly the line: FIXREVIEWED " + seg + " r" + roundLabel);
+  return lines.join("\n");
+}
+
 // #198 -- the plain-Claude DISPATCHER for the review job. Symmetric to
 // translateDrivePrompt (no agentType, effort low; --kind review;
 // --expect-token RUN_ID:seg:r<label>; task-file .codex_task.review.<seg>.
