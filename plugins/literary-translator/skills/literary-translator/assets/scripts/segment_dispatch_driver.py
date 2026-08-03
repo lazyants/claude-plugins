@@ -27,7 +27,7 @@ step. Applying review findings to a draft is a real LLM content-editing
 turn (mass-translate-wf.template.js's own `callFix`/`fixPrompt`, dispatched
 via a Claude `agent()` call today) -- a plain Python process has no
 equivalent capability, and PLAN.md's own step order defers redesigning fix
-as a codex_job.py dispatch to a LATER phase ("Шаг 5 (B)"), explicitly
+as a codex_job.py dispatch to a LATER phase (step 5, track B), explicitly
 because it only pays off once this driver already exists. So when a
 segment's review comes back not-clean, `process_segment()` below stops at
 that segment and returns a `needs_fix` result carrying the round label,
@@ -220,12 +220,12 @@ batch never triggers the resource it measures.
   batch-level `mergeLedgerPrompt` completeness check. This driver reports
   its own per-segment results (`run()`'s returned `summary`); the batch-
   final `ledger_merge.py --expected-segs ... --run-token ...` completeness
-  re-check PLAN.md's Шаг 4 acceptance criteria describe is not wired in
+  re-check that PLAN.md's step-4 acceptance criteria describe is not wired in
   here -- it is a single, whole-batch, end-of-run concern the orchestrating
   session can run directly (mirroring `mergeLedgerPrompt`'s own script
   call, again with no agent() indirection needed) after this driver's
   `results` show every segment converged or accounted for.
-- Any of PLAN.md's later "Этап 0" trust-boundary work (a content-addressed
+- Any of PLAN.md's later stage-0 trust-boundary work (a content-addressed
   read-only executable snapshot replacing today's plain durable-root
   script copies; a per-job writable sandbox with descriptor-pinned
   publish; root-threading through the WHOLE selector/resume chain). That
@@ -332,7 +332,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, Optional
 
 try:
     import yaml
@@ -1848,13 +1848,6 @@ def _draft_observation(seg: str, draft_path: Path, segments_dir: Path, scripts_d
     return (hashlib.sha256(before).hexdigest(), content_sha1, token)
 
 
-def _read_json_or_none(path: Path):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError, TypeError):
-        return None
-
-
 def classify_txn_recovery(observed: dict) -> dict:
     """Decide what to do about a segment's transaction, from observed state.
 
@@ -2127,7 +2120,7 @@ def txn_failures_exhausted(txn_dir: Path, seg: str, ceiling: int) -> bool:
     return state["count"] >= ceiling
 
 
-def charge_txn_failure(txn_dir: Path, seg: str, txn_id: str, ceiling: int) -> dict:
+def charge_txn_failure(txn_dir: Path, seg: str, txn_id: str, ceiling: int) -> Optional[dict]:
     """Charge ONE failure against `seg`, idempotently, keyed on `txn_id`.
 
     Exactly-once here is a property of IDEMPOTENCE, not of write ordering, and
