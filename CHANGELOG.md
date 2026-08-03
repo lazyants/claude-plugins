@@ -2,6 +2,46 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [ai-cli-optout 1.1.2] — 2026-08-03
+
+The shipped `SKILL.md` frontmatter `description` was 1674 characters against the Agent Skills
+maximum of 1024 — startup discovery metadata, so an over-limit value risks failing validation or
+loading depending on the consumer, silently either way. Closes #374.
+
+### Fixed
+- **`description` trimmed to 956 characters**, 68 under the limit, from 1674 (both measured by
+  parsing the frontmatter with a real YAML parser, not by counting source bytes). The trailing list of
+  41 literal trigger phrases was the cheapest ~700 characters to reclaim.
+  - **What actually preserves discovery is naming things, not listing phrasings.** The body loads only
+    after the skill has been selected, so moving phrases there cannot keep them matchable — a first
+    draft did exactly that and claimed "no phrase was dropped", which was true of the file and false
+    of the behavior. The description instead now names **every vendor** and **every action term** —
+    telemetry, tracking, analytics, error reporting, feedback, opt out, privacy mode, kill switch — so
+    requests like "disable windows telemetry" or "opt out of vercel" still match without appearing
+    verbatim. `gh` and JetBrains join the vendor enumeration, where neither had ever appeared; the old
+    description mentioned them only inside trigger phrases. Measured: of the 43 distinct words across
+    all 41 former phrases, exactly two are absent from the new description — `optout`, a spelling of
+    "opt out", and `off`, which is a synonym rather than a spelling, so "vscode telemetry off" is the
+    one phrasing that now rests on semantic inference rather than on a word the description contains.
+  - Ten representative phrasings remain in the description; all 41 are recorded in a new **Trigger
+    phrases** section in the body, explicitly labelled documentation rather than discovery.
+
+### Not included
+- **An automated frontmatter-length gate is deliberately deferred to #425, not forgotten.** #374
+  proposed one alongside the fix, and a draft was written and reviewed twice. Both rounds rejected it
+  for the same
+  structural reason: the cap applies to the YAML *value*, not to the source text, so enforcing it
+  without a YAML parser means writing one. Each review round surfaced a fresh class of valid YAML that
+  the hand-rolled reader silently UNDER-measured — aliases, `+` chomping with trailing blank lines,
+  U+00A0 inside a plain scalar, a duplicate key (YAML takes the last, the reader took the first), a
+  column-zero key nested in a flow mapping — and every one of those is a false PASS on a file that
+  really does violate the cap, which is the exact failure such a gate exists to prevent. A gate that
+  under-measures is worse than no gate, because it converts an unknown into a false assurance. The
+  requirement stands: **#425** carries the full list of measured under-counts with the parser's own
+  figures, the requirements an acceptable design must meet, and the verification trap that made the
+  rejected draft look verified when it was not. The design needs a root of trust — a real parser, or a
+  provably conservative over-estimate — rather than another special case.
+
 ## [enduser-handbook 1.12.0] — 2026-07-31
 
 Build-provenance records: a published handbook can say which build of the documented software it
