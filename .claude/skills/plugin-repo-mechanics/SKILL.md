@@ -1,6 +1,6 @@
 ---
 name: plugin-repo-mechanics
-description: Publishing and maintenance for the lazy-ants claude-plugins marketplace repo — bumping a plugin version across its four synced surfaces, adding a plugin or ai-cli-optout vendor, verifying a squash-merge landed on origin/main, parallel-PR conflicts on README/marketplace.json, the lazy-ants-reviewer bot, and `claude plugin` CLI ops.
+description: Publishing and maintenance for the lazy-ants claude-plugins marketplace repo — bumping a plugin version across its four synced surfaces, adding a plugin or ai-cli-optout vendor, verifying a squash-merge landed on origin/main, parallel-PR conflicts on README/marketplace.json, the lazy-ants-reviewer bot, `claude plugin` CLI ops and installed-version reads, refreshing the installed copy per profile after merge (publish is not ship), switching a marketplace source directory/github, scrubbing author-local paths out of a generalized plugin, and per-project skill parameterization via a profile file.
 ---
 
 Publishing and maintenance mechanics for THIS claude-plugins marketplace repo. Two cross-cutting rules apply everywhere below:

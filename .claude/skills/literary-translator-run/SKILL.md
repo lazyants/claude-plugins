@@ -1,6 +1,6 @@
 ---
 name: literary-translator-run
-description: Driving a real book end-to-end through the literary-translator plugin as an operator — translating an actual book (especially Hebrew, Yiddish, Arabic or another uncased/non-Latin script), onboarding a source language, hand-scaffolding Step 0a, EPUB-wrapping a plain-text/OCR/PDF source, and auditing an LLM-built name canon or a finished translation.
+description: Driving a real book through the literary-translator plugin as an operator, especially Hebrew, Yiddish, Arabic or another uncased/non-Latin script — onboarding a source language preset (he.local.json), hand-scaffolding Step 0a (durable_root, bundle-hash markers, profile.yml), EPUB-wrapping a plain-text/OCR/PDF source, marker-snapped segmentation, structure attestation, clearing a W3 zero-candidate name canon, driving W5 translate and W3a glossary dispatch by hand, depositing into the Obsidian book-vault, and auditing an LLM-built canon or translation via a blind-adjudicated convergence loop.
 ---
 
 # Driving a real book through the literary-translator plugin

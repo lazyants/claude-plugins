@@ -1,6 +1,6 @@
 ---
 name: enduser-handbook-ops
-description: Working ON the enduser-handbook plugin — modifying its skill, publish-target/adapter-filename resolution, link-emission canons (wikilinks/index rows), grep-based test assertions over its hard-wrapped docs, reference-assets.test.sh portability, citation-audit-lib.mjs or profile-schema-evaluator.mjs, or its capture-safety PII audit.
+description: Working ON the enduser-handbook plugin — modifying its skill, publish-target/adapter-filename resolution, link-emission canons (wikilinks/index rows), adding or removing a profile.yml key, grep assertions and enumeration sweeps over its hard-wrapped docs (`has` vs `has_in_section`, "must-now-fail" self-tests, reference-assets.test.sh portability), chapter-paths delimiter tests, citation-audit-lib.mjs regex, profile-schema-evaluator.mjs `in` vs `Object.hasOwn`, tracing what a gate/backstop really catches, a halt-driven manual recipe completion check, or its capture-safety PII audit.
 ---
 
 The `enduser-handbook` plugin is a **contract-dense reference-doc skill**: the same rule is stated in several `references/*.md` files plus `SKILL.md`, the docs are hard-wrapped, and the runtime steps (`Step 0b`, `W5`) must agree with the prose. Recurring traps, the review discipline that catches them, and a technique for designing convergence checks on manual-work recipes.

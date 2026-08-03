@@ -1,6 +1,6 @@
 ---
 name: codex-runtime-driving
-description: Mechanics for reliably driving the codex-companion runtime and recovering its verdict — use when running codex:codex-rescue or codex-companion.mjs (task/adversarial-review/codex exec, foreground, --background, or via the rescue Agent), polling or reading its job state JSON / result, diagnosing a backgrounded or lost verdict, a dead/hung/killed worker, "No job found", a fabricated wait-state, arg-misparse, env/PATH/broker/TMPDIR/moderation/usage-limit breakage, driving long or parallel background jobs safely, or benchmarking codex model×effort on a slice before committing a big job.
+description: Mechanics for reliably driving the codex-companion runtime and recovering its verdict — use when running codex:codex-rescue or codex-companion.mjs (task/adversarial-review/codex exec, foreground, --background, or via the rescue Agent), polling or reading its job state JSON / result, diagnosing a backgrounded or lost verdict, a dead/hung/killed worker, "No job found", a fabricated wait-state, arg-misparse, env/PATH/broker/TMPDIR/moderation/usage-limit breakage, driving long or parallel background jobs safely, confining what a job may WRITE or reasoning about its sandbox/workspace-root boundary (a `--cwd` inside a repo does not move it), or benchmarking codex model×effort on a slice before committing a big job.
 ---
 
 # Driving the Codex runtime
@@ -21,6 +21,10 @@ Read the reference file that matches the task:
   review, monitoring its state JSON or verdict, or recovering from any failure: a backgrounded/lost verdict,
   a dead or hung or harness-killed worker, "No job found", a fabricated wait-state, an arg-misparse launch
   400, an env/PATH/broker/TMPDIR/moderation breakage, or driving long/parallel `--background` jobs safely.
+  **Also read it before trying to CONFINE a job's writes:** `--cwd` does not set the sandbox boundary —
+  the workspace root is the enclosing repo's toplevel, so a per-launch dir under a durable root inside a
+  repo still hands the job `--write` over the whole repo; and job records are keyed by that resolved root,
+  so `status`/`cancel` must reuse the launch-time cwd or report "No job found" for a live job.
   Covers the reliable direct-drive patterns, the fastest `jq -r '.result.rawOutput'` verdict recovery,
   stall/hang thresholds, and the `/security-review` working-tree diff caveats.
 - **`references/prompt-sizing.md`** — read BEFORE dispatching a job whose prompt is large and whose payload

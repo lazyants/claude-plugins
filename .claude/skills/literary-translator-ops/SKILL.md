@@ -1,6 +1,6 @@
 ---
 name: literary-translator-ops
-description: Engineering conventions for working ON the literary-translator plugin (in the claude-plugins repo at plugins/literary-translator) — use when modifying its Python scripts or JSON schemas, adding or widening a field on a candidate row / skeptic assignment / any structure a workflow template consumes, editing canon.json or reasoning about its 1:1 name-dictionary data model, changing any hashed file and needing the re-translation / resume / render-baseline migration cost, enriching canon without triggering mass re-translation, matching the script/test/docs house style, or porting or adjusting the canon_adjudication_audit gate.
+description: Engineering conventions for working ON the literary-translator plugin (in the claude-plugins repo at plugins/literary-translator) — use when modifying its Python scripts or JSON schemas, adding or widening a field on a candidate row / skeptic assignment / any structure a workflow template consumes, editing canon.json or reasoning about its 1:1 name-dictionary data model, changing any hashed file and needing the re-translation / resume / render-baseline migration cost, moving or renaming a `durable_root` (its absolute path is hashed, so relocating invalidates every converged segment), enriching canon without triggering mass re-translation, matching the script/test/docs house style, or porting or adjusting the canon_adjudication_audit gate.
 ---
 
 # literary-translator plugin — engineering conventions
@@ -44,8 +44,12 @@ that mode needs genuinely relative links.
   `canon.json` data model, the iron rule, the script house style (self-anchored paths, one-JSON-line
   stdout, exit 0/1/2), the pytest test conventions and subprocess pattern, and the docs/registration
   surfaces to touch when adding a script.
-- **references/hash-migration-impact.md** — read before editing ANY schema or script, or before
-  editing `canon.json` content: the five hash surfaces (cache_key composite / resume digest /
+- **references/hash-migration-impact.md** — read before editing ANY schema or script, before
+  editing `canon.json` content, **and before MOVING, renaming, or re-homing a `durable_root`:
+  `source_input_hash` covers the source's absolute PATH, not only its bytes, so a relocation
+  invalidates every converged segment while nothing about the book changed** — count `converged`
+  in `runs/ledger.json` first, because that count is the cost. Also: the five hash surfaces
+  (cache_key composite / resume digest /
   render_version / migration-inert / canon-DATA `used_terms_hash`), their very different blast radii,
   the sidecar rule for enriching canon without re-translating, and the derivation-regen recovery path
   for a mature/zero-candidate project (`--restamp-derivation`, sanctioned since 1.15.0 — no longer a

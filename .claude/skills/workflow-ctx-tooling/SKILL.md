@@ -1,6 +1,6 @@
 ---
 name: workflow-ctx-tooling
-description: Traps when authoring or debugging a Workflow script or using context-mode (ctx) tools — ctx path confinement, the background-task .output wrapper shape, apostrophes breaking the pre-run parse, JSON-encoded args killing the script before dispatch, and multi-agent output you must not trust at face value (empty/garbage agent slots, a synthesis contradicting its own data).
+description: Traps when authoring or debugging a Workflow script or using context-mode (ctx) tools — ctx path confinement, the background-task .output shape, apostrophes breaking the pre-run parse, JSON-encoded args, an agent() prompt array missing .join so the agent improvises confident garbage, schema agents failing to null or a truthy placeholder, spread-makes-null-truthy, a partially-failed run whose empty category looks clean, and agents reading a stale copy. Read when a Workflow is rejected before dispatch, a ctx tool refuses a path, an agent slot returns empty/garbage, a synthesis contradicts its inputs, or before banking a Workflow recommendation.
 ---
 
 # Workflow + context-mode (ctx) tooling traps
