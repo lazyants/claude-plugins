@@ -43,20 +43,47 @@ Design (PLAN-198 §2.1; the 7 steps below map 1:1) -- #409 SANDBOX HARDENING:
      `completed` attempt reached with no finalize budget left to validate it is DEFERRED
      (#213) to the deterministic pending slot rather than discarded -- recoverable; the
      NEXT dispatch's step-4 adopt_pending() validates + adopts it.
+     `--kind fixreview` (#409 track B) is the ONE exception to "then ONE atomic os.replace":
+     it validates through a FOUR-gate chain (see _validate_fixreview_candidates()) and
+     STAGES both candidates privately in segments/ -- never a canonical os.replace, and no
+     #213 defer/adopt_pending counterpart -- see the CLI section below.
   7. Finalize within a reserved FINALIZE_TAIL: emit the ONE stdout JSON line, write the
      empty per-dispatch fail sentinel (iff not promoted) + terminal hygiene joblog (iff we
      hold the lease), and clean this invocation's OWN scratch by exact path.
 
 CLI (canonical path is DERIVED, never caller-supplied):
-    python3 codex_job.py --kind {translate|review} --companion <abs codex-companion.mjs>
-      --cwd <durable_root> --seg <seg> --prompt-file <abs prompt with EXACTLY one ⟦JOB_OUT⟧>
-      --expect-token <RUN_ID:seg|RUN_ID:seg:r<label>> --disp <per-dispatch nonce>
+    python3 codex_job.py --kind {translate|review|fixreview} --companion <abs codex-companion.mjs>
+      --cwd <durable_root> --seg <seg> --prompt-file <abs prompt with EXACTLY one ⟦JOB_OUT⟧,
+      PLUS exactly one ⟦JOB_OUT_REVIEW⟧ when --kind fixreview>
+      --expect-token <RUN_ID:seg|RUN_ID:seg:r<label>>
+      [--expect-review-token <RUN_ID:seg:r<label>>, REQUIRED iff --kind fixreview]
+      --disp <per-dispatch nonce>
       --deadline-sec <int> [--poll-sec <int default 15>]
       [--write] [--fresh] [--effort high] [--model <model>] [--node <exe default "node">]
       [--plugin-root <plugin install root, #412>]
 
-Exit codes: 0 = promoted (or adopted) a validated artifact; 1 = launch/run/validate failure
-(recoverable, wrote an empty fail sentinel); 2 = usage/env error.
+--kind fixreview (#409 track B): a MERGED review+fix codex call producing TWO artifacts (a
+candidate draft AND a candidate review) instead of one. --expect-token carries the DRAFT
+token (translate_dispatch_token's own `RUN_ID:seg` shape); --expect-review-token carries the
+REVIEW token (review_dispatch_token's own `RUN_ID:seg:r<label>` shape) -- the two differ in
+shape, so one flag cannot serve both. Unlike translate/review, this driver never promotes a
+fixreview result to a single canonical path -- there is no one canonical path for two
+artifacts, and publishing them as a CONSISTENT PAIR is segment_dispatch_driver.py's own
+write_txn_intent/publish_txn/cleanup_txn transaction, never this driver's (see that module's
+own #409 track B comments). On success this driver's job ends at STAGING both candidates,
+fully validated, at their own private per-invocation slots in segments/ (never
+segments/{seg}.draft.json / segments/{seg}.review.json themselves) and REPORTING their paths
++ sha256 digests on the one stdout JSON line (staged_draft_path/staged_review_path/
+staged_draft_sha256/staged_review_sha256) -- see _validate_fixreview_candidates()'s own
+docstring for the 4-gate chain this runs before ever calling anything "staged". run()'s
+fixreview branch also skips safe_adopt()/adopt_pending() (the #213 defer/adopt idempotence
+machinery) entirely: segment_dispatch_driver.py's own txn recovery layer
+(classify_txn_recovery/gather_txn_observed) is the authoritative recovery path for a
+fixreview round, not a second one here.
+
+Exit codes: 0 = promoted, adopted, or (fixreview only) staged a validated artifact;
+1 = launch/run/validate failure (recoverable, wrote an empty fail sentinel); 2 = usage/env
+error.
 
 stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied to
 <durable_root>/scripts/ at Step 0a (it IS a PLUGIN_BUNDLE_MEMBERS script -- see cache_key.py).
@@ -74,6 +101,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path  # only for Path.as_uri() in _matched_verdict()'s node import()
 from typing import TypeGuard
 
 # ---- Constants (PLAN-198 §2.1 / CONTRACT.md; frozen) ------------------------
@@ -85,6 +113,48 @@ CODEX_WAIT_GRACE_SEC = 600       # (Workflow-side wait grace; documented here fo
 
 # The JOB_OUT placeholder, spelled via escapes to avoid pasting raw U+27E6/U+27E7.
 JOB_OUT_PLACEHOLDER = "⟦JOB_OUT⟧"
+# --kind fixreview's SECOND output slot (the candidate review, alongside the candidate draft
+# JOB_OUT_PLACEHOLDER already names) -- required in the prompt text exactly once, ONLY for
+# --kind fixreview (see main()'s placeholder-count checks).
+JOB_OUT_REVIEW_PLACEHOLDER = "⟦JOB_OUT_REVIEW⟧"
+
+# ---------------------------------------------------------------------------
+# --kind fixreview's 4th gate: matchedVerdict(), executed against the REAL
+# mass-translate-wf.template.js -- never hand-transcribed. See
+# _matched_verdict()'s own docstring for the full rationale; this is
+# deliberately the SAME truncate-then-export-then-run-under-node MECHANISM
+# segment_dispatch_driver.py's own call_template_functions()/
+# template_harness_source() use (duplicated per this project's "no shared lib
+# between self-contained scripts" convention -- see review_ready.py's own
+# _SEG_ID_RE comment for the same convention applied elsewhere), scoped down
+# to the ONE function this driver ever needs to call.
+# ---------------------------------------------------------------------------
+_TEMPLATE_NAME = "mass-translate-wf.template.js"
+_MATCHED_VERDICT_FN = "matchedVerdict"
+_TEMPLATE_TRUNCATE_BEFORE_MARKER = "function draftProbePrompt("
+# Every {{TOKEN}} above the truncation marker must still be substituted with
+# something SYNTACTICALLY VALID for the truncated prefix to import as ESM at
+# all, even though matchedVerdict()/findingsAuthentic() read none of these
+# values -- so this table exists purely to keep the file parseable, not to
+# supply meaningful data. Kept identical (token name -> style) to
+# segment_dispatch_driver.py's own _TEMPLATE_TOKEN_STYLE so a template edit
+# that adds/removes a token is caught here too (see _matched_verdict()'s own
+# "unresolved {{TOKEN}}" fatal check) rather than one copy silently drifting
+# from the other.
+_TEMPLATE_TOKEN_STYLE = {
+    "DURABLE_ROOT": "quoted",
+    "RUN_ID": "quoted",
+    "SOURCE_LANG": "quoted",
+    "TARGET_LANG": "quoted",
+    "EFFORT": "quoted",
+    "MODEL": "quoted",
+    "VERSE_POLICY_INSTRUCTION_BLOCK": "quoted",
+    "MAX_FIX_ROUNDS": "int",
+    "BATCH_AGENT_CAP": "int",
+    "MAX_CODEX_JOBS_PER_BATCH": "int",
+    "CODEX_COMPANION_PATH_JSON": "json",
+    "PLUGIN_ROOT": "json",
+}
 
 # Canonical segment-id safety contract. A seg id is either an ordinary body
 # id (e.g. "seg01", "seg05_blocked_regen", "segAnchor") or a translate-decision
@@ -130,7 +200,18 @@ def canonical_path(root, seg, kind):
     """Pure, side-effect-free canonical artifact-path deriver (importable by the
     draft/review path-convention audits). Returns
     ``<root>/segments/<seg>.<draft|review>.json`` -- draft for kind "translate",
-    review otherwise -- NEVER a language-suffixed ``.ru.`` variant."""
+    review for kind "review" -- NEVER a language-suffixed ``.ru.`` variant.
+
+    kind "fixreview" has no single canonical path (it produces TWO artifacts;
+    see this file's own module docstring's "--kind fixreview" section) and is
+    refused here rather than silently falling into the "review" branch below
+    -- CodexJob never calls this function for that kind."""
+    if kind == "fixreview":
+        raise ValueError(
+            "canonical_path() has no single answer for kind='fixreview' -- it "
+            "produces TWO artifacts with no one canonical path; see this "
+            "file's own module docstring."
+        )
     ext = "draft" if kind == "translate" else "review"
     return os.path.join(root, "segments", "%s.%s.json" % (seg, ext))
 
@@ -185,12 +266,41 @@ def _silent_unlinkat(dir_fd, name):
         pass
 
 
+def _sha256_path(path):
+    """sha256 of a regular file at `path`, via the SAME O_NOFOLLOW-open +
+    _sha256_fd() primitive every other digest in this file uses -- never a
+    plain open()/read(). Returns None on any failure (missing, symlink,
+    non-regular, unreadable) rather than raising; used only for the
+    --kind fixreview stdout report, where "could not hash it" must degrade
+    to an absent digest, never a crash."""
+    try:
+        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        return _sha256_fd(fd)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 class CodexJob:
     def __init__(self, kind, seg, tok, disp, root, companion, prompt_text, prompt_file,
-                 deadline_sec, poll_sec, effort, node, model=None, plugin_root=None):
+                 deadline_sec, poll_sec, effort, node, model=None, plugin_root=None,
+                 review_tok=None):
         self.kind = kind
         self.seg = seg
         self.tok = tok
+        # --kind fixreview ONLY: the review token (review_dispatch_token's own
+        # `RUN_ID:seg:r<label>` shape), separate from self.tok (which carries the DRAFT
+        # token, translate_dispatch_token's own `RUN_ID:seg` shape, for this kind) because
+        # the two artifacts' freshness tokens have different shapes and are checked by two
+        # different gates (draft_ready.py vs review_ready.py). None for every other kind.
+        self.review_tok = review_tok
         self.disp = disp
         self.root = os.path.realpath(root)
         self.companion = companion
@@ -227,10 +337,45 @@ class CodexJob:
 
         self.inv = os.urandom(8).hex()
         self.segdir = os.path.join(self.root, "segments")
-        ext = "draft" if kind == "translate" else "review"
-        self.canonical = canonical_path(self.root, seg, kind)
-        self.attempt = os.path.join(self.segdir, ".att.%s.%s.%s.json" % (seg, self.inv, ext))
-        self.pending = os.path.join(self.segdir, ".att_pending.%s.%s.json" % (seg, ext))
+        if kind == "fixreview":
+            # #409 track B: TWO candidate artifacts, no single canonical -- publication
+            # into segments/{seg}.draft.json / segments/{seg}.review.json is
+            # segment_dispatch_driver.py's own write_txn_intent/publish_txn/cleanup_txn
+            # transaction, never this driver's (see this file's own module docstring's
+            # "--kind fixreview" section). This driver's job for fixreview ends at
+            # staging BOTH validated candidates at their own private per-invocation
+            # slots in segdir (self.attempt / self.attempt_review) and reporting their
+            # paths + digests on the one stdout JSON line -- see run()'s fixreview
+            # branch and _validate_fixreview_candidates().
+            self.canonical = None
+            self.attempt = os.path.join(self.segdir, ".att.%s.%s.draft.json" % (seg, self.inv))
+            self.attempt_review = os.path.join(self.segdir, ".att.%s.%s.review.json" % (seg, self.inv))
+            # A rejected fixreview candidate is QUARANTINED (moved, never deleted) --
+            # see _quarantine_fixreview_candidates() -- distinct from every other kind's
+            # plain-delete-on-reject, because a fixreview rejection can mean a
+            # fabricated-loc review accompanied a REAL draft edit (this kind can modify
+            # the draft, unlike plain "review"); keeping both candidates inspectable is
+            # the whole point of catching that case at all. Named distinctly
+            # (.codex_quarantine.*, never .att.*/.att_pending.*) so a quarantined file
+            # can never be mistaken for a live staging/pending slot by a future dispatch.
+            self.quarantine_draft = os.path.join(
+                self.segdir, ".codex_quarantine.%s.%s.draft.json" % (seg, self.inv))
+            self.quarantine_review = os.path.join(
+                self.segdir, ".codex_quarantine.%s.%s.review.json" % (seg, self.inv))
+            # fixreview does not participate in the #213 defer/adopt_pending mechanism
+            # (see run()'s fixreview branch docstring for why) -- pending is still
+            # computed, matching every other kind's naming convention, purely so
+            # _preflight_same_device()'s generic os.path.dirname(self.pending) check
+            # keeps working unchanged; it is never read from or written to for this kind.
+            self.pending = os.path.join(self.segdir, ".att_pending.%s.fixreview.json" % seg)
+        else:
+            ext = "draft" if kind == "translate" else "review"
+            self.canonical = canonical_path(self.root, seg, kind)
+            self.attempt = os.path.join(self.segdir, ".att.%s.%s.%s.json" % (seg, self.inv, ext))
+            self.attempt_review = None
+            self.quarantine_draft = None
+            self.quarantine_review = None
+            self.pending = os.path.join(self.segdir, ".att_pending.%s.%s.json" % (seg, ext))
         self.lock = os.path.join(self.segdir, ".codex_job.%s.lock" % seg)
         self.joblog = os.path.join(self.segdir, ".codex_job.%s.json" % seg)
         self.fail_sentinel = os.path.join(self.segdir, ".codex_failed.%s.%s" % (seg, disp))
@@ -239,6 +384,9 @@ class CodexJob:
         # __init__ (creating it is real filesystem I/O, not pure state setup).
         self.sandbox_dir = None
         self.sandbox_attempt = None
+        # --kind fixreview's SECOND sandbox output slot (the candidate review) -- None for
+        # every other kind. Set by _setup_sandbox() alongside self.sandbox_attempt.
+        self.sandbox_attempt_review = None
 
         # Two hard, absolute time ceilings, fixed at construction (step 1).
         now = time.monotonic()
@@ -249,6 +397,14 @@ class CodexJob:
         self.ok = False
         self.promoted = False
         self.adopted = False
+        # --kind fixreview's OWN terminal outcome: both candidates validated through the
+        # full 4-gate chain and staged (never promoted to canonical -- see this class's
+        # own fixreview comments above). Always False for every other kind.
+        self.staged = False
+        # Slots a quarantine move failed on, which finalize() must therefore NOT
+        # delete. Empty on every path that never quarantines, so the check below
+        # costs nothing for the other kinds.
+        self.quarantine_stuck = set()
         self.timed_out = False
         self.holds_lock = False
         self.jobId = None
@@ -449,6 +605,250 @@ class CodexJob:
             return False
         return True
 
+    # ---- --kind fixreview: the 4-gate validate-and-stage chain (#409 track B) ----
+    def _trusted_template_path(self):
+        """Where the REAL mass-translate-wf.template.js is read from, for the
+        matchedVerdict() fabricated-finding gate (--kind fixreview only). Mirrors
+        _trusted_scripts_dir()'s own plugin_root/SCRIPTS_DIR fallback exactly -- same
+        trust boundary, same reasoning: the durable root's own scripts/ dir is
+        codex-writable, so a --plugin-root redirect must resolve this from the SAME
+        trusted location gate EXECUTABLES are resolved from, never from self.root.
+
+        THE TWO BRANCHES ARE NOT SYMMETRIC, and assuming they were is what broke
+        this. In the PLUGIN checkout the template lives under assets/templates/,
+        one directory over from assets/scripts/. In the DURABLE tree it does not:
+        scaffold_setup.py:217 places every bundle member -- the .py gates and the
+        .template.js templates alike -- flat at ${durable_root}/scripts/<name>,
+        and its docstring says "there is no scripts/templates/ subdir".
+        mass-translate-wf.template.js is a PLUGIN_BUNDLE_MEMBER, so self-anchored
+        it sits beside draft_ready.py, not one level up.
+
+        Mirroring the plugin layout here pointed at ${durable_root}/templates/,
+        which Step 0a never creates. Since --plugin-root is optional, that made
+        gate 4 unpassable in the shipped deployment: every fixreview dispatch
+        would quarantine both candidates and exit 1."""
+        if self.plugin_root:
+            return os.path.join(self.plugin_root, "assets", "templates", _TEMPLATE_NAME)
+        return os.path.join(SCRIPTS_DIR, _TEMPLATE_NAME)
+
+    def _matched_verdict(self, review_obj, timeout):
+        """Runs the REAL mass-translate-wf.template.js's own matchedVerdict() against
+        `review_obj` (an already-parsed dict) via a fresh node subprocess. NEVER a
+        hand-transcription of findingsAuthentic()/matchedVerdict()'s own JS logic into
+        Python -- see mass-translate-wf.template.js's own comment ("#348 -- one copy,
+        not two, for the same reason matchedVerdict() is one copy: two divergent
+        readings of a false-green boundary are worse than one") and this file's own
+        module docstring for why. Only the MECHANISM (truncate the real template
+        source right before the first declaration this call doesn't need, append an
+        `export`, run it under node) is duplicated from segment_dispatch_driver.py's
+        own call_template_functions()/template_harness_source() -- the fabricated-
+        finding RULE itself is always executed fresh, straight from the shipped
+        template file.
+
+        Returns (verdict_dict, None) on a harness that actually ran, or (None,
+        error_str) on any failure to even PRODUCE a verdict (missing template, node
+        failure, bad JSON) -- callers must treat a None verdict exactly like any other
+        gate that "could not run", never as a passing one (fail closed)."""
+        template_path = self._trusted_template_path()
+        try:
+            with open(template_path, "r", encoding="utf-8") as fh:
+                template_text = fh.read()
+        except OSError as exc:
+            return None, "could not read %s: %s" % (template_path, exc)
+
+        text = template_text
+        for name, style in _TEMPLATE_TOKEN_STYLE.items():
+            token = "{{%s}}" % name
+            if name == "EFFORT":
+                # The ONE substituted const the template validates at module-load time
+                # with no "empty is fine" escape hatch (unlike MODEL, whose own guard
+                # explicitly allows empty) -- EFFORT_RE requires one of
+                # low|medium|high|xhigh, so an empty dummy would throw before
+                # matchedVerdict is ever reachable. "high" is semantically inert here
+                # (this harness never calls anything that reads EFFORT).
+                replacement = "high"
+            elif style == "int":
+                replacement = "0"
+            elif style == "json":
+                replacement = json.dumps("")
+            else:  # "quoted" -- the token already sits inside quotes the template supplies
+                replacement = ""
+            text = text.replace(token, replacement)
+        if "{{" in text and "}}" in text:
+            return None, (
+                "unresolved {{TOKEN}} left in %s after substitution -- this harness's "
+                "own token table is stale relative to the shipped template" % _TEMPLATE_NAME
+            )
+
+        idx = text.find(_TEMPLATE_TRUNCATE_BEFORE_MARKER)
+        if idx == -1:
+            return None, (
+                "could not find the truncation marker %r in %s -- its shape has "
+                "changed; re-derive this harness's truncation point before trusting "
+                "its output" % (_TEMPLATE_TRUNCATE_BEFORE_MARKER, _TEMPLATE_NAME)
+            )
+        harness_source = text[:idx] + "\nexport { %s };\n" % _MATCHED_VERDICT_FN
+
+        try:
+            tmpdir = tempfile.mkdtemp(prefix="ltcj.mv.%s.%s." % (self.seg, self.inv))
+        except OSError as exc:
+            return None, "could not create a scratch dir for the matchedVerdict harness: %s" % exc
+        try:
+            tmpl_path = os.path.join(tmpdir, "instantiated.mjs")
+            with open(tmpl_path, "w", encoding="utf-8") as fh:
+                fh.write(harness_source)
+            runner_path = os.path.join(tmpdir, "runner.mjs")
+            # args/log/agent/pipeline stubbed as harmless globals, matching
+            # segment_dispatch_driver.py's own runner -- agent()/pipeline() are
+            # unreachable once the tail is truncated away (defence in depth only).
+            runner_src = (
+                "globalThis.args = \"[]\";\n"
+                "globalThis.log = () => {};\n"
+                "globalThis.agent = async () => { throw new Error(\"harness: agent() must never be called\"); };\n"
+                "globalThis.pipeline = async () => { throw new Error(\"harness: pipeline() must never be called\"); };\n"
+                "const mod = await import(" + json.dumps(Path(tmpl_path).as_uri()) + ");\n"
+                "const rev = " + json.dumps(review_obj, ensure_ascii=False) + ";\n"
+                "process.stdout.write(JSON.stringify(mod.%s(rev)));\n" % _MATCHED_VERDICT_FN
+            )
+            with open(runner_path, "w", encoding="utf-8") as fh:
+                fh.write(runner_src)
+            try:
+                proc = subprocess.run([self.node, runner_path], capture_output=True,
+                                      text=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return None, "node timed out running the matchedVerdict harness"
+            except (OSError, ValueError) as exc:
+                return None, "could not run node for the matchedVerdict harness: %s" % exc
+            if proc.returncode != 0:
+                return None, "matchedVerdict harness failed (exit %d): %s" % (
+                    proc.returncode, (proc.stderr or "").strip())
+            try:
+                return json.loads(proc.stdout), None
+            except ValueError as exc:
+                return None, "matchedVerdict harness did not print valid JSON (%s): %r" % (
+                    exc, proc.stdout)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _validate_fixreview_candidates(self, timeout_fn):
+        """The 4-gate --kind fixreview validation chain (#409 track B, merged
+        review+fix), each call bounded by a FRESH timeout_fn() (remaining budget
+        re-read per call), in the ORDER load-bearing to what each gate assumes about
+        the ones before it:
+
+          1. draft_ready.py --expect-token <draft tok>   -- structural readiness +
+             draft freshness token.
+          2. validate_draft.py                            -- the false-green coverage/
+             content gate.
+          3. review_ready.py --expect-token <review tok>  -- schema + draft_sha1
+             freshness (against the CURRENT canonical draft, still untouched at this
+             point -- see this file's module docstring: this driver never promotes a
+             fixreview result, so the canonical draft cannot have moved between here
+             and when codex read it) + review token.
+          4. matchedVerdict() on the CANDIDATE review's own content -- the
+             fabricated-finding gate. LOAD-BEARING here in a way it is not for plain
+             "review": fixreview can EDIT the draft, so a schema-valid review carrying
+             a fabricated loc would otherwise stage a draft already edited per
+             findings nobody can trust, and the later txn layer has no way to undo
+             that edit once it is published.
+
+        Publishes BOTH sandbox candidates into their own private per-invocation
+        segdir slots (self.attempt / self.attempt_review) FIRST -- the same
+        fd-pinned, digest-verified _publish_from_sandbox() copy every other kind
+        already uses -- so every gate below (including matchedVerdict, which reads
+        the review's own CONTENT) sees only what actually left the sandbox, never a
+        path trusted by name alone.
+
+        Returns True iff all four gates passed (both candidates are now sitting,
+        validated, at self.attempt/self.attempt_review -- "staged", never promoted).
+        Returns False on ANY gate rejecting OR being unable to run; self.error_detail
+        names which gate and why whenever there is diagnostic text to capture. Never
+        quarantines or cleans up on its own -- that is run()'s job, right after this
+        returns."""
+        if not self._publish_from_sandbox(self.sandbox_attempt, self.attempt):
+            return False
+        if not self._is_regular(self.attempt):
+            return False
+        if not self._publish_from_sandbox(self.sandbox_attempt_review, self.attempt_review):
+            return False
+        if not self._is_regular(self.attempt_review):
+            return False
+
+        proc = self._gate(["draft_ready.py", self.seg, "--expect-token", self.tok,
+                           "--candidate-file", self.attempt], timeout_fn())
+        if not _ok(proc):
+            if proc is not None:
+                self._capture_gate_rejection("draft_ready.py", proc)
+            return False
+
+        proc = self._gate(["validate_draft.py", self.seg, "--candidate-file", self.attempt],
+                         timeout_fn())
+        if not _ok(proc):
+            if proc is not None:
+                self._capture_gate_rejection("validate_draft.py", proc)
+            return False
+
+        proc = self._gate(["review_ready.py", self.seg, "--expect-token", self.review_tok,
+                           "--candidate-file", self.attempt_review], timeout_fn())
+        if not _ok(proc):
+            if proc is not None:
+                self._capture_gate_rejection("review_ready.py", proc)
+            return False
+
+        try:
+            with open(self.attempt_review, "r", encoding="utf-8") as fh:
+                review_obj = json.load(fh)
+        except (OSError, ValueError) as exc:
+            self.error_detail = "matchedVerdict: could not read/parse the candidate review: %s" % exc
+            return False
+        verdict, err = self._matched_verdict(review_obj, timeout_fn())
+        if verdict is None:
+            self.error_detail = "matchedVerdict: %s" % err
+            return False
+        if not isinstance(verdict, dict) or verdict.get("status") != "ok":
+            self.error_detail = "matchedVerdict: rejected (%s)" % json.dumps(verdict, ensure_ascii=False)
+            return False
+        return True
+
+    def _quarantine_fixreview_candidates(self):
+        """On ANY fixreview gate rejection: move whichever of self.attempt/
+        self.attempt_review actually made it out of the sandbox into its own
+        quarantine slot (self.quarantine_draft/self.quarantine_review) -- named
+        distinctly (.codex_quarantine.*) so it can never be mistaken for a live
+        .att.*/.att_pending.* slot by a future dispatch -- rather than silently
+        discarding it the way a plain translate/review rejection does (finalize()'s
+        own _silent_remove). See _validate_fixreview_candidates()'s own docstring for
+        why keeping both candidates inspectable matters specifically for this kind.
+        A missing source (never published, or a partial publish that stopped
+        before this file existed) is not an error -- os.replace() is only
+        attempted for a source that exists.
+
+        A FAILED MOVE IS NOT THE SAME AS A MISSING SOURCE, and collapsing the two
+        turned this function into the opposite of what it is for. finalize()
+        deletes self.attempt/self.attempt_review whenever staged is False,
+        reasoning that they were either already moved here or never created. A
+        swallowed OSError creates a third case its reasoning does not cover: the
+        file is still sitting at self.attempt, and the unconditional delete then
+        destroys exactly the evidence quarantine exists to preserve -- a
+        fabricated-loc review together with the REAL draft edit that accompanied
+        it. Each failure is now recorded and named on stderr, and finalize() is
+        told not to remove what could not be moved.
+
+        Returns the set of slots ("draft"/"review") that must NOT be deleted."""
+        stuck = set()
+        for what, src, dst in (("draft", self.attempt, self.quarantine_draft),
+                               ("review", self.attempt_review, self.quarantine_review)):
+            if src and os.path.exists(src):
+                try:
+                    os.replace(src, dst)
+                except OSError as exc:
+                    stuck.add(what)
+                    sys.stderr.write(
+                        "codex_job.py: could not quarantine the %s candidate for %s: %s "
+                        "-- leaving it at %s rather than deleting it\n"
+                        % (what, self.seg, exc, src))
+        return stuck
+
     # ---- step 2: write-isolated sandbox (#409) -------------------------------
     # Outcomes of the enclosing-repository probe. These MUST stay distinct: the generic
     # _run() helper collapses "git ran and reported no repository", "git timed out" and
@@ -510,7 +910,7 @@ class CodexJob:
         __init__. On any failure (mkdtemp error, or the sandbox turns out to be inside a
         git working tree after all) the caller MUST refuse to dispatch: an unconfined
         sandbox is worse than no launch at all (strictness bias)."""
-        ext = "draft" if self.kind == "translate" else "review"
+        ext = "draft" if self.kind in ("translate", "fixreview") else "review"
         try:
             raw = tempfile.mkdtemp(prefix="ltcj.%s.%s." % (self.seg, self.inv))
         except OSError:
@@ -523,15 +923,25 @@ class CodexJob:
         if not self._sandbox_is_confined(self.sandbox_dir):
             return False
         self.sandbox_attempt = os.path.join(self.sandbox_dir, "attempt.%s.json" % ext)
+        if self.kind == "fixreview":
+            # SECOND output slot: codex must write both attempt.draft.json AND
+            # attempt.review.json into this SAME confined sandbox before this driver will
+            # ever look at either -- see _write_final_prompt() for how each gets its own
+            # ⟦JOB_OUT⟧/⟦JOB_OUT_REVIEW⟧ placeholder substitution.
+            self.sandbox_attempt_review = os.path.join(self.sandbox_dir, "attempt.review.json")
         return True
 
     def _write_final_prompt(self):
         """Write the frozen prompt INSIDE the sandbox (its only other content besides the
-        attempt file codex will create) and substitute ⟦JOB_OUT⟧ with the SANDBOX attempt
+        attempt file(s) codex will create) and substitute ⟦JOB_OUT⟧ with the SANDBOX attempt
         path -- never a path outside it, or codex's own write-confinement would simply
-        reject the write and the #198 no-output failure returns."""
+        reject the write and the #198 no-output failure returns. --kind fixreview also
+        substitutes ⟦JOB_OUT_REVIEW⟧ with the second sandbox attempt path (the candidate
+        review) -- both writes must land inside the SAME confined sandbox."""
         final = os.path.join(self.sandbox_dir, "prompt.txt")
         text = self.prompt_text.replace(JOB_OUT_PLACEHOLDER, self.sandbox_attempt)
+        if self.kind == "fixreview":
+            text = text.replace(JOB_OUT_REVIEW_PLACEHOLDER, self.sandbox_attempt_review)
         with open(final, "w", encoding="utf-8") as fh:
             fh.write(text)
         self.final_prompt = final
@@ -944,11 +1354,32 @@ class CodexJob:
             pass  # best-effort (e.g. an existing symlink -> ELOOP under O_NOFOLLOW)
 
     def finalize(self):
-        self.ok = self.promoted or self.adopted
+        self.ok = self.promoted or self.adopted or self.staged
         if not self.ok:
             self._write_fail_sentinel()
         # Clean ONLY this invocation's own scratch, by EXACT path (never a wildcard).
-        if not self.promoted:
+        if self.kind == "fixreview":
+            # self.staged=True -> BOTH candidates are the deliverable, left exactly
+            # where they are (never removed here, same as self.promoted skipping the
+            # removal below). self.staged=False -> either already MOVED out by
+            # _quarantine_fixreview_candidates(), or never created at all
+            # (job-completed/launch-failed/etc.), and _silent_remove() is a safe
+            # no-op for both.
+            #
+            # THERE IS A THIRD CASE, and the two above used to be written as if
+            # there were not: quarantine can FAIL. Then the candidate is still at
+            # self.attempt, and deleting it here destroys the evidence quarantine
+            # exists to keep -- the one outcome this kind's whole
+            # move-instead-of-delete design is built to prevent. Whatever could not
+            # be moved is skipped, deliberately leaving an .att.* file behind: a
+            # later dispatch's own hygiene will find it, which is strictly better
+            # than a silent unrecoverable delete.
+            if not self.staged:
+                if "draft" not in self.quarantine_stuck:
+                    _silent_remove(self.attempt)
+                if "review" not in self.quarantine_stuck:
+                    _silent_remove(self.attempt_review)
+        elif not self.promoted:
             _silent_remove(self.attempt)  # the os.replace consumed it iff promoted
         if self.sandbox_dir:
             # Abandon the WHOLE sandbox unconditionally -- on every path (success,
@@ -975,13 +1406,26 @@ class CodexJob:
                 "jobId": self.jobId, "kind": self.kind, "seg": self.seg, "token": self.tok,
                 "disp": self.disp, "inv": self.inv, "status": "terminal", "ok": self.ok,
                 "timed_out": self.timed_out, "job_status": self.job_status, "adopted": self.adopted,
-                "reason": self.reason, "error_detail": self.error_detail,
+                "staged": self.staged, "reason": self.reason, "error_detail": self.error_detail,
             })
         line = {
             "ok": self.ok, "kind": self.kind, "seg": self.seg, "jobId": self.jobId,
             "job_status": self.job_status, "timed_out": self.timed_out,
             "adopted": self.adopted, "reason": self.reason, "error_detail": self.error_detail,
         }
+        if self.kind == "fixreview":
+            # --kind fixreview's OWN report: this driver never promotes for this kind
+            # (see the class-level fixreview comments), so the caller
+            # (segment_dispatch_driver.py) needs the exact paths + digests of what got
+            # staged to hand into its own write_txn_intent/publish_txn transaction --
+            # staged_draft_sha256/staged_review_sha256 line up 1:1 with that intent's
+            # own required fields of the same name. All four are None/absent-shaped
+            # when self.staged is False (nothing was validated well enough to stage).
+            line["staged"] = self.staged
+            line["staged_draft_path"] = self.attempt if self.staged else None
+            line["staged_review_path"] = self.attempt_review if self.staged else None
+            line["staged_draft_sha256"] = _sha256_path(self.attempt) if self.staged else None
+            line["staged_review_sha256"] = _sha256_path(self.attempt_review) if self.staged else None
         sys.stdout.write(json.dumps(line) + "\n")
         sys.stdout.flush()
 
@@ -1011,28 +1455,51 @@ class CodexJob:
                 self.reason = "lease-held"
                 return 1
             self.hygiene()
-            if self.safe_adopt():
-                _silent_remove(self.pending)          # canonical already valid -> any deferred attempt is moot
-                self.adopted = True
-                self.reason = "adopted"
-                return 0
-            if self.adopt_pending():                  # NEW: promote a prior run's deferred completed attempt
-                self.adopted = True
-                self.reason = "adopted-pending"
-                return 0
+            # --kind fixreview skips safe_adopt()/adopt_pending() entirely (always
+            # launches fresh) -- segment_dispatch_driver.py's own txn recovery layer
+            # (classify_txn_recovery/gather_txn_observed) is the authoritative recovery
+            # path for a fixreview round, not a second idempotence mechanism here. See
+            # this file's own module docstring's "--kind fixreview" section.
+            if self.kind != "fixreview":
+                if self.safe_adopt():
+                    _silent_remove(self.pending)          # canonical already valid -> any deferred attempt is moot
+                    self.adopted = True
+                    self.reason = "adopted"
+                    return 0
+                if self.adopt_pending():                  # NEW: promote a prior run's deferred completed attempt
+                    self.adopted = True
+                    self.reason = "adopted-pending"
+                    return 0
             if not self.launch():                     # False (incl. no-budget, pending kept) -> launch fresh
                 self.reason = "launch-failed"
                 return 1
             self.poll()
             if self.job_status == "completed" and self.abs_remaining() > FINALIZE_TAIL:
-                if self.validate_attempt():
-                    os.replace(self.attempt, self.canonical)
-                    self.promoted = True
-                    self.reason = "promoted"
-                    return 0
-                self.reason = "validate-failed"
+                if self.kind == "fixreview":
+                    if self._validate_fixreview_candidates(self.finalize_timeout):
+                        self.staged = True
+                        self.reason = "staged"
+                        return 0
+                    self.quarantine_stuck = self._quarantine_fixreview_candidates()
+                    self.reason = "validate-failed"
+                else:
+                    if self.validate_attempt():
+                        os.replace(self.attempt, self.canonical)
+                        self.promoted = True
+                        self.reason = "promoted"
+                        return 0
+                    self.reason = "validate-failed"
             elif self.job_status == "completed":       # NEW: completed but no budget to validate this run
-                self.reason = "deferred-completed" if self._defer_attempt() else "job-completed"
+                if self.kind == "fixreview":
+                    # No #213 defer/adopt_pending counterpart for fixreview (see this
+                    # file's module docstring) -- a completed-but-unvalidated fixreview
+                    # attempt cannot be safely deferred (nothing else will ever
+                    # revalidate + adopt it), so it is simply discarded via finalize()'s
+                    # own scratch cleanup, same as any other never-published sandbox
+                    # output.
+                    self.reason = "job-completed"
+                else:
+                    self.reason = "deferred-completed" if self._defer_attempt() else "job-completed"
             elif self.timed_out:
                 self.reason = "timed-out"
             else:
@@ -1058,12 +1525,19 @@ def _build_parser():
         prog="codex_job.py",
         description="Isolating, validate-before-promote codex-job driver (#198).",
     )
-    p.add_argument("--kind", required=True, choices=("translate", "review"))
+    p.add_argument("--kind", required=True, choices=("translate", "review", "fixreview"))
     p.add_argument("--companion", required=True)
     p.add_argument("--cwd", required=True)
     p.add_argument("--seg", required=True)
     p.add_argument("--prompt-file", required=True, dest="prompt_file")
     p.add_argument("--expect-token", required=True, dest="expect_token")
+    # --kind fixreview ONLY: the review token (review_dispatch_token's own
+    # `RUN_ID:seg:r<label>` shape) -- --expect-token above carries the DRAFT token for
+    # this kind (translate_dispatch_token's own `RUN_ID:seg` shape). REQUIRED iff
+    # --kind fixreview, and refused for every other kind -- see main()'s own check
+    # (argparse choices/required alone cannot express a flag conditional on another
+    # flag's value).
+    p.add_argument("--expect-review-token", default=None, dest="expect_review_token")
     p.add_argument("--disp", required=True)
     p.add_argument("--deadline-sec", required=True, type=int, dest="deadline_sec")
     p.add_argument("--poll-sec", type=int, default=15, dest="poll_sec")
@@ -1096,6 +1570,25 @@ def main(argv=None):
         return 2
     if not _valid_disp(args.disp):
         print("Error: --disp is not a safe single path component", file=sys.stderr)
+        return 2
+    # --expect-review-token is a --kind fixreview-ONLY flag -- present-but-wrong-kind and
+    # absent-but-fixreview are both usage errors, refused loudly here rather than one of
+    # them silently reproducing today's single-token behavior for a kind that needs two.
+    if args.kind == "fixreview":
+        if not args.expect_review_token or not args.expect_review_token.strip():
+            print(
+                "Error: --kind fixreview requires --expect-review-token (the review "
+                "token, RUN_ID:seg:r<label> shape) in addition to --expect-token (the "
+                "draft token) -- see this file's own module docstring.",
+                file=sys.stderr,
+            )
+            return 2
+    elif args.expect_review_token is not None:
+        print(
+            "Error: --expect-review-token is only meaningful for --kind fixreview; "
+            f"got --kind {args.kind!r}",
+            file=sys.stderr,
+        )
         return 2
     if not os.path.isfile(args.companion):
         print("Error: --companion not found: %s" % args.companion, file=sys.stderr)
@@ -1165,13 +1658,29 @@ def main(argv=None):
     if prompt_text.count(JOB_OUT_PLACEHOLDER) != 1:
         print("Error: --prompt-file must contain EXACTLY one JOB_OUT placeholder", file=sys.stderr)
         return 2
+    if args.kind == "fixreview":
+        if prompt_text.count(JOB_OUT_REVIEW_PLACEHOLDER) != 1:
+            print(
+                "Error: --kind fixreview requires --prompt-file to contain EXACTLY one "
+                "JOB_OUT_REVIEW placeholder (in addition to the one JOB_OUT placeholder "
+                "above) -- one output slot per candidate artifact.",
+                file=sys.stderr,
+            )
+            return 2
+    elif JOB_OUT_REVIEW_PLACEHOLDER in prompt_text:
+        print(
+            "Error: the JOB_OUT_REVIEW placeholder is only meaningful for --kind "
+            f"fixreview; got --kind {args.kind!r}",
+            file=sys.stderr,
+        )
+        return 2
 
     poll_sec = args.poll_sec if args.poll_sec > 0 else 15
     job = CodexJob(
         kind=args.kind, seg=args.seg, tok=args.expect_token, disp=args.disp, root=args.cwd,
         companion=args.companion, prompt_text=prompt_text, prompt_file=args.prompt_file,
         deadline_sec=args.deadline_sec, poll_sec=poll_sec, effort=args.effort, node=args.node,
-        model=args.model, plugin_root=resolved_plugin_root,
+        model=args.model, plugin_root=resolved_plugin_root, review_tok=args.expect_review_token,
     )
     return job.run()
 
