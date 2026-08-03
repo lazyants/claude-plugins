@@ -399,6 +399,26 @@ driver polling `status` is the reliable shape. The non-obvious correctness rules
   (`.att/<token>/`, unique per launch), `--cwd` it there, and ATOMICALLY promote its output (`os.replace`)
   to the canonical path ONLY after observing `completed`; on timeout, best-effort cancel + DELETE the
   jobfile and ABANDON the dir. A surviving zombie can then only write into an abandoned dir.
+- **A `--cwd` INSIDE a git repo does not move the sandbox boundary at all — the workspace root is the
+  repo TOPLEVEL, resolved by walking UP.** `resolveWorkspaceRoot(cwd)` (`lib/workspace.mjs`) calls
+  `ensureGitRepository(cwd)` (`lib/git.mjs`), which is `git rev-parse --show-toplevel`, and falls back to
+  `cwd` itself ONLY when that fails. So `--cwd`-ing into a per-launch `.att/<token>/` under a durable root
+  that lives in a repo hands the job `--write` over the ENTIRE repo — every gate script, the ledger, the
+  lock, every other segment — exactly as if no isolation had been attempted. The bullet above still
+  applies for output hygiene, but read it as "unique OUTPUT dir", never as a write boundary.
+  **To actually confine, put the dir where `git rev-parse --show-toplevel` FAILS** (e.g. `mkdtemp()`
+  outside any working tree) so the fallback branch is taken, and VERIFY it by running that same command
+  against the dir rather than assuming — the check must replicate the companion's own algorithm, because
+  it is the companion's resolution, not yours, that decides the boundary. Refuse to dispatch if it does
+  not hold. Two consequences worth pre-empting: the supported `durable_root == project root` layout makes
+  the whole repo the root, and on macOS pin `realpath` once (`/tmp` → `/private/tmp` otherwise yields two
+  spellings of one dir that silently miss each other). This is why a by-PATH guard can never close it:
+  the checked party shares the enforcement mechanism's access, and only a categorically different
+  capability (write-confinement) separates them.
+- **Job records are keyed by the RESOLVED workspace root, so `status`/`cancel` must use the SAME `--cwd`
+  the job launched with** — a lookup from a different cwd silently reports "No job found", which is
+  indistinguishable from a finished job. Record the launch-time cwd and thread it through every later
+  call.
 - **Path isolation is a PRE-FILTER, not a quiescence guarantee.** Under one shared `--write`
   (`workspace-write`) root, a sibling job CAN write another seg's unique path, and an `O_NOFOLLOW`-opened
   fd does NOT bind a later by-PATH validate/`os.replace` to one inode. Rest consumption-safety on

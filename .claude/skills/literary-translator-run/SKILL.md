@@ -1,6 +1,6 @@
 ---
 name: literary-translator-run
-description: How to drive a real book end-to-end through the literary-translator plugin as an operator — use when running/translating an actual book (especially Hebrew, Yiddish, Arabic, or any uncased/non-Latin script) through the plugin, onboarding a new source language, hand-scaffolding Step 0a (managed dirs + bundle-hash markers + language preset), EPUB-wrapping a plain-text/OCR/PDF source because the plain_text and custom adapters are unimplemented, choosing marker-snapped segmentation for a book without clean chapter structure, working around W3 zero-candidate name-canon and W5 mass-translate dispatch convergence problems, or verifying/auditing an LLM-built name canon or a completed translation via a source-grounded, blind-adjudicated convergence loop.
+description: Driving a real book end-to-end through the literary-translator plugin as an operator — translating an actual book (especially Hebrew, Yiddish, Arabic or another uncased/non-Latin script), onboarding a source language, hand-scaffolding Step 0a, EPUB-wrapping a plain-text/OCR/PDF source, and auditing an LLM-built name canon or a finished translation.
 ---
 
 # Driving a real book through the literary-translator plugin

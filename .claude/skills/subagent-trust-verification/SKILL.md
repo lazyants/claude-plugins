@@ -1,6 +1,6 @@
 ---
 name: subagent-trust-verification
-description: Techniques for running a parallel-agent/team build and VERIFYING teammate output — shared-contract docs before fanning out, resolving every OPEN/"lead decides" item into a central decisions doc, verifying a completion report on disk rather than trusting its narrative, never firing a correction off a stale cached read, avoiding a duplicate agent on a live work-unit, handling teammate message races and idle≠done pings, and recovering from a CC restart that wiped the task list. Use whenever setting up a parallel team, resolving an unpinned decision before dispatch, verifying a teammate's "done"/green report, diffing a cross-owner interface, checking whether a teammate is still alive before re-dispatching, or resuming after a mid-session restart.
+description: Running a parallel-agent/team build and VERIFYING teammate output — shared-contract docs before fan-out, pinning every OPEN/"lead decides" item before dispatch, checking a completion or "tests green" report on disk rather than trusting its narrative, teammate message races and idle≠done, and recovering from a restart that wiped the task list.
 ---
 
 # Running a parallel team and verifying its output

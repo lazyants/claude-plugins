@@ -31,6 +31,18 @@ Editing a member invalidates every converged segment. Members whose BYTES feed i
   canon_senses.py, fetch_citation.py`, `mass-translate-wf.template.js`, `glossary-pass-wf.template.js`.
 - `derivation_bundle_hash` = `DERIVATION_BUNDLE_MEMBERS` = `bootstrap_names.py` + `segpack.py`.
 
+**`source_input_hash` covers the source's ABSOLUTE PATH, not only its bytes — so MOVING a
+`durable_root` invalidates every segment while nothing about the book changed.**
+`compute_source_input_hash()` returns `sha1(canonical_json({"source_path": <profile
+source.path>, "source_bytes_sha1": …}))`, and `source.path` in `profile.yml` is absolute. Verified
+2026-07-31 by relocating a root: `select_segments.py` (no `--only-segs`, its default full-set
+run — there is no `--all` flag) then reported every segment `blocked_needs_regeneration` with
+`pending_fields: ["source_input_hash"]`, remedy W2. Leaving the old path in `profile.yml` instead
+is strictly worse — it points at a file that no longer exists.
+**So before relocating, renaming, or re-homing a `durable_root`, read `runs/ledger.json` and count
+`converged` segments — that count IS the cost**, and it is state no test and no reviewer can see.
+Zero converged means the move is free.
+
 **Within surface 1, members do NOT migrate equally.** `plugin_bundle_hash` and `schema_hash` route a
 mismatched converged segment to `stale` → **re-translate only**. But
 `derivation_bundle_hash ∈ DERIVATION_STATE_FIELDS` (`select_segments.py:186-193`, alongside
