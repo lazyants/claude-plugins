@@ -431,19 +431,59 @@ def test_an_unreadable_canonical_review_is_not_recorded_as_ABSENT(tmp_path):
     assert not DRIVER.txn_intent_path(ctx.txn_dir, SEG).exists()
 
 
+def test_a_write_landing_DURING_the_decision_makes_the_round_re_derive(tmp_path, monkeypatch):
+    """THE BRACKET, and the reason a one-sided premise was worthless.
+
+    Capturing the premise only AFTER derive returns records whatever is on disk
+    at that moment -- including a write that landed WHILE the decision was
+    being read. derive answers from state A, the premise records state B, and
+    the publish-time check then compares B against B and passes: the guard
+    agreed with itself about exactly the writer it existed to catch.
+
+    Found by codex review, which also pointed out that the test I had written
+    for it called decision_premise() directly and never derive_next_action(),
+    so it could not have detected this. This one drives the real loop and
+    writes from inside derive."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    dispatched = []
+    writes = []
+
+    def _derive_then_somebody_writes(seg, c):
+        # The competing write lands after derive has read, before the premise
+        # that is supposed to describe derive's read is taken. It must write
+        # something NEW each time: a writer that keeps re-writing identical
+        # bytes leaves the state stable from the second iteration on, and a
+        # stable state is one the decision may legitimately act on.
+        writes.append(len(writes))
+        (ctx.segments_dir / f"{SEG}.review.json").write_text(
+            json.dumps({"published": "by somebody else", "n": len(writes)}),
+            encoding="utf-8")
+        return {"action": "review", "round_label": "1"}
+
+    monkeypatch.setattr(DRIVER, "derive_next_action", _derive_then_somebody_writes)
+    monkeypatch.setattr(DRIVER, "run_one_codex_job",
+                        lambda c, **k: dispatched.append(k) or {"ok": True, "reason": "staged"})
+
+    result = DRIVER.process_segment(SEG, ctx)
+
+    assert dispatched == [], "a decision whose premise moved must dispatch nothing"
+    assert len(writes) > 1, "the fixture must have re-derived, not returned after one look"
+    # Every iteration re-derives and every one is written under, so the loop
+    # ends on its own cap rather than acting on a decision it cannot trust.
+    assert result["reason"] == "loop-exhausted-without-terminal-state"
+
+
 def test_a_round_decided_against_state_somebody_else_has_since_replaced_is_refused(tmp_path):
     """THE LEASE HANDOFF WINDOW. The parent decides under the lease, releases
     it to launch the child, and the child takes it -- so a writer can land in
     between. The transaction's own CAS does NOT catch that: it binds the state
     observed AFTER the job returns, so the competitor's publication becomes
     part of the premise instead of invalidating it, and the round would
-    overwrite a review it never saw.
-
-    Found by codex review. The premise captured at decide time is what makes
-    the window a refusal instead of a silent overwrite."""
+    overwrite a review it never saw."""
     ctx = _ctx(tmp_path)
     _write_canonical(ctx, review={"old": "review"})
-    premise = DRIVER.decision_premise(ctx, SEG)  # what derive_next_action saw
+    premise = DRIVER.decision_premise(ctx, SEG)
     result = _stage_candidates(ctx)
 
     # ... and now somebody else publishes a review for this segment.
@@ -476,6 +516,52 @@ def test_the_premise_covers_the_draft_TOKEN_and_the_review_not_only_content(tmp_
 
     assert after[0] == premise[0], "content sha1 is unchanged -- that is the point"
     assert after != premise, "the token change must still invalidate the premise"
+
+
+def test_the_premise_covers_the_SEGPACK_the_gates_judged_against(tmp_path):
+    """The segpack is the AUTHORITY, not context: both draft gates read it. A
+    content change that keeps the key topology leaves the draft and review
+    bytes untouched, so a premise over those two alone still matches and the
+    pair publishes as if validated against the new source -- and the resulting
+    convergence's cache key is then computed from the new segpack, marking work
+    derived from the old one reusable under it.
+
+    Found by codex review; deferring this was not defensible without an
+    enforced "the segpack does not change mid-run" contract, and there is none."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    segpack = ctx.segments_dir / f"segpack_{SEG}.json"
+    segpack.write_text('{"blocks": {"b": "source"}}', encoding="utf-8")
+    premise = DRIVER.decision_premise(ctx, SEG)
+
+    segpack.write_text('{"blocks": {"b": "corrected source"}}', encoding="utf-8")
+
+    assert DRIVER.decision_premise(ctx, SEG) != premise
+    txn = _publish(ctx, "1", _stage_candidates(ctx), premise=premise)
+    assert txn["reason"] == "txn-decision-stale"
+
+
+def test_the_premise_covers_the_PROFILE_the_prompt_was_built_from(tmp_path):
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    profile = ctx.dirs["durable_root"] / "profile.yml"
+    profile.write_text("engine:\n  max_fix_rounds: 2\n", encoding="utf-8")
+    (ctx.dirs["durable_root"] / ".literary-translator-root.json").write_text(
+        json.dumps({"owner_profile_path": str(profile)}), encoding="utf-8")
+    premise = DRIVER.decision_premise(ctx, SEG)
+
+    profile.write_text("engine:\n  max_fix_rounds: 4\n", encoding="utf-8")
+
+    assert DRIVER.decision_premise(ctx, SEG) != premise
+
+
+def test_an_absent_segpack_or_profile_is_stable_rather_than_flapping(tmp_path):
+    """Absence must compare equal to absence, or every round in a fixture-less
+    project would refuse itself. It is UNREADABILITY that must refuse, and that
+    is a different observation -- _sha256_of returns a distinct sentinel."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    assert DRIVER.decision_premise(ctx, SEG) == DRIVER.decision_premise(ctx, SEG)
 
 
 def test_the_private_candidates_are_removed_once_the_transaction_owns_copies(tmp_path):
@@ -950,6 +1036,54 @@ def test_publication_happens_UNDER_the_lease_not_merely_after_it(tmp_path, monke
     assert result["stage"] == "publish"
     assert result["reason"] == "segment-busy"
     assert _canonical(ctx, "draft")["blocks"]["b"] == "old", "nothing may have been published"
+    # The validated pair is unreachable from here on -- random per-invocation
+    # paths, nothing sweeps for them, only this run's journal names them. Leave
+    # them and every occurrence leaks a draft-sized pair forever; the round
+    # itself re-runs next invocation either way.
+    assert not (ctx.segments_dir / f".att.{SEG}.abcd.draft.json").exists()
+    assert not (ctx.segments_dir / f".att.{SEG}.abcd.review.json").exists()
+
+
+def test_the_renames_themselves_run_while_the_lease_is_HELD(tmp_path, monkeypatch):
+    """The test above proves the lease is ACQUIRED before publishing. It cannot
+    tell that apart from acquiring it, releasing it, and then publishing --
+    mutation confirmed exactly that: moving the publish call one line out of
+    the `with` left it green.
+
+    This one observes the lock at the moment of the rename. flock is per
+    OPEN FILE DESCRIPTION, so a second open() in this same process contends
+    with the driver's own hold just as another process would."""
+    ctx = _ctx(tmp_path)
+    _write_canonical(ctx)
+    observed = {}
+    real_publish = DRIVER.publish_txn
+
+    def _publish_and_look(txn_dir, seg, segments_dir, decision, scripts_dir=DRIVER.SCRIPTS_DIR):
+        fd = os.open(str(segments_dir / f".codex_job.{seg}.lock"),
+                     os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            observed["lease_was_free"] = True
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            observed["lease_was_free"] = False
+        finally:
+            os.close(fd)
+        return real_publish(txn_dir, seg, segments_dir, decision, scripts_dir)
+
+    monkeypatch.setattr(DRIVER, "publish_txn", _publish_and_look)
+    monkeypatch.setattr(DRIVER, "derive_next_action",
+                        lambda seg, c: {"action": "review", "round_label": "1"})
+    monkeypatch.setattr(
+        DRIVER, "run_one_codex_job",
+        lambda c, **k: dict(_stage_candidates(ctx), **k))
+
+    DRIVER.process_segment(SEG, ctx)
+
+    assert observed.get("lease_was_free") is False, (
+        "the canonical renames ran with the per-segment lease NOT held -- the "
+        "driver's own publication was racing the children it launches")
+    assert _canonical(ctx, "draft")["blocks"]["b"] == "fixed"
 
 
 def test_handoff_takes_no_lease_at_all(tmp_path, monkeypatch):

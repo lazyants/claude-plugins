@@ -4139,6 +4139,24 @@ def _stage_candidate(source: Path, destination: Path, expected_sha256) -> bool:
     return _fsync_dir(destination.parent)
 
 
+def _discard_unpublished_candidates(result: dict) -> None:
+    """Remove codex_job.py's two private per-invocation candidates.
+
+    Best effort by design: a failed unlink is litter, never a reason to fail an
+    otherwise valid publication. Callers use this for BOTH of the states in
+    which the pair has stopped being the record -- consumed into transaction
+    staging, or abandoned unpublishable -- because the files are identical and
+    so is the reason they must not stay."""
+    for key in ("staged_draft_path", "staged_review_path"):
+        path = result.get(key)
+        if not isinstance(path, str) or not path:
+            continue
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def _txn_failure_ceiling(ctx: "DispatchContext") -> int:
     return ctx.translate_cfg.get("max_txn_failures_per_segment",
                                  DEFAULT_MAX_TXN_FAILURES_PER_SEGMENT)
@@ -4258,23 +4276,83 @@ def recover_segment_txns(ctx: "DispatchContext", seg: str) -> list:
     return results
 
 
-def decision_premise(ctx: "DispatchContext", seg: str) -> tuple:
-    """The canonical state derive_next_action() based its answer on, as a
-    comparable tuple: the draft's CONTENT sha1, the draft's dispatch_token, and
-    the raw sha256 of the canonical review (None when absent).
+def owner_profile_path(durable_root: Path):
+    """The profile.yml this durable root is owned by, per its ownership marker,
+    or None if the marker cannot be read. Never fatals: this is used to HASH
+    the profile for the premise below, and a premise that cannot be built must
+    refuse the round, not abort the batch."""
+    try:
+        marker = json.loads(
+            (durable_root / ".literary-translator-root.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    path = marker.get("owner_profile_path") if isinstance(marker, dict) else None
+    return Path(path) if path else None
 
-    Captured under the per-segment lease at DECIDE time and re-asserted at
-    PUBLISH time. The transaction's own CAS is not a substitute: it binds the
+
+def decision_premise(ctx: "DispatchContext", seg: str) -> tuple:
+    """Everything derive_next_action()'s answer and the round's validation both
+    depend on, as a comparable tuple: the draft's CONTENT sha1, the draft's
+    dispatch_token, the raw sha256 of the canonical review (None when absent),
+    the raw sha256 of the segpack, and the raw sha256 of the owning profile.
+
+    Captured around the DECIDE step under the per-segment lease and re-asserted
+    at PUBLISH time. The transaction's own CAS is not a substitute: it binds the
     state observed AFTER the codex job returns, so a competing publication that
     lands in the gap between the parent releasing the lease and the child
     taking it becomes part of the transaction's premise instead of
     invalidating it -- and the round then publishes work that, on the state now
-    on disk, would never have been dispatched."""
+    on disk, would never have been dispatched.
+
+    THE SEGPACK AND THE PROFILE ARE IN HERE, not just the two artifacts, because
+    they are the AUTHORITY the round was judged against, not merely context.
+    draft_ready.py and validate_draft.py both read the segpack; the child's
+    prompt is built from the profile. If the segpack's content changes while
+    keeping its key topology -- a corrected source line, an adjusted canon
+    entry -- the draft and review bytes are untouched, so a premise over those
+    two alone still matches and the pair publishes as if validated against the
+    new source. Worse than a stale publication: the resulting convergence's
+    cache key is computed from the NEW segpack, marking work derived from the
+    old one reusable under it.
+
+    Any component that could not be read comes back as None or TXN_UNREADABLE
+    and simply fails to compare equal, which refuses the round -- the correct
+    direction, since an unreadable authority is not an observation that it is
+    unchanged."""
     draft_path = ctx.segments_dir / f"{seg}.draft.json"
     _, content_sha1, token = _draft_observation(
         seg, draft_path, ctx.segments_dir, ctx.dirs["scripts_dir"])
     review_sha256 = _sha256_of(ctx.segments_dir / f"{seg}.review.json")
-    return (content_sha1, token, review_sha256)
+    segpack_sha256 = _sha256_of(ctx.segments_dir / f"segpack_{seg}.json")
+    profile_path = owner_profile_path(ctx.dirs["durable_root"])
+    profile_sha256 = _sha256_of(profile_path) if profile_path is not None else None
+    return (content_sha1, token, review_sha256, segpack_sha256, profile_sha256)
+
+
+def decide_under_premise(ctx: "DispatchContext", seg: str):
+    """derive_next_action(), BRACKETED by the premise it is deciding from.
+
+    Returns (action, premise), or (None, None) when the state moved during the
+    read -- in which case the caller must re-derive rather than act.
+
+    THE BRACKET IS THE WHOLE POINT AND THE SINGLE-SIDED VERSION WAS VACUOUS.
+    Capturing the premise only AFTER derive returns records whatever is on disk
+    at that moment, including a write that landed DURING the decision: derive
+    answers from state A, the premise records state B, and the publish-time
+    check then compares B against B and passes. The guard agreed with itself
+    about exactly the writer it existed to catch. Reading before and after and
+    requiring them equal is what makes "the state derive saw" a claim with
+    evidence behind it rather than a comment.
+
+    This still does not make the read atomic -- nothing available here does --
+    but a writer must now land entirely between two reads that bracket the
+    decision, and be gone by the second, to go unnoticed."""
+    before = decision_premise(ctx, seg)
+    action = derive_next_action(seg, ctx)
+    after = decision_premise(ctx, seg)
+    if before != after:
+        return None, None
+    return action, after
 
 
 def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
@@ -4373,13 +4451,10 @@ def publish_fixreview_pair(ctx: "DispatchContext", seg: str, round_label: str,
     # both are now copied, fsynced and digest-confirmed in the transaction's
     # own staging, which is the record recovery reads. Left in place they
     # accumulate one draft-sized pair per round per invocation, in the
-    # segments directory, forever. Best effort: a failed unlink is litter, not
-    # a reason to refuse a validated pair.
-    for path in (result["staged_draft_path"], result["staged_review_path"]):
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+    # segments directory, forever. Reached ONLY after both staging copies
+    # succeeded -- every earlier refusal returns above, leaving the
+    # candidates intact for a path that has not consumed them.
+    _discard_unpublished_candidates(result)
 
     intent = {
         "txn_schema": TXN_SCHEMA_VERSION,
@@ -4770,11 +4845,16 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                         return {"seg": seg, "converged": False, "outcome": "failed",
                                 "reason": "segment-busy"}
                     recover_segment_txns(ctx, seg)
-                    action = derive_next_action(seg, ctx)
-                    # Captured HERE, inside the lease, together with the read
-                    # it describes -- see decision_premise(). Taken after
-                    # derive so it describes the state derive actually saw.
-                    premise = decision_premise(ctx, seg)
+                    # Decided and premised in one bracketed read, inside the
+                    # lease -- see decide_under_premise() for why capturing the
+                    # premise only afterwards made the guard agree with itself.
+                    action, premise = decide_under_premise(ctx, seg)
+                if action is None:
+                    # Something wrote while the decision was being read. Nothing
+                    # was dispatched, so this costs one iteration of the bounded
+                    # loop and no codex job; re-derive against whatever is there
+                    # now rather than act on a decision whose premise moved.
+                    continue
             else:
                 action = derive_next_action(seg, ctx)
                 premise = None
@@ -4906,6 +4986,15 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                     # process, a human editor, a sync daemon.
                     with segment_lease(ctx.segments_dir, seg) as leased:
                         if not leased:
+                            # The pair is validated but can never be published
+                            # or found again: its paths carry a random
+                            # per-invocation component, nothing sweeps for
+                            # them, and only this run's journal records them.
+                            # Between leaking one draft-sized pair per
+                            # occurrence forever and discarding work that is
+                            # already unreachable, discard -- the round
+                            # re-runs next invocation.
+                            _discard_unpublished_candidates(result)
                             return {"seg": seg, "converged": False, "outcome": "failed",
                                     "stage": "publish", "round_label": round_label,
                                     "reason": "segment-busy"}
