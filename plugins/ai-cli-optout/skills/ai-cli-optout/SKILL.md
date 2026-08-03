@@ -1,6 +1,6 @@
 ---
 name: ai-cli-optout
-description: Opt out of telemetry / error reporting / analytics / feedback uploads across every locally installed AI CLI and AI-enabled IDE — Anthropic Claude Code, OpenAI Codex CLI, Google Gemini CLI, GitHub CLI + Copilot CLI, Cursor, Cursor CLI (cursor-agent), Google Antigravity, VS Code, PhpStorm — plus Vercel CLI (adjacent developer tooling) and macOS + Windows OS-level privacy surfaces (Apple Intelligence, Mac Analytics, Advertising ID, Recall, Copilot, Diagnostic Data). Applies documented opt-out flags per vendor, diffs against live vendor docs to surface NEW vars not in baseline, and reports persistent local state without deleting anything. Triggers — "opt out", "opt out of telemetry", "disable telemetry", "privacy mode", "kill switch", "disable analytics", "stop sending data", "disable claude code tracking", "disable claude code telemetry", "stop sending data to anthropic", "opt out of codex", "disable codex analytics", "disable openai telemetry", "disable gemini telemetry", "disable gemini analytics", "disable copilot telemetry", "disable gh telemetry", "cursor privacy mode", "disable cursor telemetry", "disable cursor cli telemetry", "cursor-agent privacy", "opt out of cursor cli", "ai cli privacy", "ai cli opt out", "opt out of antigravity", "disable google antigravity telemetry", "vscode telemetry off", "disable vscode telemetry", "phpstorm privacy", "disable jetbrains telemetry", "disable apple intelligence", "macos privacy optout", "disable mac analytics", "disable advertising id", "windows privacy optout", "disable windows telemetry", "disable recall", "disable windows copilot", "disable vercel telemetry", "opt out of vercel", "vercel privacy".
+description: Opt out of telemetry / tracking / error reporting / analytics / feedback uploads across every locally installed AI CLI and AI-enabled IDE — Anthropic Claude Code, OpenAI Codex CLI, Google Gemini CLI, GitHub CLI (gh) + Copilot CLI, Cursor, Cursor CLI (cursor-agent), Google Antigravity, VS Code (vscode), JetBrains PhpStorm — plus Vercel CLI and macOS + Windows OS-level privacy surfaces (Apple Intelligence, Mac Analytics, Advertising ID, Recall, Copilot, Diagnostic Data). Applies documented opt-out flags per vendor, diffs against live vendor docs to surface NEW vars not in baseline, and reports persistent local state without deleting anything. Triggers include "opt out", "opt out of telemetry", "disable telemetry", "disable tracking", "privacy mode", "kill switch", "disable analytics", "stop sending data", "ai cli opt out", "disable apple intelligence" — the full list is under "Trigger phrases" in the body, which is documentation, not discovery.
 ---
 
 # AI CLI Optout
@@ -25,6 +25,31 @@ Covered vendors (2026-04-24 baseline):
 | Vercel CLI | any | `vercel telemetry disable` (persistent) + `VERCEL_TELEMETRY_DISABLED=1` (per-run override) | Sibling tools (Next.js, Turborepo) have separate streams and are not covered. |
 | macOS system privacy | darwin | `defaults write` (AdLib, CrashReporter plist) | Apple Intelligence keys are MDM-only on unmanaged Macs |
 | Windows system privacy | win32 | `reg add` (Recall, Copilot, AllowTelemetry, AdvertisingInfo) | Home edition: AllowTelemetry=0 unsupported (floor is Required) |
+
+## Trigger phrases
+
+**This list is documentation, not discovery.** The body loads only after the skill has already been
+selected, so nothing here can cause a match — selection happens entirely on the frontmatter
+`description`, which the Agent Skills spec caps at 1024 characters. The description therefore names
+every vendor and every action term (telemetry, tracking, analytics, error reporting, feedback, opt
+out, privacy mode, kill switch) rather than every phrasing of them, which is what keeps requests like
+"disable windows telemetry" or "opt out of vercel" matchable without listing them verbatim. The list
+below records the phrasings this skill is meant to answer, for authors and for anyone auditing that
+coverage:
+
+"opt out", "opt out of telemetry", "disable telemetry", "privacy mode", "kill switch",
+"disable analytics", "stop sending data", "disable claude code tracking",
+"disable claude code telemetry", "stop sending data to anthropic", "opt out of codex",
+"disable codex analytics", "disable openai telemetry", "disable gemini telemetry",
+"disable gemini analytics", "disable copilot telemetry", "disable gh telemetry",
+"cursor privacy mode", "disable cursor telemetry", "disable cursor cli telemetry",
+"cursor-agent privacy", "opt out of cursor cli", "ai cli privacy", "ai cli opt out",
+"opt out of antigravity", "disable google antigravity telemetry", "vscode telemetry off",
+"disable vscode telemetry", "phpstorm privacy", "disable jetbrains telemetry",
+"disable apple intelligence", "macos privacy optout", "disable mac analytics",
+"disable advertising id", "windows privacy optout", "disable windows telemetry",
+"disable recall", "disable windows copilot", "disable vercel telemetry", "opt out of vercel",
+"vercel privacy".
 
 ## Workflow
 
