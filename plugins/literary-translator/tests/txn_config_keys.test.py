@@ -31,7 +31,7 @@ actually consumed at runtime -- that is a separate change.
 
 RED-before-GREEN for the boolean-is-not-an-integer case (the one case where
 `isinstance(True, int) is True` in plain Python makes the naive check look
-like it would silently pass): `test_boolean_true_and_false_rejected_for_both_keys`
+like it would silently pass): `test_boolean_rejected_for_both_keys`
 first proves the REAL schema rejects `True`/`False` for both keys, then
 `test_removing_the_type_keyword_would_have_let_booleans_through` proves the
 NEGATIVE half by patching a deep-copied schema to drop exactly the `"type":
