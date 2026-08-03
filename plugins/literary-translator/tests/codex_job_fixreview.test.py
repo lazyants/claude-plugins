@@ -911,6 +911,85 @@ def test_the_reported_digest_is_the_VALIDATED_one_not_a_later_re_read(tmp_path, 
     assert line["ok"] is False
 
 
+def _run_drifted_fixreview_job(tmp_path, monkeypatch):
+    """Same tamper-after-gates shape as
+    test_the_reported_digest_is_the_VALIDATED_one_not_a_later_re_read above, factored
+    out because the three tests below assert on finalize()'s SIDE EFFECTS (fail
+    sentinel, retained candidates, the durable joblog) rather than only the stdout
+    line that test already covers -- finalize() used to decide self.ok, write the fail
+    sentinel, run the fixreview cleanup, AND write the durable joblog, ALL before the
+    staged-digest confirmation that this tamper is designed to trip. On the pre-fix
+    driver every one of those already happened on the wrong (pre-drift) verdict by the
+    time the confirmation finally ran."""
+    job = _mkjob(tmp_path, deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "_preflight_same_device", lambda: True)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+
+    def fake_launch():
+        _seed_fixreview_sandbox(tmp_path, job)
+        Path(job.sandbox_attempt).write_text(_draft_payload(job.tok), encoding="utf-8")
+        Path(job.sandbox_attempt_review).write_text(_review_payload(job.review_tok), encoding="utf-8")
+        return True
+    monkeypatch.setattr(job, "launch", fake_launch)
+    monkeypatch.setattr(job, "poll", lambda: setattr(job, "job_status", "completed"))
+    gate, _ = _gate_recorder({})
+    monkeypatch.setattr(job, "_gate", gate)
+    mv, _ = _matched_verdict_stub(({"status": "ok"}, None))
+
+    def validate_then_tamper(review_obj, timeout):
+        result = mv(review_obj, timeout)
+        # Lands after every gate has passed, before finalize reports.
+        Path(job.attempt).write_text('{"rewritten":"after the gates"}', encoding="utf-8")
+        return result
+    monkeypatch.setattr(job, "_matched_verdict", validate_then_tamper)
+
+    job.run()
+    return job
+
+
+def test_a_drifted_staging_writes_the_fail_sentinel(tmp_path, monkeypatch, capsys):
+    """run() launches this driver DETACHED (`nohup ... >/dev/null 2>&1 &` -- see
+    finalize()'s own joblog comment), so stdout is discarded at the shell level and the
+    fail sentinel is the ONLY fail-fast signal a detached caller ever sees. finalize()
+    used to compute self.ok (and decide whether to write the sentinel) BEFORE the
+    staged-digest confirmation ran, so a drifted staging that flips self.staged/self.ok
+    to False afterward left no sentinel on disk -- the correction existed only on
+    stdout, which the detached caller never reads."""
+    job = _run_drifted_fixreview_job(tmp_path, monkeypatch)
+    capsys.readouterr()  # drain -- this test only cares about the sentinel, not the line
+    assert os.path.exists(job.fail_sentinel), (
+        "a drifted staging is a FAILURE; without the sentinel a detached caller waits "
+        "out the full deadline instead of failing fast"
+    )
+
+
+def test_a_drifted_staging_leaves_both_candidates_on_disk(tmp_path, monkeypatch, capsys):
+    """finalize()'s fixreview cleanup (`if not self.staged:`) used to run against the
+    ALREADY-FLIPPED self.staged == False and delete both .att.* candidates -- destroying
+    the very evidence of the concurrent writer that caused the drift. Retaining them is
+    deliberate, mirroring the quarantine-failed-to-move case just above (same file)."""
+    job = _run_drifted_fixreview_job(tmp_path, monkeypatch)
+    capsys.readouterr()
+    assert os.path.exists(job.attempt), "drifted evidence must survive finalize(), not be deleted"
+    assert os.path.exists(job.attempt_review)
+
+
+def test_a_drifted_staging_joblog_records_failure_not_success(tmp_path, monkeypatch, capsys):
+    """The durable joblog is the ONLY record on the detached path (see finalize()'s own
+    comment: stdout is thrown away at the shell level). It used to be written BEFORE the
+    staged-digest confirmation ran, so it recorded a drifted staging as ok:true,
+    staged:true, with no reason -- the one surviving record said the opposite of what
+    happened."""
+    job = _run_drifted_fixreview_job(tmp_path, monkeypatch)
+    capsys.readouterr()
+    joblog = job.read_joblog()
+    assert joblog is not None, "the terminal joblog must exist"
+    assert joblog["ok"] is False
+    assert joblog["staged"] is False
+    assert joblog["reason"] == "staged-digest-drifted"
+
+
 def test_a_staging_with_no_captured_digest_is_refused_not_reported_as_null(tmp_path, capsys):
     """Fail CLOSED when there is nothing to compare.
 

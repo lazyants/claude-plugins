@@ -1467,6 +1467,182 @@ def test_isolation_reject_invalid_quality_preserves_canonical(tmp_path):
     assert not list((root / "segments").glob(".att.*"))  # attempt cleaned
 
 
+def test_promote_refuses_when_canonical_is_an_unreadable_regular_file(tmp_path):
+    """os.replace() needs write permission on the DIRECTORY holding the canonical, not
+    on the canonical itself -- so an unreadable regular file installed at the canonical
+    path is still fully replaceable by the promote step, even though safe_adopt()'s own
+    gates (which DO try to read self.canonical directly, no --candidate-file override)
+    correctly refuse to adopt it. The trigger: a human or another tool drops unreadable
+    bytes at c001.draft.json between segment_dispatch_driver.py's own dispatch-time
+    readability check and this run; the promote step must refuse to destroy the only
+    copy of whatever it holds."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    canon = root / "segments" / "c001.draft.json"
+    canon.write_text('{"marker":"unreadable-canonical"}', encoding="utf-8")
+    canon.chmod(0o000)
+    try:
+        if os.access(str(canon), os.R_OK):
+            pytest.skip("cannot make a file unreadable as this user")
+        proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                            base_state(seg, tok, "translate", attempt_mode="valid",
+                                       status_seq=["completed"]))
+    finally:
+        canon.chmod(0o644)
+
+    line = parse_line(proc)
+    assert proc.returncode == 1 and line["ok"] is False
+    assert line["reason"] == "canonical-unreadable"
+    assert canon.read_bytes() == b'{"marker":"unreadable-canonical"}', (
+        "canonical must be byte-identical -- never replaced over bytes nobody read"
+    )
+    assert sentinel_path(root, seg, "D1").exists()
+
+
+def test_promote_refuses_when_canonical_is_a_dangling_symlink(tmp_path):
+    """Same class as the unreadable-regular-file case above, reached a different way: a
+    canonical whose symlink TARGET vanished raises FileNotFoundError on read --
+    indistinguishable, to any check that follows the link, from "nothing at this path at
+    all". os.path.exists() (which follows) reports False for BOTH a dangling symlink and
+    a genuinely absent canonical, so asserting survival with it here would not catch a
+    driver that just deleted the link outright; os.path.lexists() (never follows) is
+    what actually proves the entry itself survived."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    canon = root / "segments" / "c001.draft.json"
+    target = root / "segments" / "c001.draft.json.target"
+    target.write_text('{"marker":"target"}', encoding="utf-8")
+    os.symlink(str(target), str(canon))
+    target.unlink()   # dangling now -- the entry exists, its target does not
+
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="valid",
+                                   status_seq=["completed"]))
+
+    line = parse_line(proc)
+    assert proc.returncode == 1 and line["ok"] is False
+    assert line["reason"] == "canonical-unreadable"
+    assert os.path.lexists(str(canon)), "the dangling symlink itself must survive"
+    assert not os.path.exists(str(canon)), "premise: still dangling, not silently repaired"
+    assert sentinel_path(root, seg, "D1").exists()
+
+
+def test_adopt_pending_refuses_when_canonical_cannot_be_observed(tmp_path, monkeypatch):
+    """The OTHER os.replace() onto self.canonical (adopt_pending(), not run()'s main
+    validate/promote step covered by the two e2e tests above). Its own gates run with
+    --candidate-file self.pending and never touch self.canonical at all, so nothing
+    upstream of this call re-observes it -- same guard, same class of bug, exercised
+    here in isolation from the full launch/poll/validate machinery."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    target = Path(job.canonical + ".target")
+    target.write_text("{}", encoding="utf-8")
+    os.symlink(target, job.canonical)
+    target.unlink()   # dangling
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "_gate", gate)
+
+    assert job.adopt_pending() is False
+    assert calls == ["draft_ready.py", "validate_draft.py"], (
+        "both gates ran and passed -- the refusal must come from the canonical check, "
+        "not from a gate rejection"
+    )
+    assert job.reason == "canonical-unreadable"
+    assert os.path.lexists(job.canonical), "the dangling symlink must survive"
+    assert not os.path.exists(job.canonical)
+    assert os.path.exists(job.pending), "recoverable work must not be discarded"
+
+
+def test_adopt_pending_refusal_protects_attempt_through_a_later_unrelated_failure(tmp_path, monkeypatch):
+    """The point of self.canonical_unreadable as a DEDICATED flag, not a self.reason
+    string comparison, at finalize()'s cleanup decision: adopt_pending()'s refusal sets
+    self.reason = "canonical-unreadable" and returns False; run() then falls through to
+    launch(), which can fail for a totally UNRELATED reason (e.g. a companion crash) --
+    self.reason becomes "launch-failed", overwriting the refusal's own record of itself.
+    A cleanup decision keyed on `self.reason != "canonical-unreadable"` would then stop
+    protecting whatever self.attempt held, the moment anything downstream narrates a
+    different outcome -- exactly the "a name describes what was decided, never what
+    happened" class of bug already found twice on this branch.
+
+    Exercised through the real run() path, not finalize() in isolation: a real
+    adopt_pending() refusal via a call-counting stub on _canonical_replaceable() that
+    simulates the canonical turning unobservable AFTER the preflight check already
+    passed it (the race window the preflight cannot close, which is why the late guards
+    still exist), followed by a real, unrelated launch() failure. self.attempt is
+    pre-seeded here because today's control flow only ever populates it for real within
+    the SAME branch that re-derives the canonical check fresh right before finalize()
+    (see test_promote_refuses_when_canonical_is_a_dangling_symlink above) -- this test
+    isolates the FLAG's survival property itself, at the exact path finalize() guards,
+    independent of how self.attempt came to hold content.
+
+    RED before the flag existed: reverting self.canonical_unreadable back to the
+    self.reason string comparison (`self.reason != "canonical-unreadable"`) at
+    finalize()'s cleanup line makes this fail on the last assertion -- self.attempt gets
+    deleted, because by the time finalize() runs self.reason reads "launch-failed"."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    Path(job.attempt).write_text('{"marker":"pre-existing-validated-candidate"}', encoding="utf-8")
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "_gate", gate)
+
+    seen = {"n": 0}
+    def flaky_check():
+        seen["n"] += 1
+        return seen["n"] == 1   # True for the preflight call, False from then on
+    monkeypatch.setattr(job, "_canonical_replaceable", flaky_check)
+
+    def fake_launch():
+        return False   # an unrelated companion crash, AFTER adopt_pending() already refused
+    monkeypatch.setattr(job, "launch", fake_launch)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert job.reason == "launch-failed", "premise: an unrelated later failure overwrote reason"
+    assert job.canonical_unreadable is True, "the dedicated flag must survive the reassignment"
+    assert os.path.exists(job.pending), "the gate-passed candidate must survive too"
+    assert os.path.exists(job.attempt), (
+        "finalize() must not delete this keyed on self.reason, which no longer says "
+        "canonical-unreadable by the time finalize() runs"
+    )
+
+
+def test_preflight_refuses_before_launch_when_canonical_cannot_be_observed(tmp_path, monkeypatch):
+    """The other half of the fix: adopt_pending()'s refusal (tested above) proves nothing
+    is destroyed, but by the time it fires a paid codex turn has ALREADY been bought and
+    is about to be spent for nothing -- adopt_pending() returning False falls straight
+    through to launch(). Mirrors _preflight_same_device()'s own "refuse BEFORE spending a
+    real codex turn" shape. Launches are COUNTED, not inferred from the outcome: a
+    refusal after a launch and a refusal before one return the identical rc/reason."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    target = Path(job.canonical + ".target")
+    target.write_text("{}", encoding="utf-8")
+    os.symlink(target, job.canonical)
+    target.unlink()   # dangling
+    launch_calls = {"n": 0}
+
+    def spy_launch():
+        launch_calls["n"] += 1
+        job.jobId = "J"
+        return True
+    monkeypatch.setattr(job, "launch", spy_launch)
+    monkeypatch.setattr(job, "poll", lambda: setattr(job, "job_status", "completed"))
+
+    rc = job.run()
+
+    assert rc == 1
+    assert launch_calls["n"] == 0, "no codex turn may be spent when nothing can ever be promoted"
+    assert job.reason == "canonical-unreadable"
+    assert job.canonical_unreadable is True
+    assert os.path.lexists(job.canonical), "the dangling symlink must survive"
+    assert not os.path.exists(job.canonical)
+    assert os.path.exists(job.fail_sentinel)
+    assert not job.holds_lock, "refused before the flock lease -- same shape as device-mismatch"
+
+
 def test_wrong_token_attempt_not_promoted(tmp_path):
     root, companion, node = build_root(tmp_path)
     seg, tok = "c001", "RUN:c001"

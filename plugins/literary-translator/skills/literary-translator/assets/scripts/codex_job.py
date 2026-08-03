@@ -401,6 +401,15 @@ class CodexJob:
         # full 4-gate chain and staged (never promoted to canonical -- see this class's
         # own fixreview comments above). Always False for every other kind.
         self.staged = False
+        # Set at every _canonical_replaceable() refusal (preflight, adopt_pending(),
+        # run()'s own promote step) -- a DEDICATED flag, not inferred from self.reason,
+        # because self.reason is reassigned by whatever the run does NEXT (a later
+        # launch-failed/validate-failed/job-completed/etc.) and finalize()'s decision to
+        # KEEP self.attempt on disk must survive that reassignment. A name describes what
+        # was decided, never what actually happened -- self.reason is for the joblog/stdout
+        # narrative; this flag is for the one thing that must not be reasoned about via a
+        # string that fourteen other branches also assign.
+        self.canonical_unreadable = False
         # Slots a quarantine move failed on, which finalize() must therefore NOT
         # delete. Empty on every path that never quarantines, so the check below
         # costs nothing for the other kinds.
@@ -554,6 +563,41 @@ class CodexJob:
                 os.remove(path)
         except OSError:
             pass
+
+    def _canonical_replaceable(self):
+        """True iff an os.replace() landing on self.canonical is safe to perform RIGHT NOW:
+        either there is no directory entry there at all (an ordinary first promotion, nothing
+        to destroy), or an entry IS there and this call just read it as a regular file.
+
+        os.replace() only needs WRITE permission on the CONTAINING DIRECTORY, not on the
+        target -- so an unreadable regular file, or a symlink whose target vanished, is fully
+        replaceable, and a caller that never re-observes self.canonical between an earlier
+        readability check and this promotion can silently destroy bytes nothing ever read.
+        Both call sites (adopt_pending()'s os.replace(self.pending, self.canonical) and
+        run()'s os.replace(self.attempt, self.canonical)) run this check while this process
+        holds the per-seg flock lease (acquired in run(), before either can be reached) -- the
+        only place the observation and the mutation share one concurrency boundary.
+        safe_adopt()'s own gates run earlier in this SAME process and DO read self.canonical
+        directly (no --candidate-file override), so they correctly refuse to adopt an
+        unreadable canonical -- but a failed safe_adopt() is deliberately indistinguishable
+        from "no valid canonical", and neither of the two paths that follow it re-observes
+        self.canonical again: adopt_pending()'s gates run with --candidate-file self.pending,
+        and validate_attempt()'s gates run with --candidate-file self.attempt -- both validate
+        the CANDIDATE, never the canonical they are about to overwrite.
+
+        os.lstat() (never follows a symlink) is what makes "no entry at all" and "an entry
+        exists but cannot be read" distinguishable: a dangling symlink's *read* raises the
+        SAME FileNotFoundError a truly absent path raises, and os.path.exists() (which
+        follows the link) reports False for both too -- either check alone would treat
+        "someone's symlink lost its target" the same as "nothing here, go ahead". A symlink
+        at the canonical path is refused UNCONDITIONALLY, dangling or not, matching
+        segment_dispatch_driver.py's own publish_txn() stance: confirming a symlink's TARGET
+        and replacing the LINK are different operations, and os.replace() replaces the link."""
+        try:
+            os.lstat(self.canonical)
+        except OSError:
+            return True  # no directory entry at all -- nothing to destroy
+        return self._is_regular(self.canonical)
 
     # #399: a gate that RAN and REJECTED an attempt currently discards both its
     # own diagnostic output and the rejected attempt itself (finalize()
@@ -1214,6 +1258,15 @@ class CodexJob:
                 self._capture_gate_rejection(name, proc)  # #399: capture before discarding
                 _silent_remove(self.pending)       # gate ran & rejected -> discard stale/bad, launch fresh
                 return False
+        if not self._canonical_replaceable():
+            # Every gate above validated self.pending, never self.canonical -- os.replace()
+            # only needs write on the DIRECTORY, not the target, so blindly replacing here
+            # could destroy bytes this process never read. Refuse and leave self.pending
+            # exactly as every other "could not promote" branch above does: intact, for a
+            # future dispatch's adopt_pending() to retry once the canonical is fixed.
+            self.canonical_unreadable = True
+            self.reason = "canonical-unreadable"
+            return False
         os.replace(self.pending, self.canonical)   # every gate passed
         return True
 
@@ -1392,6 +1445,25 @@ class CodexJob:
         return True
 
     def finalize(self):
+        # #409 track B follow-up: CONFIRM the staged digests BEFORE self.ok is decided
+        # -- not after, which is what this used to do. By the time the confirmation ran
+        # at the very end of the old finalize(), self.ok had already been computed (and
+        # the fail sentinel written, or skipped, on the WRONG verdict), the fixreview
+        # cleanup below had already run against the wrong self.staged, and the terminal
+        # joblog further down had already recorded the drifted staging as a success.
+        # run() launches this driver DETACHED (`nohup ... >/dev/null 2>&1 &` -- see the
+        # joblog comment further below), so stdout is discarded at the shell level and
+        # the joblog is the ONLY durable record on that path; it must not say the
+        # opposite of what happened.
+        draft_digest = review_digest = None
+        staged_digest_drifted = False
+        if self.kind == "fixreview":
+            draft_digest = self.published_digests.get(self.attempt)
+            review_digest = self.published_digests.get(self.attempt_review)
+            if self.staged and not self._staged_still_matches(draft_digest, review_digest):
+                self.staged = False
+                staged_digest_drifted = True
+                self.reason = "staged-digest-drifted"
         self.ok = self.promoted or self.adopted or self.staged
         if not self.ok:
             self._write_fail_sentinel()
@@ -1412,13 +1484,27 @@ class CodexJob:
             # be moved is skipped, deliberately leaving an .att.* file behind: a
             # later dispatch's own hygiene will find it, which is strictly better
             # than a silent unrecoverable delete.
-            if not self.staged:
+            #
+            # A FOURTH CASE, same shape: staged_digest_drifted (computed above) means a
+            # concurrent writer touched a candidate AFTER this run's own gates
+            # validated it. Both candidates are evidence of that writer -- deleting
+            # them here would be exactly the silent unrecoverable delete the THIRD
+            # case above exists to prevent, just reached by a different path. Keep
+            # them deliberately, the same way quarantine_stuck is kept.
+            if not self.staged and not staged_digest_drifted:
                 if "draft" not in self.quarantine_stuck:
                     _silent_remove(self.attempt)
                 if "review" not in self.quarantine_stuck:
                     _silent_remove(self.attempt_review)
-        elif not self.promoted:
-            _silent_remove(self.attempt)  # the os.replace consumed it iff promoted
+        elif not self.promoted and not self.canonical_unreadable:
+            _silent_remove(self.attempt)  # the os.replace consumed it iff promoted; a
+            # canonical-unreadable refusal is a data-safety refusal, not a candidate
+            # defect (see _canonical_replaceable()'s own docstring) -- the validated
+            # attempt is left in place rather than discarded. self.canonical_unreadable,
+            # not self.reason: reason is reassigned by whatever this run does NEXT (a
+            # later launch-failed/validate-failed/job-completed/etc reaching THIS
+            # finalize() call), so a string comparison here would stop protecting the
+            # file the moment anything downstream narrates a different outcome.
         if self.sandbox_dir:
             # Abandon the WHOLE sandbox unconditionally -- on every path (success,
             # validate-failure, timeout) we are done reading from it by this point
@@ -1460,23 +1546,18 @@ class CodexJob:
             # own required fields of the same name. All four are None/absent-shaped
             # when self.staged is False (nothing was validated well enough to stage).
             #
-            # THE DIGEST MUST BE OF THE BYTES THE GATES VALIDATED, not of whatever
-            # is at the path when this line is written. Re-hashing here -- which is
-            # what this did -- reports a digest for bytes nothing checked, and the
-            # transaction layer then binds its intent to it: a rewrite landing after
-            # gate 4 and before this read would be staged under a digest that makes
-            # it look validated. _publish_from_sandbox already computes the digest of
-            # what it verified landed, so the value is CAPTURED there and confirmed
-            # here; a mismatch means the staged file moved under us after validation,
-            # and the honest answer is then not to report a staging at all.
-            draft_digest = self.published_digests.get(self.attempt)
-            review_digest = self.published_digests.get(self.attempt_review)
-            if self.staged and not self._staged_still_matches(draft_digest, review_digest):
-                self.staged = False
-                self.ok = self.promoted or self.adopted
-                self.reason = "staged-digest-drifted"
-                line["ok"] = self.ok
-                line["reason"] = self.reason
+            # THE DIGEST MUST BE OF THE BYTES THE GATES VALIDATED, not of whatever is
+            # at the path when this line is written -- draft_digest/review_digest and
+            # the staged-digest CONFIRMATION (self.staged/self.ok/self.reason) are
+            # decided up top, before self.ok was computed, not here: re-hashing at
+            # report time (which is what this used to do) reports a digest for bytes
+            # nothing checked, and the transaction layer then binds its intent to it --
+            # a rewrite landing after gate 4 and before this read would be staged under
+            # a digest that makes it look validated. _publish_from_sandbox already
+            # computes the digest of what it verified landed, so the value is CAPTURED
+            # there and confirmed at the top of this method; a mismatch means the
+            # staged file moved under us after validation, and self.staged is already
+            # False by the time this line is built.
             line["staged"] = self.staged
             line["staged_draft_path"] = self.attempt if self.staged else None
             line["staged_review_path"] = self.attempt_review if self.staged else None
@@ -1498,6 +1579,23 @@ class CodexJob:
                 # share a device, or the final promote os.replace() is not atomic. Refuse
                 # BEFORE spending a real codex turn.
                 self.reason = "device-mismatch"
+                return 1
+            if self.kind != "fixreview" and not self._canonical_replaceable():
+                # Same shape as the device-mismatch check above: refuse BEFORE spending a
+                # real codex turn, not after. fixreview never promotes to a single
+                # self.canonical (it is None for that kind -- see canonical_path()'s own
+                # docstring), so this check does not apply there. For translate/review, if
+                # the canonical entry exists but cannot be observed right now, NEITHER
+                # safe_adopt() (whose own gates read self.canonical directly and would just
+                # fail the same way) NOR adopt_pending()/this run's own eventual promote
+                # step (both refuse via this SAME _canonical_replaceable() check -- see
+                # adopt_pending() and the promote branch further below) can succeed this
+                # run; launching a fresh codex turn anyway buys nothing but cost. This is
+                # the COMMON case; the later guards remain in place for the file that turns
+                # unreadable DURING this run, after this check already passed -- neither
+                # makes the other redundant.
+                self.canonical_unreadable = True
+                self.reason = "canonical-unreadable"
                 return 1
             if not self._setup_sandbox():
                 # #409 property 4-adjacent: an unconfined sandbox is worse than none.
@@ -1540,11 +1638,22 @@ class CodexJob:
                     self.reason = "validate-failed"
                 else:
                     if self.validate_attempt():
-                        os.replace(self.attempt, self.canonical)
-                        self.promoted = True
-                        self.reason = "promoted"
-                        return 0
-                    self.reason = "validate-failed"
+                        if not self._canonical_replaceable():
+                            # Data-safety refusal, not a candidate defect: self.attempt just
+                            # passed every gate, but self.canonical cannot be read right now
+                            # (an unreadable regular file, or a symlink whose target vanished)
+                            # -- promoting over it would destroy bytes nothing has read.
+                            # finalize()'s own cleanup must not discard self.attempt for THIS
+                            # reason (see its own comment there); leave both untouched.
+                            self.canonical_unreadable = True
+                            self.reason = "canonical-unreadable"
+                        else:
+                            os.replace(self.attempt, self.canonical)
+                            self.promoted = True
+                            self.reason = "promoted"
+                            return 0
+                    else:
+                        self.reason = "validate-failed"
             elif self.job_status == "completed":       # NEW: completed but no budget to validate this run
                 if self.kind == "fixreview":
                     # No #213 defer/adopt_pending counterpart for fixreview (see this
