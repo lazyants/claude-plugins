@@ -324,6 +324,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -344,7 +345,6 @@ except ImportError:
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPTS_DIR.parent
-TEMPLATES_DIR = SCRIPTS_DIR.parent / "templates"
 SELECT_SEGMENTS_SCRIPT = SCRIPTS_DIR / "select_segments.py"
 CODEX_JOB_SCRIPT = SCRIPTS_DIR / "codex_job.py"
 
@@ -356,6 +356,30 @@ DRIVER_LOCK_NAME = ".driver.lock"
 # select_segments.py/codex_job.py, so it gets the identical --plugin-root
 # redirect treatment in resolve_dirs() below -- one table, not six near-
 # duplicate if/else blocks.
+#
+# resolve_codex_companion.py belongs here, and it was NOT always true that
+# it did. SKILL.md's own Step 0a copy-pass section used to exclude it,
+# fourth alongside profile_validate.py/validate_extraction.py/
+# glossary_preflight.py, on the claimed reason that a durable copy "could
+# not glob the plugin's own install locations to find the newest installed
+# codex-companion.mjs". That reason was false: resolve_codex_companion.py
+# has zero occurrences of `__file__` and imports nothing plugin-specific --
+# its entire search is rooted at `os.path.expanduser("~")` against
+# `~/.claude*/plugins/cache/openai-codex/**/codex-companion.mjs`, a
+# DIFFERENT plugin's own install cache, found identically regardless of
+# where resolve_codex_companion.py itself happens to be running from. See
+# SKILL.md's own Step 0a section for the full disproof and the corrected
+# copy-pass rule.
+#
+# Before this was corrected, the documented default launch --
+# `nohup python3 {durable_root}/scripts/segment_dispatch_driver.py ...`,
+# no --plugin-root, exactly as SKILL.md instructs -- could not complete a
+# single dispatch: dirs["resolve_codex_companion_script"] resolved to a
+# path Step 0a never created, and resolve_companion_path()'s own
+# `script.is_file()` check fataled (exit_code=2) before any segment got a
+# prompt rendered. Do not re-exclude this script by re-deriving the same
+# plausible-but-wrong glob argument -- check the file's own source for
+# `__file__` first.
 _PHASE2_SIBLING_SCRIPTS = (
     "resume_setup.py",
     "resolve_codex_companion.py",
@@ -378,6 +402,124 @@ _PHASE2_SIBLING_SCRIPTS = (
 _TEMPLATE_NAME = "mass-translate-wf.template.js"
 
 
+def _template_candidate_state(path: Path) -> str:
+    """Tri-state verdict for ONE template candidate path, using `os.lstat()`
+    -- never `Path.is_file()`. `is_file()` FOLLOWS a valid symlink and
+    reports True for it exactly like a real regular file, and it collapses
+    every lookup failure (permission denied on an ancestor directory,
+    ELOOP, ENOTDIR, ...) to a bare False, indistinguishable from genuine
+    absence. Resolving the prompt-building template is not a cosmetic
+    layout question: `call_template_functions()` dynamically imports and
+    EXECUTES whatever this path resolves to
+    (mirrors codex_job.py's own `_is_regular()`/`_clear_nonregular()`
+    lstat-based discipline for the identical reason, applied here to a
+    lookup rather than a write-slot). Collapsing "a symlink to something
+    attacker-controlled" or "could not tell" into the same signal as
+    "nothing is there" would let a planted or tampered file silently become
+    the driver's authority for every prompt this file renders.
+
+    Returns one of:
+      "absent"     -- os.lstat() raised FileNotFoundError: the namespace
+                       positively says there is no entry at `path`.
+      "file"       -- a real, non-symlink regular file. The only state a
+                       caller may treat as a usable authority.
+      "suspicious" -- anything else: a symlink (even one that resolves to a
+                       genuine file), a directory, or any other lookup
+                       failure. The caller must refuse, not guess."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return "absent"
+    except OSError as exc:
+        print(
+            f"segment_dispatch_driver.py: warning: could not stat {path}: {exc}; "
+            f"treating the template candidate as suspicious",
+            file=sys.stderr,
+        )
+        return "suspicious"
+    if stat.S_ISREG(st.st_mode):
+        return "file"
+    return "suspicious"
+
+
+def _self_anchored_template_path():
+    """Where the prompt-building template lives relative to THIS file, across
+    the two layouts a self-anchored (no --plugin-root) driver can actually be
+    running from. They are not the same directory, and there is no single
+    path that names both:
+
+      * a DEPLOYED durable root -- Step 0a's copy pass places every bundle
+        member FLAT at ${durable_root}/scripts/<name>, the .template.js
+        workflow template exactly like the .py gates. There is no
+        scripts/templates/ subdirectory in a real deployed root. So the
+        template sits BESIDE this file.
+      * this PLUGIN checkout -- assets/scripts/ and assets/templates/ are
+        siblings, and the template sits ONE DIRECTORY OVER.
+
+    A hardcoded guess at either layout alone is wrong for the other: naming
+    only the checkout shape (SCRIPTS_DIR.parent / "templates", what this
+    function replaces) leaves a deployed, self-anchored driver invocation --
+    the one SKILL.md's own documented launch command produces -- unable to
+    find the template at all. Naming only the deployed shape would break
+    every self-anchored test that runs straight out of this checkout.
+
+    Nor can the two candidates simply be tried in a fixed order and the
+    first winner trusted: this function selects EXECUTABLE AUTHORITY, not
+    merely a layout (call_template_functions() dynamically imports whatever
+    it returns), so a stray or planted file at either path is an ambiguity
+    to refuse, not a tiebreak to resolve silently. Using
+    _template_candidate_state()'s lstat-based tri-state verdict instead of
+    is_file():
+      * BOTH candidates non-absent (in any state) -> fatal(). There is no
+        principled way to prefer one from inside this function.
+      * exactly one candidate is a genuine regular file ("file") and the
+        other is absent -> return the file.
+      * the one non-absent candidate is "suspicious" (symlink, directory, or
+        an unreadable/unlookupable entry) -> fatal(). Falling through to
+        treat it as though it were absent would be exactly the silent guess
+        this function exists to refuse.
+      * BOTH candidates absent -> return the deployed path, unchanged from
+        the previous behavior's failure mode: the caller's own "could not
+        read <path>" is the useful error, and naming the durable root points
+        at the layout a real deployment has to satisfy."""
+    deployed = SCRIPTS_DIR / _TEMPLATE_NAME
+    checkout = SCRIPTS_DIR.parent / "templates" / _TEMPLATE_NAME
+    deployed_state = _template_candidate_state(deployed)
+    checkout_state = _template_candidate_state(checkout)
+
+    if deployed_state != "absent" and checkout_state != "absent":
+        fatal(
+            f"ambiguous prompt-template authority: both {deployed} "
+            f"({deployed_state}) and {checkout} ({checkout_state}) exist -- "
+            f"refusing to guess which is authoritative; remove the stale one",
+            template_deployed=str(deployed),
+            template_deployed_state=deployed_state,
+            template_checkout=str(checkout),
+            template_checkout_state=checkout_state,
+        )
+    if deployed_state == "file":
+        return deployed
+    if deployed_state == "suspicious":
+        fatal(
+            f"prompt-template candidate at {deployed} is not a genuine "
+            f"regular file (symlink, directory, or unreadable) -- refusing "
+            f"to guess its authority",
+            template_path=str(deployed),
+            template_state=deployed_state,
+        )
+    if checkout_state == "file":
+        return checkout
+    if checkout_state == "suspicious":
+        fatal(
+            f"prompt-template candidate at {checkout} is not a genuine "
+            f"regular file (symlink, directory, or unreadable) -- refusing "
+            f"to guess its authority",
+            template_path=str(checkout),
+            template_state=checkout_state,
+        )
+    return deployed
+
+
 def resolve_dirs(durable_root_str, plugin_root_str=None):
     """LT-409 convention: `durable_root_str` governs DATA (runs/) -- rebuilt
     from that root when given, self-anchored otherwise.
@@ -395,7 +537,13 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
     `{plugin_root}/assets/templates/mass-translate-wf.template.js`.
     `plugin_root_str=None` reproduces today's self-anchored sibling lookup
     unchanged. Both None -> today's exact self-anchored values.
-    """
+
+    THE TWO BRANCHES ARE NOT SYMMETRIC FOR THE TEMPLATE. The --plugin-root
+    branch can name assets/templates/ outright, because it is told which
+    plugin install to trust. The self-anchored branch cannot name any
+    single directory, because the two trees it might be running from put
+    the template in different places -- see _self_anchored_template_path()'s
+    own docstring before changing either branch."""
     if durable_root_str is None:
         durable_root = DURABLE_ROOT
     else:
@@ -408,7 +556,7 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
         select_segments_script = SELECT_SEGMENTS_SCRIPT
         codex_job_script = CODEX_JOB_SCRIPT
         scripts = {_script_key(name): SCRIPTS_DIR / name for name in _PHASE2_SIBLING_SCRIPTS}
-        template_script = TEMPLATES_DIR / _TEMPLATE_NAME
+        template_script = _self_anchored_template_path()
         scripts_dir = SCRIPTS_DIR
     else:
         plugin_root = Path(plugin_root_str).resolve()
@@ -1706,9 +1854,17 @@ def _call_resume_setup(script: Path, payload: dict, dirs: dict, durable_root_str
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 -- resolve the codex-companion.mjs path, exactly like SKILL.md's
-# own W5 instantiation step (1.4.7): resolve_codex_companion.py, never a
-# durable-root copy, ABORT on any non-zero exit.
+# Phase 2 -- resolve the codex-companion.mjs path by running
+# resolve_codex_companion.py, ABORT on any non-zero exit. `dirs[
+# "resolve_codex_companion_script"]` is resolve_dirs()'s own answer for
+# WHERE that script is -- the durable-root copy in the self-anchored case,
+# exactly like every other Phase 2 sibling, or {plugin_root}/assets/
+# scripts/resolve_codex_companion.py when --plugin-root is given. SKILL.md's
+# own W5 instantiation step (1.4.7) separately runs the SAME script directly
+# from the plugin path, because the orchestrating session already has the
+# plugin root in hand at that step and there is no reason to prefer an
+# indirect copy there -- but that is a DIFFERENT call site than this one,
+# not a claim about what this function itself does.
 # ---------------------------------------------------------------------------
 
 
@@ -1946,10 +2102,28 @@ def call_template_functions(dirs: dict, subst: dict, calls: list, node_bin: str 
     that runs through this function. (This is exactly why this driver's
     own SEGS-facing checks -- validate_seg()'s --only-segs loop in run(),
     _dedupe_segs() -- are separate, independent code, never delegated to
-    "the template already checks this.")"""
+    "the template already checks this.")
+
+    THE READ BELOW IS THE ACTUAL TRUST BOUNDARY, not _self_anchored_
+    template_path()'s own resolution. dirs["template_script"] can come from
+    EITHER resolve_dirs() branch -- the self-anchored one, already fail-
+    closed via _self_anchored_template_path(), or the --plugin-root one,
+    which just joins a path with no check of its own (it is TOLD which
+    plugin to trust, so there is nothing for it to probe). Checking with
+    _template_candidate_state() HERE, unconditionally, protects both:
+    whichever branch produced this path, this driver must still refuse to
+    follow a symlink into it or read a non-regular entry before executing
+    whatever it finds -- never Path.is_file(), which follows a valid
+    symlink and reports it exactly like a real regular file."""
     template_path = dirs["template_script"]
-    if not template_path.is_file():
-        fatal(f"mass-translate-wf.template.js not found at {template_path}", exit_code=2)
+    template_state = _template_candidate_state(template_path)
+    if template_state != "file":
+        fatal(
+            f"mass-translate-wf.template.js at {template_path} is not usable "
+            f"(state={template_state}) -- refusing rather than following a "
+            f"symlink or reading a non-regular entry",
+            exit_code=2, template_path=str(template_path), template_state=template_state,
+        )
     template_text = template_path.read_text(encoding="utf-8")
     harness_source = template_harness_source(template_text, subst)
 

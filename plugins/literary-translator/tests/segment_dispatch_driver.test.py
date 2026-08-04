@@ -4104,5 +4104,280 @@ def test_resume_setup_rejects_both_resume_from_run_ids_and_the_singular_field_to
         assert result.get("resume") is False, (kwargs, result)
 
 
+# ===========================================================================
+# The prompt-building template: WHERE the driver looks for it (layout
+# resolution across the two shapes a self-anchored driver can be running
+# from), and WHAT it trusts once it looks (never following a symlink or
+# reading a non-regular entry -- the highest-severity finding on this
+# branch, because call_template_functions() dynamically imports and
+# EXECUTES whatever it reads: every render_translate_prompt()/
+# render_review_prompt()/render_fix_prompt() call, and the fabricated-
+# finding matchedVerdict() gate derive_next_action() runs against every
+# review, all go through this one function).
+# ===========================================================================
+
+
+def test_resolve_dirs_finds_the_template_under_a_deployed_durable_root(tmp_path):
+    """Step 0a's copy pass places every bundle member -- the .py gates AND
+    the .template.js workflow template alike -- FLAT at
+    ${durable_root}/scripts/<name>. There is no scripts/templates/ subdir in
+    a real deployed root. Reproduces that shape directly: copies the real
+    driver into an isolated root/scripts/ with the template ALSO flat there
+    and NO sibling templates/ directory, loads THAT copy (so its own
+    SCRIPTS_DIR self-anchors to the deployed location, not this checkout),
+    and calls its own resolve_dirs(None) -- the same self-anchored path a
+    real deployed driver invocation takes."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    flat_template = deployed_scripts / "mass-translate-wf.template.js"
+    shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, flat_template)
+
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_deployed_template")
+    assert deployed.resolve_dirs(None)["template_script"] == flat_template
+
+
+def test_resolve_dirs_still_finds_the_template_in_this_plugin_checkout_layout(tmp_path):
+    """The other half, and the one every phase2_project()-based test in this
+    file already depends on: assets/scripts/ and assets/templates/ are
+    siblings in a plugin checkout, so a self-anchored driver running from a
+    checkout must resolve ONE DIRECTORY OVER, not beside itself. Built as a
+    synthetic checkout rather than asserting against the real one, so the
+    assertion is about the LAYOUT rule, not this repo's own paths."""
+    assets = tmp_path / "assets"
+    checkout_scripts = assets / "scripts"
+    checkout_templates = assets / "templates"
+    checkout_scripts.mkdir(parents=True)
+    checkout_templates.mkdir()
+    shutil.copy2(DRIVER_SRC, checkout_scripts / "segment_dispatch_driver.py")
+    sibling_template = checkout_templates / "mass-translate-wf.template.js"
+    shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, sibling_template)
+
+    checkout = _load_module(
+        checkout_scripts / "segment_dispatch_driver.py", "sdd_checkout_template")
+    assert checkout.resolve_dirs(None)["template_script"] == sibling_template, (
+        "a self-anchored driver in a plugin checkout must resolve assets/templates/, "
+        "not a flat sibling that does not exist there"
+    )
+
+
+def test_resolve_dirs_refuses_when_both_template_candidates_exist(tmp_path):
+    """The concrete ambiguity a fixed-order probe cannot resolve safely: a
+    stray checkout-layout copy left beside a real deployed one (or vice
+    versa) must never be silently resolved by preferring one -- that is how
+    a stale or planted copy takes over every prompt this driver renders.
+    With both candidates real files, deployed-first and checkout-first
+    orderings would return DIFFERENT paths while both returning normally --
+    fail-closed is the only answer that agrees with itself regardless of
+    ordering."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, deployed_scripts / "mass-translate-wf.template.js")
+    checkout_templates = tmp_path / "templates"
+    checkout_templates.mkdir()
+    (checkout_templates / "mass-translate-wf.template.js").write_text(
+        "// stray checkout-layout copy\n", encoding="utf-8")
+
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_both_template_candidates")
+    with pytest.raises(deployed.DriverError):
+        deployed.resolve_dirs(None)
+
+
+def test_resolve_dirs_refuses_a_symlinked_template_candidate(tmp_path):
+    """is_file() FOLLOWS a valid symlink and reports True, exactly like a
+    real regular file -- so a symlink at either candidate path, pointing
+    ANYWHERE, would silently become the executable authority under the old
+    is_file()-based check. Refuse it outright rather than trust where it
+    resolves to."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    real_target = tmp_path / "elsewhere.js"
+    real_target.write_text("// a real file the symlink points at\n", encoding="utf-8")
+    (deployed_scripts / "mass-translate-wf.template.js").symlink_to(real_target)
+
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_symlinked_template")
+    with pytest.raises(deployed.DriverError):
+        deployed.resolve_dirs(None)
+
+
+def test_resolve_dirs_refuses_a_directory_where_the_template_should_be(tmp_path):
+    """A directory of the exact expected name -- is_file() reports False for
+    a directory (so the old code silently fell through to the checkout
+    candidate, or to the fallback, as if nothing were there at all), but a
+    directory is a real entry, not an absence: something put it there, and
+    treating it as "no candidate" is the same authority-selection risk as
+    silently preferring a stray file."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    (deployed_scripts / "mass-translate-wf.template.js").mkdir()
+
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_directory_template")
+    with pytest.raises(deployed.DriverError):
+        deployed.resolve_dirs(None)
+
+
+def test_resolve_dirs_refuses_when_a_candidate_cannot_be_looked_up_at_all(tmp_path):
+    """A lookup failure that is NOT ENOENT: os.lstat() needs traverse
+    permission on the PARENT directory, not read permission on the
+    candidate itself, so the scripts/ directory is what loses permission
+    here, after the driver module has already been imported from it (import
+    happens first, while the directory is still traversable -- otherwise
+    loading the module under test would fail for the same reason this test
+    wants to exercise). A non-ENOENT lookup failure must be treated as
+    PRESENT rather than absent, for the identical fail-closed reason a
+    genuinely absent entry is treated as safe to fall through on."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_unlookupable_template")
+
+    deployed_scripts.chmod(0o000)
+    try:
+        if os.access(str(deployed_scripts), os.X_OK):  # root -- the chmod bought nothing
+            pytest.skip("cannot make a directory unsearchable as this user")
+        with pytest.raises(deployed.DriverError):
+            deployed.resolve_dirs(None)
+    finally:
+        deployed_scripts.chmod(0o755)
+
+
+def test_a_symlinked_template_reached_via_plugin_root_is_refused_before_execution(tmp_path):
+    """THE HIGHEST-SEVERITY FINDING ON THIS BRANCH: --plugin-root's own
+    branch in resolve_dirs() just joins a path -- `plugin_root / "assets" /
+    "templates" / _TEMPLATE_NAME` -- with no existence or type check of its
+    own, because it is TOLD which plugin install to trust and has nothing
+    to probe. Under the old is_file()-based check in
+    call_template_functions(), a symlink planted at that exact path,
+    pointing at attacker-controlled content, would be followed and its
+    JavaScript top-level code EXECUTED (call_template_functions()
+    dynamically imports whatever dirs["template_script"] names) the moment
+    any prompt is rendered -- translate and review, not merely a
+    fixreview-style gate. The fix has to live at the point of USE
+    (call_template_functions() itself), not only at resolution, because
+    this branch never goes through _self_anchored_template_path() at all.
+
+    Reproduces the real attack shape: a real trusted plugin_root (the same
+    fixture make_trusted_plugin_root() builds for the existing --plugin-root
+    battery), with its real template REPLACED by a symlink to attacker-
+    controlled content placed OUTSIDE the plugin root entirely -- and calls
+    call_template_functions() directly, the same function every prompt
+    render and the fabricated-finding gate go through."""
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    template_path = plugin_root / "assets" / "templates" / "mass-translate-wf.template.js"
+    evil_js = tmp_path / "attacker_controlled" / "evil.js"
+    evil_js.parent.mkdir(parents=True)
+    evil_js.write_text(
+        "export const meta = {};\n"
+        "process.stdout.write('EVIL CODE EXECUTED');\n"
+        "export function translatePrompt() { return ''; }\n",
+        encoding="utf-8",
+    )
+    template_path.unlink()
+    template_path.symlink_to(evil_js)
+
+    dirs = DRIVER.resolve_dirs(None, str(plugin_root))
+    assert dirs["template_script"] == template_path, (
+        "sanity: the --plugin-root branch must still name this exact path -- "
+        "if it does not, this test is not exercising the branch it claims to"
+    )
+
+    # A COMPLETE, valid subst dict -- not {} -- so this test's own failure
+    # mode cannot be confused with an incidental KeyError from a lazy
+    # fixture: whatever call_template_functions() does with a real template
+    # this driver could actually be asked to render, it must never even
+    # attempt with a symlinked entry.
+    subst = {
+        "durable_root": str(tmp_path), "run_id": "20260101T000000Z",
+        "source_lang": "fr", "target_lang": "ru", "effort": "high", "model": "",
+        "verse_policy_instruction_block": "", "max_fix_rounds": 2,
+        "batch_agent_cap": 10000, "max_codex_jobs_per_batch": 400,
+        "companion_path": "/fake/companion.mjs", "plugin_root": "",
+    }
+    with pytest.raises(DRIVER.DriverError) as excinfo:
+        DRIVER.call_template_functions(dirs, subst, [])
+    # DISCRIMINATING, not just "some DriverError fired": evil.js is not
+    # template-shaped (no {{TOKEN}}s, no truncation marker), so a driver
+    # that read it anyway would ALSO eventually hit a DIFFERENT, unrelated
+    # DriverError (a missing truncation marker) further down the pipeline
+    # -- and that would make this test pass for the wrong reason even
+    # against an implementation that never closed the symlink hole. Assert
+    # on the SPECIFIC refusal instead: the fix reports the template's
+    # lstat-classified state, which is only ever attached by
+    # _template_candidate_state()'s own fail-closed check.
+    assert excinfo.value.extra.get("template_state") == "suspicious", (
+        f"expected the fail-closed template check to refuse this symlink "
+        f"specifically (extra={excinfo.value.extra!r}) -- a DriverError "
+        f"from ANY later stage of the pipeline is not proof the symlink "
+        f"itself was ever refused"
+    )
+
+
+# ===========================================================================
+# SKILL.md's Step 0a copy-pass correction: resolve_codex_companion.py is now
+# copied to ${durable_root}/scripts/ like every other self-anchored .py
+# script -- the old exclusion rested on a false claim (the script has zero
+# occurrences of __file__; its whole search is rooted at ~, independent of
+# its own location, so a durable copy globs the identical paths and finds
+# the identical companions). Before this fix, a genuinely deployed, self-
+# anchored (no --plugin-root) driver invocation -- SKILL.md's own documented
+# default launch line -- could not complete a single dispatch:
+# resolve_companion_path() found nothing at dirs[
+# "resolve_codex_companion_script"] and fataled (exit_code=2) before any
+# segment got a prompt rendered. No production code change was needed for
+# this fix: _PHASE2_SIBLING_SCRIPTS already named the correct self-anchored
+# path; Step 0a's copy pass was the only thing wrong. These two tests
+# bracket that.
+# ===========================================================================
+
+
+def test_resolve_companion_path_fatals_when_absent_from_a_deployed_root(tmp_path):
+    """Today's exact bug, reproduced directly: a deployed, self-anchored
+    durable root where resolve_codex_companion.py has not been copied (the
+    shape any install would have if Step 0a's copy pass simply failed to
+    run) still refuses cleanly with the driver's own fatal rather than
+    crashing some other way. This stays true regardless of the SKILL.md
+    fix -- a genuinely missing companion resolver must always refuse before
+    a paid codex call, never silently proceed with no companion path."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_companion_absent")
+    dirs = deployed.resolve_dirs(None)
+
+    with pytest.raises(deployed.DriverError) as excinfo:
+        deployed.resolve_companion_path(dirs, node_bin="node")
+    assert excinfo.value.exit_code == 2
+    assert "resolve_codex_companion.py not found" in str(excinfo.value), str(excinfo.value)
+
+
+def test_resolve_companion_path_succeeds_once_step_0a_copies_it_into_a_deployed_root(tmp_path):
+    """The regression the SKILL.md fix exists to satisfy: place
+    resolve_codex_companion.py where the CORRECTED Step 0a copy pass puts
+    it -- flat in scripts/, beside the driver, exactly like every other
+    self-anchored .py sibling -- and confirm resolve_companion_path(), the
+    SAME unmodified code the test above exercises, now succeeds instead of
+    hitting that fatal."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    (deployed_scripts / "resolve_codex_companion.py").write_text(
+        FAKE_RESOLVE_CODEX_COMPANION_PY, encoding="utf-8")
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_companion_present")
+    dirs = deployed.resolve_dirs(None)
+
+    companion_path = deployed.resolve_companion_path(dirs, node_bin="node")
+    assert companion_path == FIXTURE_COMPANION_PATH
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

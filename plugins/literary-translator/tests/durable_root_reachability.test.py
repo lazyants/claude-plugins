@@ -110,17 +110,28 @@ for _name in MANAGED_DIRS:
 # (each runs only from the plugin's own install path) -- so the collision
 # enumeration must not treat any of them as a shipped-into-scripts name. See
 # SKILL.md's Step 0a copy-exclusion list and profile_validate.py's own module
-# docstring. Four are the pipeline gate/validator scripts SKILL.md names as the
-# "four plugin-path scripts never copied" (1.4.7 added resolve_codex_companion.py,
-# the W5 codex-companion path resolver). scaffold_setup.py (1.9.0, #194) is a
-# fifth of a distinct category -- Step 0a's own shipped marker-writer, added to
-# SKILL.md's copy-exclusion as a separate clause -- so it is likewise never
-# copied and must be excluded here too.
+# docstring. Three are the pipeline gate/validator scripts SKILL.md names as
+# the "three plugin-path scripts never copied". resolve_codex_companion.py
+# (the W5 codex-companion path resolver) is deliberately NOT in this set: 1.4.7
+# added it as a fourth exclusion on the claimed reason that a durable copy
+# "could not glob the plugin's own install locations" -- found false (zero
+# occurrences of `__file__`; the whole search is rooted at `~`, independent
+# of the script's own location) and reverted. It IS now copied like every
+# other self-anchored script, so listing it here would be actively wrong: it
+# would make the collision enumeration below silently skip warning about a
+# pre-existing resolve_codex_companion.py in an adopted directory that Step
+# 0a is now actually about to overwrite -- exactly the collision this set
+# exists to catch, for the one member that switched sides. Do not re-add it
+# by re-deriving the same plausible-but-wrong glob argument -- check the
+# file's own source for `__file__` first.
+# scaffold_setup.py (1.9.0, #194) is a fourth of a distinct category -- Step
+# 0a's own shipped marker-writer, added to SKILL.md's copy-exclusion as a
+# separate clause -- so it is likewise never copied and must be excluded
+# here too.
 NEVER_COPIED_SCRIPTS = frozenset({
     "profile_validate.py",
     "validate_extraction.py",
     "glossary_preflight.py",
-    "resolve_codex_companion.py",
     "scaffold_setup.py",
 })
 
@@ -339,14 +350,21 @@ def _assert_full_skeleton_and_markers(durable_root: Path, profile_path: Path) ->
 # (A) Step 0a ownership / adoption logic
 # ---------------------------------------------------------------------------
 
-def test_skill_lists_resolve_codex_companion_as_fourth_plugin_path_script():
-    """1.4.7: SKILL.md's copy-exclusion sweep now names FOUR plugin-path
-    scripts never copied to durable_root -- resolve_codex_companion.py (the W5
-    codex-companion path resolver) joins profile_validate.py,
-    validate_extraction.py, and glossary_preflight.py. Guards the count from
-    silently drifting back to three when the sweep is next touched."""
+def test_skill_no_longer_excludes_resolve_codex_companion_from_the_copy_pass():
+    """1.4.7 added resolve_codex_companion.py (the W5 codex-companion path
+    resolver) as a FOURTH plugin-path script never copied to durable_root,
+    on the claimed reason that a durable copy "could not glob the plugin's
+    own install locations" -- found false (the script has zero occurrences
+    of `__file__`; its whole search is rooted at `~`, independent of its
+    own location) and the exclusion reverted, so it is copied like every
+    other self-anchored script and the sweep is back down to three. Guards
+    the count from silently drifting back to FOUR by someone re-deriving
+    the same plausible-but-wrong argument -- the inverse of what this test
+    used to guard, replaced rather than deleted so the count is still
+    pinned in one direction or the other."""
     assert "resolve_codex_companion.py" in _SKILL_TEXT
-    assert "four plugin-path scripts never copied" in _SKILL_TEXT
+    assert "three plugin-path scripts never copied" in _SKILL_TEXT
+    assert "four plugin-path scripts never copied" not in _SKILL_TEXT
 
 
 # A shipped he.json Hebrew preset once went unlisted in this same Step 0a
@@ -567,6 +585,40 @@ def test_unrelated_scripts_dir_with_validate_draft_py_names_it_as_a_collision(tm
     assert result.outcome == "adoption_prompt"
     assert "validate_draft.py" in result.message, result.message
     assert result.collisions["scripts"] == ["validate_draft.py"]
+
+
+def test_unrelated_scripts_dir_with_resolve_codex_companion_py_names_it_as_a_collision(tmp_path):
+    """The one BEHAVIORAL consequence of removing resolve_codex_companion.py
+    from NEVER_COPIED_SCRIPTS, not merely a documentary one: before this
+    fix, this name was excluded from _shipped_filenames("scripts"), so a
+    pre-existing resolve_codex_companion.py in an adopted directory was
+    silently invisible to the collision enumeration -- correct THEN,
+    because Step 0a genuinely never overwrote it, but it would have
+    UNDER-reported a real collision once Step 0a started copying it.
+    Mirrors test_unrelated_scripts_dir_with_validate_draft_py_names_it_as_a_
+    collision exactly, for the one member that switched sides."""
+    shipped_scripts = _shipped_filenames("scripts")
+    assert "resolve_codex_companion.py" in shipped_scripts, (
+        "sanity: this fixture assumes resolve_codex_companion.py now genuinely "
+        "ships into scripts/ -- re-derive the fixture if NEVER_COPIED_SCRIPTS "
+        "ever changes again"
+    )
+
+    durable_root = tmp_path / "book_project"
+    durable_root.mkdir()
+    scripts_dir = durable_root / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "resolve_codex_companion.py").write_text(
+        "# not the real plugin file -- just a name collision for this fixture\n",
+        encoding="utf-8",
+    )
+    profile_path = _make_profile_path(tmp_path)
+
+    result = run_step0a(durable_root, profile_path)
+
+    assert result.outcome == "adoption_prompt"
+    assert "resolve_codex_companion.py" in result.message, result.message
+    assert result.collisions["scripts"] == ["resolve_codex_companion.py"]
 
 
 def test_unrelated_scripts_dir_with_no_shipped_filenames_states_no_collisions(tmp_path):

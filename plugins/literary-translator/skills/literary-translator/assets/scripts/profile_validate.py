@@ -5,10 +5,9 @@ Authoritative spec: SKILL.md's "Step 0 -- Read + validate profile.yml"
 section, cross-checked against ``assets/schemas/profile.schema.json`` and
 ``assets/profile.example.yml``. Read those before changing anything here.
 
-**ONE OF FOUR SCRIPTS NEVER COPIED TO ``durable_root``** (the other three are
-``validate_extraction.py``, the W2 post-extraction gate; ``glossary_preflight.py``,
-the W3 glossary pre-dispatch staleness gate; and ``resolve_codex_companion.py``,
-the W5 codex-companion path resolver). Every *other* script in this plugin
+**ONE OF THREE SCRIPTS NEVER COPIED TO ``durable_root``** (the other two are
+``validate_extraction.py``, the W2 post-extraction gate, and ``glossary_preflight.py``,
+the W3 glossary pre-dispatch staleness gate). Every *other* script in this plugin
 gets physically copied to ``${durable_root}/scripts/`` by Step 0a and
 self-anchors relative to ITS OWN location under durable_root. This script is
 never copied for a specific reason: it runs *before* Step 0a exists to do that
@@ -19,9 +18,15 @@ is kept plugin-only so a hand-edited extractor cannot bypass it; see
 for a *third* reason -- a copied durable instance would resolve its own schemas
 from the durable root and compare durable-vs-durable, a vacuous pass that can
 never detect staleness; see SKILL.md's Step 0a copy-exclusion list.
-``resolve_codex_companion.py`` is never copied for a *fourth* reason -- it must
-glob the plugin's own install locations to find the newest installed
-``codex-companion.mjs``, which a durable-root copy could not do.) This script
+``resolve_codex_companion.py`` used to be a *fourth* such exception, on the
+claimed reason that it must glob the plugin's own install locations to find
+the newest installed ``codex-companion.mjs``, which a durable-root copy could
+not do. That reason was false -- the script has zero occurrences of
+``__file__`` and its entire search is rooted at ``~/.claude*/plugins/cache/
+openai-codex/**``, a different plugin's own install cache, found identically
+regardless of where ``resolve_codex_companion.py`` itself runs from -- so it
+is copied like every other self-anchored script now; see SKILL.md's Step 0a
+copy-exclusion list for the full disproof.) This script
 is always invoked directly from the plugin's own install path:
 
     python3 {{PLUGIN_ROOT}}/assets/scripts/profile_validate.py \\
@@ -120,11 +125,13 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Self-anchoring: this script is one of FOUR deliberate exceptions to "every
+# Self-anchoring: this script is one of THREE deliberate exceptions to "every
 # script lives under ${durable_root}/scripts/ and self-anchors via
-# Path(__file__).resolve().parents[1]" (the other three are validate_extraction.py,
-# glossary_preflight.py, and resolve_codex_companion.py) -- it lives at the
-# PLUGIN'S OWN ``assets/scripts/`` directory and is never copied to
+# Path(__file__).resolve().parents[1]" (the other two are validate_extraction.py
+# and glossary_preflight.py -- resolve_codex_companion.py used to be a fourth
+# exception here too, on a reason since found false; it is copied like every
+# other self-anchored script now, see this file's own module docstring) -- it
+# lives at the PLUGIN'S OWN ``assets/scripts/`` directory and is never copied to
 # durable_root, so its parents[1] gives the plugin's ``assets/`` root instead
 # of a durable_root. It never assumes cwd and never takes a --plugin-root flag.
 # ---------------------------------------------------------------------------

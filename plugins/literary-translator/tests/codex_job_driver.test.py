@@ -35,6 +35,7 @@ launched with, matching codex-companion's own workspaceRoot-keyed job store) rat
 passing vacuously regardless of which cwd the driver happens to send.
 """
 
+import errno
 import hashlib
 import importlib.util
 import json
@@ -2519,6 +2520,394 @@ def test_poll_sec_zero_is_clamped_rather_than_busy_looping(tmp_path):
         f"unclamped=143, for this identical fixture)."
     )
     assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+# --------------------------------------------------------------------------- #
+# _canonical_replaceable() -- os.replace(..., self.canonical) used to run
+# unconditionally at both write sites (adopt_pending(), run()'s promote step),
+# with no check that the canonical entry was even safe to overwrite. This guard
+# closes that: absence (ENOENT) is the only state that licenses a replace: any
+# OTHER lookup failure -- permission denied, a transient I/O error, a dangling
+# symlink -- must read as "present, do not touch", never as "nothing here".
+# --------------------------------------------------------------------------- #
+def test_canonical_replaceable_true_when_genuinely_absent(tmp_path):
+    """CONTROL -- the discriminating half. Without this pinned, an implementation that
+    simply refuses on ANY exception would also pass the EACCES/ENOTDIR cases below, and
+    would then refuse every legitimate first-ever translate."""
+    job = _mkjob(tmp_path)
+    assert not os.path.exists(job.canonical), "premise: nothing has created it yet"
+    assert job._canonical_replaceable() is True
+
+
+def test_canonical_replaceable_false_on_eacces(tmp_path):
+    """A present, real file whose PARENT directory has had its search bit removed:
+    os.lstat() cannot even resolve the path and raises PermissionError -- a genuine
+    EACCES, not a fixture artifact. Must return False (present, not replaceable), not
+    the True a genuinely absent canonical returns."""
+    locked_dir = tmp_path / "locked"
+    locked_dir.mkdir()
+    canonical = locked_dir / "canonical.json"
+    canonical.write_text('{"staged_digest": "deadbeef"}', encoding="utf-8")
+    job = _mkjob(tmp_path)
+    job.canonical = str(canonical)
+    os.chmod(locked_dir, 0o000)
+    try:
+        result = job._canonical_replaceable()
+    finally:
+        os.chmod(locked_dir, 0o755)   # restore -- tmp_path teardown must be able to search it
+    assert result is False
+
+
+def test_canonical_replaceable_false_on_enotdir(tmp_path):
+    """A path component that is a regular file, not a directory: os.lstat() raises
+    NotADirectoryError -- distinct from both FileNotFoundError and PermissionError, and
+    reached with no permission trickery (so also immune to root/sandbox quirks)."""
+    blocker_file = tmp_path / "blocker_file"
+    blocker_file.write_text("this is a regular file, not a directory", encoding="utf-8")
+    job = _mkjob(tmp_path)
+    job.canonical = str(blocker_file / "canonical.json")
+    assert job._canonical_replaceable() is False
+
+
+def test_canonical_replaceable_false_on_arbitrary_oserror_class(tmp_path, monkeypatch):
+    """codex_job.py's own code never inspects exc.errno anywhere in this method -- the
+    only branching is FileNotFoundError vs. everything else -- so ONE synthetic,
+    arbitrary-errno OSError from a faulted os.lstat is a COMPLETE proof the catch-all
+    branch is reached for ANY non-ENOENT failure, not a sample from a larger space (an
+    implementation that special-cased only PermissionError/NotADirectoryError, still
+    treating ESTALE/EIO/ELOOP as absence, would pass the two tests above and fail only
+    this one). Faults only job's REAL, unmodified, production self.canonical (never
+    reassigned outside segdir, unlike the fixtures above)."""
+    job = _mkjob(tmp_path)
+    real_lstat = os.lstat
+
+    def fake_lstat(path, *a, **kw):
+        if os.fspath(path) == job.canonical:
+            raise OSError(errno.ESTALE, "Stale file handle", path)
+        return real_lstat(path, *a, **kw)
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+
+    assert job._canonical_replaceable() is False
+
+
+def test_is_regular_false_when_fstat_raises(tmp_path, monkeypatch):
+    """PROPERTY: _is_regular() must return False, never raise, if fstat() fails on an fd
+    that just opened successfully -- for ANY errno, not one specific one. Before this
+    fix, fstat() and close() were entirely unguarded: an OSError from either (a stale
+    file handle or a transient I/O error on a network/FUSE filesystem, both real even
+    though open() just succeeded) propagated straight out of the method uncaught, past
+    every caller's own "False means do not proceed" check."""
+    f = tmp_path / "candidate.txt"
+    f.write_text("x", encoding="utf-8")
+    job = _mkjob(tmp_path)
+
+    def fake_fstat(fd):
+        raise OSError(errno.ESTALE, "Stale file handle")
+    monkeypatch.setattr(os, "fstat", fake_fstat)
+
+    assert job._is_regular(str(f)) is False
+
+
+def test_is_regular_survives_close_raising(tmp_path, monkeypatch):
+    """PROPERTY: a close() failure (a real, documented failure mode on network/FUSE
+    filesystems -- a delayed write-back error can surface at close time) must never
+    escape OR corrupt the already-computed answer. fstat() already told the truth about
+    the file BEFORE close() ran; close()'s own failure is irrelevant to that answer's
+    correctness and must not be allowed to override or mask it."""
+    f = tmp_path / "candidate.txt"
+    f.write_text("x", encoding="utf-8")
+    job = _mkjob(tmp_path)
+
+    def fake_close(fd):
+        raise OSError(errno.EIO, "Input/output error")
+    monkeypatch.setattr(os, "close", fake_close)
+
+    assert job._is_regular(str(f)) is True, "fstat()'s own TRUE answer must survive close()'s own failure"
+
+
+def test_canonical_replaceable_false_when_fstat_raises_on_the_open_fd(tmp_path, monkeypatch):
+    """The same escape one layer up: let os.lstat(self.canonical) and _is_regular()'s own
+    os.open() BOTH succeed (so _canonical_replaceable() reaches its
+    `return self._is_regular(...)` line, never its own except-OSError branch), then
+    fault fstat(). Proves the exception does not propagate out of
+    _canonical_replaceable() either, not just _is_regular() as a standalone unit."""
+    job = _mkjob(tmp_path)
+    Path(job.canonical).write_text("{}", encoding="utf-8")
+
+    def fake_fstat(fd):
+        raise OSError(errno.ESTALE, "Stale file handle")
+    monkeypatch.setattr(os, "fstat", fake_fstat)
+
+    assert job._canonical_replaceable() is False
+
+
+def test_preflight_refuses_before_launch_when_canonical_eacces(tmp_path, monkeypatch):
+    """Call site #1: run()'s preflight, BEFORE spending a codex turn. If the canonical
+    entry exists but cannot be observed, launching a fresh codex turn buys nothing --
+    no path through this run can ever promote successfully."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    locked_dir = tmp_path / "locked_preflight"
+    locked_dir.mkdir()
+    canonical = locked_dir / "canonical.json"
+    canonical.write_text("{}", encoding="utf-8")
+    job.canonical = str(canonical)
+    os.chmod(locked_dir, 0o000)
+
+    launch_calls = {"n": 0}
+
+    def spy_launch():
+        launch_calls["n"] += 1
+        job.jobId = "J"
+        return True
+    monkeypatch.setattr(job, "launch", spy_launch)
+    monkeypatch.setattr(job, "poll", lambda: setattr(job, "job_status", "completed"))
+
+    try:
+        rc = job.run()
+    finally:
+        os.chmod(locked_dir, 0o755)
+
+    assert rc == 1
+    assert launch_calls["n"] == 0, "no codex turn may be spent when the canonical cannot even be observed"
+    assert job.reason == "canonical-unreadable"
+    assert job.canonical_unreadable is True
+    assert not job.holds_lock, "refused before the flock lease -- same shape as device-mismatch"
+
+
+def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, monkeypatch):
+    """Call site #2: run()'s promote branch, immediately before os.replace(). The
+    preflight passes against the real, absent job.canonical; a validate_attempt() stub
+    then repoints job.canonical at a locked directory, simulating the canonical turning
+    unreadable DURING this run, after the preflight already passed it -- exactly the
+    race the second guard exists for. The real _canonical_replaceable() -- not a stub --
+    must still refuse, and the validated candidate must survive."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+
+    locked_dir = tmp_path / "locked_promote"
+    locked_dir.mkdir()
+    locked_canonical = locked_dir / "canonical.json"
+    locked_canonical.write_text('{"marker":"present-but-locked"}', encoding="utf-8")
+
+    def spy_launch():
+        job.jobId = "J"
+        return True
+
+    def fake_poll():
+        job.job_status = "completed"
+
+    def fake_validate_attempt():
+        Path(job.attempt).write_text('{"marker":"validated"}', encoding="utf-8")
+        job.canonical = str(locked_canonical)          # the race: repoints mid-run
+        os.chmod(locked_dir, 0o000)
+        return True
+
+    monkeypatch.setattr(job, "launch", spy_launch)
+    monkeypatch.setattr(job, "poll", fake_poll)
+    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
+
+    try:
+        rc = job.run()
+    finally:
+        os.chmod(locked_dir, 0o755)
+
+    assert rc == 1
+    assert job.reason == "canonical-unreadable"
+    assert job.canonical_unreadable is True
+    assert os.path.exists(job.attempt), (
+        "the validated candidate must survive -- os.replace() must never fire when the "
+        "canonical it would overwrite could not be observed"
+    )
+
+
+def test_adopt_pending_refuses_when_canonical_cannot_be_observed(tmp_path, monkeypatch):
+    """Call site #3: adopt_pending()'s own os.replace(self.pending, self.canonical).
+    Its own gates run with --candidate-file self.pending and never touch self.canonical
+    at all, so nothing upstream of this call re-observes it -- same guard, same class of
+    defect, exercised here in isolation from the full launch/poll/validate machinery."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    target = Path(job.canonical + ".target")
+    target.write_text("{}", encoding="utf-8")
+    os.symlink(target, job.canonical)
+    target.unlink()   # dangling
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "_gate", gate)
+
+    assert job.adopt_pending() is False
+    assert calls == ["draft_ready.py", "validate_draft.py"], (
+        "both gates ran and passed -- the refusal must come from the canonical check, "
+        "not from a gate rejection"
+    )
+    assert job.reason == "canonical-unreadable"
+    assert os.path.lexists(job.canonical), "the dangling symlink must survive"
+    assert not os.path.exists(job.canonical)
+    assert os.path.exists(job.pending), "recoverable work must not be discarded"
+
+
+class _ClosedStderr:
+    """Stand-in for a closed TEXT stream (as opposed to a closed underlying fd, which
+    raises BrokenPipeError instead)."""
+    def write(self, *a, **kw):
+        raise ValueError("I/O operation on closed file")
+
+
+class _BrokenPipeStderr:
+    def write(self, *a, **kw):
+        raise BrokenPipeError(errno.EPIPE, "Broken pipe")
+
+
+class _NeverSeenBeforeError(Exception):
+    """A type nothing in codex_job.py enumerates anywhere. See the parametrized test
+    below for why THIS specific case is the one that actually pins the property, not
+    just one more known instance of it."""
+
+
+class _ArbitraryExplodingStderr:
+    def write(self, *a, **kw):
+        raise _NeverSeenBeforeError("an arbitrary, unenumerated write failure")
+
+
+@pytest.mark.parametrize("stderr_stand_in,label", [
+    (None, "stderr is None (fd 2 closed at interpreter startup) -> AttributeError"),
+    (_ClosedStderr(), "stderr is a CLOSED text stream -> ValueError"),
+    (_BrokenPipeStderr(), "stderr's underlying pipe is broken -> BrokenPipeError"),
+    (_ArbitraryExplodingStderr(), "an arbitrary, UNENUMERATED exception type -- this is "
+     "the case that actually pins the property (\"no failure of the diagnostic can "
+     "change the outcome\"); the three cases above only pin three known INSTANCES of "
+     "it, and an implementation narrowed to `except (OSError, AttributeError, "
+     "ValueError, BrokenPipeError)` would still pass all three and fail only this one"),
+])
+def test_canonical_replaceable_false_survives_any_stderr_failure(
+    tmp_path, monkeypatch, stderr_stand_in, label
+):
+    """PROPERTY: no failure of the diagnostic write inside _canonical_replaceable()'s
+    except branch can change its return value. NOT "OSError from the write is
+    tolerated" -- `sys.stderr` being None (AttributeError) or a closed TEXT stream
+    (ValueError) are both real, distinct failure modes a bare `except OSError` would
+    not catch, and either would let the exception escape past the caller's own
+    protective state. A wrong implementation that enumerates known exception types,
+    however many, is still "sampling", not "pinning" -- see the fourth parametrize
+    case."""
+    job = _mkjob(tmp_path)
+    locked_dir = tmp_path / "locked_stderr_test"
+    locked_dir.mkdir()
+    candidate = locked_dir / "canonical.json"
+    candidate.write_text("{}", encoding="utf-8")
+    job.canonical = str(candidate)
+    os.chmod(locked_dir, 0o000)
+    monkeypatch.setattr(sys, "stderr", stderr_stand_in)
+    try:
+        result = job._canonical_replaceable()
+    finally:
+        os.chmod(locked_dir, 0o755)
+    assert result is False, label
+
+
+def test_promote_refuses_when_stderr_raises_an_arbitrary_unenumerated_exception(
+    tmp_path, monkeypatch
+):
+    """The e2e counterpart of the property-pinning parametrize case above, through the
+    FULL run() path (not just the direct method): proves the run()-level guarantee
+    (refusal happens, the flag is set, the attempt survives) holds for a stderr failure
+    nothing in codex_job.py could have specifically enumerated -- not merely that the
+    one reported BrokenPipeError instance is handled."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(sys, "stderr", _ArbitraryExplodingStderr())
+
+    locked_dir = tmp_path / "locked_promote_arbitrary"
+    locked_dir.mkdir()
+    locked_canonical = locked_dir / "canonical.json"
+    locked_canonical.write_text('{"marker":"present-but-locked"}', encoding="utf-8")
+
+    def spy_launch():
+        job.jobId = "J"
+        return True
+
+    def fake_poll():
+        job.job_status = "completed"
+
+    def fake_validate_attempt():
+        Path(job.attempt).write_text('{"marker":"validated"}', encoding="utf-8")
+        job.canonical = str(locked_canonical)          # the race: repoints mid-run
+        os.chmod(locked_dir, 0o000)
+        return True
+
+    monkeypatch.setattr(job, "launch", spy_launch)
+    monkeypatch.setattr(job, "poll", fake_poll)
+    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
+
+    try:
+        rc = job.run()
+    finally:
+        os.chmod(locked_dir, 0o755)
+
+    assert rc == 1
+    assert job.reason == "canonical-unreadable"
+    assert job.canonical_unreadable is True
+    assert os.path.exists(job.attempt), (
+        "the validated candidate must survive a stderr failure of a type nothing in "
+        "codex_job.py specifically enumerates"
+    )
+
+
+def test_canonical_unreadable_detail_survives_a_later_launch_failure(tmp_path, monkeypatch):
+    """PROPERTY: the specific errno diagnostic behind a canonical-unreadable refusal
+    must survive into the terminal joblog even when self.error_detail itself gets
+    overwritten by something UNRELATED afterward -- the same "the flag is
+    authoritative, the string is not" guarantee self.canonical_unreadable already has
+    (self.reason gets reassigned by whatever the run does next; a string comparison at
+    finalize() time would stop protecting the file the moment anything downstream
+    narrates a different outcome), extended to its diagnostic payload. Reached through
+    adopt_pending(), then a REAL, unrelated launch() failure that overwrites
+    self.error_detail on its own real failure path (not a stub that merely returns
+    False and leaves error_detail untouched, which would prove nothing about the
+    overwrite)."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "_gate", gate)
+
+    # run()'s OWN preflight lstat()s this exact same self.canonical path first -- must
+    # be let through genuinely (as absent, via the real FileNotFoundError) or the run
+    # never reaches adopt_pending() at all. Only the SECOND observation, adopt_pending()'s
+    # own, is faulted.
+    lstat_calls = {"n": 0}
+    real_lstat = os.lstat
+
+    def fake_lstat(path, *a, **kw):
+        if os.fspath(path) == job.canonical:
+            lstat_calls["n"] += 1
+            if lstat_calls["n"] >= 2:
+                raise OSError(errno.EIO, "Input/output error", path)
+        return real_lstat(path, *a, **kw)
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+
+    def fake_launch():
+        # Mirrors what launch() ACTUALLY does on its own failure path (self.error_detail
+        # = _stderr_text(proc)) -- a stub that just returns False without touching
+        # error_detail would not exercise the overwrite this test is about.
+        job.error_detail = "companion stderr: an unrelated launch failure"
+        return False
+    monkeypatch.setattr(job, "launch", fake_launch)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert job.reason == "launch-failed", "premise: an unrelated later failure overwrote reason"
+    assert job.canonical_unreadable is True
+    assert job.error_detail == "companion stderr: an unrelated launch failure", (
+        "premise: launch()'s own failure path DID overwrite self.error_detail -- "
+        "otherwise this test proves nothing about the preservation mechanism"
+    )
+    assert job.canonical_unreadable_detail is not None
+    assert "Input/output error" in job.canonical_unreadable_detail, (
+        "the ORIGINAL canonical-unreadable diagnostic must survive under its own "
+        "dedicated field even though self.error_detail was overwritten"
+    )
 
 
 if __name__ == "__main__":

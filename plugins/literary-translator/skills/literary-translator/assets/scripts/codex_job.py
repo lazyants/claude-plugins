@@ -264,6 +264,20 @@ class CodexJob:
         # for poll() to later overwrite this with). See poll()/launch() for exactly
         # when each is set.
         self.error_detail = None
+        # Set when a canonical-unreadable refusal (see _canonical_replaceable()) blocks a
+        # promote. A DEDICATED flag, not inferred from self.reason: self.reason is
+        # reassigned by whatever this run does NEXT (e.g. a later launch-failed), but
+        # finalize()'s decision to KEEP self.attempt on disk must survive that
+        # reassignment -- a string comparison there would stop protecting the file the
+        # moment anything downstream narrates a different outcome.
+        self.canonical_unreadable = False
+        # The diagnostic behind THAT specific refusal, snapshotted at the moment the flag
+        # above is set. self.error_detail can itself be overwritten afterward -- e.g. by a
+        # launch() failure reached right after adopt_pending()'s own refusal falls through
+        # to a fresh launch attempt -- so this field is what finalize() reports instead,
+        # whenever the flag survived, and the original errno is never silently lost the
+        # same way self.reason's own string already is not.
+        self.canonical_unreadable_detail = None
 
     # ---- time helpers (FLOAT, no floor) -------------------------------------
     def poll_remaining(self):
@@ -362,16 +376,83 @@ class CodexJob:
 
     # ---- shared regular-file / candidate-gate helpers (#213) ----------------
     def _is_regular(self, path):
-        """O_NOFOLLOW|O_NONBLOCK open + S_ISREG: reject a symlink, FIFO, dir, or absent file."""
+        """O_NOFOLLOW|O_NONBLOCK open + S_ISREG: reject a symlink, FIFO, dir, or absent file.
+
+        fstat() and close() are guarded the same way open() already was: an OSError from
+        either -- a stale file handle or a transient I/O error on a network/FUSE
+        filesystem, both real even though open() just succeeded -- used to propagate
+        straight out of this method uncaught, past every caller's own "False means do not
+        proceed" check. Every call site here already treats a bare False as "refuse", so
+        there was never a wrong ANSWER to correct, only a code path that could raise
+        instead of answering at all."""
         try:
             fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC)
         except OSError:
             return False
         try:
             st = os.fstat(fd)
+        except OSError:
+            return False
         finally:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         return stat.S_ISREG(st.st_mode)
+
+    def _canonical_replaceable(self):
+        """True iff an os.replace() landing on self.canonical is safe to perform RIGHT NOW:
+        either there is no directory entry there at all (an ordinary first promotion,
+        nothing to destroy), or an entry IS there and this call just confirmed it is a
+        regular file.
+
+        os.replace() only needs WRITE permission on the CONTAINING DIRECTORY, not on the
+        target itself -- so an unreadable regular file, or a symlink whose target vanished,
+        is fully replaceable at the OS level. Both write sites this check guards
+        (adopt_pending()'s os.replace(self.pending, self.canonical) and run()'s own
+        promote step, os.replace(self.attempt, self.canonical)) used to call os.replace()
+        directly, with no check at all: if self.canonical had ever become unreadable --
+        permissions changed underneath it, a transient I/O error, a dangling symlink left
+        by a crashed writer -- the promote would silently destroy whatever was there, and
+        nothing had ever actually read those bytes to know they were safe to discard. Both
+        sites run while this process holds the per-seg flock lease (acquired in run(),
+        before either can be reached) -- the only place the observation this method makes
+        and the mutation that follows it share one concurrency boundary.
+
+        os.lstat() (never follows a symlink) is what makes "no entry at all" and "an entry
+        exists but cannot be read" distinguishable, PROVIDED the exception handling below
+        treats ONLY FileNotFoundError as absence. Any OTHER OSError -- EACCES, a transient
+        EIO, ENOTDIR, a self-referential symlink -- means the lookup FAILED, not that it
+        found nothing; treating a failed lookup the same as a genuinely empty one is
+        exactly the mistake that would license the destruction this method exists to
+        prevent. A dangling symlink's *read* raises the SAME FileNotFoundError a truly
+        absent path raises, and os.path.exists() (which follows the link) reports False
+        for both too -- either check alone would treat "someone's symlink lost its target"
+        the same as "nothing here, go ahead". A symlink at the canonical path is refused
+        UNCONDITIONALLY, dangling or not: confirming a symlink's TARGET and replacing the
+        LINK are different operations, and os.replace() replaces the link."""
+        try:
+            os.lstat(self.canonical)
+        except FileNotFoundError:
+            return True  # ENOENT only: no directory entry at all -- nothing to destroy
+        except OSError as exc:
+            # A lookup that merely FAILED must read as "present", not absent -- see the
+            # docstring above. State is set FIRST, and the diagnostic write that follows
+            # is wrapped so no failure of the write itself can prevent this refusal from
+            # taking effect: if fd 2 is closed (making sys.stderr None) or the stream
+            # itself is already closed, sys.stderr.write() can raise AttributeError or
+            # ValueError -- not just OSError -- and either would otherwise propagate out
+            # of this method, skip `return False` below, and leave the caller's own
+            # protective state unset, turning a refusal into a silent promote.
+            self.error_detail = "canonical unreadable: %s: %s" % (self.canonical, exc)
+            try:
+                sys.stderr.write(
+                    "codex_job.py: could not stat %s: %s -- treating it as present, "
+                    "refusing to replace it\n" % (self.canonical, exc))
+            except Exception:
+                pass
+            return False
+        return self._is_regular(self.canonical)
 
     def _clear_nonregular(self, path):
         """Remove a NON-REGULAR entry squatting on a deterministic driver slot so it cannot
@@ -791,6 +872,16 @@ class CodexJob:
                 self._capture_gate_rejection(name, proc)  # #399: capture before discarding
                 _silent_remove(self.pending)       # gate ran & rejected -> discard stale/bad, launch fresh
                 return False
+        if not self._canonical_replaceable():
+            # Every gate above validated self.pending, never self.canonical -- os.replace()
+            # only needs write permission on the DIRECTORY, not the target, so blindly
+            # replacing here could destroy bytes this process never read. Refuse and leave
+            # self.pending exactly as every other "could not promote" branch above does:
+            # intact, for a future dispatch to retry once the canonical is readable again.
+            self.canonical_unreadable = True
+            self.canonical_unreadable_detail = self.error_detail
+            self.reason = "canonical-unreadable"
+            return False
         os.replace(self.pending, self.canonical)   # every gate passed
         return True
 
@@ -948,8 +1039,15 @@ class CodexJob:
         if not self.ok:
             self._write_fail_sentinel()
         # Clean ONLY this invocation's own scratch, by EXACT path (never a wildcard).
-        if not self.promoted:
-            _silent_remove(self.attempt)  # the os.replace consumed it iff promoted
+        if not self.promoted and not self.canonical_unreadable:
+            _silent_remove(self.attempt)  # the os.replace consumed it iff promoted; a
+            # canonical-unreadable refusal is a data-safety refusal, not a candidate
+            # defect (see _canonical_replaceable()'s own docstring) -- the validated
+            # attempt is left in place rather than discarded. self.canonical_unreadable,
+            # not self.reason: reason is reassigned by whatever this run does NEXT (a
+            # later launch-failed/validate-failed/job-completed/etc reaching THIS
+            # finalize() call), so a string comparison here would stop protecting the
+            # file the moment anything downstream narrates a different outcome.
         if self.sandbox_dir:
             # Abandon the WHOLE sandbox unconditionally -- on every path (success,
             # validate-failure, timeout) we are done reading from it by this point
@@ -970,17 +1068,27 @@ class CodexJob:
         # only durable place either ever lands. Previously `reason` (a gate-REJECTED attempt
         # reported no differently from a genuine timeout) and error_detail's two sources
         # (poll()'s companion errorMessage, launch()'s stderr) were computed and discarded.
+        # self.error_detail may have been overwritten since the canonical-unreadable
+        # refusal that set self.canonical_unreadable -- e.g. by a launch() failure
+        # reached right after adopt_pending()'s own refusal falls through to a fresh
+        # launch attempt. self.canonical_unreadable_detail is the snapshot taken at the
+        # moment of refusal (see __init__'s own comment on the field); prefer it here
+        # whenever the flag survived, the same "the flag is authoritative, the string is
+        # not" reasoning self.canonical_unreadable itself already gets above, applied to
+        # its diagnostic payload too.
+        effective_error_detail = (
+            self.canonical_unreadable_detail if self.canonical_unreadable else self.error_detail)
         if self.holds_lock:
             self._write_joblog({
                 "jobId": self.jobId, "kind": self.kind, "seg": self.seg, "token": self.tok,
                 "disp": self.disp, "inv": self.inv, "status": "terminal", "ok": self.ok,
                 "timed_out": self.timed_out, "job_status": self.job_status, "adopted": self.adopted,
-                "reason": self.reason, "error_detail": self.error_detail,
+                "reason": self.reason, "error_detail": effective_error_detail,
             })
         line = {
             "ok": self.ok, "kind": self.kind, "seg": self.seg, "jobId": self.jobId,
             "job_status": self.job_status, "timed_out": self.timed_out,
-            "adopted": self.adopted, "reason": self.reason, "error_detail": self.error_detail,
+            "adopted": self.adopted, "reason": self.reason, "error_detail": effective_error_detail,
         }
         sys.stdout.write(json.dumps(line) + "\n")
         sys.stdout.flush()
@@ -998,6 +1106,21 @@ class CodexJob:
                 # share a device, or the final promote os.replace() is not atomic. Refuse
                 # BEFORE spending a real codex turn.
                 self.reason = "device-mismatch"
+                return 1
+            if not self._canonical_replaceable():
+                # Same shape as the device-mismatch check above: refuse BEFORE spending a
+                # real codex turn, not after. If the canonical entry exists but cannot be
+                # observed right now, neither safe_adopt() (which reads self.canonical
+                # directly and would fail the same way) NOR adopt_pending()/this run's
+                # own eventual promote step (both refuse via this SAME check -- see
+                # adopt_pending() and the promote branch further below) can succeed this
+                # run; launching a fresh codex turn anyway buys nothing but cost. This is
+                # the common case; the later guards remain in place for the file that
+                # turns unreadable DURING this run, after this check already passed --
+                # neither makes the other redundant.
+                self.canonical_unreadable = True
+                self.canonical_unreadable_detail = self.error_detail
+                self.reason = "canonical-unreadable"
                 return 1
             if not self._setup_sandbox():
                 # #409 property 4-adjacent: an unconfined sandbox is worse than none.
@@ -1026,11 +1149,23 @@ class CodexJob:
             self.poll()
             if self.job_status == "completed" and self.abs_remaining() > FINALIZE_TAIL:
                 if self.validate_attempt():
-                    os.replace(self.attempt, self.canonical)
-                    self.promoted = True
-                    self.reason = "promoted"
-                    return 0
-                self.reason = "validate-failed"
+                    if not self._canonical_replaceable():
+                        # Data-safety refusal, not a candidate defect: self.attempt just
+                        # passed every gate, but self.canonical cannot be read right now
+                        # (an unreadable regular file, or a symlink whose target vanished)
+                        # -- promoting over it would destroy bytes nothing has read.
+                        # finalize()'s own cleanup must not discard self.attempt for THIS
+                        # reason (see its own comment there); leave both untouched.
+                        self.canonical_unreadable = True
+                        self.canonical_unreadable_detail = self.error_detail
+                        self.reason = "canonical-unreadable"
+                    else:
+                        os.replace(self.attempt, self.canonical)
+                        self.promoted = True
+                        self.reason = "promoted"
+                        return 0
+                else:
+                    self.reason = "validate-failed"
             elif self.job_status == "completed":       # NEW: completed but no budget to validate this run
                 self.reason = "deferred-completed" if self._defer_attempt() else "job-completed"
             elif self.timed_out:

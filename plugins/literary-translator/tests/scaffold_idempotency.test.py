@@ -12,12 +12,14 @@ re-invoke across a project's whole lifetime:
       ``profile_validate.py`` as a subprocess, exactly the way SKILL.md
       documents invoking it (``python3 assets/scripts/profile_validate.py
       --profile <path>``, always from the plugin's own install path --
-      this is one of FOUR plugin-path scripts never copied to
+      this is one of THREE plugin-path scripts never copied to
       durable_root: ``profile_validate.py``, ``validate_extraction.py``
-      (the W2 post-extraction gate), ``glossary_preflight.py`` (1.4.0,
-      the W3 glossary staleness gate), and ``resolve_codex_companion.py``
-      (1.4.7, the W5 codex-companion path resolver)), against a
-      constructed fixture profile built from the real shipped
+      (the W2 post-extraction gate), and ``glossary_preflight.py`` (1.4.0,
+      the W3 glossary staleness gate). (``resolve_codex_companion.py``, the
+      W5 codex-companion path resolver, was a fourth such exclusion from
+      1.4.7 until its stated reason was found false and reverted -- it is
+      copied like every other self-anchored script now.)
+      Against a constructed fixture profile built from the real shipped
       ``profile.example.yml`` with every placeholder substituted for real
       values (mirroring the "case 3" fixture in
       ``profile_example_validation.test.py``), and asserts the file's bytes
@@ -36,11 +38,12 @@ re-invoke across a project's whole lifetime:
       #194, Step 0a's OTHER half -- writing the ``.plugin_bundle_hash`` /
       ``.orchestration_bundle_hash`` markers -- IS a shipped script,
       ``scaffold_setup.py``; but the one-time template copy this suite locks
-      stays prose.) The pipeline gate scripts SKILL.md names as the "four
+      stays prose.) The pipeline gate scripts SKILL.md names as the "three
       plugin-path scripts never copied" (``profile_validate.py`` at Step 0,
       ``validate_extraction.py`` at W2, ``glossary_preflight.py`` at W3
-      (1.4.0), ``resolve_codex_companion.py`` at W5 (1.4.7)) are likewise not
-      Step 0a's copy logic. So this half of the suite (1) transcribes the documented
+      (1.4.0)) are likewise not Step 0a's copy logic -- nor is
+      ``resolve_codex_companion.py`` at W5 (1.4.7), which no longer belongs
+      to that set. So this half of the suite (1) transcribes the documented
       guard literally, as a small reference implementation using the exact
       same "copy iff destination absent" idiom as
       ``profile_validate.ensure_profile_exists`` (see

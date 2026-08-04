@@ -111,13 +111,14 @@ Run by the **orchestrating session directly**, always from the plugin's own
 install path, never a durable-root copy — it runs before Step 0a exists to
 create one (same exception as Step 0c reading
 `references/source-format-adapters/*.md` directly from the plugin). It is one
-of four plugin-path scripts never copied to `durable_root`: `validate_extraction.py`
+of three plugin-path scripts never copied to `durable_root`: `validate_extraction.py`
 (the W2 post-extraction gate) and `glossary_preflight.py` (the W3 glossary
 staleness gate, 1.4.0) are kept plugin-only for tamper-proofing and
-freshness-on-resume rather than because either predates the durable root, and
-`resolve_codex_companion.py` (the W5 codex-companion path resolver, 1.4.7) is
-never copied because it must glob the plugin's own install locations to find
-the newest installed `codex-companion.mjs` — a durable-root copy could not.
+freshness-on-resume rather than because either predates the durable root. See
+Step 0a's own copy-pass section below for each exclusion's specific reason —
+including why `resolve_codex_companion.py` (the W5 codex-companion path
+resolver, 1.4.7) is NOT a fourth exclusion: it is copied like every other
+self-anchored script, since the claim that it could not be was found false.
 
 Order of operations:
 
@@ -231,17 +232,40 @@ same for `smoke_test.report_path` (skipped when null).
 
 Copies (unconditional overwrite, safe since these files are never
 hand-edited): every file in `assets/scripts/*.py` (except
-`profile_validate.py`, `validate_extraction.py`, `glossary_preflight.py`, and
-`resolve_codex_companion.py` — all four run only from the plugin path and are
-never copied; a copied `glossary_preflight.py` would resolve its own
-`__file__`-relative schema lookup against the *durable* schemas and compare
-durable-vs-durable, a vacuous pass that could never detect staleness, and a
-copied `resolve_codex_companion.py` could not glob the plugin's own install
-locations to find the newest installed `codex-companion.mjs`; and, separately,
-`scaffold_setup.py` — Step 0a's own bundle-hash marker writer (#194), which
-likewise runs only from the plugin path: it is invoked below as Step 0a's final
-action and imports the plugin's own `cache_key.py` helpers, and is deliberately
-NOT a bundle member, so it must never land under `scripts/`), every shipped
+`profile_validate.py`, `validate_extraction.py`, and `glossary_preflight.py`
+— three files, EACH excluded for its own distinct reason, never a shared one:
+  - `profile_validate.py` runs *before* Step 0a exists to copy anything — Step 0
+    reads and validates `profile.yml` first, so there is no durable-root copy of
+    this script yet, and there never will be one for that specific invocation.
+  - `validate_extraction.py` is kept plugin-only so a hand-adapted `extract.py`
+    cannot weaken its own self-checks and still pass: the gate pins the durable
+    `extract.py`'s self-check region by hash against the plugin's own shipped
+    value, which only works if the checker itself is never a durable, hand-reachable
+    copy (see `references/false-green-gate.md`).
+  - `glossary_preflight.py` would be actively harmful copied, not merely redundant:
+    a durable copy's own `__file__`-relative schema lookup would land on the
+    *durable* schemas as its "plugin" side too, comparing durable-vs-durable — a
+    vacuous pass that could never detect staleness.
+
+`resolve_codex_companion.py` used to be a fourth exclusion here, on the claimed
+reason that a durable copy "could not glob the plugin's own install locations to
+find the newest installed `codex-companion.mjs`". That reason was false, and the
+disproof is short: the script has zero occurrences of `__file__` and imports
+nothing plugin-specific; its entire search is rooted at `os.path.expanduser("~")`
+against `~/.claude*/plugins/cache/openai-codex/**/codex-companion.mjs` — a
+different plugin's own install cache, found the same way regardless of where
+`resolve_codex_companion.py` itself happens to be running from. A durable copy
+globs the identical `~` paths and finds the identical companions. It is now
+copied like every other self-anchored script; do not re-exclude it by
+re-deriving this same plausible-sounding-but-wrong argument — check the file's
+own source for `__file__` before trusting a "could not glob the plugin's own
+install locations" claim about it again.
+
+Also, separately, `scaffold_setup.py` — Step 0a's own bundle-hash marker writer
+(#194), which likewise runs only from the plugin path: it is invoked below as
+Step 0a's final action and imports the plugin's own `cache_key.py` helpers, and
+is deliberately NOT a bundle member, so it must never land under
+`scripts/`), every shipped
 file in `assets/languages/`
 (`fr.json`, `de.json`, `es.json`, `he.json`, `it.json`, `README.md`), every file in
 `assets/schemas/*.json` → `${durable_root}/scripts/`,
@@ -1480,10 +1504,15 @@ syntax error at instantiation (verified: `node --check` exits 1 on an
 unsubstituted bare token), not a silent fallback — the same fail-loud property
 `{{CITATION_CONTENT_TYPES}}` relies on. **1.4.7:** as part of that same instantiation the
 orchestrator first runs `resolve_codex_companion.py --durable-root
-${durable_root}` from the plugin's own install path (never a durable-root
-copy — it must glob the plugin's install locations to find the newest
-installed `codex-companion.mjs`), ABORTS W5 on any non-zero exit (codex is the
-required engine per R1 — fail-fast, not today's silent no-draft hang), reads
+${durable_root}` from the plugin's own install path — the orchestrating
+session already has `{{PLUGIN_ROOT}}` in hand at this step, so there is no
+reason to prefer the durable copy Step 0a now also places at
+`${durable_root}/scripts/resolve_codex_companion.py` for the fully
+self-anchored, no-orchestrating-session case (`segment_dispatch_driver.py`'s
+own dispatch path uses that copy instead; see Step 0a's copy-pass section for
+why this script needs no plugin-path-specific behavior either way) — ABORTS
+W5 on any non-zero exit (codex is the required engine per R1 — fail-fast, not
+today's silent no-draft hang), reads
 the raw `companion_path` it prints, `json.dumps`-encodes that string ONCE, and
 substitutes it as the `{{CODEX_COMPANION_PATH_JSON}}` token alongside every
 other. Each per-segment translate/review dispatch then launches codex through
