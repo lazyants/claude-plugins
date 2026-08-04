@@ -1,5 +1,63 @@
 # Changelog
 
+## 1.19.0 — 2026-08-04
+
+Five defects in the W5 dispatch driver and its codex worker, all of them shipped in
+1.18.0. No new features; the driver behaves as it always did except where it was wrong.
+
+### Fixed
+
+- **The documented way to launch the driver could not dispatch anything.** SKILL.md
+  prescribes `nohup python3 ${durable_root}/scripts/segment_dispatch_driver.py …` with no
+  `--plugin-root`. Self-anchored, the driver looked for `resolve_codex_companion.py` under
+  `${durable_root}/scripts/` — where Step 0a deliberately never copied it — and exited 2
+  before rendering a prompt or dispatching a segment. A selection with nothing to do
+  returned cleanly earlier, so the failure was specific to a run that had work.
+
+  Step 0a now copies that script like every other bundle member. The stated reason for
+  excluding it was false, which is why the exclusion survived every review it passed
+  through: the script was said to need the plugin's own install locations, and in fact it
+  reads no `__file__` at all — its search is rooted at
+  `~/.claude*/plugins/cache/openai-codex/**` and works from anywhere. The three remaining
+  exclusions are real, unchanged, and each now states its own actual reason instead of
+  sharing one that was only ever true of some of them.
+
+- **The workflow template was unresolvable under a deployed durable root.** The
+  self-anchored branch named `${durable_root}/templates/`, a directory Step 0a never
+  creates; bundle members land flat under `scripts/`, the `.template.js` files exactly like
+  the `.py` gates. A deployed root and a plugin checkout genuinely put the template in
+  different places and no single path names both, so resolution now handles each.
+
+- **The template path was chosen with a check that follows symlinks.** What that path
+  resolves to is read and executed as part of prompt rendering, so choosing it selects
+  executable authority rather than detecting a layout. `Path.is_file()` reports True for a
+  symlink exactly as for a regular file, and collapses every lookup failure — EACCES on an
+  ancestor, ELOOP, ENOTDIR — into the same False that means "nothing here". A stray or
+  planted file beside the scripts could take over the gate and every prompt. Selection is
+  now `lstat`-based: a positive ENOENT is the only absence, a non-symlink regular file the
+  only acceptance, two candidates present a refusal rather than a preference.
+
+- **A canonical draft that existed but could not be read was replaceable.** Two
+  `os.replace()` calls onto the canonical draft ran with no check that the file about to be
+  destroyed could be observed. `os.replace()` needs write permission on the containing
+  directory, not on the target, so an unreadable regular file — or a symlink whose target
+  had vanished — was overwritten silently, destroying bytes nothing had read. Both sites,
+  and the preflight that runs before any codex turn is spent, now refuse unless the
+  canonical is either genuinely absent by ENOENT alone or a regular file this very call
+  just read. A lookup that merely failed reads as present.
+
+- **`_is_regular()` could raise past the callers relying on it.** It guarded `open()` but
+  not `fstat()` or `close()`, so a failure in either propagated out of a caller that was
+  depending on it to answer False — skipping the state that protects a validated candidate
+  from cleanup. Every syscall it makes is now guarded.
+
+### Known limits
+
+- Both canonical guards are check-then-`os.replace()`. They close the window in which an
+  unobservable file is destroyed with nothing recording that it happened; they do not make
+  the check and the rename a single operation. A writer that makes the canonical unreadable
+  between the two is not caught.
+
 ## 1.18.0 — 2026-08-03
 
 W5 mass-translate can now be driven by a local out-of-band process instead of from inside agent
