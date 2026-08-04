@@ -278,6 +278,17 @@ class CodexJob:
         # whenever the flag survived, and the original errno is never silently lost the
         # same way self.reason's own string already is not.
         self.canonical_unreadable_detail = None
+        # True iff a canonical-unreadable refusal at the FINAL promote step (not the
+        # earlier preflight or adopt_pending() refusals, which never touch self.attempt)
+        # successfully relocated the just-validated self.attempt into self.pending for a
+        # future dispatch's adopt_pending() to re-validate and retry, instead of leaving
+        # it stranded at its own random, never-revisited path. "Refused, and the candidate
+        # is parked for retry" and "refused, and it is wherever it was" are different
+        # operational outcomes -- an operator reading a joblog cannot tell them apart from
+        # self.reason alone, which is the same "canonical-unreadable" string either way on
+        # purpose (see the relocate site's own comment for why that string is not
+        # widened). Internal bookkeeping only; not reported in the joblog/stdout line.
+        self.canonical_unreadable_parked = False
 
     # ---- time helpers (FLOAT, no floor) -------------------------------------
     def poll_remaining(self):
@@ -376,7 +387,9 @@ class CodexJob:
 
     # ---- shared regular-file / candidate-gate helpers (#213) ----------------
     def _is_regular(self, path):
-        """O_NOFOLLOW|O_NONBLOCK open + S_ISREG: reject a symlink, FIFO, dir, or absent file.
+        """O_NOFOLLOW|O_NONBLOCK open + S_ISREG + a confirmed read: reject a symlink,
+        FIFO, dir, or absent file, and confirm the descriptor is actually READABLE, not
+        merely open-able.
 
         fstat() and close() are guarded the same way open() already was: an OSError from
         either -- a stale file handle or a transient I/O error on a network/FUSE
@@ -384,13 +397,31 @@ class CodexJob:
         straight out of this method uncaught, past every caller's own "False means do not
         proceed" check. Every call site here already treats a bare False as "refuse", so
         there was never a wrong ANSWER to correct, only a code path that could raise
-        instead of answering at all."""
+        instead of answering at all.
+
+        open()+fstat() succeeding only proves the entry EXISTS and is regular -- neither
+        one actually reads a byte. On a network/FUSE filesystem or damaged storage, the
+        metadata calls can both succeed while the very first real read returns EIO/ESTALE
+        -- exactly the failure this method exists to catch, slipping through anyway. A
+        single os.read(fd, 1), in the SAME try/except as fstat() (one answer for "could
+        not stat it" and "could not read it", not two), closes that: cost is O(1)
+        regardless of the canonical's actual size (one syscall, at most one page fault,
+        never scales with file length), and it can only run on an entry the type check
+        above already confirmed is a genuine regular file, so there is no risk of
+        blocking on a FIFO or similar. An EMPTY regular file reads back b"" -- falsy, but
+        NOT an error and NOT a failure of this check: os.read() only raises on a real I/O
+        failure, so a zero-length canonical still correctly answers True here. Do not
+        "fix" a falsy b"" into a rejection; that would refuse every legitimately empty
+        file."""
         try:
             fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC)
         except OSError:
             return False
         try:
             st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return False
+            os.read(fd, 1)
         except OSError:
             return False
         finally:
@@ -398,7 +429,7 @@ class CodexJob:
                 os.close(fd)
             except OSError:
                 pass
-        return stat.S_ISREG(st.st_mode)
+        return True
 
     def _canonical_replaceable(self):
         """True iff an os.replace() landing on self.canonical is safe to perform RIGHT NOW:
@@ -1143,6 +1174,20 @@ class CodexJob:
                 self.adopted = True
                 self.reason = "adopted-pending"
                 return 0
+            if self.canonical_unreadable:
+                # adopt_pending() found a candidate that passed every gate, but its own
+                # canonical guard refused the promotion -- NOT "no usable pending", which
+                # is the only other reason adopt_pending() returns False. self.pending was
+                # left untouched by that refusal (see adopt_pending()'s own comment), so
+                # there is nothing to lose by stopping here, and everything to lose by not
+                # stopping: falling through to launch() spends a fresh paid turn that can
+                # never succeed either (the canonical is still unreadable), and if that
+                # fresh completion then lands in the no-budget branch below,
+                # _defer_attempt()'s own documented last-writer-wins semantics would
+                # overwrite the still-good pending candidate with the new, unvalidated
+                # one -- destroying validated work to make room for work nobody has
+                # checked yet.
+                return 1
             if not self.launch():                     # False (incl. no-budget, pending kept) -> launch fresh
                 self.reason = "launch-failed"
                 return 1
@@ -1154,11 +1199,45 @@ class CodexJob:
                         # passed every gate, but self.canonical cannot be read right now
                         # (an unreadable regular file, or a symlink whose target vanished)
                         # -- promoting over it would destroy bytes nothing has read.
-                        # finalize()'s own cleanup must not discard self.attempt for THIS
-                        # reason (see its own comment there); leave both untouched.
                         self.canonical_unreadable = True
                         self.canonical_unreadable_detail = self.error_detail
                         self.reason = "canonical-unreadable"
+                        # self.attempt lives at this invocation's own random
+                        # .att.<seg>.<inv>... path -- nothing ever revisits that path on a
+                        # later run (only self.canonical and self.pending are consulted),
+                        # so leaving a validated candidate there stripes it: the bytes
+                        # survive on disk, but nothing will ever find or promote them, and
+                        # the next dispatch pays to regenerate the same work. Relocate it
+                        # into self.pending instead -- the SAME deterministic slot
+                        # adopt_pending() already knows to re-validate and retry from, and
+                        # the exact tail _defer_attempt() already runs for the sibling
+                        # "no budget to validate" case, minus that method's own head (the
+                        # sandbox-publish step does not apply -- this attempt is already
+                        # published and already gate-validated, not fresh sandbox output).
+                        #
+                        # This CAN overwrite an existing self.pending. Traced exhaustively
+                        # against this method's own three refusal sites: the only way to
+                        # reach this branch at all is for THIS run's own adopt_pending()
+                        # call to have returned False WITHOUT setting
+                        # self.canonical_unreadable (the sibling refusal above already
+                        # returns 1 before launch() if it did) -- and the only one of
+                        # adopt_pending()'s three False-without-refusal paths that can
+                        # leave self.pending non-empty is "a gate could not even run"
+                        # (budget/timeout/spawn failure), which never reached a pass/fail
+                        # verdict on it at all. So whatever might still be sitting in
+                        # self.pending at this point is, at best, an UNCONFIRMED-this-run
+                        # candidate -- never something that passed gates THIS run and
+                        # still lost to what replaces it. What replaces it here always has
+                        # passed every gate in the SAME run. Matches (and never exceeds)
+                        # _defer_attempt()'s own already-accepted "always refresh the
+                        # slot, newest completion wins" bound.
+                        self._clear_nonregular(self.pending)
+                        try:
+                            os.replace(self.attempt, self.pending)
+                            self.canonical_unreadable_parked = True
+                        except OSError:
+                            pass  # best-effort -- falls back to today's behavior: leave
+                            # self.attempt at its own path rather than risk losing it
                     else:
                         os.replace(self.attempt, self.canonical)
                         self.promoted = True

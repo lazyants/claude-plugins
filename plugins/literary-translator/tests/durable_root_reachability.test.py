@@ -361,10 +361,43 @@ def test_skill_no_longer_excludes_resolve_codex_companion_from_the_copy_pass():
     the count from silently drifting back to FOUR by someone re-deriving
     the same plausible-but-wrong argument -- the inverse of what this test
     used to guard, replaced rather than deleted so the count is still
-    pinned in one direction or the other."""
+    pinned in one direction or the other.
+
+    codex's finding on this test: it checked only PROSE WORDING ("three"/
+    "four"), never the ACTUAL exclusion clause resolve_dirs()/Step 0a's
+    copy pass reads its behavior from -- a maintainer editing SKILL.md's
+    real `(except ...)` list back onto resolve_codex_companion.py while
+    leaving the "three plugin-path scripts" sentence elsewhere untouched
+    (or fixing it inconsistently) would leave this test green. Closes that
+    with the SAME structural technique fetch_citation_bundle.test.py's own
+    `test_step_0a_copy_pass_does_not_exclude_fetch_citation` already uses:
+    bracket the real exclusion clause by its own two load-bearing anchor
+    phrases and check membership INSIDE that span directly, independent of
+    any prose describing the count."""
     assert "resolve_codex_companion.py" in _SKILL_TEXT
     assert "three plugin-path scripts never copied" in _SKILL_TEXT
     assert "four plugin-path scripts never copied" not in _SKILL_TEXT
+
+    flat = re.sub(r"\s+", " ", _SKILL_TEXT)
+    start = flat.find("every file in `assets/scripts/*.py` (except")
+    assert start != -1, "could not locate Step 0a's assets/scripts/*.py copy-pass sentence in SKILL.md"
+    # Narrower than the WHOLE parenthetical (which also legitimately
+    # discusses resolve_codex_companion.py BY NAME in its own historical-
+    # correction prose, further down in that same paren) -- this bounds
+    # just the backtick-listed exclusion names themselves, ending at the
+    # em dash that starts the "N files, EACH excluded..." lead-in.
+    list_end = flat.find("— three files", start)
+    assert list_end != -1, (
+        "could not locate the end of Step 0a's exclusion LIST (the "
+        "'— three files' lead-in) -- has the wording changed?"
+    )
+    exclusion_list_span = flat[start:list_end]
+    assert "resolve_codex_companion.py" not in exclusion_list_span, (
+        f"resolve_codex_companion.py is back in the REAL exclusion LIST -- "
+        f"this is the actual regression, independent of whatever the "
+        f"surrounding prose happens to say about the count. Exclusion list "
+        f"span was:\n{exclusion_list_span}"
+    )
 
 
 # A shipped he.json Hebrew preset once went unlisted in this same Step 0a

@@ -5,9 +5,13 @@ Authoritative spec: SKILL.md's "Step 0 -- Read + validate profile.yml"
 section, cross-checked against ``assets/schemas/profile.schema.json`` and
 ``assets/profile.example.yml``. Read those before changing anything here.
 
-**ONE OF THREE SCRIPTS NEVER COPIED TO ``durable_root``** (the other two are
-``validate_extraction.py``, the W2 post-extraction gate, and ``glossary_preflight.py``,
-the W3 glossary pre-dispatch staleness gate). Every *other* script in this plugin
+**ONE OF THREE PLUGIN-PATH-ONLY SCRIPTS NEVER COPIED TO ``durable_root``** (the
+other two are ``validate_extraction.py``, the W2 post-extraction gate, and
+``glossary_preflight.py``, the W3 glossary pre-dispatch staleness gate --
+``scaffold_setup.py`` is ALSO never copied, but for a wholly unrelated reason,
+in a different category from these three: it is Step 0a's own bundle-hash
+marker writer, deliberately not a bundle member at all; see SKILL.md's Step 0a
+copy-exclusion list for both categories). Every *other* script in this plugin
 gets physically copied to ``${durable_root}/scripts/`` by Step 0a and
 self-anchors relative to ITS OWN location under durable_root. This script is
 never copied for a specific reason: it runs *before* Step 0a exists to do that

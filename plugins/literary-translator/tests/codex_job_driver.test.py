@@ -2641,6 +2641,48 @@ def test_canonical_replaceable_false_when_fstat_raises_on_the_open_fd(tmp_path, 
     assert job._canonical_replaceable() is False
 
 
+def test_is_regular_false_when_read_raises(tmp_path, monkeypatch):
+    """PROPERTY: open() and fstat() succeeding is not enough to trust a descriptor --
+    a stale file handle or transient I/O error on the very FIRST READ (real on
+    network/FUSE filesystems and damaged storage, even after both metadata calls
+    already succeeded) must also refuse, in the SAME branch as an fstat() failure --
+    one answer for "could not stat it" and "could not read it", not two."""
+    f = tmp_path / "candidate.txt"
+    f.write_text("real content", encoding="utf-8")
+    job = _mkjob(tmp_path)
+
+    def fake_read(fd, n):
+        raise OSError(errno.ESTALE, "Stale file handle")
+    monkeypatch.setattr(os, "read", fake_read)
+
+    assert job._is_regular(str(f)) is False
+
+
+def test_is_regular_true_on_genuinely_empty_file(tmp_path):
+    """CONTROL for the read fix: os.read() on an empty regular file returns b"" --
+    falsy, but NOT an error. A wrong implementation that treats a falsy read result as
+    a failure would refuse every legitimately empty canonical; this pins that it must
+    not."""
+    f = tmp_path / "empty.txt"
+    f.write_text("", encoding="utf-8")
+    job = _mkjob(tmp_path)
+    assert job._is_regular(str(f)) is True
+
+
+def test_canonical_replaceable_false_when_read_raises_on_the_open_fd(tmp_path, monkeypatch):
+    """The same escape one layer up as the fstat-chain test above: let lstat() and
+    open()/fstat() all succeed, then fault the read. Proves the refusal reaches
+    _canonical_replaceable() too, not just _is_regular() as a standalone unit."""
+    job = _mkjob(tmp_path)
+    Path(job.canonical).write_text("{}", encoding="utf-8")
+
+    def fake_read(fd, n):
+        raise OSError(errno.ESTALE, "Stale file handle")
+    monkeypatch.setattr(os, "read", fake_read)
+
+    assert job._canonical_replaceable() is False
+
+
 def test_preflight_refuses_before_launch_when_canonical_eacces(tmp_path, monkeypatch):
     """Call site #1: run()'s preflight, BEFORE spending a codex turn. If the canonical
     entry exists but cannot be observed, launching a fresh codex turn buys nothing --
@@ -2678,10 +2720,20 @@ def test_preflight_refuses_before_launch_when_canonical_eacces(tmp_path, monkeyp
 def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, monkeypatch):
     """Call site #2: run()'s promote branch, immediately before os.replace(). The
     preflight passes against the real, absent job.canonical; a validate_attempt() stub
-    then repoints job.canonical at a locked directory, simulating the canonical turning
-    unreadable DURING this run, after the preflight already passed it -- exactly the
-    race the second guard exists for. The real _canonical_replaceable() -- not a stub --
-    must still refuse, and the validated candidate must survive."""
+    then repoints job.canonical at a locked directory BEFORE this call site's own guard
+    ever runs -- simulating the canonical turning unreadable DURING this run, sometime
+    after the preflight already passed it, and confirming the SECOND observation (not
+    just the preflight's first one) correctly sees that and refuses. The real
+    _canonical_replaceable() -- not a stub -- must still refuse, and the validated
+    candidate must survive.
+
+    NOT a test of the check-then-replace race (the guard observing safe, then a writer
+    publishing something new in the window before os.replace() acts): the mutation here
+    happens BEFORE this guard's own check, so the guard genuinely sees the bad state
+    and correctly refuses -- an implementation that never closed that race would still
+    pass this test. See
+    test_canonical_replaceable_check_then_replace_window_is_a_known_unclosed_race,
+    below, for the one that actually exercises that window."""
     job = _mkjob(tmp_path, kind="translate", deadline=100)
     monkeypatch.setattr(job, "hygiene", lambda: None)
 
@@ -2715,9 +2767,79 @@ def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, m
     assert rc == 1
     assert job.reason == "canonical-unreadable"
     assert job.canonical_unreadable is True
-    assert os.path.exists(job.attempt), (
-        "the validated candidate must survive -- os.replace() must never fire when the "
-        "canonical it would overwrite could not be observed"
+    assert not os.path.exists(job.attempt), (
+        "os.replace() must never fire when the canonical it would overwrite could not "
+        "be observed -- but the validated candidate must not just sit at its own "
+        "never-revisited random path either"
+    )
+    assert job.canonical_unreadable_parked is True
+    assert Path(job.pending).read_text(encoding="utf-8") == '{"marker":"validated"}', (
+        "the validated candidate must be relocated into self.pending -- the "
+        "deterministic slot a future adopt_pending() will re-validate and retry from "
+        "-- not stranded at a path nothing ever revisits again"
+    )
+
+
+def test_canonical_replaceable_check_then_replace_window_is_a_known_unclosed_race(
+    tmp_path, monkeypatch
+):
+    """Documents a KNOWN, ACCEPTED limit -- not a regression, and this test is not
+    asking for it to change. _canonical_replaceable()'s own observation and the
+    os.replace() that follows it are two separate syscalls, not one atomic operation:
+    a writer that publishes a NEW canonical in the window BETWEEN them is never
+    observed, and os.replace() destroys it anyway. The per-segment flock only
+    serialises COOPERATING codex_job.py processes against each other; it does nothing
+    against a non-cooperating writer.
+
+    Different from every OTHER test in this file that exercises a "bad" canonical:
+    those all mutate it BEFORE the guard's own check runs, so the guard genuinely
+    observes the bad state and correctly refuses -- proving the guard works, not that
+    the window is closed. This test mutates AFTER the check returns its REAL, honest
+    answer (wrapping the actual method rather than stubbing a fake result), racing a
+    writer in during the one window the guard structurally cannot see.
+
+    If this test ever starts FAILING -- the raced content survives -- that is real
+    news: the implementation gained an atomicity property this comment says it does
+    not have. Update this docstring and the design's own known-limits documentation
+    then; do not just delete the test."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+
+    real_check = job._canonical_replaceable
+    raced_writer_content = '{"marker":"raced-writer-published-this"}'
+
+    def racing_check():
+        result = real_check()  # the REAL answer, honestly observed
+        if result:
+            # A non-cooperating writer publishing a new canonical in the window
+            # between this check returning and os.replace() acting on its answer.
+            Path(job.canonical).write_text(raced_writer_content, encoding="utf-8")
+        return result
+    monkeypatch.setattr(job, "_canonical_replaceable", racing_check)
+
+    def spy_launch():
+        job.jobId = "J"
+        return True
+
+    def fake_poll():
+        job.job_status = "completed"
+
+    def fake_validate_attempt():
+        Path(job.attempt).write_text('{"marker":"validated"}', encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(job, "launch", spy_launch)
+    monkeypatch.setattr(job, "poll", fake_poll)
+    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
+
+    rc = job.run()
+
+    assert rc == 0
+    assert job.promoted is True
+    assert Path(job.canonical).read_text(encoding="utf-8") != raced_writer_content, (
+        "the KNOWN, ACCEPTED limit: the raced writer's content is gone, overwritten "
+        "by a promote whose own check never observed it. If this assertion starts "
+        "failing, the race window has closed -- that is real news, not a broken test"
     )
 
 
@@ -2744,6 +2866,114 @@ def test_adopt_pending_refuses_when_canonical_cannot_be_observed(tmp_path, monke
     assert os.path.lexists(job.canonical), "the dangling symlink must survive"
     assert not os.path.exists(job.canonical)
     assert os.path.exists(job.pending), "recoverable work must not be discarded"
+
+
+def test_run_refuses_immediately_when_adopt_pending_hits_canonical_unreadable(tmp_path, monkeypatch):
+    """PROPERTY: when adopt_pending()'s own guard refuses a candidate that passed every
+    gate -- NOT "no usable pending", the only other reason it returns False -- run()
+    must stop right there, never fall through to launch(). Falling through would spend
+    a fresh paid turn that can never succeed either (the canonical is still unreadable),
+    and if that fresh completion then landed in the no-budget branch,
+    _defer_attempt()'s own documented last-writer-wins semantics would overwrite the
+    still-good pending candidate with the new, unvalidated one -- destroying validated
+    work to make room for work nobody has checked yet."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "_gate", gate)
+
+    # run()'s OWN preflight lstat()s this exact same self.canonical path first -- must
+    # be let through genuinely (as absent) or the run never reaches adopt_pending() at
+    # all. Only the SECOND observation, adopt_pending()'s own, is faulted.
+    lstat_calls = {"n": 0}
+    real_lstat = os.lstat
+
+    def fake_lstat(path, *a, **kw):
+        if os.fspath(path) == job.canonical:
+            lstat_calls["n"] += 1
+            if lstat_calls["n"] >= 2:
+                raise OSError(errno.EIO, "Input/output error", path)
+        return real_lstat(path, *a, **kw)
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+
+    launch_calls = {"n": 0}
+
+    def spy_launch():
+        launch_calls["n"] += 1
+        job.jobId = "J"
+        return True
+    monkeypatch.setattr(job, "launch", spy_launch)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert launch_calls["n"] == 0, (
+        "no fresh paid turn may be spent once adopt_pending() has already found a "
+        "blocked-but-validated candidate"
+    )
+    assert job.reason == "canonical-unreadable"
+    assert job.canonical_unreadable is True
+    assert os.path.exists(job.pending), "the validated pending candidate must survive, untouched"
+    assert Path(job.pending).read_text(encoding="utf-8") == "{}"
+
+
+def test_relocate_at_final_promote_safely_supersedes_an_unconfirmed_pending(tmp_path, monkeypatch):
+    """The one reachable case where self.pending can hold something at the moment the
+    FINAL promote refusal's relocate fires: adopt_pending()'s own gate call returned
+    None (a budget/timeout/spawn failure -- "could not validate", not "ran and
+    rejected" or "ran and passed"), which leaves self.pending UNTOUCHED and does not
+    set self.canonical_unreadable, so run() falls through past the early return above
+    into a fresh launch. Proves the relocate never destroys anything MORE validated
+    than what replaces it: whatever was sitting in self.pending here never reached a
+    pass/fail verdict in THIS run at all, while the fresh attempt that supersedes it
+    has just passed every gate in the SAME run -- matching, never exceeding,
+    _defer_attempt()'s own already-accepted "always refresh the slot, newest
+    completion wins" bound for the sibling no-budget case."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    Path(job.pending).write_text('{"marker":"unconfirmed-this-run"}', encoding="utf-8")
+
+    def gate_none(args, timeout):
+        return None  # simulates adopt_pending()'s own gate call exhausting budget
+    monkeypatch.setattr(job, "_gate", gate_none)
+
+    locked_dir = tmp_path / "locked_scenario2_caseb"
+    locked_dir.mkdir()
+    locked_canonical = locked_dir / "canonical.json"
+    locked_canonical.write_text("{}", encoding="utf-8")
+
+    def spy_launch():
+        job.jobId = "J"
+        return True
+
+    def fake_poll():
+        job.job_status = "completed"
+
+    def fake_validate_attempt():
+        Path(job.attempt).write_text('{"marker":"fresh-and-validated"}', encoding="utf-8")
+        job.canonical = str(locked_canonical)          # the race: repoints mid-run
+        os.chmod(locked_dir, 0o000)
+        return True
+
+    monkeypatch.setattr(job, "launch", spy_launch)
+    monkeypatch.setattr(job, "poll", fake_poll)
+    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
+
+    try:
+        rc = job.run()
+    finally:
+        os.chmod(locked_dir, 0o755)
+
+    assert rc == 1
+    assert job.reason == "canonical-unreadable"
+    assert job.canonical_unreadable is True
+    assert job.canonical_unreadable_parked is True
+    assert Path(job.pending).read_text(encoding="utf-8") == '{"marker":"fresh-and-validated"}', (
+        "the fresh, gate-validated attempt must supersede the unconfirmed pending -- not "
+        "because destroying it is free, but because the fresh candidate is strictly MORE "
+        "validated than what it replaces"
+    )
 
 
 class _ClosedStderr:
@@ -2847,66 +3077,58 @@ def test_promote_refuses_when_stderr_raises_an_arbitrary_unenumerated_exception(
     assert rc == 1
     assert job.reason == "canonical-unreadable"
     assert job.canonical_unreadable is True
-    assert os.path.exists(job.attempt), (
+    assert job.canonical_unreadable_parked is True
+    assert not os.path.exists(job.attempt)
+    assert Path(job.pending).read_text(encoding="utf-8") == '{"marker":"validated"}', (
         "the validated candidate must survive a stderr failure of a type nothing in "
-        "codex_job.py specifically enumerates"
+        "codex_job.py specifically enumerates -- relocated into self.pending, not left "
+        "at its own never-revisited path"
     )
 
 
-def test_canonical_unreadable_detail_survives_a_later_launch_failure(tmp_path, monkeypatch):
-    """PROPERTY: the specific errno diagnostic behind a canonical-unreadable refusal
-    must survive into the terminal joblog even when self.error_detail itself gets
-    overwritten by something UNRELATED afterward -- the same "the flag is
-    authoritative, the string is not" guarantee self.canonical_unreadable already has
-    (self.reason gets reassigned by whatever the run does next; a string comparison at
-    finalize() time would stop protecting the file the moment anything downstream
-    narrates a different outcome), extended to its diagnostic payload. Reached through
-    adopt_pending(), then a REAL, unrelated launch() failure that overwrites
-    self.error_detail on its own real failure path (not a stub that merely returns
-    False and leaves error_detail untouched, which would prove nothing about the
-    overwrite)."""
+def test_canonical_unreadable_detail_survives_overwritten_error_detail_in_finalize(
+    tmp_path, monkeypatch
+):
+    """PROPERTY: finalize()'s reported error_detail must come from
+    self.canonical_unreadable_detail, not bare self.error_detail, whenever
+    self.canonical_unreadable is set -- the same "the flag is authoritative, the
+    string is not" guarantee self.canonical_unreadable already gets for self.reason,
+    extended to its diagnostic payload.
+
+    Exercised directly against finalize(), not through a full run(): the ORIGINAL
+    version of this test drove it end-to-end (adopt_pending()'s own refusal, then a
+    real launch() failure overwriting self.error_detail on the fall-through to a
+    fresh launch) -- but the early return this same round adds right after
+    adopt_pending() (see test_run_refuses_immediately_when_adopt_pending_hits_
+    canonical_unreadable, above) means run() no longer reaches launch() at all once
+    adopt_pending() has refused, closing off that specific overwrite path as a side
+    effect. Nothing else in run()'s current control flow runs after any of the three
+    canonical-unreadable refusal sites either (each is either an immediate return or
+    the terminal action in its branch), so no LIVE path currently exercises the
+    overwrite. The field and the preference logic stay -- cheap insurance against a
+    future change reopening one -- and this test pins the mechanism itself directly,
+    independent of whether today's control flow happens to reach it."""
     job = _mkjob(tmp_path, kind="translate", deadline=100)
-    monkeypatch.setattr(job, "hygiene", lambda: None)
-    Path(job.pending).write_text("{}", encoding="utf-8")
-    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
-    monkeypatch.setattr(job, "_gate", gate)
+    job.canonical_unreadable = True
+    job.canonical_unreadable_detail = "canonical unreadable: original diagnostic, EIO"
+    job.error_detail = "companion stderr: an unrelated later overwrite"  # simulates
+    # whatever ELSE might, in a future control-flow change, run after the refusal and
+    # touch self.error_detail -- the mechanism must not assume today's reachability
+    # holds_lock is only ever True after a real flock acquire in run(); set directly
+    # here so finalize()'s own joblog write (holds_lock-gated) actually runs, giving
+    # this test something durable to read back rather than only the stdout line.
+    job.holds_lock = True
 
-    # run()'s OWN preflight lstat()s this exact same self.canonical path first -- must
-    # be let through genuinely (as absent, via the real FileNotFoundError) or the run
-    # never reaches adopt_pending() at all. Only the SECOND observation, adopt_pending()'s
-    # own, is faulted.
-    lstat_calls = {"n": 0}
-    real_lstat = os.lstat
+    job.finalize()
 
-    def fake_lstat(path, *a, **kw):
-        if os.fspath(path) == job.canonical:
-            lstat_calls["n"] += 1
-            if lstat_calls["n"] >= 2:
-                raise OSError(errno.EIO, "Input/output error", path)
-        return real_lstat(path, *a, **kw)
-    monkeypatch.setattr(os, "lstat", fake_lstat)
-
-    def fake_launch():
-        # Mirrors what launch() ACTUALLY does on its own failure path (self.error_detail
-        # = _stderr_text(proc)) -- a stub that just returns False without touching
-        # error_detail would not exercise the overwrite this test is about.
-        job.error_detail = "companion stderr: an unrelated launch failure"
-        return False
-    monkeypatch.setattr(job, "launch", fake_launch)
-
-    rc = job.run()
-
-    assert rc == 1
-    assert job.reason == "launch-failed", "premise: an unrelated later failure overwrote reason"
-    assert job.canonical_unreadable is True
-    assert job.error_detail == "companion stderr: an unrelated launch failure", (
-        "premise: launch()'s own failure path DID overwrite self.error_detail -- "
-        "otherwise this test proves nothing about the preservation mechanism"
+    assert job.canonical_unreadable_detail == "canonical unreadable: original diagnostic, EIO", (
+        "finalize() must never mutate the snapshot itself"
     )
-    assert job.canonical_unreadable_detail is not None
-    assert "Input/output error" in job.canonical_unreadable_detail, (
+    joblog = job.read_joblog()
+    assert joblog is not None, "finalize() must have written the joblog (holds_lock is True)"
+    assert joblog["error_detail"] == "canonical unreadable: original diagnostic, EIO", (
         "the ORIGINAL canonical-unreadable diagnostic must survive under its own "
-        "dedicated field even though self.error_detail was overwritten"
+        "dedicated field even though self.error_detail was overwritten afterward"
     )
 
 

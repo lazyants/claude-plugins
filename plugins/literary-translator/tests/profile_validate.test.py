@@ -156,13 +156,22 @@ def test_module_docstring_names_three_never_copied_scripts():
     Step 0a copy-exclusion list for the disproof) -- profile_validate.py's own
     module docstring must name itself as ONE OF THREE now, not four, and must
     still mention resolve_codex_companion.py by name (as the corrected
-    historical note explaining why it is NOT a fourth exception). Guards the
-    count from drifting out of sync with SKILL.md's Step 0a copy-exclusion
-    list in either direction."""
+    historical note explaining why it is NOT a fourth exception). Also must
+    NOT claim "every other script" is copied without qualification --
+    scaffold_setup.py is ALSO never copied, for a wholly unrelated reason
+    (it is not a bundle member at all), and an unqualified "every other" is
+    false regardless of what happens to resolve_codex_companion.py's own
+    count. Guards both properties from drifting out of sync with SKILL.md's
+    Step 0a copy-exclusion list."""
     source = SCRIPT_PATH.read_text(encoding="utf-8")
-    assert "ONE OF THREE SCRIPTS NEVER COPIED" in source
+    assert "ONE OF THREE PLUGIN-PATH-ONLY SCRIPTS NEVER COPIED" in source
     assert "ONE OF FOUR SCRIPTS NEVER COPIED" not in source
     assert "resolve_codex_companion.py" in source
+    assert "scaffold_setup.py" in source, (
+        "the docstring's own qualification of \"every other script\" must name "
+        "scaffold_setup.py as the OTHER, unrelated exclusion -- omitting it "
+        "reintroduces the false 'every other script is copied' claim"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -233,7 +233,11 @@ same for `smoke_test.report_path` (skipped when null).
 Copies (unconditional overwrite, safe since these files are never
 hand-edited): every file in `assets/scripts/*.py` (except
 `profile_validate.py`, `validate_extraction.py`, and `glossary_preflight.py`
-— three files, EACH excluded for its own distinct reason, never a shared one:
+— three files, EACH excluded for its own distinct reason, never a shared one
+(a fourth exclusion, `scaffold_setup.py`, follows below in a wholly separate
+category — it is not a bundle member at all, never mind never-copied-for-its-
+own-reason like these three; do not read "three" here as this paragraph's
+total exclusion count):
   - `profile_validate.py` runs *before* Step 0a exists to copy anything — Step 0
     reads and validates `profile.yml` first, so there is no durable-root copy of
     this script yet, and there never will be one for that specific invocation.
@@ -260,6 +264,45 @@ copied like every other self-anchored script; do not re-exclude it by
 re-deriving this same plausible-sounding-but-wrong argument — check the file's
 own source for `__file__` before trusting a "could not glob the plugin's own
 install locations" claim about it again.
+
+**Migration note, mandatory before `resolve_codex_companion.py` is copied on
+any project scaffolded before this correction:** its destination,
+`${durable_root}/scripts/resolve_codex_companion.py`, was explicitly EXCLUDED
+from this copy pass until now, and the "unconditional overwrite, safe since
+these files are never hand-edited" premise the rest of this copy pass rests on
+was NEVER true for this one path — a project that hit the exit-2 default-
+launch defect this correction fixes could have reasonably worked around it by
+placing its own adapted copy exactly there, on the explicit strength of that
+destination being documented as untouched. Copying over it unconditionally now
+would silently destroy that adaptation with no backup and no warning, and on a
+RESUMED project (outcome 2 above) this would happen with NO collision
+detection of any kind — collision detection exists only on outcome 3's
+ambiguous-adoption path, which a resumed project's own root marker match
+bypasses entirely.
+
+So THIS ONE FILE, and only this one, gets a three-way check before its copy,
+never the blanket unconditional overwrite the rest of the bundle gets:
+  - **Absent** at the destination → copy normally. This is every project that
+    never worked around the defect — the overwhelming majority, and the same
+    shape a fresh project (outcome 1) always has.
+  - **Present and byte-identical** to the shipped source → copy normally (a
+    no-op overwrite of itself).
+  - **Present and byte-DIFFERENT** from the shipped source → do NOT overwrite
+    silently. Rename the existing file to
+    `resolve_codex_companion.py.pre-upgrade-backup` (or
+    `.pre-upgrade-backup-2`, `-3`, ... if that name is already taken —
+    idempotent across repeated runs) before copying the shipped file into
+    place, and name this explicitly in the scaffold's own output so the
+    operator knows a local adaptation was preserved and where.
+
+This check applies exactly once per divergent file, ever: after the first
+backup-and-copy, the destination matches the shipped bundle byte-for-byte, so
+every later re-scaffold — under this plugin version or a later one — sees the
+byte-identical case and proceeds with the ordinary unconditional overwrite
+like every other bundle member, with no further backup. Every OTHER bundle
+member never needs this treatment: none of them were ever excluded from the
+copy pass before, so none of them have a population of pre-existing, possibly-
+hand-adapted destinations to protect.
 
 Also, separately, `scaffold_setup.py` — Step 0a's own bundle-hash marker writer
 (#194), which likewise runs only from the plugin path: it is invoked below as

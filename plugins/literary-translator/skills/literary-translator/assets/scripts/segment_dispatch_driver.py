@@ -2075,6 +2075,78 @@ def template_harness_source(template_text: str, subst: dict) -> str:
     return truncated + exports
 
 
+def _open_regular_no_follow_walk(path: Path):
+    """Opens `path` component-by-component from the filesystem root, with
+    `os.O_NOFOLLOW` at EVERY step -- not just the leaf. This closes two
+    gaps `_template_candidate_state()`'s own `os.lstat()` cannot:
+
+      * `lstat(path)` only inspects the FINAL path component. Every
+        component BEFORE it is resolved by the kernel exactly like
+        `Path.is_file()` would -- so a symlinked ANCESTOR directory (e.g.
+        `assets/templates` itself replaced with a symlink, with a genuine
+        regular file sitting at the far end of it) passes lstat's own
+        check on the leaf while the actual bytes read come from somewhere
+        else entirely. Walking with O_NOFOLLOW at every step refuses that.
+      * a check (`_template_candidate_state()`) and a SEPARATE later
+        `read_text()` are two independent lookups, with a window between
+        them for an atomic leaf swap to install a symlink or FIFO. The fd
+        this returns is the SAME fd the caller reads from -- one lookup,
+        one set of bytes, nothing to swap in between.
+
+    Returns `(fd, "file")` on success -- the CALLER owns the fd and must
+    close it. Returns `(None, "absent")` if the leaf genuinely does not
+    exist, or `(None, "suspicious")` for anything else refused along the
+    way (a symlinked or non-directory ancestor, a symlinked/non-regular
+    leaf, or any other lookup failure) -- the SAME tri-state vocabulary
+    `_template_candidate_state()` already uses, so callers do not need a
+    second failure shape.
+
+    WHAT THIS DOES NOT DO: verify the file's CONTENT. A process with write
+    access to this exact location -- the documented, accepted #412 risk on
+    the self-anchored default, closed only by an orchestrating session
+    actually passing `--plugin-root` -- can still replace this path with
+    an ORDINARY regular file carrying malicious top-level JavaScript.
+    Every check here is about STRUCTURE (symlink? directory? genuinely a
+    regular file, reached with no substitution along the way?), never
+    about whether the bytes inside are the real, unmodified template. No
+    filesystem-type check, however thorough, can establish that; it would
+    need content-level provenance (a pinned hash checked against a trusted
+    value) -- a materially bigger mechanism this fix does not attempt. See
+    `call_template_functions()`'s own docstring for where that boundary is
+    drawn and why."""
+    if not path.is_absolute():
+        fatal(f"internal error: {path} must be absolute for the no-follow walk", exit_code=2)
+    parts = path.parts
+    fd = None
+    try:
+        fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY)
+        for name in parts[1:-1]:
+            next_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        leaf_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        os.close(fd)
+        fd = None
+    except FileNotFoundError:
+        if fd is not None:
+            os.close(fd)
+        return None, "absent"
+    except OSError as exc:
+        if fd is not None:
+            os.close(fd)
+        print(
+            f"segment_dispatch_driver.py: warning: no-follow walk to {path} "
+            f"refused: {exc}; treating as suspicious",
+            file=sys.stderr,
+        )
+        return None, "suspicious"
+    st = os.fstat(leaf_fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(leaf_fd)
+        return None, "suspicious"
+    return leaf_fd, "file"
+
+
 def call_template_functions(dirs: dict, subst: dict, calls: list, node_bin: str = "node") -> dict:
     """Runs `node` against a freshly instantiated, truncated copy of the
     REAL mass-translate-wf.template.js (dirs["template_script"]) and calls
@@ -2113,22 +2185,42 @@ def call_template_functions(dirs: dict, subst: dict, calls: list, node_bin: str 
     EITHER resolve_dirs() branch -- the self-anchored one, already fail-
     closed via _self_anchored_template_path(), or the --plugin-root one,
     which just joins a path with no check of its own (it is TOLD which
-    plugin to trust, so there is nothing for it to probe). Checking with
-    _template_candidate_state() HERE, unconditionally, protects both:
-    whichever branch produced this path, this driver must still refuse to
-    follow a symlink into it or read a non-regular entry before executing
-    whatever it finds -- never Path.is_file(), which follows a valid
-    symlink and reports it exactly like a real regular file."""
+    plugin to trust, so there is nothing for it to probe). Using
+    _open_regular_no_follow_walk() HERE, unconditionally, protects both:
+    whichever branch produced this path, this driver refuses a symlink
+    ANYWHERE on the path to it (not just the leaf), a non-regular leaf, and
+    the check/read race a separate is_file()-then-read_text() pair leaves
+    open -- one fd, opened with O_NOFOLLOW the entire way down, is both the
+    verification and the bytes executed.
+
+    STILL NOT A CONTENT CHECK. This establishes the path structurally
+    reaches a genuine, unsubstituted regular file -- it says nothing about
+    whether that file's BYTES are the real, unmodified template. A process
+    with write access to this exact location (the documented, accepted
+    #412 risk on the self-anchored default; --plugin-root is the actual
+    closure) can still replace it with an ordinary regular file carrying
+    malicious top-level JavaScript, and no filesystem-structure check can
+    detect that -- it would take a pinned content hash checked against a
+    trusted value, which this fix does not attempt. Narrow any claim about
+    what this closes accordingly: structural substitution (symlinks,
+    ancestor swaps, non-regular entries, the check/read race), not content
+    tampering of a genuinely regular file at a location already writable
+    by whatever produced it."""
     template_path = dirs["template_script"]
-    template_state = _template_candidate_state(template_path)
-    if template_state != "file":
+    template_fd, template_state = _open_regular_no_follow_walk(template_path)
+    if template_fd is None:
         fatal(
             f"mass-translate-wf.template.js at {template_path} is not usable "
             f"(state={template_state}) -- refusing rather than following a "
-            f"symlink or reading a non-regular entry",
+            f"symlink (anywhere on the path, not just the leaf) or reading a "
+            f"non-regular entry",
             exit_code=2, template_path=str(template_path), template_state=template_state,
         )
-    template_text = template_path.read_text(encoding="utf-8")
+    try:
+        with os.fdopen(template_fd, "r", encoding="utf-8") as fh:
+            template_text = fh.read()
+    except OSError as exc:
+        fatal(f"could not read {template_path}: {exc}", exit_code=2)
     harness_source = template_harness_source(template_text, subst)
 
     for c in calls:

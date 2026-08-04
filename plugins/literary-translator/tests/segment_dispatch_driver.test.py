@@ -4138,6 +4138,41 @@ def test_resolve_dirs_finds_the_template_under_a_deployed_durable_root(tmp_path)
     assert deployed.resolve_dirs(None)["template_script"] == flat_template
 
 
+def test_a_deployed_layout_template_is_actually_readable_and_executable_end_to_end(tmp_path):
+    """codex's finding on the test above: it asserts only resolve_dirs()'s
+    RETURNED PATH, never that the deployed-layout resolution actually
+    produces a template call_template_functions() can read and Node can
+    run. Proves the full chain for the deployed layout specifically --
+    resolve -> _open_regular_no_follow_walk() -> read -> truncate -> Node
+    execution -> JSON parse -- the same round trip
+    test_translate_dispatch_byte_equivalence_to_template already proves
+    for the CHECKOUT layout (via phase2_project()'s own stage_phase2_
+    sibling_scripts() fixture, which always creates a separate templates/
+    dir), but that test never exercises the deployed, flat-scripts/ shape
+    at all."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, deployed_scripts / "mass-translate-wf.template.js")
+
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_deployed_template_e2e")
+    dirs = deployed.resolve_dirs(None)
+    subst = {
+        "durable_root": str(tmp_path), "run_id": "20260101T000000Z",
+        "source_lang": "fr", "target_lang": "ru", "effort": "high", "model": "",
+        "verse_policy_instruction_block": "", "max_fix_rounds": 2,
+        "batch_agent_cap": 10000, "max_codex_jobs_per_batch": 400,
+        "companion_path": "/fake/companion.mjs", "plugin_root": "",
+    }
+    out = deployed.call_template_functions(
+        dirs, subst, [{"key": "text", "fn": "translatePrompt", "args": ["seg01"]}])
+    assert isinstance(out["text"], str) and out["text"], (
+        f"expected translatePrompt() to return real, non-empty prompt text via "
+        f"the deployed layout, got {out!r}"
+    )
+
+
 def test_resolve_dirs_still_finds_the_template_in_this_plugin_checkout_layout(tmp_path):
     """The other half, and the one every phase2_project()-based test in this
     file already depends on: assets/scripts/ and assets/templates/ are
@@ -4317,6 +4352,99 @@ def test_a_symlinked_template_reached_via_plugin_root_is_refused_before_executio
         f"specifically (extra={excinfo.value.extra!r}) -- a DriverError "
         f"from ANY later stage of the pipeline is not proof the symlink "
         f"itself was ever refused"
+    )
+
+
+# ===========================================================================
+# codex's BLOCKER on 7524076: os.lstat()-based classification only inspects
+# the LEAF path component -- an ANCESTOR directory that is itself a symlink
+# is followed transparently, exactly like Path.is_file() would, because
+# lstat() never looks past the final component. And a check (lstat, then
+# later is_file()/_template_candidate_state()) followed by a SEPARATE
+# read_text() leaves a window for an atomic swap in between. Both close with
+# _open_regular_no_follow_walk(): every component from / down to the leaf is
+# opened with O_NOFOLLOW, and the SAME fd that was verified is the fd the
+# bytes come from -- one lookup, not two.
+# ===========================================================================
+
+
+def test_a_symlinked_ancestor_directory_is_refused_even_with_a_genuine_regular_leaf(tmp_path):
+    """The property os.lstat()-based classification cannot see: `lstat(full_
+    path)` only inspects the FINAL component. If `assets/templates` itself
+    is a symlink pointing somewhere else, and a perfectly genuine, non-
+    symlinked regular file sits at the far end of it, `_template_candidate_
+    state()` (and Path.is_file() before it) would call that "file" -- the
+    leaf, considered alone, really is one. The bytes actually read come
+    from wherever the swapped ANCESTOR points, not from the trusted
+    location. Only a component-by-component no-follow walk can tell the
+    difference; a single lstat on the full path cannot, no matter how
+    strict its own leaf-only check is."""
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    real_templates_dir = plugin_root / "assets" / "templates"
+    real_template = real_templates_dir / "mass-translate-wf.template.js"
+    assert real_template.is_file(), "sanity: make_trusted_plugin_root() ships a real template here"
+
+    # Move the genuine templates/ directory aside, then plant a SYMLINK at
+    # the expected location pointing at it. The leaf resolve_dirs() names
+    # is still, in isolation, a completely genuine regular file -- the
+    # substitution is one level up, at the ancestor directory.
+    real_templates_dir.rename(plugin_root / "assets" / "templates_moved_aside")
+    (plugin_root / "assets" / "templates").symlink_to(plugin_root / "assets" / "templates_moved_aside")
+
+    dirs = DRIVER.resolve_dirs(None, str(plugin_root))
+    template_path = dirs["template_script"]
+    assert template_path.is_file(), (
+        "sanity: the leaf, resolved THROUGH the symlinked ancestor, must still "
+        "look like a completely ordinary regular file to Path.is_file() -- "
+        "otherwise this test is not exercising the gap it claims to"
+    )
+
+    fd, state = DRIVER._open_regular_no_follow_walk(template_path)
+    assert fd is None and state == "suspicious", (
+        f"expected the no-follow walk to refuse a symlinked ancestor even "
+        f"with a genuine regular leaf, got fd={fd!r} state={state!r}"
+    )
+
+
+def test_the_read_is_immune_to_a_leaf_swap_that_happens_after_the_open(tmp_path):
+    """The check/read race codex's BLOCKER named directly: a check
+    (_template_candidate_state(), or Path.is_file()) and a LATER, separate
+    read_text() are two independent filesystem lookups, with a window in
+    between for an atomic rename to install something else at that exact
+    path. _open_regular_no_follow_walk() returns an ALREADY-OPEN file
+    descriptor rather than a verdict to act on later -- once open, a POSIX
+    fd stays bound to the SAME underlying inode regardless of what the
+    PATHNAME is later renamed to point at. Proves this directly: open the
+    real template, THEN atomically replace the path with a different file,
+    THEN read from the fd the walk already returned -- the bytes must be
+    the ORIGINAL template's, never the swapped-in content, because the
+    open already happened before the swap and pathnames stopped mattering
+    the instant that fd existed."""
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    dirs = DRIVER.resolve_dirs(None, str(plugin_root))
+    template_path = dirs["template_script"]
+    original_bytes = template_path.read_bytes()
+
+    fd, state = DRIVER._open_regular_no_follow_walk(template_path)
+    assert state == "file" and fd is not None
+
+    # THE RACE WINDOW: an atomic swap of the path, simulating an attacker
+    # (or a legitimate concurrent writer) replacing the file the instant
+    # after this driver decided it was safe to read.
+    swapped_in = tmp_path / "swapped_in.js"
+    swapped_in.write_text("process.stdout.write('SWAPPED CONTENT');\n", encoding="utf-8")
+    os.replace(str(swapped_in), str(template_path))
+    assert template_path.read_bytes() != original_bytes, (
+        "sanity: the swap must genuinely have changed what the PATHNAME now "
+        "points at, or this test proves nothing"
+    )
+
+    with os.fdopen(fd, "rb") as fh:
+        read_via_fd = fh.read()
+    assert read_via_fd == original_bytes, (
+        "the fd opened BEFORE the swap must still return the ORIGINAL "
+        "template's bytes -- reading the swapped-in content here would mean "
+        "the check/read race is still open despite the fd-pinned read"
     )
 
 

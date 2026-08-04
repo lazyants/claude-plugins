@@ -407,3 +407,143 @@ def test_repeatable_overwrite_helper_actually_overwrites(tmp_path):
     repeatable_overwrite(template_path, dest_path)
 
     assert dest_path.read_text(encoding="utf-8") == "// v2 template content\n"
+
+
+# ===========================================================================
+# Part C -- the ONE-TIME migration guard for resolve_codex_companion.py's
+# copy pass, added when its exclusion was reverted. Every OTHER bundle
+# member gets plain unconditional overwrite ("safe since these files are
+# never hand-edited") -- but that premise was never true for THIS path: it
+# was explicitly excluded from the copy pass before this release, so a
+# project that hit the resulting exit-2 default-launch defect could have
+# reasonably worked around it by hand-adapting its own copy exactly there,
+# on the documented strength of that destination being untouched. See
+# SKILL.md's own "Migration note" in its Step 0a section for the full
+# three-way contract this transcribes literally.
+# ===========================================================================
+
+
+def apply_resolve_codex_companion_migration(shipped_source: Path, dest_path: Path) -> str:
+    """Literal transcription of SKILL.md's Step 0a migration note for
+    resolve_codex_companion.py: absent -> copy; present and byte-identical
+    -> copy (a no-op over itself); present and byte-different -> rename the
+    existing file to a `.pre-upgrade-backup` sibling (numbered if that name
+    is already taken) BEFORE copying, never a silent overwrite.
+
+    Returns one of "copied-fresh" (was absent), "copied-noop" (was already
+    byte-identical), "backed-up-and-copied" (diverged; the pre-existing
+    file survives under a new name) -- the three states SKILL.md's own
+    migration note names, so a test can assert on which one fired rather
+    than only on the end state."""
+    if not dest_path.exists():
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(shipped_source, dest_path)
+        return "copied-fresh"
+    if dest_path.read_bytes() == shipped_source.read_bytes():
+        shutil.copyfile(shipped_source, dest_path)
+        return "copied-noop"
+    backup_path = dest_path.with_name(dest_path.name + ".pre-upgrade-backup")
+    suffix = 2
+    while backup_path.exists():
+        backup_path = dest_path.with_name(dest_path.name + f".pre-upgrade-backup-{suffix}")
+        suffix += 1
+    dest_path.rename(backup_path)
+    shutil.copyfile(shipped_source, dest_path)
+    return "backed-up-and-copied"
+
+
+def _resolve_codex_companion_shipped_fixture(tmp_path: Path) -> Path:
+    shipped = tmp_path / "shipped_resolve_codex_companion.py"
+    shipped.write_text("# the real, shipped resolve_codex_companion.py\n", encoding="utf-8")
+    return shipped
+
+
+def test_resolve_codex_companion_migration_copies_freely_when_absent(tmp_path):
+    """The overwhelming majority case: any project that never hit the old
+    exit-2 default-launch defect (or hit it but never worked around it) has
+    nothing at this destination at all. Must copy exactly like every other
+    bundle member -- no backup, no special handling, because there is
+    nothing to protect."""
+    shipped = _resolve_codex_companion_shipped_fixture(tmp_path)
+    dest = tmp_path / "durable_root" / "scripts" / "resolve_codex_companion.py"
+
+    outcome = apply_resolve_codex_companion_migration(shipped, dest)
+
+    assert outcome == "copied-fresh"
+    assert dest.read_bytes() == shipped.read_bytes()
+
+
+def test_resolve_codex_companion_migration_is_a_noop_when_already_byte_identical(tmp_path):
+    """A project already on the corrected copy pass -- every re-scaffold
+    after the first backup-and-copy, or a project that adopted this
+    correction's shipped file some other way -- sees the byte-identical
+    case forever after and gets the ordinary unconditional-overwrite
+    treatment, matching every other bundle member. No backup should ever
+    be created for an already-matching destination."""
+    shipped = _resolve_codex_companion_shipped_fixture(tmp_path)
+    dest = tmp_path / "durable_root" / "scripts" / "resolve_codex_companion.py"
+    dest.parent.mkdir(parents=True)
+    shutil.copyfile(shipped, dest)
+
+    outcome = apply_resolve_codex_companion_migration(shipped, dest)
+
+    assert outcome == "copied-noop"
+    assert dest.read_bytes() == shipped.read_bytes()
+    backups = list(dest.parent.glob("resolve_codex_companion.py.pre-upgrade-backup*"))
+    assert backups == [], f"no backup should exist for an already-identical destination: {backups}"
+
+
+def test_resolve_codex_companion_migration_backs_up_a_genuinely_hand_adapted_copy(tmp_path):
+    """THE property this whole migration note exists for: a project that
+    worked around the old defect by hand-adapting its own copy at this
+    exact, previously-documented-as-untouched destination must not lose
+    that work silently. The divergent bytes survive under a
+    `.pre-upgrade-backup` sibling, and the destination itself ends up
+    matching the shipped source (so the driver can actually dispatch --
+    the whole point of this release)."""
+    shipped = _resolve_codex_companion_shipped_fixture(tmp_path)
+    dest = tmp_path / "durable_root" / "scripts" / "resolve_codex_companion.py"
+    dest.parent.mkdir(parents=True)
+    hand_adapted_bytes = b"# a project's own hand-adapted workaround, pre-dating this release\n"
+    dest.write_bytes(hand_adapted_bytes)
+
+    outcome = apply_resolve_codex_companion_migration(shipped, dest)
+
+    assert outcome == "backed-up-and-copied"
+    assert dest.read_bytes() == shipped.read_bytes(), (
+        "the destination must end up matching the shipped file -- the whole "
+        "point is that the driver can now find a real resolve_codex_companion.py "
+        "there, not just that the old one was preserved somewhere"
+    )
+    backup = dest.with_name(dest.name + ".pre-upgrade-backup")
+    assert backup.is_file(), "the hand-adapted file must survive under a backup name"
+    assert backup.read_bytes() == hand_adapted_bytes
+
+
+def test_resolve_codex_companion_migration_numbers_repeated_backups(tmp_path):
+    """Idempotent across repeated runs against the SAME diverged fixture --
+    the described shape covers a single migration event, but a real
+    project could re-run Step 0a multiple times against a durable_root
+    someone keeps hand-editing back to something different every time
+    (or, more realistically, a test exercising this function twice against
+    a pre-seeded backup to prove the numbering logic itself, not just its
+    existence)."""
+    shipped = _resolve_codex_companion_shipped_fixture(tmp_path)
+    dest = tmp_path / "durable_root" / "scripts" / "resolve_codex_companion.py"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"# first divergent hand-adapted copy\n")
+    (dest.parent / "resolve_codex_companion.py.pre-upgrade-backup").write_bytes(
+        b"# a backup from an earlier migration run\n"
+    )
+
+    outcome = apply_resolve_codex_companion_migration(shipped, dest)
+
+    assert outcome == "backed-up-and-copied"
+    assert dest.read_bytes() == shipped.read_bytes()
+    first_backup = dest.parent / "resolve_codex_companion.py.pre-upgrade-backup"
+    second_backup = dest.parent / "resolve_codex_companion.py.pre-upgrade-backup-2"
+    assert first_backup.read_bytes() == b"# a backup from an earlier migration run\n", (
+        "the EXISTING backup must survive untouched -- only the newly-diverged "
+        "file gets renamed into the next free slot"
+    )
+    assert second_backup.read_bytes() == b"# first divergent hand-adapted copy\n"
