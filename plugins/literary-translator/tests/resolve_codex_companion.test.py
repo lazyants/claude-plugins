@@ -16,6 +16,7 @@ executable `node` stub, plus white-box calls into its pure helpers; that setup i
 them independent of where the file sits, which is the property under test here.
 """
 
+import ast
 import importlib.util
 import json
 import stat
@@ -194,6 +195,38 @@ def test_legit_space_and_nonascii_path_accepted_and_roundtrips(tmp_path):
     )
     assert echoed.returncode == 0
     assert echoed.stdout == raw
+
+
+def test_the_resolver_contains_no_executable_reference_to_dunder_file():
+    """The load-bearing disproof of this release, made mechanically checkable.
+
+    The exclusion that broke the documented self-anchored driver launch rested on one
+    claim: that a durable copy of this script "could not glob the plugin's own install
+    locations". The disproof is that the script's location never enters its search --
+    it reads no `__file__`. That disproof is currently asserted only in prose, in four
+    places, and prose about a property is not the property.
+
+    Checks the AST, not the raw text, and the distinction is the whole point: this
+    file's own module docstring now DISCUSSES `__file__` by name (it has to -- it tells
+    the next maintainer exactly which claim to re-check before re-excluding this
+    script), so a literal `grep -c __file__` returns a nonzero count and reads as a
+    refutation of the very sentence above it. `ast.walk()` sees identifiers, never
+    comments or string contents, so it answers the question actually being asked:
+    does any CODE PATH here depend on where this file sits?
+
+    If this ever fails, the resolver has become location-dependent and Step 0a copying
+    it to `${durable_root}/scripts/` is no longer safe -- re-read the exclusion
+    reasoning in SKILL.md's Step 0a copy-pass section before changing this test."""
+    tree = ast.parse(RESOLVER_SRC.read_text(encoding="utf-8"), filename=str(RESOLVER_SRC))
+    offenders = [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "__file__"
+    ]
+    assert offenders == [], (
+        f"{RESOLVER_SRC.name} now READS __file__ at line(s) {offenders} -- it is no "
+        f"longer location-independent, which is the sole premise on which Step 0a "
+        f"copies it into ${{durable_root}}/scripts/"
+    )
 
 
 if __name__ == "__main__":

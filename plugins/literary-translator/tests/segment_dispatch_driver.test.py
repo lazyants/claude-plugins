@@ -4293,11 +4293,13 @@ def test_a_symlinked_template_reached_via_plugin_root_is_refused_before_executio
     call_template_functions(), a symlink planted at that exact path,
     pointing at attacker-controlled content, would be followed and its
     JavaScript top-level code EXECUTED (call_template_functions()
-    dynamically imports whatever dirs["template_script"] names) the moment
-    any prompt is rendered -- translate and review, not merely a
-    fixreview-style gate. The fix has to live at the point of USE
-    (call_template_functions() itself), not only at resolution, because
-    this branch never goes through _self_anchored_template_path() at all.
+    dynamically imports whatever dirs["template_script"] names). This is
+    not a narrow, one-gate exposure: call_template_functions() sits on the
+    path of EVERY prompt kind this driver renders -- translate and review
+    alike -- so any dispatch, not some special case, would have taken it.
+    The fix has to live at the point of USE (call_template_functions()
+    itself), not only at resolution, because this branch never goes
+    through _self_anchored_template_path() at all.
 
     Reproduces the real attack shape: a real trusted plugin_root (the same
     fixture make_trusted_plugin_root() builds for the existing --plugin-root
@@ -4352,6 +4354,75 @@ def test_a_symlinked_template_reached_via_plugin_root_is_refused_before_executio
         f"specifically (extra={excinfo.value.extra!r}) -- a DriverError "
         f"from ANY later stage of the pipeline is not proof the symlink "
         f"itself was ever refused"
+    )
+
+
+def test_a_fifo_at_the_leaf_is_refused_quickly_never_blocks_the_open(tmp_path):
+    """codex round 2, MAJOR, fix-introduced: the first version of
+    _open_regular_no_follow_walk() opened the leaf with blocking `O_RDONLY
+    | O_NOFOLLOW` and classified its type ONLY AFTER the open succeeded.
+    Opening a FIFO with no writer on the other end BLOCKS INSIDE os.open()
+    itself, before classification ever runs and before any caller-side
+    timeout (Node's 60s subprocess timeout, in call_template_functions())
+    can even start -- an attacker-triggerable hang, and strictly worse
+    than the plain os.lstat() check this whole fix replaced (lstat never
+    opens anything, so it could refuse a FIFO instantly). Verified
+    directly, not asserted: a genuinely blocking open on this exact FIFO,
+    run in a separate process with a bounded timeout, really does hang
+    (confirmed while designing this fix, kept here as the documented
+    reason O_NONBLOCK on the leaf open is load-bearing, not cosmetic).
+
+    BOUNDED WITH A HARD SIGALRM, not left to run unbounded on the claim
+    that a hang IS the signal. An earlier version of this test argued
+    exactly that -- if the fix regresses, the test itself hangs, and a
+    wedged suite is proof enough. It is not: a wedged run produces no
+    failing test name, no assertion text, no traceback, and takes every
+    OTHER test's result down with it -- the single hardest failure mode to
+    attribute, and this session has already been bitten once by a run
+    that hangs looking identical, from outside, to one that is merely
+    slow. A regression here must FAIL LOUDLY, not wedge the release gate
+    silently. The alarm is generous (5s -- os.open() with O_NONBLOCK on a
+    real FIFO returns in microseconds when the fix is intact) and is
+    cleared in `finally` regardless of outcome, so it can never leak into
+    a later test.
+
+    THE TIMEOUT SIGNAL MUST NOT BE AN OSError SUBCLASS. Verified while
+    building this bound, not assumed: `TimeoutError` IS one (Python 3.3+),
+    so raising it from the SIGALRM handler while blocked inside
+    `os.open()` gets silently caught by `_open_regular_no_follow_walk()`'s
+    OWN `except OSError` handler -- the function returns `(None,
+    "suspicious")` exactly as if it had refused the FIFO cleanly, and this
+    test would report PASSED after the full 5s wait, having proven
+    NOTHING about whether the hang ever happened. `_FifoOpenTimedOut`
+    below is a `RuntimeError`, deliberately outside the OSError family, so
+    a genuine regression propagates THROUGH the production function's own
+    exception handling instead of being absorbed by it."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    fifo_path = deployed_scripts / "mass-translate-wf.template.js"
+    os.mkfifo(str(fifo_path))
+
+    class _FifoOpenTimedOut(RuntimeError):
+        pass
+
+    def _timeout_handler(signum, frame):
+        raise _FifoOpenTimedOut(
+            "regression: the leaf open blocked on a FIFO for 5s -- "
+            "O_NONBLOCK was dropped from _open_regular_no_follow_walk()'s "
+            "leaf open, reintroducing the exact hang this test exists to catch"
+        )
+
+    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, 5)
+    try:
+        fd, state = DRIVER._open_regular_no_follow_walk(fifo_path)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+    assert fd is None and state == "suspicious", (
+        f"expected a FIFO to be refused as suspicious (never opened for a "
+        f"real read), got fd={fd!r} state={state!r}"
     )
 
 
@@ -4448,13 +4519,107 @@ def test_the_read_is_immune_to_a_leaf_swap_that_happens_after_the_open(tmp_path)
     )
 
 
+def test_the_bytes_node_executes_come_from_the_pinned_descriptor_not_a_reopened_path(
+    tmp_path, monkeypatch,
+):
+    """The property _open_regular_no_follow_walk() and the two tests above
+    were BUILT for, asserted here at the one place it actually matters:
+    call_template_functions() itself. The tests above assert on the
+    HELPER's own return value directly; nothing in this suite proves the
+    LIVE CALLER actually reads from the fd it returns rather than
+    discarding it and reopening the pathname -- a mutation as small as
+    `os.close(template_fd); template_text = template_path.read_text()`
+    would keep every one of those tests, and the byte-equivalence tests,
+    and the deployed-layout end-to-end test, green: they only check that
+    the eventual bytes look like a valid template, never that they came
+    off the specific descriptor that was opened and verified.
+
+    Wraps the REAL _open_regular_no_follow_walk() rather than stubbing a
+    fake result (same technique codex_job_driver.test.py's own
+    test_canonical_replaceable_check_then_replace_window_is_a_known_
+    unclosed_race uses, for the identical reason): only AFTER it has
+    genuinely opened and verified the leaf -- proving the returned fd is
+    real -- does this atomically replace the file at that SAME pathname
+    with a second, itself completely genuine regular file (never a
+    symlink or FIFO; the point is that even a perfectly legitimate-
+    looking replacement must not be what gets executed, because identity
+    was fixed at the moment of open, not at the moment of read).
+    Deliberately `os.replace()` -- an ATOMIC rename onto a NEW inode --
+    never an in-place overwrite (`Path.write_text()`/`shutil.copyfile`
+    onto the existing path would truncate-and-rewrite the SAME inode the
+    already-open fd is pinned to, proving nothing about descriptor-
+    pinning either way).
+
+    Read through the pinned fd -> the ORIGINAL template's own
+    translatePrompt() output (pass). Reopened by path after the swap ->
+    the marker template's output (fail, loudly, naming the property that
+    broke)."""
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    dirs = DRIVER.resolve_dirs(None, str(plugin_root))
+    template_path = dirs["template_script"]
+
+    real_open = DRIVER._open_regular_no_follow_walk
+
+    def racing_open(path):
+        fd, state = real_open(path)  # the REAL answer, honestly observed
+        if fd is not None:
+            # Complete enough to survive the REAL harness pipeline if this
+            # ever gets read (the mutant case): every name in
+            # TEMPLATE_EXPORTED_FUNCTIONS must be DEFINED (the harness's own
+            # generated `export { ... }` line names all seven regardless of
+            # which one this call actually invokes -- an ESM export of an
+            # undefined name is a hard SyntaxError, not a runtime one) and
+            # the truncation marker must be present. Plain `function`
+            # declarations, never `export function` -- the harness's own
+            # trailing export statement already exports these names, and a
+            # SECOND export of the same name is itself a SyntaxError.
+            marker_path = path.parent / "marker_template.js.tmp"
+            marker_path.write_text(
+                "export const meta = {};\n"
+                "function translatePrompt(seg) { return 'MARKER-REOPENED-BY-PATH'; }\n"
+                "function translateDrivePrompt() { return ''; }\n"
+                "function reviewDispatchPrompt() { return ''; }\n"
+                "function reviewDrivePrompt() { return ''; }\n"
+                "function fixPrompt() { return ''; }\n"
+                "function parseDisp() { return ''; }\n"
+                "function matchedVerdict() { return { status: 'ok' }; }\n"
+                "function draftProbePrompt() {}\n",
+                encoding="utf-8",
+            )
+            os.replace(str(marker_path), str(path))
+        return fd, state
+
+    monkeypatch.setattr(DRIVER, "_open_regular_no_follow_walk", racing_open)
+
+    subst = {
+        "durable_root": str(tmp_path), "run_id": "20260101T000000Z",
+        "source_lang": "fr", "target_lang": "ru", "effort": "high", "model": "",
+        "verse_policy_instruction_block": "", "max_fix_rounds": 2,
+        "batch_agent_cap": 10000, "max_codex_jobs_per_batch": 400,
+        "companion_path": "/fake/companion.mjs", "plugin_root": "",
+    }
+    out = DRIVER.call_template_functions(
+        dirs, subst, [{"key": "text", "fn": "translatePrompt", "args": ["seg01"]}])
+
+    assert out["text"] != "MARKER-REOPENED-BY-PATH", (
+        "the marker string came back in the rendered prompt -- the bytes "
+        "Node actually executed came from a FRESH re-open of the pathname "
+        "AFTER the swap, not the descriptor _open_regular_no_follow_walk() "
+        "already verified. Descriptor-pinning is the property this whole "
+        "fix exists for, and this proves it broke."
+    )
+
+
 # ===========================================================================
 # SKILL.md's Step 0a copy-pass correction: resolve_codex_companion.py is now
 # copied to ${durable_root}/scripts/ like every other self-anchored .py
-# script -- the old exclusion rested on a false claim (the script has zero
-# occurrences of __file__; its whole search is rooted at ~, independent of
-# its own location, so a durable copy globs the identical paths and finds
-# the identical companions). Before this fix, a genuinely deployed, self-
+# script -- the old exclusion rested on a false claim (the script reads no
+# __file__ -- its own location never enters its search; see
+# tests/resolve_codex_companion.test.py::test_the_resolver_contains_no_executable_reference_to_dunder_file
+# for the mechanical proof, parsed with ast rather than grepped -- its
+# whole search is rooted at ~, independent of its own location, so a
+# durable copy globs the identical paths and finds the identical
+# companions). Before this fix, a genuinely deployed, self-
 # anchored (no --plugin-root) driver invocation -- SKILL.md's own documented
 # default launch line -- could not complete a single dispatch:
 # resolve_companion_path() found nothing at dirs[

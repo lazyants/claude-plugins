@@ -24,7 +24,11 @@ excluding this file from Step 0a's copy pass. It was false, and the exclusion it
 left SKILL.md's own documented self-anchored driver launch unable to dispatch a single
 segment: the driver resolved this script under `${durable_root}/scripts/`, where nothing
 had ever copied it, and fataled before rendering any prompt. Do not re-derive that argument
--- check this file's own source for `__file__` first.
+-- the property is pinned by a test: `tests/resolve_codex_companion.test.py`'s
+`test_the_resolver_contains_no_executable_reference_to_dunder_file` parses this file and
+fails if any CODE here ever reads `__file__`. Read that test's verdict, not a raw
+`grep __file__` over this file: the mentions in this docstring are prose ABOUT the claim
+and a text search cannot tell them apart from a real one.
 
 Still NOT a `PLUGIN_BUNDLE_MEMBERS` entry (see cache_key.py), like draft_ready.py and the
 other Step-0a-copied siblings outside that allowlist: the companion path this resolves is a

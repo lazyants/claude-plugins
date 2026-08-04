@@ -67,6 +67,7 @@ import hashlib
 import importlib.util
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -410,46 +411,63 @@ def test_repeatable_overwrite_helper_actually_overwrites(tmp_path):
 
 
 # ===========================================================================
-# Part C -- the ONE-TIME migration guard for resolve_codex_companion.py's
-# copy pass, added when its exclusion was reverted. Every OTHER bundle
-# member gets plain unconditional overwrite ("safe since these files are
-# never hand-edited") -- but that premise was never true for THIS path: it
-# was explicitly excluded from the copy pass before this release, so a
-# project that hit the resulting exit-2 default-launch defect could have
-# reasonably worked around it by hand-adapting its own copy exactly there,
-# on the documented strength of that destination being untouched. See
+# Part C -- the migration GUARD (refuse, never a clever preserving copy)
+# for resolve_codex_companion.py's copy pass, added when its exclusion was
+# reverted. Every OTHER bundle member gets plain unconditional overwrite
+# ("safe since these files are never hand-edited") -- but that premise was
+# never true for THIS path: it was explicitly excluded from the copy pass
+# before this release, so a project that hit the resulting exit-2 default-
+# launch defect could have reasonably worked around it by hand-adapting
+# its own copy exactly there, on the documented strength of that
+# destination being untouched. This deliberately does NOT try to preserve
+# a divergent file automatically (an earlier version did, via rename-then-
+# copy, and was found to have three real failure modes -- symlink-through,
+# pointer-only backups, concurrent-backup races -- none of which Step 0a's
+# own orchestrating-session-executed prose can close for real). See
 # SKILL.md's own "Migration note" in its Step 0a section for the full
-# three-way contract this transcribes literally.
+# reasoning this transcribes literally.
 # ===========================================================================
 
 
 def apply_resolve_codex_companion_migration(shipped_source: Path, dest_path: Path) -> str:
     """Literal transcription of SKILL.md's Step 0a migration note for
-    resolve_codex_companion.py: absent -> copy; present and byte-identical
-    -> copy (a no-op over itself); present and byte-different -> rename the
-    existing file to a `.pre-upgrade-backup` sibling (numbered if that name
-    is already taken) BEFORE copying, never a silent overwrite.
+    resolve_codex_companion.py: absent -> copy; a genuine regular file,
+    byte-identical -> copy (a no-op over itself); anything else -> HALT,
+    never a silent overwrite and never an automatic backup.
 
-    Returns one of "copied-fresh" (was absent), "copied-noop" (was already
-    byte-identical), "backed-up-and-copied" (diverged; the pre-existing
-    file survives under a new name) -- the three states SKILL.md's own
-    migration note names, so a test can assert on which one fired rather
-    than only on the end state."""
-    if not dest_path.exists():
+    "Anything else" is deliberately broad: a genuine regular file with
+    DIFFERENT bytes, a symlink (regardless of what it points at -- its
+    target content is never even read), a directory, or any other
+    non-absent entry os.lstat() reports. An earlier version of this note
+    specified renaming a divergent file aside before copying over it; that
+    shape was found to have three real failure modes (a byte-identical
+    symlink stays a symlink after a naive copy, since copying OVER a
+    symlink writes THROUGH it rather than replacing it; a divergent
+    symlink's "backup" preserves only a pointer, not the adapted bytes it
+    points at; two concurrent migrations can race on the same backup
+    name) -- see SKILL.md's own note for the full reasoning. A halt has
+    none of them, because it performs no automatic write to a divergent
+    destination at all.
+
+    Classifies with os.lstat() -- NEVER Path.exists()/is_file(), which
+    FOLLOW a symlink and would silently write through it, leaving
+    whatever was actually there in place while reporting success.
+
+    Returns one of "copied-fresh" (was absent), "copied-noop" (was
+    already a genuine regular file, byte-identical), "halt" (anything
+    else) -- the three outcomes SKILL.md's own migration note names, so a
+    test can assert on which one fired rather than only on the end
+    state."""
+    try:
+        st = dest_path.lstat()
+    except FileNotFoundError:
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(shipped_source, dest_path)
         return "copied-fresh"
-    if dest_path.read_bytes() == shipped_source.read_bytes():
+    if stat.S_ISREG(st.st_mode) and dest_path.read_bytes() == shipped_source.read_bytes():
         shutil.copyfile(shipped_source, dest_path)
         return "copied-noop"
-    backup_path = dest_path.with_name(dest_path.name + ".pre-upgrade-backup")
-    suffix = 2
-    while backup_path.exists():
-        backup_path = dest_path.with_name(dest_path.name + f".pre-upgrade-backup-{suffix}")
-        suffix += 1
-    dest_path.rename(backup_path)
-    shutil.copyfile(shipped_source, dest_path)
-    return "backed-up-and-copied"
+    return "halt"
 
 
 def _resolve_codex_companion_shipped_fixture(tmp_path: Path) -> Path:
@@ -475,11 +493,10 @@ def test_resolve_codex_companion_migration_copies_freely_when_absent(tmp_path):
 
 def test_resolve_codex_companion_migration_is_a_noop_when_already_byte_identical(tmp_path):
     """A project already on the corrected copy pass -- every re-scaffold
-    after the first backup-and-copy, or a project that adopted this
-    correction's shipped file some other way -- sees the byte-identical
-    case forever after and gets the ordinary unconditional-overwrite
-    treatment, matching every other bundle member. No backup should ever
-    be created for an already-matching destination."""
+    after a real deployment, or a project that adopted this correction's
+    shipped file some other way -- sees the byte-identical case forever
+    after and gets the ordinary unconditional-overwrite treatment,
+    matching every other bundle member."""
     shipped = _resolve_codex_companion_shipped_fixture(tmp_path)
     dest = tmp_path / "durable_root" / "scripts" / "resolve_codex_companion.py"
     dest.parent.mkdir(parents=True)
@@ -489,18 +506,19 @@ def test_resolve_codex_companion_migration_is_a_noop_when_already_byte_identical
 
     assert outcome == "copied-noop"
     assert dest.read_bytes() == shipped.read_bytes()
-    backups = list(dest.parent.glob("resolve_codex_companion.py.pre-upgrade-backup*"))
-    assert backups == [], f"no backup should exist for an already-identical destination: {backups}"
 
 
-def test_resolve_codex_companion_migration_backs_up_a_genuinely_hand_adapted_copy(tmp_path):
+def test_resolve_codex_companion_migration_halts_rather_than_overwrite_a_hand_adapted_copy(tmp_path):
     """THE property this whole migration note exists for: a project that
     worked around the old defect by hand-adapting its own copy at this
     exact, previously-documented-as-untouched destination must not lose
-    that work silently. The divergent bytes survive under a
-    `.pre-upgrade-backup` sibling, and the destination itself ends up
-    matching the shipped source (so the driver can actually dispatch --
-    the whole point of this release)."""
+    that work silently. Refuses rather than cleverly preserving it: the
+    divergent file is left EXACTLY as it was, untouched, and the shipped
+    source is never copied over it. This is a narrower guarantee than the
+    driver being immediately dispatch-ready after this one migration step
+    -- the operator has to act -- but it is the guarantee that does not
+    depend on Step 0a's copy pass (orchestrating-session prose, not
+    atomic code) getting a rename-then-copy sequence perfectly right."""
     shipped = _resolve_codex_companion_shipped_fixture(tmp_path)
     dest = tmp_path / "durable_root" / "scripts" / "resolve_codex_companion.py"
     dest.parent.mkdir(parents=True)
@@ -509,41 +527,98 @@ def test_resolve_codex_companion_migration_backs_up_a_genuinely_hand_adapted_cop
 
     outcome = apply_resolve_codex_companion_migration(shipped, dest)
 
-    assert outcome == "backed-up-and-copied"
-    assert dest.read_bytes() == shipped.read_bytes(), (
-        "the destination must end up matching the shipped file -- the whole "
-        "point is that the driver can now find a real resolve_codex_companion.py "
-        "there, not just that the old one was preserved somewhere"
+    assert outcome == "halt"
+    assert dest.read_bytes() == hand_adapted_bytes, (
+        "the hand-adapted file must be left completely untouched on a halt -- "
+        "no backup, no rename, no partial copy"
     )
-    backup = dest.with_name(dest.name + ".pre-upgrade-backup")
-    assert backup.is_file(), "the hand-adapted file must survive under a backup name"
-    assert backup.read_bytes() == hand_adapted_bytes
+    assert not list(dest.parent.glob("resolve_codex_companion.py.*")), (
+        "a halt must create nothing extra -- no backup sibling of any name"
+    )
 
 
-def test_resolve_codex_companion_migration_numbers_repeated_backups(tmp_path):
-    """Idempotent across repeated runs against the SAME diverged fixture --
-    the described shape covers a single migration event, but a real
-    project could re-run Step 0a multiple times against a durable_root
-    someone keeps hand-editing back to something different every time
-    (or, more realistically, a test exercising this function twice against
-    a pre-seeded backup to prove the numbering logic itself, not just its
-    existence)."""
+def test_resolve_codex_companion_migration_halts_on_a_symlink_even_with_an_identical_looking_target(tmp_path):
+    """codex's specific finding against the earlier backup-and-copy design,
+    still worth pinning now that the design is refuse-only: a symlink
+    whose TARGET happens to be byte-identical to the shipped source must
+    still halt, never be waved through as "copied-noop". os.lstat()
+    classifies the symlink itself (S_ISLNK), never resolving to compare
+    the target's content -- the whole point is refusing to make ANY
+    judgment about what a symlink at this path might mean, since a
+    symlink is not the "genuine regular file" the byte-identical fast
+    path is defined over at all."""
     shipped = _resolve_codex_companion_shipped_fixture(tmp_path)
     dest = tmp_path / "durable_root" / "scripts" / "resolve_codex_companion.py"
     dest.parent.mkdir(parents=True)
-    dest.write_bytes(b"# first divergent hand-adapted copy\n")
-    (dest.parent / "resolve_codex_companion.py.pre-upgrade-backup").write_bytes(
-        b"# a backup from an earlier migration run\n"
-    )
+    identical_target = tmp_path / "elsewhere_but_identical.py"
+    shutil.copyfile(shipped, identical_target)
+    dest.symlink_to(identical_target)
 
     outcome = apply_resolve_codex_companion_migration(shipped, dest)
 
-    assert outcome == "backed-up-and-copied"
-    assert dest.read_bytes() == shipped.read_bytes()
-    first_backup = dest.parent / "resolve_codex_companion.py.pre-upgrade-backup"
-    second_backup = dest.parent / "resolve_codex_companion.py.pre-upgrade-backup-2"
-    assert first_backup.read_bytes() == b"# a backup from an earlier migration run\n", (
-        "the EXISTING backup must survive untouched -- only the newly-diverged "
-        "file gets renamed into the next free slot"
+    assert outcome == "halt", (
+        "a symlink must halt regardless of what its target contains -- "
+        "os.lstat() must never be resolved into a content comparison"
     )
-    assert second_backup.read_bytes() == b"# first divergent hand-adapted copy\n"
+    assert dest.is_symlink(), "the symlink itself must be left exactly as it was"
+
+
+def test_resolve_codex_companion_migration_halts_on_a_directory_at_the_destination(tmp_path):
+    """A directory is a real, non-absent entry -- os.lstat() succeeds on it
+    -- so it must halt exactly like a divergent file, never be silently
+    treated as "absent" the way a naive exists()-only check might invite
+    (a directory IS something exists() reports True for, but a plain
+    is_file()-style check some other naive implementation might reach for
+    reports False for it, risking the opposite mistake of treating a real
+    directory as absent and attempting to copy INTO or OVER it)."""
+    shipped = _resolve_codex_companion_shipped_fixture(tmp_path)
+    dest = tmp_path / "durable_root" / "scripts" / "resolve_codex_companion.py"
+    dest.mkdir(parents=True)
+
+    outcome = apply_resolve_codex_companion_migration(shipped, dest)
+
+    assert outcome == "halt"
+    assert dest.is_dir(), "the directory must be left exactly as it was"
+
+
+def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
+    """codex's finding on the reference implementation above: it is tested
+    thoroughly, but nothing here ties it back to what SKILL.md's own
+    prose actually instructs a Claude session to do -- someone could
+    revert SKILL.md's migration note to the earlier backup-and-copy shape
+    (the one this design deliberately replaced) while leaving THIS file's
+    reference implementation and its own tests untouched, and every test
+    above would keep passing green. Pins the actual prose: the migration
+    note names HALT explicitly, and does not instruct a
+    `.pre-upgrade-backup`-style rename-then-copy (the literal filename
+    pattern the earlier, superseded design used) -- catching a reversion
+    of the DOCUMENTED CONTRACT itself, independent of whether this file's
+    own transcription also reverted."""
+    skill_md = PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md"
+    text = skill_md.read_text(encoding="utf-8")
+    start = text.find("Migration note, mandatory before")
+    assert start != -1, "could not locate SKILL.md's resolve_codex_companion.py migration note"
+    # Narrower than the whole note: JUST the operative instruction (the
+    # three-outcome list), stopping before the "deliberately a REFUSAL"
+    # paragraph -- which legitimately explains, and therefore legitimately
+    # NAMES, the superseded backup-and-copy shape it replaced. Checking
+    # the whole note would make this test fail against its own correct,
+    # historical prose, exactly the trap fetch_citation_bundle.test.py's
+    # own exclusion-span technique already had to route around once.
+    end = text.find("**This is deliberately a REFUSAL", start)
+    assert end != -1, "could not locate the end of the migration note's operative instruction"
+    instruction_section = text[start:end]
+    assert "HALT" in instruction_section, (
+        "the migration note's ACTUAL INSTRUCTION must say HALT on a non-"
+        "absent, non-identical destination -- this is the operative safety "
+        "property, and its absence here means the documented contract "
+        "reverted to something else"
+    )
+    assert "pre-upgrade-backup" not in instruction_section, (
+        "the migration note's ACTUAL INSTRUCTION must NOT describe the "
+        "superseded backup-and-copy shape (rename to a .pre-upgrade-backup "
+        "sibling) -- that design was replaced because it cannot be made "
+        "symlink-safe or concurrency-safe from orchestrating-session prose "
+        "alone. (The explanatory paragraph AFTER this instruction may still "
+        "name it historically -- that is not what this check bounds.)"
+    )

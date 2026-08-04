@@ -25,8 +25,12 @@ never detect staleness; see SKILL.md's Step 0a copy-exclusion list.
 ``resolve_codex_companion.py`` used to be a *fourth* such exception, on the
 claimed reason that it must glob the plugin's own install locations to find
 the newest installed ``codex-companion.mjs``, which a durable-root copy could
-not do. That reason was false -- the script has zero occurrences of
-``__file__`` and its entire search is rooted at ``~/.claude*/plugins/cache/
+not do. That reason was false -- the script never READS ``__file__`` (pinned by
+``tests/resolve_codex_companion.test.py``'s
+``test_the_resolver_contains_no_executable_reference_to_dunder_file``, which
+parses it rather than grepping it; the file's own docstring mentions the name
+in prose, so a text search over it is not the check)
+and its entire search is rooted at ``~/.claude*/plugins/cache/
 openai-codex/**``, a different plugin's own install cache, found identically
 regardless of where ``resolve_codex_companion.py`` itself runs from -- so it
 is copied like every other self-anchored script now; see SKILL.md's Step 0a

@@ -346,7 +346,9 @@ class CodexJob:
     #     exact substitution shape) redirects _trusted_scripts_dir() to
     #     `{plugin_root}/assets/scripts/`, the SAME layout SKILL.md's never-copied
     #     plugin-path scripts already use (profile_validate.py, validate_extraction.py,
-    #     glossary_preflight.py, resolve_codex_companion.py) -- a location the codex
+    #     glossary_preflight.py -- resolve_codex_companion.py was a fourth exclusion
+    #     here once, but is now copied, with its own migration handling; see SKILL.md's
+    #     own note on why the exclusion was dropped) -- a location the codex
     #     process this driver launches cannot write to. Omitting --plugin-root
     #     reproduces the pre-#412 vulnerability unchanged (byte-identical default);
     #     closing it for a given dispatch requires the ORCHESTRATING SESSION to
@@ -401,15 +403,21 @@ class CodexJob:
 
         open()+fstat() succeeding only proves the entry EXISTS and is regular -- neither
         one actually reads a byte. On a network/FUSE filesystem or damaged storage, the
-        metadata calls can both succeed while the very first real read returns EIO/ESTALE
-        -- exactly the failure this method exists to catch, slipping through anyway. A
-        single os.read(fd, 1), in the SAME try/except as fstat() (one answer for "could
-        not stat it" and "could not read it", not two), closes that: cost is O(1)
-        regardless of the canonical's actual size (one syscall, at most one page fault,
-        never scales with file length), and it can only run on an entry the type check
-        above already confirmed is a genuine regular file, so there is no risk of
-        blocking on a FIFO or similar. An EMPTY regular file reads back b"" -- falsy, but
-        NOT an error and NOT a failure of this check: os.read() only raises on a real I/O
+        metadata calls can both succeed while a real read still returns EIO/ESTALE --
+        exactly the failure this method exists to catch, slipping through anyway. This
+        method used to read a SINGLE byte to catch that, which was wrong, not merely
+        incomplete: a single successful read only proves the FIRST byte is readable,
+        and a regular file can serve a good prefix and then fail on a later page or
+        extent -- the promote this method guards against would still destroy those
+        unread bytes. Draining the descriptor to EOF instead, in the SAME try/except as
+        fstat() (one answer for "could not stat it" and "could not read it", not two),
+        closes that for real: every byte the promote is about to discard gets read at
+        least once before this method calls the file trustworthy. Cost is ONE full
+        read of the canonical PER PROMOTE ATTEMPT, not per loop iteration elsewhere --
+        real canonical drafts run tens to a couple hundred KB, so this is a handful of
+        _COPY_CHUNK-sized read() calls, not a meaningful cost against a paid codex
+        turn. An EMPTY regular file drains to b"" on the FIRST read -- falsy, but NOT
+        an error and NOT a failure of this check: os.read() only raises on a real I/O
         failure, so a zero-length canonical still correctly answers True here. Do not
         "fix" a falsy b"" into a rejection; that would refuse every legitimately empty
         file."""
@@ -421,7 +429,8 @@ class CodexJob:
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
                 return False
-            os.read(fd, 1)
+            while os.read(fd, _COPY_CHUNK):     # drain to EOF; b"" ends the loop, not an error
+                pass
         except OSError:
             return False
         finally:
@@ -1109,17 +1118,26 @@ class CodexJob:
         # its diagnostic payload too.
         effective_error_detail = (
             self.canonical_unreadable_detail if self.canonical_unreadable else self.error_detail)
+        # canonical_unreadable_parked was, until now, internal-only -- readable from
+        # Python, invisible to anyone reading a joblog. "Parked for retry" and "fell
+        # back, stranded at its own random path" are different operational outcomes an
+        # operator cannot otherwise tell apart without reconstructing the filesystem by
+        # hand (self.attempt's own random path is never logged either). Only meaningful
+        # when self.canonical_unreadable is set -- False the rest of the time, same as
+        # the flag it rides with.
         if self.holds_lock:
             self._write_joblog({
                 "jobId": self.jobId, "kind": self.kind, "seg": self.seg, "token": self.tok,
                 "disp": self.disp, "inv": self.inv, "status": "terminal", "ok": self.ok,
                 "timed_out": self.timed_out, "job_status": self.job_status, "adopted": self.adopted,
                 "reason": self.reason, "error_detail": effective_error_detail,
+                "canonical_unreadable_parked": self.canonical_unreadable_parked,
             })
         line = {
             "ok": self.ok, "kind": self.kind, "seg": self.seg, "jobId": self.jobId,
             "job_status": self.job_status, "timed_out": self.timed_out,
             "adopted": self.adopted, "reason": self.reason, "error_detail": effective_error_detail,
+            "canonical_unreadable_parked": self.canonical_unreadable_parked,
         }
         sys.stdout.write(json.dumps(line) + "\n")
         sys.stdout.flush()
@@ -1215,29 +1233,45 @@ class CodexJob:
                         # sandbox-publish step does not apply -- this attempt is already
                         # published and already gate-validated, not fresh sandbox output).
                         #
-                        # This CAN overwrite an existing self.pending. Traced exhaustively
-                        # against this method's own three refusal sites: the only way to
-                        # reach this branch at all is for THIS run's own adopt_pending()
-                        # call to have returned False WITHOUT setting
-                        # self.canonical_unreadable (the sibling refusal above already
-                        # returns 1 before launch() if it did) -- and the only one of
-                        # adopt_pending()'s three False-without-refusal paths that can
-                        # leave self.pending non-empty is "a gate could not even run"
-                        # (budget/timeout/spawn failure), which never reached a pass/fail
-                        # verdict on it at all. So whatever might still be sitting in
-                        # self.pending at this point is, at best, an UNCONFIRMED-this-run
-                        # candidate -- never something that passed gates THIS run and
-                        # still lost to what replaces it. What replaces it here always has
-                        # passed every gate in the SAME run. Matches (and never exceeds)
-                        # _defer_attempt()'s own already-accepted "always refresh the
-                        # slot, newest completion wins" bound.
-                        self._clear_nonregular(self.pending)
+                        # MUST NOT overwrite self.pending unless it is GENUINELY,
+                        # VERIFIABLY safe to -- absent, or squatted on by a non-regular
+                        # entry _clear_nonregular() already knows to remove. An earlier
+                        # version of this comment argued the only way to reach this
+                        # branch with self.pending non-empty was "adopt_pending()'s own
+                        # gate call returned None", making whatever is there "at best
+                        # unconfirmed this run" and therefore safe to supersede. That
+                        # argument was refuted: a PREVIOUSLY validated pending file can
+                        # go unreadable (EACCES/EIO/ESTALE) between runs. _is_regular()
+                        # then returns False, _clear_nonregular() sees a regular inode
+                        # (lstat does not care about readability) and correctly leaves it
+                        # alone, and adopt_pending() returns False from its VERY FIRST
+                        # check -- never reaching the canonical-guard branch that would
+                        # have set self.canonical_unreadable, so the early return above
+                        # never fires either. A regular file at self.pending can
+                        # therefore be something genuinely validated, unreadable now for
+                        # reasons that have nothing to do with its own validity, and
+                        # there is no way to positively prove otherwise from here -- so a
+                        # regular file, readable or not, refuses unconditionally rather
+                        # than guess. Only a VERIFIED-absent or VERIFIED-non-regular slot
+                        # is touched.
                         try:
-                            os.replace(self.attempt, self.pending)
-                            self.canonical_unreadable_parked = True
+                            pending_lstat = os.lstat(self.pending)
+                        except FileNotFoundError:
+                            pending_occupied = False
                         except OSError:
-                            pass  # best-effort -- falls back to today's behavior: leave
-                            # self.attempt at its own path rather than risk losing it
+                            pending_occupied = True  # could not even observe it -- treat
+                            # as occupied, the same "a failed lookup is not an absence"
+                            # discipline _canonical_replaceable() already applies
+                        else:
+                            pending_occupied = stat.S_ISREG(pending_lstat.st_mode)
+                        if not pending_occupied:
+                            self._clear_nonregular(self.pending)
+                            try:
+                                os.replace(self.attempt, self.pending)
+                                self.canonical_unreadable_parked = True
+                            except OSError:
+                                pass  # best-effort -- falls back to leaving self.attempt
+                                # at its own path rather than risk losing it
                     else:
                         os.replace(self.attempt, self.canonical)
                         self.promoted = True

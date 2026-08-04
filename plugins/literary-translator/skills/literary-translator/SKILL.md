@@ -254,16 +254,21 @@ total exclusion count):
 `resolve_codex_companion.py` used to be a fourth exclusion here, on the claimed
 reason that a durable copy "could not glob the plugin's own install locations to
 find the newest installed `codex-companion.mjs`". That reason was false, and the
-disproof is short: the script has zero occurrences of `__file__` and imports
-nothing plugin-specific; its entire search is rooted at `os.path.expanduser("~")`
-against `~/.claude*/plugins/cache/openai-codex/**/codex-companion.mjs` — a
-different plugin's own install cache, found the same way regardless of where
+disproof is short: the script **reads** no `__file__` — its own location never
+enters its search — and imports nothing plugin-specific; its entire search is
+rooted at `os.path.expanduser("~")` against
+`~/.claude*/plugins/cache/openai-codex/**/codex-companion.mjs` — a different
+plugin's own install cache, found the same way regardless of where
 `resolve_codex_companion.py` itself happens to be running from. A durable copy
 globs the identical `~` paths and finds the identical companions. It is now
 copied like every other self-anchored script; do not re-exclude it by
-re-deriving this same plausible-sounding-but-wrong argument — check the file's
-own source for `__file__` before trusting a "could not glob the plugin's own
-install locations" claim about it again.
+re-deriving this same plausible-sounding-but-wrong argument — a literal
+occurrence count of `__file__` in the file is not this claim (the script's own
+docstring has to discuss `__file__` by NAME to explain this exact history, which
+makes a bare grep count useless as a re-check either way). Read
+`tests/resolve_codex_companion.test.py::test_the_resolver_contains_no_executable_reference_to_dunder_file`'s
+verdict instead — it parses the file with `ast` and only flags a genuine
+executable reference (an `ast.Name` node), never a prose mention.
 
 **Migration note, mandatory before `resolve_codex_companion.py` is copied on
 any project scaffolded before this correction:** its destination,
@@ -280,28 +285,58 @@ detection of any kind — collision detection exists only on outcome 3's
 ambiguous-adoption path, which a resumed project's own root marker match
 bypasses entirely.
 
-So THIS ONE FILE, and only this one, gets a three-way check before its copy,
-never the blanket unconditional overwrite the rest of the bundle gets:
-  - **Absent** at the destination → copy normally. This is every project that
-    never worked around the defect — the overwhelming majority, and the same
-    shape a fresh project (outcome 1) always has.
-  - **Present and byte-identical** to the shipped source → copy normally (a
-    no-op overwrite of itself).
-  - **Present and byte-DIFFERENT** from the shipped source → do NOT overwrite
-    silently. Rename the existing file to
-    `resolve_codex_companion.py.pre-upgrade-backup` (or
-    `.pre-upgrade-backup-2`, `-3`, ... if that name is already taken —
-    idempotent across repeated runs) before copying the shipped file into
-    place, and name this explicitly in the scaffold's own output so the
-    operator knows a local adaptation was preserved and where.
+So THIS ONE FILE, and only this one, gets a check before its copy, never the
+blanket unconditional overwrite the rest of the bundle gets. Classify the
+destination with `os.lstat()` first — NEVER `Path.exists()`/`is_file()`,
+which FOLLOW a symlink and would silently write through it, leaving whatever
+was actually there (a workaround pointed elsewhere, or a stale copy) in
+place while reporting success:
+  - **Absent** (`os.lstat()` raises `FileNotFoundError`) → copy normally.
+    This is every project that never worked around the defect — the
+    overwhelming majority, and the same shape a fresh project (outcome 1)
+    always has.
+  - **A genuine regular file, byte-identical** to the shipped source → copy
+    normally (a no-op overwrite of itself).
+  - **Anything else** — a genuine regular file with DIFFERENT bytes, a
+    symlink (identical-looking target or not — lstat does not resolve it,
+    so its target content is never compared), a directory, or any other
+    non-absent entry `os.lstat()` reports — → HALT before copying anything.
+    Name the exact path and state plainly that a pre-existing,
+    non-managed entry sits there and this copy pass will not touch it
+    silently. Instruct the operator to move or rename it themselves, then
+    re-run.
 
-This check applies exactly once per divergent file, ever: after the first
-backup-and-copy, the destination matches the shipped bundle byte-for-byte, so
-every later re-scaffold — under this plugin version or a later one — sees the
-byte-identical case and proceeds with the ordinary unconditional overwrite
-like every other bundle member, with no further backup. Every OTHER bundle
-member never needs this treatment: none of them were ever excluded from the
-copy pass before, so none of them have a population of pre-existing, possibly-
+**This is deliberately a REFUSAL, not a clever preserving copy.** An earlier
+version of this note specified renaming a divergent file aside to a
+`.pre-upgrade-backup` sibling before copying over it, so the copy could
+proceed unattended. That shape has three real failure modes none of this
+document's own instructions can close, because Step 0a's copy pass is
+orchestrating-session prose executed by hand, not atomic code with the
+guarantees the shape would need: (1) a byte-identical-looking SYMLINK is
+still a symlink after a naive copy-over-the-path — the copy follows it and
+writes through to wherever it points, so the shipped file never actually
+lands at the expected destination, silently defeating the very launch fix
+this correction exists to deliver; (2) a DIVERGENT symlink's "backup" is
+just the symlink renamed, preserving a pointer rather than the adapted
+bytes it points at, which can go stale or vanish independently; (3) two
+concurrent scaffolds of the same durable_root can both pick the same free
+backup name and the second overwrites the first's backup. A HALT has none
+of these failure modes, because it performs no automatic write to a
+divergent destination at all — the operator's own manual move is the only
+step that has to be trustworthy, and that step is unaffected by any of the
+three. Do not "improve" this back into an automatic backup-and-copy without
+also closing all three failure modes for real, not just for the ordinary
+sequential-regular-file case that happens to look safe in testing.
+
+This check has no "runs once, ever" property to claim, and does not need
+one: unlike a backup-and-copy design (which only needed to fire on the
+FIRST migration), a halt-based check is memoryless and correctly re-fires
+on ANY future divergence at this exact path — whether from an old,
+never-cleaned-up workaround or a genuinely new one an operator creates
+later — treating both identically and safely, with no marker or prior-
+version digest required to tell them apart. Every OTHER bundle member never
+needs this treatment: none of them were ever excluded from the copy pass
+before, so none of them have a population of pre-existing, possibly-
 hand-adapted destinations to protect.
 
 Also, separately, `scaffold_setup.py` — Step 0a's own bundle-hash marker writer

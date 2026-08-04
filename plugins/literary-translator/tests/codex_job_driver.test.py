@@ -2669,6 +2669,38 @@ def test_is_regular_true_on_genuinely_empty_file(tmp_path):
     assert job._is_regular(str(f)) is True
 
 
+def test_is_regular_false_when_a_later_read_fails_after_a_successful_prefix(tmp_path, monkeypatch):
+    """THE discriminating regression a single-byte read cannot see, and the one the PR
+    bot reproduced against the one-byte version of this fix: a regular file that
+    serves a GOOD prefix and then fails partway through -- real on NFS/FUSE and
+    damaged storage, where a later page or extent can EIO/ESTALE even though the file
+    opened, fstat'd, and started reading fine. A guard that reads only the first byte
+    (or the first chunk, then stops) answers True here; only draining to EOF -- every
+    os.read() call checked, not just the first -- catches it. Faults the SECOND
+    os.read() call specifically, letting the first one return real, non-empty bytes,
+    so the loop is provably still running when the failure hits."""
+    f = tmp_path / "candidate.txt"
+    f.write_text("x", encoding="utf-8")
+    job = _mkjob(tmp_path)
+
+    calls = {"n": 0}
+
+    def fake_read(fd, n):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return b"a good prefix"  # a genuine-looking successful read -- non-empty,
+            # so the drain loop must continue rather than stop here
+        raise OSError(errno.EIO, "Input/output error")  # fails on the NEXT read
+    monkeypatch.setattr(os, "read", fake_read)
+
+    assert job._is_regular(str(f)) is False
+    assert calls["n"] == 2, (
+        "premise: a second read must actually have been attempted -- an implementation "
+        "that stops after one successful read (the one-byte version this replaces) "
+        "would never reach it, and this test would not distinguish the two"
+    )
+
+
 def test_canonical_replaceable_false_when_read_raises_on_the_open_fd(tmp_path, monkeypatch):
     """The same escape one layer up as the fstat-chain test above: let lstat() and
     open()/fstat() all succeed, then fault the read. Proves the refusal reaches
@@ -2918,27 +2950,30 @@ def test_run_refuses_immediately_when_adopt_pending_hits_canonical_unreadable(tm
     assert Path(job.pending).read_text(encoding="utf-8") == "{}"
 
 
-def test_relocate_at_final_promote_safely_supersedes_an_unconfirmed_pending(tmp_path, monkeypatch):
-    """The one reachable case where self.pending can hold something at the moment the
-    FINAL promote refusal's relocate fires: adopt_pending()'s own gate call returned
-    None (a budget/timeout/spawn failure -- "could not validate", not "ran and
-    rejected" or "ran and passed"), which leaves self.pending UNTOUCHED and does not
-    set self.canonical_unreadable, so run() falls through past the early return above
-    into a fresh launch. Proves the relocate never destroys anything MORE validated
-    than what replaces it: whatever was sitting in self.pending here never reached a
-    pass/fail verdict in THIS run at all, while the fresh attempt that supersedes it
-    has just passed every gate in the SAME run -- matching, never exceeding,
-    _defer_attempt()'s own already-accepted "always refresh the slot, newest
-    completion wins" bound for the sibling no-budget case."""
+def test_relocate_at_final_promote_refuses_when_pending_is_occupied_by_anything(tmp_path, monkeypatch):
+    """PROPERTY, revised after codex round 2 refuted the earlier version of it:
+    relocation into self.pending must refuse whenever that slot is occupied by
+    ANYTHING -- not only when the occupant is provably "more validated" than the
+    incoming candidate. An earlier version of this fix argued the only way to reach
+    this branch with self.pending non-empty was "adopt_pending()'s own gate call
+    returned None", making the occupant "at best unconfirmed this run" and therefore
+    safe to overwrite. That argument does not survive: a REGULAR file at self.pending
+    could be something that WAS fully validated in an earlier run and has since gone
+    unreadable for reasons that say nothing about its own validity (see the next test)
+    -- and there is no way to tell the two cases apart from here. So the fresh,
+    gate-validated attempt must NOT overwrite an occupied slot, even one this run's own
+    adopt_pending() just left there because its gate call could not run. It falls back
+    to being stranded at its own random path -- the same outcome as before this
+    relocate mechanism existed, which is the SAFE direction to fail toward."""
     job = _mkjob(tmp_path, kind="translate", deadline=100)
     monkeypatch.setattr(job, "hygiene", lambda: None)
-    Path(job.pending).write_text('{"marker":"unconfirmed-this-run"}', encoding="utf-8")
+    Path(job.pending).write_text('{"marker":"occupied"}', encoding="utf-8")
 
     def gate_none(args, timeout):
         return None  # simulates adopt_pending()'s own gate call exhausting budget
     monkeypatch.setattr(job, "_gate", gate_none)
 
-    locked_dir = tmp_path / "locked_scenario2_caseb"
+    locked_dir = tmp_path / "locked_pending_occupied"
     locked_dir.mkdir()
     locked_canonical = locked_dir / "canonical.json"
     locked_canonical.write_text("{}", encoding="utf-8")
@@ -2968,11 +3003,75 @@ def test_relocate_at_final_promote_safely_supersedes_an_unconfirmed_pending(tmp_
     assert rc == 1
     assert job.reason == "canonical-unreadable"
     assert job.canonical_unreadable is True
-    assert job.canonical_unreadable_parked is True
-    assert Path(job.pending).read_text(encoding="utf-8") == '{"marker":"fresh-and-validated"}', (
-        "the fresh, gate-validated attempt must supersede the unconfirmed pending -- not "
-        "because destroying it is free, but because the fresh candidate is strictly MORE "
-        "validated than what it replaces"
+    assert job.canonical_unreadable_parked is False, "occupied -- must NOT be reported as parked"
+    assert Path(job.pending).read_text(encoding="utf-8") == '{"marker":"occupied"}', (
+        "the pre-existing occupant of self.pending must survive untouched"
+    )
+    assert os.path.exists(job.attempt), (
+        "the fresh, validated attempt falls back to its own path -- stranded, not "
+        "destroyed, and never allowed to destroy what was already there"
+    )
+
+
+def test_relocate_refuses_when_pending_is_a_previously_validated_but_now_unreadable_regular_file(
+    tmp_path, monkeypatch
+):
+    """The route codex round 2 actually found, and neither the early return after
+    adopt_pending() nor a naive relocate catches on its own: a self.pending that was
+    fully validated at some point in the past can become unreadable (EACCES/EIO/ESTALE)
+    before this run even starts. _is_regular(self.pending) then returns False;
+    _clear_nonregular() lstat()s it, sees a genuine regular inode (lstat does not care
+    about readability), and correctly leaves it alone -- that is its OWN documented
+    contract, only non-regular squatters get cleared; adopt_pending() therefore returns
+    False from its VERY FIRST check, before ever reaching the canonical-guard branch
+    that would set self.canonical_unreadable, so the scenario-1 early return never
+    fires either. Both of the guards this file would otherwise rely on to protect
+    self.pending are bypassed by THIS specific route -- real permissions, not a stub,
+    reproducing exactly the bypass -- and it is the relocate's own occupied-slot check
+    that has to catch it."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    Path(job.pending).write_text('{"marker":"previously-validated"}', encoding="utf-8")
+    os.chmod(job.pending, 0o000)   # unreadable -- but still a genuine regular inode
+
+    locked_dir = tmp_path / "locked_pending_unreadable"
+    locked_dir.mkdir()
+    locked_canonical = locked_dir / "canonical.json"
+    locked_canonical.write_text("{}", encoding="utf-8")
+
+    def spy_launch():
+        job.jobId = "J"
+        return True
+
+    def fake_poll():
+        job.job_status = "completed"
+
+    def fake_validate_attempt():
+        Path(job.attempt).write_text('{"marker":"fresh-and-validated"}', encoding="utf-8")
+        job.canonical = str(locked_canonical)          # the race: repoints mid-run
+        os.chmod(locked_dir, 0o000)
+        return True
+
+    monkeypatch.setattr(job, "launch", spy_launch)
+    monkeypatch.setattr(job, "poll", fake_poll)
+    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
+
+    try:
+        rc = job.run()
+    finally:
+        os.chmod(locked_dir, 0o755)
+        os.chmod(job.pending, 0o644)   # restore -- tmp_path teardown must read/remove it
+
+    assert rc == 1
+    assert job.reason == "canonical-unreadable"
+    assert job.canonical_unreadable is True
+    assert job.canonical_unreadable_parked is False, (
+        "occupied by a previously-validated-but-now-unreadable regular file -- must "
+        "NOT be reported as parked"
+    )
+    assert os.path.exists(job.attempt), (
+        "the fresh candidate falls back to its own path rather than destroying the "
+        "previously-validated (now merely unreadable) pending file"
     )
 
 

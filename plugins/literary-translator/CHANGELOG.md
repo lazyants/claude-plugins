@@ -14,13 +14,29 @@ Five defects in the W5 dispatch driver and its codex worker, all of them shipped
   before rendering a prompt or dispatching a segment. A selection with nothing to do
   returned cleanly earlier, so the failure was specific to a run that had work.
 
-  Step 0a now copies that script like every other bundle member. The stated reason for
+  Step 0a now copies that script, like the other self-anchored scripts it copies. (It is
+  still not a `PLUGIN_BUNDLE_MEMBERS` entry — copied and hashed are different sets, and the
+  companion path it resolves is a per-machine environment fact deliberately kept out of
+  every bundle hash.) The stated reason for
   excluding it was false, which is why the exclusion survived every review it passed
   through: the script was said to need the plugin's own install locations, and in fact it
   reads no `__file__` at all — its search is rooted at
   `~/.claude*/plugins/cache/openai-codex/**` and works from anywhere. The three remaining
   exclusions are real, unchanged, and each now states its own actual reason instead of
   sharing one that was only ever true of some of them.
+
+  **Upgrading an existing project: if you hand-adapted `resolve_codex_companion.py`
+  yourself** to work around the exit-2 launch defect above — that exact destination was
+  documented as never touched before this release, so this was a reasonable workaround —
+  Step 0a will now HALT on it instead of silently overwriting or auto-backing it up. Move
+  or rename your copy and re-run Step 0a; it will then copy the shipped file cleanly. This
+  refusal, rather than an automatic backup-and-copy, is deliberate: an automatic copy
+  cannot be made safe against a symlinked workaround (it would write through the symlink
+  rather than replacing it) or two concurrent scaffolds racing on the same backup name,
+  from Step 0a's own orchestrating-session-executed instructions alone. Everyone who never
+  worked around the old defect — the overwhelming majority — sees no behavior change at
+  all: the destination is absent, so the copy proceeds exactly like every other file in
+  the bundle.
 
 - **The workflow template was unresolvable under a deployed durable root.** The
   self-anchored branch named `${durable_root}/templates/`, a directory Step 0a never
@@ -46,17 +62,37 @@ Five defects in the W5 dispatch driver and its codex worker, all of them shipped
   canonical is either genuinely absent by ENOENT alone or a regular file this very call
   just read. A lookup that merely failed reads as present.
 
-- **`_is_regular()` could raise past the callers relying on it.** It guarded `open()` but
-  not `fstat()` or `close()`, so a failure in either propagated out of a caller that was
-  depending on it to answer False — skipping the state that protects a validated candidate
-  from cleanup. Every syscall it makes is now guarded.
+- **`_is_regular()` could raise past the callers relying on it, and never actually read.**
+  It guarded `open()` but not `fstat()` or `close()`, so a failure in either propagated out
+  of a caller that was depending on it to answer False — skipping the state that protects a
+  validated candidate from cleanup. Every syscall it makes is now guarded.
+
+  Separately, and more consequentially for the guard above: `open()` and `fstat()`
+  succeeding prove only that the entry exists and is regular. Neither reads a byte, so on a
+  network or FUSE filesystem, or damaged storage, both can succeed while a real read returns
+  EIO or ESTALE — exactly the failure the check exists to catch, passing it. The check now
+  **drains the descriptor to EOF** before calling a file readable. Reading only the first
+  byte was tried and is not enough: a regular file can serve a good prefix and fail on a
+  later page, and the promote this guards would still destroy the unread bytes. The cost is
+  one full read of the canonical per promote attempt — tens to a couple of hundred KB
+  against a paid codex turn. An empty regular file drains to `b""` on the first read and is
+  still correctly readable; that is not a failure and must not be "fixed" into a rejection.
 
 ### Known limits
 
-- Both canonical guards are check-then-`os.replace()`. They close the window in which an
-  unobservable file is destroyed with nothing recording that it happened; they do not make
-  the check and the rename a single operation. A writer that makes the canonical unreadable
-  between the two is not caught.
+- **Both canonical guards are check-then-`os.replace()`, and that gap is wider than
+  "an unreadable file slips through".** The guard observes the entry at one moment; the
+  rename resolves the pathname again at another. Anything that substitutes a different file
+  at that path in between — including a perfectly readable newer canonical published by
+  another writer — is destroyed without ever being observed. This repository's own test
+  suite pins that behaviour rather than forbidding it. The per-segment lock serialises
+  cooperating `codex_job.py` processes and nothing else.
+- **The template's bytes are not authenticated.** The path is now resolved and read through
+  a single no-follow descriptor, which closes leaf and ancestor symlink substitution and the
+  swap between checking and reading. It does not establish that the content is the shipped
+  template: an ordinary regular file at the expected path passes every check and is
+  executed. The previous release executed that same path with a weaker check, so this is
+  **structurally narrowed, not closed.**
 
 ## 1.18.0 — 2026-08-03
 

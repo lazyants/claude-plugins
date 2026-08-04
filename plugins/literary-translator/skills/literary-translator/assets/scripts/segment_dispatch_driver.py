@@ -363,13 +363,17 @@ DRIVER_LOCK_NAME = ".driver.lock"
 # glossary_preflight.py, on the claimed reason that a durable copy "could
 # not glob the plugin's own install locations to find the newest installed
 # codex-companion.mjs". That reason was false: resolve_codex_companion.py
-# has zero occurrences of `__file__` and imports nothing plugin-specific --
-# its entire search is rooted at `os.path.expanduser("~")` against
+# reads no `__file__` -- its own location never enters its search -- and
+# imports nothing plugin-specific; its entire search is rooted at
+# `os.path.expanduser("~")` against
 # `~/.claude*/plugins/cache/openai-codex/**/codex-companion.mjs`, a
 # DIFFERENT plugin's own install cache, found identically regardless of
-# where resolve_codex_companion.py itself happens to be running from. See
-# SKILL.md's own Step 0a section for the full disproof and the corrected
-# copy-pass rule.
+# where resolve_codex_companion.py itself happens to be running from. This
+# is mechanically pinned by
+# tests/resolve_codex_companion.test.py::test_the_resolver_contains_no_executable_reference_to_dunder_file
+# (parses the file with `ast`, flags only a genuine executable reference,
+# never a prose mention) -- see SKILL.md's own Step 0a section for the
+# full disproof and the corrected copy-pass rule.
 #
 # Before this was corrected, the documented default launch --
 # `nohup python3 {durable_root}/scripts/segment_dispatch_driver.py ...`,
@@ -2101,6 +2105,26 @@ def _open_regular_no_follow_walk(path: Path):
     `_template_candidate_state()` already uses, so callers do not need a
     second failure shape.
 
+    THE LEAF OPEN CARRIES `O_NONBLOCK`, and this is load-bearing, not
+    cosmetic (codex, round 2 -- fix-introduced regression against the
+    point-of-use `os.lstat()` this replaced, which refused a FIFO without
+    ever opening it). Without it, a FIFO planted at the leaf path -- e.g.
+    the checkout-provided one classified regular a moment earlier, then
+    swapped for a FIFO before this exact call -- blocks INSIDE `os.open()`
+    itself, before type checking ever runs and before the caller's own
+    Node timeout can even start: an attacker-triggerable hang, strictly
+    worse than the check this fix exists to close. `O_NONBLOCK` makes the
+    open on a FIFO with no writer return immediately instead of blocking,
+    so classification (`os.fstat()` + `S_ISREG`) always runs and can
+    refuse it. This is the SAME shape `codex_job.py`'s own `_is_regular()`
+    already uses for the identical reason (`O_NOFOLLOW | O_NONBLOCK`) --
+    read that helper before touching this one; the answer already existed
+    one file over. `O_NONBLOCK` has no effect on a GENUINE regular file's
+    subsequent reads (the flag is only meaningful for FIFOs, sockets, and
+    certain character devices; POSIX regular-file I/O ignores it), so
+    nothing needs to clear it once `S_ISREG` confirms the leaf is real --
+    the returned fd reads normally.
+
     WHAT THIS DOES NOT DO: verify the file's CONTENT. A process with write
     access to this exact location -- the documented, accepted #412 risk on
     the self-anchored default, closed only by an orchestrating session
@@ -2118,31 +2142,44 @@ def _open_regular_no_follow_walk(path: Path):
         fatal(f"internal error: {path} must be absolute for the no-follow walk", exit_code=2)
     parts = path.parts
     fd = None
+    leaf_fd = None
     try:
         fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY)
         for name in parts[1:-1]:
             next_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = next_fd
-        leaf_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        leaf_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
         os.close(fd)
         fd = None
+        # fstat() is INSIDE this same try, not a bare statement after it --
+        # an EIO/ESTALE here (a network/FUSE filesystem, damaged storage)
+        # is exactly the metadata-failure shape this whole tri-state
+        # design exists to catch; letting it propagate as an uncaught
+        # exception (instead of the documented "suspicious" verdict) AND
+        # leaking leaf_fd until process exit was the bug, not a variant of
+        # the same fix already applied to codex_job.py's _is_regular().
+        st = os.fstat(leaf_fd)
+        if not stat.S_ISREG(st.st_mode):
+            os.close(leaf_fd)
+            leaf_fd = None
+            return None, "suspicious"
     except FileNotFoundError:
         if fd is not None:
             os.close(fd)
+        if leaf_fd is not None:
+            os.close(leaf_fd)
         return None, "absent"
     except OSError as exc:
         if fd is not None:
             os.close(fd)
+        if leaf_fd is not None:
+            os.close(leaf_fd)
         print(
             f"segment_dispatch_driver.py: warning: no-follow walk to {path} "
             f"refused: {exc}; treating as suspicious",
             file=sys.stderr,
         )
-        return None, "suspicious"
-    st = os.fstat(leaf_fd)
-    if not stat.S_ISREG(st.st_mode):
-        os.close(leaf_fd)
         return None, "suspicious"
     return leaf_fd, "file"
 
