@@ -261,9 +261,14 @@ from the plugin's own install location) is an ENVIRONMENT fact, not project stat
 it varies by machine / CC version and would spuriously force a fresh, no-resume run
 every time a book moved machines or the plugin updated its install path. It is
 therefore never folded into `resume_setup.py`'s resume-integrity digest nor any
-bundle hash, and `resolve_codex_companion.py` itself — like `profile_validate.py` —
-is plugin-anchored and never copied to `durable_root`, so it cannot be a bundle
-member at all. What DOES gate resume for the driver is `codex_job.py`'s own bytes
+bundle hash, and `resolve_codex_companion.py` itself is not a `PLUGIN_BUNDLE_MEMBERS`
+entry either — for the same environment-fact reason, not because of where it runs
+from. (This paragraph used to say it "is plugin-anchored and never copied to
+`durable_root`, so it cannot be a bundle member at all". The premise was false —
+the script reads no `__file__` and globs `~` — and the exclusion it justified left
+the self-anchored driver launch unable to dispatch; Step 0a now copies it like
+every other self-anchored script. Non-membership is a deliberate allowlist
+decision, unchanged.) What DOES gate resume for the driver is `codex_job.py`'s own bytes
 (a `plugin_bundle_hash` member), so a driver-logic change still forces the correct
 re-validation.
 

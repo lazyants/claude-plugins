@@ -450,9 +450,13 @@ def _self_anchored_template_path():
 
       * a DEPLOYED durable root -- Step 0a's copy pass places every bundle
         member FLAT at ${durable_root}/scripts/<name>, the .template.js
-        workflow template exactly like the .py gates. There is no
-        scripts/templates/ subdirectory in a real deployed root. So the
-        template sits BESIDE this file.
+        workflow template exactly like the .py gates. A real deployed root
+        has no templates/ directory at all, and the one that matters here is
+        ${durable_root}/templates/ -- that is what `SCRIPTS_DIR.parent /
+        "templates"` (the checkout candidate below) resolves to when this
+        file runs from a durable root, so THAT is the absence to verify, not
+        a scripts/templates/ nobody ever names. So the template sits BESIDE
+        this file.
       * this PLUGIN checkout -- assets/scripts/ and assets/templates/ are
         siblings, and the template sits ONE DIRECTORY OVER.
 

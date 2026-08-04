@@ -26,10 +26,13 @@ design (every placeholder in it is an intentionally invalid sentinel).
 
 The target script is loaded directly from its real location under
 ``skills/literary-translator/assets/scripts/`` via ``importlib`` (it is not a
-package, and it is one of FOUR plugin-path scripts in this plugin that are
-NEVER copied to a durable_root -- alongside ``validate_extraction.py``,
-``glossary_preflight.py`` (1.4.0), and ``resolve_codex_companion.py`` (1.4.7)
--- always invoked from the plugin's own install path).
+package, and it is one of THREE plugin-path scripts in this plugin that are
+NEVER copied to a durable_root -- alongside ``validate_extraction.py`` and
+``glossary_preflight.py`` (1.4.0) -- always invoked from the plugin's own
+install path). ``resolve_codex_companion.py`` (1.4.7) was a fourth until its
+stated reason was found false and the exclusion reverted; see
+``test_module_docstring_names_three_never_copied_scripts`` below, which pins
+that count against the script's own module docstring.
 """
 
 import copy

@@ -7,9 +7,13 @@ node/companion `status` failing OR hanging past the finite timeout -> nonzero; s
 path ACCEPTED, its json.dumps is a valid JS literal, and a single-quoted-bash round-trip
 recovers it exactly).
 
-The resolver is plugin-anchored and never copied to a durable_root; these tests drive it as
-a subprocess with an explicit --search-glob (so the real ~/.claude* store is never touched)
-and a fake executable `node` stub, plus white-box calls into its pure helpers.
+The resolver is location-INDEPENDENT (it reads no `__file__`; its whole search is rooted at
+`~`), so Step 0a copies it to `${durable_root}/scripts/` like every other self-anchored
+script and it runs correctly from either place -- see its own module docstring for why the
+older "plugin-anchored, never copied" claim was false. These tests drive it as a subprocess
+with an explicit --search-glob (so the real ~/.claude* store is never touched) and a fake
+executable `node` stub, plus white-box calls into its pure helpers; that setup is what makes
+them independent of where the file sits, which is the property under test here.
 """
 
 import importlib.util
