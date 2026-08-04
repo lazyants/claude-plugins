@@ -303,8 +303,20 @@ place while reporting success:
     non-absent entry `os.lstat()` reports — → HALT before copying anything.
     Name the exact path and state plainly that a pre-existing,
     non-managed entry sits there and this copy pass will not touch it
-    silently. Instruct the operator to move or rename it themselves, then
-    re-run.
+    silently. Instruct the operator PER ENTRY KIND, never one generic
+    "move or rename it" — renaming preserves bytes only for the entry
+    kinds where the name and the bytes are the same thing:
+      - **Divergent regular file** → move or rename the file itself aside.
+        This genuinely preserves its bytes; the name is the only thing
+        that changes.
+      - **Symlink** → renaming the link is NOT preservation — it relocates
+        the POINTER, not the bytes it points at, and that target can be
+        transient, on a different filesystem, or itself deleted later.
+        Instruct the operator to first copy out the RESOLVED target's
+        actual content to a new location, THEN remove the symlink.
+      - **Directory** → move the whole directory aside; this preserves its
+        contents as a unit.
+    Then re-run.
 
 **This is deliberately a REFUSAL, not a clever preserving copy.** An earlier
 version of this note specified renaming a divergent file aside to a
@@ -320,13 +332,25 @@ this correction exists to deliver; (2) a DIVERGENT symlink's "backup" is
 just the symlink renamed, preserving a pointer rather than the adapted
 bytes it points at, which can go stale or vanish independently; (3) two
 concurrent scaffolds of the same durable_root can both pick the same free
-backup name and the second overwrites the first's backup. A HALT has none
-of these failure modes, because it performs no automatic write to a
-divergent destination at all — the operator's own manual move is the only
-step that has to be trustworthy, and that step is unaffected by any of the
-three. Do not "improve" this back into an automatic backup-and-copy without
-also closing all three failure modes for real, not just for the ordinary
-sequential-regular-file case that happens to look safe in testing.
+backup name and the second overwrites the first's backup. **A HALT closes
+exactly these three** — it performs no automatic write to a divergent
+destination at all, so there is no automatic-copy-through-a-symlink, no
+pointer-only backup, and no concurrent-backup-name race, because none of
+those three OPERATIONS ever run. It does NOT close every race this check
+could conceivably have: `os.lstat()`'s classification and the copy that
+follows it, in the absent and byte-identical branches above, are still two
+separate operations, not one atomic one — an entry classified absent or
+identical can change before the copy actually runs. That window is real,
+it is not closed by refusing (refusing only ever applies to the divergent
+branch, which performs no copy at all), and it is not being claimed closed
+here; it is simply much less consequential in this shape (prose a session
+executes by hand, once, rather than a machine loop an attacker can race
+repeatedly) than the automatic-backup shape's three failure modes were,
+which is why THOSE three, and not this one, are what this refusal exists
+to close. Do not "improve" this back into an automatic backup-and-copy
+without also closing all three of ITS failure modes for real, not just
+for the ordinary sequential-regular-file case that happens to look safe
+in testing.
 
 This check has no "runs once, ever" property to claim, and does not need
 one: unlike a backup-and-copy design (which only needed to fire on the

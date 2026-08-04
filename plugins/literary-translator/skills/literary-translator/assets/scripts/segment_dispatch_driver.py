@@ -97,9 +97,15 @@ what keeps the driver alive past this Bash call's own return).
    process lifetime, never a pid file** -- `acquire_driver_lock()` below,
    on `runs/.driver.lock`. Per-segment leases already exist
    (`codex_job.py`'s own `.codex_job.<seg>.lock`, acquired inside `run()`
-   after hygiene); there is no project-level one today (confirmed by
-   `git grep -rn LOCK_EX` across `assets/scripts/*.py`: exactly one
-   call site, `codex_job.py`'s per-segment lease). Without it, two
+   BEFORE hygiene runs, not after); what does not exist ANYWHERE in
+   `codex_job.py` is a PROJECT-level lock -- it only ever leases one
+   segment at a time, never the project as a whole. `acquire_driver_lock()`
+   below is what adds that, and it is itself the reason `git grep -rn
+   LOCK_EX` across `assets/scripts/*.py` now finds THREE call sites, not
+   one: `codex_job.py`'s per-segment lease, plus this function's own
+   acquisition and its startup self-test probe (see `acquire_driver_lock()`'s
+   own docstring for why the self-test exists). Without a project-level
+   lease, two
    drivers on one project each try to lease every segment `codex_job.py`
    already protects individually, but nothing stops both from reaching
    `select_segments.py` and the volume check redundantly, or from
@@ -2119,11 +2125,19 @@ def _open_regular_no_follow_walk(path: Path):
     refuse it. This is the SAME shape `codex_job.py`'s own `_is_regular()`
     already uses for the identical reason (`O_NOFOLLOW | O_NONBLOCK`) --
     read that helper before touching this one; the answer already existed
-    one file over. `O_NONBLOCK` has no effect on a GENUINE regular file's
-    subsequent reads (the flag is only meaningful for FIFOs, sockets, and
-    certain character devices; POSIX regular-file I/O ignores it), so
-    nothing needs to clear it once `S_ISREG` confirms the leaf is real --
-    the returned fd reads normally.
+    one file over. `O_NONBLOCK` has done its whole job the moment
+    `S_ISREG` confirms the leaf is a genuine regular file (it existed only
+    to keep a FIFO's `open()` from blocking before classification could
+    even run), and it is CLEARED on this exact descriptor right after that
+    check passes, before this function returns it. codex round 3, MINOR:
+    an earlier version of this left the flag set on the returned fd,
+    reasoning that ordinary regular-file I/O ignores it -- true in the
+    common case, but `S_ISREG` does not UNIVERSALLY guarantee a
+    nonblocking read cannot short-read or return `EWOULDBLOCK` (Linux
+    exposes regular pseudo-files, and FUSE implementations choose their
+    own read semantics), so leaving it set asked every caller to be right
+    about a guarantee this function does not actually make. Clearing it
+    here, once, is cheaper than auditing every current and future caller.
 
     WHAT THIS DOES NOT DO: verify the file's CONTENT. A process with write
     access to this exact location -- the documented, accepted #412 risk on
@@ -2143,15 +2157,33 @@ def _open_regular_no_follow_walk(path: Path):
     parts = path.parts
     fd = None
     leaf_fd = None
+
+    def _safe_close(descriptor: int) -> None:
+        """codex round 3, MINOR: the old cleanup closed `fd`/`leaf_fd`
+        directly wherever ownership needed to be released, twice over in
+        some paths -- if THAT close() itself raised (a real possibility;
+        close() is not guaranteed to succeed), the variable was still
+        non-None when a LATER handler ran, so it retried the identical
+        close on an fd that already had a failed close attempt. Every
+        release now goes through here, and EVERY caller detaches ownership
+        (sets its own variable to None) BEFORE calling this, never after
+        -- so a failure inside this function can never leave a caller
+        thinking it still owns something it already tried to give up."""
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
     try:
         fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY)
         for name in parts[1:-1]:
             next_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
+            closing, fd = fd, None
+            _safe_close(closing)
             fd = next_fd
         leaf_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-        os.close(fd)
-        fd = None
+        closing, fd = fd, None
+        _safe_close(closing)
         # fstat() is INSIDE this same try, not a bare statement after it --
         # an EIO/ESTALE here (a network/FUSE filesystem, damaged storage)
         # is exactly the metadata-failure shape this whole tri-state
@@ -2161,20 +2193,49 @@ def _open_regular_no_follow_walk(path: Path):
         # the same fix already applied to codex_job.py's _is_regular().
         st = os.fstat(leaf_fd)
         if not stat.S_ISREG(st.st_mode):
-            os.close(leaf_fd)
-            leaf_fd = None
+            closing, leaf_fd = leaf_fd, None
+            _safe_close(closing)
+            return None, "suspicious"
+        # codex round 3, MINOR: O_NONBLOCK was left set on the fd this
+        # function RETURNS, and the caller reads it as an ordinary
+        # EOF-complete text stream (os.fdopen(fd, "r").read()). Ordinary
+        # disk files ignore the flag, but S_ISREG does not UNIVERSALLY
+        # guarantee that -- Linux exposes regular pseudo-files, and FUSE
+        # implementations choose their own read semantics, so a nonblocking
+        # short-read or EWOULDBLOCK on some regular-typed entry is not
+        # provably impossible. The flag has done its whole job the moment
+        # S_ISREG passes (it existed ONLY to keep a FIFO's open() from
+        # blocking before classification could run); clear it now, on this
+        # SAME verified descriptor, guarded the same way every other
+        # metadata call in this function already is.
+        try:
+            current_flags = fcntl.fcntl(leaf_fd, fcntl.F_GETFL)
+            fcntl.fcntl(leaf_fd, fcntl.F_SETFL, current_flags & ~os.O_NONBLOCK)
+        except OSError as exc:
+            closing, leaf_fd = leaf_fd, None
+            _safe_close(closing)
+            print(
+                f"segment_dispatch_driver.py: warning: could not clear "
+                f"O_NONBLOCK on {path} after classifying it regular: {exc}; "
+                f"treating as suspicious",
+                file=sys.stderr,
+            )
             return None, "suspicious"
     except FileNotFoundError:
         if fd is not None:
-            os.close(fd)
+            closing, fd = fd, None
+            _safe_close(closing)
         if leaf_fd is not None:
-            os.close(leaf_fd)
+            closing, leaf_fd = leaf_fd, None
+            _safe_close(closing)
         return None, "absent"
     except OSError as exc:
         if fd is not None:
-            os.close(fd)
+            closing, fd = fd, None
+            _safe_close(closing)
         if leaf_fd is not None:
-            os.close(leaf_fd)
+            closing, leaf_fd = leaf_fd, None
+            _safe_close(closing)
         print(
             f"segment_dispatch_driver.py: warning: no-follow walk to {path} "
             f"refused: {exc}; treating as suspicious",

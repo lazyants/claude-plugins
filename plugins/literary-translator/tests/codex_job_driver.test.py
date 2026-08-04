@@ -2701,6 +2701,118 @@ def test_is_regular_false_when_a_later_read_fails_after_a_successful_prefix(tmp_
     )
 
 
+def test_is_regular_false_when_file_exceeds_the_byte_ceiling(tmp_path, monkeypatch):
+    """#409 round 3 MAJOR: the EOF-drain fix above closed the "later read fails" gap
+    but left the read itself UNBOUNDED -- no size cap, called AFTER this process holds
+    the per-segment flock lease. HUGE bound: _MAX_REGULAR_READ_BYTES caps a file whose
+    fstat()-reported st_size ALONE already exceeds the ceiling, refused by the upfront
+    st_size check before a single byte is read. Shrinks the ceiling (real content stays
+    tiny) rather than writing 64 MiB of real bytes to stay fast; a vacuous
+    implementation that never checks size at all -- the exact defect this pins -- would
+    still return True here."""
+    f = tmp_path / "huge.txt"
+    f.write_bytes(b"x" * 100)
+    job = _mkjob(tmp_path)
+    monkeypatch.setattr(codex_job, "_MAX_REGULAR_READ_BYTES", 50)
+
+    assert job._is_regular(str(f)) is False
+
+
+def test_is_regular_true_at_exactly_the_byte_ceiling(tmp_path, monkeypatch):
+    """CONTROL for the HUGE bound: a file whose size sits exactly AT the ceiling, not
+    over it, must still pass -- pins `>`, not `>=`, an off-by-one a careless
+    implementation of the check above could introduce."""
+    f = tmp_path / "at_ceiling.txt"
+    f.write_bytes(b"x" * 50)
+    job = _mkjob(tmp_path)
+    monkeypatch.setattr(codex_job, "_MAX_REGULAR_READ_BYTES", 50)
+
+    assert job._is_regular(str(f)) is True
+
+
+def test_is_regular_false_when_actual_bytes_read_exceed_the_stale_fstat_snapshot(
+    tmp_path, monkeypatch
+):
+    """GROWING bound: st_size is a snapshot taken once, at fstat() time, and can be
+    stale by the time the drain loop finishes -- a file that keeps growing while it is
+    being read must be caught by the RUNNING byte counter inside the loop, not by
+    re-trusting the (by-then-stale) st_size a second time. A real growing file cannot
+    be fabricated portably in a unit test, so this fakes fstat() to report a size
+    UNDER the (shrunk) ceiling -- the stale, since-outgrown snapshot, which alone would
+    let the file straight through -- while os.read() keeps serving real chunks whose
+    CUMULATIVE total exceeds the ceiling. Only an implementation that tracks actual
+    bytes read, not just the fstat() snapshot, refuses here."""
+    f = tmp_path / "growing.txt"
+    f.write_text("irrelevant -- os.fstat/os.read are both faked below", encoding="utf-8")
+    job = _mkjob(tmp_path)
+    monkeypatch.setattr(codex_job, "_MAX_REGULAR_READ_BYTES", 10)
+
+    real_fstat = os.fstat
+
+    def fake_fstat(fd):
+        st = real_fstat(fd)
+        # Report a size UNDER the shrunk ceiling -- the stale, since-outgrown
+        # snapshot -- so the upfront HUGE check alone would let this through; only
+        # the running counter inside the drain loop can catch it from here.
+        return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                                st.st_uid, st.st_gid, 1, st.st_atime,
+                                st.st_mtime, st.st_ctime))
+    monkeypatch.setattr(os, "fstat", fake_fstat)
+
+    calls = {"n": 0}
+
+    def fake_read(fd, n):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return b"123456"  # 6 bytes/call -- two calls already exceed the ceiling of 10
+        return b""  # never reached if the fix is correct
+    monkeypatch.setattr(os, "read", fake_read)
+
+    assert job._is_regular(str(f)) is False
+    assert calls["n"] == 2, (
+        "must refuse the INSTANT the running total exceeds the ceiling, on the very "
+        "read call that crosses it -- not after draining further to EOF regardless"
+    )
+
+
+def test_is_regular_false_when_a_read_call_stalls_past_the_timeout(tmp_path, monkeypatch):
+    """STALLED bound: a SINGLE os.read() call that never returns -- the shape of a hung
+    network/FUSE mount, where O_NONBLOCK has NO EFFECT on a regular file's read() --
+    must be caught by _read_bounded()'s SIGALRM-based per-call timeout, the only
+    mechanism that can observe a stall from OUTSIDE a syscall that structurally never
+    returns to let any in-loop check run at all.
+
+    Cannot fabricate an ACTUALLY-hung kernel read() portably in a unit test, so this
+    substitutes a real, long time.sleep() for the blocking call -- still a genuine
+    blocking call from Python's perspective, still genuinely interrupted by a REAL
+    delivered SIGALRM (not a mocked timeout, not a monkeypatched exception), routed
+    through the SAME signal.signal()+signal.setitimer() machinery _read_bounded()
+    actually uses. Shrinks _READ_STALL_TIMEOUT_SEC so the test stays fast, and asserts
+    WALL-CLOCK elapsed time, not just the boolean result -- if the signal handler
+    merely returned instead of raising (PEP 475: os.read() would then silently retry
+    the interrupted syscall and keep blocking), this would hang for the full 30s fake
+    stall instead of returning within the shrunk 1s timeout."""
+    f = tmp_path / "stalled.txt"
+    f.write_text("irrelevant -- os.read is faked below", encoding="utf-8")
+    job = _mkjob(tmp_path)
+    monkeypatch.setattr(codex_job, "_READ_STALL_TIMEOUT_SEC", 1)
+
+    def fake_read(fd, n):
+        time.sleep(30)  # far longer than the shrunk 1s timeout -- must never complete
+        return b"should never be reached"
+    monkeypatch.setattr(os, "read", fake_read)
+
+    start = time.monotonic()
+    result = job._is_regular(str(f))
+    elapsed = time.monotonic() - start
+
+    assert result is False
+    assert elapsed < 5, (
+        f"took {elapsed:.1f}s -- the per-call stall timeout must cut the blocked read "
+        "off promptly, not let it run to completion (the fake stall is 30s)"
+    )
+
+
 def test_canonical_replaceable_false_when_read_raises_on_the_open_fd(tmp_path, monkeypatch):
     """The same escape one layer up as the fstat-chain test above: let lstat() and
     open()/fstat() all succeed, then fault the read. Proves the refusal reaches
@@ -2749,7 +2861,7 @@ def test_preflight_refuses_before_launch_when_canonical_eacces(tmp_path, monkeyp
     assert not job.holds_lock, "refused before the flock lease -- same shape as device-mismatch"
 
 
-def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, monkeypatch):
+def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, monkeypatch, capsys):
     """Call site #2: run()'s promote branch, immediately before os.replace(). The
     preflight passes against the real, absent job.canonical; a validate_attempt() stub
     then repoints job.canonical at a locked directory BEFORE this call site's own guard
@@ -2765,7 +2877,20 @@ def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, m
     and correctly refuses -- an implementation that never closed that race would still
     pass this test. See
     test_canonical_replaceable_check_then_replace_window_is_a_known_unclosed_race,
-    below, for the one that actually exercises that window."""
+    below, for the one that actually exercises that window.
+
+    #409 round 3 MINOR: also the parked=True half of the joblog/stdout observability
+    proof (the parked=False half lives in
+    test_relocate_at_final_promote_refuses_when_pending_is_occupied_by_anything, below).
+    Asserting only job.canonical_unreadable_parked -- an in-memory attribute -- left
+    this reviewer-found gap: deleting the "canonical_unreadable_parked" key from EITHER
+    finalize()'s joblog dict or its stdout line left every existing test green, since
+    none of them read back either real output channel. job.run() already calls
+    finalize() itself (see run()'s own outer finally:), which both writes the durable
+    joblog (gated on self.holds_lock, true here -- the flock is acquired earlier in
+    run(), well before this call site) and prints the terminal stdout line
+    unconditionally -- so both channels are already populated by the run() call below;
+    this only adds the missing assertions against them."""
     job = _mkjob(tmp_path, kind="translate", deadline=100)
     monkeypatch.setattr(job, "hygiene", lambda: None)
 
@@ -2809,6 +2934,22 @@ def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, m
         "the validated candidate must be relocated into self.pending -- the "
         "deterministic slot a future adopt_pending() will re-validate and retry from "
         "-- not stranded at a path nothing ever revisits again"
+    )
+
+    joblog = job.read_joblog()
+    assert joblog is not None, "holds_lock is True here -- the durable joblog must exist"
+    assert joblog["canonical_unreadable_parked"] is True, (
+        "the durable joblog -- not just the in-memory flag -- must carry the parked "
+        "outcome; an operator reconstructing state after a crash has only this file"
+    )
+
+    stdout_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert stdout_lines, "finalize() must print exactly one terminal JSON line"
+    parsed_line = json.loads(stdout_lines[-1])
+    assert parsed_line["canonical_unreadable_parked"] is True, (
+        "the parsed terminal stdout line must also carry the parked outcome -- "
+        "run() launches this driver DETACHED (nohup ... >/dev/null), so a caller "
+        "that only reads stdout synchronously, not the joblog, must still see this"
     )
 
 
@@ -2950,7 +3091,9 @@ def test_run_refuses_immediately_when_adopt_pending_hits_canonical_unreadable(tm
     assert Path(job.pending).read_text(encoding="utf-8") == "{}"
 
 
-def test_relocate_at_final_promote_refuses_when_pending_is_occupied_by_anything(tmp_path, monkeypatch):
+def test_relocate_at_final_promote_refuses_when_pending_is_occupied_by_anything(
+    tmp_path, monkeypatch, capsys
+):
     """PROPERTY, revised after codex round 2 refuted the earlier version of it:
     relocation into self.pending must refuse whenever that slot is occupied by
     ANYTHING -- not only when the occupant is provably "more validated" than the
@@ -2964,7 +3107,15 @@ def test_relocate_at_final_promote_refuses_when_pending_is_occupied_by_anything(
     gate-validated attempt must NOT overwrite an occupied slot, even one this run's own
     adopt_pending() just left there because its gate call could not run. It falls back
     to being stranded at its own random path -- the same outcome as before this
-    relocate mechanism existed, which is the SAFE direction to fail toward."""
+    relocate mechanism existed, which is the SAFE direction to fail toward.
+
+    #409 round 3 MINOR: also the parked=False half of the joblog/stdout observability
+    proof (the parked=True half lives in
+    test_promote_refuses_when_canonical_turns_eacces_after_preflight, above). The
+    reviewer's exact objection was that removing the field from either output channel
+    left every test green; pinning ONLY the True case would still miss a bug that
+    always writes True regardless of outcome, so this pins False on the SAME two real
+    channels the other test pins True on."""
     job = _mkjob(tmp_path, kind="translate", deadline=100)
     monkeypatch.setattr(job, "hygiene", lambda: None)
     Path(job.pending).write_text('{"marker":"occupied"}', encoding="utf-8")
@@ -3010,6 +3161,21 @@ def test_relocate_at_final_promote_refuses_when_pending_is_occupied_by_anything(
     assert os.path.exists(job.attempt), (
         "the fresh, validated attempt falls back to its own path -- stranded, not "
         "destroyed, and never allowed to destroy what was already there"
+    )
+
+    joblog = job.read_joblog()
+    assert joblog is not None, "holds_lock is True here -- the durable joblog must exist"
+    assert joblog["canonical_unreadable_parked"] is False, (
+        "the durable joblog must report False, not just leave the field out or "
+        "default it True regardless of outcome"
+    )
+
+    stdout_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert stdout_lines, "finalize() must print exactly one terminal JSON line"
+    parsed_line = json.loads(stdout_lines[-1])
+    assert parsed_line["canonical_unreadable_parked"] is False, (
+        "the parsed terminal stdout line must also report False -- a caller reading "
+        "only stdout must not be told a relocate happened when it did not"
     )
 
 
@@ -3072,6 +3238,91 @@ def test_relocate_refuses_when_pending_is_a_previously_validated_but_now_unreada
     assert os.path.exists(job.attempt), (
         "the fresh candidate falls back to its own path rather than destroying the "
         "previously-validated (now merely unreadable) pending file"
+    )
+
+
+def test_relocate_pending_publication_is_atomic_no_clobber_even_when_a_writer_races_the_link_call(
+    tmp_path, monkeypatch
+):
+    """#409 round 3 MAJOR: the previous relocate observed self.pending with os.lstat(),
+    then separately called os.replace() -- a check-then-act race where a non-cooperating
+    writer publishing a validated regular file into self.pending in the window between
+    the two syscalls would be silently destroyed. The fix routes the relocate through
+    os.link(self.attempt, self.pending) instead: link() creates the new name ONLY if
+    none exists yet and raises EEXIST rather than overwriting if one does, so "is
+    anything there" and "put something there" become ONE atomic kernel operation with no
+    window between them at all -- unlike
+    test_canonical_replaceable_check_then_replace_window_is_a_known_unclosed_race, above,
+    which documents the SAME class of defect at a DIFFERENT call site as a known,
+    accepted, still-open limit.
+
+    Wraps the REAL os.link (not a stub) and plants a writer's own validated regular file
+    at self.pending immediately before delegating to the genuine syscall -- the latest
+    possible moment a race could land, one line before the exact call that would have
+    clobbered it under the old observe-then-replace shape. If the relocate ever reverts
+    to os.lstat()-then-os.replace(), this test's injection point (os.link) is never
+    called at all: the old code's own lstat runs first, sees self.pending genuinely
+    empty (this test never writes to it before job.run() starts), and its os.replace()
+    then overwrites that empty slot with the FRESH candidate's own content -- not the
+    raced content this test plants, which never gets the chance to land. Either way,
+    the assertions below (parked stays False, self.pending holds the RACED writer's
+    content rather than the fresh candidate's) only pass when the relocate is genuinely
+    routed through the atomic link-then-EEXIST path."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+
+    raced_writer_content = '{"marker":"raced-writer-published-this"}'
+    real_link = os.link
+
+    def racing_link(src, dst, *a, **kw):
+        # The race: a non-cooperating writer publishes its own validated regular file
+        # into self.pending in the instant before the real link() syscall runs.
+        Path(dst).write_text(raced_writer_content, encoding="utf-8")
+        return real_link(src, dst, *a, **kw)
+    monkeypatch.setattr(os, "link", racing_link)
+
+    locked_dir = tmp_path / "locked_pending_link_race"
+    locked_dir.mkdir()
+    locked_canonical = locked_dir / "canonical.json"
+    locked_canonical.write_text("{}", encoding="utf-8")
+
+    def spy_launch():
+        job.jobId = "J"
+        return True
+
+    def fake_poll():
+        job.job_status = "completed"
+
+    def fake_validate_attempt():
+        Path(job.attempt).write_text('{"marker":"fresh-and-validated"}', encoding="utf-8")
+        job.canonical = str(locked_canonical)          # the race: repoints mid-run
+        os.chmod(locked_dir, 0o000)
+        return True
+
+    monkeypatch.setattr(job, "launch", spy_launch)
+    monkeypatch.setattr(job, "poll", fake_poll)
+    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
+
+    try:
+        rc = job.run()
+    finally:
+        os.chmod(locked_dir, 0o755)
+
+    assert rc == 1
+    assert job.reason == "canonical-unreadable"
+    assert job.canonical_unreadable_parked is False, (
+        "the raced writer's content occupies self.pending by the time link() actually "
+        "runs -- it must see EEXIST and refuse, not report a parked relocate that "
+        "never happened"
+    )
+    assert Path(job.pending).read_text(encoding="utf-8") == raced_writer_content, (
+        "the raced writer's content must SURVIVE untouched -- this is exactly the "
+        "property the old lstat()-then-replace() shape violated: its os.replace() "
+        "would have clobbered whatever it did not itself just observe"
+    )
+    assert os.path.exists(job.attempt), (
+        "the fresh candidate falls back to its own path rather than clobbering what "
+        "the race planted"
     )
 
 

@@ -593,7 +593,17 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
     `.pre-upgrade-backup`-style rename-then-copy (the literal filename
     pattern the earlier, superseded design used) -- catching a reversion
     of the DOCUMENTED CONTRACT itself, independent of whether this file's
-    own transcription also reverted."""
+    own transcription also reverted.
+
+    codex round 3's finding on THIS test: checking only for the bare word
+    "HALT" is too weak -- a document saying "overwrite divergent regular
+    files; HALT only on directories" would pass it, which is a real,
+    narrower-than-intended contract regression this test could not catch.
+    Pins that the halt covers all THREE entry kinds the note's own
+    per-entry-kind instruction distinguishes (a divergent regular file, a
+    symlink, and a directory) -- that is what would actually have to
+    change in the prose for the contract to regress, not merely the
+    presence of one keyword."""
     skill_md = PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md"
     text = skill_md.read_text(encoding="utf-8")
     start = text.find("Migration note, mandatory before")
@@ -621,4 +631,20 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
         "symlink-safe or concurrency-safe from orchestrating-session prose "
         "alone. (The explanatory paragraph AFTER this instruction may still "
         "name it historically -- that is not what this check bounds.)"
+    )
+    assert "Divergent regular file" in instruction_section, (
+        "the HALT must explicitly cover a divergent REGULAR FILE -- a note "
+        "that only names symlinks and directories would silently narrow "
+        "the contract back toward overwriting the one case the migration "
+        "note exists for in the first place"
+    )
+    assert "Symlink" in instruction_section, (
+        "the HALT must explicitly cover a SYMLINK -- omitting it would "
+        "silently reopen the copy-through-a-symlink failure mode the "
+        "earlier backup-and-copy design was rejected for"
+    )
+    assert "Directory" in instruction_section, (
+        "the HALT must explicitly cover a DIRECTORY -- omitting it risks "
+        "a naive implementation treating a directory as \"not a file, so "
+        "not really there\" and attempting to copy into or over it"
     )

@@ -4426,6 +4426,88 @@ def test_a_fifo_at_the_leaf_is_refused_quickly_never_blocks_the_open(tmp_path):
     )
 
 
+def test_the_returned_descriptor_has_o_nonblock_cleared(tmp_path):
+    """codex round 3, MINOR: O_NONBLOCK is load-bearing during the LEAF
+    open (it keeps a FIFO's own open() from blocking before classification
+    can run -- see the FIFO test above), but the caller
+    (call_template_functions()) reads the RETURNED fd as an ordinary
+    EOF-complete text stream. Ordinary regular-file I/O ignores the flag,
+    but S_ISREG does not universally guarantee that -- Linux exposes
+    regular pseudo-files, and FUSE implementations choose their own read
+    semantics -- so the flag is cleared, on the SAME verified descriptor,
+    the moment S_ISREG confirms it is safe to. Checked directly via
+    fcntl(F_GETFL), not inferred from a successful read (a successful read
+    would pass whether or not the flag were still set, on any filesystem
+    where the flag happens not to matter -- this asserts the PROPERTY, not
+    a symptom of its absence)."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    real_file = deployed_scripts / "mass-translate-wf.template.js"
+    real_file.write_text("// a genuine regular file\n", encoding="utf-8")
+
+    fd, state = DRIVER._open_regular_no_follow_walk(real_file)
+    try:
+        assert state == "file" and fd is not None
+        current_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        assert not (current_flags & os.O_NONBLOCK), (
+            f"expected O_NONBLOCK cleared on the returned descriptor once "
+            f"S_ISREG confirmed a genuine regular file, but F_GETFL still "
+            f"reports it set (flags={current_flags!r})"
+        )
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def test_a_close_failure_during_cleanup_is_never_retried_on_the_same_fd(tmp_path, monkeypatch):
+    """codex round 3, MINOR: the old cleanup closed a descriptor directly,
+    then (on a SEPARATE line) set the owning variable to None -- if that
+    close() itself raised, the variable was still non-None by the time an
+    outer exception handler ran, so the handler retried the IDENTICAL
+    close on an fd whose close had already failed. Verifies the actual
+    property (no fd is EVER passed to os.close() more than once), not just
+    that the function still returns cleanly -- a mutant that swallowed the
+    double-close's own exception without fixing the double-close itself
+    would still pass a return-value-only check."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    # A directory at the leaf: reaches the "close leaf_fd because it is
+    # not S_ISREG" branch -- exactly the close call that used to be
+    # unguarded and un-detached.
+    (deployed_scripts / "mass-translate-wf.template.js").mkdir()
+
+    closed_fds = []
+    real_close = os.close
+
+    def spy_close(fd, *args, **kwargs):
+        if fd in closed_fds:
+            pytest.fail(
+                f"fd {fd} was passed to os.close() more than once -- "
+                f"ownership was not detached before a failed close, so an "
+                f"outer handler retried it"
+            )
+        closed_fds.append(fd)
+        raise OSError("simulated close failure, e.g. EIO on close")
+
+    monkeypatch.setattr(os, "close", spy_close)
+
+    fd, state = DRIVER._open_regular_no_follow_walk(
+        deployed_scripts / "mass-translate-wf.template.js")
+
+    # The simulated close failure must be swallowed (guarded), not
+    # propagated -- the function still reports its documented verdict.
+    assert fd is None and state == "suspicious", (
+        f"expected a directory leaf to be refused as suspicious even when "
+        f"its own cleanup close() fails, got fd={fd!r} state={state!r}"
+    )
+    monkeypatch.setattr(os, "close", real_close)
+    for real_fd in closed_fds:
+        try:
+            real_close(real_fd)
+        except OSError:
+            pass  # the spy already "closed" it (by raising); this is best-effort
+
+
 # ===========================================================================
 # codex's BLOCKER on 7524076: os.lstat()-based classification only inspects
 # the LEAF path component -- an ANCESTOR directory that is itself a symlink

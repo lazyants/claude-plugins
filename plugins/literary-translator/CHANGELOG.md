@@ -73,10 +73,35 @@ Five defects in the W5 dispatch driver and its codex worker, all of them shipped
   EIO or ESTALE — exactly the failure the check exists to catch, passing it. The check now
   **drains the descriptor to EOF** before calling a file readable. Reading only the first
   byte was tried and is not enough: a regular file can serve a good prefix and fail on a
-  later page, and the promote this guards would still destroy the unread bytes. The cost is
-  one full read of the canonical per promote attempt — tens to a couple of hundred KB
-  against a paid codex turn. An empty regular file drains to `b""` on the first read and is
+  later page, and the promote this guards would still destroy the unread bytes.
+
+  The drain is **bounded three ways, and it has to be**: it runs while this process holds
+  the per-segment lease, inside a job with a hard deadline, against a file whose size and
+  behaviour are not the guard's to assume. A 64 MiB ceiling is checked from `fstat()` before
+  a single byte is read, and re-checked against the bytes actually read, because `st_size`
+  is a snapshot and a file can grow past it. This run's own deadline is re-checked between
+  reads. And each individual `os.read()` is bounded by a timer, because neither of the other
+  two helps against a read that never returns at all — `O_NONBLOCK` has no effect on a
+  regular file, so a hung network or FUSE mount blocks inside the call and no check between
+  iterations ever runs.
+
+  **A file that exceeds the ceiling, or whose read stalls, is REFUSED**, in the same
+  direction every other uncertain outcome here goes: an unpromotable draft is recoverable,
+  destroyed bytes are not. That is a real trade-off, not a free win — a legitimately huge
+  canonical becomes unpromotable rather than accepted unread. Measured on the actual corpus,
+  drafts run tens to a couple of hundred KB, so the ceiling sits roughly 400× above the
+  largest legitimate file. An empty regular file drains to `b""` on the first read and is
   still correctly readable; that is not a failure and must not be "fixed" into a rejection.
+
+- **A refused promotion could destroy a candidate while parking its replacement.** When the
+  canonical guard refuses at the final promote step, the validated attempt is parked in the
+  per-segment pending slot for a later run to re-validate. That parking observed the slot
+  and then wrote to it by pathname — two operations, so a validated file published into the
+  slot in between was overwritten unseen, which is the same defect the guard exists to
+  prevent, one step downstream. Parking is now a single atomic `link()`: the kernel creates
+  the name only if nothing is there and fails otherwise, so there is no window between
+  observing and writing. An occupied slot means the fresh attempt stays where it is rather
+  than displacing what it found.
 
 ### Known limits
 
