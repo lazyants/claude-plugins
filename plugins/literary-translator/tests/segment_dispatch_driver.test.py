@@ -4358,45 +4358,41 @@ def test_a_symlinked_template_reached_via_plugin_root_is_refused_before_executio
 
 
 def test_a_fifo_at_the_leaf_is_refused_quickly_never_blocks_the_open(tmp_path):
-    """codex round 2, MAJOR, fix-introduced: the first version of
-    _open_regular_no_follow_walk() opened the leaf with blocking `O_RDONLY
-    | O_NOFOLLOW` and classified its type ONLY AFTER the open succeeded.
-    Opening a FIFO with no writer on the other end BLOCKS INSIDE os.open()
-    itself, before classification ever runs and before any caller-side
-    timeout (Node's 60s subprocess timeout, in call_template_functions())
-    can even start -- an attacker-triggerable hang, and strictly worse
-    than the plain os.lstat() check this whole fix replaced (lstat never
-    opens anything, so it could refuse a FIFO instantly). Verified
-    directly, not asserted: a genuinely blocking open on this exact FIFO,
-    run in a separate process with a bounded timeout, really does hang
-    (confirmed while designing this fix, kept here as the documented
-    reason O_NONBLOCK on the leaf open is load-bearing, not cosmetic).
+    """A FIFO with no writer on the other end, opened with a BLOCKING
+    `O_RDONLY | O_NOFOLLOW`, BLOCKS INSIDE os.open() itself, before
+    classification ever runs and before any caller-side timeout (Node's
+    60s subprocess timeout, in call_template_functions()) can even start
+    -- an attacker-triggerable hang, and strictly worse than the plain
+    os.lstat() check this whole fix replaced (lstat never opens anything,
+    so it could refuse a FIFO instantly). Verified directly, not
+    asserted: a genuinely blocking open on this exact FIFO, run in a
+    separate process with a bounded timeout, really does hang -- the
+    documented reason O_NONBLOCK on the leaf open is load-bearing, not
+    cosmetic.
 
     BOUNDED WITH A HARD SIGALRM, not left to run unbounded on the claim
-    that a hang IS the signal. An earlier version of this test argued
-    exactly that -- if the fix regresses, the test itself hangs, and a
-    wedged suite is proof enough. It is not: a wedged run produces no
-    failing test name, no assertion text, no traceback, and takes every
-    OTHER test's result down with it -- the single hardest failure mode to
-    attribute, and this session has already been bitten once by a run
-    that hangs looking identical, from outside, to one that is merely
-    slow. A regression here must FAIL LOUDLY, not wedge the release gate
-    silently. The alarm is generous (5s -- os.open() with O_NONBLOCK on a
-    real FIFO returns in microseconds when the fix is intact) and is
-    cleared in `finally` regardless of outcome, so it can never leak into
-    a later test.
+    that a hang IS the signal: if the fix regresses, the test itself
+    hangs, and a wedged suite is proof enough. It is not: a wedged run
+    produces no failing test name, no assertion text, no traceback, and
+    takes every OTHER test's result down with it -- the single hardest
+    failure mode to attribute, and a hung run looks, from outside,
+    identical to one that is merely slow. A regression here must FAIL
+    LOUDLY, not wedge the release gate silently. The alarm is generous
+    (5s -- os.open() with O_NONBLOCK on a real FIFO returns in
+    microseconds when the fix is intact) and is cleared in `finally`
+    regardless of outcome, so it can never leak into a later test.
 
-    THE TIMEOUT SIGNAL MUST NOT BE AN OSError SUBCLASS. Verified while
-    building this bound, not assumed: `TimeoutError` IS one (Python 3.3+),
-    so raising it from the SIGALRM handler while blocked inside
-    `os.open()` gets silently caught by `_open_regular_no_follow_walk()`'s
-    OWN `except OSError` handler -- the function returns `(None,
-    "suspicious")` exactly as if it had refused the FIFO cleanly, and this
-    test would report PASSED after the full 5s wait, having proven
-    NOTHING about whether the hang ever happened. `_FifoOpenTimedOut`
-    below is a `RuntimeError`, deliberately outside the OSError family, so
-    a genuine regression propagates THROUGH the production function's own
-    exception handling instead of being absorbed by it."""
+    THE TIMEOUT SIGNAL MUST NOT BE AN OSError SUBCLASS: `TimeoutError` IS
+    one (Python 3.3+), so raising it from the SIGALRM handler while
+    blocked inside `os.open()` gets silently caught by
+    `_open_regular_no_follow_walk()`'s OWN `except OSError` handler -- the
+    function returns `(None, "suspicious")` exactly as if it had refused
+    the FIFO cleanly, and this test would report PASSED after the full 5s
+    wait, having proven NOTHING about whether the hang ever happened.
+    `_FifoOpenTimedOut` below is a `RuntimeError`, deliberately outside
+    the OSError family, so a genuine regression propagates THROUGH the
+    production function's own exception handling instead of being
+    absorbed by it."""
     deployed_scripts = tmp_path / "scripts"
     deployed_scripts.mkdir()
     fifo_path = deployed_scripts / "mass-translate-wf.template.js"
@@ -4427,7 +4423,7 @@ def test_a_fifo_at_the_leaf_is_refused_quickly_never_blocks_the_open(tmp_path):
 
 
 def test_the_returned_descriptor_has_o_nonblock_cleared(tmp_path):
-    """codex round 3, MINOR: O_NONBLOCK is load-bearing during the LEAF
+    """O_NONBLOCK is load-bearing during the LEAF
     open (it keeps a FIFO's own open() from blocking before classification
     can run -- see the FIFO test above), but the caller
     (call_template_functions()) reads the RETURNED fd as an ordinary
@@ -4460,15 +4456,15 @@ def test_the_returned_descriptor_has_o_nonblock_cleared(tmp_path):
 
 
 def test_a_close_failure_during_cleanup_is_never_retried_on_the_same_fd(tmp_path, monkeypatch):
-    """codex round 3, MINOR: the old cleanup closed a descriptor directly,
-    then (on a SEPARATE line) set the owning variable to None -- if that
-    close() itself raised, the variable was still non-None by the time an
-    outer exception handler ran, so the handler retried the IDENTICAL
-    close on an fd whose close had already failed. Verifies the actual
-    property (no fd is EVER passed to os.close() more than once), not just
-    that the function still returns cleanly -- a mutant that swallowed the
-    double-close's own exception without fixing the double-close itself
-    would still pass a return-value-only check."""
+    """Verifies the actual property directly: no fd is EVER passed to
+    os.close() more than once. Closing a descriptor and only afterward, on
+    a SEPARATE line, setting the owning variable to None would violate
+    this -- if that close() itself raised, the variable would still be
+    non-None by the time an outer exception handler ran, so the handler
+    would retry the IDENTICAL close on an fd whose close had already
+    failed. Checking this directly matters because a mutant that swallowed
+    the double-close's own exception without fixing the double-close
+    itself would still pass a return-value-only check."""
     deployed_scripts = tmp_path / "scripts"
     deployed_scripts.mkdir()
     # A directory at the leaf: reaches the "close leaf_fd because it is

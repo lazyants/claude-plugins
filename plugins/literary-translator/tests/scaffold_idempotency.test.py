@@ -420,10 +420,10 @@ def test_repeatable_overwrite_helper_actually_overwrites(tmp_path):
 # launch defect could have reasonably worked around it by hand-adapting
 # its own copy exactly there, on the documented strength of that
 # destination being untouched. This deliberately does NOT try to preserve
-# a divergent file automatically (an earlier version did, via rename-then-
-# copy, and was found to have three real failure modes -- symlink-through,
-# pointer-only backups, concurrent-backup races -- none of which Step 0a's
-# own orchestrating-session-executed prose can close for real). See
+# a divergent file automatically via rename-then-copy: that shape has
+# three real failure modes -- symlink-through, pointer-only backups,
+# concurrent-backup races -- none of which Step 0a's own
+# orchestrating-session-executed prose can close for real. See
 # SKILL.md's own "Migration note" in its Step 0a section for the full
 # reasoning this transcribes literally.
 # ===========================================================================
@@ -438,16 +438,16 @@ def apply_resolve_codex_companion_migration(shipped_source: Path, dest_path: Pat
     "Anything else" is deliberately broad: a genuine regular file with
     DIFFERENT bytes, a symlink (regardless of what it points at -- its
     target content is never even read), a directory, or any other
-    non-absent entry os.lstat() reports. An earlier version of this note
-    specified renaming a divergent file aside before copying over it; that
-    shape was found to have three real failure modes (a byte-identical
-    symlink stays a symlink after a naive copy, since copying OVER a
-    symlink writes THROUGH it rather than replacing it; a divergent
-    symlink's "backup" preserves only a pointer, not the adapted bytes it
-    points at; two concurrent migrations can race on the same backup
-    name) -- see SKILL.md's own note for the full reasoning. A halt has
-    none of them, because it performs no automatic write to a divergent
-    destination at all.
+    non-absent entry os.lstat() reports. Renaming a divergent file aside
+    before copying over it is NOT what this does, because that shape has
+    three real failure modes: a byte-identical symlink stays a symlink
+    after a naive copy, since copying OVER a symlink writes THROUGH it
+    rather than replacing it; a divergent symlink's "backup" preserves
+    only a pointer, not the adapted bytes it points at; and two
+    concurrent migrations can race on the same backup name -- see
+    SKILL.md's own note for the full reasoning. A halt has none of them,
+    because it performs no automatic write to a divergent destination at
+    all.
 
     Classifies with os.lstat() -- NEVER Path.exists()/is_file(), which
     FOLLOW a symlink and would silently write through it, leaving
@@ -595,7 +595,7 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
     of the DOCUMENTED CONTRACT itself, independent of whether this file's
     own transcription also reverted.
 
-    codex round 3's finding on THIS test: checking only for the bare word
+    Checking only for the bare word
     "HALT" is too weak -- a document saying "overwrite divergent regular
     files; HALT only on directories" would pass it, which is a real,
     narrower-than-intended contract regression this test could not catch.
@@ -613,11 +613,43 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
     # paragraph -- which legitimately explains, and therefore legitimately
     # NAMES, the superseded backup-and-copy shape it replaced. Checking
     # the whole note would make this test fail against its own correct,
-    # historical prose, exactly the trap fetch_citation_bundle.test.py's
-    # own exclusion-span technique already had to route around once.
+    # historical prose -- the same trap fetch_citation_bundle.test.py's
+    # own exclusion-span technique exists to route around.
     end = text.find("**This is deliberately a REFUSAL", start)
     assert end != -1, "could not locate the end of the migration note's operative instruction"
     instruction_section = text[start:end]
+
+    # Checking for "HALT" and
+    # for the three entry-kind labels INDEPENDENTLY cannot distinguish an
+    # instruction from its own negation, because presence is invariant
+    # under "do not" -- a migration note rewritten to say "do not HALT
+    # before copying anything" keeps every token asserted below present
+    # and still passes. Bind the verb to its OWN trigger clause instead of
+    # scattering the check across the whole section: the note's
+    # established style already writes each outcome as "<condition> ->
+    # <action>" (see the "Absent" and "byte-identical" bullets above this
+    # one, both "-> copy normally"), so the one substring a negation like
+    # "do not HALT" is forced to break is the arrow sitting directly
+    # against the verb -- "→ HALT before copying anything." -- since
+    # inserting "do not"/"never"/"should not anything" between them is
+    # exactly what a negation needs to do. A bag-of-words check over the
+    # same span would not notice; this one does, because it pins the
+    # ADJACENCY, not just the token.
+    trigger_clause_end = text.find("Divergent regular file", start)
+    assert trigger_clause_end != -1 and start < trigger_clause_end < end, (
+        "could not locate the start of the per-entry-kind recovery list "
+        "to bound the 'Anything else' trigger clause"
+    )
+    trigger_clause = text[start:trigger_clause_end]
+    assert "→ HALT before copying anything." in trigger_clause, (
+        "the trigger clause must say the verb ADJACENT to its own arrow -- "
+        "'→ HALT before copying anything.', exactly as the note's own "
+        "'Absent' and 'byte-identical' bullets say '→ copy normally.' "
+        "-- not merely contain the word HALT somewhere in the section. "
+        "'do not HALT before copying anything' keeps HALT present but "
+        "breaks this exact adjacency, which is the property that actually "
+        "distinguishes the instruction from its own negation"
+    )
     assert "HALT" in instruction_section, (
         "the migration note's ACTUAL INSTRUCTION must say HALT on a non-"
         "absent, non-identical destination -- this is the operative safety "

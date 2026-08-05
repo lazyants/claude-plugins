@@ -28,8 +28,13 @@ Five defects in the W5 dispatch driver and its codex worker, all of them shipped
   **Upgrading an existing project: if you hand-adapted `resolve_codex_companion.py`
   yourself** to work around the exit-2 launch defect above — that exact destination was
   documented as never touched before this release, so this was a reasonable workaround —
-  Step 0a will now HALT on it instead of silently overwriting or auto-backing it up. Move
-  or rename your copy and re-run Step 0a; it will then copy the shipped file cleanly. This
+  Step 0a will now HALT on it instead of silently overwriting or auto-backing it up, and
+  name the exact path. **How you clear it depends on what is actually there, and SKILL.md's
+  own migration note states the three cases — follow it rather than this summary.** The one
+  worth repeating: renaming a *symlink* aside preserves the pointer, not the adapted bytes
+  it points at, so a symlinked workaround has to have its resolved target copied out before
+  the link is removed. A divergent regular file can simply be moved aside. Once the path is
+  clear, re-run Step 0a and it copies the shipped file. This
   refusal, rather than an automatic backup-and-copy, is deliberate: an automatic copy
   cannot be made safe against a symlinked workaround (it would write through the symlink
   rather than replacing it) or two concurrent scaffolds racing on the same backup name,
@@ -75,23 +80,34 @@ Five defects in the W5 dispatch driver and its codex worker, all of them shipped
   byte was tried and is not enough: a regular file can serve a good prefix and fail on a
   later page, and the promote this guards would still destroy the unread bytes.
 
-  The drain is **bounded three ways, and it has to be**: it runs while this process holds
-  the per-segment lease, inside a job with a hard deadline, against a file whose size and
-  behaviour are not the guard's to assume. A 64 MiB ceiling is checked from `fstat()` before
-  a single byte is read, and re-checked against the bytes actually read, because `st_size`
-  is a snapshot and a file can grow past it. This run's own deadline is re-checked between
-  reads. And each individual `os.read()` is bounded by a timer, because neither of the other
-  two helps against a read that never returns at all — `O_NONBLOCK` has no effect on a
-  regular file, so a hung network or FUSE mount blocks inside the call and no check between
-  iterations ever runs.
+  The drain is **bounded two ways**: it runs while this process holds the per-segment lease,
+  inside a job with a hard deadline, against a file whose size is not the guard's to assume.
+  A 64 MiB ceiling is checked from `fstat()` before a single byte is read, and re-checked
+  against the bytes actually read, because `st_size` is a snapshot and a file can grow past
+  it. And the caller's own remaining phase budget is re-checked between reads and again after
+  EOF — the phase budget, not the whole job's ceiling, so a poll-window operation cannot eat
+  the reserved finalize tail.
 
-  **A file that exceeds the ceiling, or whose read stalls, is REFUSED**, in the same
-  direction every other uncertain outcome here goes: an unpromotable draft is recoverable,
-  destroyed bytes are not. That is a real trade-off, not a free win — a legitimately huge
-  canonical becomes unpromotable rather than accepted unread. Measured on the actual corpus,
-  drafts run tens to a couple of hundred KB, so the ceiling sits roughly 400× above the
-  largest legitimate file. An empty regular file drains to `b""` on the first read and is
-  still correctly readable; that is not a failure and must not be "fixed" into a rejection.
+  **A file that exceeds the ceiling, or whose read outlasts the phase budget, is REFUSED**,
+  in the same direction every other uncertain outcome here goes: an unpromotable draft is
+  recoverable, destroyed bytes are not. That is a real trade-off, not a free win — a
+  legitimately huge canonical becomes unpromotable rather than accepted unread. Measured on
+  the actual corpus, drafts run tens to a couple of hundred KB, so the ceiling sits roughly
+  400× above the largest legitimate file. An empty regular file drains to `b""` on the first
+  read and is still correctly readable; that is not a failure and must not be "fixed" into a
+  rejection.
+
+  **What these two bounds do NOT cover, stated plainly:** a single `os.read()` that never
+  returns at all. Both bounds sit *between* reads, so a hung mount blocks inside the call and
+  neither check runs again. `O_NONBLOCK` is not a usable stall bound here — an ordinary disk
+  file ignores it entirely, and a FUSE or pseudo-file entry that `S_ISREG` accepts chooses
+  its own read semantics. A per-read timer was built for exactly this and then removed
+  before release: it would have been the only process-global signal handler in the script,
+  it could be silently defeated by a signal mask inherited across `exec` (a defeat whose
+  failure mode is a false PASS indistinguishable from a real one), and it would have guarded
+  one of the three byte-copy loops in this file while the other two — both older than this
+  release — stayed unbounded. **This drain now shares their residual rather than claiming a
+  bound it could not keep.**
 
 - **A refused promotion could destroy a candidate while parking its replacement.** When the
   canonical guard refuses at the final promote step, the validated attempt is parked in the
@@ -102,6 +118,22 @@ Five defects in the W5 dispatch driver and its codex worker, all of them shipped
   the name only if nothing is there and fails otherwise, so there is no window between
   observing and writing. An occupied slot means the fresh attempt stays where it is rather
   than displacing what it found.
+
+- **The tail-exhausted deferral overwrote the pending slot unconditionally.** This one is
+  older than 1.18.0 and is fixed here because it needs no concurrency to bite: a pending
+  candidate that a previous run validated can become merely *unreadable* between runs
+  (EACCES, EIO, a stale NFS handle). Adoption then refuses it at its first check, the
+  non-regular clear correctly leaves a regular inode alone — and the next ordinary
+  no-budget completion replaced it. One temporarily-unreadable file plus one normal
+  deferral, no second writer anywhere. The deferral now **refuses** an occupied slot and
+  discards the fresh, never-validated attempt instead, recording the refusal so it is
+  visible rather than silent. Discarding an unvalidated attempt is the strictly smaller
+  loss; the previous behaviour destroyed the one candidate that had already passed.
+
+  The argument that shipped in 1.18.0's own source comment — that the choice was between
+  clobbering and a slot blocked forever — was wrong, and it was wrong in a way worth
+  naming: calling the unreadable occupant "poisoned" presumes unreadable means invalid,
+  which is the exact presumption the canonical guard one branch over exists to reject.
 
 ### Known limits
 
@@ -118,6 +150,28 @@ Five defects in the W5 dispatch driver and its codex worker, all of them shipped
   template: an ordinary regular file at the expected path passes every check and is
   executed. The previous release executed that same path with a weaker check, so this is
   **structurally narrowed, not closed.**
+- **Clearing a non-regular squatter is itself a check-then-act.** The helper that removes a
+  symlink, FIFO or directory forged onto a deterministic slot classifies the entry with
+  `lstat()` and then removes it by pathname — two syscalls, not one atomic operation. A
+  writer that substitutes a real file in between has it destroyed, one step upstream of the
+  atomic `link()` that the parking path relies on — so that path's no-clobber guarantee
+  holds at the `link()` and not before it. **Scope stated rather than left to be found:**
+  the helper is unchanged from the previous release, but it now has **three** call sites
+  where that release had two, because the new parking path clears the slot before linking
+  into it. So this release does not introduce the race and does add one more place it can
+  occur. Keeping that clear is still the better trade — without it a stale symlink or FIFO
+  blocks the slot and the validated candidate is stranded rather than parked — but it is a
+  trade, and the count belongs in the record.
+  Closing this needs the same transactional exchange the other two limits above need, and
+  the same threat model applies: it requires a writer that does not take the per-segment
+  lock. It is disclosed rather than closed, deliberately and consistently with them, rather
+  than closed with new machinery while the two larger ones stay open.
+
+**One line governs which of the defects above were fixed and which are listed here:** a
+data-loss path reachable without a hostile concurrent writer is fixed when the fix is small;
+a race that needs a racing writer and new machinery to close is disclosed. The removed
+per-read stall timer is neither — a liveness bound, not a data-loss path — and is covered in
+the drain section above.
 
 ## 1.18.0 — 2026-08-03
 

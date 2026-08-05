@@ -63,14 +63,12 @@ stdlib-only, self-anchoring (sibling gate scripts located via __file__); copied 
 """
 
 import argparse
-import errno
 import fcntl
 import hashlib
 import json
 import os
 import re
 import shutil
-import signal
 import stat
 import subprocess
 import sys
@@ -110,13 +108,10 @@ _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 _COPY_CHUNK = 1 << 20  # 1 MiB read chunk for the sandbox->staging copy
 
-# #409 round 3 MAJOR: _is_regular()'s full-EOF-drain fix (a defect-fix release earlier
-# this same round) closed the "read only the first byte" gap but left the read itself
-# UNBOUNDED -- no size cap, no deadline check, called AFTER this process holds the
-# per-segment flock lease. A huge, growing, or stalled canonical could overrun the
-# job's own abs_ceiling or block the read forever, wedging every cooperating retry for
-# that segment behind a lease nothing releases. Three DIFFERENT failure shapes, three
-# DIFFERENT bounds -- none of the three alone covers the others:
+# _is_regular() drains the WHOLE file to confirm it is readable (main's own version
+# reads only the first byte); the bounds below cap that drain against two independent
+# overrun shapes -- a huge or growing canonical could otherwise cost real time confirming
+# an anomalous file:
 _MAX_REGULAR_READ_BYTES = 64 << 20  # 64 MiB. Real canonical drafts run tens to a
 # couple hundred KB (measured on the actual corpus) -- this is roughly 400x headroom
 # over the largest legitimate file, generous enough to never trip on real content, small
@@ -124,48 +119,21 @@ _MAX_REGULAR_READ_BYTES = 64 << 20  # 64 MiB. Real canonical drafts run tens to 
 # Bounds the HUGE case: an upfront os.fstat().st_size check short-circuits before
 # reading a single byte, and a running counter inside the drain loop backstops a file
 # that GROWS past what st_size reported at open time.
-_READ_STALL_TIMEOUT_SEC = 10  # A SINGLE os.read() call must return within this many
-# seconds, or the descriptor is presumed permanently stuck (a hung network/FUSE mount)
-# -- O_NONBLOCK has NO EFFECT on a regular file's read(), so this is the only thing
-# that bounds a call that never returns at all, as opposed to one that returns slowly.
-# Local disk reads finish in microseconds to low milliseconds even under load; ten
-# seconds is generous for a legitimate slow read and still refuses a hung one promptly
-# rather than consuming the whole per-call budget below waiting on it.
-
-
-def _read_bounded(fd, n, timeout_sec):
-    """os.read(fd, n), but a single call that never returns -- a hung network/FUSE
-    mount, O_NONBLOCK notwithstanding -- raises OSError after `timeout_sec` instead of
-    blocking this process forever while it holds the per-segment flock lease.
-
-    signal.setitimer + SIGALRM, not a thread or asyncio: os.read() is a blocking C
-    call, and a signal is the only thing that can interrupt it mid-syscall from
-    within the SAME process. PEP 475 made os.read() retry automatically on a bare
-    EINTR, so a handler that merely returns would change NOTHING -- the interrupted
-    syscall is transparently restarted and blocks again. The handler here RAISES
-    instead, which stops that retry: the exception propagates out of the read
-    instead of the read being silently resumed. Deliberately an OSError subclass, so
-    every caller's existing `except OSError` already handles it the same way a
-    genuine EIO would -- refuse, do not guess -- without a second exception type to
-    plumb through.
-
-    This is library code, not a standalone script's own top-level signal handling:
-    the previous SIGALRM handler and any pending itimer are saved and restored in
-    `finally`, because a caller of this method may itself be using SIGALRM for
-    something unrelated, and this must not leave that broken. Callable only from the
-    main thread -- signal.signal()/setitimer() raise ValueError anywhere else, which
-    is the correct, loud failure for a threading model this file does not use
-    (codex_job.py is always the main thread of its own standalone process)."""
-    def _on_alarm(signum, frame):
-        raise OSError(errno.ETIMEDOUT, "os.read() exceeded its per-call stall timeout")
-
-    old_handler = signal.signal(signal.SIGALRM, _on_alarm)
-    old_itimer = signal.setitimer(signal.ITIMER_REAL, timeout_sec)
-    try:
-        return os.read(fd, n)
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, old_itimer[0], old_itimer[1])
-        signal.signal(signal.SIGALRM, old_handler)
+#
+# A single os.read() call that never returns at all (a hung network/FUSE mount) is NOT
+# bounded here, deliberately: `git show main:.../codex_job.py` shows _sha256_fd() and
+# _publish_from_sandbox() each drain a file with a plain, unbounded os.read() loop, on
+# the SAME class of files, under the SAME per-segment lock, on every job -- neither has a
+# stall bound. Bounding only THIS read loop out of three structurally identical ones
+# would be a false sense of security, not a real one -- the process could still hang
+# forever inside either of the other two -- and O_NONBLOCK has no effect on a regular
+# file's read(), so nothing short of a signal-based interrupt (real, process-global
+# machinery, and the only such handler this file would otherwise need) could close it
+# here alone. A stalled read is a KNOWN, ACCEPTED limit shared with _sha256_fd() and
+# _publish_from_sandbox(), not a defect specific to this method. The HUGE/GROWING bounds
+# above and the phase-deadline check in the drain loop below still apply on every
+# ITERATION between reads; only a single os.read() call that never returns at all falls
+# outside all of them, exactly as it always has for the other two read loops.
 
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -450,7 +418,7 @@ class CodexJob:
         return self._run(argv, timeout)
 
     # ---- shared regular-file / candidate-gate helpers (#213) ----------------
-    def _is_regular(self, path):
+    def _is_regular(self, path, remaining_fn):
         """O_NOFOLLOW|O_NONBLOCK open + S_ISREG + a confirmed read: reject a symlink,
         FIFO, dir, or absent file, and confirm the descriptor is actually READABLE, not
         merely open-able.
@@ -464,24 +432,23 @@ class CodexJob:
         instead of answering at all.
 
         open()+fstat() succeeding only proves the entry EXISTS and is regular -- neither
-        one actually reads a byte. On a network/FUSE filesystem or damaged storage, the
-        metadata calls can both succeed while a real read still returns EIO/ESTALE --
-        exactly the failure this method exists to catch, slipping through anyway. This
-        method used to read a SINGLE byte to catch that, which was wrong, not merely
-        incomplete: a single successful read only proves the FIRST byte is readable,
-        and a regular file can serve a good prefix and then fail on a later page or
-        extent -- the promote this method guards against would still destroy those
-        unread bytes. Draining the descriptor to EOF instead, in the SAME try/except as
-        fstat() (one answer for "could not stat it" and "could not read it", not two),
-        closes THAT for real: every byte the promote is about to discard gets read at
-        least once before this method calls the file trustworthy.
+        one actually reads a byte (main's own version of this check stops at exactly
+        open()+fstat()+S_ISREG, so it never confirms the descriptor is actually
+        READABLE). On a network/FUSE filesystem or damaged storage, the metadata calls
+        can both succeed while a real read still returns EIO/ESTALE -- exactly the
+        failure this method exists to catch, slipping through both open() and fstat().
+        Draining the descriptor to EOF, in the SAME try/except as fstat() (one answer
+        for "could not stat it" and "could not read it", not two), closes that: every
+        byte the promote is about to discard gets read at least once before this method
+        calls the file trustworthy. A single read is not enough either -- a regular file
+        can serve a good prefix and then fail on a later page or extent, so only
+        draining the WHOLE file catches a later read failure (see
+        test_is_regular_false_when_a_later_read_fails_after_a_successful_prefix).
 
-        The unbounded drain that first closed the single-byte gap was ITSELF a defect,
-        not a documented limit: every call site here runs AFTER this process holds the
-        per-segment flock lease, so a huge, growing, or STALLED file does not just cost
-        time, it wedges every cooperating retry for that segment behind a lease nothing
-        releases. Three different failure shapes, three different, independently
-        necessary bounds -- dropping any one leaves a way through:
+        The unbounded drain above is a partial defect on its own: every call site here
+        runs AFTER this process holds the per-segment flock lease, so a huge or growing
+        file does not just cost time, it wedges every cooperating retry for that segment
+        behind a lease nothing releases. Two independently necessary bounds cover that:
           - HUGE: st.st_size is already in hand from fstat() above -- checked BEFORE
             reading a single byte, so an oversized file costs one comparison, not one
             attempted full read.
@@ -489,17 +456,21 @@ class CodexJob:
             time the drain loop runs -- a running byte counter backstops it, refusing
             the instant the ACTUAL bytes read exceed the cap, regardless of what
             st_size claimed.
-          - STALLED: O_NONBLOCK has NO EFFECT on a regular file's read() -- a hung
-            network/FUSE mount blocks inside the kernel with nothing to check between
-            iterations, because the call never returns to let a per-iteration check
-            run at all. Only _read_bounded()'s SIGALRM-based per-call timeout can
-            observe that, from outside the blocked syscall.
-        An over-cap or stalled file REFUSES (returns False), the same direction every
-        other uncertain outcome in this method already goes: destroying an oversized or
-        slow-to-verify canonical because this method gave up checking it would be wrong
-        in the same way the single-byte read was, just at the opposite end -- a
-        legitimately huge canonical becomes unpromotable rather than accepted unread,
-        and that is deliberate. "Do not destroy" outranks "do not stall" here.
+        An over-cap file REFUSES (returns False), the same direction every other
+        uncertain outcome in this method already goes: destroying an oversized canonical
+        because this method gave up checking it would be wrong in the same way trusting
+        an unread file would be, just at the opposite end -- a legitimately huge
+        canonical becomes unpromotable rather than accepted unread, and that is
+        deliberate.
+
+        A STALLED file -- one whose os.read() call never returns at all, a hung
+        network/FUSE mount; O_NONBLOCK has NO EFFECT on a regular file's read() -- is NOT
+        bounded here. See the module-level comment above _MAX_REGULAR_READ_BYTES for the
+        full reasoning: a stall is a KNOWN, ACCEPTED limit shared across all three
+        structurally identical read loops in this file (_sha256_fd(),
+        _publish_from_sandbox(), and this one), not a defect specific to this method --
+        closing it for real would mean bounding all three consistently, a larger,
+        deliberate change this method does not make on its own.
 
         Cost, normally: ONE full read of the canonical per promote attempt (not per
         loop iteration elsewhere) -- real canonical drafts run tens to a couple hundred
@@ -508,7 +479,22 @@ class CodexJob:
         falsy, but NOT an error and NOT a failure of this check: os.read() only raises
         on a real I/O failure, so a zero-length canonical still correctly answers True
         here. Do not "fix" a falsy b"" into a rejection; that would refuse every
-        legitimately empty file."""
+        legitimately empty file.
+
+        `remaining_fn`: a zero-arg callable returning the CALLER's own current
+        remaining-seconds budget for ITS phase (self.poll_remaining for a poll-window
+        operation, self.finalize_timeout to leave FINALIZE_TAIL for the non-subprocess
+        finalize() that follows, self.abs_remaining for a caller with nothing further to
+        reserve) -- never a value read once and reused, and never this method's own
+        substitute for one. Sharing this job's WHOLE abs_remaining() ceiling across every
+        caller regardless of phase would let a poll-window operation (adopt_pending())
+        eat the 150s finalize budget while holding the lease, and let attempt validation
+        consume FINALIZE_TAIL -- reserved for the non-subprocess finalize()
+        (stdout/sentinel/joblog) -- instead of leaving it alone. `remaining_fn` is
+        re-invoked fresh at EVERY check below, per-read and after EOF, because real
+        wall-clock time passes between drain-loop iterations and a stale snapshot taken
+        once would silently re-introduce the same overrun for a caller whose phase budget
+        shrinks as this method runs."""
         try:
             fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC)
         except OSError:
@@ -521,30 +507,48 @@ class CodexJob:
                 return False  # HUGE, per the fstat() snapshot -- refuse before reading
             total_read = 0
             while True:
-                if self.abs_remaining() <= 0:
-                    return False  # SLOW: this run's own deadline, exhausted mid-drain
-                chunk = _read_bounded(fd, _COPY_CHUNK, _READ_STALL_TIMEOUT_SEC)
+                # Checked BEFORE every read, using the CALLER's own phase-specific
+                # remaining_fn() -- not this job's whole abs_remaining() ceiling -- so a
+                # poll-window caller cannot eat the finalize budget, and validation cannot
+                # eat FINALIZE_TAIL. Re-invoked fresh each iteration (never a value read
+                # once and reused): real wall-clock time passes between reads, and a stale
+                # snapshot would silently re-introduce the same overrun for a caller whose
+                # phase budget shrinks as this runs.
+                if remaining_fn() <= 0:
+                    return False  # SLOW: the CALLER's own phase budget, exhausted
+                chunk = os.read(fd, _COPY_CHUNK)
                 if not chunk:
                     break  # EOF -- b"" ends the loop, not an error
                 total_read += len(chunk)
                 if total_read > _MAX_REGULAR_READ_BYTES:
                     return False  # GROWING: actual bytes read outran the fstat() snapshot
         except OSError:
-            return False  # covers fstat()'s own failure AND _read_bounded()'s
-            # deliberately-OSError stall timeout -- one answer for both, not two
-            # exception classes (open()'s own OSError has its own handler above)
+            return False  # covers fstat()'s own failure AND a real read failure --
+            # one answer for both, not two exception classes (open()'s own OSError has
+            # its own handler above)
         finally:
             try:
                 os.close(fd)
             except OSError:
                 pass
+        # Reaching EOF itself takes real wall-clock time (the read that returns b""
+        # still has to complete), so a file that consumed the ENTIRE phase budget
+        # confirming EOF must not be reported trustworthy just because every byte was
+        # eventually read; re-checking here catches that even though the loop's own
+        # per-iteration check never runs again after a break.
+        if remaining_fn() <= 0:
+            return False
         return True
 
-    def _canonical_replaceable(self):
+    def _canonical_replaceable(self, remaining_fn):
         """True iff an os.replace() landing on self.canonical is safe to perform RIGHT NOW:
         either there is no directory entry there at all (an ordinary first promotion,
         nothing to destroy), or an entry IS there and this call just confirmed it is a
         regular file.
+
+        `remaining_fn`: threaded straight through to _is_regular()'s own read -- see that
+        method's docstring for what a caller must pass and why it must be phase-specific,
+        not this job's whole abs_remaining() ceiling.
 
         os.replace() only needs WRITE permission on the CONTAINING DIRECTORY, not on the
         target itself -- so an unreadable regular file, or a symlink whose target vanished,
@@ -592,14 +596,32 @@ class CodexJob:
             except Exception:
                 pass
             return False
-        return self._is_regular(self.canonical)
+        return self._is_regular(self.canonical, remaining_fn)
 
     def _clear_nonregular(self, path):
         """Remove a NON-REGULAR entry squatting on a deterministic driver slot so it cannot
-        permanently block an os.replace into that slot (#213). A regular file is LEFT untouched
-        (callers overwrite it via os.replace or delete it via _silent_remove). lstat (never
-        follows) classifies: a symlink/FIFO/socket is unlinked as the entry itself; a real
-        directory is removed recursively (the slot is never legitimately a directory). Best-effort."""
+        permanently block a promote into that slot (#213). A regular file is LEFT untouched
+        (callers overwrite it via os.replace/os.link, or delete it via _silent_remove). lstat
+        (never follows) classifies: a symlink/FIFO/socket is unlinked as the entry itself; a
+        real directory is removed recursively (the slot is never legitimately a directory).
+        Best-effort.
+
+        KNOWN, ACCEPTED LIMIT, inherited unchanged from before this release (this shape is
+        present verbatim on main): the classify (lstat) and the destroy (remove/rmtree) are
+        two separate syscalls, not one atomic operation. A non-cooperating writer -- the flock
+        only serialises COOPERATING codex_job.py processes, per this file's own module
+        docstring -- could replace a genuinely non-regular squatter with a VALIDATED REGULAR
+        FILE in the window between them, and the destroy would fire on whatever occupies
+        `path` AT THAT MOMENT, not on what was classified moments earlier. It needs a racing
+        writer to reach at all, and real machinery to close (an atomic rename-to-quarantine
+        step: a second mutating syscall plus a private, per-invocation name). That machinery
+        was built and then removed: it renames the entry out and back, so an occupant that is
+        merely UNREADABLE -- exactly what _defer_attempt() now refuses in order to preserve --
+        makes a round trip through a name nothing globs, and a crash mid-way strands it there.
+        Disclosed instead, alongside the other instances of this same threat model in this
+        release's own "Known limits" section. NOTE for whoever changes this: that section also
+        records that this helper has THREE call sites where the previous release had two. Do
+        not close this one, or add a fourth call site, without updating that text too."""
         try:
             st = os.lstat(path)
         except OSError:
@@ -994,8 +1016,13 @@ class CodexJob:
           - a gate that could NOT run (proc is None: exhausted budget / timeout / spawn fail) -> LEAVE
             the pending intact for a future run (never delete recoverable work), return False.
         Never promotes unvalidated content; runs before launch, so uses the poll-window budget. Because
-        False always falls through to launch(), the no-budget case cannot starve (MINOR-1)."""
-        if not self._is_regular(self.pending):
+        False always falls through to launch(), the no-budget case cannot starve (MINOR-1).
+
+        The deadline this method's own _is_regular()/_canonical_replaceable() calls are bounded
+        by is self.poll_remaining -- a poll-window operation, per this method's own name and
+        docstring -- never self.abs_remaining(), the WHOLE JOB's ceiling: sharing that wider
+        ceiling would let this method eat into the 150s finalize budget while holding the lease."""
+        if not self._is_regular(self.pending, self.poll_remaining):
             self._clear_nonregular(self.pending)
             return False
         gates = ([("draft_ready.py", True), ("validate_draft.py", False)]
@@ -1012,7 +1039,7 @@ class CodexJob:
                 self._capture_gate_rejection(name, proc)  # #399: capture before discarding
                 _silent_remove(self.pending)       # gate ran & rejected -> discard stale/bad, launch fresh
                 return False
-        if not self._canonical_replaceable():
+        if not self._canonical_replaceable(self.poll_remaining):
             # Every gate above validated self.pending, never self.canonical -- os.replace()
             # only needs write permission on the DIRECTORY, not the target, so blindly
             # replacing here could destroy bytes this process never read. Refuse and leave
@@ -1121,9 +1148,33 @@ class CodexJob:
         # THEN do the existing candidate gates (unchanged) get to see it.
         if not self._publish_from_sandbox(self.sandbox_attempt, self.attempt):
             return False
-        if not self._is_regular(self.attempt):
+        if not self._is_regular(self.attempt, self.finalize_timeout):
             return False
         return self._validate_candidate(self.attempt, self.finalize_timeout)
+
+    def _complete_relocate(self, leftover):
+        """After a successful os.link() publishes content under a SECOND name, remove the
+        FIRST name (`leftover`) so the two do not stay live forever for the same bytes.
+        Returns True iff `leftover` is actually gone afterward.
+
+        os.link()+remove() is not a rename -- if the remove fails (or this process dies
+        right there), `leftover` persists indefinitely as an ordinary-looking, fully
+        readable regular file. The content itself is never at
+        risk (self.pending already holds it, via the surviving link), but a surviving
+        SECOND name is not inert: `leftover` (self.attempt) is named
+        `.att.<seg>.<inv>.<draft|review>.json` -- ending in exactly the
+        `.draft.json`/`.review.json` suffix OTHER scripts (select_segments.py,
+        backfill_resume_gate_ack.py) glob, INCLUDING dotfiles -- so it can duplicate
+        run/segment evidence or acknowledgement counts downstream. The cheapest honest
+        fix is not to retry or relocate it further, but to stop CLAIMING a clean park
+        when the cleanup did not actually happen: the caller must gate
+        canonical_unreadable_parked on this return value, not set it unconditionally the
+        moment link() itself succeeded."""
+        try:
+            os.remove(leftover)
+            return True
+        except OSError:
+            return False
 
     def _defer_attempt(self):
         """#213: atomically move a completed-but-unvalidated attempt into the stable per-seg/kind
@@ -1132,19 +1183,35 @@ class CodexJob:
         first so the rename cannot fail into finalize()'s discard. Returns True iff a real regular
         attempt file was preserved. Promotes NOTHING.
 
+        A PRE-EXISTING data-loss path this release also closes: unconditionally
+        os.replace()ing whatever fresh attempt just completed straight over self.pending is
+        main's own shape, unguarded. Closed here (unlike the two LARGER, disclosed-not-closed
+        races in this same release's "Known limits" text) because it needs NO racing writer to
+        reach at all: a PREVIOUSLY VALIDATED pending can go merely unreadable
+        (EACCES/EIO/ESTALE) between ordinary runs, and the unconditional replace destroys
+        exactly that on the very next no-budget completion -- reachable by this process alone,
+        with no concurrency and no adversary.
+
+        The fix: REFUSE, rather than clobber. self.pending is populated ONLY by this method
+        (aside from being cleared or promoted elsewhere), so a READABLE regular file there is,
+        by construction, just an earlier UNVALIDATED completion -- superseding it with a newer
+        one costs nothing (see the last-writer-wins paragraph below, which still applies to
+        this half, unchanged). An UNREADABLE regular file cannot be told apart from a genuinely
+        valuable candidate that merely went temporarily unreadable -- refusing there, and
+        recording why, is the safe default when nothing can positively confirm what would be
+        destroyed. The cost is the deferral optimisation for that one segment until an operator
+        looks: it simply launches a fresh codex turn every run instead, the pre-#213
+        behaviour -- strictly better than destroying validated work.
+
         The single per-seg/kind slot deliberately retains the MOST RECENT completed attempt
-        (last-writer-wins). Validity cannot be determined at defer time -- the defer is triggered
-        precisely because no budget remained to run the candidate gate -- so preferentially KEEPING
-        an existing pending over a fresh attempt risks sticking on an unadoptable one (a same-token
-        but structurally invalid pending would be kept forever while valid fresh attempts are
-        discarded). Always refreshing the slot instead guarantees it tracks the latest completion
-        and can NEVER get stuck: an invalid pending is superseded by the next fresh attempt, and
-        adopt_pending() discards it outright the first time a gate can actually run. Superseding an
-        equal-status older attempt is a bounded cost, and still strictly better than the pre-#213
-        status quo (which discarded EVERY tail-completed attempt). A multi-slot queue would only
-        trade this bounded, self-healing residual for unbounded pending-file accumulation (or, if
-        capped, the same discard at the cap) for no convergence benefit -- adopt_pending() promotes
-        the first candidate that passes, and a failing one is superseded by the next launch anyway.
+        (last-writer-wins) for the READABLE case. Validity cannot be determined at defer time -- the
+        defer is triggered precisely because no budget remained to run the candidate gate -- so
+        preferentially KEEPING an existing pending over a fresh attempt risks sticking on an
+        unadoptable one (a same-token but structurally invalid pending would be kept forever while
+        valid fresh attempts are discarded). Always refreshing the slot instead guarantees it tracks
+        the latest completion and can NEVER get stuck: an invalid pending is superseded by the next
+        fresh attempt, and adopt_pending() discards it outright the first time a gate can actually
+        run.
 
         #409: PUBLISH from the sandbox first (fd-pinned, digest-verified) -- at this point
         nothing has validated the candidate yet, but the sandbox->staging copy is not itself
@@ -1152,22 +1219,22 @@ class CodexJob:
         real candidate gates before anything is promoted."""
         if not self._publish_from_sandbox(self.sandbox_attempt, self.attempt):
             return False
-        if not self._is_regular(self.attempt):
+        if not self._is_regular(self.attempt, self.abs_remaining):
             return False
         self._clear_nonregular(self.pending)
         try:
-            # Deliberately UNCONDITIONAL, unlike the sibling relocate in run()'s promote
-            # branch (which refuses via os.link()'s atomic EEXIST rather than ever
-            # overwriting an occupied slot): that site can safely refuse because its
-            # fallback is a stranded, still-recoverable attempt at its own random path --
-            # nothing is lost by walking away. THIS slot has no such fallback. Per this
-            # method's own docstring above, adopt_pending() refuses at its very first
-            # check on an unreadable-but-regular pending, and _clear_nonregular() leaves
-            # regular inodes alone -- so this unconditional replace is the ONLY code path
-            # that can ever clear a poisoned slot. Refusing here on occupancy would leave
-            # that slot blocked for as long as the unreadability persists, with nothing
-            # anywhere able to clear it -- exactly the "gets stuck" failure the
-            # always-refresh design above exists to prevent, not a race left unfixed.
+            pending_is_regular = stat.S_ISREG(os.lstat(self.pending).st_mode)
+        except OSError:
+            pending_is_regular = False  # absent, or another lookup failure -- nothing to refuse over
+        if pending_is_regular and not self._is_regular(self.pending, self.abs_remaining):
+            # A regular file that this process cannot read -- refuse rather than guess whether
+            # it is validated work merely gone temporarily unreadable. Diagnostic recorded so an
+            # operator can see WHY this segment stopped deferring, not just that it did.
+            self.error_detail = (
+                "pending slot occupied by a regular file that could not be read -- refusing "
+                "to supersede it; deferral skipped for this attempt")
+            return False
+        try:
             os.replace(self.attempt, self.pending)
         except OSError:
             return False
@@ -1268,7 +1335,7 @@ class CodexJob:
                 # BEFORE spending a real codex turn.
                 self.reason = "device-mismatch"
                 return 1
-            if not self._canonical_replaceable():
+            if not self._canonical_replaceable(self.abs_remaining):
                 # Same shape as the device-mismatch check above: refuse BEFORE spending a
                 # real codex turn, not after. If the canonical entry exists but cannot be
                 # observed right now, neither safe_adopt() (which reads self.canonical
@@ -1324,7 +1391,7 @@ class CodexJob:
             self.poll()
             if self.job_status == "completed" and self.abs_remaining() > FINALIZE_TAIL:
                 if self.validate_attempt():
-                    if not self._canonical_replaceable():
+                    if not self._canonical_replaceable(self.finalize_timeout):
                         # Data-safety refusal, not a candidate defect: self.attempt just
                         # passed every gate, but self.canonical cannot be read right now
                         # (an unreadable regular file, or a symlink whose target vanished)
@@ -1347,59 +1414,49 @@ class CodexJob:
                         #
                         # MUST NOT overwrite self.pending unless it is GENUINELY,
                         # VERIFIABLY safe to -- absent, or squatted on by a non-regular
-                        # entry _clear_nonregular() already knows to remove. An earlier
-                        # version of this comment argued the only way to reach this
-                        # branch with self.pending non-empty was "adopt_pending()'s own
-                        # gate call returned None", making whatever is there "at best
-                        # unconfirmed this run" and therefore safe to supersede. That
-                        # argument was refuted: a PREVIOUSLY validated pending file can
-                        # go unreadable (EACCES/EIO/ESTALE) between runs. _is_regular()
-                        # then returns False, _clear_nonregular() sees a regular inode
-                        # (lstat does not care about readability) and correctly leaves it
-                        # alone, and adopt_pending() returns False from its VERY FIRST
-                        # check -- never reaching the canonical-guard branch that would
-                        # have set self.canonical_unreadable, so the early return above
-                        # never fires either. A regular file at self.pending can
-                        # therefore be something genuinely validated, unreadable now for
-                        # reasons that have nothing to do with its own validity, and
-                        # there is no way to positively prove otherwise from here -- so a
-                        # regular file, readable or not, refuses unconditionally rather
-                        # than guess. Only a VERIFIED-absent or VERIFIED-non-regular slot
-                        # is touched.
+                        # entry _clear_nonregular() already knows to remove. A regular
+                        # file at self.pending, readable or not, refuses unconditionally
+                        # rather than guess: a PREVIOUSLY validated pending file can go
+                        # unreadable (EACCES/EIO/ESTALE) between runs, and there is no way
+                        # to positively prove from here whether it is that or genuinely
+                        # worthless. adopt_pending() itself already treats this the same
+                        # way -- an unreadable regular file there returns False from its
+                        # very first check, never reaching the canonical-guard branch that
+                        # would set self.canonical_unreadable, so the early return above
+                        # never fires for it either. Only a VERIFIED-absent or
+                        # VERIFIED-non-regular slot is touched.
                         #
-                        # An EARLIER version of the code above checked this with
-                        # os.lstat(self.pending) and then, separately, os.replace() --
-                        # itself a check-then-act race: a non-cooperating writer (the
-                        # flock only serialises COOPERATING codex_job.py processes, per
-                        # this file's own module docstring) could publish a validated
-                        # regular file into self.pending in the window between the lstat
-                        # and the replace, and the replace would clobber it unobserved --
-                        # the identical class of defect this whole guard exists to
-                        # prevent, just moved one relocate downstream. os.link() instead
-                        # of os.replace() makes the "is anything there" question and the
-                        # "put something there" action ONE atomic kernel operation:
-                        # link() creates the new name ONLY if self.pending does not
-                        # already exist, and fails EEXIST -- never overwrites -- if it
-                        # does. There is no window between "observed empty" and "wrote
-                        # into it" for anything to land in. _clear_nonregular() still
-                        # runs first, best-effort, so the common "stale symlink/FIFO/dir
-                        # squatter" case still succeeds -- but the SAFETY guarantee
-                        # against clobbering a REGULAR file comes from link()'s own
-                        # atomicity, not from that clear step: if the clear fails or
-                        # races, link() still correctly refuses rather than clobbering.
+                        # os.link() makes the "is anything there" question and the "put
+                        # something there" action ONE atomic kernel operation: it creates
+                        # the new name ONLY if self.pending does not already exist, and
+                        # fails EEXIST -- never overwrites -- if it does. There is no
+                        # window between "observed empty" and "wrote into it" for a
+                        # non-cooperating writer (the flock only serialises COOPERATING
+                        # codex_job.py processes, per this file's own module docstring) to
+                        # land in.
+                        #
+                        # _clear_nonregular() runs first, best-effort, so the common "stale
+                        # symlink/FIFO/dir squatter" case still succeeds -- but the SAFETY
+                        # GUARANTEE against clobbering a REGULAR file comes from link()'s own
+                        # atomicity, not from that clear step: if the clear fails, races, or
+                        # is skipped entirely, link() still correctly refuses rather than
+                        # clobbering. Only claim what link() itself guarantees here: the clear
+                        # step does NOT close the window against a racing writer (see
+                        # _clear_nonregular()'s own docstring for that KNOWN, ACCEPTED,
+                        # inherited limit, disclosed in this release's "Known limits" text
+                        # alongside the other two instances of the identical threat model).
                         self._clear_nonregular(self.pending)
                         try:
                             os.link(self.attempt, self.pending)
                         except OSError:
-                            pass  # occupied (EEXIST) or otherwise could not link --
-                            # refuse, leave both self.attempt and self.pending alone
+                            pass  # occupied (EEXIST, by anything) or otherwise could
+                            # not link -- refuse, leave both self.attempt and
+                            # self.pending alone
                         else:
-                            _silent_remove(self.attempt)  # complete the relocate --
-                            # os.link() leaves BOTH names pointing at the same inode
-                            # until this removes the original; a failure here is
-                            # harmless (self.attempt persists as a second, unused name
-                            # for content already safely reachable via self.pending)
-                            self.canonical_unreadable_parked = True
+                            # Only report a completed park if _complete_relocate()
+                            # actually finished the job -- see its own docstring for why
+                            # a surviving second name is not inert.
+                            self.canonical_unreadable_parked = self._complete_relocate(self.attempt)
                     else:
                         os.replace(self.attempt, self.canonical)
                         self.promoted = True

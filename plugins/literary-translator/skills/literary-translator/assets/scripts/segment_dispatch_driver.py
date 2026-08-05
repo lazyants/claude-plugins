@@ -2112,30 +2112,28 @@ def _open_regular_no_follow_walk(path: Path):
     second failure shape.
 
     THE LEAF OPEN CARRIES `O_NONBLOCK`, and this is load-bearing, not
-    cosmetic (codex, round 2 -- fix-introduced regression against the
-    point-of-use `os.lstat()` this replaced, which refused a FIFO without
-    ever opening it). Without it, a FIFO planted at the leaf path -- e.g.
-    the checkout-provided one classified regular a moment earlier, then
-    swapped for a FIFO before this exact call -- blocks INSIDE `os.open()`
-    itself, before type checking ever runs and before the caller's own
-    Node timeout can even start: an attacker-triggerable hang, strictly
-    worse than the check this fix exists to close. `O_NONBLOCK` makes the
-    open on a FIFO with no writer return immediately instead of blocking,
-    so classification (`os.fstat()` + `S_ISREG`) always runs and can
-    refuse it. This is the SAME shape `codex_job.py`'s own `_is_regular()`
-    already uses for the identical reason (`O_NOFOLLOW | O_NONBLOCK`) --
-    read that helper before touching this one; the answer already existed
-    one file over. `O_NONBLOCK` has done its whole job the moment
-    `S_ISREG` confirms the leaf is a genuine regular file (it existed only
-    to keep a FIFO's `open()` from blocking before classification could
-    even run), and it is CLEARED on this exact descriptor right after that
-    check passes, before this function returns it. codex round 3, MINOR:
-    an earlier version of this left the flag set on the returned fd,
-    reasoning that ordinary regular-file I/O ignores it -- true in the
-    common case, but `S_ISREG` does not UNIVERSALLY guarantee a
-    nonblocking read cannot short-read or return `EWOULDBLOCK` (Linux
-    exposes regular pseudo-files, and FUSE implementations choose their
-    own read semantics), so leaving it set asked every caller to be right
+    cosmetic -- the point-of-use `os.lstat()` this replaced refused a FIFO
+    without ever opening it. Without it, a FIFO planted at the leaf path --
+    e.g. the checkout-provided one classified regular a moment earlier,
+    then swapped for a FIFO before this exact call -- blocks INSIDE
+    `os.open()` itself, before type checking ever runs and before the
+    caller's own Node timeout can even start: an attacker-triggerable
+    hang, strictly worse than the check this fix exists to close.
+    `O_NONBLOCK` makes the open on a FIFO with no writer return
+    immediately instead of blocking, so classification (`os.fstat()` +
+    `S_ISREG`) always runs and can refuse it. This is the SAME shape
+    `codex_job.py`'s own `_is_regular()` already uses for the identical
+    reason (`O_NOFOLLOW | O_NONBLOCK`) -- read that helper before touching
+    this one; the answer already existed one file over. `O_NONBLOCK` has
+    done its whole job the moment `S_ISREG` confirms the leaf is a genuine
+    regular file (it existed only to keep a FIFO's `open()` from blocking
+    before classification could even run), and it is CLEARED on this
+    exact descriptor right after that check passes, before this function
+    returns it: ordinary regular-file I/O ignores the flag in the common
+    case, but `S_ISREG` does not UNIVERSALLY guarantee a nonblocking read
+    cannot short-read or return `EWOULDBLOCK` (Linux exposes regular
+    pseudo-files, and FUSE implementations choose their own read
+    semantics), so leaving it set would ask every caller to be right
     about a guarantee this function does not actually make. Clearing it
     here, once, is cheaper than auditing every current and future caller.
 
@@ -2159,16 +2157,13 @@ def _open_regular_no_follow_walk(path: Path):
     leaf_fd = None
 
     def _safe_close(descriptor: int) -> None:
-        """codex round 3, MINOR: the old cleanup closed `fd`/`leaf_fd`
-        directly wherever ownership needed to be released, twice over in
-        some paths -- if THAT close() itself raised (a real possibility;
-        close() is not guaranteed to succeed), the variable was still
-        non-None when a LATER handler ran, so it retried the identical
-        close on an fd that already had a failed close attempt. Every
-        release now goes through here, and EVERY caller detaches ownership
-        (sets its own variable to None) BEFORE calling this, never after
-        -- so a failure inside this function can never leave a caller
-        thinking it still owns something it already tried to give up."""
+        """Every release of `fd`/`leaf_fd` goes through here, and EVERY
+        caller detaches ownership (sets its own variable to None) BEFORE
+        calling this, never after. `close()` is not guaranteed to succeed;
+        detaching first means a failure inside this function can never
+        leave a caller thinking it still owns something it already tried
+        to give up, which is what a retried close on the same already-
+        failed fd would mean."""
         try:
             os.close(descriptor)
         except OSError:
@@ -2196,18 +2191,18 @@ def _open_regular_no_follow_walk(path: Path):
             closing, leaf_fd = leaf_fd, None
             _safe_close(closing)
             return None, "suspicious"
-        # codex round 3, MINOR: O_NONBLOCK was left set on the fd this
-        # function RETURNS, and the caller reads it as an ordinary
-        # EOF-complete text stream (os.fdopen(fd, "r").read()). Ordinary
-        # disk files ignore the flag, but S_ISREG does not UNIVERSALLY
-        # guarantee that -- Linux exposes regular pseudo-files, and FUSE
-        # implementations choose their own read semantics, so a nonblocking
-        # short-read or EWOULDBLOCK on some regular-typed entry is not
-        # provably impossible. The flag has done its whole job the moment
-        # S_ISREG passes (it existed ONLY to keep a FIFO's open() from
-        # blocking before classification could run); clear it now, on this
-        # SAME verified descriptor, guarded the same way every other
-        # metadata call in this function already is.
+        # O_NONBLOCK must be cleared here, before this function returns the
+        # fd -- the caller reads it as an ordinary EOF-complete text stream
+        # (os.fdopen(fd, "r").read()). Ordinary disk files ignore the flag,
+        # but S_ISREG does not UNIVERSALLY guarantee that -- Linux exposes
+        # regular pseudo-files, and FUSE implementations choose their own
+        # read semantics, so a nonblocking short-read or EWOULDBLOCK on
+        # some regular-typed entry is not provably impossible. The flag
+        # has done its whole job the moment S_ISREG passes (it existed
+        # ONLY to keep a FIFO's open() from blocking before classification
+        # could run); clear it now, on this SAME verified descriptor,
+        # guarded the same way every other metadata call in this function
+        # already is.
         try:
             current_flags = fcntl.fcntl(leaf_fd, fcntl.F_GETFL)
             fcntl.fcntl(leaf_fd, fcntl.F_SETFL, current_flags & ~os.O_NONBLOCK)
