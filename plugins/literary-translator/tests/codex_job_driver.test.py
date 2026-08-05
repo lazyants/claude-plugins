@@ -608,6 +608,58 @@ def test_finalize_timeout_reserves_tail(tmp_path):
     assert job.finalize_timeout() == 0.0
 
 
+def test_run_preflight_canonical_check_is_bounded_by_finalize_timeout_not_the_whole_job_ceiling(
+    tmp_path, monkeypatch
+):
+    """run()'s preflight _canonical_replaceable() call (immediately after the
+    device-mismatch check, BEFORE the flock is even acquired) must reserve
+    FINALIZE_TAIL out of the whole job's abs_remaining() ceiling, exactly like the
+    LATER _canonical_replaceable() call in the promote branch already does (both guard
+    the same os.replace(..., self.canonical) risk) -- not consult abs_remaining()
+    directly, which reserves nothing and would let this drain eat into the 150s
+    finalize budget before a single paid codex turn is even spent.
+
+    Constructs a job whose abs_remaining() is small but still POSITIVE (5s) -- below
+    FINALIZE_TAIL (10s), so finalize_timeout() clamps to 0.0 (see
+    test_finalize_timeout_reserves_tail, above) while abs_remaining() itself would
+    still look like "plenty of budget" to a caller that consulted it directly. A
+    correctly-bounded preflight refuses immediately, before ANY of hygiene/safe_adopt/
+    adopt_pending/launch runs; a caller sharing the whole-job ceiling proceeds past
+    the preflight and reaches launch() instead."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    Path(job.canonical).write_text('{"marker":"present-and-readable"}', encoding="utf-8")
+    monkeypatch.setattr(job, "abs_remaining", lambda: 5.0)
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    monkeypatch.setattr(job, "adopt_pending", lambda: False)
+
+    launch_calls = {"n": 0}
+
+    def spy_launch():
+        launch_calls["n"] += 1
+        job.jobId = "J"
+        return True
+    monkeypatch.setattr(job, "launch", spy_launch)
+
+    def fake_poll():
+        job.job_status = "completed"
+    monkeypatch.setattr(job, "poll", fake_poll)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert job.reason == "canonical-unreadable"
+    assert job.canonical_unreadable is True
+    assert launch_calls["n"] == 0, (
+        "no fresh paid turn may be spent once the preflight's own canonical check has "
+        "refused -- a version sharing abs_remaining() directly would see 5.0 > 0, pass "
+        "the preflight, and reach launch() anyway"
+    )
+    assert Path(job.canonical).read_text(encoding="utf-8") == '{"marker":"present-and-readable"}', (
+        "the canonical must survive untouched -- this is a refusal, not a promote"
+    )
+
+
 def test_run_refuses_promote_when_budget_exhausted(tmp_path, monkeypatch):
     """A job that completes with abs_remaining() <= FINALIZE_TAIL must NOT promote. Its
     fake_launch writes NO attempt file, so there is nothing for _defer_attempt() to
@@ -625,11 +677,19 @@ def test_run_refuses_promote_when_budget_exhausted(tmp_path, monkeypatch):
         return True
     monkeypatch.setattr(job, "launch", fake_launch)
 
+    # Exhaust the finalize budget only from poll() onward: run()'s own preflight
+    # canonical check is ALSO bounded by finalize_timeout (-> abs_remaining, see
+    # test_run_preflight_canonical_check_is_bounded_by_finalize_timeout_not_the_whole_job_ceiling,
+    # above) and must see the real, comfortably-positive budget a fresh job actually
+    # has at that early point -- a flat constant for the whole run() would trip THAT
+    # guard instead of the promote guard this test means to exercise.
+    budget = {"exhausted": False}
+    monkeypatch.setattr(job, "abs_remaining", lambda: 2.0 if budget["exhausted"] else 200.0)
+
     def fake_poll():
         job.job_status = "completed"
+        budget["exhausted"] = True
     monkeypatch.setattr(job, "poll", fake_poll)
-    # Exhaust the finalize budget so the promote guard refuses to begin.
-    monkeypatch.setattr(job, "abs_remaining", lambda: 2.0)
     validated = {"called": False}
     monkeypatch.setattr(job, "validate_attempt",
                         lambda: validated.__setitem__("called", True) or True)
@@ -674,11 +734,17 @@ def test_run_defers_completed_attempt_when_budget_exhausted(tmp_path, monkeypatc
         return True
     monkeypatch.setattr(job, "launch", fake_launch)
 
+    # Exhaust the finalize budget only from poll() onward -- see
+    # test_run_refuses_promote_when_budget_exhausted's own comment on this same
+    # pattern, above: a flat constant for the whole run() would also trip the
+    # preflight canonical check, which is not what this test means to exercise.
+    budget = {"exhausted": False}
+    monkeypatch.setattr(job, "abs_remaining", lambda: 2.0 if budget["exhausted"] else 200.0)
+
     def fake_poll():
         job.job_status = "completed"
+        budget["exhausted"] = True
     monkeypatch.setattr(job, "poll", fake_poll)
-    # Exhaust the finalize budget so the promote guard refuses to begin.
-    monkeypatch.setattr(job, "abs_remaining", lambda: 2.0)
     validated = {"called": False}
     monkeypatch.setattr(job, "validate_attempt",
                         lambda: validated.__setitem__("called", True) or True)

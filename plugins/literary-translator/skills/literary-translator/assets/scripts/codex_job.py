@@ -588,7 +588,7 @@ class CodexJob:
     def _clear_nonregular(self, path):
         """Remove a NON-REGULAR entry squatting on a deterministic driver slot so it cannot
         permanently block a promote into that slot (#213). A regular file is LEFT untouched
-        (callers overwrite it via os.replace/os.link, or delete it via _silent_remove). lstat
+        (callers overwrite it via os.replace, or delete it via _silent_remove). lstat
         (never follows) classifies: a symlink/FIFO/socket is unlinked as the entry itself; a
         real directory is removed recursively (the slot is never legitimately a directory).
         Best-effort.
@@ -600,15 +600,13 @@ class CodexJob:
         docstring -- could replace a genuinely non-regular squatter with a VALIDATED REGULAR
         FILE in the window between them, and the destroy would fire on whatever occupies
         `path` AT THAT MOMENT, not on what was classified moments earlier. It needs a racing
-        writer to reach at all, and real machinery to close (an atomic rename-to-quarantine
-        step: a second mutating syscall plus a private, per-invocation name). That machinery
-        was built and then removed: it renames the entry out and back, so an occupant that is
-        merely UNREADABLE -- exactly what _defer_attempt() now refuses in order to preserve --
-        makes a round trip through a name nothing globs, and a crash mid-way strands it there.
-        Disclosed instead, alongside the other instances of this same threat model in this
-        release's own "Known limits" section. NOTE for whoever changes this: that section also
-        records that this helper has THREE call sites where the previous release had two. Do
-        not close this one, or add a fourth call site, without updating that text too."""
+        writer to reach at all, and real machinery to close it (an atomic rename-to-quarantine
+        step: a second mutating syscall plus a private, per-invocation name), which this
+        release does not build. Disclosed instead, alongside the other instances of this same
+        threat model in this release's own "Known limits" section. NOTE for whoever changes
+        this: that section also describes this helper by its call sites -- grep for
+        `_clear_nonregular(` rather than trust a hand-maintained count anywhere, including
+        this note, before touching either that section or a caller of this method."""
         try:
             st = os.lstat(path)
         except OSError:
@@ -995,15 +993,20 @@ class CodexJob:
         """#213: try to adopt a completed-but-unvalidated attempt DEFERRED by a prior run of the same
         seg/kind. Validate through the same candidate gates (which also enforce --expect-token against
         the candidate's own dispatch_token) and, only on a FULL PASS, atomically promote it -> return
-        True. Return False (caller launches fresh codex) in every other case, handling the pending
-        file so it is never lost or left to block a future run:
+        True. Return False in every other case, handling the pending file so it is never lost or left
+        to block a future run:
           - absent / a non-regular squatter -> cleared, return False;
           - a gate that RAN and REJECTED the candidate (proc.returncode != 0: bad content / stale
             cross-run token) -> DISCARD the pending, return False;
           - a gate that could NOT run (proc is None: exhausted budget / timeout / spawn fail) -> LEAVE
-            the pending intact for a future run (never delete recoverable work), return False.
-        Never promotes unvalidated content; runs before launch, so uses the poll-window budget. Because
-        False always falls through to launch(), the no-budget case cannot starve (MINOR-1).
+            the pending intact for a future run (never delete recoverable work), return False;
+          - every gate PASSED but the canonical guard refuses the promote (self.canonical_unreadable
+            set) -> LEAVE the pending intact, return False.
+        Never promotes unvalidated content; runs before launch, so uses the poll-window budget. Only
+        the no-budget gate case above is guaranteed to fall through to caller's launch() (MINOR-1) --
+        the canonical-unreadable case is NOT: the caller stops there instead (see run()'s own
+        canonical_unreadable branch, right after this call), since a fresh codex turn cannot succeed
+        either while the canonical stays unreadable.
 
         The deadline this method's own _is_regular()/_canonical_replaceable() calls are bounded
         by is self.poll_remaining -- a poll-window operation, per this method's own name and
@@ -1161,6 +1164,20 @@ class CodexJob:
         real candidate gates before anything is promoted."""
         if not self._publish_from_sandbox(self.sandbox_attempt, self.attempt):
             return False
+        # abs_remaining here is deliberate, not an oversight against the phase-budget
+        # taxonomy _is_regular() documents (poll_remaining / finalize_timeout / abs_remaining
+        # for a caller with nothing further to reserve). The phase-correct value by that
+        # taxonomy is finalize_timeout, since finalize() always follows -- but this method is
+        # only ever reached on the branch where abs_remaining() <= FINALIZE_TAIL already, and
+        # finalize_timeout() is max(0.0, ... - FINALIZE_TAIL): it is pinned at exactly zero by
+        # construction at this point, so threading it would refuse at this very first check
+        # every single time, silently disabling the #213 deferral this method exists to do.
+        # The trade this leaves standing: the drain below can run inside the reserved finalize
+        # tail rather than before it. In practice that is bounded by self.attempt being a small
+        # local JSON file this same process just wrote via _publish_from_sandbox, still subject
+        # to _is_regular()'s own size ceiling and growth counter -- not a network fetch, not an
+        # arbitrary pre-existing file -- but it is not a guarantee, and is disclosed as a known
+        # limit rather than closed here.
         if not self._is_regular(self.attempt, self.abs_remaining):
             return False
         self._clear_nonregular(self.pending)
@@ -1246,7 +1263,7 @@ class CodexJob:
                 # BEFORE spending a real codex turn.
                 self.reason = "device-mismatch"
                 return 1
-            if not self._canonical_replaceable(self.abs_remaining):
+            if not self._canonical_replaceable(self.finalize_timeout):
                 # Same shape as the device-mismatch check above: refuse BEFORE spending a
                 # real codex turn, not after. If the canonical entry exists but cannot be
                 # observed right now, neither safe_adopt() (which reads self.canonical
@@ -1257,6 +1274,14 @@ class CodexJob:
                 # the common case; the later guards remain in place for the file that
                 # turns unreadable DURING this run, after this check already passed --
                 # neither makes the other redundant.
+                #
+                # finalize_timeout, not abs_remaining: this drain runs BEFORE the flock is
+                # even acquired (below), with the WHOLE job's ceiling still ahead of it --
+                # sharing that unbounded ceiling here would let this one check consume the
+                # 10s FINALIZE_TAIL reserved for finalize()'s own stdout/sentinel/joblog
+                # write, the exact overrun the phase threading elsewhere in this file exists
+                # to prevent (see _is_regular()'s own docstring for the three legitimate
+                # remaining_fn shapes and why abs_remaining is not one of them here).
                 self.canonical_unreadable = True
                 self.reason = "canonical-unreadable"
                 return 1

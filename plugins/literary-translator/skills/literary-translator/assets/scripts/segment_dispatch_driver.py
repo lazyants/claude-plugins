@@ -346,10 +346,25 @@ except ImportError:
     yaml = None
 
 # ---------------------------------------------------------------------------
-# Self-anchoring -- identical convention to select_segments.py/ledger_merge.py.
+# Self-anchoring -- identical convention to select_segments.py/ledger_merge.py,
+# EXCEPT for `.absolute()` in place of `.resolve()` (both those sibling files
+# still use `.resolve()`, unchanged by this release -- see this file's own
+# `resolve_dirs()` docstring for why `.resolve()` cannot be used for any path
+# `_open_regular_no_follow_walk()` will later verify: `.resolve()` follows
+# every ancestor symlink and hands the walk an already-canonicalized target,
+# so it never sees the symlink it exists to refuse). `SCRIPTS_DIR` feeds
+# `_self_anchored_template_path()`, which feeds the same walk for the
+# self-anchored (no `--plugin-root`) branch -- so it needs the identical
+# treatment, not just the `--plugin-root` branch in `resolve_dirs()` below.
+# `.absolute()` makes `__file__` absolute (joins it against this process's
+# CWD if it is relative) WITHOUT touching the filesystem at all: no symlink
+# is ever followed, and no `..`/`.` component is collapsed -- a literal `..`
+# in the resulting path is still safe, because `_open_regular_no_follow_walk()`
+# opens it as an ordinary directory ENTRY (never a symlink) via the kernel's
+# own directory structure, not by lexically guessing its target.
 # ---------------------------------------------------------------------------
 
-SCRIPTS_DIR = Path(__file__).resolve().parent
+SCRIPTS_DIR = Path(__file__).absolute().parent
 DURABLE_ROOT = SCRIPTS_DIR.parent
 SELECT_SEGMENTS_SCRIPT = SCRIPTS_DIR / "select_segments.py"
 CODEX_JOB_SCRIPT = SCRIPTS_DIR / "codex_job.py"
@@ -573,7 +588,29 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
         template_script = _self_anchored_template_path()
         scripts_dir = SCRIPTS_DIR
     else:
-        plugin_root = Path(plugin_root_str).resolve()
+        if not plugin_root_str.strip():
+            # An unset {{PLUGIN_ROOT}} template substitution renders as the
+            # empty string, not as the flag being omitted -- and
+            # Path("").absolute() (like Path("").resolve()) is CWD, silently
+            # making wherever this process happens to be launched from the
+            # executable authority for the template AND every sibling
+            # script. codex_job.py:1436 already refuses this same input;
+            # refusing it here too, before any path is built from it, keeps
+            # both scripts consistent instead of one being the loophole.
+            fatal(
+                "--plugin-root was given but is empty/whitespace-only -- "
+                "this usually means a {{PLUGIN_ROOT}} template substitution "
+                "did not happen. Omit the flag entirely for today's "
+                "self-anchored behavior, or pass a real path.",
+                exit_code=2,
+            )
+        # `.absolute()`, never `.resolve()`: see this module's own
+        # SCRIPTS_DIR comment above for why -- `.resolve()` would follow
+        # every ancestor symlink in `plugin_root_str` before
+        # `_open_regular_no_follow_walk()` ever gets a chance to refuse one,
+        # silently narrowing "refuses a symlink anywhere on the path" down
+        # to "anywhere below whatever `--plugin-root` already resolved to".
+        plugin_root = Path(plugin_root_str).absolute()
         plugin_scripts_dir = plugin_root / "assets" / "scripts"
         select_segments_script = plugin_scripts_dir / "select_segments.py"
         codex_job_script = plugin_scripts_dir / "codex_job.py"
@@ -665,11 +702,14 @@ def _root_forward_args(dirs: dict, durable_root_str, plugin_root_str, *, support
         # string here would let a relative --plugin-root resolve a SECOND
         # time, against the CHILD's cwd (durable_root, for the one caller
         # that overrides it), landing parent and child on two DIFFERENT
-        # plugin roots. Path(plugin_root_str).resolve() here reproduces
-        # the identical resolution resolve_dirs() already performed (same
-        # string, same unchanged process cwd), never a second, independent
-        # answer.
-        args += ["--plugin-root", str(Path(plugin_root_str).resolve())]
+        # plugin roots. `.absolute()`, matching resolve_dirs() exactly (see
+        # its own comment on the same line for why never `.resolve()`),
+        # reproduces the identical computation resolve_dirs() already
+        # performed (same string, same unchanged process cwd), never a
+        # second, independent answer -- and never a canonicalized one that
+        # would disagree with what this driver's own no-follow walk on
+        # `dirs["template_script"]` just verified.
+        args += ["--plugin-root", str(Path(plugin_root_str).absolute())]
     return args
 
 
@@ -2101,7 +2141,14 @@ def _open_regular_no_follow_walk(path: Path):
         `read_text()` are two independent lookups, with a window between
         them for an atomic leaf swap to install a symlink or FIFO. The fd
         this returns is the SAME fd the caller reads from -- one lookup,
-        one set of bytes, nothing to swap in between.
+        PATHNAME substitution and NEW-INODE substitution both closed
+        (nothing can swap what this fd points at out from under the
+        caller). What this does NOT close: SAME-INODE mutation. The fd
+        pins an inode, not immutable bytes -- a concurrent truncate,
+        append, or overwrite-in-place on this exact inode, after this
+        function returns it, still changes what the caller's later read
+        sees. Closing that needs a content check (e.g. reading once and
+        hashing), not a filesystem-structure one.
 
     Returns `(fd, "file")` on success -- the CALLER owns the fd and must
     close it. Returns `(None, "absent")` if the leaf genuinely does not
@@ -2298,7 +2345,20 @@ def call_template_functions(dirs: dict, subst: dict, calls: list, node_bin: str 
     what this closes accordingly: structural substitution (symlinks,
     ancestor swaps, non-regular entries, the check/read race), not content
     tampering of a genuinely regular file at a location already writable
-    by whatever produced it."""
+    by whatever produced it.
+
+    THE TEMPLATE READ BELOW IS UNBOUNDED, AND NOTHING TIME-LIMITS IT. The
+    accepted fd is handed to a plain `fh.read()` -- no size cap, no
+    deadline -- and the 60s bound this function DOES enforce (the `node`
+    subprocess.run() call further down) only starts once that read has
+    already finished. A genuine regular file at the verified path that is
+    huge or, on a stalled network/FUSE filesystem, slow to deliver its
+    bytes can exhaust memory or hang here, before Node ever starts and
+    before any timeout in this function has a chance to apply. Disclosed,
+    not fixed here: closing it needs a size ceiling and a deadline-bound
+    read, the same shape `codex_job.py` already had to add for its own
+    unbounded artifact drain -- a materially bigger change than this
+    function's own scope."""
     template_path = dirs["template_script"]
     template_fd, template_state = _open_regular_no_follow_walk(template_path)
     if template_fd is None:
@@ -2310,6 +2370,9 @@ def call_template_functions(dirs: dict, subst: dict, calls: list, node_bin: str 
             exit_code=2, template_path=str(template_path), template_state=template_state,
         )
     try:
+        # Unbounded and undeadlined -- see this function's own docstring
+        # ("THE TEMPLATE READ BELOW IS UNBOUNDED") for why this is a
+        # disclosed, not closed, gap.
         with os.fdopen(template_fd, "r", encoding="utf-8") as fh:
             template_text = fh.read()
     except OSError as exc:

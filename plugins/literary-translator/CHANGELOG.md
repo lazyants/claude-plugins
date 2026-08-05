@@ -97,9 +97,14 @@ Five defects in the W5 dispatch driver and its codex worker, all of them shipped
   read and is still correctly readable; that is not a failure and must not be "fixed" into a
   rejection.
 
-  **What these two bounds do NOT cover, stated plainly:** a single `os.read()` that never
-  returns at all. Both bounds sit *between* reads, so a hung mount blocks inside the call and
-  neither check runs again. `O_NONBLOCK` is not a usable stall bound here — an ordinary disk
+  **What these two bounds do NOT cover, stated plainly — and it is more than one call.** Both
+  bounds sit *between* reads, so anything that blocks *inside* a syscall escapes them. That is
+  not only `os.read()`: the `lstat()` that classifies the entry, and the `open()`, `fstat()`
+  and `close()` around the drain, are all blocking filesystem calls outside any interruptible
+  check, and a hard NFS or FUSE failure can stall in any of them. Catching `OSError` helps only
+  after a syscall returns. **The honest statement is that the whole probe is unbounded against
+  a stalled mount, not merely the gap between reads** — an earlier draft of this section said
+  the latter, which was narrower than the code. `O_NONBLOCK` is not a usable stall bound here — an ordinary disk
   file ignores it entirely, and a FUSE or pseudo-file entry that `S_ISREG` accepts chooses
   its own read semantics. A per-read timer was built for exactly this and then removed
   before release: it would have been the only process-global signal handler in the script,
@@ -144,10 +149,14 @@ Five defects in the W5 dispatch driver and its codex worker, all of them shipped
   - **Destination substitution.** Anything put at the canonical path between check and
     rename — including a perfectly readable *newer* canonical published by another writer —
     is destroyed without ever being observed.
-  - **Source substitution, which is the worse one.** The gates validate the *pending* file,
-    and `os.replace()` then re-resolves that same pathname. A writer who swaps the source
-    after validation gets bytes **no gate ever examined** promoted to canonical. The failure
-    is not lost work but a false green — unvalidated content published as validated.
+  - **Source substitution, which is the worse one, and it applies to BOTH source paths.** The
+    gates validate a file by pathname and `os.replace()` then re-resolves that same pathname.
+    A writer who swaps the source after validation gets bytes **no gate ever examined**
+    promoted to canonical. The failure is not lost work but a false green — unvalidated
+    content published as validated. This holds for the adopted pending file *and* for a fresh
+    attempt: the attempt is published and gated, the canonical readability drain then widens
+    the interval, and the rename re-resolves the attempt path afterwards. An earlier draft of
+    this list described only the pending path; the fresh path has the same window.
   - **The deferral's own check-then-write**, which can destroy a file published into the
     pending slot after its observation.
   - **Same-inode rewrite.** Append, truncate or overwrite in place after the guard reaches
@@ -159,27 +168,40 @@ Five defects in the W5 dispatch driver and its codex worker, all of them shipped
   than substituting a new inode, so an implementation that preserved the displaced inode
   elsewhere would still pass it. Treat it as a sentinel that fails if someone *closes* the
   race, not as evidence of its full width.
-- **The template's bytes are not authenticated.** The path is now resolved and read through
-  a single no-follow descriptor, which closes leaf and ancestor symlink substitution and the
-  swap between checking and reading. It does not establish that the content is the shipped
-  template: an ordinary regular file at the expected path passes every check and is
-  executed. The previous release executed that same path with a weaker check, so this is
+- **The template's bytes are not authenticated.** The path is built **lexically** and then
+  read through a single no-follow descriptor, which closes leaf and ancestor symlink
+  substitution — including symlinks *above* the supplied root — and the swap between checking
+  and reading. Building it lexically is the load-bearing part and was got wrong once: an
+  earlier form of this release canonicalized the path first, which resolved every ancestor
+  symlink away before the no-follow walk could object, so the walk protected only the segment
+  *below* an already-resolved root while the text claimed it refused a symlink anywhere. The
+  descriptor also pins an **inode**, not a set of bytes: pathname and new-inode substitution
+  are closed, while truncate, append or overwrite in place is not. And none of it establishes
+  that the content is the shipped template: an ordinary regular file at the expected path
+  passes every check and is executed. The previous release executed that same path with a
+  weaker check, so this is
   **structurally narrowed, not closed.**
+- **One readability drain runs inside the reserved finalize tail, not before it.** Every
+  other caller of the check passes the budget for its own phase. The tail-exhausted deferral
+  cannot: it is only ever reached on the branch where the remaining budget has already fallen
+  below the finalize reserve, so the phase-correct value is **zero by construction** at that
+  point, and threading it would refuse at the first check every time — disabling the deferred
+  attempt mechanism in exactly the situation it exists for. It therefore passes the job's
+  overall remaining budget, and on a pathological filesystem that drain can consume time
+  reserved for `finalize()` itself. Two things bound it in practice, neither of them a
+  guarantee: the file it reads is a small local JSON artifact **this same process just wrote**,
+  not an arbitrary pre-existing entry, and the size ceiling and byte counter still apply. A
+  dedicated smaller reserve would close it and was deliberately not built — a second reserve
+  constant interacting with the first is new machinery in the most defect-prone path in this
+  file, and this release has already withdrawn one attempt there for that reason.
 - **Clearing a non-regular squatter is itself a check-then-act.** The helper that removes a
   symlink, FIFO or directory forged onto a deterministic slot classifies the entry with
   `lstat()` and then removes it by pathname — two syscalls, not one atomic operation. A
-  writer that substitutes a real file in between has it destroyed, one step upstream of the
-  atomic `link()` that the parking path relies on — so that path's no-clobber guarantee
-  holds at the `link()` and not before it. **The blast radius is a tree, not a file:** when
-  the classify sees a directory the destroy is `shutil.rmtree`, so a replacement *directory*
-  substituted into that window is removed recursively. **Scope stated rather than left to be
-  found:**
-  the helper is unchanged from the previous release, but it now has **three** call sites
-  where that release had two, because the new parking path clears the slot before linking
-  into it. So this release does not introduce the race and does add one more place it can
-  occur. Keeping that clear is still the better trade — without it a stale symlink or FIFO
-  blocks the slot and the validated candidate is stranded rather than parked — but it is a
-  trade, and the count belongs in the record.
+  writer that substitutes a real file in that window has it destroyed. **The blast radius is
+  a tree, not a file:** when the classify sees a directory the destroy is `shutil.rmtree`, so
+  a replacement *directory* substituted into that window is removed recursively. The helper
+  and its call sites are unchanged from the previous release: this release neither introduces
+  this race nor widens it.
   Closing this needs the same transactional exchange the other two limits above need, and
   the same threat model applies: it requires a writer that does not take the per-segment
   lock. It is disclosed rather than closed, deliberately and consistently with them, rather

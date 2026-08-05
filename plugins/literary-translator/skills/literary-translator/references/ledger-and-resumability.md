@@ -217,7 +217,11 @@ and from the resume-integrity digest:
 - the driver's own final-prompt temp (deleted on every path),
 - `.att.<seg>.<INV>.<draft|review>.json` — the ISOLATED attempt the driver
   validates before it `os.replace`-promotes it to the canonical
-  `draft_path(seg)`/`review_path(seg)` (deleted if unpromoted),
+  `draft_path(seg)`/`review_path(seg)` (deleted if unpromoted, with one deliberate
+  exception: a canonical-unreadable refusal keeps it rather than destroying validated
+  bytes. It is then unreachable by any later run — the name embeds a per-invocation
+  random component — but it is NOT inert, since it still matches the `*.draft.json`
+  glob the dispatch scans use and can perturb their counts until removed),
 - `.codex_job.<seg>.json` — the driver's HYGIENE control state (overwritten per
   dispatch; read ONLY by the driver, never by the Workflow),
 - `.codex_job.<seg>.lock` — the never-unlinked kernel-`flock` sentinel that
@@ -234,6 +238,14 @@ per-dispatch `DISP` nonce travels only via the drive agent's `DISPATCHED <seg>
 Workflow's own poll adds `CODEX_WAIT_GRACE_SEC=600`, so the total W5
 translate/review wait is bounded at `2700 + 150 + 600 = 3450 s` of polling plus one
 final finite on-disk gate check — never an unbounded hang (the #198 failure mode).
+
+**That bound covers the POLLING, not every syscall underneath it.** The on-disk gate
+check reads the canonical entry with ordinary blocking filesystem calls — `lstat()`,
+`open()`, `fstat()`, `read()`, `close()` — none of which is interruptible by the
+budget checks that sit between them. Against a hung NFS or FUSE mount a single one of
+those can block indefinitely, and no timer in this driver stops it. The wait arithmetic
+above is exact for a responsive filesystem and is not a liveness guarantee on an
+unresponsive one.
 **1.16.1 (#348):** that bound is UNCHANGED; what changed is that it is now SPENT
 ACROSS AGENT CALLS rather than inside one. The agent's Bash tool clamps any single
 call at `BASH_CALL_CAP_SEC = 600 s` no matter what timeout the agent asks for, so

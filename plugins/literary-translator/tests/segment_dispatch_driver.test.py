@@ -4555,6 +4555,122 @@ def test_a_symlinked_ancestor_directory_is_refused_even_with_a_genuine_regular_l
     )
 
 
+def test_a_symlinked_plugin_root_argument_itself_is_refused_not_silently_canonicalized(tmp_path):
+    """A DIFFERENT gap than the ancestor-symlink test above, even though
+    both plant a symlink somewhere in the chain: that test plants its
+    symlink INSIDE an already-real, non-symlinked plugin_root STRING (the
+    --plugin-root argument itself never touches a symlink, only a
+    directory two levels below it does) -- so it passes whether
+    resolve_dirs() builds plugin_root with `.resolve()` or `.absolute()`,
+    and never actually exercised this gap. This test plants the symlink
+    AT the level of the --plugin-root argument itself: `resolve_dirs()`
+    used to build plugin_root via `Path(plugin_root_str).resolve()`,
+    which follows every symlink in plugin_root_str's OWN chain and hands
+    the no-follow walk an already-canonicalized target, before the walk
+    ever gets a chance to see the symlink it exists to refuse.
+
+    Proven real, not theoretical, before this test existed: walking
+    `/etc/hosts` directly refuses it (macOS: `/etc` is a symlink to
+    `/private/etc`); walking `Path("/etc/hosts").resolve()` (==
+    `/private/etc/hosts`) accepts it -- the exact shape reproduced here
+    against a `--plugin-root` argument instead."""
+    real_plugin_root = make_trusted_plugin_root(tmp_path)
+    symlinked_plugin_root = tmp_path / "plugin_root_via_symlink"
+    symlinked_plugin_root.symlink_to(real_plugin_root, target_is_directory=True)
+
+    dirs = DRIVER.resolve_dirs(None, str(symlinked_plugin_root))
+    template_path = dirs["template_script"]
+    assert "plugin_root_via_symlink" in str(template_path), (
+        "sanity: resolve_dirs() must preserve the symlinked ancestor "
+        "LEXICALLY, not silently canonicalize it away to the real install "
+        "-- otherwise this test is not exercising the gap it claims to"
+    )
+    assert template_path.is_file(), (
+        "sanity: resolved THROUGH the symlink, the leaf must still look "
+        "like a completely ordinary regular file to Path.is_file() -- "
+        "otherwise this test is not exercising the gap it claims to"
+    )
+
+    fd, state = DRIVER._open_regular_no_follow_walk(template_path)
+    assert fd is None and state == "suspicious", (
+        f"expected the no-follow walk to refuse a --plugin-root argument "
+        f"that is ITSELF reached through a symlink, even with a genuine "
+        f"trusted install at its target, got fd={fd!r} state={state!r}"
+    )
+
+
+def test_a_symlinked_self_anchored_install_directory_is_refused_not_silently_canonicalized(tmp_path):
+    """Same BLOCKER, the OTHER resolve_dirs() branch: `SCRIPTS_DIR`
+    (module-level, computed once at import from `__file__`) used to be
+    `Path(__file__).resolve().parent`, which follows every symlink in
+    wherever this script's OWN file happens to sit -- the self-anchored
+    branch's own ancestor chain, not just --plugin-root's.
+    `_self_anchored_template_path()` builds `deployed` directly from
+    `SCRIPTS_DIR`, so an already-canonicalized `SCRIPTS_DIR` handed the
+    no-follow walk an already-resolved target for the identical reason
+    the --plugin-root branch did -- the driver's own claim ("whichever
+    branch produced this path, this driver refuses a symlink ANYWHERE on
+    the path") was false for BOTH branches, not just one.
+
+    `SCRIPTS_DIR` is computed once at MODULE IMPORT, so proving this
+    property means importing a FRESH copy of the driver from exactly the
+    symlinked layout under test (never the shared `DRIVER` this file
+    loads once at collection time, which has no reason to be reloaded) --
+    using this file's own `_load_module()` helper, the same one that
+    loaded `DRIVER` itself."""
+    real_install = tmp_path / "real_install"
+    scripts_dir = real_install / "assets" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(DRIVER_SRC, scripts_dir / "segment_dispatch_driver.py")
+    # Deployed-layout candidate: directly in scripts_dir, the layout
+    # _self_anchored_template_path() checks FIRST.
+    (scripts_dir / "mass-translate-wf.template.js").write_text(
+        "// self-anchored template\n", encoding="utf-8"
+    )
+
+    symlinked_install = tmp_path / "install_via_symlink"
+    symlinked_install.symlink_to(real_install, target_is_directory=True)
+
+    module_path = symlinked_install / "assets" / "scripts" / "segment_dispatch_driver.py"
+    fresh_driver = _load_module(module_path, "driver_loaded_via_symlinked_install")
+
+    assert "install_via_symlink" in str(fresh_driver.SCRIPTS_DIR), (
+        "sanity: SCRIPTS_DIR must preserve the symlinked ancestor "
+        "LEXICALLY, not silently canonicalize it away to the real install "
+        "-- otherwise this test is not exercising the gap it claims to"
+    )
+
+    deployed_path = fresh_driver._self_anchored_template_path()
+    fd, state = fresh_driver._open_regular_no_follow_walk(deployed_path)
+    assert fd is None and state == "suspicious", (
+        f"expected the no-follow walk to refuse a self-anchored install "
+        f"reached through a symlinked ancestor, got fd={fd!r} state={state!r}"
+    )
+
+
+def test_empty_or_whitespace_only_plugin_root_is_refused_never_becomes_cwd(tmp_path):
+    """`Path("").absolute()` (like `Path("").resolve()`
+    before it) is CWD, not an error -- so `--plugin-root ""` (a real shape:
+    an unset `{{PLUGIN_ROOT}}` template substitution renders as the empty
+    string, never as the flag being omitted) would silently make wherever
+    this process happens to be launched from the executable authority for
+    the template AND every sibling script, with no error at all.
+    `codex_job.py:1436` already refuses exactly this input; refusing it
+    here too, before any path is built from it, keeps both scripts
+    consistent instead of one being the loophole the other closed."""
+    for bad_value in ("", "   ", "\t\n", "  \t "):
+        with pytest.raises(DRIVER.DriverError) as exc_info:
+            DRIVER.resolve_dirs(None, bad_value)
+        assert "empty" in str(exc_info.value).lower() or "whitespace" in str(exc_info.value).lower(), (
+            f"expected an explicit empty/whitespace-only refusal for "
+            f"plugin_root_str={bad_value!r}, got: {exc_info.value}"
+        )
+        assert exc_info.value.exit_code == 2, (
+            f"expected exit_code=2 for plugin_root_str={bad_value!r}, "
+            f"got {exc_info.value.exit_code!r}"
+        )
+
+
 def test_the_read_is_immune_to_a_leaf_swap_that_happens_after_the_open(tmp_path):
     """The check/read race codex's BLOCKER named directly: a check
     (_template_candidate_state(), or Path.is_file()) and a LATER, separate
