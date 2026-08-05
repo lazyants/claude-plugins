@@ -1440,6 +1440,95 @@ def test_plugin_root_redirects_which_codex_job_py_would_be_popened(tmp_path):
     assert via_plugin_root["codex_job_script"] == plugin_root / "assets" / "scripts" / "codex_job.py"
 
 
+def test_a_symlinked_plugin_root_is_refused_before_any_sibling_script_ever_runs(tmp_path):
+    """The PR bot's own finding, reproduced in the SAME shape it used to
+    prove it: a test that only checks "the template's no-follow walk
+    refuses a symlinked root" passed BEFORE this fix and proves nothing
+    about this gap, because the template walk was never the thing a
+    symlinked root needed to get past. `SELECT_SEGMENTS_SCRIPT` and
+    `CODEX_JOB_SCRIPT` are built from the SAME root by simple
+    concatenation, with no check of their own -- so with a symlinked
+    --plugin-root, the redirected tree's own select_segments.py ran and
+    produced a REAL, OBSERVABLE effect (the bot's own proof: a marker
+    file) before the driver ever reached the template check that used to
+    be the only thing standing in the way.
+
+    Proves the actual property, not a proxy for it: a marker file
+    select_segments.py would write IF it ever ran must NOT exist after
+    the driver refuses -- not "the process exited nonzero" (true for
+    many unrelated reasons) and not "the template walk returned
+    'suspicious'" (true today but was ALSO true, uselessly, before this
+    exact gap was closed, since that check runs strictly after
+    select_segments.py would already have run)."""
+    root = phase2_project(tmp_path, n=1)
+    marker = tmp_path / "select_segments_ran.marker"
+    assert not marker.exists(), "sanity: the marker must not pre-exist"
+
+    real_root = tmp_path / "real_plugin_root"
+    plugin_scripts_dir = real_root / "assets" / "scripts"
+    plugin_scripts_dir.mkdir(parents=True)
+    (real_root / "assets" / "templates").mkdir(parents=True)
+    (real_root / "assets" / "templates" / "mass-translate-wf.template.js").write_text(
+        "// should never even be reached\n", encoding="utf-8"
+    )
+    (plugin_scripts_dir / "select_segments.py").write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"open({str(marker)!r}, 'w', encoding='utf-8').write('SELECT_SEGMENTS_RAN')\n"
+        "sys.stderr.write('SELECT_SEGMENTS_MUST_NEVER_RUN_FROM_A_SYMLINKED_ROOT')\n"
+        "sys.exit(97)\n",
+        encoding="utf-8",
+    )
+
+    symlinked_root = tmp_path / "plugin_root_via_symlink"
+    symlinked_root.symlink_to(real_root, target_is_directory=True)
+
+    proc = run_driver(root, "--plugin-root", str(symlinked_root), timeout=60)
+
+    assert proc.returncode != 0, (
+        f"expected the driver to refuse a symlinked --plugin-root, got "
+        f"rc=0:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert not marker.exists(), (
+        f"select_segments.py resolved from a SYMLINKED root RAN -- exactly "
+        f"the PR bot's own finding -- before the driver's refusal ever took "
+        f"effect. stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "SELECT_SEGMENTS_MUST_NEVER_RUN_FROM_A_SYMLINKED_ROOT" not in proc.stdout
+    assert "SELECT_SEGMENTS_MUST_NEVER_RUN_FROM_A_SYMLINKED_ROOT" not in proc.stderr
+
+
+def test_a_symlinked_self_anchored_scripts_dir_is_refused_before_any_sibling_path_is_built(tmp_path):
+    """Same gap, the OTHER resolve_dirs() branch: `SCRIPTS_DIR` feeds
+    `SELECT_SEGMENTS_SCRIPT`/`CODEX_JOB_SCRIPT` (module-level) the
+    identical unchecked way `plugin_root` used to feed the --plugin-root
+    branch's siblings. Proven at the `resolve_dirs()` level directly
+    (there is no `--plugin-root` flag to launch a subprocess against for
+    this branch -- the root comes from `__file__`) via a FRESH module
+    load from a symlinked install, the same technique the round-6 self-
+    anchored test uses, extended to confirm the refusal happens BEFORE
+    `select_segments_script`/`codex_job_script` are ever assigned, not
+    only when the template is later read."""
+    real_install = tmp_path / "real_install"
+    scripts_dir = real_install / "assets" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(DRIVER_SRC, scripts_dir / "segment_dispatch_driver.py")
+    (scripts_dir / "mass-translate-wf.template.js").write_text(
+        "// self-anchored template\n", encoding="utf-8"
+    )
+
+    symlinked_install = tmp_path / "install_via_symlink"
+    symlinked_install.symlink_to(real_install, target_is_directory=True)
+
+    module_path = symlinked_install / "assets" / "scripts" / "segment_dispatch_driver.py"
+    fresh_driver = _load_module(module_path, "driver_loaded_via_symlinked_install_root_gate")
+
+    with pytest.raises(fresh_driver.DriverError) as exc_info:
+        fresh_driver.resolve_dirs(None, None)
+    assert exc_info.value.exit_code == 2
+    assert "symlink" in str(exc_info.value).lower()
+
+
 # ===========================================================================
 # Bundle registration -- NAMED assertions. schema_literal_drift.test.py's
 # own doc-comparison test and scaffold_setup.test.py's dynamic-tuple
@@ -4573,15 +4662,27 @@ def test_a_symlinked_plugin_root_argument_itself_is_refused_not_silently_canonic
     `/etc/hosts` directly refuses it (macOS: `/etc` is a symlink to
     `/private/etc`); walking `Path("/etc/hosts").resolve()` (==
     `/private/etc/hosts`) accepts it -- the exact shape reproduced here
-    against a `--plugin-root` argument instead."""
+    against a `--plugin-root` argument instead.
+
+    Builds `template_script` the SAME way `resolve_dirs()`'s
+    --plugin-root branch does (`.absolute()`, never `.resolve()`) rather
+    than calling `resolve_dirs()` itself: a LATER fix added a root-level
+    gate that now refuses a symlinked `--plugin-root` earlier, inside
+    `resolve_dirs()`, before it would ever compute `template_script` at
+    all (see `test_a_symlinked_plugin_root_is_refused_before_any_
+    sibling_script_ever_runs`, which proves THAT property). This test's
+    own job is narrower and still worth keeping as defence in depth:
+    prove `_open_regular_no_follow_walk()` itself would ALSO refuse this
+    exact path, independent of whether anything upstream already did --
+    so if the earlier gate ever regresses, this still catches it at the
+    template."""
     real_plugin_root = make_trusted_plugin_root(tmp_path)
     symlinked_plugin_root = tmp_path / "plugin_root_via_symlink"
     symlinked_plugin_root.symlink_to(real_plugin_root, target_is_directory=True)
 
-    dirs = DRIVER.resolve_dirs(None, str(symlinked_plugin_root))
-    template_path = dirs["template_script"]
+    template_path = Path(str(symlinked_plugin_root)).absolute() / "assets" / "templates" / DRIVER._TEMPLATE_NAME
     assert "plugin_root_via_symlink" in str(template_path), (
-        "sanity: resolve_dirs() must preserve the symlinked ancestor "
+        "sanity: the computed path must preserve the symlinked ancestor "
         "LEXICALLY, not silently canonicalize it away to the real install "
         "-- otherwise this test is not exercising the gap it claims to"
     )

@@ -582,6 +582,27 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
         return name[: -len(".py")] + "_script"
 
     if plugin_root_str is None:
+        # The ROOT itself, validated ONCE, before ANY path below is built
+        # from it -- not a per-consumer check each new caller has to
+        # remember to add. The template already got its OWN no-follow
+        # walk at the point of use (call_template_functions(), defence in
+        # depth); SELECT_SEGMENTS_SCRIPT, CODEX_JOB_SCRIPT and every Phase
+        # 2 sibling script never did, and a symlinked SCRIPTS_DIR (this
+        # branch's own root) would have redirected ALL of them silently.
+        # See _root_no_follow_walk_state()'s own docstring for the PR
+        # bot's concrete proof this closes.
+        scripts_dir_state = _root_no_follow_walk_state(SCRIPTS_DIR)
+        if scripts_dir_state != "dir":
+            fatal(
+                f"the self-anchored scripts directory {SCRIPTS_DIR} is not "
+                f"reachable without following a symlink somewhere on the "
+                f"way (state={scripts_dir_state}) -- refusing to derive any "
+                f"executable or template path from it. If this plugin "
+                f"install is genuinely reached through a symlink, pass "
+                f"--plugin-root explicitly instead of relying on "
+                f"self-anchoring",
+                exit_code=2, scripts_dir=str(SCRIPTS_DIR), scripts_dir_state=scripts_dir_state,
+            )
         select_segments_script = SELECT_SEGMENTS_SCRIPT
         codex_job_script = CODEX_JOB_SCRIPT
         scripts = {_script_key(name): SCRIPTS_DIR / name for name in _PHASE2_SIBLING_SCRIPTS}
@@ -611,6 +632,23 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
         # silently narrowing "refuses a symlink anywhere on the path" down
         # to "anywhere below whatever `--plugin-root` already resolved to".
         plugin_root = Path(plugin_root_str).absolute()
+        # The ROOT itself, validated ONCE, before ANY path below is built
+        # from it -- see the self-anchored branch's own identical comment
+        # above, and _root_no_follow_walk_state()'s own docstring for why:
+        # this is the PR bot's actual finding, that a symlinked --plugin-
+        # root redirected select_segments.py (and every OTHER sibling
+        # script) silently, before the driver ever reached the template's
+        # own, narrower no-follow walk.
+        plugin_root_state = _root_no_follow_walk_state(plugin_root)
+        if plugin_root_state != "dir":
+            fatal(
+                f"--plugin-root {plugin_root_str!r} (resolved to "
+                f"{plugin_root}) is not reachable without following a "
+                f"symlink somewhere on the way (state={plugin_root_state}) "
+                f"-- refusing to derive any executable or template path "
+                f"from it",
+                exit_code=2, plugin_root=str(plugin_root), plugin_root_state=plugin_root_state,
+            )
         plugin_scripts_dir = plugin_root / "assets" / "scripts"
         select_segments_script = plugin_scripts_dir / "select_segments.py"
         codex_job_script = plugin_scripts_dir / "codex_job.py"
@@ -2123,6 +2161,90 @@ def template_harness_source(template_text: str, subst: dict) -> str:
     truncated = substituted[:idx]
     exports = "\nexport { %s };\n" % ", ".join(TEMPLATE_EXPORTED_FUNCTIONS)
     return truncated + exports
+
+
+def _root_no_follow_walk_state(root: Path) -> str:
+    """Same shape and same idiom as `_open_regular_no_follow_walk()`
+    below -- walks every path component from the filesystem root down to
+    AND INCLUDING `root` itself with `os.O_NOFOLLOW` -- but for a
+    DIRECTORY leaf, not a regular-file one, and with no fd for the caller
+    to keep: `root` is validated once, structurally, and then left alone;
+    nothing here reads its contents. Deliberately a SEPARATE, self-
+    contained function rather than a shared helper refactored out of
+    `_open_regular_no_follow_walk()` -- that function has already been
+    through six review rounds in this exact area; duplicating its walk
+    loop here means a mistake in this new, narrower function can never
+    retroactively regress the one that already earned its scrutiny.
+
+    WHY THIS EXISTS: `resolve_dirs()` used to validate exactly ONE
+    consumer of a root -- the template, via
+    `_open_regular_no_follow_walk()` applied to `dirs["template_script"]`
+    inside `call_template_functions()` -- while every OTHER path built
+    from the SAME root by simple concatenation (`SELECT_SEGMENTS_SCRIPT`,
+    `CODEX_JOB_SCRIPT`, every Phase 2 sibling script) inherited whatever
+    that root turned out to be, completely unchecked. The PR bot's own
+    proof: with a symlinked `--plugin-root`, the redirected tree's own
+    `select_segments.py` ran and produced a real, observable effect (a
+    marker file) before the driver ever reached the template's own
+    no-follow walk -- the check that WAS there was never on the path an
+    attacker needed to cross. Validating `root` itself, once, before ANY
+    path is derived from it, closes every consumer at once instead of
+    requiring each new caller to remember its own check -- the per-path
+    walk on the template stays as defence in depth, it just stops being
+    the ONLY thing standing between a symlinked root and execution.
+
+    `O_DIRECTORY` at the leaf inherently refuses a symlink there too
+    (`O_DIRECTORY | O_NOFOLLOW` together fail even on a symlink that
+    points AT a genuine directory), so this needs no separate `S_ISDIR`
+    check the way `_open_regular_no_follow_walk()` needs `S_ISREG` --
+    the open itself IS the check.
+
+    Returns `"dir"` on success, `"absent"` if `root` genuinely does not
+    exist, or `"suspicious"` for anything else refused along the way (a
+    symlinked ancestor, a symlinked or non-directory `root` itself, or
+    any other lookup failure) -- the SAME tri-state vocabulary every
+    other check in this module already uses."""
+    if not root.is_absolute():
+        fatal(f"internal error: {root} must be absolute for the no-follow root check", exit_code=2)
+    parts = root.parts
+    fd = None
+
+    def _safe_close(descriptor: int) -> None:
+        """Same detach-before-close discipline as
+        `_open_regular_no_follow_walk()`'s own `_safe_close()` -- every
+        caller sets its own variable to `None` BEFORE calling this, so a
+        failed close here can never be retried on the same fd by a later
+        handler."""
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+    try:
+        fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY)
+        for name in parts[1:]:
+            next_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            closing, fd = fd, None
+            _safe_close(closing)
+            fd = next_fd
+    except FileNotFoundError:
+        if fd is not None:
+            closing, fd = fd, None
+            _safe_close(closing)
+        return "absent"
+    except OSError as exc:
+        if fd is not None:
+            closing, fd = fd, None
+            _safe_close(closing)
+        print(
+            f"segment_dispatch_driver.py: warning: no-follow walk to root "
+            f"{root} refused: {exc}; treating as suspicious",
+            file=sys.stderr,
+        )
+        return "suspicious"
+    closing, fd = fd, None
+    _safe_close(closing)
+    return "dir"
 
 
 def _open_regular_no_follow_walk(path: Path):
