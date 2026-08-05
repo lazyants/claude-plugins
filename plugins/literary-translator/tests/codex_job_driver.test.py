@@ -781,47 +781,15 @@ def test_defer_over_forged_directory_preserves_attempt(tmp_path):
 def test_defer_supersedes_existing_pending_with_newer(tmp_path):
     """#213 review: the single per-seg/kind slot deliberately retains the MOST RECENT
     completed attempt (last-writer-wins) -- it never sticks on a stale/invalid pending.
-    This is the READABLE half of _defer_attempt()'s current contract, unchanged since
-    #213 and deliberately kept even though the unreadable-regular case below refuses
-    instead: self.pending is populated ONLY by this method, so a READABLE occupant is, by
-    construction, just an earlier unvalidated completion, and superseding it costs
-    nothing. Regression pin, not a RED proof (this is the driver's own established
-    behavior). #409: the "NEW" candidate is seeded in the sandbox, matching where codex
-    actually writes it."""
+    Regression pin, not a RED proof (this is the driver's own established behavior).
+    #409: the "NEW" candidate is seeded in the sandbox, matching where codex actually
+    writes it."""
     job = _mkjob(tmp_path, kind="translate")
     Path(job.pending).write_text(json.dumps({"marker": "OLD"}), encoding="utf-8")
     _seed_sandbox(tmp_path, job, content=json.dumps({"marker": "NEW"}))
     assert job._defer_attempt() is True
     assert json.loads(Path(job.pending).read_text())["marker"] == "NEW"   # superseded
     assert not os.path.exists(job.attempt)          # moved into the slot
-
-
-def test_defer_refuses_when_pending_is_a_previously_validated_but_now_unreadable_regular_file(
-    tmp_path,
-):
-    """A PREVIOUSLY VALIDATED pending can go merely unreadable (EACCES/EIO/ESTALE)
-    between runs, and cannot be told apart from a genuinely worthless one from here --
-    so a regular file that cannot be READ refuses unconditionally rather than guess,
-    unlike the READABLE case above, where superseding is deliberate and unchanged. Real
-    permissions, not a stub, reproducing the exact bypass this guards against."""
-    job = _mkjob(tmp_path, kind="translate")
-    Path(job.pending).write_text(json.dumps({"marker": "previously-validated"}),
-                                  encoding="utf-8")
-    os.chmod(job.pending, 0o000)   # unreadable -- but still a genuine regular inode
-    _seed_sandbox(tmp_path, job, content=json.dumps({"marker": "fresh-and-validated"}))
-    try:
-        assert job._defer_attempt() is False
-    finally:
-        os.chmod(job.pending, 0o644)   # restore -- tmp_path teardown must read/remove it
-    assert job.error_detail, "a diagnostic must be recorded for why deferral was skipped"
-    assert json.loads(Path(job.pending).read_text())["marker"] == "previously-validated", (
-        "the occupant must survive completely UNTOUCHED -- refusal means refusal, not "
-        "a detour through _clear_nonregular() or any other mutation of the slot"
-    )
-    assert os.path.exists(job.attempt), (
-        "the fresh candidate falls back to its own path rather than destroying the "
-        "previously-validated (now merely unreadable) pending file"
-    )
 
 
 def test_run_adopts_pending_before_launch(tmp_path, monkeypatch):
@@ -2572,6 +2540,18 @@ def test_canonical_replaceable_true_when_genuinely_absent(tmp_path):
     assert job._canonical_replaceable(job.abs_remaining) is True
 
 
+def test_canonical_replaceable_false_when_absent_but_phase_budget_is_exhausted(tmp_path):
+    """The ENOENT (genuinely absent) branch used to return True unconditionally,
+    without ever consulting remaining_fn() -- so a caller whose phase budget was
+    ALREADY exhausted would still get a bare `True` here and spend its os.replace()
+    anyway, on the strength of a deadline this method never actually checked. Pins
+    that the absent case is bounded by the SAME phase deadline every other branch
+    already respects."""
+    job = _mkjob(tmp_path)
+    assert not os.path.exists(job.canonical), "premise: nothing has created it yet"
+    assert job._canonical_replaceable(lambda: -0.5) is False
+
+
 def test_canonical_replaceable_false_on_eacces(tmp_path):
     """A present, real file whose PARENT directory has had its search bit removed:
     os.lstat() cannot even resolve the path and raises PermissionError -- a genuine
@@ -2924,7 +2904,7 @@ def test_preflight_refuses_before_launch_when_canonical_eacces(tmp_path, monkeyp
     assert not job.holds_lock, "refused before the flock lease -- same shape as device-mismatch"
 
 
-def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, monkeypatch, capsys):
+def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, monkeypatch):
     """Call site #2: run()'s promote branch, immediately before os.replace(). The
     preflight passes against the real, absent job.canonical; a validate_attempt() stub
     then repoints job.canonical at a locked directory BEFORE this call site's own guard
@@ -2932,7 +2912,9 @@ def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, m
     after the preflight already passed it, and confirming the SECOND observation (not
     just the preflight's first one) correctly sees that and refuses. The real
     _canonical_replaceable() -- not a stub -- must still refuse, and the validated
-    candidate must survive.
+    candidate must survive at its own random path -- finalize() keeps self.attempt
+    whenever canonical_unreadable is set; nothing later ever revisits that path, which
+    is a disclosed limit, not a defect this release closes.
 
     NOT a test of the check-then-replace race (the guard observing safe, then a writer
     publishing something new in the window before os.replace() acts): the mutation here
@@ -2940,20 +2922,7 @@ def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, m
     and correctly refuses -- an implementation that never closed that race would still
     pass this test. See
     test_canonical_replaceable_check_then_replace_window_is_a_known_unclosed_race,
-    below, for the one that actually exercises that window.
-
-    Also the parked=True half of the joblog/stdout observability proof (the parked=False
-    half lives in
-    test_relocate_at_final_promote_refuses_when_pending_is_occupied_by_anything, below).
-    Asserting only job.canonical_unreadable_parked -- an in-memory attribute -- would
-    leave a gap: deleting the "canonical_unreadable_parked" key from EITHER finalize()'s
-    joblog dict or its stdout line would leave a test asserting only that attribute
-    green, since it never reads back either real output channel. job.run() already calls
-    finalize() itself (see run()'s own outer finally:), which both writes the durable
-    joblog (gated on self.holds_lock, true here -- the flock is acquired earlier in
-    run(), well before this call site) and prints the terminal stdout line
-    unconditionally -- so both channels are already populated by the run() call below;
-    this only adds the missing assertions against them."""
+    below, for the one that actually exercises that window."""
     job = _mkjob(tmp_path, kind="translate", deadline=100)
     monkeypatch.setattr(job, "hygiene", lambda: None)
 
@@ -2987,32 +2956,10 @@ def test_promote_refuses_when_canonical_turns_eacces_after_preflight(tmp_path, m
     assert rc == 1
     assert job.reason == "canonical-unreadable"
     assert job.canonical_unreadable is True
-    assert not os.path.exists(job.attempt), (
+    assert os.path.exists(job.attempt), (
         "os.replace() must never fire when the canonical it would overwrite could not "
-        "be observed -- but the validated candidate must not just sit at its own "
-        "never-revisited random path either"
-    )
-    assert job.canonical_unreadable_parked is True
-    assert Path(job.pending).read_text(encoding="utf-8") == '{"marker":"validated"}', (
-        "the validated candidate must be relocated into self.pending -- the "
-        "deterministic slot a future adopt_pending() will re-validate and retry from "
-        "-- not stranded at a path nothing ever revisits again"
-    )
-
-    joblog = job.read_joblog()
-    assert joblog is not None, "holds_lock is True here -- the durable joblog must exist"
-    assert joblog["canonical_unreadable_parked"] is True, (
-        "the durable joblog -- not just the in-memory flag -- must carry the parked "
-        "outcome; an operator reconstructing state after a crash has only this file"
-    )
-
-    stdout_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-    assert stdout_lines, "finalize() must print exactly one terminal JSON line"
-    parsed_line = json.loads(stdout_lines[-1])
-    assert parsed_line["canonical_unreadable_parked"] is True, (
-        "the parsed terminal stdout line must also carry the parked outcome -- "
-        "run() launches this driver DETACHED (nohup ... >/dev/null), so a caller "
-        "that only reads stdout synchronously, not the joblog, must still see this"
+        "be observed -- the validated candidate survives at its own random path "
+        "instead (finalize() keeps self.attempt whenever canonical_unreadable is set)"
     )
 
 
@@ -3154,361 +3101,6 @@ def test_run_refuses_immediately_when_adopt_pending_hits_canonical_unreadable(tm
     assert Path(job.pending).read_text(encoding="utf-8") == "{}"
 
 
-def test_relocate_at_final_promote_refuses_when_pending_is_occupied_by_anything(
-    tmp_path, monkeypatch, capsys
-):
-    """PROPERTY: relocation into self.pending must refuse whenever that slot is occupied
-    by ANYTHING -- not only when the occupant is provably "more validated" than the
-    incoming candidate. "The occupant can only be there because adopt_pending()'s own
-    gate call returned None, so it is at best unconfirmed this run and therefore safe to
-    overwrite" does not hold: a REGULAR file at self.pending could be something that WAS
-    fully validated in an earlier run and has since gone unreadable for reasons that say
-    nothing about its own validity (see the next test) -- and there is no way to tell the
-    two cases apart from here. So the fresh, gate-validated attempt must NOT overwrite an
-    occupied slot, even one this run's own adopt_pending() just left there because its
-    gate call could not run. It falls back to being stranded at its own random path --
-    the same outcome as before this relocate mechanism existed, which is the SAFE
-    direction to fail toward.
-
-    Also the parked=False half of the joblog/stdout observability proof (the parked=True
-    half lives in test_promote_refuses_when_canonical_turns_eacces_after_preflight,
-    above): removing the field from either output channel must not leave a test green.
-    Pinning ONLY the True case would still miss a bug that always writes True regardless
-    of outcome, so this pins False on the SAME two real channels the other test pins
-    True on."""
-    job = _mkjob(tmp_path, kind="translate", deadline=100)
-    monkeypatch.setattr(job, "hygiene", lambda: None)
-    Path(job.pending).write_text('{"marker":"occupied"}', encoding="utf-8")
-
-    def gate_none(args, timeout):
-        return None  # simulates adopt_pending()'s own gate call exhausting budget
-    monkeypatch.setattr(job, "_gate", gate_none)
-
-    locked_dir = tmp_path / "locked_pending_occupied"
-    locked_dir.mkdir()
-    locked_canonical = locked_dir / "canonical.json"
-    locked_canonical.write_text("{}", encoding="utf-8")
-
-    def spy_launch():
-        job.jobId = "J"
-        return True
-
-    def fake_poll():
-        job.job_status = "completed"
-
-    def fake_validate_attempt():
-        Path(job.attempt).write_text('{"marker":"fresh-and-validated"}', encoding="utf-8")
-        job.canonical = str(locked_canonical)          # the race: repoints mid-run
-        os.chmod(locked_dir, 0o000)
-        return True
-
-    monkeypatch.setattr(job, "launch", spy_launch)
-    monkeypatch.setattr(job, "poll", fake_poll)
-    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
-
-    try:
-        rc = job.run()
-    finally:
-        os.chmod(locked_dir, 0o755)
-
-    assert rc == 1
-    assert job.reason == "canonical-unreadable"
-    assert job.canonical_unreadable is True
-    assert job.canonical_unreadable_parked is False, "occupied -- must NOT be reported as parked"
-    assert Path(job.pending).read_text(encoding="utf-8") == '{"marker":"occupied"}', (
-        "the pre-existing occupant of self.pending must survive untouched"
-    )
-    assert os.path.exists(job.attempt), (
-        "the fresh, validated attempt falls back to its own path -- stranded, not "
-        "destroyed, and never allowed to destroy what was already there"
-    )
-
-    joblog = job.read_joblog()
-    assert joblog is not None, "holds_lock is True here -- the durable joblog must exist"
-    assert joblog["canonical_unreadable_parked"] is False, (
-        "the durable joblog must report False, not just leave the field out or "
-        "default it True regardless of outcome"
-    )
-
-    stdout_lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
-    assert stdout_lines, "finalize() must print exactly one terminal JSON line"
-    parsed_line = json.loads(stdout_lines[-1])
-    assert parsed_line["canonical_unreadable_parked"] is False, (
-        "the parsed terminal stdout line must also report False -- a caller reading "
-        "only stdout must not be told a relocate happened when it did not"
-    )
-
-
-def test_relocate_refuses_when_pending_is_a_previously_validated_but_now_unreadable_regular_file(
-    tmp_path, monkeypatch
-):
-    """The route neither the early return after adopt_pending() nor a naive relocate
-    catches on its own: a self.pending that was fully validated at some point in the past
-    can become unreadable (EACCES/EIO/ESTALE)
-    before this run even starts. _is_regular(self.pending) then returns False;
-    _clear_nonregular() lstat()s it, sees a genuine regular inode (lstat does not care
-    about readability), and correctly leaves it alone -- that is its OWN documented
-    contract, only non-regular squatters get cleared; adopt_pending() therefore returns
-    False from its VERY FIRST check, before ever reaching the canonical-guard branch
-    that would set self.canonical_unreadable, so the scenario-1 early return never
-    fires either. Both of the guards this file would otherwise rely on to protect
-    self.pending are bypassed by THIS specific route -- real permissions, not a stub,
-    reproducing exactly the bypass -- and it is the relocate's own occupied-slot check
-    that has to catch it."""
-    job = _mkjob(tmp_path, kind="translate", deadline=100)
-    monkeypatch.setattr(job, "hygiene", lambda: None)
-    Path(job.pending).write_text('{"marker":"previously-validated"}', encoding="utf-8")
-    os.chmod(job.pending, 0o000)   # unreadable -- but still a genuine regular inode
-
-    locked_dir = tmp_path / "locked_pending_unreadable"
-    locked_dir.mkdir()
-    locked_canonical = locked_dir / "canonical.json"
-    locked_canonical.write_text("{}", encoding="utf-8")
-
-    def spy_launch():
-        job.jobId = "J"
-        return True
-
-    def fake_poll():
-        job.job_status = "completed"
-
-    def fake_validate_attempt():
-        Path(job.attempt).write_text('{"marker":"fresh-and-validated"}', encoding="utf-8")
-        job.canonical = str(locked_canonical)          # the race: repoints mid-run
-        os.chmod(locked_dir, 0o000)
-        return True
-
-    monkeypatch.setattr(job, "launch", spy_launch)
-    monkeypatch.setattr(job, "poll", fake_poll)
-    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
-
-    try:
-        rc = job.run()
-    finally:
-        os.chmod(locked_dir, 0o755)
-        os.chmod(job.pending, 0o644)   # restore -- tmp_path teardown must read/remove it
-
-    assert rc == 1
-    assert job.reason == "canonical-unreadable"
-    assert job.canonical_unreadable is True
-    assert job.canonical_unreadable_parked is False, (
-        "occupied by a previously-validated-but-now-unreadable regular file -- must "
-        "NOT be reported as parked"
-    )
-    assert os.path.exists(job.attempt), (
-        "the fresh candidate falls back to its own path rather than destroying the "
-        "previously-validated (now merely unreadable) pending file"
-    )
-
-
-def test_relocate_pending_publication_is_atomic_no_clobber_even_when_a_writer_races_the_link_call(
-    tmp_path, monkeypatch
-):
-    """The relocate routes through os.link(self.attempt, self.pending): link() creates the
-    new name ONLY if none exists yet and raises EEXIST rather than overwriting if one
-    does, so "is anything there" and "put something there" become ONE atomic kernel
-    operation with no window between them at all -- unlike a check-then-act shape
-    (observe self.pending with os.lstat(), then separately call os.replace()), where a
-    non-cooperating writer publishing a validated regular file into self.pending in the
-    window between the two syscalls would be silently destroyed. Different call site,
-    same class of defect as
-    test_canonical_replaceable_check_then_replace_window_is_a_known_unclosed_race, above,
-    which documents it as a known, accepted, still-open limit there.
-
-    Wraps the REAL os.link (not a stub) and plants a writer's own validated regular file
-    at self.pending immediately before delegating to the genuine syscall -- the latest
-    possible moment a race could land, one line before the exact call that would have
-    clobbered it under a check-then-act shape. A hypothetical os.lstat()-then-os.replace()
-    implementation would never even call os.link() -- this test's injection point -- at
-    all: its own lstat would see self.pending genuinely empty (this test never writes to
-    it before job.run() starts), and its os.replace() would then overwrite that empty
-    slot with the FRESH candidate's own content -- not the raced content this test
-    plants, which never gets the chance to land. Either way, the assertions below (parked
-    stays False, self.pending holds the RACED writer's content rather than the fresh
-    candidate's) only pass when the relocate is genuinely routed through the atomic
-    link-then-EEXIST path."""
-    job = _mkjob(tmp_path, kind="translate", deadline=100)
-    monkeypatch.setattr(job, "hygiene", lambda: None)
-
-    raced_writer_content = '{"marker":"raced-writer-published-this"}'
-    real_link = os.link
-
-    def racing_link(src, dst, *a, **kw):
-        # The race: a non-cooperating writer publishes its own validated regular file
-        # into self.pending in the instant before the real link() syscall runs.
-        Path(dst).write_text(raced_writer_content, encoding="utf-8")
-        return real_link(src, dst, *a, **kw)
-    monkeypatch.setattr(os, "link", racing_link)
-
-    locked_dir = tmp_path / "locked_pending_link_race"
-    locked_dir.mkdir()
-    locked_canonical = locked_dir / "canonical.json"
-    locked_canonical.write_text("{}", encoding="utf-8")
-
-    def spy_launch():
-        job.jobId = "J"
-        return True
-
-    def fake_poll():
-        job.job_status = "completed"
-
-    def fake_validate_attempt():
-        Path(job.attempt).write_text('{"marker":"fresh-and-validated"}', encoding="utf-8")
-        job.canonical = str(locked_canonical)          # the race: repoints mid-run
-        os.chmod(locked_dir, 0o000)
-        return True
-
-    monkeypatch.setattr(job, "launch", spy_launch)
-    monkeypatch.setattr(job, "poll", fake_poll)
-    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
-
-    try:
-        rc = job.run()
-    finally:
-        os.chmod(locked_dir, 0o755)
-
-    assert rc == 1
-    assert job.reason == "canonical-unreadable"
-    assert job.canonical_unreadable_parked is False, (
-        "the raced writer's content occupies self.pending by the time link() actually "
-        "runs -- it must see EEXIST and refuse, not report a parked relocate that "
-        "never happened"
-    )
-    assert Path(job.pending).read_text(encoding="utf-8") == raced_writer_content, (
-        "the raced writer's content must SURVIVE untouched -- this is exactly the "
-        "property the old lstat()-then-replace() shape violated: its os.replace() "
-        "would have clobbered whatever it did not itself just observe"
-    )
-    assert os.path.exists(job.attempt), (
-        "the fresh candidate falls back to its own path rather than clobbering what "
-        "the race planted"
-    )
-
-
-def test_relocate_clears_a_non_regular_squatter_before_link_and_still_parks(tmp_path, monkeypatch):
-    """#213 (MAJOR-2 guard): _clear_nonregular() runs here, immediately before os.link(),
-    so a non-regular squatter (symlink/FIFO/dir) left by a crashed writer cannot
-    permanently block this deterministic slot. link() alone already gives the safety
-    guarantee against a REGULAR occupant -- but WITHOUT this clear, an ordinary stale
-    symlink would brick the slot forever instead of being cleared, which has nothing to
-    do with the clobber concern link()'s own atomicity addresses.
-
-    self.pending starts genuinely ABSENT, not pre-seeded with the squatter: with a
-    squatter already present, adopt_pending()'s OWN _is_regular() check (which this
-    method still calls) would already clear it via its own _clear_nonregular() call,
-    well before run() ever reaches the relocate site -- masking exactly the behaviour
-    this test exists to pin. The symlink is planted from inside fake_validate_attempt()
-    instead, which runs AFTER adopt_pending() has already returned False against a
-    genuinely empty slot, so it is still there, unobserved by anything, when the
-    relocate site's own _clear_nonregular()+os.link() pair finally runs."""
-    job = _mkjob(tmp_path, kind="translate", deadline=100)
-    monkeypatch.setattr(job, "hygiene", lambda: None)
-
-    locked_dir = tmp_path / "locked_pending_symlink"
-    locked_dir.mkdir()
-    locked_canonical = locked_dir / "canonical.json"
-    locked_canonical.write_text("{}", encoding="utf-8")
-
-    def spy_launch():
-        job.jobId = "J"
-        return True
-
-    def fake_poll():
-        job.job_status = "completed"
-
-    def fake_validate_attempt():
-        Path(job.attempt).write_text('{"marker":"fresh-and-validated"}', encoding="utf-8")
-        target = Path(job.pending + ".target")
-        target.write_text("{}", encoding="utf-8")
-        os.symlink(target, job.pending)   # planted here -- AFTER adopt_pending() already ran
-        job.canonical = str(locked_canonical)          # the race: repoints mid-run
-        os.chmod(locked_dir, 0o000)
-        return True
-
-    monkeypatch.setattr(job, "launch", spy_launch)
-    monkeypatch.setattr(job, "poll", fake_poll)
-    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
-
-    try:
-        rc = job.run()
-    finally:
-        os.chmod(locked_dir, 0o755)
-
-    assert rc == 1
-    assert job.reason == "canonical-unreadable"
-    assert job.canonical_unreadable_parked is True, (
-        "the symlink squatter must be CLEARED, not left blocking the slot -- link() "
-        "then succeeds and the candidate is genuinely parked"
-    )
-    assert not os.path.islink(job.pending), "the symlink itself must be gone, not followed"
-    assert json.loads(Path(job.pending).read_text())["marker"] == "fresh-and-validated"
-    assert not os.path.exists(job.attempt), "moved into the slot -- no leftover second name"
-
-
-def test_relocate_does_not_report_a_completed_park_when_the_final_unlink_fails(tmp_path, monkeypatch):
-    """os.link()+remove() is not a rename -- if the final remove of self.attempt (the
-    leftover FIRST name) fails, both names persist as live hardlinks
-    for the same bytes, and self.attempt's own name ends in exactly the
-    .draft.json/.review.json suffix OTHER scripts glob (select_segments.py,
-    backfill_resume_gate_ack.py, including dotfiles), so a surviving alias is not
-    inert. Reporting a completed park anyway would be a FALSE claim of a clean,
-    unambiguous state -- canonical_unreadable_parked must be gated on
-    _complete_relocate()'s own return value, not set unconditionally the moment link()
-    itself succeeds."""
-    job = _mkjob(tmp_path, kind="translate", deadline=100)
-    monkeypatch.setattr(job, "hygiene", lambda: None)
-
-    locked_dir = tmp_path / "locked_pending_unlink_fails"
-    locked_dir.mkdir()
-    locked_canonical = locked_dir / "canonical.json"
-    locked_canonical.write_text("{}", encoding="utf-8")
-
-    def spy_launch():
-        job.jobId = "J"
-        return True
-
-    def fake_poll():
-        job.job_status = "completed"
-
-    def fake_validate_attempt():
-        Path(job.attempt).write_text('{"marker":"fresh-and-validated"}', encoding="utf-8")
-        job.canonical = str(locked_canonical)
-        os.chmod(locked_dir, 0o000)
-        return True
-
-    monkeypatch.setattr(job, "launch", spy_launch)
-    monkeypatch.setattr(job, "poll", fake_poll)
-    monkeypatch.setattr(job, "validate_attempt", fake_validate_attempt)
-
-    real_remove = os.remove
-
-    def failing_remove(path, *a, **kw):
-        if path == job.attempt:
-            raise OSError(errno.EBUSY, "simulated: cannot remove the leftover name")
-        return real_remove(path, *a, **kw)
-    monkeypatch.setattr(os, "remove", failing_remove)
-
-    try:
-        rc = job.run()
-    finally:
-        os.chmod(locked_dir, 0o755)
-
-    assert rc == 1
-    assert job.reason == "canonical-unreadable"
-    assert job.canonical_unreadable_parked is False, (
-        "the leftover attempt name could not be removed -- must NOT report a "
-        "completed park"
-    )
-    assert Path(job.pending).read_text(encoding="utf-8") == '{"marker":"fresh-and-validated"}', (
-        "the content itself is still safely reachable via the surviving link -- only "
-        "the PARKED claim is withheld, not the relocate itself"
-    )
-    assert os.path.exists(job.attempt), (
-        "the leftover second name (hardlinked to the same content) survives since "
-        "the remove failed -- both names now point at the same inode"
-    )
-
-
 class _ClosedStderr:
     """Stand-in for a closed TEXT stream (as opposed to a closed underlying fd, which
     raises BrokenPipeError instead)."""
@@ -3610,58 +3202,12 @@ def test_promote_refuses_when_stderr_raises_an_arbitrary_unenumerated_exception(
     assert rc == 1
     assert job.reason == "canonical-unreadable"
     assert job.canonical_unreadable is True
-    assert job.canonical_unreadable_parked is True
-    assert not os.path.exists(job.attempt)
-    assert Path(job.pending).read_text(encoding="utf-8") == '{"marker":"validated"}', (
-        "the validated candidate must survive a stderr failure of a type nothing in "
-        "codex_job.py specifically enumerates -- relocated into self.pending, not left "
-        "at its own never-revisited path"
-    )
-
-
-def test_canonical_unreadable_detail_survives_overwritten_error_detail_in_finalize(
-    tmp_path, monkeypatch
-):
-    """PROPERTY: finalize()'s reported error_detail must come from
-    self.canonical_unreadable_detail, not bare self.error_detail, whenever
-    self.canonical_unreadable is set -- the same "the flag is authoritative, the
-    string is not" guarantee self.canonical_unreadable already gets for self.reason,
-    extended to its diagnostic payload.
-
-    Exercised directly against finalize(), not through a full run(): the ORIGINAL
-    version of this test drove it end-to-end (adopt_pending()'s own refusal, then a
-    real launch() failure overwriting self.error_detail on the fall-through to a
-    fresh launch) -- but the early return this same round adds right after
-    adopt_pending() (see test_run_refuses_immediately_when_adopt_pending_hits_
-    canonical_unreadable, above) means run() no longer reaches launch() at all once
-    adopt_pending() has refused, closing off that specific overwrite path as a side
-    effect. Nothing else in run()'s current control flow runs after any of the three
-    canonical-unreadable refusal sites either (each is either an immediate return or
-    the terminal action in its branch), so no LIVE path currently exercises the
-    overwrite. The field and the preference logic stay -- cheap insurance against a
-    future change reopening one -- and this test pins the mechanism itself directly,
-    independent of whether today's control flow happens to reach it."""
-    job = _mkjob(tmp_path, kind="translate", deadline=100)
-    job.canonical_unreadable = True
-    job.canonical_unreadable_detail = "canonical unreadable: original diagnostic, EIO"
-    job.error_detail = "companion stderr: an unrelated later overwrite"  # simulates
-    # whatever ELSE might, in a future control-flow change, run after the refusal and
-    # touch self.error_detail -- the mechanism must not assume today's reachability
-    # holds_lock is only ever True after a real flock acquire in run(); set directly
-    # here so finalize()'s own joblog write (holds_lock-gated) actually runs, giving
-    # this test something durable to read back rather than only the stdout line.
-    job.holds_lock = True
-
-    job.finalize()
-
-    assert job.canonical_unreadable_detail == "canonical unreadable: original diagnostic, EIO", (
-        "finalize() must never mutate the snapshot itself"
-    )
-    joblog = job.read_joblog()
-    assert joblog is not None, "finalize() must have written the joblog (holds_lock is True)"
-    assert joblog["error_detail"] == "canonical unreadable: original diagnostic, EIO", (
-        "the ORIGINAL canonical-unreadable diagnostic must survive under its own "
-        "dedicated field even though self.error_detail was overwritten afterward"
+    assert os.path.exists(job.attempt), (
+        "os.replace() must never fire when the canonical it would overwrite could not "
+        "be observed -- the validated candidate survives at its own random path "
+        "instead (finalize() keeps self.attempt whenever canonical_unreadable is set), "
+        "even when the diagnostic write that reaches this refusal itself fails with a "
+        "type nothing in codex_job.py specifically enumerates"
     )
 
 

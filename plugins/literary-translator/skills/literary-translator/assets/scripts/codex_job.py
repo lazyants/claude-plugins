@@ -299,26 +299,6 @@ class CodexJob:
         # reassignment -- a string comparison there would stop protecting the file the
         # moment anything downstream narrates a different outcome.
         self.canonical_unreadable = False
-        # The diagnostic behind THAT specific refusal, snapshotted at the moment the flag
-        # above is set. self.error_detail can itself be overwritten afterward -- e.g. by a
-        # launch() failure reached right after adopt_pending()'s own refusal falls through
-        # to a fresh launch attempt -- so this field is what finalize() reports instead,
-        # whenever the flag survived, and the original errno is never silently lost the
-        # same way self.reason's own string already is not.
-        self.canonical_unreadable_detail = None
-        # True iff a canonical-unreadable refusal at the FINAL promote step (not the
-        # earlier preflight or adopt_pending() refusals, which never touch self.attempt)
-        # successfully relocated the just-validated self.attempt into self.pending for a
-        # future dispatch's adopt_pending() to re-validate and retry, instead of leaving
-        # it stranded at its own random, never-revisited path. "Refused, and the candidate
-        # is parked for retry" and "refused, and it is wherever it was" are different
-        # operational outcomes -- an operator reading a joblog cannot tell them apart from
-        # self.reason alone, which is the same "canonical-unreadable" string either way on
-        # purpose (see the relocate site's own comment for why that string is not
-        # widened). Also reported as its own field in the joblog/stdout line -- see
-        # finalize() -- since "parked for retry" and "fell back, stranded" are exactly
-        # the two outcomes an operator cannot otherwise distinguish from outside.
-        self.canonical_unreadable_parked = False
 
     # ---- time helpers (FLOAT, no floor) -------------------------------------
     def poll_remaining(self):
@@ -546,9 +526,10 @@ class CodexJob:
         nothing to destroy), or an entry IS there and this call just confirmed it is a
         regular file.
 
-        `remaining_fn`: threaded straight through to _is_regular()'s own read -- see that
-        method's docstring for what a caller must pass and why it must be phase-specific,
-        not this job's whole abs_remaining() ceiling.
+        `remaining_fn`: consulted directly for the ENOENT (absent) case below, and threaded
+        through to _is_regular()'s own read for the regular-file case -- see that method's
+        docstring for what a caller must pass and why it must be phase-specific, not this
+        job's whole abs_remaining() ceiling.
 
         os.replace() only needs WRITE permission on the CONTAINING DIRECTORY, not on the
         target itself -- so an unreadable regular file, or a symlink whose target vanished,
@@ -578,7 +559,13 @@ class CodexJob:
         try:
             os.lstat(self.canonical)
         except FileNotFoundError:
-            return True  # ENOENT only: no directory entry at all -- nothing to destroy
+            # ENOENT only: no directory entry at all -- nothing to destroy. Still
+            # consult the CALLER's own phase deadline before saying yes: an absent
+            # canonical is otherwise promotable regardless of remaining_fn(), so a
+            # caller whose phase budget is already exhausted would get a bare `True`
+            # here and then spend its os.replace() anyway, on the strength of a
+            # deadline this method never actually checked.
+            return remaining_fn() > 0
         except OSError as exc:
             # A lookup that merely FAILED must read as "present", not absent -- see the
             # docstring above. State is set FIRST, and the diagnostic write that follows
@@ -1046,7 +1033,6 @@ class CodexJob:
             # self.pending exactly as every other "could not promote" branch above does:
             # intact, for a future dispatch to retry once the canonical is readable again.
             self.canonical_unreadable = True
-            self.canonical_unreadable_detail = self.error_detail
             self.reason = "canonical-unreadable"
             return False
         os.replace(self.pending, self.canonical)   # every gate passed
@@ -1152,30 +1138,6 @@ class CodexJob:
             return False
         return self._validate_candidate(self.attempt, self.finalize_timeout)
 
-    def _complete_relocate(self, leftover):
-        """After a successful os.link() publishes content under a SECOND name, remove the
-        FIRST name (`leftover`) so the two do not stay live forever for the same bytes.
-        Returns True iff `leftover` is actually gone afterward.
-
-        os.link()+remove() is not a rename -- if the remove fails (or this process dies
-        right there), `leftover` persists indefinitely as an ordinary-looking, fully
-        readable regular file. The content itself is never at
-        risk (self.pending already holds it, via the surviving link), but a surviving
-        SECOND name is not inert: `leftover` (self.attempt) is named
-        `.att.<seg>.<inv>.<draft|review>.json` -- ending in exactly the
-        `.draft.json`/`.review.json` suffix OTHER scripts (select_segments.py,
-        backfill_resume_gate_ack.py) glob, INCLUDING dotfiles -- so it can duplicate
-        run/segment evidence or acknowledgement counts downstream. The cheapest honest
-        fix is not to retry or relocate it further, but to stop CLAIMING a clean park
-        when the cleanup did not actually happen: the caller must gate
-        canonical_unreadable_parked on this return value, not set it unconditionally the
-        moment link() itself succeeded."""
-        try:
-            os.remove(leftover)
-            return True
-        except OSError:
-            return False
-
     def _defer_attempt(self):
         """#213: atomically move a completed-but-unvalidated attempt into the stable per-seg/kind
         pending slot so the NEXT run's adopt_pending() can validate + adopt it, instead of
@@ -1183,35 +1145,15 @@ class CodexJob:
         first so the rename cannot fail into finalize()'s discard. Returns True iff a real regular
         attempt file was preserved. Promotes NOTHING.
 
-        A PRE-EXISTING data-loss path this release also closes: unconditionally
-        os.replace()ing whatever fresh attempt just completed straight over self.pending is
-        main's own shape, unguarded. Closed here (unlike the two LARGER, disclosed-not-closed
-        races in this same release's "Known limits" text) because it needs NO racing writer to
-        reach at all: a PREVIOUSLY VALIDATED pending can go merely unreadable
-        (EACCES/EIO/ESTALE) between ordinary runs, and the unconditional replace destroys
-        exactly that on the very next no-budget completion -- reachable by this process alone,
-        with no concurrency and no adversary.
-
-        The fix: REFUSE, rather than clobber. self.pending is populated ONLY by this method
-        (aside from being cleared or promoted elsewhere), so a READABLE regular file there is,
-        by construction, just an earlier UNVALIDATED completion -- superseding it with a newer
-        one costs nothing (see the last-writer-wins paragraph below, which still applies to
-        this half, unchanged). An UNREADABLE regular file cannot be told apart from a genuinely
-        valuable candidate that merely went temporarily unreadable -- refusing there, and
-        recording why, is the safe default when nothing can positively confirm what would be
-        destroyed. The cost is the deferral optimisation for that one segment until an operator
-        looks: it simply launches a fresh codex turn every run instead, the pre-#213
-        behaviour -- strictly better than destroying validated work.
-
         The single per-seg/kind slot deliberately retains the MOST RECENT completed attempt
-        (last-writer-wins) for the READABLE case. Validity cannot be determined at defer time -- the
-        defer is triggered precisely because no budget remained to run the candidate gate -- so
-        preferentially KEEPING an existing pending over a fresh attempt risks sticking on an
-        unadoptable one (a same-token but structurally invalid pending would be kept forever while
-        valid fresh attempts are discarded). Always refreshing the slot instead guarantees it tracks
-        the latest completion and can NEVER get stuck: an invalid pending is superseded by the next
-        fresh attempt, and adopt_pending() discards it outright the first time a gate can actually
-        run.
+        (last-writer-wins) -- it never sticks on a stale/invalid pending. Validity cannot be
+        determined at defer time -- the defer is triggered precisely because no budget remained to
+        run the candidate gate -- so preferentially KEEPING an existing pending over a fresh attempt
+        risks sticking on an unadoptable one (a same-token but structurally invalid pending would be
+        kept forever while valid fresh attempts are discarded). Always refreshing the slot instead
+        guarantees it tracks the latest completion and can NEVER get stuck: an invalid pending is
+        superseded by the next fresh attempt, and adopt_pending() discards it outright the first time
+        a gate can actually run.
 
         #409: PUBLISH from the sandbox first (fd-pinned, digest-verified) -- at this point
         nothing has validated the candidate yet, but the sandbox->staging copy is not itself
@@ -1222,18 +1164,6 @@ class CodexJob:
         if not self._is_regular(self.attempt, self.abs_remaining):
             return False
         self._clear_nonregular(self.pending)
-        try:
-            pending_is_regular = stat.S_ISREG(os.lstat(self.pending).st_mode)
-        except OSError:
-            pending_is_regular = False  # absent, or another lookup failure -- nothing to refuse over
-        if pending_is_regular and not self._is_regular(self.pending, self.abs_remaining):
-            # A regular file that this process cannot read -- refuse rather than guess whether
-            # it is validated work merely gone temporarily unreadable. Diagnostic recorded so an
-            # operator can see WHY this segment stopped deferring, not just that it did.
-            self.error_detail = (
-                "pending slot occupied by a regular file that could not be read -- refusing "
-                "to supersede it; deferral skipped for this attempt")
-            return False
         try:
             os.replace(self.attempt, self.pending)
         except OSError:
@@ -1287,36 +1217,17 @@ class CodexJob:
         # only durable place either ever lands. Previously `reason` (a gate-REJECTED attempt
         # reported no differently from a genuine timeout) and error_detail's two sources
         # (poll()'s companion errorMessage, launch()'s stderr) were computed and discarded.
-        # self.error_detail may have been overwritten since the canonical-unreadable
-        # refusal that set self.canonical_unreadable -- e.g. by a launch() failure
-        # reached right after adopt_pending()'s own refusal falls through to a fresh
-        # launch attempt. self.canonical_unreadable_detail is the snapshot taken at the
-        # moment of refusal (see __init__'s own comment on the field); prefer it here
-        # whenever the flag survived, the same "the flag is authoritative, the string is
-        # not" reasoning self.canonical_unreadable itself already gets above, applied to
-        # its diagnostic payload too.
-        effective_error_detail = (
-            self.canonical_unreadable_detail if self.canonical_unreadable else self.error_detail)
-        # canonical_unreadable_parked was, until now, internal-only -- readable from
-        # Python, invisible to anyone reading a joblog. "Parked for retry" and "fell
-        # back, stranded at its own random path" are different operational outcomes an
-        # operator cannot otherwise tell apart without reconstructing the filesystem by
-        # hand (self.attempt's own random path is never logged either). Only meaningful
-        # when self.canonical_unreadable is set -- False the rest of the time, same as
-        # the flag it rides with.
         if self.holds_lock:
             self._write_joblog({
                 "jobId": self.jobId, "kind": self.kind, "seg": self.seg, "token": self.tok,
                 "disp": self.disp, "inv": self.inv, "status": "terminal", "ok": self.ok,
                 "timed_out": self.timed_out, "job_status": self.job_status, "adopted": self.adopted,
-                "reason": self.reason, "error_detail": effective_error_detail,
-                "canonical_unreadable_parked": self.canonical_unreadable_parked,
+                "reason": self.reason, "error_detail": self.error_detail,
             })
         line = {
             "ok": self.ok, "kind": self.kind, "seg": self.seg, "jobId": self.jobId,
             "job_status": self.job_status, "timed_out": self.timed_out,
-            "adopted": self.adopted, "reason": self.reason, "error_detail": effective_error_detail,
-            "canonical_unreadable_parked": self.canonical_unreadable_parked,
+            "adopted": self.adopted, "reason": self.reason, "error_detail": self.error_detail,
         }
         sys.stdout.write(json.dumps(line) + "\n")
         sys.stdout.flush()
@@ -1347,7 +1258,6 @@ class CodexJob:
                 # turns unreadable DURING this run, after this check already passed --
                 # neither makes the other redundant.
                 self.canonical_unreadable = True
-                self.canonical_unreadable_detail = self.error_detail
                 self.reason = "canonical-unreadable"
                 return 1
             if not self._setup_sandbox():
@@ -1397,66 +1307,17 @@ class CodexJob:
                         # (an unreadable regular file, or a symlink whose target vanished)
                         # -- promoting over it would destroy bytes nothing has read.
                         self.canonical_unreadable = True
-                        self.canonical_unreadable_detail = self.error_detail
                         self.reason = "canonical-unreadable"
                         # self.attempt lives at this invocation's own random
                         # .att.<seg>.<inv>... path -- nothing ever revisits that path on a
                         # later run (only self.canonical and self.pending are consulted),
-                        # so leaving a validated candidate there stripes it: the bytes
-                        # survive on disk, but nothing will ever find or promote them, and
-                        # the next dispatch pays to regenerate the same work. Relocate it
-                        # into self.pending instead -- the SAME deterministic slot
-                        # adopt_pending() already knows to re-validate and retry from, and
-                        # the exact tail _defer_attempt() already runs for the sibling
-                        # "no budget to validate" case, minus that method's own head (the
-                        # sandbox-publish step does not apply -- this attempt is already
-                        # published and already gate-validated, not fresh sandbox output).
-                        #
-                        # MUST NOT overwrite self.pending unless it is GENUINELY,
-                        # VERIFIABLY safe to -- absent, or squatted on by a non-regular
-                        # entry _clear_nonregular() already knows to remove. A regular
-                        # file at self.pending, readable or not, refuses unconditionally
-                        # rather than guess: a PREVIOUSLY validated pending file can go
-                        # unreadable (EACCES/EIO/ESTALE) between runs, and there is no way
-                        # to positively prove from here whether it is that or genuinely
-                        # worthless. adopt_pending() itself already treats this the same
-                        # way -- an unreadable regular file there returns False from its
-                        # very first check, never reaching the canonical-guard branch that
-                        # would set self.canonical_unreadable, so the early return above
-                        # never fires for it either. Only a VERIFIED-absent or
-                        # VERIFIED-non-regular slot is touched.
-                        #
-                        # os.link() makes the "is anything there" question and the "put
-                        # something there" action ONE atomic kernel operation: it creates
-                        # the new name ONLY if self.pending does not already exist, and
-                        # fails EEXIST -- never overwrites -- if it does. There is no
-                        # window between "observed empty" and "wrote into it" for a
-                        # non-cooperating writer (the flock only serialises COOPERATING
-                        # codex_job.py processes, per this file's own module docstring) to
-                        # land in.
-                        #
-                        # _clear_nonregular() runs first, best-effort, so the common "stale
-                        # symlink/FIFO/dir squatter" case still succeeds -- but the SAFETY
-                        # GUARANTEE against clobbering a REGULAR file comes from link()'s own
-                        # atomicity, not from that clear step: if the clear fails, races, or
-                        # is skipped entirely, link() still correctly refuses rather than
-                        # clobbering. Only claim what link() itself guarantees here: the clear
-                        # step does NOT close the window against a racing writer (see
-                        # _clear_nonregular()'s own docstring for that KNOWN, ACCEPTED,
-                        # inherited limit, disclosed in this release's "Known limits" text
-                        # alongside the other two instances of the identical threat model).
-                        self._clear_nonregular(self.pending)
-                        try:
-                            os.link(self.attempt, self.pending)
-                        except OSError:
-                            pass  # occupied (EEXIST, by anything) or otherwise could
-                            # not link -- refuse, leave both self.attempt and
-                            # self.pending alone
-                        else:
-                            # Only report a completed park if _complete_relocate()
-                            # actually finished the job -- see its own docstring for why
-                            # a surviving second name is not inert.
-                            self.canonical_unreadable_parked = self._complete_relocate(self.attempt)
+                        # so a validated candidate refused here is unreachable by any
+                        # future dispatch: the bytes survive on disk (finalize() never
+                        # discards self.attempt while canonical_unreadable is set -- see
+                        # its own comment), but nothing will ever find or promote them,
+                        # and the next dispatch pays to regenerate the same work. This is
+                        # a disclosed limit, not a defect this release closes: see the
+                        # release's own "Known limits" text.
                     else:
                         os.replace(self.attempt, self.canonical)
                         self.promoted = True

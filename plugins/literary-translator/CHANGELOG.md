@@ -109,41 +109,56 @@ Five defects in the W5 dispatch driver and its codex worker, all of them shipped
   release — stayed unbounded. **This drain now shares their residual rather than claiming a
   bound it could not keep.**
 
-- **A refused promotion could destroy a candidate while parking its replacement.** When the
-  canonical guard refuses at the final promote step, the validated attempt is parked in the
-  per-segment pending slot for a later run to re-validate. That parking observed the slot
-  and then wrote to it by pathname — two operations, so a validated file published into the
-  slot in between was overwritten unseen, which is the same defect the guard exists to
-  prevent, one step downstream. Parking is now a single atomic `link()`: the kernel creates
-  the name only if nothing is there and fails otherwise, so there is no window between
-  observing and writing. An occupied slot means the fresh attempt stays where it is rather
-  than displacing what it found.
+  When the guard refuses, the run stops with `canonical-unreadable` and the validated attempt
+  is left on disk rather than destroyed. It is **not** recoverable by a later run — its name
+  embeds a per-invocation random component no other run reconstructs — so the practical
+  outcome is one regenerated segment, not lost correctness. Stated plainly because an earlier
+  draft of this release claimed more.
 
-- **The tail-exhausted deferral overwrote the pending slot unconditionally.** This one is
-  older than 1.18.0 and is fixed here because it needs no concurrency to bite: a pending
-  candidate that a previous run validated can become merely *unreadable* between runs
-  (EACCES, EIO, a stale NFS handle). Adoption then refuses it at its first check, the
-  non-regular clear correctly leaves a regular inode alone — and the next ordinary
-  no-budget completion replaced it. One temporarily-unreadable file plus one normal
-  deferral, no second writer anywhere. The deferral now **refuses** an occupied slot and
-  discards the fresh, never-validated attempt instead, recording the refusal so it is
-  visible rather than silent. Discarding an unvalidated attempt is the strictly smaller
-  loss; the previous behaviour destroyed the one candidate that had already passed.
+### Attempted and withdrawn
 
-  The argument that shipped in 1.18.0's own source comment — that the choice was between
-  clobbering and a slot blocked forever — was wrong, and it was wrong in a way worth
-  naming: calling the unreadable occupant "poisoned" presumes unreadable means invalid,
-  which is the exact presumption the canonical guard one branch over exists to reject.
+- **The pending-slot lifecycle is untouched by this release, deliberately.** A fix for
+  `_defer_attempt()`'s unconditional overwrite — which destroys a previously validated
+  candidate that has merely gone unreadable between runs — was built here and then withdrawn.
+  Two reasons, both worth stating rather than quietly dropping the work. It is not one of the
+  defects this release exists to fix: it predates the previous release and was never in the
+  stated scope. And every attempt at it introduced a new defect — three consecutive review
+  rounds each found the flaw in the *previous* round's fix, ending with a version that
+  stranded validated work while an unvalidated leftover held the only slot a later run reads.
+
+  The reason it is hard is now on record rather than in anyone's head: **the two sites that
+  write the slot have opposite validation asymmetries.** At the deferral the fresh candidate
+  is unvalidated by construction, so refusing is the right trade. At the canonical-refusal
+  site the fresh candidate has passed every gate while the occupant probably has not, so
+  refusing is the wrong one. Whichever uniform rule is chosen, it is wrong at one of the two
+  sites. Tracked as an issue with the three refuted arguments and their measurements; not to
+  be attempted again without a design that addresses that asymmetry directly.
 
 ### Known limits
 
 - **Both canonical guards are check-then-`os.replace()`, and that gap is wider than
-  "an unreadable file slips through".** The guard observes the entry at one moment; the
-  rename resolves the pathname again at another. Anything that substitutes a different file
-  at that path in between — including a perfectly readable newer canonical published by
-  another writer — is destroyed without ever being observed. This repository's own test
-  suite pins that behaviour rather than forbidding it. The per-segment lock serialises
-  cooperating `codex_job.py` processes and nothing else.
+  "an unreadable file slips through" — wider, too, than an earlier draft of this section
+  admitted.** The guard observes the entry at one moment; the rename resolves the pathname
+  again at another. The per-segment lock serialises cooperating `codex_job.py` processes and
+  nothing else. Four distinct exposures follow, and only the first was previously disclosed:
+  - **Destination substitution.** Anything put at the canonical path between check and
+    rename — including a perfectly readable *newer* canonical published by another writer —
+    is destroyed without ever being observed.
+  - **Source substitution, which is the worse one.** The gates validate the *pending* file,
+    and `os.replace()` then re-resolves that same pathname. A writer who swaps the source
+    after validation gets bytes **no gate ever examined** promoted to canonical. The failure
+    is not lost work but a false green — unvalidated content published as validated.
+  - **The deferral's own check-then-write**, which can destroy a file published into the
+    pending slot after its observation.
+  - **Same-inode rewrite.** Append, truncate or overwrite in place after the guard reaches
+    EOF needs no substitution at all; the descriptor identity the guard confirmed stays
+    valid while the content changes underneath it.
+
+  This repository's own test suite pins the first of these rather than forbidding it, and
+  that pin is weaker than the sentence above suggests: it rewrites the file in place rather
+  than substituting a new inode, so an implementation that preserved the displaced inode
+  elsewhere would still pass it. Treat it as a sentinel that fails if someone *closes* the
+  race, not as evidence of its full width.
 - **The template's bytes are not authenticated.** The path is now resolved and read through
   a single no-follow descriptor, which closes leaf and ancestor symlink substitution and the
   swap between checking and reading. It does not establish that the content is the shipped
@@ -155,7 +170,10 @@ Five defects in the W5 dispatch driver and its codex worker, all of them shipped
   `lstat()` and then removes it by pathname — two syscalls, not one atomic operation. A
   writer that substitutes a real file in between has it destroyed, one step upstream of the
   atomic `link()` that the parking path relies on — so that path's no-clobber guarantee
-  holds at the `link()` and not before it. **Scope stated rather than left to be found:**
+  holds at the `link()` and not before it. **The blast radius is a tree, not a file:** when
+  the classify sees a directory the destroy is `shutil.rmtree`, so a replacement *directory*
+  substituted into that window is removed recursively. **Scope stated rather than left to be
+  found:**
   the helper is unchanged from the previous release, but it now has **three** call sites
   where that release had two, because the new parking path clears the slot before linking
   into it. So this release does not introduce the race and does add one more place it can
@@ -172,6 +190,17 @@ data-loss path reachable without a hostile concurrent writer is fixed when the f
 a race that needs a racing writer and new machinery to close is disclosed. The removed
 per-read stall timer is neither — a liveness bound, not a data-loss path — and is covered in
 the drain section above.
+
+**That line does not classify all three limits above the same way, and an earlier draft of
+this section wrongly implied it did.** Two of them — the check-then-`os.replace()` guards and
+the non-regular clear — need a writer that does not take the per-segment lock. **The template
+limit does not.** An ordinary regular file sitting at the expected path, placed at any earlier
+time by anything, is read and executed; no race, no concurrency, no timing. It is disclosed
+rather than fixed for a different reason: authenticating content requires a trusted digest or
+a signed value, which is a capability this release does not have, not a lock it declines to
+take. Grouping it with the races understated it, and the grouping is corrected here rather
+than quietly dropped, because an overstated mitigation reads as caution and is the last thing
+anyone re-attacks.
 
 ## 1.18.0 — 2026-08-03
 
