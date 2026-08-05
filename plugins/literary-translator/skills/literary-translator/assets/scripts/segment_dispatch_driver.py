@@ -362,6 +362,19 @@ except ImportError:
 # in the resulting path is still safe, because `_open_regular_no_follow_walk()`
 # opens it as an ordinary directory ENTRY (never a symlink) via the kernel's
 # own directory structure, not by lexically guessing its target.
+#
+# `SCRIPTS_DIR` ITSELF never had the "intermediate directory unchecked"
+# gap -- worth saying explicitly, because "the root check was fixed"
+# reads as if both branches were equally broken and only one was.
+# `SCRIPTS_DIR` sits
+# DIRECTLY at the `assets/scripts` level (this file's own `__file__` IS
+# in `assets/scripts/`), so there is no separate "assets" component for
+# the self-anchored branch to skip over the way `--plugin-root`'s
+# `plugin_root / "assets" / "scripts"` construction could. What the
+# self-anchored branch genuinely lacked, same as --plugin-root, was
+# verification of the LEAF filename itself -- `_refuse_unless_executable_
+# leaf()` (below) is what closes that, for both branches identically,
+# not a second root-level fix.
 # ---------------------------------------------------------------------------
 
 SCRIPTS_DIR = Path(__file__).absolute().parent
@@ -2359,7 +2372,24 @@ def _refuse_unless_executable_leaf(path: Path, label: str) -> None:
     same "not found" case -- `Path.is_file()` just could not tell a
     genuine regular file from a symlink pointing at one. This replaces
     each of those in place, strengthened, not a new site added
-    elsewhere."""
+    elsewhere.
+
+    THE RE-WALK FROM `/` AT EVERY CALL SITE IS DELIBERATE, NOT AN
+    OVERSIGHT TO OPTIMIZE AWAY. Every one of this function's callers
+    walks its OWN full path from the filesystem root, independently, even
+    when two artifacts share the same parent directory -- so the SAME
+    unmodified `_open_regular_no_follow_walk()` verifies every single
+    executed path, with no exceptions and no variant shapes. A future
+    "optimization" sharing one directory `dir_fd` across multiple leaf
+    opens would reintroduce exactly the surface this design avoids. Each
+    narrower mechanism written for this boundary has had its own gap, in
+    a different layer than the one before it; the walk below is the only
+    one that has been attacked from every layer and held. Widening its
+    use costs a few redundant syscalls per artifact, dwarfed by the
+    subprocess spawn each call guards, and buys the property that matters
+    here: there is exactly ONE piece of code deciding whether an
+    executed path is safe, so it can be audited once rather than per
+    call site."""
     fd, state = _open_regular_no_follow_walk(path)
     if fd is not None:
         os.close(fd)

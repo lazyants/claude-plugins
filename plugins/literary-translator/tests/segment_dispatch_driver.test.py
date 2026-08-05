@@ -1493,9 +1493,9 @@ def test_plugin_root_redirects_which_codex_job_py_would_be_popened(tmp_path):
 
 
 def test_a_symlinked_plugin_root_is_refused_before_any_sibling_script_ever_runs(tmp_path):
-    """The PR bot's own finding, reproduced in the SAME shape it used to
-    prove it: a test that only checks "the template's no-follow walk
-    refuses a symlinked root" passed BEFORE this fix and proves nothing
+    """Proven by execution, not by a refusal message: a test that only
+    checks "the template's no-follow walk refuses a symlinked root"
+    passes WITHOUT this defense and proves nothing
     about this gap, because the template walk was never the thing a
     symlinked root needed to get past. `SELECT_SEGMENTS_SCRIPT` and
     `CODEX_JOB_SCRIPT` are built from the SAME root by simple
@@ -1542,8 +1542,8 @@ def test_a_symlinked_plugin_root_is_refused_before_any_sibling_script_ever_runs(
         f"rc=0:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
     assert not marker.exists(), (
-        f"select_segments.py resolved from a SYMLINKED root RAN -- exactly "
-        f"the PR bot's own finding -- before the driver's refusal ever took "
+        f"select_segments.py resolved from a SYMLINKED root RAN -- the "
+        f"redirected script executed before the driver's refusal ever took "
         f"effect. stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
     assert "SELECT_SEGMENTS_MUST_NEVER_RUN_FROM_A_SYMLINKED_ROOT" not in proc.stdout
