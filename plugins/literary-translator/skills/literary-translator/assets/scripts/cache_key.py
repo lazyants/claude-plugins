@@ -118,7 +118,7 @@ DURABLE_ROOT = Path(__file__).resolve().parents[1]
 # same way. Not the orchestration bucket -- this is not a diagnostic poll, and
 # its output is consumed as evidence rather than as logging. (Step 0a already
 # copies it: SKILL.md's copy pass takes every assets/scripts/*.py except the
-# five plugin-path-only scripts, which this is not.)
+# four plugin-path-only scripts, which this is not.)
 # segment_dispatch_driver.py (#409 Step 4, the W5 local driver) belongs here
 # for the SAME reason codex_job.py does: it owns the ACCEPT decision for
 # dispatched work -- which segments even get dispatched (the Step 1

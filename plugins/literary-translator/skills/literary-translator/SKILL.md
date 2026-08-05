@@ -111,13 +111,14 @@ Run by the **orchestrating session directly**, always from the plugin's own
 install path, never a durable-root copy — it runs before Step 0a exists to
 create one (same exception as Step 0c reading
 `references/source-format-adapters/*.md` directly from the plugin). It is one
-of four plugin-path scripts never copied to `durable_root`: `validate_extraction.py`
+of three plugin-path scripts never copied to `durable_root`: `validate_extraction.py`
 (the W2 post-extraction gate) and `glossary_preflight.py` (the W3 glossary
 staleness gate, 1.4.0) are kept plugin-only for tamper-proofing and
-freshness-on-resume rather than because either predates the durable root, and
-`resolve_codex_companion.py` (the W5 codex-companion path resolver, 1.4.7) is
-never copied because it must glob the plugin's own install locations to find
-the newest installed `codex-companion.mjs` — a durable-root copy could not.
+freshness-on-resume rather than because either predates the durable root. See
+Step 0a's own copy-pass section below for each exclusion's specific reason —
+including why `resolve_codex_companion.py` (the W5 codex-companion path
+resolver, 1.4.7) is NOT a fourth exclusion: it is copied like every other
+self-anchored script, since the claim that it could not be was found false.
 
 Order of operations:
 
@@ -231,17 +232,142 @@ same for `smoke_test.report_path` (skipped when null).
 
 Copies (unconditional overwrite, safe since these files are never
 hand-edited): every file in `assets/scripts/*.py` (except
-`profile_validate.py`, `validate_extraction.py`, `glossary_preflight.py`, and
-`resolve_codex_companion.py` — all four run only from the plugin path and are
-never copied; a copied `glossary_preflight.py` would resolve its own
-`__file__`-relative schema lookup against the *durable* schemas and compare
-durable-vs-durable, a vacuous pass that could never detect staleness, and a
-copied `resolve_codex_companion.py` could not glob the plugin's own install
-locations to find the newest installed `codex-companion.mjs`; and, separately,
-`scaffold_setup.py` — Step 0a's own bundle-hash marker writer (#194), which
-likewise runs only from the plugin path: it is invoked below as Step 0a's final
-action and imports the plugin's own `cache_key.py` helpers, and is deliberately
-NOT a bundle member, so it must never land under `scripts/`), every shipped
+`profile_validate.py`, `validate_extraction.py`, and `glossary_preflight.py`
+— three files, EACH excluded for its own distinct reason, never a shared one
+(a fourth exclusion, `scaffold_setup.py`, follows below in a wholly separate
+category — it is not a bundle member at all, never mind never-copied-for-its-
+own-reason like these three; do not read "three" here as this paragraph's
+total exclusion count):
+  - `profile_validate.py` runs *before* Step 0a exists to copy anything — Step 0
+    reads and validates `profile.yml` first, so there is no durable-root copy of
+    this script yet, and there never will be one for that specific invocation.
+  - `validate_extraction.py` is kept plugin-only so a hand-adapted `extract.py`
+    cannot weaken its own self-checks and still pass: the gate pins the durable
+    `extract.py`'s self-check region by hash against the plugin's own shipped
+    value, which only works if the checker itself is never a durable, hand-reachable
+    copy (see `references/false-green-gate.md`).
+  - `glossary_preflight.py` would be actively harmful copied, not merely redundant:
+    a durable copy's own `__file__`-relative schema lookup would land on the
+    *durable* schemas as its "plugin" side too, comparing durable-vs-durable — a
+    vacuous pass that could never detect staleness.
+
+`resolve_codex_companion.py` used to be a fourth exclusion here, on the claimed
+reason that a durable copy "could not glob the plugin's own install locations to
+find the newest installed `codex-companion.mjs`". That reason was false, and the
+disproof is short: the script **reads** no `__file__` — its own location never
+enters its search — and imports nothing plugin-specific; its entire search is
+rooted at `os.path.expanduser("~")` against
+`~/.claude*/plugins/cache/openai-codex/**/codex-companion.mjs` — a different
+plugin's own install cache, found the same way regardless of where
+`resolve_codex_companion.py` itself happens to be running from. A durable copy
+globs the identical `~` paths and finds the identical companions. It is now
+copied like every other self-anchored script; do not re-exclude it by
+re-deriving this same plausible-sounding-but-wrong argument — a literal
+occurrence count of `__file__` in the file is not this claim (the script's own
+docstring has to discuss `__file__` by NAME to explain this exact history, which
+makes a bare grep count useless as a re-check either way). Read
+`tests/resolve_codex_companion.test.py::test_the_resolver_contains_no_executable_reference_to_dunder_file`'s
+verdict instead — it parses the file with `ast` and only flags a genuine
+executable reference (an `ast.Name` node), never a prose mention.
+
+**Migration note, mandatory before `resolve_codex_companion.py` is copied on
+any project scaffolded before this correction:** its destination,
+`${durable_root}/scripts/resolve_codex_companion.py`, was explicitly EXCLUDED
+from this copy pass until now, and the "unconditional overwrite, safe since
+these files are never hand-edited" premise the rest of this copy pass rests on
+was NEVER true for this one path — a project that hit the exit-2 default-
+launch defect this correction fixes could have reasonably worked around it by
+placing its own adapted copy exactly there, on the explicit strength of that
+destination being documented as untouched. Copying over it unconditionally now
+would silently destroy that adaptation with no backup and no warning, and on a
+RESUMED project (outcome 2 above) this would happen with NO collision
+detection of any kind — collision detection exists only on outcome 3's
+ambiguous-adoption path, which a resumed project's own root marker match
+bypasses entirely.
+
+So THIS ONE FILE, and only this one, gets a check before its copy, never the
+blanket unconditional overwrite the rest of the bundle gets. Classify the
+destination with `os.lstat()` first — NEVER `Path.exists()`/`is_file()`,
+which FOLLOW a symlink and would silently write through it, leaving whatever
+was actually there (a workaround pointed elsewhere, or a stale copy) in
+place while reporting success:
+  - **Absent** (`os.lstat()` raises `FileNotFoundError`) → copy normally.
+    This is every project that never worked around the defect — the
+    overwhelming majority, and the same shape a fresh project (outcome 1)
+    always has.
+  - **A genuine regular file, byte-identical** to the shipped source → copy
+    normally (a no-op overwrite of itself).
+  - **Anything else** — a genuine regular file with DIFFERENT bytes, a
+    symlink (identical-looking target or not — lstat does not resolve it,
+    so its target content is never compared), a directory, or any other
+    non-absent entry `os.lstat()` reports — → HALT before copying anything.
+    Name the exact path and state plainly that a pre-existing,
+    non-managed entry sits there and this copy pass will not touch it
+    silently. Instruct the operator PER ENTRY KIND, never one generic
+    "move or rename it" — renaming preserves bytes only for the entry
+    kinds where the name and the bytes are the same thing:
+      - **Divergent regular file** → move or rename the file itself aside.
+        This genuinely preserves its bytes; the name is the only thing
+        that changes.
+      - **Symlink** → renaming the link is NOT preservation — it relocates
+        the POINTER, not the bytes it points at, and that target can be
+        transient, on a different filesystem, or itself deleted later.
+        Instruct the operator to first copy out the RESOLVED target's
+        actual content to a new location, THEN remove the symlink.
+      - **Directory** → move the whole directory aside; this preserves its
+        contents as a unit.
+    Then re-run.
+
+**This is deliberately a REFUSAL, not a clever preserving copy.** An earlier
+version of this note specified renaming a divergent file aside to a
+`.pre-upgrade-backup` sibling before copying over it, so the copy could
+proceed unattended. That shape has three real failure modes none of this
+document's own instructions can close, because Step 0a's copy pass is
+orchestrating-session prose executed by hand, not atomic code with the
+guarantees the shape would need: (1) a byte-identical-looking SYMLINK is
+still a symlink after a naive copy-over-the-path — the copy follows it and
+writes through to wherever it points, so the shipped file never actually
+lands at the expected destination, silently defeating the very launch fix
+this correction exists to deliver; (2) a DIVERGENT symlink's "backup" is
+just the symlink renamed, preserving a pointer rather than the adapted
+bytes it points at, which can go stale or vanish independently; (3) two
+concurrent scaffolds of the same durable_root can both pick the same free
+backup name and the second overwrites the first's backup. **A HALT closes
+exactly these three** — it performs no automatic write to a divergent
+destination at all, so there is no automatic-copy-through-a-symlink, no
+pointer-only backup, and no concurrent-backup-name race, because none of
+those three OPERATIONS ever run. It does NOT close every race this check
+could conceivably have: `os.lstat()`'s classification and the copy that
+follows it, in the absent and byte-identical branches above, are still two
+separate operations, not one atomic one — an entry classified absent or
+identical can change before the copy actually runs. That window is real,
+it is not closed by refusing (refusing only ever applies to the divergent
+branch, which performs no copy at all), and it is not being claimed closed
+here; it is simply much less consequential in this shape (prose a session
+executes by hand, once, rather than a machine loop an attacker can race
+repeatedly) than the automatic-backup shape's three failure modes were,
+which is why THOSE three, and not this one, are what this refusal exists
+to close. Do not "improve" this back into an automatic backup-and-copy
+without also closing all three of ITS failure modes for real, not just
+for the ordinary sequential-regular-file case that happens to look safe
+in testing.
+
+This check has no "runs once, ever" property to claim, and does not need
+one: unlike a backup-and-copy design (which only needed to fire on the
+FIRST migration), a halt-based check is memoryless and correctly re-fires
+on ANY future divergence at this exact path — whether from an old,
+never-cleaned-up workaround or a genuinely new one an operator creates
+later — treating both identically and safely, with no marker or prior-
+version digest required to tell them apart. Every OTHER bundle member never
+needs this treatment: none of them were ever excluded from the copy pass
+before, so none of them have a population of pre-existing, possibly-
+hand-adapted destinations to protect.
+
+Also, separately, `scaffold_setup.py` — Step 0a's own bundle-hash marker writer
+(#194), which likewise runs only from the plugin path: it is invoked below as
+Step 0a's final action and imports the plugin's own `cache_key.py` helpers, and
+is deliberately NOT a bundle member, so it must never land under
+`scripts/`), every shipped
 file in `assets/languages/`
 (`fr.json`, `de.json`, `es.json`, `he.json`, `it.json`, `README.md`), every file in
 `assets/schemas/*.json` → `${durable_root}/scripts/`,
@@ -1480,10 +1606,15 @@ syntax error at instantiation (verified: `node --check` exits 1 on an
 unsubstituted bare token), not a silent fallback — the same fail-loud property
 `{{CITATION_CONTENT_TYPES}}` relies on. **1.4.7:** as part of that same instantiation the
 orchestrator first runs `resolve_codex_companion.py --durable-root
-${durable_root}` from the plugin's own install path (never a durable-root
-copy — it must glob the plugin's install locations to find the newest
-installed `codex-companion.mjs`), ABORTS W5 on any non-zero exit (codex is the
-required engine per R1 — fail-fast, not today's silent no-draft hang), reads
+${durable_root}` from the plugin's own install path — the orchestrating
+session already has `{{PLUGIN_ROOT}}` in hand at this step, so there is no
+reason to prefer the durable copy Step 0a now also places at
+`${durable_root}/scripts/resolve_codex_companion.py` for the fully
+self-anchored, no-orchestrating-session case (`segment_dispatch_driver.py`'s
+own dispatch path uses that copy instead; see Step 0a's copy-pass section for
+why this script needs no plugin-path-specific behavior either way) — ABORTS
+W5 on any non-zero exit (codex is the required engine per R1 — fail-fast, not
+today's silent no-draft hang), reads
 the raw `companion_path` it prints, `json.dumps`-encodes that string ONCE, and
 substitutes it as the `{{CODEX_COMPANION_PATH_JSON}}` token alongside every
 other. Each per-segment translate/review dispatch then launches codex through

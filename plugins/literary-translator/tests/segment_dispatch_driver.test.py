@@ -1166,7 +1166,11 @@ def test_dispatch_codex_job_fatals_when_the_script_is_missing(tmp_path):
 
     with pytest.raises(DRIVER.DriverError) as exc_info:
         DRIVER.dispatch_codex_job(missing, [str(marker), "0", "0"], wait_timeout=10)
-    assert "not found" in str(exc_info.value)
+    # _refuse_unless_executable_leaf()'s own tri-state message ("state=absent"),
+    # not "not found" -- the STRUCTURAL check reports a richer state than
+    # Path.is_file() ever could, matching call_template_functions()'s own
+    # established message shape for the identical tri-state.
+    assert "state=absent" in str(exc_info.value)
 
 
 # ===========================================================================
@@ -1226,6 +1230,54 @@ def test_current_draft_sha1_fatals_on_missing_draft(tmp_path):
     with pytest.raises(DRIVER.DriverError) as exc_info:
         DRIVER.current_draft_sha1("seg01", segments_dir, scripts_dir)
     assert "not found" in str(exc_info.value)
+
+
+def test_load_draft_sha1_module_refuses_a_symlinked_scripts_dir(tmp_path):
+    """draft_sha1.py is NOT tracked in resolve_dirs()'s own `dirs` dict --
+    it is resolved independently, by `_load_draft_sha1_module()`, against
+    whatever `scripts_dir` its caller passes (always `dirs["scripts_dir"]`
+    in practice). `exec_module()` runs its top-level code INSIDE this
+    process -- no subprocess isolation at all -- so this needs its OWN
+    full-path no-follow check, not resolve_dirs()'s per-artifact loop
+    (which never sees `draft_sha1.py`). A directory-level symlink: real
+    `scripts_dir` moved aside, symlink planted at the expected location."""
+    real_scripts_dir = tmp_path / "real_scripts"
+    real_scripts_dir.mkdir()
+    (real_scripts_dir / "draft_sha1.py").write_text(
+        DRAFT_SHA1_SRC.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    symlinked_scripts_dir = tmp_path / "scripts_dir_via_symlink"
+    symlinked_scripts_dir.symlink_to(real_scripts_dir, target_is_directory=True)
+
+    with pytest.raises(DRIVER.DriverError) as exc_info:
+        DRIVER._load_draft_sha1_module(symlinked_scripts_dir)
+    assert exc_info.value.exit_code == 2
+    assert "symlink" in str(exc_info.value).lower()
+
+
+def test_load_draft_sha1_module_refuses_a_symlinked_leaf(tmp_path):
+    """Same function, the OTHER depth: a completely genuine, non-symlinked
+    `scripts_dir`, but `draft_sha1.py` itself is a symlink to real content
+    placed elsewhere -- the leaf substitution a directory-only check would
+    miss."""
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    real_draft_sha1 = tmp_path / "real_draft_sha1.py"
+    real_draft_sha1.write_text(DRAFT_SHA1_SRC.read_text(encoding="utf-8"), encoding="utf-8")
+    (scripts_dir / "draft_sha1.py").symlink_to(real_draft_sha1)
+
+    with pytest.raises(DRIVER.DriverError) as exc_info:
+        DRIVER._load_draft_sha1_module(scripts_dir)
+    assert exc_info.value.exit_code == 2
+    assert "symlink" in str(exc_info.value).lower()
+
+
+def test_load_draft_sha1_module_still_works_against_the_real_unmodified_repo(tmp_path):
+    """Sanity, since validating deeper means more real components must be
+    symlink-free: the REAL, currently-deployed draft_sha1.py, reached the
+    normal way, must still load without any false refusal."""
+    module = DRIVER._load_draft_sha1_module(DRIVER.SCRIPTS_DIR)
+    assert hasattr(module, "draft_content_sha1")
 
 
 # ===========================================================================
@@ -1438,6 +1490,347 @@ def test_plugin_root_redirects_which_codex_job_py_would_be_popened(tmp_path):
         "--plugin-root does"
     )
     assert via_plugin_root["codex_job_script"] == plugin_root / "assets" / "scripts" / "codex_job.py"
+
+
+def test_a_symlinked_plugin_root_is_refused_before_any_sibling_script_ever_runs(tmp_path):
+    """Proven by execution, not by a refusal message: a test that only
+    checks "the template's no-follow walk refuses a symlinked root"
+    passes WITHOUT this defense and proves nothing
+    about this gap, because the template walk was never the thing a
+    symlinked root needed to get past. `SELECT_SEGMENTS_SCRIPT` and
+    `CODEX_JOB_SCRIPT` are built from the SAME root by simple
+    concatenation, with no check of their own -- so with a symlinked
+    --plugin-root, the redirected tree's own select_segments.py ran and
+    produced a REAL, OBSERVABLE effect (the bot's own proof: a marker
+    file) before the driver ever reached the template check that used to
+    be the only thing standing in the way.
+
+    Proves the actual property, not a proxy for it: a marker file
+    select_segments.py would write IF it ever ran must NOT exist after
+    the driver refuses -- not "the process exited nonzero" (true for
+    many unrelated reasons) and not "the template walk returned
+    'suspicious'" (true today but was ALSO true, uselessly, before this
+    exact gap was closed, since that check runs strictly after
+    select_segments.py would already have run)."""
+    root = phase2_project(tmp_path, n=1)
+    marker = tmp_path / "select_segments_ran.marker"
+    assert not marker.exists(), "sanity: the marker must not pre-exist"
+
+    real_root = tmp_path / "real_plugin_root"
+    plugin_scripts_dir = real_root / "assets" / "scripts"
+    plugin_scripts_dir.mkdir(parents=True)
+    (real_root / "assets" / "templates").mkdir(parents=True)
+    (real_root / "assets" / "templates" / "mass-translate-wf.template.js").write_text(
+        "// should never even be reached\n", encoding="utf-8"
+    )
+    (plugin_scripts_dir / "select_segments.py").write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"open({str(marker)!r}, 'w', encoding='utf-8').write('SELECT_SEGMENTS_RAN')\n"
+        "sys.stderr.write('SELECT_SEGMENTS_MUST_NEVER_RUN_FROM_A_SYMLINKED_ROOT')\n"
+        "sys.exit(97)\n",
+        encoding="utf-8",
+    )
+
+    symlinked_root = tmp_path / "plugin_root_via_symlink"
+    symlinked_root.symlink_to(real_root, target_is_directory=True)
+
+    proc = run_driver(root, "--plugin-root", str(symlinked_root), timeout=60)
+
+    assert proc.returncode != 0, (
+        f"expected the driver to refuse a symlinked --plugin-root, got "
+        f"rc=0:\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert not marker.exists(), (
+        f"select_segments.py resolved from a SYMLINKED root RAN -- the "
+        f"redirected script executed before the driver's refusal ever took "
+        f"effect. stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
+    assert "SELECT_SEGMENTS_MUST_NEVER_RUN_FROM_A_SYMLINKED_ROOT" not in proc.stdout
+    assert "SELECT_SEGMENTS_MUST_NEVER_RUN_FROM_A_SYMLINKED_ROOT" not in proc.stderr
+
+
+def test_a_symlinked_self_anchored_install_never_lets_select_segments_run(tmp_path):
+    """Same gap, the OTHER resolve_dirs() branch: `SCRIPTS_DIR` feeds
+    `SELECT_SEGMENTS_SCRIPT` (module-level) the identical way `plugin_root`
+    feeds the --plugin-root branch's siblings -- and the refusal now lives
+    at `run_select_segments()`'s own point of use (`resolve_dirs()` itself
+    only BUILDS the dict; it stopped being the check site once artifacts
+    that no test fixture needs stopped being required to exist just to
+    call it -- see `_refuse_unless_executable_leaf()`'s own docstring for
+    why). Proven at the CONSUMER level, via a FRESH module load from a
+    symlinked install (there is no --plugin-root flag to launch a
+    subprocess against for this branch -- the root comes from `__file__`),
+    with a marker-writing select_segments.py stub: `resolve_dirs()` itself
+    succeeds (nothing to refuse yet, it never touches the filesystem
+    beyond building paths), but `run_select_segments()` must never let the
+    symlinked script actually run."""
+    real_install = tmp_path / "real_install"
+    scripts_dir = real_install / "assets" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(DRIVER_SRC, scripts_dir / "segment_dispatch_driver.py")
+    (scripts_dir / "mass-translate-wf.template.js").write_text(
+        "// self-anchored template\n", encoding="utf-8"
+    )
+    marker = tmp_path / "select_segments_ran.marker"
+    (scripts_dir / "select_segments.py").write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"open({str(marker)!r}, 'w', encoding='utf-8').write('RAN')\n"
+        "sys.exit(3)\n",
+        encoding="utf-8",
+    )
+
+    symlinked_install = tmp_path / "install_via_symlink"
+    symlinked_install.symlink_to(real_install, target_is_directory=True)
+
+    module_path = symlinked_install / "assets" / "scripts" / "segment_dispatch_driver.py"
+    fresh_driver = _load_module(module_path, "driver_loaded_via_symlinked_install_consumer_check")
+
+    dirs = fresh_driver.resolve_dirs(None, None)
+    try:
+        fresh_driver.run_select_segments(dirs)
+    except Exception:
+        pass
+    assert not marker.exists(), (
+        "select_segments.py resolved from a symlinked self-anchored "
+        "install RAN -- run_select_segments() must refuse it before Popen"
+    )
+
+
+# ===========================================================================
+# A genuine directory root satisfies a root-only check while "assets" one
+# level below it is a symlink: such a check validates the ROOT and nothing
+# BELOW it, and placing it in resolve_dirs() puts it at a single choke point
+# every executed artifact happens to pass through.
+# Consolidating the check there turned out to have its own cost: many of
+# this file's own fixtures deliberately stage only the SUBSET of sibling
+# scripts a given test actually needs (a Step-1-only test has no reason to
+# ship a real codex_job.py), and an upfront, all-8-required check inside
+# resolve_dirs() made resolve_dirs() itself fail for artifacts those tests
+# never touch. So the fix moved: `_refuse_unless_executable_leaf()` (full
+# root+every-intermediate-directory+leaf verification, exactly
+# `_open_regular_no_follow_walk()`'s own walk) now lives at each artifact's
+# own POINT OF USE -- the same place the template's own check has ALWAYS
+# lived (call_template_functions(), never resolve_dirs()) -- so an artifact
+# a given run never reaches never has to exist, and one that IS reached
+# still gets the full, three-depth-closing check right before it runs.
+#
+# Two groups below: the MECHANISM (`_refuse_unless_executable_leaf()`
+# itself, proven directly at all three depths -- root/assets/leaf -- since
+# every consumer below is a thin, identical wrapper around it) + the WIRING
+# (does each of the 8 consumer functions actually CALL it before Popen'ing
+# -- proven per artifact, by a marker it would write if it ever ran, not by
+# an exception alone: "a test asserting resolve_dirs raised is weaker; it
+# can pass for the wrong reason," which is exactly why this file no longer
+# asserts that).
+# ===========================================================================
+
+_EXECUTED_SCRIPT_ARTIFACT_NAMES = (
+    "select_segments.py",
+    "codex_job.py",
+    "resume_setup.py",
+    "resolve_codex_companion.py",
+    "ledger_update.py",
+    "cache_key.py",
+    "draft_ready.py",
+    "validate_draft.py",
+)
+
+
+@pytest.mark.parametrize("depth", ["root", "assets", "leaf"])
+def test_refuse_unless_executable_leaf_closes_all_three_depths(tmp_path, depth):
+    """The MECHANISM, proven once, directly: `_refuse_unless_executable_leaf()`
+    is a thin wrapper around `_open_regular_no_follow_walk()` -- same walk,
+    same three-depth coverage -- so this is what every one of the 8
+    per-artifact WIRING tests below relies on without re-proving it
+    themselves."""
+    real_plugin_root = make_trusted_plugin_root(tmp_path, name=f"real_root_{depth}")
+    leaf = real_plugin_root / "assets" / "scripts" / "select_segments.py"
+
+    if depth == "root":
+        symlinked = tmp_path / f"root_via_symlink_{depth}"
+        symlinked.symlink_to(real_plugin_root, target_is_directory=True)
+        target_leaf = symlinked / "assets" / "scripts" / "select_segments.py"
+    elif depth == "assets":
+        outer = tmp_path / f"outer_root_{depth}"
+        outer.mkdir()
+        (outer / "assets").symlink_to(real_plugin_root / "assets", target_is_directory=True)
+        target_leaf = outer / "assets" / "scripts" / "select_segments.py"
+    else:  # "leaf"
+        real_target = tmp_path / f"real_select_segments_{depth}.py"
+        real_target.write_text(leaf.read_text(encoding="utf-8"), encoding="utf-8")
+        leaf.unlink()
+        leaf.symlink_to(real_target)
+        target_leaf = leaf
+
+    with pytest.raises(DRIVER.DriverError) as exc_info:
+        DRIVER._refuse_unless_executable_leaf(target_leaf, "select_segments.py")
+    assert exc_info.value.exit_code == 2
+    assert "symlink" in str(exc_info.value).lower()
+
+
+def _plugin_root_with_marker_artifact(tmp_path, artifact_name, marker, label):
+    """A --plugin-root fixture where `artifact_name` is a SYMLINK to a
+    separate marker-writing stub -- every OTHER artifact stays a real,
+    ordinary file `make_trusted_plugin_root()` already ships. The symlink
+    is the load-bearing part: an ordinary regular file here would pass
+    every check trivially and prove nothing. Returns the `--plugin-root`
+    string."""
+    real_plugin_root = make_trusted_plugin_root(tmp_path, name=f"real_plugin_root_{label}")
+    marker_stub = (
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"open({str(marker)!r}, 'w', encoding='utf-8').write('RAN')\n"
+        "print('{}')\n"
+        "sys.exit(3)\n"
+    )
+    real_marker_script = tmp_path / f"real_{label}_stub.py"
+    real_marker_script.write_text(marker_stub, encoding="utf-8")
+    target_leaf = real_plugin_root / "assets" / "scripts" / artifact_name
+    target_leaf.unlink()
+    target_leaf.symlink_to(real_marker_script)
+    return str(real_plugin_root)
+
+
+def _invoke_select_segments(dirs, tmp_path):
+    DRIVER.run_select_segments(dirs)
+
+
+def _invoke_codex_job(dirs, tmp_path):
+    DRIVER.dispatch_codex_job(dirs["codex_job_script"], [], wait_timeout=10)
+
+
+def _invoke_resume_setup(dirs, tmp_path):
+    # translate_cfg={} would KeyError inside resolve_run_id() itself,
+    # before it ever reaches the script check -- caught by this test's
+    # own broad except and passing for the WRONG reason (exactly what
+    # "resolve_dirs raised is weaker" warns about, one layer further in).
+    # _FIXTURE_TRANSLATE_CFG (defined below, but already a module global
+    # by the time any test body runs) is what every OTHER test in this
+    # file already uses for a genuinely complete config.
+    DRIVER.resolve_run_id(
+        dirs, translate_cfg=_FIXTURE_TRANSLATE_CFG, plugin_root_str=None, durable_root_str=None
+    )
+
+
+def _invoke_resolve_codex_companion(dirs, tmp_path):
+    DRIVER.resolve_companion_path(dirs, node_bin="node")
+
+
+def _invoke_cache_key(dirs, tmp_path):
+    DRIVER.write_ledger(dirs, "seg01", {"status": "converged"}, run_id="r1", needs_cache_key=True)
+
+
+def _invoke_ledger_update(dirs, tmp_path):
+    DRIVER.write_ledger(dirs, "seg01", {"status": "converged"}, needs_cache_key=False)
+
+
+def _invoke_draft_ready(dirs, tmp_path):
+    ctx = DRIVER.DispatchContext(
+        dirs=dirs, run_id="r1", translate_cfg={}, companion_path="",
+        durable_root_str=None, plugin_root_str=None, node_bin="node", session_id=None,
+    )
+    DRIVER._run_gate(dirs["draft_ready_script"], [], ctx, supports_plugin_root=False)
+
+
+def _invoke_validate_draft(dirs, tmp_path):
+    ctx = DRIVER.DispatchContext(
+        dirs=dirs, run_id="r1", translate_cfg={}, companion_path="",
+        durable_root_str=None, plugin_root_str=None, node_bin="node", session_id=None,
+    )
+    DRIVER._run_gate(dirs["validate_draft_script"], ["seg01"], ctx, supports_plugin_root=False)
+
+
+_ARTIFACT_INVOKERS = {
+    "select_segments.py": _invoke_select_segments,
+    "codex_job.py": _invoke_codex_job,
+    "resume_setup.py": _invoke_resume_setup,
+    "resolve_codex_companion.py": _invoke_resolve_codex_companion,
+    "cache_key.py": _invoke_cache_key,
+    "ledger_update.py": _invoke_ledger_update,
+    "draft_ready.py": _invoke_draft_ready,
+    "validate_draft.py": _invoke_validate_draft,
+}
+
+
+@pytest.mark.parametrize("artifact_name", _EXECUTED_SCRIPT_ARTIFACT_NAMES)
+def test_a_symlinked_artifact_never_actually_runs(tmp_path, artifact_name):
+    """The WIRING, per artifact: replace `artifact_name`'s own content
+    with a script that writes a marker if it EVER runs, symlink it at the
+    LEAF (the depth the mechanism test above already proved this catches;
+    this test's own job is narrower -- does calling the REAL consumer
+    function for THIS artifact actually invoke the check before Popen'ing
+    it, not whether the check itself works at every depth). The marker
+    being absent is the proof, not the exception this call may or may not
+    raise (`write_ledger()`/`_run_gate()` return a failure value rather
+    than raising, by their own documented contract -- an assertion tied to
+    "raised" would be wrong for those two and prove nothing for either)."""
+    marker = tmp_path / "ran.marker"
+    plugin_root_str = _plugin_root_with_marker_artifact(tmp_path, artifact_name, marker, artifact_name)
+    dirs = DRIVER.resolve_dirs(None, plugin_root_str)
+
+    invoke = _ARTIFACT_INVOKERS[artifact_name]
+    try:
+        invoke(dirs, tmp_path)
+    except Exception:
+        pass
+
+    assert not marker.exists(), (
+        f"{artifact_name}: ran when reached through its own consumer "
+        f"function with a symlinked leaf -- expected "
+        f"_refuse_unless_executable_leaf() to refuse it before Popen"
+    )
+
+
+def test_attempt_cancel_orphan_never_invokes_node_against_a_symlinked_companion_path(tmp_path, monkeypatch):
+    """`companion_path` is a DIFFERENT shape than every artifact above: not
+    built from SCRIPTS_DIR/plugin_root by concatenation at all -- it is a
+    STRING resolve_codex_companion.py prints on its own stdout, discovered
+    dynamically at runtime. This function still executes it directly
+    (`[node_bin, companion_path, "status"/"cancel", ...]`), so it needs,
+    and got, its OWN check (unlike the artifacts above, whose protection
+    lives one layer up in resolve_dirs() -- this one is verified fresh
+    inside `_attempt_cancel_orphan()` itself, every call, since it can
+    fire long after `companion_path` was first resolved).
+
+    Proven by spying on `subprocess.run` directly, not by the absence of
+    an exception: this function's own documented contract is "never
+    raises" (best-effort cleanup), so a clean return proves nothing on
+    its own. The spy proves the STRONGER, actually-relevant property --
+    node is never even INVOKED against the symlinked path."""
+    real_companion = tmp_path / "real_companion.mjs"
+    real_companion.write_text("// real companion\n", encoding="utf-8")
+    symlinked_companion_dir = tmp_path / "companion_via_symlink"
+    symlinked_companion_dir.mkdir()
+    fake_companion = symlinked_companion_dir / "companion.mjs"
+    fake_companion.symlink_to(real_companion)
+
+    durable_root = tmp_path / "durable_root"
+    (durable_root / "segments").mkdir(parents=True)
+    (durable_root / "segments" / ".codex_job.seg01.json").write_text(
+        json.dumps({"status": "launched", "disp": "d1", "jobId": "j1", "jobCwd": "/tmp"}),
+        encoding="utf-8",
+    )
+
+    invoked_with = []
+    real_run = subprocess.run
+
+    def spy_run(cmd, *args, **kwargs):
+        invoked_with.append(cmd)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy_run)
+
+    DRIVER._attempt_cancel_orphan(
+        durable_root=durable_root, seg="seg01", disp="d1",
+        companion_path=str(fake_companion), node_bin="node",
+    )
+
+    assert not invoked_with, (
+        f"expected NO subprocess to be launched against a symlinked "
+        f"companion_path -- got: {invoked_with}"
+    )
 
 
 # ===========================================================================
@@ -4102,6 +4495,784 @@ def test_resume_setup_rejects_both_resume_from_run_ids_and_the_singular_field_to
         result = _resume_setup_result(proc)
         assert result.get("success") is True, (kwargs, result)
         assert result.get("resume") is False, (kwargs, result)
+
+
+# ===========================================================================
+# The prompt-building template: WHERE the driver looks for it (layout
+# resolution across the two shapes a self-anchored driver can be running
+# from), and WHAT it trusts once it looks (never following a symlink or
+# reading a non-regular entry -- the highest-severity finding on this
+# branch, because call_template_functions() dynamically imports and
+# EXECUTES whatever it reads: every render_translate_prompt()/
+# render_review_prompt()/render_fix_prompt() call, and the fabricated-
+# finding matchedVerdict() gate derive_next_action() runs against every
+# review, all go through this one function).
+# ===========================================================================
+
+
+def test_resolve_dirs_finds_the_template_under_a_deployed_durable_root(tmp_path):
+    """Step 0a's copy pass places every bundle member -- the .py gates AND
+    the .template.js workflow template alike -- FLAT at
+    ${durable_root}/scripts/<name>. There is no scripts/templates/ subdir in
+    a real deployed root. Reproduces that shape directly: copies the real
+    driver into an isolated root/scripts/ with the template ALSO flat there
+    and NO sibling templates/ directory, loads THAT copy (so its own
+    SCRIPTS_DIR self-anchors to the deployed location, not this checkout),
+    and calls its own resolve_dirs(None) -- the same self-anchored path a
+    real deployed driver invocation takes."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    flat_template = deployed_scripts / "mass-translate-wf.template.js"
+    shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, flat_template)
+
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_deployed_template")
+    assert deployed.resolve_dirs(None)["template_script"] == flat_template
+
+
+def test_a_deployed_layout_template_is_actually_readable_and_executable_end_to_end(tmp_path):
+    """codex's finding on the test above: it asserts only resolve_dirs()'s
+    RETURNED PATH, never that the deployed-layout resolution actually
+    produces a template call_template_functions() can read and Node can
+    run. Proves the full chain for the deployed layout specifically --
+    resolve -> _open_regular_no_follow_walk() -> read -> truncate -> Node
+    execution -> JSON parse -- the same round trip
+    test_translate_dispatch_byte_equivalence_to_template already proves
+    for the CHECKOUT layout (via phase2_project()'s own stage_phase2_
+    sibling_scripts() fixture, which always creates a separate templates/
+    dir), but that test never exercises the deployed, flat-scripts/ shape
+    at all."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, deployed_scripts / "mass-translate-wf.template.js")
+
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_deployed_template_e2e")
+    dirs = deployed.resolve_dirs(None)
+    subst = {
+        "durable_root": str(tmp_path), "run_id": "20260101T000000Z",
+        "source_lang": "fr", "target_lang": "ru", "effort": "high", "model": "",
+        "verse_policy_instruction_block": "", "max_fix_rounds": 2,
+        "batch_agent_cap": 10000, "max_codex_jobs_per_batch": 400,
+        "companion_path": "/fake/companion.mjs", "plugin_root": "",
+    }
+    out = deployed.call_template_functions(
+        dirs, subst, [{"key": "text", "fn": "translatePrompt", "args": ["seg01"]}])
+    assert isinstance(out["text"], str) and out["text"], (
+        f"expected translatePrompt() to return real, non-empty prompt text via "
+        f"the deployed layout, got {out!r}"
+    )
+
+
+def test_resolve_dirs_still_finds_the_template_in_this_plugin_checkout_layout(tmp_path):
+    """The other half, and the one every phase2_project()-based test in this
+    file already depends on: assets/scripts/ and assets/templates/ are
+    siblings in a plugin checkout, so a self-anchored driver running from a
+    checkout must resolve ONE DIRECTORY OVER, not beside itself. Built as a
+    synthetic checkout rather than asserting against the real one, so the
+    assertion is about the LAYOUT rule, not this repo's own paths."""
+    assets = tmp_path / "assets"
+    checkout_scripts = assets / "scripts"
+    checkout_templates = assets / "templates"
+    checkout_scripts.mkdir(parents=True)
+    checkout_templates.mkdir()
+    shutil.copy2(DRIVER_SRC, checkout_scripts / "segment_dispatch_driver.py")
+    sibling_template = checkout_templates / "mass-translate-wf.template.js"
+    shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, sibling_template)
+
+    checkout = _load_module(
+        checkout_scripts / "segment_dispatch_driver.py", "sdd_checkout_template")
+    assert checkout.resolve_dirs(None)["template_script"] == sibling_template, (
+        "a self-anchored driver in a plugin checkout must resolve assets/templates/, "
+        "not a flat sibling that does not exist there"
+    )
+
+
+def test_resolve_dirs_refuses_when_both_template_candidates_exist(tmp_path):
+    """The concrete ambiguity a fixed-order probe cannot resolve safely: a
+    stray checkout-layout copy left beside a real deployed one (or vice
+    versa) must never be silently resolved by preferring one -- that is how
+    a stale or planted copy takes over every prompt this driver renders.
+    With both candidates real files, deployed-first and checkout-first
+    orderings would return DIFFERENT paths while both returning normally --
+    fail-closed is the only answer that agrees with itself regardless of
+    ordering."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, deployed_scripts / "mass-translate-wf.template.js")
+    checkout_templates = tmp_path / "templates"
+    checkout_templates.mkdir()
+    (checkout_templates / "mass-translate-wf.template.js").write_text(
+        "// stray checkout-layout copy\n", encoding="utf-8")
+
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_both_template_candidates")
+    with pytest.raises(deployed.DriverError):
+        deployed.resolve_dirs(None)
+
+
+def test_resolve_dirs_refuses_a_symlinked_template_candidate(tmp_path):
+    """is_file() FOLLOWS a valid symlink and reports True, exactly like a
+    real regular file -- so a symlink at either candidate path, pointing
+    ANYWHERE, would silently become the executable authority under the old
+    is_file()-based check. Refuse it outright rather than trust where it
+    resolves to."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    real_target = tmp_path / "elsewhere.js"
+    real_target.write_text("// a real file the symlink points at\n", encoding="utf-8")
+    (deployed_scripts / "mass-translate-wf.template.js").symlink_to(real_target)
+
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_symlinked_template")
+    with pytest.raises(deployed.DriverError):
+        deployed.resolve_dirs(None)
+
+
+def test_resolve_dirs_refuses_a_directory_where_the_template_should_be(tmp_path):
+    """A directory of the exact expected name -- is_file() reports False for
+    a directory (so the old code silently fell through to the checkout
+    candidate, or to the fallback, as if nothing were there at all), but a
+    directory is a real entry, not an absence: something put it there, and
+    treating it as "no candidate" is the same authority-selection risk as
+    silently preferring a stray file."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    (deployed_scripts / "mass-translate-wf.template.js").mkdir()
+
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_directory_template")
+    with pytest.raises(deployed.DriverError):
+        deployed.resolve_dirs(None)
+
+
+def test_resolve_dirs_refuses_when_a_candidate_cannot_be_looked_up_at_all(tmp_path):
+    """A lookup failure that is NOT ENOENT: os.lstat() needs traverse
+    permission on the PARENT directory, not read permission on the
+    candidate itself, so the scripts/ directory is what loses permission
+    here, after the driver module has already been imported from it (import
+    happens first, while the directory is still traversable -- otherwise
+    loading the module under test would fail for the same reason this test
+    wants to exercise). A non-ENOENT lookup failure must be treated as
+    PRESENT rather than absent, for the identical fail-closed reason a
+    genuinely absent entry is treated as safe to fall through on."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_unlookupable_template")
+
+    deployed_scripts.chmod(0o000)
+    try:
+        if os.access(str(deployed_scripts), os.X_OK):  # root -- the chmod bought nothing
+            pytest.skip("cannot make a directory unsearchable as this user")
+        with pytest.raises(deployed.DriverError):
+            deployed.resolve_dirs(None)
+    finally:
+        deployed_scripts.chmod(0o755)
+
+
+def test_a_symlinked_template_reached_via_plugin_root_is_refused_before_execution(tmp_path):
+    """THE HIGHEST-SEVERITY FINDING ON THIS BRANCH: --plugin-root's own
+    branch in resolve_dirs() just joins a path -- `plugin_root / "assets" /
+    "templates" / _TEMPLATE_NAME` -- with no existence or type check of its
+    own, because it is TOLD which plugin install to trust and has nothing
+    to probe. Under the old is_file()-based check in
+    call_template_functions(), a symlink planted at that exact path,
+    pointing at attacker-controlled content, would be followed and its
+    JavaScript top-level code EXECUTED (call_template_functions()
+    dynamically imports whatever dirs["template_script"] names). This is
+    not a narrow, one-gate exposure: call_template_functions() sits on the
+    path of EVERY prompt kind this driver renders -- translate and review
+    alike -- so any dispatch, not some special case, would have taken it.
+    The fix has to live at the point of USE (call_template_functions()
+    itself), not only at resolution, because this branch never goes
+    through _self_anchored_template_path() at all.
+
+    Reproduces the real attack shape: a real trusted plugin_root (the same
+    fixture make_trusted_plugin_root() builds for the existing --plugin-root
+    battery), with its real template REPLACED by a symlink to attacker-
+    controlled content placed OUTSIDE the plugin root entirely -- and calls
+    call_template_functions() directly, the same function every prompt
+    render and the fabricated-finding gate go through."""
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    template_path = plugin_root / "assets" / "templates" / "mass-translate-wf.template.js"
+    evil_js = tmp_path / "attacker_controlled" / "evil.js"
+    evil_js.parent.mkdir(parents=True)
+    evil_js.write_text(
+        "export const meta = {};\n"
+        "process.stdout.write('EVIL CODE EXECUTED');\n"
+        "export function translatePrompt() { return ''; }\n",
+        encoding="utf-8",
+    )
+    template_path.unlink()
+    template_path.symlink_to(evil_js)
+
+    dirs = DRIVER.resolve_dirs(None, str(plugin_root))
+    assert dirs["template_script"] == template_path, (
+        "sanity: the --plugin-root branch must still name this exact path -- "
+        "if it does not, this test is not exercising the branch it claims to"
+    )
+
+    # A COMPLETE, valid subst dict -- not {} -- so this test's own failure
+    # mode cannot be confused with an incidental KeyError from a lazy
+    # fixture: whatever call_template_functions() does with a real template
+    # this driver could actually be asked to render, it must never even
+    # attempt with a symlinked entry.
+    subst = {
+        "durable_root": str(tmp_path), "run_id": "20260101T000000Z",
+        "source_lang": "fr", "target_lang": "ru", "effort": "high", "model": "",
+        "verse_policy_instruction_block": "", "max_fix_rounds": 2,
+        "batch_agent_cap": 10000, "max_codex_jobs_per_batch": 400,
+        "companion_path": "/fake/companion.mjs", "plugin_root": "",
+    }
+    with pytest.raises(DRIVER.DriverError) as excinfo:
+        DRIVER.call_template_functions(dirs, subst, [])
+    # DISCRIMINATING, not just "some DriverError fired": evil.js is not
+    # template-shaped (no {{TOKEN}}s, no truncation marker), so a driver
+    # that read it anyway would ALSO eventually hit a DIFFERENT, unrelated
+    # DriverError (a missing truncation marker) further down the pipeline
+    # -- and that would make this test pass for the wrong reason even
+    # against an implementation that never closed the symlink hole. Assert
+    # on the SPECIFIC refusal instead: the fix reports the template's
+    # lstat-classified state, which is only ever attached by
+    # _template_candidate_state()'s own fail-closed check.
+    assert excinfo.value.extra.get("template_state") == "suspicious", (
+        f"expected the fail-closed template check to refuse this symlink "
+        f"specifically (extra={excinfo.value.extra!r}) -- a DriverError "
+        f"from ANY later stage of the pipeline is not proof the symlink "
+        f"itself was ever refused"
+    )
+
+
+def test_a_fifo_at_the_leaf_is_refused_quickly_never_blocks_the_open(tmp_path):
+    """A FIFO with no writer on the other end, opened with a BLOCKING
+    `O_RDONLY | O_NOFOLLOW`, BLOCKS INSIDE os.open() itself, before
+    classification ever runs and before any caller-side timeout (Node's
+    60s subprocess timeout, in call_template_functions()) can even start
+    -- an attacker-triggerable hang, and strictly worse than the plain
+    os.lstat() check this whole fix replaced (lstat never opens anything,
+    so it could refuse a FIFO instantly). Verified directly, not
+    asserted: a genuinely blocking open on this exact FIFO, run in a
+    separate process with a bounded timeout, really does hang -- the
+    documented reason O_NONBLOCK on the leaf open is load-bearing, not
+    cosmetic.
+
+    BOUNDED WITH A HARD SIGALRM, not left to run unbounded on the claim
+    that a hang IS the signal: if the fix regresses, the test itself
+    hangs, and a wedged suite is proof enough. It is not: a wedged run
+    produces no failing test name, no assertion text, no traceback, and
+    takes every OTHER test's result down with it -- the single hardest
+    failure mode to attribute, and a hung run looks, from outside,
+    identical to one that is merely slow. A regression here must FAIL
+    LOUDLY, not wedge the release gate silently. The alarm is generous
+    (5s -- os.open() with O_NONBLOCK on a real FIFO returns in
+    microseconds when the fix is intact) and is cleared in `finally`
+    regardless of outcome, so it can never leak into a later test.
+
+    THE TIMEOUT SIGNAL MUST NOT BE AN OSError SUBCLASS: `TimeoutError` IS
+    one (Python 3.3+), so raising it from the SIGALRM handler while
+    blocked inside `os.open()` gets silently caught by
+    `_open_regular_no_follow_walk()`'s OWN `except OSError` handler -- the
+    function returns `(None, "suspicious")` exactly as if it had refused
+    the FIFO cleanly, and this test would report PASSED after the full 5s
+    wait, having proven NOTHING about whether the hang ever happened.
+    `_FifoOpenTimedOut` below is a `RuntimeError`, deliberately outside
+    the OSError family, so a genuine regression propagates THROUGH the
+    production function's own exception handling instead of being
+    absorbed by it."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    fifo_path = deployed_scripts / "mass-translate-wf.template.js"
+    os.mkfifo(str(fifo_path))
+
+    class _FifoOpenTimedOut(RuntimeError):
+        pass
+
+    def _timeout_handler(signum, frame):
+        raise _FifoOpenTimedOut(
+            "regression: the leaf open blocked on a FIFO for 5s -- "
+            "O_NONBLOCK was dropped from _open_regular_no_follow_walk()'s "
+            "leaf open, reintroducing the exact hang this test exists to catch"
+        )
+
+    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, 5)
+    try:
+        fd, state = DRIVER._open_regular_no_follow_walk(fifo_path)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+    assert fd is None and state == "suspicious", (
+        f"expected a FIFO to be refused as suspicious (never opened for a "
+        f"real read), got fd={fd!r} state={state!r}"
+    )
+
+
+def test_the_returned_descriptor_has_o_nonblock_cleared(tmp_path):
+    """O_NONBLOCK is load-bearing during the LEAF
+    open (it keeps a FIFO's own open() from blocking before classification
+    can run -- see the FIFO test above), but the caller
+    (call_template_functions()) reads the RETURNED fd as an ordinary
+    EOF-complete text stream. Ordinary regular-file I/O ignores the flag,
+    but S_ISREG does not universally guarantee that -- Linux exposes
+    regular pseudo-files, and FUSE implementations choose their own read
+    semantics -- so the flag is cleared, on the SAME verified descriptor,
+    the moment S_ISREG confirms it is safe to. Checked directly via
+    fcntl(F_GETFL), not inferred from a successful read (a successful read
+    would pass whether or not the flag were still set, on any filesystem
+    where the flag happens not to matter -- this asserts the PROPERTY, not
+    a symptom of its absence)."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    real_file = deployed_scripts / "mass-translate-wf.template.js"
+    real_file.write_text("// a genuine regular file\n", encoding="utf-8")
+
+    fd, state = DRIVER._open_regular_no_follow_walk(real_file)
+    try:
+        assert state == "file" and fd is not None
+        current_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        assert not (current_flags & os.O_NONBLOCK), (
+            f"expected O_NONBLOCK cleared on the returned descriptor once "
+            f"S_ISREG confirmed a genuine regular file, but F_GETFL still "
+            f"reports it set (flags={current_flags!r})"
+        )
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def test_a_close_failure_during_cleanup_is_never_retried_on_the_same_fd(tmp_path, monkeypatch):
+    """Verifies the actual property directly: no fd is EVER passed to
+    os.close() more than once. Closing a descriptor and only afterward, on
+    a SEPARATE line, setting the owning variable to None would violate
+    this -- if that close() itself raised, the variable would still be
+    non-None by the time an outer exception handler ran, so the handler
+    would retry the IDENTICAL close on an fd whose close had already
+    failed. Checking this directly matters because a mutant that swallowed
+    the double-close's own exception without fixing the double-close
+    itself would still pass a return-value-only check."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    # A directory at the leaf: reaches the "close leaf_fd because it is
+    # not S_ISREG" branch -- exactly the close call that used to be
+    # unguarded and un-detached.
+    (deployed_scripts / "mass-translate-wf.template.js").mkdir()
+
+    closed_fds = []
+    real_close = os.close
+
+    def spy_close(fd, *args, **kwargs):
+        if fd in closed_fds:
+            pytest.fail(
+                f"fd {fd} was passed to os.close() more than once -- "
+                f"ownership was not detached before a failed close, so an "
+                f"outer handler retried it"
+            )
+        closed_fds.append(fd)
+        raise OSError("simulated close failure, e.g. EIO on close")
+
+    monkeypatch.setattr(os, "close", spy_close)
+
+    fd, state = DRIVER._open_regular_no_follow_walk(
+        deployed_scripts / "mass-translate-wf.template.js")
+
+    # The simulated close failure must be swallowed (guarded), not
+    # propagated -- the function still reports its documented verdict.
+    assert fd is None and state == "suspicious", (
+        f"expected a directory leaf to be refused as suspicious even when "
+        f"its own cleanup close() fails, got fd={fd!r} state={state!r}"
+    )
+    monkeypatch.setattr(os, "close", real_close)
+    for real_fd in closed_fds:
+        try:
+            real_close(real_fd)
+        except OSError:
+            pass  # the spy already "closed" it (by raising); this is best-effort
+
+
+# ===========================================================================
+# codex's BLOCKER on 7524076: os.lstat()-based classification only inspects
+# the LEAF path component -- an ANCESTOR directory that is itself a symlink
+# is followed transparently, exactly like Path.is_file() would, because
+# lstat() never looks past the final component. And a check (lstat, then
+# later is_file()/_template_candidate_state()) followed by a SEPARATE
+# read_text() leaves a window for an atomic swap in between. Both close with
+# _open_regular_no_follow_walk(): every component from / down to the leaf is
+# opened with O_NOFOLLOW, and the SAME fd that was verified is the fd the
+# bytes come from -- one lookup, not two.
+# ===========================================================================
+
+
+def test_a_symlinked_ancestor_directory_is_refused_even_with_a_genuine_regular_leaf(tmp_path):
+    """The property os.lstat()-based classification cannot see: `lstat(full_
+    path)` only inspects the FINAL component. If `assets/templates` itself
+    is a symlink pointing somewhere else, and a perfectly genuine, non-
+    symlinked regular file sits at the far end of it, `_template_candidate_
+    state()` (and Path.is_file() before it) would call that "file" -- the
+    leaf, considered alone, really is one. The bytes actually read come
+    from wherever the swapped ANCESTOR points, not from the trusted
+    location. Only a component-by-component no-follow walk can tell the
+    difference; a single lstat on the full path cannot, no matter how
+    strict its own leaf-only check is."""
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    real_templates_dir = plugin_root / "assets" / "templates"
+    real_template = real_templates_dir / "mass-translate-wf.template.js"
+    assert real_template.is_file(), "sanity: make_trusted_plugin_root() ships a real template here"
+
+    # Move the genuine templates/ directory aside, then plant a SYMLINK at
+    # the expected location pointing at it. The leaf resolve_dirs() names
+    # is still, in isolation, a completely genuine regular file -- the
+    # substitution is one level up, at the ancestor directory.
+    real_templates_dir.rename(plugin_root / "assets" / "templates_moved_aside")
+    (plugin_root / "assets" / "templates").symlink_to(plugin_root / "assets" / "templates_moved_aside")
+
+    dirs = DRIVER.resolve_dirs(None, str(plugin_root))
+    template_path = dirs["template_script"]
+    assert template_path.is_file(), (
+        "sanity: the leaf, resolved THROUGH the symlinked ancestor, must still "
+        "look like a completely ordinary regular file to Path.is_file() -- "
+        "otherwise this test is not exercising the gap it claims to"
+    )
+
+    fd, state = DRIVER._open_regular_no_follow_walk(template_path)
+    assert fd is None and state == "suspicious", (
+        f"expected the no-follow walk to refuse a symlinked ancestor even "
+        f"with a genuine regular leaf, got fd={fd!r} state={state!r}"
+    )
+
+
+def test_a_symlinked_plugin_root_argument_itself_is_refused_not_silently_canonicalized(tmp_path):
+    """A DIFFERENT gap than the ancestor-symlink test above, even though
+    both plant a symlink somewhere in the chain: that test plants its
+    symlink INSIDE an already-real, non-symlinked plugin_root STRING (the
+    --plugin-root argument itself never touches a symlink, only a
+    directory two levels below it does) -- so it passes whether
+    resolve_dirs() builds plugin_root with `.resolve()` or `.absolute()`,
+    and never actually exercised this gap. This test plants the symlink
+    AT the level of the --plugin-root argument itself: `resolve_dirs()`
+    used to build plugin_root via `Path(plugin_root_str).resolve()`,
+    which follows every symlink in plugin_root_str's OWN chain and hands
+    the no-follow walk an already-canonicalized target, before the walk
+    ever gets a chance to see the symlink it exists to refuse.
+
+    Proven real, not theoretical, before this test existed: walking
+    `/etc/hosts` directly refuses it (macOS: `/etc` is a symlink to
+    `/private/etc`); walking `Path("/etc/hosts").resolve()` (==
+    `/private/etc/hosts`) accepts it -- the exact shape reproduced here
+    against a `--plugin-root` argument instead.
+
+    Builds `template_script` the SAME way `resolve_dirs()`'s
+    --plugin-root branch does (`.absolute()`, never `.resolve()`) rather
+    than calling `resolve_dirs()` itself: a LATER fix added a root-level
+    gate that now refuses a symlinked `--plugin-root` earlier, inside
+    `resolve_dirs()`, before it would ever compute `template_script` at
+    all (see `test_a_symlinked_plugin_root_is_refused_before_any_
+    sibling_script_ever_runs`, which proves THAT property). This test's
+    own job is narrower and still worth keeping as defence in depth:
+    prove `_open_regular_no_follow_walk()` itself would ALSO refuse this
+    exact path, independent of whether anything upstream already did --
+    so if the earlier gate ever regresses, this still catches it at the
+    template."""
+    real_plugin_root = make_trusted_plugin_root(tmp_path)
+    symlinked_plugin_root = tmp_path / "plugin_root_via_symlink"
+    symlinked_plugin_root.symlink_to(real_plugin_root, target_is_directory=True)
+
+    template_path = Path(str(symlinked_plugin_root)).absolute() / "assets" / "templates" / DRIVER._TEMPLATE_NAME
+    assert "plugin_root_via_symlink" in str(template_path), (
+        "sanity: the computed path must preserve the symlinked ancestor "
+        "LEXICALLY, not silently canonicalize it away to the real install "
+        "-- otherwise this test is not exercising the gap it claims to"
+    )
+    assert template_path.is_file(), (
+        "sanity: resolved THROUGH the symlink, the leaf must still look "
+        "like a completely ordinary regular file to Path.is_file() -- "
+        "otherwise this test is not exercising the gap it claims to"
+    )
+
+    fd, state = DRIVER._open_regular_no_follow_walk(template_path)
+    assert fd is None and state == "suspicious", (
+        f"expected the no-follow walk to refuse a --plugin-root argument "
+        f"that is ITSELF reached through a symlink, even with a genuine "
+        f"trusted install at its target, got fd={fd!r} state={state!r}"
+    )
+
+
+def test_a_symlinked_self_anchored_install_directory_is_refused_not_silently_canonicalized(tmp_path):
+    """Same BLOCKER, the OTHER resolve_dirs() branch: `SCRIPTS_DIR`
+    (module-level, computed once at import from `__file__`) used to be
+    `Path(__file__).resolve().parent`, which follows every symlink in
+    wherever this script's OWN file happens to sit -- the self-anchored
+    branch's own ancestor chain, not just --plugin-root's.
+    `_self_anchored_template_path()` builds `deployed` directly from
+    `SCRIPTS_DIR`, so an already-canonicalized `SCRIPTS_DIR` handed the
+    no-follow walk an already-resolved target for the identical reason
+    the --plugin-root branch did -- the driver's own claim ("whichever
+    branch produced this path, this driver refuses a symlink ANYWHERE on
+    the path") was false for BOTH branches, not just one.
+
+    `SCRIPTS_DIR` is computed once at MODULE IMPORT, so proving this
+    property means importing a FRESH copy of the driver from exactly the
+    symlinked layout under test (never the shared `DRIVER` this file
+    loads once at collection time, which has no reason to be reloaded) --
+    using this file's own `_load_module()` helper, the same one that
+    loaded `DRIVER` itself."""
+    real_install = tmp_path / "real_install"
+    scripts_dir = real_install / "assets" / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(DRIVER_SRC, scripts_dir / "segment_dispatch_driver.py")
+    # Deployed-layout candidate: directly in scripts_dir, the layout
+    # _self_anchored_template_path() checks FIRST.
+    (scripts_dir / "mass-translate-wf.template.js").write_text(
+        "// self-anchored template\n", encoding="utf-8"
+    )
+
+    symlinked_install = tmp_path / "install_via_symlink"
+    symlinked_install.symlink_to(real_install, target_is_directory=True)
+
+    module_path = symlinked_install / "assets" / "scripts" / "segment_dispatch_driver.py"
+    fresh_driver = _load_module(module_path, "driver_loaded_via_symlinked_install")
+
+    assert "install_via_symlink" in str(fresh_driver.SCRIPTS_DIR), (
+        "sanity: SCRIPTS_DIR must preserve the symlinked ancestor "
+        "LEXICALLY, not silently canonicalize it away to the real install "
+        "-- otherwise this test is not exercising the gap it claims to"
+    )
+
+    deployed_path = fresh_driver._self_anchored_template_path()
+    fd, state = fresh_driver._open_regular_no_follow_walk(deployed_path)
+    assert fd is None and state == "suspicious", (
+        f"expected the no-follow walk to refuse a self-anchored install "
+        f"reached through a symlinked ancestor, got fd={fd!r} state={state!r}"
+    )
+
+
+def test_empty_or_whitespace_only_plugin_root_is_refused_never_becomes_cwd(tmp_path):
+    """`Path("").absolute()` (like `Path("").resolve()`
+    before it) is CWD, not an error -- so `--plugin-root ""` (a real shape:
+    an unset `{{PLUGIN_ROOT}}` template substitution renders as the empty
+    string, never as the flag being omitted) would silently make wherever
+    this process happens to be launched from the executable authority for
+    the template AND every sibling script, with no error at all.
+    `codex_job.py:1436` already refuses exactly this input; refusing it
+    here too, before any path is built from it, keeps both scripts
+    consistent instead of one being the loophole the other closed."""
+    for bad_value in ("", "   ", "\t\n", "  \t "):
+        with pytest.raises(DRIVER.DriverError) as exc_info:
+            DRIVER.resolve_dirs(None, bad_value)
+        assert "empty" in str(exc_info.value).lower() or "whitespace" in str(exc_info.value).lower(), (
+            f"expected an explicit empty/whitespace-only refusal for "
+            f"plugin_root_str={bad_value!r}, got: {exc_info.value}"
+        )
+        assert exc_info.value.exit_code == 2, (
+            f"expected exit_code=2 for plugin_root_str={bad_value!r}, "
+            f"got {exc_info.value.exit_code!r}"
+        )
+
+
+def test_the_read_is_immune_to_a_leaf_swap_that_happens_after_the_open(tmp_path):
+    """The check/read race codex's BLOCKER named directly: a check
+    (_template_candidate_state(), or Path.is_file()) and a LATER, separate
+    read_text() are two independent filesystem lookups, with a window in
+    between for an atomic rename to install something else at that exact
+    path. _open_regular_no_follow_walk() returns an ALREADY-OPEN file
+    descriptor rather than a verdict to act on later -- once open, a POSIX
+    fd stays bound to the SAME underlying inode regardless of what the
+    PATHNAME is later renamed to point at. Proves this directly: open the
+    real template, THEN atomically replace the path with a different file,
+    THEN read from the fd the walk already returned -- the bytes must be
+    the ORIGINAL template's, never the swapped-in content, because the
+    open already happened before the swap and pathnames stopped mattering
+    the instant that fd existed."""
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    dirs = DRIVER.resolve_dirs(None, str(plugin_root))
+    template_path = dirs["template_script"]
+    original_bytes = template_path.read_bytes()
+
+    fd, state = DRIVER._open_regular_no_follow_walk(template_path)
+    assert state == "file" and fd is not None
+
+    # THE RACE WINDOW: an atomic swap of the path, simulating an attacker
+    # (or a legitimate concurrent writer) replacing the file the instant
+    # after this driver decided it was safe to read.
+    swapped_in = tmp_path / "swapped_in.js"
+    swapped_in.write_text("process.stdout.write('SWAPPED CONTENT');\n", encoding="utf-8")
+    os.replace(str(swapped_in), str(template_path))
+    assert template_path.read_bytes() != original_bytes, (
+        "sanity: the swap must genuinely have changed what the PATHNAME now "
+        "points at, or this test proves nothing"
+    )
+
+    with os.fdopen(fd, "rb") as fh:
+        read_via_fd = fh.read()
+    assert read_via_fd == original_bytes, (
+        "the fd opened BEFORE the swap must still return the ORIGINAL "
+        "template's bytes -- reading the swapped-in content here would mean "
+        "the check/read race is still open despite the fd-pinned read"
+    )
+
+
+def test_the_bytes_node_executes_come_from_the_pinned_descriptor_not_a_reopened_path(
+    tmp_path, monkeypatch,
+):
+    """The property _open_regular_no_follow_walk() and the two tests above
+    were BUILT for, asserted here at the one place it actually matters:
+    call_template_functions() itself. The tests above assert on the
+    HELPER's own return value directly; nothing in this suite proves the
+    LIVE CALLER actually reads from the fd it returns rather than
+    discarding it and reopening the pathname -- a mutation as small as
+    `os.close(template_fd); template_text = template_path.read_text()`
+    would keep every one of those tests, and the byte-equivalence tests,
+    and the deployed-layout end-to-end test, green: they only check that
+    the eventual bytes look like a valid template, never that they came
+    off the specific descriptor that was opened and verified.
+
+    Wraps the REAL _open_regular_no_follow_walk() rather than stubbing a
+    fake result (same technique codex_job_driver.test.py's own
+    test_canonical_replaceable_check_then_replace_window_is_a_known_
+    unclosed_race uses, for the identical reason): only AFTER it has
+    genuinely opened and verified the leaf -- proving the returned fd is
+    real -- does this atomically replace the file at that SAME pathname
+    with a second, itself completely genuine regular file (never a
+    symlink or FIFO; the point is that even a perfectly legitimate-
+    looking replacement must not be what gets executed, because identity
+    was fixed at the moment of open, not at the moment of read).
+    Deliberately `os.replace()` -- an ATOMIC rename onto a NEW inode --
+    never an in-place overwrite (`Path.write_text()`/`shutil.copyfile`
+    onto the existing path would truncate-and-rewrite the SAME inode the
+    already-open fd is pinned to, proving nothing about descriptor-
+    pinning either way).
+
+    Read through the pinned fd -> the ORIGINAL template's own
+    translatePrompt() output (pass). Reopened by path after the swap ->
+    the marker template's output (fail, loudly, naming the property that
+    broke)."""
+    plugin_root = make_trusted_plugin_root(tmp_path)
+    dirs = DRIVER.resolve_dirs(None, str(plugin_root))
+    template_path = dirs["template_script"]
+
+    real_open = DRIVER._open_regular_no_follow_walk
+
+    def racing_open(path):
+        fd, state = real_open(path)  # the REAL answer, honestly observed
+        if fd is not None:
+            # Complete enough to survive the REAL harness pipeline if this
+            # ever gets read (the mutant case): every name in
+            # TEMPLATE_EXPORTED_FUNCTIONS must be DEFINED (the harness's own
+            # generated `export { ... }` line names all seven regardless of
+            # which one this call actually invokes -- an ESM export of an
+            # undefined name is a hard SyntaxError, not a runtime one) and
+            # the truncation marker must be present. Plain `function`
+            # declarations, never `export function` -- the harness's own
+            # trailing export statement already exports these names, and a
+            # SECOND export of the same name is itself a SyntaxError.
+            marker_path = path.parent / "marker_template.js.tmp"
+            marker_path.write_text(
+                "export const meta = {};\n"
+                "function translatePrompt(seg) { return 'MARKER-REOPENED-BY-PATH'; }\n"
+                "function translateDrivePrompt() { return ''; }\n"
+                "function reviewDispatchPrompt() { return ''; }\n"
+                "function reviewDrivePrompt() { return ''; }\n"
+                "function fixPrompt() { return ''; }\n"
+                "function parseDisp() { return ''; }\n"
+                "function matchedVerdict() { return { status: 'ok' }; }\n"
+                "function draftProbePrompt() {}\n",
+                encoding="utf-8",
+            )
+            os.replace(str(marker_path), str(path))
+        return fd, state
+
+    monkeypatch.setattr(DRIVER, "_open_regular_no_follow_walk", racing_open)
+
+    subst = {
+        "durable_root": str(tmp_path), "run_id": "20260101T000000Z",
+        "source_lang": "fr", "target_lang": "ru", "effort": "high", "model": "",
+        "verse_policy_instruction_block": "", "max_fix_rounds": 2,
+        "batch_agent_cap": 10000, "max_codex_jobs_per_batch": 400,
+        "companion_path": "/fake/companion.mjs", "plugin_root": "",
+    }
+    out = DRIVER.call_template_functions(
+        dirs, subst, [{"key": "text", "fn": "translatePrompt", "args": ["seg01"]}])
+
+    assert out["text"] != "MARKER-REOPENED-BY-PATH", (
+        "the marker string came back in the rendered prompt -- the bytes "
+        "Node actually executed came from a FRESH re-open of the pathname "
+        "AFTER the swap, not the descriptor _open_regular_no_follow_walk() "
+        "already verified. Descriptor-pinning is the property this whole "
+        "fix exists for, and this proves it broke."
+    )
+
+
+# ===========================================================================
+# SKILL.md's Step 0a copy-pass correction: resolve_codex_companion.py is now
+# copied to ${durable_root}/scripts/ like every other self-anchored .py
+# script -- the old exclusion rested on a false claim (the script reads no
+# __file__ -- its own location never enters its search; see
+# tests/resolve_codex_companion.test.py::test_the_resolver_contains_no_executable_reference_to_dunder_file
+# for the mechanical proof, parsed with ast rather than grepped -- its
+# whole search is rooted at ~, independent of its own location, so a
+# durable copy globs the identical paths and finds the identical
+# companions). Before this fix, a genuinely deployed, self-
+# anchored (no --plugin-root) driver invocation -- SKILL.md's own documented
+# default launch line -- could not complete a single dispatch:
+# resolve_companion_path() found nothing at dirs[
+# "resolve_codex_companion_script"] and fataled (exit_code=2) before any
+# segment got a prompt rendered. No production code change was needed for
+# this fix: _PHASE2_SIBLING_SCRIPTS already named the correct self-anchored
+# path; Step 0a's copy pass was the only thing wrong. These two tests
+# bracket that.
+# ===========================================================================
+
+
+def test_resolve_companion_path_fatals_when_absent_from_a_deployed_root(tmp_path):
+    """Today's exact bug, reproduced directly: a deployed, self-anchored
+    durable root where resolve_codex_companion.py has not been copied (the
+    shape any install would have if Step 0a's copy pass simply failed to
+    run) still refuses cleanly with the driver's own fatal rather than
+    crashing some other way. This stays true regardless of the SKILL.md
+    fix -- a genuinely missing companion resolver must always refuse before
+    a paid codex call, never silently proceed with no companion path."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_companion_absent")
+    dirs = deployed.resolve_dirs(None)
+
+    with pytest.raises(deployed.DriverError) as excinfo:
+        deployed.resolve_companion_path(dirs, node_bin="node")
+    assert excinfo.value.exit_code == 2
+    # _refuse_unless_executable_leaf()'s own tri-state message
+    # ("state=absent"), not "not found" -- see the identical note on
+    # test_dispatch_codex_job_fatals_when_the_script_is_missing above.
+    assert "resolve_codex_companion.py" in str(excinfo.value), str(excinfo.value)
+    assert "state=absent" in str(excinfo.value), str(excinfo.value)
+
+
+def test_resolve_companion_path_succeeds_once_step_0a_copies_it_into_a_deployed_root(tmp_path):
+    """The regression the SKILL.md fix exists to satisfy: place
+    resolve_codex_companion.py where the CORRECTED Step 0a copy pass puts
+    it -- flat in scripts/, beside the driver, exactly like every other
+    self-anchored .py sibling -- and confirm resolve_companion_path(), the
+    SAME unmodified code the test above exercises, now succeeds instead of
+    hitting that fatal."""
+    deployed_scripts = tmp_path / "scripts"
+    deployed_scripts.mkdir()
+    shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    (deployed_scripts / "resolve_codex_companion.py").write_text(
+        FAKE_RESOLVE_CODEX_COMPANION_PY, encoding="utf-8")
+    deployed = _load_module(
+        deployed_scripts / "segment_dispatch_driver.py", "sdd_companion_present")
+    dirs = deployed.resolve_dirs(None)
+
+    companion_path = deployed.resolve_companion_path(dirs, node_bin="node")
+    assert companion_path == FIXTURE_COMPANION_PATH
 
 
 if __name__ == "__main__":

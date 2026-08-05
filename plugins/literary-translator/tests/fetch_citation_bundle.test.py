@@ -132,9 +132,9 @@ def _documented_bundle_hash(durable_root: Path, members) -> str:
 
 def _make_durable_root(tmp_path) -> Path:
     """A durable_root fixture whose scripts/ mirrors Step 0a's real copy pass:
-    every shipped assets/scripts/*.py except the five plugin-path-only ones,
+    every shipped assets/scripts/*.py except the four plugin-path-only ones,
     plus the workflow templates (which land FLAT under scripts/, since the
-    durable tree has no scripts/templates/ subdir).
+    durable tree has no templates/ directory at all).
 
     Kept self-contained rather than shared with the other bundle suites, per
     this plugin's fixture convention.
@@ -144,11 +144,18 @@ def _make_durable_root(tmp_path) -> Path:
     would contain a member iff the list named it, so the "editing
     fetch_citation.py moves the hash" assertion could pass on an empty read.
     """
+    # Kept in sync with SKILL.md's Step 0a copy-exclusion list and with
+    # durable_root_reachability.test.py's NEVER_COPIED_SCRIPTS.
+    # resolve_codex_companion.py is deliberately NOT here: it was a fifth
+    # entry until its stated reason (a durable copy "could not glob the
+    # plugin's own install locations") was found false, and it is now copied
+    # like every other self-anchored script. Staging it changes no hash in
+    # this file -- it is not a PLUGIN_BUNDLE_MEMBERS entry -- but a fixture
+    # that claims to mirror Step 0a must actually mirror it.
     plugin_path_only = {
         "profile_validate.py",
         "validate_extraction.py",
         "glossary_preflight.py",
-        "resolve_codex_companion.py",
         "scaffold_setup.py",
     }
     root = tmp_path / "durable_root"

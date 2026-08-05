@@ -1,5 +1,229 @@
 # Changelog
 
+## 1.19.0 — 2026-08-04
+
+Five defects in the W5 dispatch driver and its codex worker, all of them shipped in
+1.18.0. No new features; the driver behaves as it always did except where it was wrong.
+
+### Fixed
+
+- **The documented way to launch the driver could not dispatch anything.** SKILL.md
+  prescribes `nohup python3 ${durable_root}/scripts/segment_dispatch_driver.py …` with no
+  `--plugin-root`. Self-anchored, the driver looked for `resolve_codex_companion.py` under
+  `${durable_root}/scripts/` — where Step 0a deliberately never copied it — and exited 2
+  before rendering a prompt or dispatching a segment. A selection with nothing to do
+  returned cleanly earlier, so the failure was specific to a run that had work.
+
+  Step 0a now copies that script, like the other self-anchored scripts it copies. (It is
+  still not a `PLUGIN_BUNDLE_MEMBERS` entry — copied and hashed are different sets, and the
+  companion path it resolves is a per-machine environment fact deliberately kept out of
+  every bundle hash.) The stated reason for
+  excluding it was false, which is why the exclusion survived every review it passed
+  through: the script was said to need the plugin's own install locations, and in fact it
+  reads no `__file__` at all — its search is rooted at
+  `~/.claude*/plugins/cache/openai-codex/**` and works from anywhere. The three remaining
+  exclusions are real, unchanged, and each now states its own actual reason instead of
+  sharing one that was only ever true of some of them.
+
+  **Upgrading an existing project: if you hand-adapted `resolve_codex_companion.py`
+  yourself** to work around the exit-2 launch defect above — that exact destination was
+  documented as never touched before this release, so this was a reasonable workaround —
+  Step 0a will now HALT on it instead of silently overwriting or auto-backing it up, and
+  name the exact path. **How you clear it depends on what is actually there, and SKILL.md's
+  own migration note states the three cases — follow it rather than this summary.** The one
+  worth repeating: renaming a *symlink* aside preserves the pointer, not the adapted bytes
+  it points at, so a symlinked workaround has to have its resolved target copied out before
+  the link is removed. A divergent regular file can simply be moved aside. Once the path is
+  clear, re-run Step 0a and it copies the shipped file. This
+  refusal, rather than an automatic backup-and-copy, is deliberate: an automatic copy
+  cannot be made safe against a symlinked workaround (it would write through the symlink
+  rather than replacing it) or two concurrent scaffolds racing on the same backup name,
+  from Step 0a's own orchestrating-session-executed instructions alone. Everyone who never
+  worked around the old defect — the overwhelming majority — sees no behavior change at
+  all: the destination is absent, so the copy proceeds exactly like every other file in
+  the bundle.
+
+- **The workflow template was unresolvable under a deployed durable root.** The
+  self-anchored branch named `${durable_root}/templates/`, a directory Step 0a never
+  creates; bundle members land flat under `scripts/`, the `.template.js` files exactly like
+  the `.py` gates. A deployed root and a plugin checkout genuinely put the template in
+  different places and no single path names both, so resolution now handles each.
+
+- **The template path was chosen with a check that follows symlinks.** What that path
+  resolves to is read and executed as part of prompt rendering, so choosing it selects
+  executable authority rather than detecting a layout. `Path.is_file()` reports True for a
+  symlink exactly as for a regular file, and collapses every lookup failure — EACCES on an
+  ancestor, ELOOP, ENOTDIR — into the same False that means "nothing here". A stray or
+  planted file beside the scripts could take over the gate and every prompt. Selection is
+  now `lstat`-based: a positive ENOENT is the only absence, a non-symlink regular file the
+  only acceptance, two candidates present a refusal rather than a preference.
+
+- **A canonical draft that existed but could not be read was replaceable.** Two
+  `os.replace()` calls onto the canonical draft ran with no check that the file about to be
+  destroyed could be observed. `os.replace()` needs write permission on the containing
+  directory, not on the target, so an unreadable regular file — or a symlink whose target
+  had vanished — was overwritten silently, destroying bytes nothing had read. Both sites,
+  and the preflight that runs before any codex turn is spent, now refuse unless the
+  canonical is either genuinely absent by ENOENT alone or a regular file this very call
+  just read. A lookup that merely failed reads as present.
+
+- **`_is_regular()` could raise past the callers relying on it, and never actually read.**
+  It guarded `open()` but not `fstat()` or `close()`, so a failure in either propagated out
+  of a caller that was depending on it to answer False — skipping the state that protects a
+  validated candidate from cleanup. Every syscall it makes is now guarded.
+
+  Separately, and more consequentially for the guard above: `open()` and `fstat()`
+  succeeding prove only that the entry exists and is regular. Neither reads a byte, so on a
+  network or FUSE filesystem, or damaged storage, both can succeed while a real read returns
+  EIO or ESTALE — exactly the failure the check exists to catch, passing it. The check now
+  **drains the descriptor to EOF** before calling a file readable. Reading only the first
+  byte was tried and is not enough: a regular file can serve a good prefix and fail on a
+  later page, and the promote this guards would still destroy the unread bytes.
+
+  The drain is **bounded two ways**: it runs while this process holds the per-segment lease,
+  inside a job with a hard deadline, against a file whose size is not the guard's to assume.
+  A 64 MiB ceiling is checked from `fstat()` before a single byte is read, and re-checked
+  against the bytes actually read, because `st_size` is a snapshot and a file can grow past
+  it. And the caller's own remaining phase budget is re-checked between reads and again after
+  EOF — the phase budget, not the whole job's ceiling, so a poll-window operation cannot eat
+  the reserved finalize tail.
+
+  **A file that exceeds the ceiling, or whose read outlasts the phase budget, is REFUSED**,
+  in the same direction every other uncertain outcome here goes: an unpromotable draft is
+  recoverable, destroyed bytes are not. That is a real trade-off, not a free win — a
+  legitimately huge canonical becomes unpromotable rather than accepted unread. Measured on
+  the actual corpus, drafts run tens to a couple of hundred KB, so the ceiling sits roughly
+  400× above the largest legitimate file. An empty regular file drains to `b""` on the first
+  read and is still correctly readable; that is not a failure and must not be "fixed" into a
+  rejection.
+
+  **What these two bounds do NOT cover, stated plainly — and it is more than one call.** Both
+  bounds sit *between* reads, so anything that blocks *inside* a syscall escapes them. That is
+  not only `os.read()`: the `lstat()` that classifies the entry, and the `open()`, `fstat()`
+  and `close()` around the drain, are all blocking filesystem calls outside any interruptible
+  check, and a hard NFS or FUSE failure can stall in any of them. Catching `OSError` helps only
+  after a syscall returns. **The honest statement is that the whole probe is unbounded against
+  a stalled mount, not merely the gap between reads** — an earlier draft of this section said
+  the latter, which was narrower than the code. `O_NONBLOCK` is not a usable stall bound here — an ordinary disk
+  file ignores it entirely, and a FUSE or pseudo-file entry that `S_ISREG` accepts chooses
+  its own read semantics. A per-read timer was built for exactly this and then removed
+  before release: it would have been the only process-global signal handler in the script,
+  it could be silently defeated by a signal mask inherited across `exec` (a defeat whose
+  failure mode is a false PASS indistinguishable from a real one), and it would have guarded
+  one of the three byte-copy loops in this file while the other two — both older than this
+  release — stayed unbounded. **This drain now shares their residual rather than claiming a
+  bound it could not keep.**
+
+  When the guard refuses, the run stops with `canonical-unreadable` and the validated attempt
+  is left on disk rather than destroyed. It is **not** recoverable by a later run — its name
+  embeds a per-invocation random component no other run reconstructs — so the practical
+  outcome is one regenerated segment, not lost correctness. Stated plainly because an earlier
+  draft of this release claimed more.
+
+### Attempted and withdrawn
+
+- **The pending-slot lifecycle is untouched by this release, deliberately.** A fix for
+  `_defer_attempt()`'s unconditional overwrite — which destroys a previously validated
+  candidate that has merely gone unreadable between runs — was built here and then withdrawn.
+  Two reasons, both worth stating rather than quietly dropping the work. It is not one of the
+  defects this release exists to fix: it predates the previous release and was never in the
+  stated scope. And every attempt at it introduced a new defect — three consecutive review
+  rounds each found the flaw in the *previous* round's fix, ending with a version that
+  stranded validated work while an unvalidated leftover held the only slot a later run reads.
+
+  The reason it is hard is now on record rather than in anyone's head: **the two sites that
+  write the slot have opposite validation asymmetries.** At the deferral the fresh candidate
+  is unvalidated by construction, so refusing is the right trade. At the canonical-refusal
+  site the fresh candidate has passed every gate while the occupant probably has not, so
+  refusing is the wrong one. Whichever uniform rule is chosen, it is wrong at one of the two
+  sites. Tracked as an issue with the three refuted arguments and their measurements; not to
+  be attempted again without a design that addresses that asymmetry directly.
+
+### Known limits
+
+- **Both canonical guards are check-then-`os.replace()`, and that gap is wider than
+  "an unreadable file slips through" — wider, too, than an earlier draft of this section
+  admitted.** The guard observes the entry at one moment; the rename resolves the pathname
+  again at another. The per-segment lock serialises cooperating `codex_job.py` processes and
+  nothing else. Four distinct exposures follow, and only the first was previously disclosed:
+  - **Destination substitution.** Anything put at the canonical path between check and
+    rename — including a perfectly readable *newer* canonical published by another writer —
+    is destroyed without ever being observed.
+  - **Source substitution, which is the worse one, and it applies to BOTH source paths.** The
+    gates validate a file by pathname and `os.replace()` then re-resolves that same pathname.
+    A writer who swaps the source after validation gets bytes **no gate ever examined**
+    promoted to canonical. The failure is not lost work but a false green — unvalidated
+    content published as validated. This holds for the adopted pending file *and* for a fresh
+    attempt: the attempt is published and gated, the canonical readability drain then widens
+    the interval, and the rename re-resolves the attempt path afterwards. An earlier draft of
+    this list described only the pending path; the fresh path has the same window.
+  - **The deferral's own check-then-write**, which can destroy a file published into the
+    pending slot after its observation.
+  - **Same-inode rewrite.** Append, truncate or overwrite in place after the guard reaches
+    EOF needs no substitution at all; the descriptor identity the guard confirmed stays
+    valid while the content changes underneath it.
+
+  This repository's own test suite pins the first of these rather than forbidding it, and
+  that pin is weaker than the sentence above suggests: it rewrites the file in place rather
+  than substituting a new inode, so an implementation that preserved the displaced inode
+  elsewhere would still pass it. Treat it as a sentinel that fails if someone *closes* the
+  race, not as evidence of its full width.
+- **The template's bytes are not authenticated.** The path is built **lexically** and then
+  read through a single no-follow descriptor, which closes leaf and ancestor symlink
+  substitution — including symlinks *above* the supplied root — and the swap between checking
+  and reading. Building it lexically is the load-bearing part and was got wrong once: an
+  earlier form of this release canonicalized the path first, which resolved every ancestor
+  symlink away before the no-follow walk could object, so the walk protected only the segment
+  *below* an already-resolved root while the text claimed it refused a symlink anywhere. The
+  descriptor also pins an **inode**, not a set of bytes: pathname and new-inode substitution
+  are closed, while truncate, append or overwrite in place is not. And none of it establishes
+  that the content is the shipped template: an ordinary regular file at the expected path
+  passes every check and is executed. The previous release executed that same path with a
+  weaker check, so this is
+  **structurally narrowed, not closed.**
+- **One readability drain runs inside the reserved finalize tail, not before it.** Every
+  other caller of the check passes the budget for its own phase. The tail-exhausted deferral
+  cannot: it is only ever reached on the branch where the remaining budget has already fallen
+  below the finalize reserve, so the phase-correct value is **zero by construction** at that
+  point, and threading it would refuse at the first check every time — disabling the deferred
+  attempt mechanism in exactly the situation it exists for. It therefore passes the job's
+  overall remaining budget, and on a pathological filesystem that drain can consume time
+  reserved for `finalize()` itself. Two things bound it in practice, neither of them a
+  guarantee: the file it reads is a small local JSON artifact **this same process just wrote**,
+  not an arbitrary pre-existing entry, and the size ceiling and byte counter still apply. A
+  dedicated smaller reserve would close it and was deliberately not built — a second reserve
+  constant interacting with the first is new machinery in the most defect-prone path in this
+  file, and this release has already withdrawn one attempt there for that reason.
+- **Clearing a non-regular squatter is itself a check-then-act.** The helper that removes a
+  symlink, FIFO or directory forged onto a deterministic slot classifies the entry with
+  `lstat()` and then removes it by pathname — two syscalls, not one atomic operation. A
+  writer that substitutes a real file in that window has it destroyed. **The blast radius is
+  a tree, not a file:** when the classify sees a directory the destroy is `shutil.rmtree`, so
+  a replacement *directory* substituted into that window is removed recursively. The helper
+  and its call sites are unchanged from the previous release: this release neither introduces
+  this race nor widens it.
+  Closing this needs the same transactional exchange the other two limits above need, and
+  the same threat model applies: it requires a writer that does not take the per-segment
+  lock. It is disclosed rather than closed, deliberately and consistently with them, rather
+  than closed with new machinery while the two larger ones stay open.
+
+**One line governs which of the defects above were fixed and which are listed here:** a
+data-loss path reachable without a hostile concurrent writer is fixed when the fix is small;
+a race that needs a racing writer and new machinery to close is disclosed. The removed
+per-read stall timer is neither — a liveness bound, not a data-loss path — and is covered in
+the drain section above.
+
+**That line does not classify all three limits above the same way, and an earlier draft of
+this section wrongly implied it did.** Two of them — the check-then-`os.replace()` guards and
+the non-regular clear — need a writer that does not take the per-segment lock. **The template
+limit does not.** An ordinary regular file sitting at the expected path, placed at any earlier
+time by anything, is read and executed; no race, no concurrency, no timing. It is disclosed
+rather than fixed for a different reason: authenticating content requires a trusted digest or
+a signed value, which is a capability this release does not have, not a lock it declines to
+take. Grouping it with the races understated it, and the grouping is corrected here rather
+than quietly dropped, because an overstated mitigation reads as caution and is the last thing
+anyone re-attacks.
+
 ## 1.18.0 — 2026-08-03
 
 W5 mass-translate can now be driven by a local out-of-band process instead of from inside agent

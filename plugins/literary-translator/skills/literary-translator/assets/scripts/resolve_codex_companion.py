@@ -8,9 +8,32 @@ diagnostic on stderr + a nonzero exit on any failure (zero candidates / unusable
 unusable companion / unsafe path), so the orchestrator ABORTS W5 (codex is the required
 engine, R1) instead of silently hanging with no draft.
 
-PLUGIN-anchored: it must run from the install path and GLOB install locations to find the
-newest companion -- it is NEVER copied to a durable_root (like profile_validate.py), and is
-NOT a bundle member.
+LOCATION-INDEPENDENT: this file reads no `__file__` and imports nothing plugin-specific.
+Its entire search is rooted at `os.path.expanduser("~")` against
+`~/.claude*/plugins/cache/openai-codex/**/codex-companion.mjs` -- a DIFFERENT plugin's own
+install cache, globbed identically regardless of where this file happens to be running
+from. It is therefore copied to `${durable_root}/scripts/` by Step 0a like every other
+self-anchored script, and BOTH call sites are legitimate: SKILL.md's W5 instantiation step
+(1.4.7) runs the PLUGIN copy, because the orchestrating session already holds
+`{{PLUGIN_ROOT}}` at that point, while segment_dispatch_driver.py's own dispatch path runs
+the durable copy, because a self-anchored driver invocation has no plugin root to run from.
+
+This docstring used to say the opposite -- "PLUGIN-anchored: it must run from the install
+path ... NEVER copied to a durable_root" -- and that sentence was the ONLY basis for
+excluding this file from Step 0a's copy pass. It was false, and the exclusion it justified
+left SKILL.md's own documented self-anchored driver launch unable to dispatch a single
+segment: the driver resolved this script under `${durable_root}/scripts/`, where nothing
+had ever copied it, and fataled before rendering any prompt. Do not re-derive that argument
+-- the property is pinned by a test: `tests/resolve_codex_companion.test.py`'s
+`test_the_resolver_contains_no_executable_reference_to_dunder_file` parses this file and
+fails if any CODE here ever reads `__file__`. Read that test's verdict, not a raw
+`grep __file__` over this file: the mentions in this docstring are prose ABOUT the claim
+and a text search cannot tell them apart from a real one.
+
+Still NOT a `PLUGIN_BUNDLE_MEMBERS` entry (see cache_key.py), like draft_ready.py and the
+other Step-0a-copied siblings outside that allowlist: the companion path this resolves is a
+per-machine ENVIRONMENT fact, deliberately kept out of every bundle hash and out of the
+resume digest (see references/ledger-and-resumability.md).
 
 Steps:
   1. Enumerate installed codex-companion.mjs under ~/.claude*/plugins/cache/openai-codex/**

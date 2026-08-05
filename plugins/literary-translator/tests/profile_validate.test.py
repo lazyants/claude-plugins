@@ -26,10 +26,13 @@ design (every placeholder in it is an intentionally invalid sentinel).
 
 The target script is loaded directly from its real location under
 ``skills/literary-translator/assets/scripts/`` via ``importlib`` (it is not a
-package, and it is one of FOUR plugin-path scripts in this plugin that are
-NEVER copied to a durable_root -- alongside ``validate_extraction.py``,
-``glossary_preflight.py`` (1.4.0), and ``resolve_codex_companion.py`` (1.4.7)
--- always invoked from the plugin's own install path).
+package, and it is one of THREE plugin-path scripts in this plugin that are
+NEVER copied to a durable_root -- alongside ``validate_extraction.py`` and
+``glossary_preflight.py`` (1.4.0) -- always invoked from the plugin's own
+install path). ``resolve_codex_companion.py`` (1.4.7) was a fourth until its
+stated reason was found false and the exclusion reverted; see
+``test_module_docstring_names_three_never_copied_scripts`` below, which pins
+that count against the script's own module docstring.
 """
 
 import copy
@@ -146,15 +149,29 @@ def test_base_profile_has_no_placeholders():
     assert pv.scan_placeholders(make_base_profile()) == []
 
 
-def test_module_docstring_names_four_never_copied_scripts():
-    """1.4.7 copy-exclusion sweep: profile_validate.py's own module docstring
-    must name itself as ONE OF FOUR plugin-path scripts never copied to
-    durable_root, adding resolve_codex_companion.py (the W5 codex-companion
-    resolver) to the exception set. Guards the count from drifting out of sync
-    with SKILL.md's Step 0a copy-exclusion list."""
+def test_module_docstring_names_three_never_copied_scripts():
+    """1.4.7's copy-exclusion sweep added resolve_codex_companion.py (the W5
+    codex-companion resolver) as a FOURTH plugin-path script never copied to
+    durable_root, on a reason since found false and reverted (see SKILL.md's
+    Step 0a copy-exclusion list for the disproof) -- profile_validate.py's own
+    module docstring must name itself as ONE OF THREE now, not four, and must
+    still mention resolve_codex_companion.py by name (as the corrected
+    historical note explaining why it is NOT a fourth exception). Also must
+    NOT claim "every other script" is copied without qualification --
+    scaffold_setup.py is ALSO never copied, for a wholly unrelated reason
+    (it is not a bundle member at all), and an unqualified "every other" is
+    false regardless of what happens to resolve_codex_companion.py's own
+    count. Guards both properties from drifting out of sync with SKILL.md's
+    Step 0a copy-exclusion list."""
     source = SCRIPT_PATH.read_text(encoding="utf-8")
-    assert "ONE OF FOUR SCRIPTS NEVER COPIED" in source
+    assert "ONE OF THREE PLUGIN-PATH-ONLY SCRIPTS NEVER COPIED" in source
+    assert "ONE OF FOUR SCRIPTS NEVER COPIED" not in source
     assert "resolve_codex_companion.py" in source
+    assert "scaffold_setup.py" in source, (
+        "the docstring's own qualification of \"every other script\" must name "
+        "scaffold_setup.py as the OTHER, unrelated exclusion -- omitting it "
+        "reintroduces the false 'every other script is copied' claim"
+    )
 
 
 # ---------------------------------------------------------------------------
