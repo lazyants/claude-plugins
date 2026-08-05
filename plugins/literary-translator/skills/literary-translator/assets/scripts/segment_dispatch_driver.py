@@ -1287,19 +1287,37 @@ def _attempt_cancel_orphan(*, durable_root: Path, seg: str, disp: str, companion
     # concatenation the way every OTHER executed artifact in this file
     # is -- it is a STRING resolve_codex_companion.py printed on its own
     # stdout, discovered dynamically, not derived from a trusted root
-    # this driver controls. That does not exempt it: this function still
-    # executes it directly, below, so it gets the SAME full-path
-    # no-follow verification every other executed artifact gets.
-    # Verified fresh on every call (never cached from resolve_companion_
-    # path()'s own, earlier verification) -- this function can fire long
-    # after that first resolution, and best-effort cleanup silently doing
-    # nothing on a failure it cannot verify is exactly this function's
-    # own documented contract (see its own docstring: "Never raises").
-    _companion_fd, _companion_state = _open_regular_no_follow_walk(Path(companion_path).absolute())
-    if _companion_fd is not None:
-        os.close(_companion_fd)
-    if _companion_state != "file":
+    # this driver controls. It is verified before being executed, but NOT
+    # with the whole-path walk the other artifacts get, and the asymmetry
+    # is deliberate: those paths are built from a root this driver is
+    # handed, so an attacker-supplied symlink ANYWHERE along them is a
+    # redirection. This one is discovered inside the user's own plugin
+    # store, where a symlinked ancestor is an ordinary, supported layout
+    # -- several profiles have shared one `plugins/` directory that way.
+    # Requiring a symlink-free ancestor chain here refuses a normal
+    # install: the resolver preserves such ancestors by design, so the
+    # whole-path walk reports `suspicious` for a perfectly legitimate
+    # companion and this best-effort cleanup silently stops running.
+    # What IS checked is the thing this function is about to execute: the
+    # leaf must be a regular file and must not itself be a symlink.
+    # Verified fresh on every call rather than cached from
+    # resolve_companion_path()'s earlier resolution, since this can fire
+    # long afterwards.
+    try:
+        _companion_fd = os.open(
+            companion_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return  # symlinked leaf, absent, or unreadable -- do not execute it
+    try:
+        if not stat.S_ISREG(os.fstat(_companion_fd).st_mode):
+            return
+    except OSError:
         return
+    finally:
+        try:
+            os.close(_companion_fd)
+        except OSError:
+            pass
     # Live status check, mirroring hygiene()'s own -- see this function's
     # own docstring for why a blind cancel on the joblog's stale LOCAL
     # "launched" status alone would be wrong. Any failure to positively
@@ -1944,7 +1962,21 @@ def _call_resume_setup(script: Path, payload: dict, dirs: dict, durable_root_str
     resume_setup.py's own `success: false`, e.g. a malformed manifest) --
     never on a mere digest MISMATCH, which resume_setup.py itself reports
     as `success: true, resume: false` (a valid, expected outcome, not an
-    error)."""
+    error).
+
+    Verifies `script` itself, here, even though this function's own only
+    current caller (`resolve_run_id()`) already does -- every OTHER
+    executed artifact in this file has its verification and its exec in
+    the SAME function, and this was the one exception, correct only
+    because of which function happens to call it. A guard that holds
+    because of the call graph rather than because of where it is written
+    is a guard waiting for a second caller that never gets it, and that
+    shape has been the source of more than one defect on this boundary.
+    Redundant with `resolve_run_id()`'s own check on the single path that
+    reaches here today; it makes the property true by inspection of THIS
+    function alone, rather than by tracing every caller, for whatever
+    paths reach it later."""
+    _refuse_unless_executable_leaf(script, "resume_setup.py")
     with tempfile.TemporaryDirectory(prefix="ltdriver.resume.") as tmpdir:
         payload_path = Path(tmpdir) / "payload.json"
         payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
