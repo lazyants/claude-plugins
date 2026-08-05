@@ -1166,7 +1166,11 @@ def test_dispatch_codex_job_fatals_when_the_script_is_missing(tmp_path):
 
     with pytest.raises(DRIVER.DriverError) as exc_info:
         DRIVER.dispatch_codex_job(missing, [str(marker), "0", "0"], wait_timeout=10)
-    assert "not found" in str(exc_info.value)
+    # _refuse_unless_executable_leaf()'s own tri-state message ("state=absent"),
+    # not "not found" -- the STRUCTURAL check reports a richer state than
+    # Path.is_file() ever could, matching call_template_functions()'s own
+    # established message shape for the identical tri-state.
+    assert "state=absent" in str(exc_info.value)
 
 
 # ===========================================================================
@@ -1226,6 +1230,54 @@ def test_current_draft_sha1_fatals_on_missing_draft(tmp_path):
     with pytest.raises(DRIVER.DriverError) as exc_info:
         DRIVER.current_draft_sha1("seg01", segments_dir, scripts_dir)
     assert "not found" in str(exc_info.value)
+
+
+def test_load_draft_sha1_module_refuses_a_symlinked_scripts_dir(tmp_path):
+    """draft_sha1.py is NOT tracked in resolve_dirs()'s own `dirs` dict --
+    it is resolved independently, by `_load_draft_sha1_module()`, against
+    whatever `scripts_dir` its caller passes (always `dirs["scripts_dir"]`
+    in practice). `exec_module()` runs its top-level code INSIDE this
+    process -- no subprocess isolation at all -- so this needs its OWN
+    full-path no-follow check, not resolve_dirs()'s per-artifact loop
+    (which never sees `draft_sha1.py`). A directory-level symlink: real
+    `scripts_dir` moved aside, symlink planted at the expected location."""
+    real_scripts_dir = tmp_path / "real_scripts"
+    real_scripts_dir.mkdir()
+    (real_scripts_dir / "draft_sha1.py").write_text(
+        DRAFT_SHA1_SRC.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    symlinked_scripts_dir = tmp_path / "scripts_dir_via_symlink"
+    symlinked_scripts_dir.symlink_to(real_scripts_dir, target_is_directory=True)
+
+    with pytest.raises(DRIVER.DriverError) as exc_info:
+        DRIVER._load_draft_sha1_module(symlinked_scripts_dir)
+    assert exc_info.value.exit_code == 2
+    assert "symlink" in str(exc_info.value).lower()
+
+
+def test_load_draft_sha1_module_refuses_a_symlinked_leaf(tmp_path):
+    """Same function, the OTHER depth: a completely genuine, non-symlinked
+    `scripts_dir`, but `draft_sha1.py` itself is a symlink to real content
+    placed elsewhere -- the leaf substitution a directory-only check would
+    miss."""
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    real_draft_sha1 = tmp_path / "real_draft_sha1.py"
+    real_draft_sha1.write_text(DRAFT_SHA1_SRC.read_text(encoding="utf-8"), encoding="utf-8")
+    (scripts_dir / "draft_sha1.py").symlink_to(real_draft_sha1)
+
+    with pytest.raises(DRIVER.DriverError) as exc_info:
+        DRIVER._load_draft_sha1_module(scripts_dir)
+    assert exc_info.value.exit_code == 2
+    assert "symlink" in str(exc_info.value).lower()
+
+
+def test_load_draft_sha1_module_still_works_against_the_real_unmodified_repo(tmp_path):
+    """Sanity, since validating deeper means more real components must be
+    symlink-free: the REAL, currently-deployed draft_sha1.py, reached the
+    normal way, must still load without any false refusal."""
+    module = DRIVER._load_draft_sha1_module(DRIVER.SCRIPTS_DIR)
+    assert hasattr(module, "draft_content_sha1")
 
 
 # ===========================================================================
@@ -1498,17 +1550,21 @@ def test_a_symlinked_plugin_root_is_refused_before_any_sibling_script_ever_runs(
     assert "SELECT_SEGMENTS_MUST_NEVER_RUN_FROM_A_SYMLINKED_ROOT" not in proc.stderr
 
 
-def test_a_symlinked_self_anchored_scripts_dir_is_refused_before_any_sibling_path_is_built(tmp_path):
+def test_a_symlinked_self_anchored_install_never_lets_select_segments_run(tmp_path):
     """Same gap, the OTHER resolve_dirs() branch: `SCRIPTS_DIR` feeds
-    `SELECT_SEGMENTS_SCRIPT`/`CODEX_JOB_SCRIPT` (module-level) the
-    identical unchecked way `plugin_root` used to feed the --plugin-root
-    branch's siblings. Proven at the `resolve_dirs()` level directly
-    (there is no `--plugin-root` flag to launch a subprocess against for
-    this branch -- the root comes from `__file__`) via a FRESH module
-    load from a symlinked install, the same technique the round-6 self-
-    anchored test uses, extended to confirm the refusal happens BEFORE
-    `select_segments_script`/`codex_job_script` are ever assigned, not
-    only when the template is later read."""
+    `SELECT_SEGMENTS_SCRIPT` (module-level) the identical way `plugin_root`
+    feeds the --plugin-root branch's siblings -- and the refusal now lives
+    at `run_select_segments()`'s own point of use (`resolve_dirs()` itself
+    only BUILDS the dict; it stopped being the check site once artifacts
+    that no test fixture needs stopped being required to exist just to
+    call it -- see `_refuse_unless_executable_leaf()`'s own docstring for
+    why). Proven at the CONSUMER level, via a FRESH module load from a
+    symlinked install (there is no --plugin-root flag to launch a
+    subprocess against for this branch -- the root comes from `__file__`),
+    with a marker-writing select_segments.py stub: `resolve_dirs()` itself
+    succeeds (nothing to refuse yet, it never touches the filesystem
+    beyond building paths), but `run_select_segments()` must never let the
+    symlinked script actually run."""
     real_install = tmp_path / "real_install"
     scripts_dir = real_install / "assets" / "scripts"
     scripts_dir.mkdir(parents=True)
@@ -1516,17 +1572,265 @@ def test_a_symlinked_self_anchored_scripts_dir_is_refused_before_any_sibling_pat
     (scripts_dir / "mass-translate-wf.template.js").write_text(
         "// self-anchored template\n", encoding="utf-8"
     )
+    marker = tmp_path / "select_segments_ran.marker"
+    (scripts_dir / "select_segments.py").write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"open({str(marker)!r}, 'w', encoding='utf-8').write('RAN')\n"
+        "sys.exit(3)\n",
+        encoding="utf-8",
+    )
 
     symlinked_install = tmp_path / "install_via_symlink"
     symlinked_install.symlink_to(real_install, target_is_directory=True)
 
     module_path = symlinked_install / "assets" / "scripts" / "segment_dispatch_driver.py"
-    fresh_driver = _load_module(module_path, "driver_loaded_via_symlinked_install_root_gate")
+    fresh_driver = _load_module(module_path, "driver_loaded_via_symlinked_install_consumer_check")
 
-    with pytest.raises(fresh_driver.DriverError) as exc_info:
-        fresh_driver.resolve_dirs(None, None)
+    dirs = fresh_driver.resolve_dirs(None, None)
+    try:
+        fresh_driver.run_select_segments(dirs)
+    except Exception:
+        pass
+    assert not marker.exists(), (
+        "select_segments.py resolved from a symlinked self-anchored "
+        "install RAN -- run_select_segments() must refuse it before Popen"
+    )
+
+
+# ===========================================================================
+# A genuine directory root satisfies a root-only check while "assets" one
+# level below it is a symlink: such a check validates the ROOT and nothing
+# BELOW it, and placing it in resolve_dirs() puts it at a single choke point
+# every executed artifact happens to pass through.
+# Consolidating the check there turned out to have its own cost: many of
+# this file's own fixtures deliberately stage only the SUBSET of sibling
+# scripts a given test actually needs (a Step-1-only test has no reason to
+# ship a real codex_job.py), and an upfront, all-8-required check inside
+# resolve_dirs() made resolve_dirs() itself fail for artifacts those tests
+# never touch. So the fix moved: `_refuse_unless_executable_leaf()` (full
+# root+every-intermediate-directory+leaf verification, exactly
+# `_open_regular_no_follow_walk()`'s own walk) now lives at each artifact's
+# own POINT OF USE -- the same place the template's own check has ALWAYS
+# lived (call_template_functions(), never resolve_dirs()) -- so an artifact
+# a given run never reaches never has to exist, and one that IS reached
+# still gets the full, three-depth-closing check right before it runs.
+#
+# Two groups below: the MECHANISM (`_refuse_unless_executable_leaf()`
+# itself, proven directly at all three depths -- root/assets/leaf -- since
+# every consumer below is a thin, identical wrapper around it) + the WIRING
+# (does each of the 8 consumer functions actually CALL it before Popen'ing
+# -- proven per artifact, by a marker it would write if it ever ran, not by
+# an exception alone: "a test asserting resolve_dirs raised is weaker; it
+# can pass for the wrong reason," which is exactly why this file no longer
+# asserts that).
+# ===========================================================================
+
+_EXECUTED_SCRIPT_ARTIFACT_NAMES = (
+    "select_segments.py",
+    "codex_job.py",
+    "resume_setup.py",
+    "resolve_codex_companion.py",
+    "ledger_update.py",
+    "cache_key.py",
+    "draft_ready.py",
+    "validate_draft.py",
+)
+
+
+@pytest.mark.parametrize("depth", ["root", "assets", "leaf"])
+def test_refuse_unless_executable_leaf_closes_all_three_depths(tmp_path, depth):
+    """The MECHANISM, proven once, directly: `_refuse_unless_executable_leaf()`
+    is a thin wrapper around `_open_regular_no_follow_walk()` -- same walk,
+    same three-depth coverage -- so this is what every one of the 8
+    per-artifact WIRING tests below relies on without re-proving it
+    themselves."""
+    real_plugin_root = make_trusted_plugin_root(tmp_path, name=f"real_root_{depth}")
+    leaf = real_plugin_root / "assets" / "scripts" / "select_segments.py"
+
+    if depth == "root":
+        symlinked = tmp_path / f"root_via_symlink_{depth}"
+        symlinked.symlink_to(real_plugin_root, target_is_directory=True)
+        target_leaf = symlinked / "assets" / "scripts" / "select_segments.py"
+    elif depth == "assets":
+        outer = tmp_path / f"outer_root_{depth}"
+        outer.mkdir()
+        (outer / "assets").symlink_to(real_plugin_root / "assets", target_is_directory=True)
+        target_leaf = outer / "assets" / "scripts" / "select_segments.py"
+    else:  # "leaf"
+        real_target = tmp_path / f"real_select_segments_{depth}.py"
+        real_target.write_text(leaf.read_text(encoding="utf-8"), encoding="utf-8")
+        leaf.unlink()
+        leaf.symlink_to(real_target)
+        target_leaf = leaf
+
+    with pytest.raises(DRIVER.DriverError) as exc_info:
+        DRIVER._refuse_unless_executable_leaf(target_leaf, "select_segments.py")
     assert exc_info.value.exit_code == 2
     assert "symlink" in str(exc_info.value).lower()
+
+
+def _plugin_root_with_marker_artifact(tmp_path, artifact_name, marker, label):
+    """A --plugin-root fixture where `artifact_name` is a SYMLINK to a
+    separate marker-writing stub -- every OTHER artifact stays a real,
+    ordinary file `make_trusted_plugin_root()` already ships. The symlink
+    is the load-bearing part: an ordinary regular file here would pass
+    every check trivially and prove nothing. Returns the `--plugin-root`
+    string."""
+    real_plugin_root = make_trusted_plugin_root(tmp_path, name=f"real_plugin_root_{label}")
+    marker_stub = (
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"open({str(marker)!r}, 'w', encoding='utf-8').write('RAN')\n"
+        "print('{}')\n"
+        "sys.exit(3)\n"
+    )
+    real_marker_script = tmp_path / f"real_{label}_stub.py"
+    real_marker_script.write_text(marker_stub, encoding="utf-8")
+    target_leaf = real_plugin_root / "assets" / "scripts" / artifact_name
+    target_leaf.unlink()
+    target_leaf.symlink_to(real_marker_script)
+    return str(real_plugin_root)
+
+
+def _invoke_select_segments(dirs, tmp_path):
+    DRIVER.run_select_segments(dirs)
+
+
+def _invoke_codex_job(dirs, tmp_path):
+    DRIVER.dispatch_codex_job(dirs["codex_job_script"], [], wait_timeout=10)
+
+
+def _invoke_resume_setup(dirs, tmp_path):
+    # translate_cfg={} would KeyError inside resolve_run_id() itself,
+    # before it ever reaches the script check -- caught by this test's
+    # own broad except and passing for the WRONG reason (exactly what
+    # "resolve_dirs raised is weaker" warns about, one layer further in).
+    # _FIXTURE_TRANSLATE_CFG (defined below, but already a module global
+    # by the time any test body runs) is what every OTHER test in this
+    # file already uses for a genuinely complete config.
+    DRIVER.resolve_run_id(
+        dirs, translate_cfg=_FIXTURE_TRANSLATE_CFG, plugin_root_str=None, durable_root_str=None
+    )
+
+
+def _invoke_resolve_codex_companion(dirs, tmp_path):
+    DRIVER.resolve_companion_path(dirs, node_bin="node")
+
+
+def _invoke_cache_key(dirs, tmp_path):
+    DRIVER.write_ledger(dirs, "seg01", {"status": "converged"}, run_id="r1", needs_cache_key=True)
+
+
+def _invoke_ledger_update(dirs, tmp_path):
+    DRIVER.write_ledger(dirs, "seg01", {"status": "converged"}, needs_cache_key=False)
+
+
+def _invoke_draft_ready(dirs, tmp_path):
+    ctx = DRIVER.DispatchContext(
+        dirs=dirs, run_id="r1", translate_cfg={}, companion_path="",
+        durable_root_str=None, plugin_root_str=None, node_bin="node", session_id=None,
+    )
+    DRIVER._run_gate(dirs["draft_ready_script"], [], ctx, supports_plugin_root=False)
+
+
+def _invoke_validate_draft(dirs, tmp_path):
+    ctx = DRIVER.DispatchContext(
+        dirs=dirs, run_id="r1", translate_cfg={}, companion_path="",
+        durable_root_str=None, plugin_root_str=None, node_bin="node", session_id=None,
+    )
+    DRIVER._run_gate(dirs["validate_draft_script"], ["seg01"], ctx, supports_plugin_root=False)
+
+
+_ARTIFACT_INVOKERS = {
+    "select_segments.py": _invoke_select_segments,
+    "codex_job.py": _invoke_codex_job,
+    "resume_setup.py": _invoke_resume_setup,
+    "resolve_codex_companion.py": _invoke_resolve_codex_companion,
+    "cache_key.py": _invoke_cache_key,
+    "ledger_update.py": _invoke_ledger_update,
+    "draft_ready.py": _invoke_draft_ready,
+    "validate_draft.py": _invoke_validate_draft,
+}
+
+
+@pytest.mark.parametrize("artifact_name", _EXECUTED_SCRIPT_ARTIFACT_NAMES)
+def test_a_symlinked_artifact_never_actually_runs(tmp_path, artifact_name):
+    """The WIRING, per artifact: replace `artifact_name`'s own content
+    with a script that writes a marker if it EVER runs, symlink it at the
+    LEAF (the depth the mechanism test above already proved this catches;
+    this test's own job is narrower -- does calling the REAL consumer
+    function for THIS artifact actually invoke the check before Popen'ing
+    it, not whether the check itself works at every depth). The marker
+    being absent is the proof, not the exception this call may or may not
+    raise (`write_ledger()`/`_run_gate()` return a failure value rather
+    than raising, by their own documented contract -- an assertion tied to
+    "raised" would be wrong for those two and prove nothing for either)."""
+    marker = tmp_path / "ran.marker"
+    plugin_root_str = _plugin_root_with_marker_artifact(tmp_path, artifact_name, marker, artifact_name)
+    dirs = DRIVER.resolve_dirs(None, plugin_root_str)
+
+    invoke = _ARTIFACT_INVOKERS[artifact_name]
+    try:
+        invoke(dirs, tmp_path)
+    except Exception:
+        pass
+
+    assert not marker.exists(), (
+        f"{artifact_name}: ran when reached through its own consumer "
+        f"function with a symlinked leaf -- expected "
+        f"_refuse_unless_executable_leaf() to refuse it before Popen"
+    )
+
+
+def test_attempt_cancel_orphan_never_invokes_node_against_a_symlinked_companion_path(tmp_path, monkeypatch):
+    """`companion_path` is a DIFFERENT shape than every artifact above: not
+    built from SCRIPTS_DIR/plugin_root by concatenation at all -- it is a
+    STRING resolve_codex_companion.py prints on its own stdout, discovered
+    dynamically at runtime. This function still executes it directly
+    (`[node_bin, companion_path, "status"/"cancel", ...]`), so it needs,
+    and got, its OWN check (unlike the artifacts above, whose protection
+    lives one layer up in resolve_dirs() -- this one is verified fresh
+    inside `_attempt_cancel_orphan()` itself, every call, since it can
+    fire long after `companion_path` was first resolved).
+
+    Proven by spying on `subprocess.run` directly, not by the absence of
+    an exception: this function's own documented contract is "never
+    raises" (best-effort cleanup), so a clean return proves nothing on
+    its own. The spy proves the STRONGER, actually-relevant property --
+    node is never even INVOKED against the symlinked path."""
+    real_companion = tmp_path / "real_companion.mjs"
+    real_companion.write_text("// real companion\n", encoding="utf-8")
+    symlinked_companion_dir = tmp_path / "companion_via_symlink"
+    symlinked_companion_dir.mkdir()
+    fake_companion = symlinked_companion_dir / "companion.mjs"
+    fake_companion.symlink_to(real_companion)
+
+    durable_root = tmp_path / "durable_root"
+    (durable_root / "segments").mkdir(parents=True)
+    (durable_root / "segments" / ".codex_job.seg01.json").write_text(
+        json.dumps({"status": "launched", "disp": "d1", "jobId": "j1", "jobCwd": "/tmp"}),
+        encoding="utf-8",
+    )
+
+    invoked_with = []
+    real_run = subprocess.run
+
+    def spy_run(cmd, *args, **kwargs):
+        invoked_with.append(cmd)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy_run)
+
+    DRIVER._attempt_cancel_orphan(
+        durable_root=durable_root, seg="seg01", disp="d1",
+        companion_path=str(fake_companion), node_bin="node",
+    )
+
+    assert not invoked_with, (
+        f"expected NO subprocess to be launched against a symlinked "
+        f"companion_path -- got: {invoked_with}"
+    )
 
 
 # ===========================================================================
@@ -4944,7 +5248,11 @@ def test_resolve_companion_path_fatals_when_absent_from_a_deployed_root(tmp_path
     with pytest.raises(deployed.DriverError) as excinfo:
         deployed.resolve_companion_path(dirs, node_bin="node")
     assert excinfo.value.exit_code == 2
-    assert "resolve_codex_companion.py not found" in str(excinfo.value), str(excinfo.value)
+    # _refuse_unless_executable_leaf()'s own tri-state message
+    # ("state=absent"), not "not found" -- see the identical note on
+    # test_dispatch_codex_job_fatals_when_the_script_is_missing above.
+    assert "resolve_codex_companion.py" in str(excinfo.value), str(excinfo.value)
+    assert "state=absent" in str(excinfo.value), str(excinfo.value)
 
 
 def test_resolve_companion_path_succeeds_once_step_0a_copies_it_into_a_deployed_root(tmp_path):

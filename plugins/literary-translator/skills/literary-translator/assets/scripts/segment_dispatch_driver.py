@@ -582,27 +582,6 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
         return name[: -len(".py")] + "_script"
 
     if plugin_root_str is None:
-        # The ROOT itself, validated ONCE, before ANY path below is built
-        # from it -- not a per-consumer check each new caller has to
-        # remember to add. The template already got its OWN no-follow
-        # walk at the point of use (call_template_functions(), defence in
-        # depth); SELECT_SEGMENTS_SCRIPT, CODEX_JOB_SCRIPT and every Phase
-        # 2 sibling script never did, and a symlinked SCRIPTS_DIR (this
-        # branch's own root) would have redirected ALL of them silently.
-        # See _root_no_follow_walk_state()'s own docstring for the PR
-        # bot's concrete proof this closes.
-        scripts_dir_state = _root_no_follow_walk_state(SCRIPTS_DIR)
-        if scripts_dir_state != "dir":
-            fatal(
-                f"the self-anchored scripts directory {SCRIPTS_DIR} is not "
-                f"reachable without following a symlink somewhere on the "
-                f"way (state={scripts_dir_state}) -- refusing to derive any "
-                f"executable or template path from it. If this plugin "
-                f"install is genuinely reached through a symlink, pass "
-                f"--plugin-root explicitly instead of relying on "
-                f"self-anchoring",
-                exit_code=2, scripts_dir=str(SCRIPTS_DIR), scripts_dir_state=scripts_dir_state,
-            )
         select_segments_script = SELECT_SEGMENTS_SCRIPT
         codex_job_script = CODEX_JOB_SCRIPT
         scripts = {_script_key(name): SCRIPTS_DIR / name for name in _PHASE2_SIBLING_SCRIPTS}
@@ -628,27 +607,12 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
         # `.absolute()`, never `.resolve()`: see this module's own
         # SCRIPTS_DIR comment above for why -- `.resolve()` would follow
         # every ancestor symlink in `plugin_root_str` before
-        # `_open_regular_no_follow_walk()` ever gets a chance to refuse one,
-        # silently narrowing "refuses a symlink anywhere on the path" down
-        # to "anywhere below whatever `--plugin-root` already resolved to".
+        # `_refuse_unless_executable_leaf()` (each artifact's own point-
+        # of-use check, below its own Popen site, not here) ever gets a
+        # chance to refuse one, silently narrowing "refuses a symlink
+        # anywhere on the path" down to "anywhere below whatever
+        # --plugin-root already resolved to".
         plugin_root = Path(plugin_root_str).absolute()
-        # The ROOT itself, validated ONCE, before ANY path below is built
-        # from it -- see the self-anchored branch's own identical comment
-        # above, and _root_no_follow_walk_state()'s own docstring for why:
-        # this is the PR bot's actual finding, that a symlinked --plugin-
-        # root redirected select_segments.py (and every OTHER sibling
-        # script) silently, before the driver ever reached the template's
-        # own, narrower no-follow walk.
-        plugin_root_state = _root_no_follow_walk_state(plugin_root)
-        if plugin_root_state != "dir":
-            fatal(
-                f"--plugin-root {plugin_root_str!r} (resolved to "
-                f"{plugin_root}) is not reachable without following a "
-                f"symlink somewhere on the way (state={plugin_root_state}) "
-                f"-- refusing to derive any executable or template path "
-                f"from it",
-                exit_code=2, plugin_root=str(plugin_root), plugin_root_state=plugin_root_state,
-            )
         plugin_scripts_dir = plugin_root / "assets" / "scripts"
         select_segments_script = plugin_scripts_dir / "select_segments.py"
         codex_job_script = plugin_scripts_dir / "codex_job.py"
@@ -829,10 +793,44 @@ def _dedupe_segs(segs: list) -> tuple:
 def _load_draft_sha1_module(scripts_dir: Path = SCRIPTS_DIR):
     """Loads the REAL sibling draft_sha1.py via importlib (never a bare
     `import draft_sha1`, which would silently succeed against whatever
-    happens to be first on sys.path rather than THIS resolved sibling)."""
+    happens to be first on sys.path rather than THIS resolved sibling).
+
+    Not tracked in `resolve_dirs()`'s own `dirs` dict -- `draft_sha1.py`
+    is resolved here, independently, against whatever `scripts_dir` the
+    caller passes (always `dirs["scripts_dir"]` in practice; see
+    `current_draft_sha1()` below) -- so it needs its OWN full-path
+    no-follow verification, at its own point of use, the same shape
+    `_refuse_unless_executable_leaf()` gives every subprocess-executed
+    sibling at ITS point of use. This one matters MORE than a
+    subprocess-executed sibling, not less: `exec_module()` runs
+    `draft_sha1.py`'s own top-level code INSIDE this process, with this
+    process's own privileges -- no subprocess boundary at all.
+
+    Deliberately verify-then-reopen-by-path, exactly like every
+    subprocess-executed sibling, rather than reading the verified fd's
+    bytes and `exec()`-ing them directly: `draft_sha1.py` computes
+    `DURABLE_ROOT = Path(__file__).resolve().parents[1]` at module level,
+    and `importlib`'s own loader is what correctly sets `__file__` before
+    that line runs. Hand-rolling an exec-from-bytes loader would mean
+    reproducing exactly what `spec_from_file_location()` already does
+    right, with a real chance of getting `__file__` subtly wrong -- a
+    correctness bug hiding inside a security fix, worse than the narrow,
+    disclosed TOCTOU residual this leaves (see `call_template_functions()`'s
+    own docstring for that residual's exact shape -- the same one every
+    verify-then-reopen-by-path artifact in this file leaves, the template
+    being the one exception, since it alone reads through the SAME
+    verified fd rather than reopening)."""
     path = scripts_dir / "draft_sha1.py"
-    if not path.is_file():
-        fatal(f"draft_sha1.py not found at {path}")
+    verified_fd, verified_state = _open_regular_no_follow_walk(path)
+    if verified_fd is not None:
+        os.close(verified_fd)
+    if verified_state != "file":
+        fatal(
+            f"draft_sha1.py at {path} is not usable (state={verified_state}) "
+            f"-- refusing to import an executable that is not reachable "
+            f"without following a symlink somewhere on the way",
+            exit_code=2, artifact_path=str(path), artifact_state=verified_state,
+        )
     spec = importlib.util.spec_from_file_location("draft_sha1", str(path))
     if spec is None or spec.loader is None:
         fatal(f"could not load draft_sha1.py from {path}")
@@ -1150,8 +1148,7 @@ def run_select_segments(
     (missing script, bad subprocess, unparseable output).
     """
     select_segments_script = dirs["select_segments_script"]
-    if not select_segments_script.is_file():
-        fatal(f"select_segments.py not found at {select_segments_script}", exit_code=2)
+    _refuse_unless_executable_leaf(select_segments_script, "select_segments.py")
 
     cmd = [sys.executable, str(select_segments_script)]
     if only_segs is not None:
@@ -1273,6 +1270,23 @@ def _attempt_cancel_orphan(*, durable_root: Path, seg: str, disp: str, companion
     job_cwd = joblog.get("jobCwd")
     if not isinstance(job_id, str) or not job_id or not isinstance(job_cwd, str) or not job_cwd:
         return
+    # `companion_path` is not built from SCRIPTS_DIR/plugin_root by
+    # concatenation the way every OTHER executed artifact in this file
+    # is -- it is a STRING resolve_codex_companion.py printed on its own
+    # stdout, discovered dynamically, not derived from a trusted root
+    # this driver controls. That does not exempt it: this function still
+    # executes it directly, below, so it gets the SAME full-path
+    # no-follow verification every other executed artifact gets.
+    # Verified fresh on every call (never cached from resolve_companion_
+    # path()'s own, earlier verification) -- this function can fire long
+    # after that first resolution, and best-effort cleanup silently doing
+    # nothing on a failure it cannot verify is exactly this function's
+    # own documented contract (see its own docstring: "Never raises").
+    _companion_fd, _companion_state = _open_regular_no_follow_walk(Path(companion_path).absolute())
+    if _companion_fd is not None:
+        os.close(_companion_fd)
+    if _companion_state != "file":
+        return
     # Live status check, mirroring hygiene()'s own -- see this function's
     # own docstring for why a blind cancel on the joblog's stale LOCAL
     # "launched" status alone would be wrong. Any failure to positively
@@ -1373,8 +1387,7 @@ def dispatch_codex_job(codex_job_script: Path, job_args: list, *, wait_timeout: 
     exception was avoided (i.e. after catching this DriverError) gets
     nothing to parse, by design, not by omission.
     """
-    if not codex_job_script.is_file():
-        fatal(f"codex_job.py not found at {codex_job_script}")
+    _refuse_unless_executable_leaf(codex_job_script, "codex_job.py")
     argv = [sys.executable, str(codex_job_script), *job_args]
     popen_kwargs.setdefault("stdout", subprocess.PIPE)
     popen_kwargs.setdefault("stderr", subprocess.PIPE)
@@ -1885,8 +1898,7 @@ def resolve_run_id(dirs: dict, *, translate_cfg: dict,
     language pair, the plugin/orchestration bundle hashes, each segment's
     own cache_key) is still fully covered by `subst`/`domain`/`version`."""
     script = dirs["resume_setup_script"]
-    if not script.is_file():
-        fatal(f"resume_setup.py not found at {script}", exit_code=2)
+    _refuse_unless_executable_leaf(script, "resume_setup.py")
 
     payload = {
         "kind": "mass",
@@ -1969,8 +1981,7 @@ def resolve_companion_path(dirs: dict, *, node_bin: str) -> str:
     attribute nothing checks -- removed rather than left to invite a
     caller into believing it does something."""
     script = dirs["resolve_codex_companion_script"]
-    if not script.is_file():
-        fatal(f"resolve_codex_companion.py not found at {script}", exit_code=2)
+    _refuse_unless_executable_leaf(script, "resolve_codex_companion.py")
     # codex round-3 correction: hand-built rather than routed through
     # _root_forward_args() -- --durable-root is forwarded UNCONDITIONALLY
     # here, even in the "both root strings None" self-anchored case, where
@@ -2163,90 +2174,6 @@ def template_harness_source(template_text: str, subst: dict) -> str:
     return truncated + exports
 
 
-def _root_no_follow_walk_state(root: Path) -> str:
-    """Same shape and same idiom as `_open_regular_no_follow_walk()`
-    below -- walks every path component from the filesystem root down to
-    AND INCLUDING `root` itself with `os.O_NOFOLLOW` -- but for a
-    DIRECTORY leaf, not a regular-file one, and with no fd for the caller
-    to keep: `root` is validated once, structurally, and then left alone;
-    nothing here reads its contents. Deliberately a SEPARATE, self-
-    contained function rather than a shared helper refactored out of
-    `_open_regular_no_follow_walk()` -- that function has already been
-    through six review rounds in this exact area; duplicating its walk
-    loop here means a mistake in this new, narrower function can never
-    retroactively regress the one that already earned its scrutiny.
-
-    WHY THIS EXISTS: `resolve_dirs()` used to validate exactly ONE
-    consumer of a root -- the template, via
-    `_open_regular_no_follow_walk()` applied to `dirs["template_script"]`
-    inside `call_template_functions()` -- while every OTHER path built
-    from the SAME root by simple concatenation (`SELECT_SEGMENTS_SCRIPT`,
-    `CODEX_JOB_SCRIPT`, every Phase 2 sibling script) inherited whatever
-    that root turned out to be, completely unchecked. The PR bot's own
-    proof: with a symlinked `--plugin-root`, the redirected tree's own
-    `select_segments.py` ran and produced a real, observable effect (a
-    marker file) before the driver ever reached the template's own
-    no-follow walk -- the check that WAS there was never on the path an
-    attacker needed to cross. Validating `root` itself, once, before ANY
-    path is derived from it, closes every consumer at once instead of
-    requiring each new caller to remember its own check -- the per-path
-    walk on the template stays as defence in depth, it just stops being
-    the ONLY thing standing between a symlinked root and execution.
-
-    `O_DIRECTORY` at the leaf inherently refuses a symlink there too
-    (`O_DIRECTORY | O_NOFOLLOW` together fail even on a symlink that
-    points AT a genuine directory), so this needs no separate `S_ISDIR`
-    check the way `_open_regular_no_follow_walk()` needs `S_ISREG` --
-    the open itself IS the check.
-
-    Returns `"dir"` on success, `"absent"` if `root` genuinely does not
-    exist, or `"suspicious"` for anything else refused along the way (a
-    symlinked ancestor, a symlinked or non-directory `root` itself, or
-    any other lookup failure) -- the SAME tri-state vocabulary every
-    other check in this module already uses."""
-    if not root.is_absolute():
-        fatal(f"internal error: {root} must be absolute for the no-follow root check", exit_code=2)
-    parts = root.parts
-    fd = None
-
-    def _safe_close(descriptor: int) -> None:
-        """Same detach-before-close discipline as
-        `_open_regular_no_follow_walk()`'s own `_safe_close()` -- every
-        caller sets its own variable to `None` BEFORE calling this, so a
-        failed close here can never be retried on the same fd by a later
-        handler."""
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-
-    try:
-        fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY)
-        for name in parts[1:]:
-            next_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            closing, fd = fd, None
-            _safe_close(closing)
-            fd = next_fd
-    except FileNotFoundError:
-        if fd is not None:
-            closing, fd = fd, None
-            _safe_close(closing)
-        return "absent"
-    except OSError as exc:
-        if fd is not None:
-            closing, fd = fd, None
-            _safe_close(closing)
-        print(
-            f"segment_dispatch_driver.py: warning: no-follow walk to root "
-            f"{root} refused: {exc}; treating as suspicious",
-            file=sys.stderr,
-        )
-        return "suspicious"
-    closing, fd = fd, None
-    _safe_close(closing)
-    return "dir"
-
-
 def _open_regular_no_follow_walk(path: Path):
     """Opens `path` component-by-component from the filesystem root, with
     `os.O_NOFOLLOW` at EVERY step -- not just the leaf. This closes two
@@ -2407,6 +2334,43 @@ def _open_regular_no_follow_walk(path: Path):
         )
         return None, "suspicious"
     return leaf_fd, "file"
+
+
+def _refuse_unless_executable_leaf(path: Path, label: str) -> None:
+    """Full-path no-follow verification for an executable artifact --
+    root, EVERY intermediate directory, AND the leaf itself, via
+    `_open_regular_no_follow_walk()` above -- at this specific artifact's
+    OWN point of use, immediately before it is Popen'd. Not upfront,
+    batched, inside `resolve_dirs()`: an artifact this particular run
+    never actually reaches should never have to exist just to call
+    `resolve_dirs()` -- many fixtures throughout this file's own test
+    suite build a MINIMAL sibling set on purpose, staging only what the
+    property under test needs, and an upfront check requiring all of them
+    made `resolve_dirs()` itself fail for reasons unrelated to what those
+    tests exercise. Point-of-use matches the ONE artifact that already
+    had full protection before this fix -- the template, checked inside
+    `call_template_functions()`, never inside `resolve_dirs()` -- so this
+    makes every executed artifact consistent with that existing
+    precedent, not a new, third shape.
+
+    Every one of this file's OWN existing point-of-use checks
+    (`select_segments_script.is_file()`, `codex_job_script.is_file()`,
+    etc.) already fired at exactly this same call site, for exactly this
+    same "not found" case -- `Path.is_file()` just could not tell a
+    genuine regular file from a symlink pointing at one. This replaces
+    each of those in place, strengthened, not a new site added
+    elsewhere."""
+    fd, state = _open_regular_no_follow_walk(path)
+    if fd is not None:
+        os.close(fd)
+    if state != "file":
+        fatal(
+            f"{label} at {path} is not usable (state={state}) -- refusing "
+            f"to derive an executable path that is not reachable without "
+            f"following a symlink somewhere on the way (the root, an "
+            f"intermediate directory, or the leaf itself)",
+            exit_code=2, artifact_path=str(path), artifact_state=state,
+        )
 
 
 def call_template_functions(dirs: dict, subst: dict, calls: list, node_bin: str = "node") -> dict:
@@ -2650,8 +2614,21 @@ def write_ledger(dirs: dict, seg: str, fields: dict, *, run_id=None, needs_cache
     payload = dict(fields)
     if needs_cache_key:
         cache_key_script = dirs["cache_key_script"]
-        if not cache_key_script.is_file():
-            return {"success": False, "error": f"cache_key.py not found at {cache_key_script}"}
+        # Not _refuse_unless_executable_leaf() -- that one fatal()s
+        # (raises), and this function's own contract, stated in its own
+        # docstring, is that an invocation failure here is a per-segment
+        # outcome, never driver-fatal. Same full-path no-follow check,
+        # inlined so a bad path becomes a {"success": False, ...} return
+        # like every other failure in this function, not an exception.
+        _cache_key_fd, _cache_key_state = _open_regular_no_follow_walk(cache_key_script)
+        if _cache_key_fd is not None:
+            os.close(_cache_key_fd)
+        if _cache_key_state != "file":
+            return {
+                "success": False,
+                "error": f"cache_key.py at {cache_key_script} is not usable "
+                         f"(state={_cache_key_state})",
+            }
         cmd = [sys.executable, str(cache_key_script), "--seg", seg]
         cmd += _root_forward_args(dirs, durable_root_str, plugin_root_str, supports_plugin_root=False)
         try:
@@ -2668,8 +2645,18 @@ def write_ledger(dirs: dict, seg: str, fields: dict, *, run_id=None, needs_cache
         payload["run_token"] = run_id
 
     ledger_update_script = dirs["ledger_update_script"]
-    if not ledger_update_script.is_file():
-        return {"success": False, "error": f"ledger_update.py not found at {ledger_update_script}"}
+    # Same reason as the cache_key.py check above: inlined, not
+    # _refuse_unless_executable_leaf(), so a bad path stays a per-segment
+    # {"success": False, ...} outcome, never a driver-fatal exception.
+    _ledger_update_fd, _ledger_update_state = _open_regular_no_follow_walk(ledger_update_script)
+    if _ledger_update_fd is not None:
+        os.close(_ledger_update_fd)
+    if _ledger_update_state != "file":
+        return {
+            "success": False,
+            "error": f"ledger_update.py at {ledger_update_script} is not usable "
+                     f"(state={_ledger_update_state})",
+        }
     with tempfile.TemporaryDirectory(prefix="ltdriver.ledger.") as tmpdir:
         payload_path = Path(tmpdir) / "payload.json"
         payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -2726,8 +2713,7 @@ def _run_gate(script: Path, argv_rest: list, ctx: "DispatchContext", *, supports
     exit) is never an error here, only a script that could not be invoked
     at all is (a driver-level fatal, matching every other subprocess
     invocation in this file)."""
-    if not script.is_file():
-        fatal(f"{script.name} not found at {script}", exit_code=2)
+    _refuse_unless_executable_leaf(script, script.name)
     cmd = [sys.executable, str(script)] + argv_rest
     cmd += _root_forward_args(ctx.dirs, ctx.durable_root_str, ctx.plugin_root_str,
                                supports_plugin_root=supports_plugin_root)
