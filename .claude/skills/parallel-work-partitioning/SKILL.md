@@ -1,6 +1,6 @@
 ---
 name: parallel-work-partitioning
-description: Planning technique for splitting an issue/change set across two or more parallel sessions, worktrees, or teammates BEFORE dispatch. Use when deciding who owns what ahead of a fan-out, sanity-checking a scout-proposed split, or partitioning a batch of issues/tickets across parallel workers. Covers why the partition is forced by shared FILES rather than topic, why a grep of current code under-detects the right split, cache-bundle membership as a second partitioning axis, shared registration files as merge-time (not dev-time) coordination, and why a scout's fix_approach is not implementability-verified until codex or a reviewer confirms the supporting contract exists.
+description: Planning technique for splitting an issue/change set across two or more parallel sessions, worktrees, or teammates BEFORE dispatch. Use when deciding who owns what ahead of a fan-out, sanity-checking a scout-proposed split, or partitioning a batch of issues/tickets across parallel workers. Covers why the partition is forced by shared FILES rather than topic, why a grep of current code under-detects the right split, cache-bundle membership as a second partitioning axis, shared registration files as merge-time (not dev-time) coordination, why a scout's fix_approach is not implementability-verified until codex or a reviewer confirms the supporting contract exists, and why a PATH whose meaning changes over time is a shared surface even with one writer — reach for it when two agents are pointed at one filename, when a path is about to be re-purposed from "the original" to "the current revision", when an artifact seems to have vanished, or when a long-running reviewer may be reading a file that moved.
 ---
 
 # Partitioning a set of changes across parallel sessions / worktrees
@@ -52,6 +52,30 @@ An investigation/scout Workflow reliably reports **root cause + fix LOCATION**, 
 ## The memory INDEX is shared even when code files aren't — defer index rewrites during a live parallel session
 
 The auto-memory dir (`~/.claude*/projects/<slug>/memory/`) is a **whole-dir symlink shared across all profiles**, so two parallel CC sessions write the **same `MEMORY.md` and `index_*.md`** — a coupling the code-file partition above does NOT cover (their repo files can be perfectly disjoint yet both append to the shared index; last-writer-wins clobbers the other's line). So during an active parallel session: (a) **do NOT rewrite/compact a shared index line the other session is editing** — e.g. a size-hook asking to compact `MEMORY.md` while the parallel session just wrote a big pointer line: DEFER the compaction until it's done; (b) capture new learnings in **unique-named memory FILES** (zero clobber) and point them from an EXISTING already-pointed file rather than adding a fresh `MEMORY.md` pointer into the contested index. Same spirit as the code-file rule: find the disjoint surface and stay on it.
+
+## A PATH is a shared surface even with ONE writer — if its meaning changes over time
+
+The file-disjointness rule above partitions *concurrent* writers. It does **not** cover a path that
+means "the original" at one moment and "the current revision" at the next — which is a shared
+mutable resource with sequential writers, and fails the same way. **One artifact, one path, one
+writer, and a path never changes meaning.** Re-purposing is the defect; concurrency is only how it
+gets noticed. Pointing two agents at one filename is the same defect with the timing removed.
+
+**Why it is invisible:** a re-purposed path and a lost file are indistinguishable — both are found
+by someone noticing an odd size or line count *later*, never at the moment it happens. So the
+countermeasure is not care, it is a **digest recorded while the artifact is whole**: a manifest whose
+`verify` reports CHANGED / GONE / NEW. Keep a volatile-file list (a measurement appending records, a
+review streaming output) reported separately, or the check cries wolf on schedule and gets skimmed —
+`CHANGED` must always mean something that should have been stable was not.
+
+**Corollaries.** (a) A long-running reviewer reading a path is a reader you cannot see; if the file
+moved under it, **kill and relaunch** rather than discount the verdict — discounting a plausible,
+detailed review of the wrong artifact is where errors slip through. (b) When retiring a path, leave a
+**tombstone naming where everything went**, not a deletion: a missing path reads as "never existed",
+so anyone arriving from an older message gets silence instead of a redirect. (c) A transient absence
+during someone else's rebuild looks exactly like loss — before declaring an artifact gone, ask
+whether a write is in flight; after real losses have occurred, prior probability will otherwise do
+the work evidence should.
 
 ## The partition holds only while your picture of it is fresh
 

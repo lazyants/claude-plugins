@@ -18,6 +18,7 @@
 - [Revert the whole file — the pins that SURVIVE say it was never guarded](#revert-the-whole-file-and-read-which-pins-survive)
 - [A never-varied argument is an untested argument — instrument, don't re-review](#a-never-varied-argument-is-an-untested-argument)
 - [A pin can CEMENT a wrong claim — pinning is not review](#a-pin-can-cement-a-wrong-claim)
+- [A presence assertion cannot distinguish an instruction from its negation](#a-presence-assertion-cannot-distinguish-an-instruction-from-its-negation)
 - [Ask which correct behaviours have NO gate at all](#ask-which-correct-behaviours-have-no-gate)
 - [An authoritative fix still needs review](#an-authoritative-fix-still-needs-review)
 - [A bare `assert` guard vanishes under `python -O`](#a-bare-assert-guard-vanishes-under-python--o)
@@ -105,6 +106,24 @@ Removing a wrong term X can INTRODUCE a new inaccuracy. A blanket replacement ca
   this new case have any reason to open this file?** If the entry does not name the new trigger,
   the case is unreachable. Progressive disclosure means the router is not documentation of the
   reference — it is the only thing that can select it.
+
+- **The same trigger must fire on REMOVAL, and that direction disguises itself as a faithful move.**
+  The two cases above both edit the reference; this one edits the ROUTER, which is why a trigger
+  worded around "any change to a reference" does not fire. When a router entry is over a length cap
+  or simply too long, the obvious fix is to move material out of it into the body — and because
+  every word is preserved somewhere, the change audits as lossless. It is not: the body loads only
+  AFTER selection, so anything moved there has been moved out of the only thing that can cause the
+  selection. Verified 2026-08-03 on a shipped plugin whose `description` was 650 characters over the
+  Agent Skills cap. The fix moved 31 of 41 trigger phrases into a body section and the release notes
+  said "no phrase was dropped" — true of the file, false of the behaviour, and the issue that
+  requested the fix had proposed exactly that shape. Two review rounds passed over it; the third
+  caught it. **Before moving anything out of a router to make room, ask what the moved text was DOING
+  there.** If it was carrying selection signal, relocating it deletes that signal — the repair is to
+  make the remaining text carry the same signal more densely (name the entities and the actions, not
+  every phrasing of them), and to say so plainly rather than claiming preservation. The general
+  form: any edit that shrinks a router is a functional change to what can be reached, even when it
+  is textually a move, and "nothing was lost" is a claim about the FILE that says nothing about
+  reachability.
 
 ## A rebuild can regress
 
@@ -332,6 +351,33 @@ Closure criterion: a rule counts as guarded ONLY if a mutant was run and a fixtu
 transitive arguments; no "no realistic mutation exists" unless one was attempted and its
 impossibility can be stated. The claim that something is covered is itself a claim.
 
+**The mirror case — a fix that NARROWS needs an under-acceptance check, and "every real instance
+here passes" is not one.** The rule above is for widening a matcher; a restrictive check (a
+refusal, a validator, a stricter guard) fails in the opposite direction, and the two are not
+symmetric in how they are caught. A widened matcher over-matches on inputs you can enumerate from
+the domain. A restrictive check over-refuses on **legitimate variants of the environment**, and the
+environment you can inspect is your own. Verified 2026-08-05: a whole-path "no symlink anywhere"
+check was applied to an executable discovered inside the user's own plugin store. Every real
+instance on the development machine passed — all eight, checked directly — and the check was
+nevertheless wrong: that store legitimately contains symlinked ancestors on installs where profiles
+share one directory, so the check reported a valid executable as suspicious and silently disabled
+the cleanup path that used it. It took a reviewer running a different layout to see it.
+
+So before shipping any new refusal, enumerate the **legitimate inputs it must still accept**, not
+only the hostile ones it must reject, and construct the legitimate variants you do NOT have locally
+rather than sampling the ones you do. The discriminating question is *what does this check now
+forbid, and who does that legitimately today?* — asked about the accept-set, which is the side no
+adversarial review looks at, because reviewers hunt for what slips through. A companion habit:
+whenever a guard's failure path is "do nothing" rather than "report an error", a false refusal is
+invisible at runtime too, so it will not be found in production either.
+
+**Trust class is the usual reason a uniform rule is wrong.** In the case above the same check was
+correct for every other path and wrong for that one, because the others were built from a root the
+program is handed (a symlink anywhere is an injection) while that one was discovered inside storage
+the user owns (a symlink is their filesystem layout). When one member of a set resists a rule the
+rest accept, suspect a trust-class difference before writing an exemption — and write the asymmetry
+down at the site, or the next round removes it as an inconsistency.
+
 ## A probe that says the same thing before and after the fix
 
 A scratch probe built to demonstrate a defect, or a fixture built to pin it, can fail to REACH the
@@ -498,6 +544,29 @@ not an imperative governing this skill's behavior, so no mutation with a real co
 named for it. A gate whose mutation cannot be named is decoration." In a repo where docs ARE the
 production path, this is also the test that separates normative prose from advisory prose. With
 the two rules above it, the three decide what NOT to assert.
+
+## A presence assertion cannot distinguish an instruction from its negation
+
+Pinning prose (a normative doc, a config, a policy file) by asserting that certain tokens are
+PRESENT is invariant under "do not". `assert "HALT" in span` passes on *"do not HALT before
+copying anything, just overwrite it"* — the word is right there. Adding more tokens does not
+help: a second version asserting `HALT` plus the three entry-kind labels it governs passed the
+same negated document, because each label is still present too. Measured by running the five
+old assertions against the mutated document: five PASS, verdict GREEN, on prose that says the
+opposite of the contract it exists to pin.
+
+**Bind the subject to its verb by ADJACENCY, not by co-occurrence in a span.** Assert the exact
+operative substring, in the document's own established style — `"→ HALT before copying
+anything."` where sibling bullets read `"→ copy normally."`. Inserting a negation between the
+arrow and the verb breaks the match; a bag of words never notices.
+
+Then apply the stopping question to your own pin before shipping it: **write down the wrong
+document that would still pass.** If you can write one, the pin is not done. A disclosed residual
+is the honest outcome when the remaining evasion needs semantics a string match cannot have (an
+append-after correction — `"→ HALT before copying anything. (Correction: ignore that, overwrite
+it.)"` — survives adjacency, and detecting it means parsing arbitrary trailing English). Say so
+at the pin. A check that pretends to a property it cannot have is worse than one whose limit is
+written down, because the next reader trusts it further than it earns.
 
 ## Ask which correct behaviours have no gate
 

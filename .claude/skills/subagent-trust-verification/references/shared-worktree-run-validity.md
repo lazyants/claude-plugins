@@ -67,6 +67,42 @@ minutes — **152 failed/289 errors**, **4797 passed**, **4796+4**, and "my own 
 taken in good faith, every one measuring a different half-finished moment. Two runs 2.5 minutes apart
 had **ZERO overlap in their failing sets**.
 
+## Concurrency is only ONE of the ways the number lies — two more, both silent
+
+Everything above is about a *concurrent writer*. Two other shapes produce an equally ordinary-looking
+result, and neither involves another process at all. All three answer the same question wrongly:
+**was the thing measured the thing you meant to measure?**
+
+**The bytes were never replaced.** Staging a fix into an isolated tree with `cp` and running the suite
+there is a normal move. But `cp` is aliased to `cp -i` in this user's shell: it prints
+`overwrite …? (y/n [n]) not overwritten`, **exits 0**, and leaves the original file in place. The suite
+then runs against unmodified code and passes — reproducing the previous run's number exactly, which
+reads as confirmation rather than as the tell it is. Only the word `not overwritten`, buried above
+several minutes of test output, distinguishes it.
+
+Use `/bin/cp -f`, and **verify by digest afterwards, never by exit status**: `shasum -a 256` both
+sides, plus a `grep -c` for a string that exists only in the new work. The check must confirm the
+new bytes are present, not that a command succeeded.
+
+**The tree cannot run the suite at all.** A plain directory copy of a plugin is not inside a git
+repository, and some tests shell out to `git diff` against a baseline commit. Those fail with
+`could not access <sha>` — 62 of them in one instance — which looks exactly like a catastrophic
+regression from a one-line change. **An isolated directory copy is valid for targeted `-k` runs and
+invalid for the full suite.** Red-before-green checks on a named test are fine there; the gating
+number is not.
+
+## The rule that covers all three
+
+**The number that gates a release is measured in a DETACHED WORKTREE at a NAMED COMMIT**, created
+with `git worktree add --detach <path> <sha>` — a real git checkout (so git-dependent tests run),
+frozen (so no lane can edit under it), and identified by a sha you can quote in the commit message.
+If work is still uncommitted, commit it first; a snapshot commit you amend later is cheaper than a
+number that describes a state which never existed.
+
+Report totals *with* the commit they belong to, and require the same from teammates. Two lanes
+disagreeing by nine tests is not a mystery to investigate — it is what measuring a moving tree looks
+like, and both numbers are honest.
+
 ## Scheduling quiet does NOT work
 
 Asking every teammate to freeze failed twice, for two independent reasons, each costing a discarded

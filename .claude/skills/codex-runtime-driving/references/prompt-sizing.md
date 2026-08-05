@@ -7,7 +7,8 @@ Two independent traps, both silent until a job dies.
 ## Trap 1 — `chars/4` is a Latin-prose ratio, not a universal one
 
 Pointed Hebrew carries a combining niqqud mark per letter; those marks tokenize separately, so the
-real chars-per-token is far below 4. Measured on SSK vol.2 (`gpt-5.6-sol`, 272K context):
+real chars-per-token is far below 4. Measured on SSK vol.2 (`gpt-5.6-sol`, nominal 272K window —
+but see Trap 3: the number you may actually spend is smaller):
 
 | prompt | chars | my `chars/4` estimate | reality |
 |---|---|---|---|
@@ -32,6 +33,31 @@ python3 -c 'import sys; print(len(open(sys.argv[1], encoding="utf-8").read()))' 
 
 never `wc -c`, when the text is not ASCII. Sibling of [[gotcha-zsh-no-word-splitting]] — same fix
 shape: measure it in Python, not in the shell.
+
+## Trap 3 — the advertised window is not the budget, and the agent preamble is already spending it
+
+`~/.codex/models_cache.json` is the record the runtime resolves against, and its `context_window`
+reads like the budget. It is not. Two other fields on the SAME record subtract from it before your
+payload is considered, and nothing errors if you miss them:
+
+- **`effective_context_window_percent`** — 95 for `gpt-5.6-sol`, so the usable window is
+  `272000 × 0.95 = 258400`, not 272000.
+- **`base_instructions`** — the Codex agent system prompt, shipped on every call. 17,766 bytes ≈
+  **3,576 tokens** (`cl100k_base`). Note it tokenizes at ~5.0 B/token: it is plain English, so it is
+  *cheaper* than its byte count suggests, unlike everything else on this page. Guessing it from
+  bytes at a JSON/non-Latin ratio over-estimates by ~40%.
+
+Missing the first field alone moved a real acceptance verdict from "+28.4% margin, passes" to
+"+23.2%, fails", and that wrong verdict was propagated into two teammates' work and a committed doc
+before it was caught. **When a budget decision rests on the window, read the whole model record, not
+the one field named `context_window`.**
+
+There is also **no `tokenizer` or `encoding` field anywhere on the record** — so no tokenizer is
+authoritative for this model, and the two plausible candidates disagree by up to **51%** on
+non-Latin/JSON content (one artifact measured 48,720 tokens under `o200k_base` and 73,465 under
+`cl100k_base`). Report a range across both, or pick the higher-count one deliberately and say so;
+a single point estimate here is a guess wearing a number's clothes. This is Trap 1 one level up —
+script density varies, and so does the tokenizer you are assuming.
 
 ## How to size safely
 

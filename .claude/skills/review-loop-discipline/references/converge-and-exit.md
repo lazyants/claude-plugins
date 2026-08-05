@@ -36,6 +36,10 @@ A mid-loop reviewer note that "the PRIMITIVES are sound, only the surrounding co
 
 A fix round that DELETES code/complexity is converging; one that ADDS a normalization layer is still feeding the tail. Closing a class sometimes means REMOVING the clever mechanism, not hardening it: replace context-aware sorting with order-exact `json.dumps(sort_keys=True)` equality; replace an `"<absent>"` sentinel with a presence-check; RAISE-on-depth instead of a truncation marker; swap a manual O_EXCL+pid/age stale-break for a kernel `fcntl.flock`; swap a backup/restore for a single atomic `os.replace`. A SIMPLIFYING pivot is the strongest convergence signal there is.
 
+**The cheapest way to DECIDE "repair or delete" is a proportionality count, not a judgement call: grep the base branch for how many sites already run the same unguarded operation.** A guard that covers a MINORITY of the identical sites is disproportionate, and repairing it a third time is spending novel-mechanism risk to close a fraction of a class that was already open everywhere. Measured: a per-read stall timer added to one `os.read()` loop turned out — `git show main:… | grep -n "os.read("` — to be guarding 1 of 3 identical loops, all reading the same files on the same path under the same lock, on every job. The timer was also the file's ONLY process-global signal handler, and the reviewer had measured it not working (an inherited blocked `SIGALRM` mask survives `exec`, holding a 0.1 s alarm past 0.6 s). Deleting it and stating the residual as SHARED WITH the pre-existing loops is both smaller and more honest than a fourth repair; it also reframes the next person's decision as "bound all three deliberately" instead of "why is this one special".
+
+The count is the discriminator because it is checkable in one command and immune to the sunk-cost pull of three rounds already spent on the mechanism. Run it BEFORE designing the next repair, not after the reviewer refutes it.
+
 **Sharper deletion signal — the reviewer is re-correcting YOUR OWN ADDITION, not the original artifact.** When the loop stops finding bugs in the code-under-review and instead keeps correcting a caveat/characterization YOU added, that addition is over-reaching → DELETE it, don't reword it (each reword is a new over-claim). Recognize it by the 2nd re-correction of the same addition, not the 3rd.
 
 **The AGGREGATE form of that signal, which the "same addition twice" trigger MISSES.** The tell above needs one addition corrected twice. The commoner and costlier shape is a stream of *different* additions each corrected *once*: every round the fix ships new justification prose, and the next round finds its defect there. No single addition repeats, so the 2nd-re-correction trigger never fires, and the loop can run indefinitely while the design underneath is stable. Diagnose it by asking each round **"was this finding against the artifact, or against prose a previous round added?"** — when that answer is "the prose" for ~3 rounds running while no finding touches the design, the argumentation has become the defect generator. The fix is not another careful sentence: **cut the accumulated justification** to spec + measured facts + obligations, archive the narrative verbatim as explicitly non-normative, and verify the cut dropped nothing load-bearing before continuing. Observed at scale on a plan review (31 rounds, ~26% of the document was round-by-round argumentation; the design had been untouched for 17 rounds).
@@ -91,6 +95,31 @@ Fence the loop, don't just exit it. Encode every ratified decision and deliberat
 ## Same mechanism third time
 
 If round N's fix for finding F1 gets a NEW counterexample at round N+1 with the same SHAPE as F1 (same failure class, cleverer instance), stop iterating on the mechanism and ask: "does the external system I'm racing against already expose a synchronization primitive for this property?" Reaching for the platform's own primitive (e.g. Playwright's `animations:'disabled'`, the same freeze-to-settled mechanism `toHaveScreenshot` uses) is simpler AND more robust than another layer of in-house observation. A "verify-don't-assume redesign" can still be verifying at the WRONG layer — an ABA race outside your observation thread survives every sampling refinement.
+
+**Variant — each round's fix covers the LAYER where the last defect was reported, not the thing
+being protected.** The tell is that every counterexample is the same failure class arriving one
+step away from the previous one, and each fix is individually correct about the spot it addresses.
+Verified 2026-08-05 across three rounds on one boundary: a check refused a symlinked leaf, but the
+path was canonicalized before it ran (fixed the canonicalization); the root was then checked, but
+only for one of ten consumers (moved the check to cover all of them); every consumer was then
+checked, but nothing *below* the root was (widened again). No round was wrong; the **unit** was —
+each guard covered a prefix of the thing subsequently trusted.
+
+Diagnostic, once the same class returns twice: **name the artifact you actually execute, read, or
+trust, and ask whether the guard covers it entirely or only a prefix of it** — a prefix of the path,
+one instance of the class, one caller out of several. If the answer is "a prefix", widening the
+guard's *unit* ends the sequence, where widening its *terms* only moves the gap. The corollary is
+that the fix usually adds no mechanism: reuse the check that has already survived the previous
+rounds and change what you hand it, because in each of those rounds the gap was inside the newly
+written narrower mechanism.
+
+**Same shape in the call graph, and it is mechanically detectable.** A guard placed in a *caller*
+rather than at the operation it guards is a prefix of the call graph: correct only for the callers
+that exist now. Verify it by mapping rather than reading — enumerate every site performing the
+dangerous operation and assert a guard appears earlier **in the same function**, then look at the
+exceptions. That check found one function whose guard lived in its only caller: safe that day,
+unguarded for the next caller anyone adds, and invisible to review because the reachable path was
+correct.
 
 **Variant — the predicate keeps failing because the LAYER can't answer the question.** The tell is subtly different from the above: each round's counterexample is a *different* shape, and each new guard is individually reasonable, yet a fresh one falls every round. That is not a mechanism problem — it means the question being asked is unanswerable with the information available *in the layer where you put it*. Diagnostic: name the question in plain words and ask what capability answers it. If the answer is a capability the module deliberately lacks (filesystem, network, clock, user intent), no predicate over the inputs it *does* have will ever be sound, and each round will keep producing a plausible-but-incomplete proxy. Move the DECISION to the layer holding the capability and leave the pure layer to *recognize candidates and produce a replacement*, deciding nothing. Verified 2026-07-19 (enduser-handbook #220): four successive designs — a syntactic `rel === ''` guard, a `legacy !== canonical` guard, a tri-state lexical comparator, then a "canonical is correct by construction" invariant — each died to a new codex counterexample, all because "is this link broken?" was being answered by path algebra inside a deliberately filesystem-free module. Relocating the decision to the workflow step that owns the filesystem ("does the existing destination resolve? then leave it") **deleted** the entire comparator and closed all three open blockers structurally. Signal to watch: a plan that keeps *growing* a decision procedure round over round is in the wrong layer; the correct layer usually makes it *smaller*.
 

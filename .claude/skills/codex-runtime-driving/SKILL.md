@@ -1,6 +1,6 @@
 ---
 name: codex-runtime-driving
-description: Mechanics for reliably driving the codex-companion runtime and recovering its verdict — use when running codex:codex-rescue or codex-companion.mjs (task/adversarial-review/codex exec, foreground, --background, or via the rescue Agent), polling or reading its job state JSON / result, diagnosing a backgrounded or lost verdict, a dead/hung/killed worker, "No job found", a fabricated wait-state, arg-misparse, env/PATH/broker/TMPDIR/moderation/usage-limit breakage, driving long or parallel background jobs safely, confining what a job may WRITE or reasoning about its sandbox/workspace-root boundary (a `--cwd` inside a repo does not move it), or benchmarking codex model×effort on a slice before committing a big job.
+description: Mechanics for reliably driving the codex-companion runtime and recovering its verdict — use when running codex:codex-rescue or codex-companion.mjs (task/adversarial-review/codex exec, foreground, --background, or via the rescue Agent), polling or reading its job state JSON / result, diagnosing a backgrounded or lost verdict, a dead/hung/killed worker, "No job found", a fabricated wait-state, arg-misparse, env/PATH/broker/TMPDIR/moderation/usage-limit breakage, driving long or parallel background jobs safely, confining what a job may WRITE or reasoning about its sandbox/workspace-root boundary (a `--cwd` inside a repo does not move it), sizing a prompt or a context budget against the model's real usable window, or benchmarking codex model×effort on a slice before committing a big job.
 ---
 
 # Driving the Codex runtime
@@ -28,10 +28,14 @@ Read the reference file that matches the task:
   Covers the reliable direct-drive patterns, the fastest `jq -r '.result.rawOutput'` verdict recovery,
   stall/hang thresholds, and the `/security-review` working-tree diff caveats.
 - **`references/prompt-sizing.md`** — read BEFORE dispatching a job whose prompt is large and whose payload
-  is non-Latin (vocalized Hebrew, Arabic with harakat, Devanagari, heavy CJK) or mostly JSON. Covers
-  budgeting per SCRIPT rather than per byte, and how to measure a prompt's real size. Two silent traps
-  invert the obvious method: `chars/4` is a Latin-prose token ratio that under-counts a diacritized script
-  badly enough to overflow a window the estimate said it fit, and `wc -c` counts BYTES, not characters.
+  is non-Latin (vocalized Hebrew, Arabic with harakat, Devanagari, heavy CJK) or mostly JSON, **and before
+  any decision that rests on how much context window is available — a size gate, a chunk size, a
+  fits/does-not-fit acceptance claim — whatever the script.** Covers budgeting per SCRIPT rather than per
+  byte, and how to measure a prompt's real size. Three silent traps invert the obvious method: `chars/4` is
+  a Latin-prose token ratio that under-counts a diacritized script badly enough to overflow a window the
+  estimate said it fit; `wc -c` counts BYTES, not characters; and `context_window` is not the budget —
+  `effective_context_window_percent` and the per-call `base_instructions` preamble on the same model record
+  both subtract from it silently, and no tokenizer field exists to settle which encoding to count with.
 - **`references/model-effort-bakeoff.md`** — read when benchmarking codex model×effort on a representative
   slice before committing a full translation/quality job (drive N isolated arms via the CLI, blind-adjudicate).
   Carries the durable finding: **an n=1 bake-off measures noise.** This one's "`high` won / `xhigh`
