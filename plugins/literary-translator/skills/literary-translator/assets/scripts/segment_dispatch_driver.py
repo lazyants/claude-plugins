@@ -3077,7 +3077,56 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         return {"action": "review", "round_label": matched_round_label}
 
     if matched_round_label == "final":
-        return {"action": "cap_reached", "findings": review_obj.get("findings") or []}
+        # #432: cap_reached used to fire unconditionally here, on the
+        # theory that a non-clean mandatory final review is always the
+        # true terminal state. That theory misses the exact case the
+        # clean branch above (`if clean and coverage_ok:`, the
+        # "codex #392-class MAJOR" comment) was already fixed for on the
+        # OTHER side of this same fork: a review's own recorded
+        # draft_sha1 can go stale the moment the draft changes after the
+        # review was written, and staleness does not become less true
+        # just because the review happened to be non-clean instead of
+        # clean.
+        #
+        # The clean branch needs its guard because ledger_update.py's own
+        # enrich_converged_fields REFUSES a convergence write whose
+        # draft_sha1 disagrees with the current draft -- so without a
+        # re-dispatch, a stale-but-clean review would live-lock on that
+        # refused write forever. This branch has no equivalent write to
+        # refuse (cap_reached's own ledger write in process_segment() is
+        # unconditional -- {"status": "non_converged", "reason": "cap"}
+        # never carries or checks a draft_sha1), so the failure mode here
+        # is quieter but just as permanent: this function only ever READS
+        # review.json, so a stale non-clean review keeps matching "final"
+        # and keeps returning cap_reached, forever -- even after every
+        # one of its findings has been applied to the draft by hand and
+        # validate_draft_script confirms the result is clean. Verified on
+        # a real book run: two segments landed exactly here, every
+        # finding applied, draft valid, with no branch anywhere in this
+        # function that would ever re-read the corrected draft -- both
+        # were permanently reported as outcome="failed", reason="cap" on
+        # every subsequent invocation.
+        #
+        # Fixed with the SAME discriminator the clean branch already
+        # uses, not a second one: draft_matches_review (computed once,
+        # above, from the current_sha1/reviewed_sha1 already in scope
+        # here) is True only when this stored final verdict was written
+        # against the draft that exists right now -- exactly when
+        # cap_reached is honest. When it is False the draft moved since
+        # the review read it, so a fresh review is dispatched at the SAME
+        # "final" label (never a new round -- there is no round past
+        # "final"; _next_round_label() treats it as absorbing, and this
+        # is a re-check of what changed, not a round spent).
+        #
+        # Ambiguity (current_sha1 or reviewed_sha1 could not be computed)
+        # stays conservative and caps -- the identical tri-state guard
+        # (`draft_matches_review or current_sha1 is None or reviewed_sha1
+        # is None`) the not-clean/not-final branch below already uses for
+        # the same ambiguity, reused verbatim rather than re-derived a
+        # third time.
+        if draft_matches_review or current_sha1 is None or reviewed_sha1 is None:
+            return {"action": "cap_reached", "findings": review_obj.get("findings") or []}
+        return {"action": "review", "round_label": "final"}
 
     # Not clean, not the mandatory final round -- a fix is needed before the
     # NEXT review round can be dispatched. Any ambiguity (can't compute
@@ -3091,9 +3140,12 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
 
 def _next_round_label(round_label: str, max_fix_rounds: int) -> str:
     """The round label immediately after `round_label` -- "final" stays
-    "final" (there is no round beyond the mandatory final one; a fresh
-    re-review of a stale "final" round is dispatched at the SAME label, see
-    derive_next_action()'s clean-but-stale branch)."""
+    "final" (there is no round beyond the mandatory final one). Both of
+    derive_next_action()'s final-labelled branches -- its clean-but-stale
+    branch and its #432 non-clean-but-stale-final branch -- reach that
+    same no-advance outcome by hardcoding "final" directly rather than
+    routing through this function, for the identical reason: the stored
+    verdict no longer describes the current draft."""
     if round_label == "final":
         return "final"
     next_round = int(round_label) + 1
@@ -3423,13 +3475,21 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               defensive: reachable (without
                                               the retry bound above) if a
                                               draft keeps changing out from
-                                              under a clean review every
-                                              single iteration -- see
+                                              under a review every single
+                                              iteration -- see
                                               derive_next_action()'s own
-                                              "clean but stale" branch,
-                                              which re-reviews at the SAME
+                                              "clean but stale" branch AND
+                                              (#432) its non-clean "final
+                                              but stale" branch, both of
+                                              which re-review at the SAME
                                               round label with no bound of
-                                              its own. Kept generic on
+                                              their own -- an operator who
+                                              keeps hand-editing the draft
+                                              between every mandatory final
+                                              review drives this exact
+                                              path, one real edit per
+                                              cycle, until this loop's own
+                                              iteration cap. Kept generic on
                                               purpose: unlike the
                                               fabricated-loc case, this path
                                               has no single template-known

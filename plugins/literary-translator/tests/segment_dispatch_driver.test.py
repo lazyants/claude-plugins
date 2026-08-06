@@ -2775,6 +2775,98 @@ def test_derive_next_action_already_converged_on_final_round(tmp_path):
     assert driver_mod.derive_next_action("seg01", ctx) == {"action": "already_converged", "round_label": "final"}
 
 
+# ===========================================================================
+# #432: a non-clean, "final"-round review used to route to cap_reached
+# UNCONDITIONALLY -- even after a human applied every finding and the draft
+# on disk moved past what that review actually judged. With nothing left to
+# re-read the corrected draft, the segment was stuck forever (ledger_
+# update.py's own draft_sha1 check refuses the convergence write, matching
+# the same "clean but stale" reasoning the branch above already applies to
+# clean reviews -- see test_a_clean_review_stale_against_an_edited_draft_
+# re_reviews_instead_of_live_locking near the top of this section). The fix
+# makes the final round check draft_matches_review (and the ambiguous-sha1
+# case) exactly like every other round already does, instead of shortcutting
+# straight to cap_reached the moment matched_round_label == "final".
+# ===========================================================================
+
+
+def test_derive_next_action_final_round_stays_cap_reached_when_draft_unchanged_since_review(tmp_path):
+    """Must NOT regress: a final-round review that is still judging the
+    CURRENT draft (nothing changed since it was written) stays cap_reached
+    -- the segment is genuinely exhausted, not stuck. Companion to
+    test_derive_next_action_cap_reached_when_final_round_not_clean above,
+    pinned again here alongside the #432 regression catcher immediately
+    below so the whole final-round branch is covered in one place."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    findings = [{"loc": "p1:1", "severity": "minor", "issue": "x", "suggest": "y"}]
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=draft_sha1, findings=findings)
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "cap_reached", "findings": findings}
+
+
+def test_derive_next_action_final_round_re_reviews_when_draft_changed_since_review(tmp_path):
+    """#432 regression catcher: a non-clean, "final"-round review whose
+    recorded draft_sha1 no longer matches the CURRENT draft (a human applied
+    the findings since this review was written) must re-review the
+    corrected draft at the SAME "final" label, never report cap_reached
+    over content nothing has re-read. Before the fix, matched_round_label
+    == "final" short-circuited straight to cap_reached regardless of
+    draft_matches_review -- this is the exact case that got the segment
+    stuck forever."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True, draft_sha1="0" * 40)
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "final"}
+
+
+def test_derive_next_action_final_round_cap_reached_when_draft_sha1_uncomputable(tmp_path, monkeypatch):
+    """The fix's final-round branch stays conservative on ambiguity, exactly
+    like the pre-existing numbered-round branch (derive_next_action()'s own
+    comment: "Any ambiguity ... stays conservative"): if the CURRENT
+    draft's sha1 cannot be computed at all, cap_reached is still reported
+    rather than guessing that the draft changed and dispatching a re-review
+    over content that cannot actually be confirmed. Forces current_sha1 is
+    None the same way current_draft_sha1() itself would signal it (a raised
+    DriverError caught by derive_next_action()), rather than corrupting the
+    draft file and risking failing the EARLIER draft_ok gates instead of
+    reaching the branch under test."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    findings = [{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}]
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=draft_sha1, findings=findings)
+
+    def _unreadable_current_draft_sha1(seg, segments_dir, scripts_dir):
+        raise driver_mod.DriverError(f"simulated draft_sha1 failure for {seg}")
+
+    monkeypatch.setattr(driver_mod, "current_draft_sha1", _unreadable_current_draft_sha1)
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "cap_reached", "findings": findings}
+
+
+def test_derive_next_action_final_round_clean_review_re_reviews_when_draft_changed_since_review(tmp_path):
+    """Must NOT regress: the NEIGHBOURING clean-review branch (`if clean and
+    coverage_ok:`, evaluated before matched_round_label == "final" is ever
+    checked) already re-reviews instead of already_converged when a clean
+    review's draft_sha1 is stale -- test_a_clean_review_stale_against_an_
+    edited_draft_re_reviews_instead_of_live_locking above pins this at
+    round "1". This is that same guarantee at the "final" label
+    specifically, the one the #432 fix's new `if matched_round_label ==
+    "final":` branch sits right next to -- proving the fix does not
+    disturb it."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    _dna_write_review(root, driver_mod, round_label="final", clean=True, coverage_ok=True, draft_sha1="0" * 40)
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "final"}
+
+
 def test_derive_next_action_re_reviews_instead_of_needs_fix_on_a_fabricated_loc(tmp_path):
     """codex #392 round-2 item 8 (MAJOR): review.schema.json types
     findings[].loc as a bare string with no pattern -- a reviewer that died
