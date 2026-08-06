@@ -3053,10 +3053,17 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
     # recorded at review time. Computed once, used by both branches below.
     reviewed_sha1 = review_obj.get("draft_sha1")
     # The caught DriverError is KEPT, not discarded: the final-round branch
-    # below re-raises it rather than folding an infrastructure failure into
-    # a content verdict (see that branch's own comment), and it is the only
+    # below fails on it rather than folding an infrastructure failure into a
+    # content verdict (see that branch's own comment), and it is the only
     # place the underlying cause -- "draft not found", "not valid JSON",
     # "draft_sha1.py is not usable" -- survives to reach the operator.
+    # It is NOT re-raised: that branch calls fatal(), which raises a NEW
+    # DriverError carrying this one's text interpolated into a message that
+    # names what was refused. Deliberate -- the operator needs "refusing to
+    # record a terminal cap over a draft this invocation never read" more
+    # than it needs this exception's identity -- but it does mean the
+    # original's exit_code and any extra fields do not survive, so nothing
+    # downstream may match on the original exception object.
     current_sha1_error = None
     try:
         current_sha1 = current_draft_sha1(seg, segments_dir, dirs["scripts_dir"])

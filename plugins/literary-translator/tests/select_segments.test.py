@@ -1907,12 +1907,27 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
     A convention duplicated N ways is one edit away from being duplicated
     N+1 ways with nothing pointing at the newcomer.
 
-    NEEDLE CHOICE matters and was measured, not assumed. Scanning for the
-    bare literal `.ever_converged.{seg}` also matches
-    backfill_resume_gate_ack.py, which only MENTIONS the convention in its
-    prose (it mirrors the shape for `.resume_gate_ack`). Both needles below
-    are the executable forms -- the f-string as actually written, and the
-    predicate's `def` line -- and each yields exactly these four today.
+    NEEDLE CHOICE matters and was measured, not assumed. Two EXECUTABLE
+    needles pin the participants -- the f-string as actually written, and
+    the predicate's `def` line -- and each yields exactly these four today.
+    But an exact-spelling needle can only see a newcomer that copies the
+    spelling: a fifth script building the same path as `".ever_converged." +
+    seg` would be invisible to both. So a THIRD, deliberately loose needle
+    scans for the bare convention `.ever_converged.` in any spelling, and
+    pins its one legitimate non-participant BY NAME:
+    backfill_resume_gate_ack.py only MENTIONS the convention in its prose
+    (it mirrors the shape for `.resume_gate_ack`). Naming it is the point --
+    the loose scan then fails on any OTHER newcomer, whatever spelling it
+    chose, instead of the narrow needles silently excluding it.
+
+    THE GLOB IS ITSELF A DEPENDENCY, and a narrowed one is the failure this
+    guard exists to catch, so it is checked by INDEPENDENT ENUMERATION
+    rather than by a floor on the count. Measured on the tree that shipped
+    1.20.0: `*.py` scans 44 files, and the plausible typo `*_*.py` scans 42
+    -- still finds all four participants, and still satisfied every
+    assertion here under the old `scanned > 10` floor. A floor cannot
+    separate "scanned everything" from "scanned almost everything and
+    happened to keep the needles"; listing the directory a second way can.
 
     Fails in BOTH directions: a fifth participant makes the scanned set a
     superset, deleting one makes it a subset, and the assertion prints the
@@ -1922,20 +1937,39 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
 
     path_builders = set()
     predicate_copies = set()
-    scanned = 0
+    mentions_convention = set()
+    scanned = set()
     for py in sorted(scripts_dir.glob("*.py")):
         src = py.read_text(encoding="utf-8")
-        scanned += 1
+        scanned.add(py.name)
         if 'f".ever_converged.{seg}"' in src:
             path_builders.add(py.name)
         if "def classify_ever_converged_sentinel" in src:
             predicate_copies.add(py.name)
+        if ".ever_converged." in src:
+            mentions_convention.add(py.name)
 
-    # A glob that matched nothing would make both sets empty and both
-    # assertions below pass for the wrong reason.
-    assert scanned > 10, f"only {scanned} script(s) scanned -- the glob is wrong"
+    # The glob above is the one input every assertion below inherits, and a
+    # narrowed glob keeps them all green (see docstring). Enumerate the same
+    # directory by a DIFFERENT mechanism -- full listing plus a suffix test,
+    # no pattern matching -- and require the two to agree exactly.
+    inventory = {p.name for p in scripts_dir.iterdir() if p.is_file() and p.suffix == ".py"}
+    assert scanned == inventory, (
+        f"the scan glob and an independent listing of {scripts_dir} disagree: "
+        f"{scanned ^ inventory}. The glob is narrower (or wider) than "
+        f"'every top-level .py in this directory', so every set built from it "
+        f"below is answering a different question than the one this test asks."
+    )
 
     expected = set(SENTINEL_SCRIPTS)
+    assert mentions_convention == expected | {"backfill_resume_gate_ack.py"}, (
+        f"a script mentions the `.ever_converged.` convention without being a "
+        f"pinned participant: {mentions_convention ^ (expected | {'backfill_resume_gate_ack.py'})}. "
+        f"If it builds the sentinel path in a spelling the exact needles below "
+        f"do not match, it is a participant and must join SENTINEL_SCRIPTS with "
+        f"the shared predicate; if it only mentions the convention in prose, add "
+        f"it to this exception set so the next newcomer still fails here."
+    )
     assert path_builders == expected, (
         f"the set of scripts that BUILD the sentinel path has changed: "
         f"{path_builders ^ expected}. Add it to SENTINEL_SCRIPTS (and give it "
