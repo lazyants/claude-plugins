@@ -1,13 +1,79 @@
 # Changelog
 
-## 1.19.1 — 2026-08-06
+## 1.20.0 — 2026-08-06
 
-Bug fix. Closes #432.
+Bug fixes and one hardening change. Closes #432.
+
+Minor rather than patch because of the Migration section below: this release moves
+`plugin_bundle_hash`, which reclassifies every already-converged mass segment in every project as
+`stale` at the next bundle refresh and invalidates in-flight resume identities. That is an
+operational consequence a patch release should not carry.
+
+There was never a released 1.19.1. That label was applied on the branch to the #432 fix alone; the
+codex-review fixes and the sentinel predicate below landed on top before anything shipped, so all of
+it is described here as one release.
 
 ### Fixed — a non-clean mandatory final review could never converge, even after every finding was applied (#432)
 
-- `derive_next_action()` returned `cap_reached` unconditionally the instant the stored review at round label `"final"` was non-clean. The mandatory final round has no round after it to advance to, so that branch read only the cached review verdict and ignored the draft-sha1 comparison the clean branch immediately above it already computes for its own use (segment_dispatch_driver.py:3056-3058) — the comparison was in scope, it was simply never consulted here. The clean branch guards the identical situation on its own side of the fork: a review whose recorded `draft_sha1` no longer matches the current draft is re-reviewed at the same round label rather than trusted, because `ledger_update.py`'s `enrich_converged_fields` refuses a convergence write whose `draft_sha1` disagrees with the current draft (ledger_update.py:746-749, `"draft changed since review; cannot record convergence"`) — without a re-dispatch, that refusal repeats every time a clean-but-stale review is re-read. The non-clean final branch had no equivalent write to refuse (`cap_reached`'s own ledger write in `process_segment()` is unconditional and never carries or checks a `draft_sha1`), so `derive_next_action()` kept returning `cap_reached` every time it was asked about that segment under the same `RUN_ID`, even after every finding had been applied by hand and `validate_draft_script` — a deterministic structural/coverage/content check that runs before any reviewer ever sees the draft, not a judgment that a reviewer would call it clean — confirmed the draft carried no mechanical defect. This is quieter than it sounds, not louder: `cap_reached` writes ledger status `non_converged`, which `select_segments.py` classifies `human_escalation` (`HUMAN_ESCALATION_STATUSES`, select_segments.py:757) — outside `DEFAULT_ELIGIBLE_CATEGORIES` (select_segments.py:1175) — so an ordinary re-run does not re-ask a capped segment at all; only an explicit re-selection (e.g. `--only-segs`) under the unchanged `RUN_ID` reproduced the bug, and a fresh `RUN_ID` (see Migration below) reroutes the segment to a full re-translate instead of repeating `cap_reached`. Observed in production: `historiettes-fr-ru/tome1` segments `seg64` and `seg66` each ran their mandatory final review (2 and 7 findings), had every finding applied, and `validate_draft_script` confirmed each draft mechanically clean — re-selecting either segment still reported `outcome="failed", reason="cap"`, since nothing in `derive_next_action()` re-read the corrected draft; together with four older escalations, this was the sole reason `final_audit.py` reported `project_complete: false` for that book.
+- `derive_next_action()` returned `cap_reached` unconditionally the instant the stored review at round label `"final"` was non-clean. The mandatory final round has no round after it to advance to, so that branch read only the cached review verdict and ignored the draft-sha1 comparison the clean branch immediately above it already computes for its own use (segment_dispatch_driver.py:3056-3058) — the comparison was in scope, it was simply never consulted here. The clean branch guards the identical situation on its own side of the fork: a review whose recorded `draft_sha1` no longer matches the current draft is re-reviewed at the same round label rather than trusted, because `ledger_update.py`'s `enrich_converged_fields` refuses a convergence write whose `draft_sha1` disagrees with the current draft (ledger_update.py:746-749, `"draft changed since review; cannot record convergence"`) — without a re-dispatch, that refusal repeats every time a clean-but-stale review is re-read. The non-clean final branch had no equivalent write to refuse (`cap_reached`'s own ledger write in `process_segment()` is unconditional and never carries or checks a `draft_sha1`), so `derive_next_action()` kept returning `cap_reached` every time it was asked about that segment under the same `RUN_ID`, even after every finding had been applied by hand and `validate_draft_script` — a deterministic structural/coverage/content check that runs before any reviewer ever sees the draft, not a judgment that a reviewer would call it clean — confirmed the draft carried no mechanical defect. This is quieter than it sounds, not louder: `cap_reached` writes ledger status `non_converged`, which `select_segments.py` classifies `human_escalation` (`HUMAN_ESCALATION_STATUSES`, select_segments.py:801) — outside `DEFAULT_ELIGIBLE_CATEGORIES` (select_segments.py:1219) — so an ordinary re-run does not re-ask a capped segment at all; only an explicit re-selection (e.g. `--only-segs`) under the unchanged `RUN_ID` reproduced the bug, and a fresh `RUN_ID` (see Migration below) reroutes the segment to a full re-translate instead of repeating `cap_reached`. Observed in production: `historiettes-fr-ru/tome1` segments `seg64` and `seg66` each ran their mandatory final review (2 and 7 findings), had every finding applied, and `validate_draft_script` confirmed each draft mechanically clean — re-selecting either segment still reported `outcome="failed", reason="cap"`, since nothing in `derive_next_action()` re-read the corrected draft; together with four older escalations, this was the sole reason `final_audit.py` reported `project_complete: false` for that book.
 - The final branch now reuses the exact discriminator the clean branch already computes (segment_dispatch_driver.py:3056-3058): when the current draft's content sha1 still matches what the stored final review recorded, `cap_reached` is returned exactly as before — correctly, since nothing about the draft has changed since a codex reviewer judged it non-clean at this label, and `cap_reached`'s role is to hand a genuinely current non-clean final verdict to a human as `human_escalation`, not to relitigate it here. When it does not match, a fresh review is dispatched at the same `"final"` label instead of capping (`_next_round_label()` treats `"final"` as absorbing — there is no round past it to advance to). Either sha1 being uncomputable stays conservative and still caps, the same tri-state rule the not-clean/not-final branch immediately below already applies to the identical ambiguity.
+
+### Fixed — three places where the fix above resolved ambiguity toward the one outcome that cannot be undone
+
+A codex review of the #432 fix returned four MAJOR findings against the driver. Three are fixed here;
+the fourth is a pre-existing defect that needs its own change, and is described under Known
+limitations below rather than left implied.
+
+- **An uncomputable draft sha1 no longer mints a terminal verdict.** `current_sha1 is None` now
+  re-raises the captured `DriverError` — no ledger write, no codex job spent — and
+  `reviewed_sha1 is None` reopens at round label `"final"` instead of capping. Both previously
+  resolved an ambiguity toward `cap_reached`, which is the one outcome a human must undo by hand.
+- **The reopen is written AND confirmed on disk before the review is dispatched.** A crash in that
+  window can no longer leave a segment dispatched against a cap that was never recorded.
+- **`_cap_still_binds_what_was_reviewed()` re-reads the review and re-hashes the draft immediately
+  before the terminal cap write**, comparing both against what `derive_next_action()` actually
+  OBSERVED rather than re-deriving them from disk — re-deriving would re-read the very file the race
+  can have replaced. The residual is disclosed in the helper's own docstring: a replacement review
+  carrying BOTH the same sha1 and the same token is not detected.
+
+### Changed — one three-state sentinel predicate replaces four independent `.exists()` reads
+
+The `.ever_converged` marker gates whether a converged segment may be re-dispatched. It was read
+through `.exists()` in four scripts that could then disagree with one another about the same file —
+and the writer disagreeing with the reader is the shape that causes data loss, because a segment the
+writer believes protected is one the dispatch gate believes unprotected.
+
+- `classify_ever_converged_sentinel(path) -> (state, detail)` is now byte-identical across
+  `select_segments.py`, `ledger_update.py`, `final_audit.py` and `backfill_ever_converged.py`. It has
+  **three** states, not two: a marker that exists but cannot be classified is neither present nor
+  absent, and `.exists()` reports both of those as `False`. It uses `lstat`, and decides ENOENT by
+  catching `FileNotFoundError` rather than testing an errno that can be `None`.
+- **AMBIGUOUS maps per caller, deliberately not uniformly.** The writer and the dispatch gate REFUSE;
+  `final_audit.py` COUNTS, because an audit must never declare a converged book undeliverable on a
+  stat failure; the backfill REPORTS UNPROTECTED.
+- Pinned by a five-state matrix including `EACCES`, an `inspect.getsource` identity check across all
+  four copies, and a census test that fails if a fifth script joins the contract without being
+  listed. The census asserts its own scan count, so a wrong glob cannot pass as a clean run.
+
+The duplication is deliberate and stays. The reason previously given in those docstrings was false —
+this codebase does share modules between "self-contained" scripts. The real reason is stronger:
+`cache_key.py` documents `PLUGIN_BUNDLE_MEMBERS` as a literal byte-hash allowlist to which a
+transitive import is INVISIBLE, so extracting the predicate into a shared module imported by a member
+script would put its bytes outside the hash meant to cover them.
+
+### Known limitations
+
+- **The codex-job budget overspend is unbounded, and is NOT fixed here.** The review reported it as
+  "one extra job per segment"; it is not. `codex_jobs_per_segment()` is a per-segment-lifetime
+  estimate while the extra loop iteration is a per-invocation bound, and the counter resets every
+  invocation, so the overspend is unbounded across invocations. Both obvious repairs either reach
+  admission (`check_volume_cap()`) or kill a legitimately retrying segment. It needs its own change
+  and its own review.
+- **The A→B→A revert inside a review window is still undetected.** The review's `draft_sha1` binding
+  catches any single change to a draft between review and convergence, but not an exact revert;
+  `review.schema.json` concedes that hash-first-then-read narrows the TOCTOU window without closing
+  it. The operational rule until it is closed: do not hand-edit a draft while a review for it is in
+  flight.
 
 ### Migration
 
