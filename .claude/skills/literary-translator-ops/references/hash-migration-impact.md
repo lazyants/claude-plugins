@@ -95,6 +95,27 @@ redoes. `resume_setup.py` folds in:
 - Separately, `language_smoke_report.py` bytes flip `smoke_report_contract_hash` → forces the W3
   language smoke test to re-run.
 
+**"Only in-flight work redoes" undersells what a fresh RUN_ID destroys — measure the population,
+not the phrase.** `translate_dispatch_token()` is a pure function of `run_id`+`seg`, so under a
+fresh RUN_ID `draft_ready --expect-token` fails against EVERY existing draft, `draft_ok` goes
+False, and in `derive_next_action()`'s `if not draft_ok:` branch the fix-vs-fresh discriminator is
+`_matched_review_round_label()` — which matches only a review of the CURRENT run and deliberately
+refuses to read an older run's review as fix evidence. The action therefore falls through to
+`translate`. So the segments that redo are **every segment holding a draft without having
+converged** — the `recoverable` AND `human_escalation` populations — and what they lose is not
+"unmerged work" but reviewed text plus every hand-applied fix round on top of it. A segment that
+exhausted its fix rounds and is waiting on a human decision does not look like in-flight work; it
+looks finished-but-blocked, and it is exactly what this silently re-translates.
+
+Converged segments really are safe here, but by a different mechanism than resume — the
+`.ever_converged` sentinel gate refuses their dispatch. Nothing plays that role for the two
+populations above.
+
+**Practical consequence: a bundle-member edit shipped mid-book is not neutral for a book in
+progress.** Before upgrading a live project, enumerate its `recoverable` + `human_escalation`
+segments and decide knowingly whether their applied edits are worth losing — the upgrade cannot
+be made cheaper, since any fix to a bundle member moves the hash by construction.
+
 ## Surface 3 — the `render_version` render-baseline stamp → a RENDER-BASELINE RE-ACCEPT
 
 NOT re-translation, NOT fresh-resume — localized to the Obsidian render/diff gate. `render_version` =

@@ -1,6 +1,6 @@
 ---
 name: parallel-work-partitioning
-description: Planning technique for splitting an issue/change set across two or more parallel sessions, worktrees, or teammates BEFORE dispatch. Use when deciding who owns what ahead of a fan-out, sanity-checking a scout-proposed split, or partitioning a batch of issues/tickets across parallel workers. Covers why the partition is forced by shared FILES rather than topic, why a grep of current code under-detects the right split, cache-bundle membership as a second partitioning axis, shared registration files as merge-time (not dev-time) coordination, why a scout's fix_approach is not implementability-verified until codex or a reviewer confirms the supporting contract exists, and why a PATH whose meaning changes over time is a shared surface even with one writer — reach for it when two agents are pointed at one filename, when a path is about to be re-purposed from "the original" to "the current revision", when an artifact seems to have vanished, or when a long-running reviewer may be reading a file that moved.
+description: Planning technique for splitting a change set across parallel sessions, worktrees, or teammates BEFORE dispatch. Use when deciding who owns what ahead of a fan-out, sanity-checking a scout-proposed split, or partitioning a batch of issues/tickets across parallel workers. Covers why the partition is forced by shared FILES not topic, why a grep of current code under-detects the split, cache-bundle membership as a second axis, registration files as merge-time coordination, why a scout's fix_approach is not implementability-verified until a reviewer confirms it, why a PATH that changes meaning over time is shared even with one writer, and why a fix and its test are ORDER-coupled despite disjoint files — reach for it when splitting a fix from the test that must catch it, when two agents are pointed at one filename, when a path is about to be re-purposed from "the original" to "the current revision", when an artifact seems to have vanished, or when a long-running reviewer may be reading a file that moved.
 ---
 
 # Partitioning a set of changes across parallel sessions / worktrees
@@ -76,6 +76,31 @@ so anyone arriving from an older message gets silence instead of a redirect. (c)
 during someone else's rebuild looks exactly like loss — before declaring an artifact gone, ask
 whether a write is in flight; after real losses have occurred, prior probability will otherwise do
 the work evidence should.
+
+## A fix and its regression test are ORDER-coupled even when their files are disjoint
+
+Splitting "change the code" and "write the test that catches the change" across two teammates
+passes every disjointness check above — two files, two owners, no shared surface. It still
+destroys something: the test owner's ability to watch the test **fail against the unfixed code**.
+Whoever finishes first wins, and if that is the implementer, the tester opens a file that is
+already fixed and has nothing red left to see.
+
+What happens next is the real cost. A conscientious tester will not fabricate a RED; it will
+**reconstruct** the pre-change code from what it read earlier and run against the reconstruction —
+substituting a memory of the old code for the old code. The reconstruction is usually right, which
+is why this passes review: the report reads like a measurement and the artifact is genuinely
+correct. But the one claim that mattered — *this test discriminates the two versions* — is now
+backed by the tester's recollection instead of by bytes.
+
+**Options, in order of preference.** Give both files to ONE owner when the test is the fix's
+proof. If they must split, hand the test owner the pre-change commit explicitly ("check out
+`<sha>` into your own tree and get your RED there") so its red window does not depend on a race it
+cannot see. Dispatching the tester first buys minutes, not a guarantee.
+
+**And verify the discrimination yourself, from version control, not from the report** — build a
+tree at the pre-change sha, drop the new test in, and confirm exactly the intended test fails and
+the others pass. That is cheap, it is the authoritative bytes rather than anyone's reconstruction,
+and it is the only step that distinguishes "the test catches this bug" from "the test passes".
 
 ## The partition holds only while your picture of it is fresh
 
