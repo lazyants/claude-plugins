@@ -41,17 +41,28 @@ limitations below rather than left implied.
   can have replaced. The residual is disclosed in the helper's own docstring: a replacement review
   carrying BOTH the same sha1 and the same token is not detected.
 
-### Changed — one three-state sentinel predicate replaces four independent `.exists()` reads
+### Changed — one three-state sentinel predicate replaces three `.exists()` reads and one EEXIST-trusting writer
 
-The `.ever_converged` marker gates whether a converged segment may be re-dispatched. It was read
-through `.exists()` in four scripts that could then disagree with one another about the same file —
-and the writer disagreeing with the reader is the shape that causes data loss, because a segment the
-writer believes protected is one the dispatch gate believes unprotected.
+The `.ever_converged` marker gates whether a converged segment may be re-dispatched. On `main` its
+existence was decided FOUR different ways by four scripts: three `.exists()` readers — the dispatch
+gate in `select_segments.py`, the completeness carve-out in `final_audit.py`, and the
+`already_sentineled` scan in `backfill_ever_converged.py` — and the writer in `ledger_update.py`,
+which inferred existence from `O_CREAT|O_EXCL` raising `FileExistsError`. (Line numbers are omitted
+deliberately: those reads are gone at this release's HEAD, so any number here would resolve against
+the shipped tree and land on unrelated code — which is exactly the failure three of this entry's
+citations already had.) Four
+scripts that could disagree with one another about the same file — and the writer disagreeing with
+the reader is the shape that causes data loss, because a segment the writer believes protected is
+one the dispatch gate believes unprotected.
 
 - `classify_ever_converged_sentinel(path) -> (state, detail)` is now byte-identical across
   `select_segments.py`, `ledger_update.py`, `final_audit.py` and `backfill_ever_converged.py`. It has
   **three** states, not two: a marker that exists but cannot be classified is neither present nor
-  absent, and `.exists()` reports both of those as `False`. It uses `lstat`, and decides ENOENT by
+  absent. `.exists()` cannot express that, and — this is the part worth stating precisely, because an
+  earlier draft of this note got it wrong — it does not fail in one direction. It folded some
+  ambiguous entries toward ABSENT (a dangling symlink, an `EACCES` on the parent) and others toward
+  PRESENT (a directory at the marker's path is `.exists() == True` and `AMBIGUOUS` under the new
+  predicate). Both directions are pinned in the state matrix. It uses `lstat`, and decides ENOENT by
   catching `FileNotFoundError` rather than testing an errno that can be `None`.
 - **AMBIGUOUS maps per caller, deliberately not uniformly.** The writer and the dispatch gate REFUSE;
   `final_audit.py` COUNTS, because an audit must never declare a converged book undeliverable on a
@@ -98,13 +109,17 @@ script would put its bytes outside the hash meant to cover them.
   changes to the ledger contract and belong with the claim mechanism, not with this fix. What this
   release does change is the failure's blast radius: before it, that branch capped with no check at
   all.
-  **The refusal is NOT self-healing in every case, and the first draft of this note said it was.**
-  A refusal writes nothing, so on a segment with no prior ledger entry it does leave the segment
-  selectable. But this branch is also reached deliberately on a segment a PREVIOUS invocation
-  already capped — that is what `reopen_capped` exists for — and there the refusal leaves the older
-  `non_converged`/`cap` fragment exactly as it found it. `select_segments.py` maps that to
-  `human_escalation` (select_segments.py:1192-1197), which is outside the default eligible set, so
-  that segment is not re-selected by an ordinary run and needs a human. Recoverable, but by hand.
+  **The refusal is NOT self-healing in every case, and two earlier drafts of this note got the
+  reason wrong in opposite directions.** A refusal writes nothing, so the fragment already on disk
+  is what survives — and whether the segment heals depends entirely on which fragment that is. No
+  prior entry: stays `not_started`, selectable. Reached through `reopen_capped`: the cap has
+  ALREADY been replaced by `in_progress` and confirmed on disk before dispatch, so the refusal
+  leaves `in_progress` — `recoverable`, selectable, genuinely self-healing. (The first draft of this
+  note claimed it left the old cap standing, which is backwards: making that reopen durable first is
+  the whole point of that branch.) A cap this invocation did NOT reopen, or a `blocked` fragment:
+  stays `human_escalation` (select_segments.py:1192-1197), outside the default eligible set, and
+  needs a human. So: never worse than the pre-fix behaviour, self-healing on the two paths that
+  matter, and recoverable-by-hand on the rest.
 - **The A→B→A revert is still undetected, and the window is wider than "while a review is in
   flight".** The review's `draft_sha1` binding catches any single change to a draft between review
   and convergence, but not an exact revert; `review.schema.json` concedes that hash-first-then-read

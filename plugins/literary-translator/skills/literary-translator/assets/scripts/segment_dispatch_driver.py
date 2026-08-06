@@ -3585,8 +3585,14 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               decision and the write (see
                                               _cap_still_binds_what_was_
                                               reviewed()). NO ledger write,
-                                              so the segment stays
-                                              recoverable and the next
+                                              so whatever fragment is on
+                                              disk survives: recoverable
+                                              where that is not_started or
+                                              the in_progress a reopen just
+                                              wrote, human_escalation where
+                                              an un-reopened cap or a
+                                              `blocked` is what was there.
+                                              Either way the next
                                               invocation re-derives from
                                               the draft that is actually
                                               there -- a cap must never
@@ -3880,13 +3886,21 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 # that has to prove it still describes reviewed bytes --
                 # see _cap_still_binds_what_was_reviewed() for the race and
                 # for the convergence-side precondition whose shape this
-                # mirrors. Refusing is recoverable BY CONSTRUCTION and
-                # self-healing, not just "less bad": no ledger write means
-                # select_segments.py keeps the segment selectable, and the
-                # only way to reach this refusal is a draft that moved --
-                # which is exactly what derive_next_action()'s own #432
-                # branch turns into a fresh final review on the very next
-                # invocation.
+                # mirrors. Refusing writes NOTHING, so whatever fragment is
+                # already on disk is what survives -- which is better than
+                # capping over unreviewed bytes in every case, but is only
+                # SELF-HEALING where that fragment is one select_segments.py
+                # still selects. It is, on the two paths that matter: a
+                # segment with no prior entry stays not_started, and a
+                # segment reached through reopen_capped has already had its
+                # cap replaced by in_progress (see that branch above, which
+                # makes the reopen durable BEFORE dispatch precisely so this
+                # is true). It is NOT self-healing on a segment carrying a
+                # cap this invocation did not reopen, or a `blocked`
+                # fragment: those stay human_escalation and need a human.
+                # Do not shorten this back to "no ledger write means the
+                # segment stays selectable" -- that sentence was in the
+                # 1.20.0 release note and was wrong.
                 bind_failure = _cap_still_binds_what_was_reviewed(seg, ctx, action)
                 if bind_failure is not None:
                     return {"seg": seg, "converged": False, "outcome": "failed",

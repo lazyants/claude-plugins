@@ -1892,6 +1892,44 @@ SENTINEL_SCRIPTS = (
     "backfill_ever_converged.py",  # the already_sentineled scan (reader+writer)
 )
 
+def _folded_str_literals(src):
+    """Every string a module's source CONSTRUCTS from literals alone: plain
+    constants, `+` concatenations of them, and the literal parts of f-strings.
+
+    Exists because a source-TEXT census is defeated by splitting the needle --
+    `".ever_" + "converged." + seg` contains `ever_converged` nowhere in the
+    source, but builds it at runtime. Folding is done here rather than with
+    `ast.literal_eval`, which refuses `+` on strings (it supports binary +/-
+    for NUMBERS only, to admit complex literals) and would therefore return
+    nothing for exactly the shape this needs to catch -- a vacuous guard that
+    looks like a working one.
+
+    `ast.parse()` reads source only: no import, no execution, so it is safe for
+    scripts that are deliberately import-free. Genuinely dynamic construction
+    (`"".join(parts)`, `getattr`, a name assembled from a config value) still
+    evades it, and no source-level check closes that."""
+    import ast
+
+    def fold(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):  # f-string: keep the literal parts
+            return "".join(p for p in (fold(v) for v in node.values) if p is not None)
+        if isinstance(node, ast.FormattedValue):  # the {...} holes contribute nothing
+            return ""
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = fold(node.left), fold(node.right)
+            if left is not None and right is not None:
+                return left + right
+        return None
+
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:  # not our problem here -- other tests own syntax
+        return []
+    return [s for node in ast.walk(tree) if (s := fold(node)) is not None]
+
+
 # Scripts that mention `ever_converged` WITHOUT touching the marker: the
 # census's loose needle would otherwise flag them forever. Membership here is
 # not trust -- the census re-checks every listed name for all three executable
@@ -1928,18 +1966,24 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
     `ever_converged` and pins the two files that legitimately mention it
     without participating (SENTINEL_NON_PARTICIPANTS). Those two are checked
     BY ROLE, not trusted by name: each is re-asserted every run to carry
-    none of the three executable signals. Trusting a name is how a listed
-    file quietly becomes a participant -- the listing that excused its prose
+    none of the executable signals. Trusting a name is how a listed file
+    quietly becomes a participant -- the listing that excused its prose
     mention goes on excusing its code.
 
-    KNOWN LIMIT, stated rather than papered over: this is a source-TEXT
-    census, so a participant that never spells `ever_converged` contiguously
-    -- a split literal, a computed attribute name -- evades all four
-    needles. Closing that needs import/AST analysis of a set of scripts that
-    are deliberately import-free (see the docstring below on
-    PLUGIN_BUNDLE_MEMBERS). The needles are chosen so that evasion takes
-    deliberate concealment rather than ordinary drift, which is the property
-    this test can actually hold.
+    A FIFTH needle is not a text scan at all. `_folded_str_literals()` reads
+    the VALUE each literal expression evaluates to, so `".ever_" +
+    "converged." + seg` is caught even though the source contains the token
+    nowhere. That shape was this census's known bypass for exactly one
+    revision, on the stated grounds that closing it needed import analysis
+    of import-free scripts -- which was wrong, and worth recording as the
+    error it was: `ast.parse()` reads source and imports nothing, so the
+    rationale for leaving the hole open did not survive being checked.
+
+    KNOWN LIMIT, now genuinely narrow: a participant that builds the name
+    dynamically -- `"".join(parts)`, `getattr`, a value read from config --
+    evades all five, because no source-level check can see it. Evasion now
+    requires deliberate concealment rather than ordinary drift, which is the
+    property this test can actually hold.
 
     THE SCAN PATTERN IS ITSELF A DEPENDENCY, and a narrowed one is the
     failure this guard exists to catch, so it is checked by INDEPENDENT
@@ -1953,6 +1997,14 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
     participant added in a SUBDIRECTORY is seen by both -- the directory is
     flat today, which is exactly when that blind spot is free to close.
 
+    Every set here is keyed by RELATIVE PATH, never basename. Two
+    enumerations that both discard directory identity agree with each other
+    while being wrong together: a nested copy of an existing participant
+    collapses onto it, both sets stay unchanged, and the census passes. That
+    is not hypothetical -- it was measured on a `nested/ledger_update.py`
+    that this test passed while keying on `py.name`. Agreement between two
+    mechanisms proves nothing about a property NEITHER of them records.
+
     Fails in BOTH directions: a fifth participant makes the scanned set a
     superset, deleting one makes it a subset, and the assertion prints the
     symmetric difference either way."""
@@ -1965,25 +2017,37 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
     predicate_copies = set()
     path_helpers = set()
     mentions_token = set()
+    builds_token = set()
     scanned = set()
     for py in sorted(scripts_dir.rglob("*.py")):
         src = py.read_text(encoding="utf-8")
-        scanned.add(py.name)
+        # RELATIVE PATH, never `py.name`: a basename discards directory
+        # identity, so a nested copy of an existing participant collapses onto
+        # it and every set below stays unchanged. Measured -- copying
+        # ledger_update.py to scripts/nested/ledger_update.py produced a fifth
+        # participant that this census PASSED while keying on basenames.
+        rel = py.relative_to(scripts_dir).as_posix()
+        scanned.add(rel)
         if 'f".ever_converged.{seg}"' in src:
-            path_builders.add(py.name)
+            path_builders.add(rel)
         if "def classify_ever_converged_sentinel" in src:
-            predicate_copies.add(py.name)
+            predicate_copies.add(rel)
         if "def ever_converged_path" in src:
-            path_helpers.add(py.name)
+            path_helpers.add(rel)
         if "ever_converged" in src:
-            mentions_token.add(py.name)
+            mentions_token.add(rel)
+        if any("ever_converged" in s for s in _folded_str_literals(src)):
+            builds_token.add(rel)
 
     # The scan above is the one input every assertion below inherits, and a
     # narrowed pattern keeps them all green (see docstring). Enumerate the same
     # tree by a DIFFERENT mechanism -- os.walk plus a suffix test, no pattern
     # matching at all -- and require the two to agree exactly.
     inventory = {
-        f for _root, _dirs, files in _os.walk(scripts_dir) for f in files if f.endswith(".py")
+        (Path(root) / f).relative_to(scripts_dir).as_posix()
+        for root, _dirs, files in _os.walk(scripts_dir)
+        for f in files
+        if f.endswith(".py")
     }
     assert scanned == inventory, (
         f"the scan pattern and an independent walk of {scripts_dir} disagree: "
@@ -2008,8 +2072,17 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
         f"prose, add it to SENTINEL_NON_PARTICIPANTS -- which is checked by ROLE "
         f"below, not merely trusted by name."
     )
+    # The needle a raw text scan cannot be: this one sees the VALUE a literal
+    # evaluates to, so `".ever_" + "converged." + seg` and an f-string are both
+    # caught while neither contains the token contiguously in the source.
+    assert builds_token == expected | set(SENTINEL_NON_PARTICIPANTS), (
+        f"a script CONSTRUCTS a string containing `ever_converged` without being "
+        f"pinned: {builds_token ^ (expected | set(SENTINEL_NON_PARTICIPANTS))}. "
+        f"Concatenated or f-string spellings are caught here even when the raw "
+        f"text scan above misses them."
+    )
     # A name on the non-participant list is not taken on trust: each one is
-    # re-checked every run for all three executable participation signals. The
+    # re-checked every run for all four executable participation signals. The
     # failure this closes is a listed file QUIETLY BECOMING a participant, where
     # the listing that excused its prose mention would otherwise excuse its code.
     for name in SENTINEL_NON_PARTICIPANTS:
