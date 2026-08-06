@@ -187,9 +187,11 @@ relocated). See run_completeness_gate() below and references/gotchas.md
 reproduces today's self-anchored sibling lookup byte-for-byte.
 """
 import argparse
+import errno
 import hashlib
 import json
 import re
+import stat
 import subprocess
 import sys
 import unicodedata
@@ -844,14 +846,157 @@ def run_completeness_gate(plugin_root_str=None):
 def ever_converged_path(seg):
     """The durable 'this segment has converged at least once' sentinel.
     WRITTEN by ledger_update.py:mark_ever_converged (the single place
-    convergence is recorded) and also READ by select_segments.py's own
-    #409 Step 1 re-translate gate -- see that function's own docstring for
-    why a separate durable file exists rather than reading the (mutable)
-    ledger status. Filename convention restated here, not imported, per
-    this plugin's "no shared lib between self-contained scripts"
-    convention -- select_segments.py's own ever_converged_path makes the
-    same choice for the same reason."""
+    convergence is recorded) and READ by three scripts: select_segments.py's
+    #409 Step 1 re-translate gate, backfill_ever_converged.py's
+    already_sentineled scan, and this module's own carve-out below -- see
+    that writer's docstring for why a separate durable file exists rather
+    than reading the (mutable) ledger status. Filename convention restated
+    here rather than imported for the bundle-hash reason spelled out in
+    classify_ever_converged_sentinel() below -- NOT for the "no shared lib
+    between self-contained scripts" convention, which is already false in
+    this codebase.
+
+    The PRESENCE TEST, however, is no longer restated: all four scripts now
+    route it through one duplicated-verbatim predicate,
+    classify_ever_converged_sentinel() below, because the four `.exists()`
+    call sites were free to disagree with the writer and with each other,
+    and two of them did."""
     return SEGMENTS_DIR / f".ever_converged.{seg}"
+
+
+# ---------------------------------------------------------------------------
+# The shared sentinel-presence predicate. This block is an EXACT duplicate of
+# the copy in the other three sentinel scripts (search `SENTINEL_ABSENT` in
+# ledger_update.py, select_segments.py and backfill_ever_converged.py) -- see
+# classify_ever_converged_sentinel()'s docstring for why it is duplicated
+# rather than imported, and which test pins the four copies together.
+# ---------------------------------------------------------------------------
+
+SENTINEL_ABSENT = "absent"
+SENTINEL_PRESENT = "present"
+SENTINEL_AMBIGUOUS = "ambiguous"
+
+
+def _sentinel_entry_kind(mode: int) -> str:
+    """A human name for the st_mode of whatever occupies a sentinel path --
+    it goes straight into an operator-facing message, which has to say what
+    is actually sitting there before it can ask anyone to fix it."""
+    if stat.S_ISLNK(mode):
+        return "a symbolic link"
+    if stat.S_ISDIR(mode):
+        return "a directory"
+    if stat.S_ISFIFO(mode):
+        return "a FIFO"
+    if stat.S_ISSOCK(mode):
+        return "a socket"
+    if stat.S_ISBLK(mode):
+        return "a block device"
+    if stat.S_ISCHR(mode):
+        return "a character device"
+    return f"a non-regular entry (st_mode {stat.S_IFMT(mode):#o})"
+
+
+def classify_ever_converged_sentinel(path) -> "tuple[str, str]":
+    """Three-state classification of the `.ever_converged.<seg>` entry at
+    `path`: `(SENTINEL_ABSENT|SENTINEL_PRESENT|SENTINEL_AMBIGUOUS, detail)`.
+
+    THE SHARED PREDICATE. Every script that asks whether a segment has ever
+    converged calls this, and all four must agree on it:
+    ledger_update.py's `mark_ever_converged()` (the only writer),
+    select_segments.py's #409 Step 1 dispatch gate,
+    final_audit.py's `count_stale_previously_converged()` carve-out, and
+    backfill_ever_converged.py's `already_sentineled` scan.
+
+    DUPLICATED RATHER THAN IMPORTED because importing it would be a live
+    hazard -- NOT because of the "no shared lib between self-contained
+    scripts" convention, which is already false here (canon_validate.py and
+    glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports
+    cache_key.py). The real reason: ledger_update.py is a
+    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:100-107 records that that
+    tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS
+    INVISIBLE -- which is why canon_senses.py had to be registered
+    explicitly once two members imported it. A shared module would put this
+    predicate's bytes outside the hash meant to cover them, so WEAKENING
+    this guard would no longer move plugin_bundle_hash, and every durable
+    root scaffolded beforehand would go on trusting it: the exact
+    false-green cache_key.py:114-118 names. Consolidation stays possible --
+    it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the
+    same commit.
+
+    What keeps the four copies honest is ENFORCEMENT, not discipline. A
+    remembered convention rots -- this docstring's own first version cited
+    the false one -- while a test that fails loudly does not.
+    tests/select_segments.test.py's
+    test_sentinel_predicate_is_identical_in_all_four_scripts pins the copies
+    byte for byte and across the state matrix; its
+    test_exactly_these_four_scripts_participate_in_the_sentinel_contract
+    fails when a fifth copy appears or one of the four goes away.
+
+    Why three states, and why not `Path.exists()`. `exists()` answers the
+    wrong question twice over, and BOTH wrong answers point at "absent" --
+    the one direction that authorizes destroying converged work:
+
+      1. It FOLLOWS symlinks, so a DANGLING symlink named as the sentinel
+         reads as absent -- while the writer's `os.open(O_CREAT|O_EXCL)` gets
+         EEXIST from that same symlink and reports the segment successfully
+         marked. That split is the whole finding: a segment recorded as
+         converged that the gate then sees as unprotected and retranslates.
+         Verified on this project's Python (3.14.6): `exists()` -> False,
+         `os.open` -> FileExistsError, for one and the same dangling link.
+      2. Since Python 3.13 `exists()` swallows EVERY OSError and returns
+         False, so an EACCES/ESTALE/EIO on the lookup is reported as "this
+         segment never converged". Verified on 3.14.6: with an unreadable
+         parent directory `exists()` returns False while `lstat()` raises
+         EACCES. (On 3.8-3.12 the same call re-raised for EACCES but still
+         swallowed ELOOP/ENOTDIR/EBADF -- so no supported version answers
+         this correctly, and the version-dependence is itself a reason not
+         to route a data-loss guard through `exists()`.)
+
+    So: only ENOENT means absent, and it is determined by catching
+    FileNotFoundError rather than by comparing `exc.errno`, so the verdict
+    never depends on an errno that may be None. `lstat`, deliberately not
+    `stat` -- a symlink is not something `mark_ever_converged()` can have
+    (its O_CREAT|O_EXCL open refuses to write through one), so following a
+    link would only ask the question about some unrelated file. Note that
+    lstat still resolves symlinks in the PARENT components, so a project
+    whose whole `segments/` directory is a symlink is unaffected: only the
+    final `.ever_converged.<seg>` component is left unresolved.
+
+    Anything that is neither ENOENT nor a regular file is AMBIGUOUS: it MAY
+    be a converged segment whose sentinel this process cannot see. Each
+    caller then maps AMBIGUOUS to ITS OWN work-preserving side, and that is
+    deliberately NOT the same action in all four: the writer and the
+    dispatch gate REFUSE (never destroy or mis-record converged work), while
+    final_audit.py's carve-out COUNTS it (never declare a converged book
+    incomplete and therefore undeliverable) and backfill's scan reports it
+    unprotected (never claim protection it did not verify). One predicate,
+    four deliberate mappings -- see each call site's own comment. The
+    asymmetry is the reason a false "absent" is the unacceptable answer
+    everywhere: it costs a finished translation, or a finished book.
+    """
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return (SENTINEL_ABSENT, "")
+    except OSError as exc:
+        # `OSError.errno` is typed `int | None` and genuinely can be None. A
+        # missing errno is the LEAST informative failure there is, so it
+        # lands on the ambiguous side like every other non-ENOENT outcome --
+        # never silently treated as "some other errno", and above all never
+        # as absence. The ENOENT verdict above does not consult `errno` at
+        # all (FileNotFoundError IS ENOENT by construction), so a None errno
+        # can never reach it, which is why this branch can be a plain guard
+        # rather than a three-way comparison.
+        if exc.errno is None:
+            return (SENTINEL_AMBIGUOUS, f"lstat failed with no errno: {exc}")
+        code = errno.errorcode.get(exc.errno, f"errno {exc.errno}")
+        return (SENTINEL_AMBIGUOUS, f"lstat failed with {code}: {exc.strerror or exc}")
+    if stat.S_ISREG(st.st_mode):
+        return (SENTINEL_PRESENT, "")
+    return (
+        SENTINEL_AMBIGUOUS,
+        f"the entry is {_sentinel_entry_kind(st.st_mode)}, not a regular file",
+    )
 
 
 # The 3 of cache_key.py's 15 CACHE_KEY_FIELD_ORDER fields whose drift can
@@ -1016,9 +1161,57 @@ def count_stale_previously_converged(classification):
             continue
         if not all(field in SAFE_STALE_CARVEOUT_FIELDS for field in mismatched_fields):
             continue
-        if ever_converged_path(seg).exists():
+        # AMBIGUOUS carves out, exactly like PRESENT, and only a clean ENOENT
+        # does not. This is the OPPOSITE ACTION from the same predicate's other
+        # callers, and it is the same principle: take the branch that cannot
+        # destroy finished work.
+        #
+        # Here "refuse" would be the destructive branch. A segment only reaches
+        # this line if the ledger ALREADY recorded it converged -- that is what
+        # select_segments.py's `stale` category means -- and if the only reason
+        # it went stale is a cache-key field that cannot change what the prose
+        # should say. So the sentinel is corroboration, not the sole evidence.
+        # Reading a dangling symlink or an EACCES as "absent" would drop the
+        # segment out of the carve-out, leave stale_blocking > 0, and make
+        # compute_project_complete() false -- a finished book declared
+        # undeliverable over an unreadable dotfile. And it would be
+        # unresolvable: the operator's only route to a fresh sentinel is a
+        # retranslate, which select_segments.py's Step 1 gate now (correctly)
+        # refuses for this very segment. Sentinel respected in one place and
+        # not the other is how "tokens saved, book undeliverable" happens.
+        #
+        # The ambiguity is never silent: main() reports every ambiguous entry
+        # on stderr (see report_ambiguous_sentinels()), so a human sees the
+        # broken path even though the audit does not block on it.
+        state, _detail = classify_ever_converged_sentinel(ever_converged_path(seg))
+        if state != SENTINEL_ABSENT:
             n += 1
     return n
+
+
+def collect_ambiguous_sentinels(classification):
+    """Every segment in `classification` whose `.ever_converged.<seg>` entry is
+    neither absent nor a regular file, as `[{"seg": ..., "detail": ...}]`.
+
+    Purely diagnostic -- it never changes a count or an exit code. It exists
+    because count_stale_previously_converged() above deliberately treats an
+    ambiguous sentinel as carved out: that is the right call for deliverability
+    (see its comment) but it would otherwise make a broken sentinel path
+    completely invisible, and the operator is the only one who can repair it.
+    Reported on stderr rather than in the JSON summary because
+    final-audit-summary.schema.json is `additionalProperties: false` and its
+    bytes feed schema_hash -- a diagnostic is not worth staling every converged
+    segment in every project to add a field.
+
+    Scans EVERY classified segment, not only the carve-out candidates: a
+    broken sentinel on a reusable or converged segment is the same latent
+    problem, and it will bite at the next cache-key move rather than now."""
+    out = []
+    for seg in sorted(classification):
+        state, detail = classify_ever_converged_sentinel(ever_converged_path(seg))
+        if state == SENTINEL_AMBIGUOUS:
+            out.append({"seg": seg, "detail": detail})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1179,6 +1372,17 @@ def main():
     # (still the raw select_segments.py count); only project_complete is
     # computed net of the carve-out.
     stale_previously_converged = count_stale_previously_converged(classification_by_seg)
+
+    # Diagnostic only -- deliberately computed BEFORE the summary so it prints
+    # even when the audit goes on to pass. count_stale_previously_converged()
+    # treats an ambiguous sentinel as carved out (see its own comment for why
+    # that is the non-destructive branch here), which is right for the verdict
+    # and would otherwise make a broken sentinel path completely invisible.
+    # Never folded into hard_failures/warnings: this is a filesystem problem
+    # for an operator to repair, not a translation defect, and inflating the
+    # warning count would make it look like the book has an issue.
+    ambiguous_sentinels = collect_ambiguous_sentinels(classification_by_seg)
+
     # Rollup invariant, enforced procedurally: project_complete is true if
     # and only if every one of completeness_counts' non-'stale' four values
     # is 0 AND completeness_counts['stale'] - stale_previously_converged == 0
@@ -1220,6 +1424,23 @@ def main():
         + f", stale_previously_converged={stale_previously_converged}",
         file=sys.stderr,
     )
+    if ambiguous_sentinels:
+        # Printed right under the completeness verdict on purpose: this is the
+        # one place where the number above rests on a sentinel nobody could
+        # actually read, and an operator deciding to ship needs both facts in
+        # the same glance.
+        print(
+            f"\nAMBIGUOUS EVER-CONVERGED SENTINELS "
+            f"({len(ambiguous_sentinels)}) -- these were COUNTED as converged "
+            f"so the completeness verdict above is not blocked by an "
+            f"unreadable file, but nothing verified them. Repair the paths: "
+            f"if the segment really did converge, replace the entry with a "
+            f"regular file containing the single line 'converged'; only if it "
+            f"did NOT converge is removing the entry correct.",
+            file=sys.stderr,
+        )
+        for entry in ambiguous_sentinels:
+            print(f"  ! {entry['seg']}: {entry['detail']}", file=sys.stderr)
     print(f"\nFRONTBACK COVERAGE ({len(frontback_coverage)} entries):", file=sys.stderr)
     for item in frontback_coverage:
         print(f"  - {item['id']} decision={item['decision']} status={item['status']}", file=sys.stderr)

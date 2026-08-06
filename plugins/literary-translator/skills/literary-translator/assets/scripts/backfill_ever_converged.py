@@ -94,11 +94,13 @@ segment EXACTLY as ``ledger_update.py:mark_ever_converged()`` does: same
 filename convention, same content (``b"converged\\n"``), same mode (``0o644``),
 same ``O_CREAT | O_EXCL | O_WRONLY`` idempotent-create semantics (never
 deletes or overwrites an existing sentinel). Duplicated here rather than
-imported, per this project's "no shared lib between self-contained scripts"
-convention (both are standalone entrypoints) -- pinned against the real
-writer by a dedicated byte-identity test,
-``tests/backfill_ever_converged.test.py``, a drift test, not a second source
-of truth.
+imported for the bundle-hash reason spelled out in
+``classify_ever_converged_sentinel()`` below -- NOT for the "no shared lib
+between self-contained scripts" convention, which is already false in this
+codebase. Pinned against the real writer by dedicated drift tests in
+``tests/backfill_ever_converged.test.py`` (byte identity of the sentinel's
+content/mode, and agreement on refusing a non-regular entry), not a second
+source of truth.
 
 ## CLI flags
 
@@ -150,9 +152,11 @@ the exit code alone.
 """
 
 import argparse
+import errno
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -231,16 +235,153 @@ def _root_forward_args(dirs: dict, durable_root_str, plugin_root_str) -> list:
 
 
 # ever_converged_path() -- the DURABLE 'this segment has converged at least
-# once' sentinel. Stated identically in ledger_update.py (the writer) and
-# select_segments.py (the reader) -- and now here (also a writer) -- because
-# all three are standalone entrypoints with no shared import; see this
-# project's "no shared lib between self-contained scripts" convention.
+# once' sentinel. Stated identically in all FOUR scripts that touch it --
+# ledger_update.py (the writer), select_segments.py (the dispatch gate),
+# final_audit.py (the completeness carve-out) and here (reader and writer
+# both) -- restated rather than imported for the bundle-hash reason spelled
+# out in classify_ever_converged_sentinel() below, NOT for the "no shared lib
+# between self-contained scripts" convention, which is already false here.
 # tests/backfill_ever_converged.test.py pins this against ledger_update.py's
 # own copy by name, a drift test, not a second source of truth.
 
 
 def ever_converged_path(seg: str, segments_dir: Path) -> Path:
     return segments_dir / f".ever_converged.{seg}"
+
+
+# ---------------------------------------------------------------------------
+# The shared sentinel-presence predicate. This block is an EXACT duplicate of
+# the copy in the other three sentinel scripts (search `SENTINEL_ABSENT` in
+# ledger_update.py, select_segments.py and final_audit.py) -- see
+# classify_ever_converged_sentinel()'s docstring for why it is duplicated
+# rather than imported, and which test pins the four copies together.
+# ---------------------------------------------------------------------------
+
+SENTINEL_ABSENT = "absent"
+SENTINEL_PRESENT = "present"
+SENTINEL_AMBIGUOUS = "ambiguous"
+
+
+def _sentinel_entry_kind(mode: int) -> str:
+    """A human name for the st_mode of whatever occupies a sentinel path --
+    it goes straight into an operator-facing message, which has to say what
+    is actually sitting there before it can ask anyone to fix it."""
+    if stat.S_ISLNK(mode):
+        return "a symbolic link"
+    if stat.S_ISDIR(mode):
+        return "a directory"
+    if stat.S_ISFIFO(mode):
+        return "a FIFO"
+    if stat.S_ISSOCK(mode):
+        return "a socket"
+    if stat.S_ISBLK(mode):
+        return "a block device"
+    if stat.S_ISCHR(mode):
+        return "a character device"
+    return f"a non-regular entry (st_mode {stat.S_IFMT(mode):#o})"
+
+
+def classify_ever_converged_sentinel(path) -> "tuple[str, str]":
+    """Three-state classification of the `.ever_converged.<seg>` entry at
+    `path`: `(SENTINEL_ABSENT|SENTINEL_PRESENT|SENTINEL_AMBIGUOUS, detail)`.
+
+    THE SHARED PREDICATE. Every script that asks whether a segment has ever
+    converged calls this, and all four must agree on it:
+    ledger_update.py's `mark_ever_converged()` (the only writer),
+    select_segments.py's #409 Step 1 dispatch gate,
+    final_audit.py's `count_stale_previously_converged()` carve-out, and
+    backfill_ever_converged.py's `already_sentineled` scan.
+
+    DUPLICATED RATHER THAN IMPORTED because importing it would be a live
+    hazard -- NOT because of the "no shared lib between self-contained
+    scripts" convention, which is already false here (canon_validate.py and
+    glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports
+    cache_key.py). The real reason: ledger_update.py is a
+    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:100-107 records that that
+    tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS
+    INVISIBLE -- which is why canon_senses.py had to be registered
+    explicitly once two members imported it. A shared module would put this
+    predicate's bytes outside the hash meant to cover them, so WEAKENING
+    this guard would no longer move plugin_bundle_hash, and every durable
+    root scaffolded beforehand would go on trusting it: the exact
+    false-green cache_key.py:114-118 names. Consolidation stays possible --
+    it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the
+    same commit.
+
+    What keeps the four copies honest is ENFORCEMENT, not discipline. A
+    remembered convention rots -- this docstring's own first version cited
+    the false one -- while a test that fails loudly does not.
+    tests/select_segments.test.py's
+    test_sentinel_predicate_is_identical_in_all_four_scripts pins the copies
+    byte for byte and across the state matrix; its
+    test_exactly_these_four_scripts_participate_in_the_sentinel_contract
+    fails when a fifth copy appears or one of the four goes away.
+
+    Why three states, and why not `Path.exists()`. `exists()` answers the
+    wrong question twice over, and BOTH wrong answers point at "absent" --
+    the one direction that authorizes destroying converged work:
+
+      1. It FOLLOWS symlinks, so a DANGLING symlink named as the sentinel
+         reads as absent -- while the writer's `os.open(O_CREAT|O_EXCL)` gets
+         EEXIST from that same symlink and reports the segment successfully
+         marked. That split is the whole finding: a segment recorded as
+         converged that the gate then sees as unprotected and retranslates.
+         Verified on this project's Python (3.14.6): `exists()` -> False,
+         `os.open` -> FileExistsError, for one and the same dangling link.
+      2. Since Python 3.13 `exists()` swallows EVERY OSError and returns
+         False, so an EACCES/ESTALE/EIO on the lookup is reported as "this
+         segment never converged". Verified on 3.14.6: with an unreadable
+         parent directory `exists()` returns False while `lstat()` raises
+         EACCES. (On 3.8-3.12 the same call re-raised for EACCES but still
+         swallowed ELOOP/ENOTDIR/EBADF -- so no supported version answers
+         this correctly, and the version-dependence is itself a reason not
+         to route a data-loss guard through `exists()`.)
+
+    So: only ENOENT means absent, and it is determined by catching
+    FileNotFoundError rather than by comparing `exc.errno`, so the verdict
+    never depends on an errno that may be None. `lstat`, deliberately not
+    `stat` -- a symlink is not something `mark_ever_converged()` can have
+    (its O_CREAT|O_EXCL open refuses to write through one), so following a
+    link would only ask the question about some unrelated file. Note that
+    lstat still resolves symlinks in the PARENT components, so a project
+    whose whole `segments/` directory is a symlink is unaffected: only the
+    final `.ever_converged.<seg>` component is left unresolved.
+
+    Anything that is neither ENOENT nor a regular file is AMBIGUOUS: it MAY
+    be a converged segment whose sentinel this process cannot see. Each
+    caller then maps AMBIGUOUS to ITS OWN work-preserving side, and that is
+    deliberately NOT the same action in all four: the writer and the
+    dispatch gate REFUSE (never destroy or mis-record converged work), while
+    final_audit.py's carve-out COUNTS it (never declare a converged book
+    incomplete and therefore undeliverable) and backfill's scan reports it
+    unprotected (never claim protection it did not verify). One predicate,
+    four deliberate mappings -- see each call site's own comment. The
+    asymmetry is the reason a false "absent" is the unacceptable answer
+    everywhere: it costs a finished translation, or a finished book.
+    """
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return (SENTINEL_ABSENT, "")
+    except OSError as exc:
+        # `OSError.errno` is typed `int | None` and genuinely can be None. A
+        # missing errno is the LEAST informative failure there is, so it
+        # lands on the ambiguous side like every other non-ENOENT outcome --
+        # never silently treated as "some other errno", and above all never
+        # as absence. The ENOENT verdict above does not consult `errno` at
+        # all (FileNotFoundError IS ENOENT by construction), so a None errno
+        # can never reach it, which is why this branch can be a plain guard
+        # rather than a three-way comparison.
+        if exc.errno is None:
+            return (SENTINEL_AMBIGUOUS, f"lstat failed with no errno: {exc}")
+        code = errno.errorcode.get(exc.errno, f"errno {exc.errno}")
+        return (SENTINEL_AMBIGUOUS, f"lstat failed with {code}: {exc.strerror or exc}")
+    if stat.S_ISREG(st.st_mode):
+        return (SENTINEL_PRESENT, "")
+    return (
+        SENTINEL_AMBIGUOUS,
+        f"the entry is {_sentinel_entry_kind(st.st_mode)}, not a regular file",
+    )
 
 
 def mark_ever_converged(seg: str, segments_dir: Path) -> str:
@@ -293,9 +434,29 @@ def mark_ever_converged(seg: str, segments_dir: Path) -> str:
     try:
         fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError:
-        return "already_present"
-    except OSError as exc:
-        return f"error: {exc}"
+        # EEXIST is not proof a sentinel is there. O_CREAT|O_EXCL raises it for
+        # ANY existing entry -- a directory, and a DANGLING SYMLINK, both
+        # verified on this project's Python 3.14.6 -- and "already_present" is
+        # this function's way of saying "protected, nothing to do", which for
+        # those two is false. Kept in step with ledger_update.py's own copy,
+        # which makes the same distinction and returns False where this one
+        # returns an "error: ..." string (see the contract note above for why
+        # the two shapes differ deliberately).
+        #
+        # run() already filters ambiguous entries out before calling this, so
+        # in practice this branch is the RACE: the path was a clean ENOENT
+        # during the scan and something occupied it before this open. That is
+        # precisely the case a bare `return "already_present"` would report as
+        # a successful backfill.
+        state, detail = classify_ever_converged_sentinel(path)
+        if state == SENTINEL_PRESENT:
+            return "already_present"
+        if state == SENTINEL_ABSENT:
+            return (
+                "error: the entry reported by O_CREAT|O_EXCL as already "
+                "existing had vanished by the time it was examined; retry"
+            )
+        return f"error: {detail}; refusing to treat this as an existing sentinel"
 
     # Content is deliberately fixed, with no timestamp -- see
     # ledger_update.py's own mark_ever_converged() docstring for why.
@@ -411,7 +572,7 @@ def run_ledger_merge(dirs: dict, durable_root_str=None, plugin_root_str=None) ->
     return payload
 
 
-def load_ledger_segments(merge_result: dict, durable_root: Path) -> dict:
+def load_ledger_segments(merge_result: dict, durable_root: Path) -> "tuple[dict, str]":
     ledger_path = Path(merge_result.get("ledger_path") or (durable_root / "runs" / "ledger.json"))
     doc = read_json(ledger_path, "materialized ledger.json")
     segments = doc.get("segments")
@@ -515,10 +676,48 @@ def run(args, dirs: dict) -> dict:
         )
 
     segments_dir = dirs["segments_dir"]
-    already_sentineled = sorted(
-        seg for seg in ever_converged_segs if ever_converged_path(seg, segments_dir).exists()
-    )
-    missing_sentinels = sorted(set(ever_converged_segs) - set(already_sentineled))
+    # Three buckets, not two. `.exists()` here used to fold two very different
+    # states into "already sentineled": a real regular sentinel, and a
+    # DIRECTORY sitting at the sentinel path (exists() is True for one). It
+    # also folded a dangling symlink and an EACCES lookup into "missing", so
+    # this script would report a sentinel CREATED for a segment whose path it
+    # had not actually written -- the writer's O_CREAT|O_EXCL gets EEXIST from
+    # a dangling link and, pre-fix, called that success.
+    #
+    # AMBIGUOUS is reported, never repaired and never counted as protected.
+    # This script is the REPAIR tool, so the branch that cannot mislead is the
+    # one that says "I could not verify this and I did not touch it": claiming
+    # protection that was never verified is what leaves a segment looking safe
+    # while the dispatch gate can still retranslate it. Blind repair is wrong
+    # for the same reason -- mark_ever_converged() would have to delete or
+    # overwrite whatever is there, and it deliberately never does either.
+    already_sentineled = []
+    missing_sentinels = []
+    ambiguous_sentinels = []
+    for seg in ever_converged_segs:
+        state, detail = classify_ever_converged_sentinel(ever_converged_path(seg, segments_dir))
+        if state == SENTINEL_PRESENT:
+            already_sentineled.append(seg)
+        elif state == SENTINEL_ABSENT:
+            missing_sentinels.append(seg)
+        else:
+            ambiguous_sentinels.append({"seg": seg, "detail": detail})
+    already_sentineled.sort()
+    missing_sentinels.sort()
+    ambiguous_sentinels.sort(key=lambda entry: entry["seg"])
+
+    for entry in ambiguous_sentinels:
+        print(
+            f"backfill_ever_converged.py: warning: the sentinel path for "
+            f"{entry['seg']!r} is neither absent nor a regular file "
+            f"({entry['detail']}). NOT counted as protected and NOT modified "
+            f"-- this script only ever creates a sentinel that is missing, it "
+            f"never replaces one that is there. Repair the path by hand: if "
+            f"the segment really did converge, replace the entry with a "
+            f"regular file containing the single line 'converged'; only if it "
+            f"did NOT converge is removing the entry correct.",
+            file=sys.stderr,
+        )
 
     created = []
     failed_to_create = []
@@ -553,12 +752,18 @@ def run(args, dirs: dict) -> dict:
         "ever_converged_segs": ever_converged_segs,
         "already_sentineled": already_sentineled,
         "missing_sentinels": missing_sentinels,
+        # Neither protected nor repairable by this script -- reported so a
+        # caller can assert the exact set instead of grepping stderr, and so
+        # that "no ambiguous entries found" is distinguishable from "nothing
+        # looked", which an absent key would not be.
+        "ambiguous_sentinels": ambiguous_sentinels,
         "created": created,
         "failed_to_create": failed_to_create,
         "counts": {
             "ever_converged": len(ever_converged_segs),
             "already_sentineled": len(already_sentineled),
             "missing_sentinels": len(missing_sentinels),
+            "ambiguous_sentinels": len(ambiguous_sentinels),
             "created": len(created),
             "failed_to_create": len(failed_to_create),
         },
@@ -671,12 +876,19 @@ def main(argv=None) -> int:
             status = "CREATED"
         elif any(f["seg"] == seg for f in result["failed_to_create"]):
             status = "FAILED to create"
+        elif any(a["seg"] == seg for a in result["ambiguous_sentinels"]):
+            # Listed as its own status rather than falling through to "missing
+            # sentinel": the entry is NOT missing, and calling it missing is
+            # exactly the misreading that let a dangling symlink pass as a
+            # successful backfill.
+            status = "AMBIGUOUS -- not protected, not modified"
         else:
             status = "missing sentinel (dry run)"
         print(f"  - {seg}: {status}", file=sys.stderr)
     print(
         f"\nalready sentineled: {result['counts']['already_sentineled']}\n"
-        f"missing sentinels:  {result['counts']['missing_sentinels']}",
+        f"missing sentinels:  {result['counts']['missing_sentinels']}\n"
+        f"ambiguous:          {result['counts']['ambiguous_sentinels']}",
         file=sys.stderr,
     )
     if result["applied"]:

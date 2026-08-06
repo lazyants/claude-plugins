@@ -2756,14 +2756,25 @@ def test_derive_next_action_advances_to_final_when_the_last_numbered_round_is_no
 
 
 def test_derive_next_action_cap_reached_when_final_round_not_clean(tmp_path):
+    """The sole owner of this assertion. #432 added a second, near-identical
+    copy of it in the section below ("...stays_cap_reached_when_draft_
+    unchanged_since_review", differing only in a finding's severity); that
+    copy was removed rather than kept, since a duplicate passes and fails in
+    lockstep with this one and therefore proves nothing this does not."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     _dna_write_draft(root, driver_mod)
     draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
     findings = [{"loc": "p1:1", "severity": "minor", "issue": "x", "suggest": "y"}]
-    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
-                       draft_sha1=draft_sha1, findings=findings)
-    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "cap_reached", "findings": findings}
+    review = _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                                draft_sha1=draft_sha1, findings=findings)
+    # reviewed_sha1/reviewed_token ride along so process_segment() can bind
+    # the terminal cap WRITE to the review this verdict was derived from --
+    # see _cap_still_binds_what_was_reviewed() and the race test below.
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "cap_reached", "findings": findings,
+        "reviewed_sha1": draft_sha1, "reviewed_token": review["dispatch_token"],
+    }
 
 
 def test_derive_next_action_already_converged_on_final_round(tmp_path):
@@ -2783,28 +2794,69 @@ def test_derive_next_action_already_converged_on_final_round(tmp_path):
 # update.py's own draft_sha1 check refuses the convergence write, matching
 # the same "clean but stale" reasoning the branch above already applies to
 # clean reviews -- see test_a_clean_review_stale_against_an_edited_draft_
-# re_reviews_instead_of_live_locking near the top of this section). The fix
-# makes the final round check draft_matches_review (and the ambiguous-sha1
-# case) exactly like every other round already does, instead of shortcutting
-# straight to cap_reached the moment matched_round_label == "final".
+# re_reviews_instead_of_live_locking near the top of this section).
+#
+# What this section covers, stated as coverage rather than as intent, since
+# the first version of it claimed "the whole final-round branch is covered"
+# while three of its four tests passed unchanged against the UNFIXED driver:
+#   - draft moved since a non-clean final review   -> re-review + reopen
+#   - review carries no draft_sha1 at all          -> re-review + reopen
+#   - clean=True but coverage_ok=False, draft moved -> re-review + reopen
+#   - the draft's own sha1 cannot be computed      -> recoverable raise,
+#                                                     never a terminal cap
+#   - the reopen is DURABLE before the codex job is spent, survives a
+#     dispatch failure, and survives a crash after promotion
+#   - a failed reopen write spends no codex job
+#   - the cap write refuses when the draft moves under it
+# NOT covered here: the unchanged-draft cap itself (owned by test_derive_
+# next_action_cap_reached_when_final_round_not_clean above, deliberately not
+# duplicated), and anything about WHAT a review's findings say.
 # ===========================================================================
 
 
-def test_derive_next_action_final_round_stays_cap_reached_when_draft_unchanged_since_review(tmp_path):
-    """Must NOT regress: a final-round review that is still judging the
-    CURRENT draft (nothing changed since it was written) stays cap_reached
-    -- the segment is genuinely exhausted, not stuck. Companion to
-    test_derive_next_action_cap_reached_when_final_round_not_clean above,
-    pinned again here alongside the #432 regression catcher immediately
-    below so the whole final-round branch is covered in one place."""
-    root = phase2_project(tmp_path, n=1)
-    driver_mod, ctx = _dna_setup(root)
-    _dna_write_draft(root, driver_mod)
-    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
-    findings = [{"loc": "p1:1", "severity": "minor", "issue": "x", "suggest": "y"}]
-    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
-                       draft_sha1=draft_sha1, findings=findings)
-    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "cap_reached", "findings": findings}
+def _dna_edit_draft(root, driver_mod, seg="seg01", text="hola FIXED BY HAND"):
+    """Rewrite the draft's content the way a human applying findings does:
+    real new bytes, dispatch_token preserved byte for byte (fixPrompt's own
+    instruction). Returns the draft's NEW content sha1.
+
+    Deliberately not the `draft_sha1="0"*40` shortcut the first version of
+    this section used: a hand-written impossible sha proves the comparison
+    is reached but never that a REAL edit produces a different hash, which
+    is the fact the whole #432 branch rests on."""
+    draft_path = root / "segments" / f"{seg}.draft.json"
+    draft = json.loads(draft_path.read_text(encoding="utf-8"))
+    draft["blocks"] = {"p1": text}
+    draft_path.write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
+    return driver_mod.current_draft_sha1(seg, root / "segments", root / "scripts")
+
+
+def _dna_capped_fragment(root, seg="seg01"):
+    """The exact terminal fragment process_segment()'s own cap_reached
+    branch causes ledger_update.py to write -- the durable state a capped
+    segment is actually resumed from, and the one select_segments.py's
+    HUMAN_ESCALATION_STATUSES excludes from the default dispatch set."""
+    ledger_dir = root / "runs" / "ledger.d"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    path = ledger_dir / f"{seg}.json"
+    path.write_text(
+        json.dumps({"timestamp": "2026-01-01T00:00:00Z", "status": "non_converged", "reason": "cap"},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _dna_read_fragment(root, seg="seg01"):
+    return json.loads((root / "runs" / "ledger.d" / f"{seg}.json").read_text(encoding="utf-8"))
+
+
+def _dna_dispatch_count(root):
+    """How many times the fake codex_job.py actually ran -- read from the
+    argv log it appends to, never predicted from the code under test."""
+    log = root / "test_fixture_argv_log.jsonl"
+    if not log.is_file():
+        return 0
+    return len([line for line in log.read_text(encoding="utf-8").splitlines() if line.strip()])
 
 
 def test_derive_next_action_final_round_re_reviews_when_draft_changed_since_review(tmp_path):
@@ -2815,25 +2867,101 @@ def test_derive_next_action_final_round_re_reviews_when_draft_changed_since_revi
     over content nothing has re-read. Before the fix, matched_round_label
     == "final" short-circuited straight to cap_reached regardless of
     draft_matches_review -- this is the exact case that got the segment
-    stuck forever."""
+    stuck forever.
+
+    Modelled as the real workflow rather than as a bare sha mismatch: the
+    review carries findings, the draft is EDITED (see _dna_edit_draft())
+    after that review is written, and the edit's own new sha1 is asserted
+    to differ -- so the test would still fail if a future change made a
+    real edit hash to the same value the review recorded."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     _dna_write_draft(root, driver_mod)
-    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True, draft_sha1="0" * 40)
-    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "final"}
+    reviewed_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    findings = [{"loc": "p1:1", "severity": "major", "issue": "literal calque", "suggest": "idiom"}]
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=reviewed_sha1, findings=findings)
+
+    edited_sha1 = _dna_edit_draft(root, driver_mod)
+    assert edited_sha1 != reviewed_sha1, "setup check: applying the finding must genuinely change the draft"
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "final", "reopen_capped": True,
+    }
 
 
-def test_derive_next_action_final_round_cap_reached_when_draft_sha1_uncomputable(tmp_path, monkeypatch):
-    """The fix's final-round branch stays conservative on ambiguity, exactly
-    like the pre-existing numbered-round branch (derive_next_action()'s own
-    comment: "Any ambiguity ... stays conservative"): if the CURRENT
-    draft's sha1 cannot be computed at all, cap_reached is still reported
-    rather than guessing that the draft changed and dispatching a re-review
-    over content that cannot actually be confirmed. Forces current_sha1 is
-    None the same way current_draft_sha1() itself would signal it (a raised
-    DriverError caught by derive_next_action()), rather than corrupting the
-    draft file and risking failing the EARLIER draft_ok gates instead of
-    reaching the branch under test."""
+def test_derive_next_action_final_round_re_reviews_when_the_review_has_no_draft_sha1(tmp_path):
+    """The second ambiguity on this branch, and the one a terminal cap
+    handles worst: a stored "final" review with NO draft_sha1 at all (hand
+    written, or predating the field). Nothing ties that verdict to any
+    draft, so capping on it is a permanent judgment about bytes with no
+    established relationship to what was reviewed -- and, because nothing
+    on disk changes between invocations, it would repeat forever, which is
+    #432 itself with a different trigger.
+
+    Re-reviewing is safe rather than merely preferable, and the reason is
+    external to this driver: review.schema.json REQUIRES draft_sha1, and
+    review_ready.py refuses to promote any candidate whose draft_sha1 does
+    not equal the draft it just hashed or whose dispatch_token does not
+    equal the expected one -- so the replacement review is bound to the
+    current draft and this run, or it never lands."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    review = {
+        "clean": False, "coverage_ok": True,
+        "findings": [{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}],
+        "dispatch_token": driver_mod.review_dispatch_token(_DNA_RUN_ID, "seg01", "final"),
+    }
+    (root / "segments" / "seg01.review.json").write_text(
+        json.dumps(review, ensure_ascii=False), encoding="utf-8"
+    )
+    assert "draft_sha1" not in review, "setup check: this arm is specifically the MISSING-field case"
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "final", "reopen_capped": True,
+    }
+
+
+def test_derive_next_action_final_round_re_reviews_when_clean_but_coverage_not_ok_and_draft_changed(tmp_path):
+    """The arm that reaches this branch WITHOUT being "not clean": `if clean
+    and coverage_ok:` above requires BOTH, so a review with clean=True and
+    coverage_ok=False falls straight through to the final-round branch.
+    Nothing else in this file exercises that combination at the "final"
+    label, and it is not hypothetical -- a reviewer reporting full coverage
+    failure with no per-finding complaints produces exactly this shape.
+    Same rule applies: the draft moved, so re-review it."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    reviewed_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label="final", clean=True, coverage_ok=False,
+                       draft_sha1=reviewed_sha1)
+    assert _dna_edit_draft(root, driver_mod) != reviewed_sha1
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {
+        "action": "review", "round_label": "final", "reopen_capped": True,
+    }
+
+
+def test_final_round_uncomputable_draft_sha1_is_recoverable_and_never_a_terminal_cap(tmp_path, monkeypatch):
+    """The ambiguity that must NOT be terminal. current_sha1 is None means
+    an INFRASTRUCTURE failure -- draft_sha1.py unusable, or the draft
+    deleted/mangled in the window since draft_ready.py and validate_draft.py
+    both passed at the top of derive_next_action() -- never a fact about
+    the translation. The first version of this fix capped here "to stay
+    conservative", copying the guard the not-clean/not-final branch uses
+    for the same ambiguity; that guard's FORM matched but its CONSEQUENCE
+    did not, since down there ambiguity yields the non-terminal needs_fix
+    and up here it yielded a terminal cap plus the non_converged ledger
+    write select_segments.py excludes from the default dispatch set. So a
+    transient sha1 failure produced a permanent verdict about a draft
+    nobody read.
+
+    Asserted through process_segment(), not just derive_next_action(),
+    because "recoverable" is a property of what the DRIVER does with the
+    raise, not of the raise itself: no ledger write at all, and no codex
+    job spent."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     _dna_write_draft(root, driver_mod)
@@ -2847,24 +2975,316 @@ def test_derive_next_action_final_round_cap_reached_when_draft_sha1_uncomputable
 
     monkeypatch.setattr(driver_mod, "current_draft_sha1", _unreadable_current_draft_sha1)
 
-    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "cap_reached", "findings": findings}
+    with pytest.raises(driver_mod.DriverError) as excinfo:
+        driver_mod.derive_next_action("seg01", ctx)
+    assert "simulated draft_sha1 failure" in str(excinfo.value), (
+        "the ORIGINAL cause must survive to the operator, not be replaced by "
+        "a generic message from a second probe"
+    )
+
+    result = driver_mod.process_segment("seg01", ctx)
+    assert result["outcome"] == "failed", result
+    assert result["reason"] == "unexpected-error:DriverError", (
+        f"an uncomputable draft sha1 must land in the recoverable, no-ledger-"
+        f"write row of process_segment()'s own outcome table, never reason="
+        f"'cap' -- got {result}"
+    )
+    assert not (root / "runs" / "ledger.d" / "seg01.json").exists(), (
+        "no ledger write of any kind: a terminal non_converged/cap fragment "
+        "here would exclude the segment from every later default selection"
+    )
+    assert _dna_dispatch_count(root) == 0, "no codex job may be spent on a draft that cannot be hashed"
+
+
+def test_an_uncomputable_draft_sha1_leaves_a_pre_existing_cap_exactly_as_it_found_it(tmp_path, monkeypatch):
+    """The LIMIT of the test above, pinned rather than left latent, because
+    "no ledger write" and "reachable by default selection" are NOT the same
+    property and only the first is guaranteed here.
+
+    "Recoverable" for a segment means classify_segment() putting it in a
+    category inside select_segments.py's DEFAULT_ELIGIBLE_CATEGORIES
+    ({"not_started", "recoverable", "stale"}). Writing nothing achieves
+    that only when the fragment ALREADY on disk is in_progress/absent. For
+    a segment carrying a non_converged/cap fragment from a PRIOR run,
+    writing nothing leaves human_escalation standing -- reachable only
+    through an explicit --only-segs override, which is how such a segment
+    got here in the first place.
+
+    That is deliberate, and the alternative is worse: reopening here would
+    durably un-escalate a segment on the strength of an infrastructure
+    failure, using a draft this process cannot even hash, i.e. it would
+    overturn a human-visible escalation on no evidence. The guarantee this
+    branch actually makes is the narrower, honest one -- ambiguity never
+    MINTS a terminal verdict -- not that it repairs one made earlier when
+    the review and the draft did agree. The reopen that DOES repair a cap
+    is on the re-review path, which reaches it with evidence (see
+    test_process_segment_reopens_a_capped_segment_durably_before_spending_
+    the_re_review)."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=draft_sha1,
+                       findings=[{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}])
+    fragment_path = _dna_capped_fragment(root)
+    before = fragment_path.read_bytes()
+
+    def _unreadable_current_draft_sha1(seg, segments_dir, scripts_dir):
+        raise driver_mod.DriverError(f"simulated draft_sha1 failure for {seg}")
+
+    monkeypatch.setattr(driver_mod, "current_draft_sha1", _unreadable_current_draft_sha1)
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result["reason"] == "unexpected-error:DriverError", result
+    assert fragment_path.read_bytes() == before, (
+        "byte-identical: the pre-existing cap is neither re-written nor "
+        "repaired -- this branch must not touch the durable record at all"
+    )
+    assert _dna_dispatch_count(root) == 0
 
 
 def test_derive_next_action_final_round_clean_review_re_reviews_when_draft_changed_since_review(tmp_path):
-    """Must NOT regress: the NEIGHBOURING clean-review branch (`if clean and
-    coverage_ok:`, evaluated before matched_round_label == "final" is ever
-    checked) already re-reviews instead of already_converged when a clean
-    review's draft_sha1 is stale -- test_a_clean_review_stale_against_an_
-    edited_draft_re_reviews_instead_of_live_locking above pins this at
-    round "1". This is that same guarantee at the "final" label
-    specifically, the one the #432 fix's new `if matched_round_label ==
-    "final":` branch sits right next to -- proving the fix does not
-    disturb it."""
+    """Ordering guard, NOT a #432 regression catcher -- this passes against
+    the unfixed driver too, and is kept for what it pins rather than for
+    what it catches: `if clean and coverage_ok:` is evaluated BEFORE
+    matched_round_label == "final" is ever tested, so a clean-but-stale
+    review at the "final" label must still take the clean branch (which
+    re-dispatches at matched_round_label, not at a hardcoded literal) and
+    never fall into the non-clean final branch beside it.
+    test_a_clean_review_stale_against_an_edited_draft_re_reviews_instead_
+    of_live_locking pins the same guarantee at round "1"; this is the
+    "final"-labelled arm, where the two branches are adjacent and an
+    ordering mistake would be invisible at any other label. Note the
+    absent reopen_capped marker: a clean review can never have produced a
+    cap, so there is nothing to reopen."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     _dna_write_draft(root, driver_mod)
     _dna_write_review(root, driver_mod, round_label="final", clean=True, coverage_ok=True, draft_sha1="0" * 40)
     assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "final"}
+
+
+def test_process_segment_reopens_a_capped_segment_durably_before_spending_the_re_review(tmp_path):
+    """#432's second half. derive_next_action() deciding to re-review a
+    capped segment is an IN-MEMORY decision; the durable record still says
+    {"status": "non_converged", "reason": "cap"}, which select_segments.py's
+    classify_segment() maps to human_escalation and EXCLUDES from the
+    default dispatch set. If the re-review dispatch then fails, the old cap
+    is the only fact left on disk and only an explicit --only-segs override
+    could ever pick the segment up again -- contradicting process_segment()'s
+    own documented invariant that a dispatch failure leaves the segment
+    recoverable.
+
+    Driven through the FAILURE path on purpose: a successful re-review would
+    overwrite the fragment on its way to convergence and prove nothing about
+    the ordering. Only a dispatch that fails can show the reopen was written
+    BEFORE the codex job, not after it."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    reviewed_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    findings = [{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}]
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=reviewed_sha1, findings=findings)
+    _dna_edit_draft(root, driver_mod)
+    _dna_capped_fragment(root)
+    write_codex_scenario(root, {"review:seg01": {"outcome": "fail", "reason": "validate-failed"}})
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    # .get(), not [] -- against a driver that caps here instead of
+    # re-reviewing there is no "stage" key at all, and a KeyError would
+    # report a broken test rather than the behaviour difference.
+    assert result["outcome"] == "failed" and result.get("stage") == "review", result
+    fragment = _dna_read_fragment(root)
+    assert fragment["status"] == "in_progress", (
+        f"the terminal cap must be REPLACED with a recoverable record before "
+        f"the re-review is dispatched -- a dispatch failure afterwards would "
+        f"otherwise leave the segment excluded from every default selection; "
+        f"got {fragment}"
+    )
+    assert "reason" not in fragment, (
+        "ledger_update.py replaces a fragment wholesale, so reason='cap' must "
+        "be GONE, not merely overlaid by a new status"
+    )
+    assert _dna_dispatch_count(root) == 1, "the re-review really was dispatched, after the reopen"
+
+
+def test_process_segment_does_not_spend_the_re_review_when_the_reopen_write_fails(tmp_path, monkeypatch):
+    """The reopen is a PRECONDITION, not a best-effort courtesy: if the
+    ledger write that makes the segment recoverable cannot be confirmed,
+    the codex job must not be spent at all. Spending it would buy a result
+    that still could not be recorded recoverably -- the same trade
+    process_segment()'s translate branch already makes for its own
+    in_progress write."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    reviewed_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=reviewed_sha1,
+                       findings=[{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}])
+    _dna_edit_draft(root, driver_mod)
+    _dna_capped_fragment(root)
+
+    # The attempted writes are RECORDED, not just failed: the returned
+    # outcome alone does not distinguish "the reopen write failed" from
+    # "some other ledger write failed later", and a driver that caps here
+    # instead of reopening produces the identical result dict.
+    attempted = []
+
+    def _failing_write_ledger(dirs, seg, fields, **kwargs):
+        attempted.append(fields)
+        return {"success": False, "error": "simulated ledger write failure"}
+
+    monkeypatch.setattr(driver_mod, "write_ledger", _failing_write_ledger)
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result == {
+        "seg": "seg01", "converged": False, "outcome": "failed",
+        "reason": "ledger-write-failed", "detail": "simulated ledger write failure",
+    }, result
+    assert len(attempted) == 1 and attempted[0]["status"] == "in_progress", (
+        f"the ONE ledger write attempted before any dispatch must be the "
+        f"recoverable reopen -- got {attempted}"
+    )
+    assert _dna_dispatch_count(root) == 0, "no codex job may be spent behind a reopen that did not land"
+
+
+def test_a_capped_segment_survives_a_crash_between_promotion_and_the_convergence_write(tmp_path, monkeypatch):
+    """The crash window the reopen exists for, driven end to end. The
+    re-review is promoted for real and THEN the driver dies before the
+    convergence write -- historically the worst case, because the promotion
+    was paid for and the only durable fact left would have been the old
+    cap. With the reopen in place the segment is in_progress on disk, so
+    the NEXT invocation (simulated here by undoing the crash and calling
+    process_segment() again) picks it up and converges it, with no
+    --only-segs override anywhere."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    reviewed_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=reviewed_sha1,
+                       findings=[{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}])
+    current_sha1 = _dna_edit_draft(root, driver_mod)
+    _dna_capped_fragment(root)
+
+    def _promote_then_crash(ctx_arg, *, kind, seg, round_label=None):
+        # codex_job.py's promotion really happened: a clean review for the
+        # CURRENT draft is on disk. Only the ledger write is missing.
+        _dna_write_review(root, driver_mod, round_label="final", clean=True, coverage_ok=True,
+                           draft_sha1=current_sha1)
+        raise RuntimeError("driver killed after promotion, before the convergence write")
+
+    monkeypatch.setattr(driver_mod, "run_one_codex_job", _promote_then_crash)
+    crashed = driver_mod.process_segment("seg01", ctx)
+    assert crashed["outcome"] == "failed" and crashed["reason"] == "unexpected-error:RuntimeError", crashed
+    assert _dna_read_fragment(root)["status"] == "in_progress", (
+        "the crash must leave a RECOVERABLE record, not the pre-existing cap"
+    )
+
+    # The next invocation, with nothing else changed.
+    monkeypatch.undo()
+    assert driver_mod.process_segment("seg01", ctx) == {
+        "seg": "seg01", "converged": True, "outcome": "converged",
+    }
+    assert _dna_read_fragment(root)["status"] == "converged"
+
+
+def test_the_cap_write_is_refused_when_the_draft_moves_after_the_cap_decision(tmp_path, monkeypatch):
+    """The cap write must describe bytes a reviewer actually read.
+    derive_next_action()'s sha comparison is a point-in-time observation and
+    the write happens later, so a human editing the draft inside that window
+    (the very workflow #432 was reported from) would otherwise get a
+    terminal, selection-excluding cap recorded against content nothing
+    judged. The convergence write on the other side of this same fork is
+    already protected against its own version of this by ledger_update.py's
+    enrich_converged_fields() -- which re-reads the review, re-checks the
+    token and re-hashes the draft -- while the non_converged write inherits
+    none of those preconditions, since they live inside that function's
+    `status == "converged"` arm.
+
+    The race is injected at the only place a test can hold it open: a
+    derive_next_action() wrapper that returns the REAL verdict and then
+    edits the draft, reproducing "the human saved the file between the
+    decision and the write" exactly."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    reviewed_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    findings = [{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}]
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=reviewed_sha1, findings=findings)
+
+    real_derive = driver_mod.derive_next_action
+
+    def _derive_then_race(seg, ctx_arg):
+        action = real_derive(seg, ctx_arg)
+        assert action["action"] == "cap_reached", f"setup check: {action}"
+        _dna_edit_draft(root, driver_mod, text="hola EDITED IN THE WINDOW")
+        return action
+
+    monkeypatch.setattr(driver_mod, "derive_next_action", _derive_then_race)
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result["outcome"] == "failed" and result["reason"] == "cap-write-draft-moved", result
+    assert "draft changed since review" in result["detail"], result
+    assert not (root / "runs" / "ledger.d" / "seg01.json").exists(), (
+        "refusing the cap must leave NO ledger write -- the segment stays "
+        "selectable and the next invocation re-derives from the draft that "
+        "is actually on disk"
+    )
+
+
+def test_the_cap_write_is_refused_when_the_review_artifact_is_swapped_after_the_decision(tmp_path, monkeypatch):
+    """The TOKEN half of the binding, which a draft re-hash alone cannot
+    cover: here the draft never moves, so the sha comparison is satisfied
+    throughout -- only the review artifact is replaced inside the window,
+    by one whose dispatch_token belongs to a different round. That is the
+    stale/straggler shape ledger_update.py refuses a CONVERGENCE write for
+    (its review_token_matches() precondition), mirrored onto the terminal
+    write on the other side of the fork.
+
+    Bounded on purpose, and the bound is the point of the assertion at the
+    end: _cap_still_binds_what_was_reviewed() binds (draft_sha1,
+    dispatch_token), the same pair enrich_converged_fields() binds, so a
+    replacement carrying BOTH unchanged is NOT detected however different
+    its verdict. See that helper's own RESIDUAL paragraph for why that is
+    the right width rather than an oversight."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    reviewed_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=reviewed_sha1,
+                       findings=[{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}])
+
+    real_derive = driver_mod.derive_next_action
+
+    def _derive_then_swap_review(seg, ctx_arg):
+        action = real_derive(seg, ctx_arg)
+        assert action["action"] == "cap_reached", f"setup check: {action}"
+        # A straggler review for round "1" lands over the "final" one the
+        # cap was decided from. The draft is untouched, so a check that
+        # only re-hashed the draft would accept this without noticing that
+        # the artifact the verdict came from is gone.
+        _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True,
+                           draft_sha1=reviewed_sha1,
+                           findings=[{"loc": "p2:1", "severity": "major", "issue": "other", "suggest": "z"}])
+        return action
+
+    monkeypatch.setattr(driver_mod, "derive_next_action", _derive_then_swap_review)
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result["outcome"] == "failed" and result["reason"] == "cap-write-draft-moved", result
+    assert "changed between the cap decision and the cap write" in result["detail"], result
+    assert not (root / "runs" / "ledger.d" / "seg01.json").exists()
 
 
 def test_derive_next_action_re_reviews_instead_of_needs_fix_on_a_fabricated_loc(tmp_path):

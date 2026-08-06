@@ -425,6 +425,12 @@ def test_full_classification_taxonomy_and_report(tmp_path):
         # always present, so silently dropping it has to fail here.
         "authorizes_dispatch",
         "previously_converged",
+        # 1.19.1 fail-closed sentinel fix: sentinel paths that were neither
+        # absent nor a regular file. Always [] on this path (a non-empty set
+        # refuses above), but part of the contract for the same reason
+        # runs_missing_digest is -- a consumer must be able to tell a scan that
+        # found nothing from a scan that never ran.
+        "ambiguous_sentinels",
         # #409 Step 3 -- the resume-gate evidence, reported on the SUCCESS
         # path too and therefore part of this contract. `runs_missing_digest`
         # in particular must always be present: a consumer (or a test) that
@@ -1607,6 +1613,428 @@ def test_gate_fires_even_though_the_ledger_status_is_no_longer_converged(tmp_pat
         "must fail through THIS gate, not through some other fatal that happens "
         "to mention the same segment"
     )
+
+
+# ---------------------------------------------------------------------------
+# 1.19.1 -- the sentinel predicate is FAIL-CLOSED.
+#
+# The bug these cover: the two halves of the sentinel contract disagreed about
+# the same path. The reader used `Path.exists()`, which FOLLOWS symlinks (a
+# dangling link reads as absent) and, since Python 3.13, swallows every OSError
+# and returns False (EACCES/ESTALE read as absent). The writer used
+# `os.open(O_CREAT|O_EXCL)`, which raises EEXIST for ANY existing entry --
+# dangling symlink and directory included -- and treated that as "already
+# marked". So a segment could be recorded as converged while the dispatch gate
+# saw it as unprotected, and the next cache-key move retranslated it. 1.19.1
+# moves plugin_bundle_hash for every converged segment in every live project,
+# which is precisely when that path gets taken.
+#
+# Fail-closed here points AWAY from tidiness: anything that is not a clean
+# ENOENT is treated as "may have converged" and refuses, because a false
+# "protected" costs one authorization and a false "absent" costs a translation.
+# ---------------------------------------------------------------------------
+
+
+def _sentinel_path(root, seg):
+    return root / "segments" / f".ever_converged.{seg}"
+
+
+def _load_script_module(name):
+    """Load a script by path -- these are standalone entrypoints with no
+    shared import, not an importable package. Same technique as
+    test_sentinel_filename_matches_the_writer_in_ledger_update below, hoisted
+    here because three tests in this section now need it."""
+    path = ASSETS_DIR / "scripts" / name
+    spec = importlib.util.spec_from_file_location(name.replace(".", "_"), str(path))
+    assert spec is not None and spec.loader is not None, f"cannot load {path}"
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_dangling_symlink_sentinel_is_not_read_as_absent(tmp_path):
+    """THE case the finding is about, reader half. `Path.exists()` follows the
+    link and reports False for a dangling one, so the pre-fix gate let the
+    segment through -- while the writer, whose O_CREAT|O_EXCL open gets EEXIST
+    from that same link, had already reported the segment successfully marked.
+
+    Fails on the unfixed code at `assert proc.returncode != 0`: the pre-fix
+    reader classifies the dangling link as absent, no gate fires, and select
+    exits 0 with the segment in `segs`."""
+    root = setup_full_project(tmp_path)
+    baseline = run_select(root)
+    assert baseline.returncode == 0
+    assert EVER_CONVERGED_SEG in parse_stdout(baseline)["segs"], (
+        "precondition: the segment must be dispatch-eligible by default, "
+        "otherwise this test proves nothing"
+    )
+
+    link = _sentinel_path(root, EVER_CONVERGED_SEG)
+    link.symlink_to(root / "segments" / "no-such-target")
+    assert not link.exists(), (
+        "precondition: this must be a DANGLING link -- Path.exists() has to "
+        "report False here, or the test is not exercising the reported bug"
+    )
+    assert link.is_symlink(), "precondition: the entry itself must be present"
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0, (
+        "a dangling symlink at the sentinel path is NOT proof the segment "
+        "never converged; dispatching on it retranslates converged work\n"
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["ambiguous_sentinels"] == [
+        {"seg": EVER_CONVERGED_SEG, "detail": "the entry is a symbolic link, not a regular file"}
+    ], out
+    assert "symbolic link" in out["error"], (
+        "the refusal must say what is actually at the path, or an operator "
+        "cannot act on it"
+    )
+
+
+def test_a_directory_at_the_sentinel_path_refuses_rather_than_counting_as_converged(tmp_path):
+    """Writer half of the same finding, seen from the reader: `exists()` is
+    True for a directory, so the pre-fix reader called it a valid sentinel and
+    reported the segment as previously CONVERGED -- clearable with
+    --allow-retranslate-converged, i.e. exactly one flag away from the same
+    loss, and diagnosed with a message that names the wrong problem.
+
+    Fails on the unfixed code at the `ambiguous_sentinels` assertion: pre-fix
+    the run also exits non-zero, but through the previously-converged gate, so
+    `ambiguous_sentinels` is missing from the payload entirely (KeyError) and
+    `previously_converged` holds the segment instead. Asserting on the exit
+    code alone would be green before the fix -- which is why this test does
+    not."""
+    root = setup_full_project(tmp_path)
+    _sentinel_path(root, EVER_CONVERGED_SEG).mkdir()
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0
+    out = parse_stdout(proc)
+    assert out["ambiguous_sentinels"] == [
+        {"seg": EVER_CONVERGED_SEG, "detail": "the entry is a directory, not a regular file"}
+    ], out
+    assert "--allow-retranslate-converged does NOT clear this" in out["error"], (
+        "a directory is not evidence the segment converged, so the flag that "
+        "authorizes retranslating converged work must be named only to rule "
+        "it OUT -- an operator who reaches for it here would authorize "
+        "discarding work nobody established the state of"
+    )
+    assert out["previously_converged"] == [], (
+        "and it must not be miscounted as a valid sentinel either -- that was "
+        "the pre-fix reading, since Path.exists() is True for a directory"
+    )
+
+
+def test_a_non_enoent_lstat_error_is_ambiguous_not_absent(tmp_path):
+    """The arm that motivated the finding: an EACCES / ESTALE / EIO on the
+    lookup -- a REAL sentinel that this process simply cannot see. Simulated
+    with a mode-000 parent directory, the same shape a stale NFS handle or a
+    permissions accident produces.
+
+    Since Python 3.13 `Path.exists()` swallows every OSError and returns
+    False, so the pre-fix reader called such a segment 'never converged' and
+    dispatched it. That divergence is asserted here directly, on one and the
+    same path, rather than described.
+
+    DELIBERATELY at the predicate level, not end-to-end, and that is not the
+    awkwardness being dodged -- it is the only way this arm can prove
+    anything. The lstat of `segments/.ever_converged.<seg>` can only be made
+    to fail with EACCES by stripping permissions from `segments/` itself, and
+    that same chmod also breaks the draft and segpack reads that
+    classify_segment() performs BEFORE the sentinel loop is ever reached. An
+    end-to-end version would refuse for an unrelated reason and be green
+    whether or not this fix exists. The end-to-end "ambiguous means refuse"
+    link is covered by the dangling-symlink and directory tests above, which
+    can be isolated; this test owns the classification.
+
+    Fails on the unfixed code at the `classify_ever_converged_sentinel`
+    lookup itself (AttributeError -- the fail-closed predicate does not
+    exist), and the `exists()` assertion below documents what the code did
+    instead: reported absent."""
+    import os as _os
+
+    reader = _load_script_module("select_segments.py")
+    locked = tmp_path / "segments"
+    locked.mkdir()
+    sentinel = locked / ".ever_converged.seg01"
+    sentinel.write_text("converged\n", encoding="utf-8")
+
+    _os.chmod(locked, 0o000)
+    try:
+        assert not sentinel.exists(), (
+            "precondition: Path.exists() must report False for this EACCES "
+            "lookup on this interpreter, or the test is not exercising the "
+            "reported bug (on 3.8-3.12 exists() re-raised instead)"
+        )
+        state, detail = reader.classify_ever_converged_sentinel(sentinel)
+    finally:
+        _os.chmod(locked, 0o755)
+
+    assert state == reader.SENTINEL_AMBIGUOUS, (
+        "a lookup that FAILED is not a lookup that found nothing; treating "
+        f"EACCES as absence retranslates a segment whose sentinel is right "
+        f"there and merely unreadable -- got {state!r}"
+    )
+    assert "EACCES" in detail, f"the errno must reach the operator, got {detail!r}"
+    assert sentinel.read_text(encoding="utf-8") == "converged\n", (
+        "and the sentinel really was there the whole time"
+    )
+
+
+def test_an_ordinary_regular_sentinel_still_protects_and_absence_still_dispatches(tmp_path):
+    """FALSE-POSITIVE BOUND for the two arms above. The fix must not turn a
+    fail-closed predicate into a fail-always one: an absent sentinel (clean
+    ENOENT) must still permit dispatch, and an ordinary regular sentinel must
+    still land in `previously_converged` -- not in `ambiguous_sentinels`.
+
+    Green both before and after the fix by design; it exists to catch a fix
+    that over-blocks, which the discriminating tests above cannot see."""
+    root = setup_full_project(tmp_path)
+
+    permitted = run_select(root)
+    assert permitted.returncode == 0, f"stderr={permitted.stderr!r}"
+    out = parse_stdout(permitted)
+    assert EVER_CONVERGED_SEG in out["segs"], "ENOENT must still mean 'dispatch'"
+    assert out["ambiguous_sentinels"] == []
+
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+    refused = run_select(root)
+    assert refused.returncode != 0
+    refused_out = parse_stdout(refused)
+    assert refused_out["ambiguous_sentinels"] == [], (
+        "an ordinary regular sentinel is unambiguous -- it must refuse through "
+        "the previously-converged gate, not through the ambiguity gate"
+    )
+    assert EVER_CONVERGED_SEG in refused_out["error"]
+    assert "--allow-retranslate-converged" in refused_out["error"]
+
+
+def test_the_writer_refuses_to_record_convergence_for_a_dangling_symlink(tmp_path):
+    """Writer half, directly. `os.open(O_CREAT|O_EXCL)` raises FileExistsError
+    for a dangling symlink exactly as it does for a real sentinel, so the
+    pre-fix `except FileExistsError: return True` reported the segment marked
+    while nothing a reader could find had been published.
+
+    Driven through ledger_update.py's own mark_ever_converged() rather than a
+    reimplementation of it -- the point is what the shipped writer does.
+
+    Fails on the unfixed code at `assert ok is False`: pre-fix it returns
+    True. (The directory arm is asserted in the same test because it is the
+    same branch and the same one-line pre-fix behavior.)"""
+    writer = _load_script_module("ledger_update.py")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+
+    link = segments_dir / ".ever_converged.segLINK"
+    link.symlink_to(segments_dir / "no-such-target")
+    ok = writer.mark_ever_converged("segLINK", segments_dir)
+    assert ok is False, (
+        "EEXIST from a dangling symlink is not proof of prior marking; "
+        "returning True records convergence with no sentinel in place"
+    )
+    assert link.is_symlink(), "the writer must not have replaced the entry"
+
+    (segments_dir / ".ever_converged.segDIR").mkdir()
+    assert writer.mark_ever_converged("segDIR", segments_dir) is False, (
+        "a directory is not a sentinel either"
+    )
+
+    real = segments_dir / ".ever_converged.segOK"
+    real.write_text("converged\n", encoding="utf-8")
+    assert writer.mark_ever_converged("segOK", segments_dir) is True, (
+        "FALSE-POSITIVE BOUND: an ordinary regular sentinel must still be "
+        "idempotently accepted, or the fix breaks every re-record"
+    )
+    assert writer.mark_ever_converged("segFRESH", segments_dir) is True, (
+        "FALSE-POSITIVE BOUND: a clean create must still succeed"
+    )
+
+
+def test_an_oserror_with_no_errno_is_ambiguous_not_absent(tmp_path):
+    """`OSError.errno` is typed `int | None` and really can be None -- pyright
+    flagged the original `errno.errorcode.get(exc.errno)` for exactly that.
+    The fix must not resolve the type error by making None mean absence, which
+    is the one direction that destroys work, so this pins the direction rather
+    than merely the absence of a crash.
+
+    Driven with a stub path whose lstat raises a bare `OSError()`: there is no
+    portable filesystem state that produces an errno-less OSError, and the
+    alternative -- trusting the type annotation -- is what let it through the
+    first time.
+
+    Green before the fix only in the sense that the function did not exist;
+    against a fix that reached for `cast()` or a `# type: ignore` it stays
+    green, and against a fix that treated a None errno as ENOENT it FAILS at
+    `assert state == reader.SENTINEL_AMBIGUOUS`."""
+    reader = _load_script_module("select_segments.py")
+
+    class _ErrnolessPath:
+        def lstat(self):
+            raise OSError()  # no errno, no strerror
+
+    state, detail = reader.classify_ever_converged_sentinel(_ErrnolessPath())
+
+    assert state == reader.SENTINEL_AMBIGUOUS, (
+        "an OSError carrying no errno is the LEAST informative failure there "
+        "is -- it cannot be evidence that the segment never converged"
+    )
+    assert "no errno" in detail, detail
+
+
+SENTINEL_SCRIPTS = (
+    "ledger_update.py",           # the only writer
+    "select_segments.py",         # the #409 Step 1 dispatch gate
+    "final_audit.py",             # the completeness carve-out
+    "backfill_ever_converged.py",  # the already_sentineled scan (reader+writer)
+)
+
+
+def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
+    """CENSUS. The drift test below pins the four copies in SENTINEL_SCRIPTS
+    against each other -- and would go on passing, quietly covering three
+    copies, if someone deleted one, or five, if someone added a fifth
+    elsewhere in scripts/. A pairwise-agreement test cannot see its own
+    population change; that is the whole reason this one exists beside it.
+
+    Not a hypothetical shape for this codebase: `draft_content_sha1` is
+    currently implemented in SEVEN scripts under assets/scripts/ (assemble,
+    draft_sha1, final_audit, ledger_merge, ledger_update, select_segments,
+    validate_assembled), each documented as byte-identical to the others.
+    A convention duplicated N ways is one edit away from being duplicated
+    N+1 ways with nothing pointing at the newcomer.
+
+    NEEDLE CHOICE matters and was measured, not assumed. Scanning for the
+    bare literal `.ever_converged.{seg}` also matches
+    backfill_resume_gate_ack.py, which only MENTIONS the convention in its
+    prose (it mirrors the shape for `.resume_gate_ack`). Both needles below
+    are the executable forms -- the f-string as actually written, and the
+    predicate's `def` line -- and each yields exactly these four today.
+
+    Fails in BOTH directions: a fifth participant makes the scanned set a
+    superset, deleting one makes it a subset, and the assertion prints the
+    symmetric difference either way."""
+    scripts_dir = ASSETS_DIR / "scripts"
+    assert scripts_dir.is_dir(), scripts_dir
+
+    path_builders = set()
+    predicate_copies = set()
+    scanned = 0
+    for py in sorted(scripts_dir.glob("*.py")):
+        src = py.read_text(encoding="utf-8")
+        scanned += 1
+        if 'f".ever_converged.{seg}"' in src:
+            path_builders.add(py.name)
+        if "def classify_ever_converged_sentinel" in src:
+            predicate_copies.add(py.name)
+
+    # A glob that matched nothing would make both sets empty and both
+    # assertions below pass for the wrong reason.
+    assert scanned > 10, f"only {scanned} script(s) scanned -- the glob is wrong"
+
+    expected = set(SENTINEL_SCRIPTS)
+    assert path_builders == expected, (
+        f"the set of scripts that BUILD the sentinel path has changed: "
+        f"{path_builders ^ expected}. Add it to SENTINEL_SCRIPTS (and give it "
+        f"the shared predicate), or remove it -- an unlisted participant is "
+        f"invisible to the drift test below."
+    )
+    assert predicate_copies == expected, (
+        f"the set of scripts carrying a copy of the shared predicate has "
+        f"changed: {predicate_copies ^ expected}. A script that builds the "
+        f"sentinel path but does NOT carry the predicate is the exact "
+        f"pre-1.19.1 state: a call site free to disagree with the writer."
+    )
+
+
+def test_sentinel_predicate_is_identical_in_all_four_scripts(tmp_path):
+    """The predicate is spelled in FOUR standalone scripts with no shared
+    import, so pin all four copies against each other across the WHOLE state
+    matrix -- not just the happy path. A drift test, not a second source of
+    truth, same technique as the filename pin below.
+
+    This is the test that keeps the fix from decaying back into the bug: the
+    bug WAS the sentinel's readers and its writer disagreeing about one path,
+    and a divergence reintroduced in any single copy is invisible to every
+    other test here, because that script's own tests would still agree with
+    it. Four copies means six pairs that can drift, so the comparison is
+    against one reference rather than pairwise.
+
+    NOTE the four map AMBIGUOUS to different ACTIONS on purpose (refuse,
+    refuse, count, report) -- that divergence is correct and lives at the call
+    sites. What must never diverge is the CLASSIFICATION, which is what this
+    pins."""
+    import os as _os
+
+    modules = {name: _load_script_module(name) for name in SENTINEL_SCRIPTS}
+    reference_name = SENTINEL_SCRIPTS[0]
+    reference = modules[reference_name]
+
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+
+    absent = segments_dir / "absent"
+    regular = segments_dir / "regular"
+    regular.write_text("converged\n", encoding="utf-8")
+    dangling = segments_dir / "dangling"
+    dangling.symlink_to(segments_dir / "no-such-target")
+    a_dir = segments_dir / "a_dir"
+    a_dir.mkdir()
+    locked_parent = segments_dir / "locked"
+    locked_parent.mkdir()
+    inaccessible = locked_parent / "sentinel"
+    inaccessible.write_text("converged\n", encoding="utf-8")
+
+    cases = [
+        ("absent (ENOENT)", absent, reference.SENTINEL_ABSENT),
+        ("ordinary regular file", regular, reference.SENTINEL_PRESENT),
+        ("dangling symlink", dangling, reference.SENTINEL_AMBIGUOUS),
+        ("directory", a_dir, reference.SENTINEL_AMBIGUOUS),
+    ]
+
+    _os.chmod(locked_parent, 0o000)
+    try:
+        cases.append(("EACCES lstat", inaccessible, reference.SENTINEL_AMBIGUOUS))
+        for label, path, expected_state in cases:
+            expected = reference.classify_ever_converged_sentinel(path)
+            assert expected[0] == expected_state, f"{label}: got {expected!r}"
+            for name, mod in modules.items():
+                got = mod.classify_ever_converged_sentinel(path)
+                assert got == expected, (
+                    f"{label}: {name} disagrees with {reference_name} about "
+                    f"the same path -- {name}={got!r} {reference_name}="
+                    f"{expected!r}. That disagreement IS the 1.19.1 data-loss "
+                    f"bug; it does not matter which of the two is 'right'."
+                )
+    finally:
+        _os.chmod(locked_parent, 0o755)
+
+    import inspect
+
+    for name, mod in modules.items():
+        assert (
+            mod.SENTINEL_ABSENT,
+            mod.SENTINEL_PRESENT,
+            mod.SENTINEL_AMBIGUOUS,
+        ) == (
+            reference.SENTINEL_ABSENT,
+            reference.SENTINEL_PRESENT,
+            reference.SENTINEL_AMBIGUOUS,
+        ), f"{name}: state names must match {reference_name}'s, not just the behavior"
+
+        for fn in ("classify_ever_converged_sentinel", "_sentinel_entry_kind"):
+            assert inspect.getsource(getattr(mod, fn)) == inspect.getsource(
+                getattr(reference, fn)
+            ), (
+                f"{name}.{fn} has drifted from {reference_name}'s copy. The "
+                f"four are meant to be textually identical: the matrix above "
+                f"samples five states, so a drift in the detail strings, in "
+                f"the entry-kind names, or in a branch it does not reach "
+                f"would otherwise pass unseen"
+            )
 
 
 def test_sentinel_filename_matches_the_writer_in_ledger_update(tmp_path):

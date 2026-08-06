@@ -453,6 +453,11 @@ def test_dry_run_writes_nothing_and_reports_correct_ids(tmp_path):
         "ever_converged": 3,
         "already_sentineled": 1,
         "missing_sentinels": 2,
+        # 1.19.1: the third bucket -- a sentinel path that is neither absent
+        # nor a regular file. Asserted as an exact dict on purpose: a bucket
+        # silently disappearing from this report is how a segment stops being
+        # counted anywhere at all.
+        "ambiguous_sentinels": 0,
         "created": 0,
         "failed_to_create": 0,
     }
@@ -538,8 +543,8 @@ def test_apply_is_idempotent_on_a_second_run(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_existing_sentinel_is_never_overwritten_or_deleted(tmp_path):
-    """CLI-level: run()'s own missing_sentinels pre-filter (computed from an
-    `.exists()` snapshot BEFORE any write) already keeps an already-sentineled
+    """CLI-level: run()'s own missing_sentinels pre-filter (computed from a
+    classify_ever_converged_sentinel() snapshot BEFORE any write) already keeps an already-sentineled
     segment out of the create loop entirely, so this proves the end-to-end
     report/behavior is correct. It does NOT by itself exercise
     mark_ever_converged()'s own O_EXCL protection, since that pre-filter
@@ -708,6 +713,143 @@ def test_sentinel_write_is_byte_identical_to_ledger_update_writer(tmp_path):
     assert writer.mark_ever_converged(seg, dir_a) is True
     assert backfill.mark_ever_converged(seg, dir_b) == "already_present"
     assert path_a.read_bytes() == path_b.read_bytes()
+
+
+def test_both_writers_refuse_a_non_regular_entry_at_the_sentinel_path(tmp_path):
+    """1.19.1: extends the drift pin above to the FileExistsError branch,
+    which is where the two writers could silently disagree while everything
+    tested above stayed green -- both write identical bytes on the happy
+    path, and that is all the byte-identity test exercises.
+
+    `os.open(O_CREAT|O_EXCL)` raises EEXIST for ANY existing entry, so a
+    dangling symlink and a directory both reach it. Neither is a sentinel
+    either writer wrote, and reporting them as marked/already_present claims
+    a protection nothing verified.
+
+    The two copies' outcome SHAPES differ on purpose (bool vs string, see
+    backfill's own mark_ever_converged docstring), so this pins the shared
+    decision -- refuse or accept -- rather than an identical return value.
+
+    Fails on the unfixed code at the first `is False` / `startswith("error:")`
+    assertion of each pair: pre-fix both writers report success."""
+    writer = _load_module(LEDGER_UPDATE_SRC, "ledger_update_nonregular")
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_nonregular")
+
+    dir_a = tmp_path / "writer_side"
+    dir_a.mkdir()
+    dir_b = tmp_path / "backfill_side"
+    dir_b.mkdir()
+
+    for seg, make_entry in (
+        ("segLink", lambda p: p.symlink_to(p.parent / "no-such-target")),
+        ("segDir", lambda p: p.mkdir()),
+    ):
+        make_entry(writer.ever_converged_path(seg, dir_a))
+        make_entry(backfill.ever_converged_path(seg, dir_b))
+
+        assert writer.mark_ever_converged(seg, dir_a) is False, (
+            f"{seg}: ledger_update.py accepted a non-regular entry as proof "
+            f"of prior marking"
+        )
+        outcome = backfill.mark_ever_converged(seg, dir_b)
+        assert outcome.startswith("error:"), (
+            f"{seg}: backfill_ever_converged.py reported {outcome!r} for a "
+            f"non-regular entry -- 'already_present' means 'protected, "
+            f"nothing to do', which is false here"
+        )
+
+    # FALSE-POSITIVE BOUND, in the same test because it is the same branch:
+    # a genuine regular sentinel must still be accepted idempotently by both.
+    for seg in ("segOK",):
+        writer.ever_converged_path(seg, dir_a).write_bytes(b"converged\n")
+        backfill.ever_converged_path(seg, dir_b).write_bytes(b"converged\n")
+        assert writer.mark_ever_converged(seg, dir_a) is True
+        assert backfill.mark_ever_converged(seg, dir_b) == "already_present"
+
+
+def test_a_dangling_symlink_is_bucketed_ambiguous_never_missing(tmp_path):
+    """CLI level. Pre-fix, `.exists()` followed the dangling link and put the
+    segment in `missing_sentinels`; --apply then called the writer, whose
+    O_CREAT|O_EXCL got EEXIST from that same link and returned
+    "already_present", so the run exited 0 having protected nothing and said
+    nothing. A repair tool reporting a repair it did not make is the worst
+    shape available here.
+
+    Fails on the unfixed code at `payload["ambiguous_sentinels"]` (KeyError:
+    the bucket does not exist) and, if that key is stubbed in, at the
+    `not in payload["missing_sentinels"]` assertion."""
+    root = setup_mixed_project(tmp_path)
+    seg = EVER_CONVERGED[0]
+    link = sentinel_path(root, seg)
+    link.symlink_to(root / "segments" / "no-such-target")
+
+    proc = run_backfill(root, "--apply")
+
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["ambiguous_sentinels"] == [
+        {"seg": seg, "detail": "the entry is a symbolic link, not a regular file"}
+    ], payload
+    assert seg not in payload["missing_sentinels"], (
+        "the entry is NOT missing -- calling it missing is what let the "
+        "backfill report a sentinel it never wrote"
+    )
+    assert seg not in payload["already_sentineled"], (
+        "and it is not protected either; those are the only two buckets that "
+        "existed before, and it belongs to neither"
+    )
+    assert seg not in payload["created"]
+    assert link.is_symlink(), (
+        "the entry must survive untouched -- this script never replaces an "
+        "entry it did not write, and the operator needs it to diagnose"
+    )
+    assert "AMBIGUOUS" in proc.stderr and seg in proc.stderr, proc.stderr
+
+
+def test_a_directory_at_the_sentinel_path_is_not_counted_as_protected(tmp_path):
+    """The other half, and the one that fails LOUDEST pre-fix: `.exists()` is
+    True for a directory, so the pre-fix scan reported the segment as
+    `already_sentineled` -- a repair tool asserting protection that is not
+    there, which is exactly the state an operator runs this script to rule
+    out.
+
+    Fails on the unfixed code at `seg not in payload["already_sentineled"]`."""
+    root = setup_mixed_project(tmp_path)
+    seg = EVER_CONVERGED[0]
+    sentinel_path(root, seg).mkdir()
+
+    proc = run_backfill(root, "--apply")
+
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert seg not in payload["already_sentineled"], (
+        "a directory is not a sentinel; counting it as one claims a "
+        "protection that does not exist"
+    )
+    assert [e["seg"] for e in payload["ambiguous_sentinels"]] == [seg], payload
+    assert payload["counts"]["ambiguous_sentinels"] == 1
+    assert sentinel_path(root, seg).is_dir(), "left untouched for the operator"
+
+
+def test_a_healthy_project_reports_no_ambiguous_sentinels(tmp_path):
+    """FALSE-POSITIVE BOUND for the two tests above: the new bucket must stay
+    empty on every normal run, and the two original buckets must still add up.
+    A predicate that over-blocks would strand a real backfill.
+
+    Green before and after the fix by design (modulo the new key)."""
+    root = setup_mixed_project(tmp_path)
+
+    proc = run_backfill(root, "--apply")
+
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["ambiguous_sentinels"] == []
+    assert payload["counts"]["ambiguous_sentinels"] == 0
+    assert sorted(payload["already_sentineled"] + payload["missing_sentinels"]) == EVER_CONVERGED, (
+        "with nothing ambiguous, the two original buckets must still "
+        "partition the ever-converged set exactly as before"
+    )
+    assert "AMBIGUOUS" not in proc.stderr
 
 
 # ---------------------------------------------------------------------------

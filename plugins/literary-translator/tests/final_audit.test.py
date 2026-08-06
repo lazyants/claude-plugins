@@ -1363,6 +1363,81 @@ def test_completeness_gate_stale_with_ever_converged_sentinel_is_deliverable(tmp
     assert "stale_previously_converged=1" in result.stderr
 
 
+def test_an_ambiguous_sentinel_still_carves_out_and_is_reported(tmp_path):
+    """1.19.1 fail-closed predicate, final_audit's half -- and the half where
+    "fail-closed" points at the OPPOSITE ACTION from the dispatch gate's.
+
+    The other three consumers refuse when the sentinel is unreadable. Here
+    refusing IS the destructive branch: a dangling symlink read as "absent"
+    drops seg02 out of the carve-out, leaves stale_blocking at 1, and reports
+    a finished book as INCOMPLETE -- over a broken dotfile, with no way out,
+    because the operator's only route to a fresh sentinel is a retranslate
+    that select_segments.py's gate now correctly refuses for this very
+    segment. Sentinel respected in one place and not the other is exactly the
+    "tokens saved, book undeliverable" shape.
+
+    Fails against the unfixed code at `assert result.returncode == 0` (and at
+    project_complete/stale_previously_converged): pre-fix `.exists()` follows
+    the dangling link, returns False, the segment is not carved out, and the
+    audit exits 3."""
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02"))
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    corrupt_cache_key_field(root, "seg02", "plugin_bundle_hash")
+
+    link = root / "segments" / ".ever_converged.seg02"
+    link.symlink_to(root / "segments" / "no-such-target")
+    assert link.is_symlink() and not link.exists(), (
+        "precondition: a DANGLING link -- Path.exists() must report False "
+        "here, or the test is not exercising the reported bug"
+    )
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0, (
+        f"an unreadable sentinel must not turn a deliverable book into an "
+        f"undeliverable one -- the ledger already recorded this segment "
+        f"converged, which is what made it 'stale' rather than 'not_started'"
+        f":\nrc={result.returncode}\nstdout={result.stdout!r}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["project_complete"] is True
+    assert summary["stale_previously_converged"] == 1
+    assert summary["completeness_counts"]["stale"] == 1, (
+        "the raw stale count must stay visible, exactly as for a valid sentinel"
+    )
+    # Counted, but never silently: the operator is the only one who can repair
+    # the path, so the audit that relied on it has to say so.
+    assert "AMBIGUOUS EVER-CONVERGED SENTINELS" in result.stderr, result.stderr
+    assert "seg02" in result.stderr
+    assert "symbolic link" in result.stderr, (
+        "the report must name what is actually at the path, not just that "
+        "something is wrong"
+    )
+
+
+def test_a_valid_sentinel_produces_no_ambiguity_report(tmp_path):
+    """FALSE-POSITIVE BOUND for the test above. A healthy project must not
+    grow a scary AMBIGUOUS banner -- a warning that fires on the normal case
+    is one operators learn to skip past, which would cost exactly the
+    attention the banner exists to buy.
+
+    Green before and after the fix by design."""
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02"))
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    corrupt_cache_key_field(root, "seg02", "plugin_bundle_hash")
+    mark_ever_converged(root, "seg02")
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0, f"stderr:\n{result.stderr}"
+    assert parse_summary(result)["project_complete"] is True
+    assert "AMBIGUOUS EVER-CONVERGED SENTINELS" not in result.stderr
+
+
 def test_completeness_gate_stale_without_sentinel_still_exits_3(tmp_path):
     """Fail-safe half of the carve-out: a 'stale' segment with NO sentinel
     must still block delivery exactly as before (#208's pre-existing
