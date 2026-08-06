@@ -3167,11 +3167,13 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         # segment; for current_draft_sha1() to fail moments later the
         # draft has to have been deleted/mangled in that window, or
         # draft_sha1.py itself is unusable. Neither is a fact about the
-        # translation, and neither is improved by writing a cap. Re-raised
+        # translation, and neither is improved by writing a cap. Raised
         # (never re-run -- `current_sha1_error` is the original DriverError
-        # captured above, so the operator gets the real cause verbatim
-        # instead of a second, possibly differently-failing probe) so it
-        # lands in process_segment()'s own `except Exception` and becomes
+        # captured above, and its text is interpolated verbatim, so the
+        # operator gets the real cause without a second, possibly
+        # differently-failing probe; the exception OBJECT is new, see the
+        # comment at the capture site) so it lands in process_segment()'s
+        # own `except Exception` and becomes
         # outcome="failed", reason="unexpected-error:DriverError" -- which,
         # per that function's docstring, writes NO terminal ledger entry
         # and dispatches NO codex job, leaving the segment "recoverable"
@@ -3647,10 +3649,11 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               also reached DELIBERATELY,
                                               not only by accident:
                                               derive_next_action()'s
-                                              non-clean-final branch
-                                              re-raises the DriverError
-                                              from a draft whose sha1 could
-                                              not be computed, precisely
+                                              non-clean-final branch raises
+                                              a DriverError carrying the
+                                              captured cause for a draft
+                                              whose sha1 could not be
+                                              computed, precisely
                                               BECAUSE this row is
                                               recoverable and spends no
                                               codex job -- see that

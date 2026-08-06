@@ -30,7 +30,7 @@ limitations below rather than left implied.
   at round label `"final"` instead of capping. Both previously resolved an ambiguity toward
   `cap_reached`, which is the one outcome a human must undo by hand. The captured cause is not
   re-raised: `fatal()` raises a NEW `DriverError` whose message interpolates the original's text and
-  names what was refused (segment_dispatch_driver.py:3221-3228). Chosen for the operator's sake, but
+  names what was refused (segment_dispatch_driver.py:3223-3230). Chosen for the operator's sake, but
   it means the original's `exit_code` and extra fields do not survive, so nothing may match on the
   original exception object.
 - **The reopen is written AND confirmed on disk before the review is dispatched.** A crash in that
@@ -58,15 +58,22 @@ writer believes protected is one the dispatch gate believes unprotected.
   stat failure; the backfill REPORTS UNPROTECTED.
 - Pinned by a five-state matrix including `EACCES`, an `inspect.getsource` identity check across all
   four copies, and a census test that fails if a fifth script joins the contract without being
-  listed. The census checks its own scan glob by enumerating the same directory a second way (full
-  listing plus a suffix test) and requiring the two to agree — not by a floor on the count, which
-  cannot separate "scanned everything" from "scanned almost everything and kept the needles":
-  measured on this tree, `*.py` scans 44 scripts while the plausible typo `*_*.py` scans 42, still
-  finds all four participants, and still satisfies every other assertion — it passed the floor this
-  release replaces, which is why the floor is gone rather than raised. A third,
-  deliberately loose needle scans for `.ever_converged.` in any spelling and pins its one legitimate
-  prose-only mention by name, so a fifth participant that builds the path in a spelling the exact
-  needles miss fails the census rather than being silently excluded by it.
+  listed. The census checks its own scan pattern by walking the same tree a second way (`os.walk`
+  plus a suffix test, no pattern matching) and requiring the two to agree — not by a floor on the
+  count, which cannot separate "scanned everything" from "scanned almost everything and kept the
+  needles": measured on this tree, `*.py` scans 44 scripts while the plausible typo `*_*.py` scans
+  42, still finds all four participants, and still satisfies every other assertion — it passed the
+  floor this release replaces, which is why the floor is gone rather than raised.
+- **The census pins participants by four needles and its exceptions by ROLE, not by name.** Two
+  needles are exact spellings (the marker f-string, the predicate `def`); a third, `def
+  ever_converged_path`, is independent of how the marker filename is spelled, so a participant
+  building the path as `".ever_converged." + seg` still trips it. A fourth, loose needle scans the
+  bare token `ever_converged` and pins the two files that mention it without participating — and
+  those two are re-asserted every run to carry none of the three executable signals, because a
+  name-only whitelist is how a listed file quietly becomes a participant. Stated rather than papered
+  over: this is a source-TEXT census, so a participant that never spells `ever_converged`
+  contiguously evades all four. Closing that needs AST/import analysis of scripts that are
+  deliberately import-free; the needles are chosen so evasion takes concealment, not drift.
 
 The duplication is deliberate and stays. The reason previously given in those docstrings was false —
 this codebase does share modules between "self-contained" scripts. The real reason is stronger:
@@ -90,7 +97,14 @@ script would put its bytes outside the hash meant to cover them.
   selection reopens a mismatch on its own, or a lease shared by every writer of that draft. Both are
   changes to the ledger contract and belong with the claim mechanism, not with this fix. What this
   release does change is the failure's blast radius: before it, that branch capped with no check at
-  all, and a refusal here writes nothing, which leaves the segment selectable and self-healing.
+  all.
+  **The refusal is NOT self-healing in every case, and the first draft of this note said it was.**
+  A refusal writes nothing, so on a segment with no prior ledger entry it does leave the segment
+  selectable. But this branch is also reached deliberately on a segment a PREVIOUS invocation
+  already capped — that is what `reopen_capped` exists for — and there the refusal leaves the older
+  `non_converged`/`cap` fragment exactly as it found it. `select_segments.py` maps that to
+  `human_escalation` (select_segments.py:1192-1197), which is outside the default eligible set, so
+  that segment is not re-selected by an ordinary run and needs a human. Recoverable, but by hand.
 - **The A→B→A revert is still undetected, and the window is wider than "while a review is in
   flight".** The review's `draft_sha1` binding catches any single change to a draft between review
   and convergence, but not an exact revert; `review.schema.json` concedes that hash-first-then-read
