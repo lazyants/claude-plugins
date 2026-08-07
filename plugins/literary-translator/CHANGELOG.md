@@ -213,7 +213,7 @@ that "three and one" count while the list grew to six.
   rewriting entries in place (which preserves the directory inode entirely), or a sentinel deleted
   after the census classified it PRESENT all do it. Closing it needs a locking protocol honoured
   by everything that can touch `segments/`, which this script cannot impose. Full statement in
-  SKILL.md's upgrade note; treat a clean run as evidence about the moment it ran.
+  SKILL.md's upgrade note; treat a clean run as evidence about the moment it ran. Tracked as #442, which records the three in-round narrowings that were tried and rejected, and the shapes that would remove the class rather than narrow it.
 
   The shipped fix stages instead: write to a uniquely-named temp file in the same directory,
   `fsync` it, then publish with `os.link()` — which raises `FileExistsError` on an existing target
@@ -288,7 +288,7 @@ that "three and one" count while the list grew to six.
 
 ### Known limitations
 
-- **The codex-job budget overspend is unbounded, and is NOT fixed here.** The review reported it as
+- **The codex-job budget overspend is unbounded, and is NOT fixed here** (tracked as #440). The budget is also one short of the legitimate worst case. The review reported it as
   "one extra job per segment"; it is not. `codex_jobs_per_segment()` is a per-segment-lifetime
   estimate while the extra loop iteration is a per-invocation bound, and the counter resets every
   invocation, so the overspend is unbounded across invocations. Both obvious repairs either reach
