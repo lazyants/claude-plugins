@@ -19,7 +19,17 @@ end while the anchor sat safely near the start, and the check passed.
 
 So anchors are a LIST, and every one must be present. For a range, declare
 enough of them to span the claim -- typically its first and last load-bearing
-line. Content leaving the range then fails, which is the whole point.
+line, plus whatever the claim is actually ABOUT in between.
+
+WHAT THIS STILL DOES NOT CATCH, stated because two earlier versions of this
+docstring claimed more than the code delivered. Anchors detect content leaving
+a range; they do not detect content CHANGING inside it. `fatal(` becoming
+`print(` keeps every anchor in range, and so does refactoring a call into a
+payload built in-range and dispatched after it. Anchoring the load-bearing
+tokens of the claim narrows that -- which is why `fatal(` is anchored rather
+than only the condition guarding it -- but a semantic mutant that preserves
+every anchored token passes. This checks that a citation still POINTS at its
+claim, not that the claim is still TRUE.
 
 MAINTENANCE CONTRACT. This covers the NEWEST entry only, since that is the one
 under active edit. Adding a citation means adding its anchors here; the test
@@ -77,6 +87,7 @@ CITATION_ANCHORS = {
     "select_segments.py:1192-1210": [
         "ledger_segments.get(seg)",
         "HUMAN_ESCALATION_STATUSES",
+        '"category": "human_escalation"',
         '"category": "recoverable"',
     ],
     "select_segments.py:1201-1206": [
@@ -97,16 +108,38 @@ CITATION_ANCHORS = {
     "select_segments.py:1428-1477": [
         "if previously_converged and not args.allow_retranslate_converged:",
         "second_loss",
+        # The refusal itself, not just the condition guarding it. Without this
+        # the call could be refactored out of the range while every other
+        # anchor stayed put.
+        "fatal(",
         "previously_converged=previously_converged",
     ],
 }
 
-# Any `name.ext:NNN`, extension-agnostic. Pinning a list of extensions is how
-# a citation becomes INVISIBLE to this test -- `template.js:12` and
-# `Dockerfile:12` were both unmatched by an earlier `(py|md|json)` alternation,
-# and an unmatched citation is one nothing here checks at all.
+# Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
+# alphabetic extension are still required. Pinning a list of extensions was
+# worse -- `template.js:12` was unmatched by an earlier `(py|md|json)`
+# alternation, and an unmatched citation is one nothing here checks at all.
+#
+# Still invisible, and this is a real gap rather than a rhetorical one:
+# extensionless filenames (`Dockerfile:12`, `Makefile:12`) and dotfiles
+# (`.gitignore:12`). This entry cites none, so the gap is currently latent;
+# cite one and it will be silently unchecked rather than reported.
+#
+# In the other direction it over-matches: `foo.bar:1` in prose and a
+# `https://host.tld:1/path` URL both look like citations. That direction is
+# SAFE -- an over-match lands in `undeclared` and fails loudly, so the cost is
+# a bogus anchor entry, never a missed drift. `v1.20.0:12`, `12:30` and `3:1`
+# do not match (no alphabetic extension).
 _CITATION = re.compile(r"\b([A-Za-z_][\w.-]*\.[A-Za-z][\w]*):(\d+)(?:-(\d+))?\b")
-_FENCE = re.compile(r"^([ \t]*)(```+|~~~+).*$", re.M)
+# A fence line, CommonMark subset: up to 3 leading spaces, then a run of at
+# least 3 backticks or tildes, then an optional info string. An earlier version
+# matched ANY indentation and either character interchangeably, which made it
+# not a state machine at all: four-space-indented code opened a fence, a `~~~`
+# line closed a backtick fence, and a short closer closed a long opener. Each
+# of those silently blanked real content, and blanked content is invisible to
+# every assertion below.
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})[^`]*$")
 # `## 1.20.0 — 2026-08-06`: the version, then anything (this repo appends a
 # release date). Requiring end-of-line after the version made this test fail on
 # every real heading in the file.
@@ -118,15 +151,34 @@ def _strip_fenced_blocks(text):
 
     A `## something` inside a fence is not a heading, and an earlier revision
     treated one as the start of the next entry -- everything after it became
-    invisible to every assertion here."""
+    invisible to every assertion here.
+
+    Only the opening fence's own character closes it, and only a closer at
+    least as long. An unclosed fence RAISES rather than blanking the rest of
+    the file: silently swallowing everything after a typo'd fence is the
+    failure mode this whole test exists to avoid, and it looks identical to a
+    clean run."""
     out = list(text.splitlines(keepends=True))
-    inside = False
+    marker = None  # the opening run, e.g. '```' -- None when outside a fence
+    opened_at = None
     for i, line in enumerate(out):
-        if _FENCE.match(line.rstrip("\n")):
-            inside = not inside
-            out[i] = "\n"
-        elif inside:
-            out[i] = "\n"
+        match = _FENCE.match(line.rstrip("\n"))
+        if marker is None:
+            if match:
+                marker, opened_at = match.group(1), i + 1
+                out[i] = "\n"
+            continue
+        # Inside: only the same character, at least as long, closes it.
+        run = match.group(1) if match else ""
+        if run and run[0] == marker[0] and len(run) >= len(marker):
+            marker = None
+        out[i] = "\n"
+    assert marker is None, (
+        f"CHANGELOG has an unclosed `{marker}` fence opened at line "
+        f"{opened_at}. Everything after it would be treated as code and "
+        f"silently excluded from every check here -- including any citation "
+        f"in it. Close the fence."
+    )
     return "".join(out)
 
 
@@ -156,6 +208,19 @@ def _resolve(filename):
 
 def test_every_changelog_citation_still_points_at_its_claim():
     version, entry = _newest_entry()
+
+    # An empty anchor list is indistinguishable from a declared one to every
+    # check below -- the key is present, so it is not `undeclared`, and the
+    # per-anchor loop runs zero times. Emptying a list is therefore the
+    # cheapest way to silently retire a citation from this test while it still
+    # looks covered. Measured: doing that to `segment_dispatch_driver.py`
+    # passed before this assertion existed.
+    empty = sorted(k for k, v in CITATION_ANCHORS.items() if not v)
+    assert not empty, (
+        f"these citations declare an EMPTY anchor list, which checks nothing: "
+        f"{empty}. Declare the strings that must appear in each range, or drop "
+        f"the citation from the entry."
+    )
     seen = {}
     for match in _CITATION.finditer(entry):
         filename, start, end = match.group(1), int(match.group(2)), match.group(3)

@@ -108,12 +108,6 @@ one the dispatch gate believes unprotected.
   discuss the marker, though in none of the three definition sets. So each is re-asserted to carry no
   definition, no token-bearing literal outside a docstring, and no API identifier. The first two of
   those were each added after a mutant passed the census without them.
-  A seventh assertion is not a census question at all: the census can be exactly right about which
-  four files participate while one of them quietly reintroduces `ever_converged_path(seg).exists()`
-  — the raw read this release removed. That is now pinned too: through a local, an alias of that
-  local, an alias of the function itself, a `Path(...)` wrapper, a lambda or class body, a
-  comprehension, and the module-function spellings (`os.path.exists`, `os.stat`) as well as the
-  method ones.
   **A seventh check was attempted and has been REMOVED, which is worth recording as plainly as the
   six that stayed.** The census pins WHICH files participate, never what they DO, so a participant
   that quietly reintroduces `ever_converged_path(seg).exists()` — the raw read this release exists

@@ -2175,12 +2175,9 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
     participant doing that has to reach the marker somehow, and reaching it
     through the shared API trips the sixth. The residue is a file that
     reimplements the whole convention from non-literal parts under its own
-    names, which is concealment, not drift. The probe check has its own
-    stated limit: indirection ACROSS scopes (a helper returning the path to a
-    caller that probes it) is not caught, and closing that needs real
-    dataflow. So this narrows evasion to shapes nobody reaches for by
-    accident; it does not make the census complete, and an earlier revision
-    of this docstring overclaimed exactly that.
+    names, which is concealment, not drift. None of this makes the census
+    complete, and an earlier revision of this docstring overclaimed exactly
+    that.
 
     THE SCAN PATTERN IS ITSELF A DEPENDENCY, and a narrowed one is the
     failure this guard exists to catch, so it is checked by INDEPENDENT
@@ -2342,19 +2339,29 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
             f"whether or not any `ever_converged` literal appears -- move it to "
             f"SENTINEL_SCRIPTS and give it the shared predicate."
         )
-        # An exempted file may not BIND an API name either, by any means. A
-        # `def` is caught above; an assignment is not, and
-        # `mark_ever_converged = write_marker` defines the writer's public name
-        # just as effectively -- measured, that shape passed every other check
-        # here. This is deliberately stricter than the census-wide needle: the
-        # census asks which files USE the API, while an exemption is a promise
-        # not to touch the convention at all.
+        # An exempted file may not BIND an API name either. A `def` is caught
+        # above; an assignment is not, and `mark_ever_converged = write_marker`
+        # defines the writer's public name just as effectively -- measured,
+        # that shape passed every other check here. This is deliberately
+        # stricter than the census-wide needle: the census asks which files USE
+        # the API, while an exemption is a promise not to touch the convention
+        # at all.
+        #
+        # It is a NAME check, not a dataflow one, and both directions are
+        # approximate. It misses binding forms `_api_names_bound_by` does not
+        # walk (parameters, comprehension targets, `match` star and mapping-
+        # rest captures, imports -- though imports are caught upstream by
+        # `_sentinel_api_refs`). And it can fire on an unrelated local that
+        # merely COLLIDES with an API name, e.g. `for mark_ever_converged in
+        # items`. A false red here is loud and one rename fixes it; the miss
+        # is the direction that matters, and it is not closed.
         bound_api_names = sorted(_api_names_bound_by(exempt_src))
         assert not bound_api_names, (
             f"{name} is on SENTINEL_NON_PARTICIPANTS but BINDS a sentinel API "
             f"name: {bound_api_names}. Assigning the name publishes the helper "
-            f"under it -- there is no version of that which is not "
-            f"participation. Move it to SENTINEL_SCRIPTS."
+            f"under it. If this is an unrelated local that merely collides "
+            f"with an API name, rename the local; otherwise move the file to "
+            f"SENTINEL_SCRIPTS."
         )
     assert path_builders == expected, (
         f"the set of scripts that BUILD the sentinel path has changed: "
