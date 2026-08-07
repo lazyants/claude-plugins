@@ -489,32 +489,42 @@ census established nothing read as a healthy project:
   in dry runs too, because a dry run's `missing_sentinels` is what this note
   tells you to act on.
 
-  **Known limitation, disclosed rather than fixed. Read this before
-  trusting a clean report on a live or networked project.** The census reads
-  each sentinel once, by pathname, and nothing revalidates that verdict
-  afterwards; the identity check takes a single sample of the directory's
-  `(st_dev, st_ino)` at the end. So a segment can be reported protected when
-  it is not, and **an earlier draft of this note badly understated how**: it
-  said this needs something renaming `segments/`. A rename is one mechanism,
-  not a precondition. All of these reach the same wrong answer:
+  **Known limitation, narrower than it was but not closed. Read this before
+  trusting a clean report on a live or networked project.** Every sentinel
+  lookup now goes through the directory descriptor the run holds — the census
+  and the writer's `EEXIST` re-read alike — so no read can land in a
+  different directory than the one the run opened. **That settles WHICH
+  DIRECTORY and nothing about the entries inside it**, and two mechanisms
+  reach a wrong answer without ever touching the pathname:
 
-  - a mount or automount overlay that appears during the census and is gone
-    before the final sample;
-  - network-filesystem failover, remount, or snapshot/backend switching —
-    no local process need be involved at all;
   - a sync client or restore tool rewriting sentinel entries **in place**,
     which leaves the directory inode unchanged, so the identity check sees
     nothing wrong;
   - a sentinel simply deleted after the census classified it PRESENT.
 
+  A third is only partly closed: network-filesystem failover, remount or
+  snapshot switching now surfaces as AMBIGUOUS and fails the run **if it
+  invalidates the descriptor**, but a silent switch that keeps it valid does
+  not.
+
   **The consequence is silent retranslation, not just a wrong report.**
   `select_segments.py` gates only the segments it finds PRESENT; a marker
   that has since gone absent leaves that segment eligible, and the refusal
-  that would have protected converged work never fires. Closing this needs a
-  locking protocol honoured by everything that can touch `segments/`, which
-  is outside what this script can impose. Treat a clean run as evidence
+  that would have protected converged work never fires. Closing what remains
+  needs a protocol honoured by everything that can write into `segments/`,
+  which is outside what this script can impose. Treat a clean run as evidence
   about the moment it ran, and re-run it immediately before dispatching
   rather than relying on an earlier result.
+
+  **Two earlier drafts of this note were wrong in opposite directions, which
+  is why it is worth reading rather than skimming.** The first said the
+  failure needs something renaming `segments/` — an understatement, since a
+  rename is one mechanism and not a precondition. The second said closing it
+  "needs a locking protocol honoured by everything that can touch
+  `segments/`" — an overstatement that survived several review rounds because
+  a limitation that sounds cautious never gets attacked. The descriptor was
+  already open; the census simply was not using it, and PR review reproduced
+  a clean report about a directory the project was not using.
 - **`ambiguous_sentinels`** — a path whose protection status could not be
   established. That covers both a path that is demonstrably not a regular
   file (a directory, a symlink, a dangling symlink) and one whose state

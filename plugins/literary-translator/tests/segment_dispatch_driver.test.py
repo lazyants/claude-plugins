@@ -33,6 +33,7 @@ reason (scope this file to the driver's OWN logic, not re-prove
 `cache_key.py`'s 15-field hashing, which has its own dedicated test file).
 """
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -2768,12 +2769,24 @@ def test_derive_next_action_cap_reached_when_final_round_not_clean(tmp_path):
     findings = [{"loc": "p1:1", "severity": "minor", "issue": "x", "suggest": "y"}]
     review = _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
                                 draft_sha1=draft_sha1, findings=findings)
-    # reviewed_sha1/reviewed_token ride along so process_segment() can bind
-    # the terminal cap WRITE to the review this verdict was derived from --
-    # see _cap_still_binds_what_was_reviewed() and the race test below.
+    # reviewed_sha1/reviewed_token/reviewed_digest ride along so
+    # process_segment() can bind the terminal cap WRITE to the review this
+    # verdict was derived from -- see _cap_still_binds_what_was_reviewed()
+    # and the race tests below.
+    #
+    # The digest is recomputed HERE from the review dict this test wrote,
+    # never read back from driver_mod._review_verdict_digest() -- calling
+    # the function under test to produce the expected value would assert
+    # nothing about it. Written out this way it also pins the canonical
+    # FORM (sha256 over sorted-key, non-ASCII-preserving JSON, utf-8), which
+    # is the part a later refactor could silently change.
+    expected_digest = hashlib.sha256(
+        json.dumps(review, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
     assert driver_mod.derive_next_action("seg01", ctx) == {
         "action": "cap_reached", "findings": findings,
         "reviewed_sha1": draft_sha1, "reviewed_token": review["dispatch_token"],
+        "reviewed_digest": expected_digest,
     }
 
 
@@ -3250,12 +3263,12 @@ def test_the_cap_write_is_refused_when_the_review_artifact_is_swapped_after_the_
     (its review_token_matches() precondition), mirrored onto the terminal
     write on the other side of the fork.
 
-    Bounded on purpose, and the bound is the point of the assertion at the
-    end: _cap_still_binds_what_was_reviewed() binds (draft_sha1,
-    dispatch_token), the same pair enrich_converged_fields() binds, so a
-    replacement carrying BOTH unchanged is NOT detected however different
-    its verdict. See that helper's own RESIDUAL paragraph for why that is
-    the right width rather than an oversight."""
+    Still the TOKEN half specifically, and it keeps its own test now that
+    the binding is wider than the pair: the replacement here differs in its
+    dispatch_token, so it is caught by the provenance comparison and never
+    reaches the digest one -- pinned by the mismatch message asserted at the
+    end, which only the provenance branch emits. The verdict-substitution
+    case the digest exists for is the test immediately below."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     _dna_write_draft(root, driver_mod)
@@ -3285,6 +3298,92 @@ def test_the_cap_write_is_refused_when_the_review_artifact_is_swapped_after_the_
     assert result["outcome"] == "failed" and result["reason"] == "cap-write-draft-moved", result
     assert "changed between the cap decision and the cap write" in result["detail"], result
     assert not (root / "runs" / "ledger.d" / "seg01.json").exists()
+
+
+def test_the_cap_write_is_refused_when_the_verdict_is_swapped_under_identical_provenance(tmp_path, monkeypatch):
+    """The VERDICT half of the binding, which neither the draft re-hash nor
+    the token comparison can cover: the draft never moves and the
+    replacement review carries the SAME draft_sha1 and the SAME
+    dispatch_token (the token is a pure function of run_id+seg+round_label,
+    so a same-round re-review reproduces it exactly) -- only the verdict
+    differs. The pair-only binding this helper shipped with accepted that
+    substitution and wrote a terminal non_converged/cap fragment from a
+    verdict that no longer existed on disk; two independent reviewers
+    reached it from different directions, which is why it is bound rather
+    than disclosed.
+
+    The substitute is deliberately a CLEAN review: the direction that
+    matters is capping a segment terminally while the artifact on disk says
+    it converged. The reverse (a clean decision overwritten by a non-clean
+    verdict) has no cap write to corrupt."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    reviewed_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=reviewed_sha1,
+                       findings=[{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}])
+
+    real_derive = driver_mod.derive_next_action
+    swapped = {}
+
+    def _derive_then_swap_verdict(seg, ctx_arg):
+        action = real_derive(seg, ctx_arg)
+        assert action["action"] == "cap_reached", f"setup check: {action}"
+        swapped.update(_dna_write_review(
+            root, driver_mod, round_label="final", clean=True, coverage_ok=True,
+            draft_sha1=reviewed_sha1, findings=[],
+        ))
+        return action
+
+    monkeypatch.setattr(driver_mod, "derive_next_action", _derive_then_swap_verdict)
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    # The substitution really is invisible to the provenance pair -- asserted
+    # against the file on disk, so this stays true only while the fixture
+    # actually reproduces the race the digest exists for.
+    on_disk = json.loads((root / "segments" / "seg01.review.json").read_text(encoding="utf-8"))
+    assert on_disk == swapped and on_disk["clean"] is True, on_disk
+    assert on_disk["draft_sha1"] == reviewed_sha1, "setup check: the swap must keep the draft sha1"
+    assert on_disk["dispatch_token"] == driver_mod.review_dispatch_token(_DNA_RUN_ID, "seg01", "final"), (
+        "setup check: the swap must keep the same-round dispatch_token"
+    )
+
+    assert result["outcome"] == "failed" and result["reason"] == "cap-write-draft-moved", result
+    assert "replaced between the cap decision and the cap write" in result["detail"], (
+        f"the refusal must come from the VERDICT comparison, not the "
+        f"provenance one: {result}"
+    )
+    assert not (root / "runs" / "ledger.d" / "seg01.json").exists(), (
+        "refusing must leave NO ledger write -- above all not the terminal "
+        "non_converged/cap fragment select_segments.py excludes from every "
+        "later default selection"
+    )
+
+
+def test_an_ordinary_unraced_cap_is_still_written(tmp_path):
+    """The false-positive bound on the binding above, driven end to end with
+    nothing racing it: a non-clean mandatory-final review over the draft
+    that is on disk must still reach the terminal write. A guard that also
+    refuses correct runs is worse than the race it closes, and this is the
+    assertion that says the widening did not do that."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    findings = [{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}]
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=draft_sha1, findings=findings)
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result == {
+        "seg": "seg01", "converged": False, "outcome": "failed",
+        "reason": "cap", "lastFindings": findings,
+    }, result
+    fragment = _dna_read_fragment(root)
+    assert fragment["status"] == "non_converged" and fragment["reason"] == "cap", fragment
 
 
 def test_derive_next_action_re_reviews_instead_of_needs_fix_on_a_fabricated_loc(tmp_path):

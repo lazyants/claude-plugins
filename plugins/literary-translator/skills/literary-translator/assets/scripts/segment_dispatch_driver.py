@@ -326,6 +326,7 @@ stdout either way; all human-readable detail on stderr.
 
 import argparse
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -2867,10 +2868,12 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         goes, exactly like the cause="fabricated_loc" marker above.
       {"action": "needs_fix", "round_label": ..., "findings": [...]}
       {"action": "cap_reached", "findings": [...], "reviewed_sha1": ...,
-        "reviewed_token": ...} -- the sha1 and dispatch_token of the review
-        this cap verdict was derived FROM, so process_segment() can refuse
-        the terminal write if either moved in between (a cap must describe
-        bytes a reviewer actually read).
+        "reviewed_token": ..., "reviewed_digest": ...} -- the draft sha1,
+        the dispatch_token AND a content digest of the review this cap
+        verdict was derived FROM, so process_segment() can refuse the
+        terminal write if any of them moved in between (a cap must describe
+        bytes a reviewer actually read, and a VERDICT a reviewer actually
+        reached -- the digest is what makes the second half true).
       {"action": "already_converged", "round_label": "1".."<max_fix_rounds>"|"final"}
       {"action": "invalid_post_fix_draft"} -- codex round-3 MAJOR, see the
         `if not draft_ok:` branch below for the full reasoning: an invalid
@@ -3229,15 +3232,20 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
                 f"invocation never read"
             )
         if draft_matches_review:
-            # reviewed_token travels with the verdict so process_segment()
-            # can bind the cap WRITE to the review this decision was made
-            # from, not merely to a review that happens to be on disk when
-            # the write runs -- see _cap_still_binds_what_was_reviewed().
+            # reviewed_token and reviewed_digest travel with the verdict so
+            # process_segment() can bind the cap WRITE to the review this
+            # decision was made from, not merely to a review that happens to
+            # be on disk when the write runs -- see
+            # _cap_still_binds_what_was_reviewed(). The digest is taken from
+            # review_obj, the object THIS function parsed and judged, which
+            # is the whole point: a digest re-read from disk at write time
+            # would describe the replacement, not the reviewed verdict.
             return {
                 "action": "cap_reached",
                 "findings": review_obj.get("findings") or [],
                 "reviewed_sha1": reviewed_sha1,
                 "reviewed_token": review_obj.get("dispatch_token"),
+                "reviewed_digest": _review_verdict_digest(review_obj),
             }
         # reopen_capped: a previous invocation may already have written the
         # terminal {"status": "non_converged", "reason": "cap"} fragment
@@ -3464,6 +3472,33 @@ def _read_review_obj(ctx: "DispatchContext", seg: str, fallback_findings=None) -
     return {"findings": fallback_findings}
 
 
+def _review_verdict_digest(review_obj: dict) -> str:
+    """sha256 over the WHOLE review object, in the sorted-key canonical form
+    review_artifact_check.py's own canonical_text() already uses for the
+    same artifact -- so this is the repo's existing notion of "the same
+    review", hashed, not a second one invented here.
+
+    Digest over the whole object rather than an enumerated list of
+    decision-bearing fields (`clean`, `coverage_ok`, `findings`): the
+    enumeration is what silently stops covering the verdict the day a field
+    is added. review.schema.json is `additionalProperties: false` over
+    exactly five properties TODAY, and review_ready.py refuses to promote
+    anything that does not validate against it, so an enumeration would be
+    complete right now -- and would go quietly incomplete at the next schema
+    change, with nothing failing to say so.
+
+    Hashed from an already-PARSED object, never from the file's raw bytes,
+    so a re-serialization that reorders keys or changes whitespace without
+    changing a single value is not mistaken for a different verdict. What is
+    NOT excused: findings[] element order, which is array order and part of
+    the value. That direction is the safe one anyway -- a mismatch refuses a
+    write and records nothing, so the segment simply comes back next
+    invocation and is re-derived from whatever is actually on disk."""
+    return hashlib.sha256(
+        json.dumps(review_obj, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
 def _cap_still_binds_what_was_reviewed(seg: str, ctx: "DispatchContext", action: dict) -> "str | None":
     """None if the terminal cap in `action` still describes the review and
     the draft bytes it was derived from, or a human-readable reason string
@@ -3499,37 +3534,40 @@ def _cap_still_binds_what_was_reviewed(seg: str, ctx: "DispatchContext", action:
     the way a converged one does -- would close it for every caller, not
     just this driver; that is a change to a file this driver does not own.
 
-    RESIDUAL, stated rather than implied by the pair chosen: the binding is
-    (draft_sha1, dispatch_token) -- the SAME two facts
-    enrich_converged_fields() binds a convergence write to, mirrored, not
-    widened. A replacement review.json carrying BOTH the same draft_sha1
-    and the same dispatch_token is therefore indistinguishable here even if
-    its verdict differs (a hand-flipped `clean`, different findings). That
-    is narrow by construction, and NOT as narrow as an earlier version of
-    this docstring claimed. That version argued the residual was
-    unreachable because the only automatic writer of review.json is
-    codex_job.py's promotion and this driver holds the project-wide flock
-    across the window. **That argument is wrong and is retracted.**
-    `runs/.driver.lock` excludes another DRIVER; codex_job.py never
-    acquires it -- it takes only its own per-segment
-    `.codex_job.<seg>.lock` -- and the default workflow launches
-    codex_job.py DETACHED, independently of any driver. So the flock does
-    not close this window, and the sha half does not either, because the
-    draft need not change for the verdict to.
+    WIDER THAN THE CONVERGENCE WRITE'S PAIR, deliberately. An earlier
+    version of this helper bound only (draft_sha1, dispatch_token) -- the
+    SAME two facts enrich_converged_fields() binds a convergence write to,
+    mirrored rather than widened -- and disclosed the rest as an accepted
+    residual: a replacement review.json carrying BOTH the same draft_sha1
+    and the same dispatch_token was indistinguishable here however
+    different its verdict (a hand-flipped `clean`, different findings).
+    That is now CLOSED by also carrying `reviewed_digest`, a sha256 over
+    the whole review object derive_next_action() actually parsed (see
+    _review_verdict_digest() for why the whole object and not an
+    enumeration of `clean`/`coverage_ok`/`findings`). The provenance pair
+    is kept alongside it, not replaced: the digest subsumes it, but the
+    pair's own mismatch message names WHICH bound fact moved, which a
+    digest cannot.
 
-    Reachability, so this is read neither narrower NOR WIDER than it is --
-    the retraction above was itself over-corrected on review, and the
-    ordinary detached-job route does NOT reach this on its own. A competing
-    codex_job.py serializes on the per-segment `.codex_job.<seg>.lock` and
-    then calls `safe_adopt()` BEFORE it would launch or promote anything
-    (codex_job.py:1300); a canonical review.json that still passes
-    `review_ready.py --expect-token` is ADOPTED, leaving the artifact
-    byte-identical rather than replacing it. SKILL.md additionally forbids
-    running the default Workflow and this driver against one project
-    concurrently.
+    Why the pair alone was not enough, kept because it is the argument the
+    widening rests on. It is not the flock: `runs/.driver.lock` excludes
+    another DRIVER, while codex_job.py never acquires it -- it takes only
+    its own per-segment `.codex_job.<seg>.lock` -- and the default workflow
+    launches codex_job.py DETACHED, independently of any driver. And it is
+    not the sha half, because the draft need not change for the verdict to.
 
-    What actually reaches the residual is therefore narrower than "a
-    detached job", and all of it lies outside that cooperating path:
+    Reachability, kept at its real width so the fix is read neither as
+    over- nor under-motivated -- the ordinary detached-job route does NOT
+    reach this on its own. A competing codex_job.py serializes on the
+    per-segment `.codex_job.<seg>.lock` and then calls `safe_adopt()`
+    BEFORE it would launch or promote anything (codex_job.py:1300); a
+    canonical review.json that still passes `review_ready.py
+    --expect-token` is ADOPTED, leaving the artifact byte-identical rather
+    than replacing it. SKILL.md additionally forbids running the default
+    Workflow and this driver against one project concurrently.
+
+    What reached it was therefore narrower than "a detached job", and all
+    of it lies outside that cooperating path:
       - a WRITER THAT NEVER TAKES THE PER-SEGMENT LOCK -- a human editing
         review.json, an ad-hoc script, a restored backup;
       - an ABA in which the canonical stops passing `review_ready.py`
@@ -3550,22 +3588,24 @@ def _cap_still_binds_what_was_reviewed(seg: str, ctx: "DispatchContext", action:
       - the two-machines-on-sync-replicated-storage case
         acquire_driver_lock()'s own docstring discloses, where the flock is
         not a shared kernel object in the first place.
-
-    One correction to the human case, which an earlier revision put on the
+    Every one of those replaces the ARTIFACT, so every one of them changes
+    the digest -- including the human case an earlier revision put on the
     wrong side of the line: applying findings to the DRAFT changes
-    draft_sha1 and IS caught by the sha half, but editing review.json ALONE
-    -- flipping a verdict without touching the draft -- changes neither
-    bound fact and is not caught.
+    draft_sha1 and was always caught by the sha half, but editing
+    review.json ALONE -- flipping a verdict without touching the draft --
+    changed neither bound fact and used to pass.
 
-    Closing it means binding the verdict itself (`clean`, `coverage_ok`,
-    an artifact digest) rather than mirroring the convergence write's
-    pair, or moving the precondition into ledger_update.py so the
-    non_converged write carries its own the way a converged one does.
-    Neither is done here. This is a KNOWN OPEN RACE, not a residual that
-    argument has disposed of.
+    RESIDUAL, and it is a DIFFERENT one, not this race narrowed: the whole
+    check is still check-then-write, so the DRAFT can be replaced between
+    the re-hash below and write_ledger() landing the cap. Nothing here
+    closes that window -- only moving the precondition into ledger_update.py,
+    so the non_converged write carries its own the way a converged one
+    does, would, and that is a file this driver does not own. Tracked in
+    CHANGELOG.md's Known limitations.
     """
     reviewed_sha1 = action.get("reviewed_sha1")
     reviewed_token = action.get("reviewed_token")
+    reviewed_digest = action.get("reviewed_digest")
     # fallback_findings deliberately omitted -- an unreadable/absent review
     # yields {"findings": None}, whose missing draft_sha1 fails the
     # comparison below, which is the correct answer for "the artifact this
@@ -3578,6 +3618,22 @@ def _cap_still_binds_what_was_reviewed(seg: str, ctx: "DispatchContext", action:
             f"{reviewed_sha1!r}/dispatch_token={reviewed_token!r}, now "
             f"draft_sha1={review_now.get('draft_sha1')!r}/dispatch_token="
             f"{review_now.get('dispatch_token')!r})"
+        )
+    # The verdict itself, not merely its provenance. Compared against the
+    # digest of what derive_next_action() PARSED -- carried on the action
+    # for the same reason reviewed_sha1/reviewed_token are, since
+    # re-deriving it here would re-read the very file the race replaced and
+    # accept the substitute on its own terms. A cap_reached action with no
+    # reviewed_digest at all fails this too, which is the correct direction:
+    # refusing writes nothing.
+    digest_now = _review_verdict_digest(review_now)
+    if digest_now != reviewed_digest:
+        return (
+            f"review verdict for segment {seg!r} was replaced between the cap "
+            f"decision and the cap write by a DIFFERENT verdict carrying the "
+            f"same provenance (draft_sha1={reviewed_sha1!r}/dispatch_token="
+            f"{reviewed_token!r}; review content sha256 {reviewed_digest!r} "
+            f"-> {digest_now!r})"
         )
     try:
         current_sha1 = current_draft_sha1(
@@ -3625,8 +3681,10 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               runRound's own isFinal branch).
       outcome="failed", reason=
         "cap-write-draft-moved"           -- the cap above was NOT recorded:
-                                              the review artifact or the
-                                              draft moved between
+                                              the draft moved, or the review
+                                              artifact changed -- its
+                                              provenance OR its verdict --
+                                              between
                                               derive_next_action()'s
                                               decision and the write (see
                                               _cap_still_binds_what_was_
@@ -3640,10 +3698,11 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               `blocked` is what was there.
                                               Either way the next
                                               invocation re-derives from
-                                              the draft that is actually
-                                              there -- a cap must never
-                                              describe bytes no reviewer
-                                              read.
+                                              the draft and review that are
+                                              actually there -- a cap must
+                                              never describe bytes no
+                                              reviewer read, nor a verdict
+                                              no reviewer reached.
       outcome="needs_fix"                 -- STOPS here: applying findings
                                               to the draft is a real LLM
                                               content-editing turn this
@@ -3929,10 +3988,11 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
             if action["action"] == "cap_reached":
                 # The ONE terminal ledger write in this function that a
                 # later invocation cannot undo by itself, so it is the one
-                # that has to prove it still describes reviewed bytes --
-                # see _cap_still_binds_what_was_reviewed() for the race and
-                # for the convergence-side precondition whose shape this
-                # mirrors. Refusing writes NOTHING, so whatever fragment is
+                # that has to prove it still describes reviewed bytes AND
+                # the verdict reached over them -- see
+                # _cap_still_binds_what_was_reviewed() for the race, and for
+                # the convergence-side precondition it starts from and then
+                # widens. Refusing writes NOTHING, so whatever fragment is
                 # already on disk is what survives -- which is better than
                 # capping over unreviewed bytes in every case, but is only
                 # SELF-HEALING where that fragment is one select_segments.py

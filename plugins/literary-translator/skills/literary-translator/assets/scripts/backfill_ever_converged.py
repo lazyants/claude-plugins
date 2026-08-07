@@ -352,7 +352,7 @@ def _sentinel_entry_kind(mode: int) -> str:
     return f"a non-regular entry (st_mode {stat.S_IFMT(mode):#o})"
 
 
-def classify_ever_converged_sentinel(path) -> "tuple[str, str]":
+def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
     """Three-state classification of the `.ever_converged.<seg>` entry at
     `path`: `(SENTINEL_ABSENT|SENTINEL_PRESENT|SENTINEL_AMBIGUOUS, detail)`.
 
@@ -422,10 +422,31 @@ def classify_ever_converged_sentinel(path) -> "tuple[str, str]":
     never depends on an errno that may be None. `lstat`, deliberately not
     `stat` -- a symlink is not something `mark_ever_converged()` can have
     (its O_CREAT|O_EXCL open refuses to write through one), so following a
-    link would only ask the question about some unrelated file. Note that
-    lstat still resolves symlinks in the PARENT components, so a project
-    whose whole `segments/` directory is a symlink is unaffected: only the
-    final `.ever_converged.<seg>` component is left unresolved.
+    link would only ask the question about some unrelated file. Either way
+    only the final `.ever_converged.<seg>` component is left unresolved:
+    WITHOUT `dir_fd` the PARENT components still resolve normally, so a
+    project whose whole `segments/` directory is a symlink is unaffected;
+    WITH `dir_fd` there are no parent components left to resolve, because
+    the caller already resolved them once, when it opened the descriptor.
+
+    `dir_fd` -- OPTIONAL, and today exactly one caller passes it:
+    backfill_ever_converged.py's census. Omitted (every other caller), the
+    lookup resolves the whole pathname afresh, which is the right thing for
+    a reader that holds nothing open. Passed, the BASENAME is looked up
+    relative to that descriptor instead, and `segments/` is not resolved by
+    pathname at all. The difference matters only for a caller that already
+    HOLDS the directory open and acts on its census afterwards, which is
+    exactly that one: it opens `segments/` once, does every write relative
+    to the descriptor, and samples directory identity at the end. A census
+    resolving the pathname afresh could therefore classify entries in a
+    DIFFERENT directory than the one being written to -- re-point
+    `segments/` at B for the length of the census and back to A before the
+    run ends, and B's sentinel is reported as A's protection while the
+    final identity sample compares A to A and agrees. Reproduced by review,
+    not theorised. Binding the census to the descriptor removes that
+    interleaving with no locking protocol at all, because the descriptor is
+    already held; a caller that holds none gains nothing here and passes
+    None.
 
     Anything that is neither ENOENT nor a regular file is AMBIGUOUS: it MAY
     be a converged segment whose sentinel this process cannot see. Each
@@ -440,7 +461,12 @@ def classify_ever_converged_sentinel(path) -> "tuple[str, str]":
     everywhere: it costs a finished translation, or a finished book.
     """
     try:
-        st = path.lstat()
+        # `path.name` is the basename and the descriptor is its parent, so
+        # the `dir_fd` branch resolves no part of `segments/` by pathname.
+        # `os.lstat` keeps `follow_symlinks` off exactly as `Path.lstat`
+        # does, so the FINAL component stays unresolved either way and both
+        # branches raise the same exceptions into the same handlers below.
+        st = path.lstat() if dir_fd is None else os.lstat(path.name, dir_fd=dir_fd)
     except FileNotFoundError:
         return (SENTINEL_ABSENT, "")
     except OSError as exc:
@@ -638,17 +664,40 @@ def check_segments_dir_identity(dir_fd: int, segments_dir: Path):
     only under `--apply`, leaving the dry-run census with no identity check
     of any kind.
 
-    WHAT THIS DOES NOT PROVE, stated because two previous versions of this
-    file claimed otherwise and were wrong both times. It samples identity
-    ONCE, at the end. That detects a pathname that is displaced AT THAT
-    INSTANT. It does NOT prove the pathname named this directory throughout
-    the run, and it cannot: a path swapped to B and back to A before the
-    sample compares equal, while the census in between may have read B. The
-    destructive shape is B holding a sentinel that A lacks -- the segment is
-    reported protected and A is left bare. Nothing a single process can do
-    closes that; it needs a locking protocol the directory's mutators also
-    honour. It is disclosed in the CHANGELOG and SKILL.md rather than
-    papered over here."""
+    WHAT THIS DOES NOT PROVE, stated because three previous versions of this
+    file claimed otherwise and were wrong every time. It samples identity
+    ONCE, at the end. That detects a pathname displaced AT THAT INSTANT, and
+    says nothing about any instant AFTER it: the dispatch gate resolves
+    `segments/` by pathname at its own, later time, and a displacement
+    between this sample and that lookup is outside anything a finished
+    process can observe. That much is inherent and stays disclosed.
+
+    What this check no longer has to carry, and what the third wrong version
+    was: the census used to resolve `{segments_dir}/.ever_converged.<seg>`
+    by pathname even though the descriptor was already open. A path swapped
+    to B for the length of the census and back to A before this sample
+    compared equal here -- while the census had read B. The destructive
+    shape was B holding a sentinel A lacks: the segment reported protected,
+    A left bare, `success: true`, this key null. Review reproduced exactly
+    that. It is closed at the source rather than here -- every lookup this
+    run makes, read and write alike, now resolves relative to the descriptor
+    opened before the census, so a pathname swapped away and back has
+    nothing left in this run to act on. Note what that correction cost: this
+    paragraph previously said closing it needed "a locking protocol the
+    directory's mutators also honour", which was simply false. The
+    descriptor was already held; only the census had failed to use it.
+
+    AND WHAT THE DESCRIPTOR DOES NOT CLOSE, because the disclosed limitation
+    is a CLASS and only one member of it moved. Binding every lookup to the
+    descriptor settles WHICH DIRECTORY is being read; it settles nothing
+    about the ENTRIES inside it between the census and anyone acting on the
+    report. A sentinel deleted after the census classified it PRESENT, or a
+    sync/restore tool rewriting entries IN PLACE, leaves the directory inode
+    untouched -- so the descriptor reads the right directory, this check
+    compares equal, and the segment is still reported protected when it is
+    not. That is the same silent-retranslation consequence, reached without
+    ever touching the pathname, and it is disclosed in SKILL.md's upgrade
+    note and tracked as #442 rather than papered over here."""
     try:
         held = os.fstat(dir_fd)
         current = os.stat(str(segments_dir))
@@ -693,11 +742,15 @@ def mark_ever_converged(seg: str, segments_dir: Path, dir_fd: int,
     with `os.link()` -- so the OS calls to keep non-raising are the staging
     open, fchmod, write, fsync, close, link and the staging unlink, not three.
     Every one of them is bound to `dir_fd`, so nothing on this function's
-    WRITE path resolves the `segments/` pathname at all. The one call that
-    still does is the EEXIST classification below, and it only READS: after a
-    retarget it can misreport WHOSE entry it examined, but it cannot place,
-    publish or strand a file. `segments_dir` otherwise survives only to derive
-    the sentinel's BASENAME, which touches nothing.
+    WRITE path resolves the `segments/` pathname at all -- and neither does
+    the one call that is not a write, the EEXIST classification below, which
+    now passes the same descriptor. It was the last pathname lookup in this
+    function, and it is a READ: it could never place, publish or strand a
+    file, only misreport WHOSE entry it had examined -- returning
+    "already_present", this function's way of saying "protected, nothing to
+    do", on the strength of a regular file in a directory the pathname had
+    been re-pointed at. `segments_dir` survives only to derive the sentinel's
+    BASENAME, which touches nothing.
     This function does NOT sync the directory; `sync_segments_dir()` does
     that once per run, and its docstring explains why a per-segment version
     could not settle durability at all. `os.link()` is what keeps
@@ -810,8 +863,15 @@ def mark_ever_converged(seg: str, segments_dir: Path, dir_fd: int,
         # on this project's Python 3.14.6 -- and "already_present" is this
         # function's way of saying "protected, nothing to do", which for those
         # two is false. Kept in step with ledger_update.py's own copy.
+        #
+        # Classified relative to `dir_fd`, like the census and like the link
+        # that just raised EEXIST. The link resolves the destination through
+        # the descriptor, so the entry it collided with is in THAT directory;
+        # re-reading the same name by pathname could answer about a different
+        # directory's entry entirely, which is how a re-pointed `segments/`
+        # turned somebody else's file into this segment's "protected".
         _cleanup_staging(None, tmp_name, dir_fd)
-        state, detail = classify_ever_converged_sentinel(path)
+        state, detail = classify_ever_converged_sentinel(path, dir_fd=dir_fd)
         if state == SENTINEL_PRESENT:
             return "already_present"
         if state == SENTINEL_ABSENT:
@@ -1149,12 +1209,15 @@ def run(args, dirs: dict) -> dict:
     # across the part of the run that WRITES is useless when the part that
     # DECIDES what to write is what got fooled.
     #
-    # Opened before the census, the comparison at the end covers the census
-    # as well as the writes. It still proves LESS than it looks: one sample
-    # detects a path displaced at that instant, not a path swapped away and
-    # back. See check_segments_dir_identity() for exactly what survives that
-    # gap and why it is disclosed rather than closed. It is opened in DRY RUN
-    # too -- the dry run's census is what the operator acts on.
+    # Opened before the census, and USED BY IT: the census classifies each
+    # sentinel relative to this descriptor, so the ordering buys more than a
+    # comparison that merely spans the census -- the census cannot read a
+    # different directory in the first place, and a pathname swapped away and
+    # back mid-run has nothing in this run left to act on. What the single
+    # end sample still cannot prove is anything about the instants AFTER it;
+    # see check_segments_dir_identity() for exactly what survives and why it
+    # is disclosed rather than closed. It is opened in DRY RUN too -- the dry
+    # run's census is what the operator acts on.
     #
     # O_DIRECTORY, never a bare O_RDONLY. Review reproduced what the bare form
     # costs: a `segments` that is a REGULAR FILE opens fine, fsyncs fine, and
@@ -1213,12 +1276,30 @@ def _run_with_segments_dir(args, dirs, ledger_path, ledger_source,
     # dispatch gate can still retranslate it. Blind repair is wrong for the
     # same reason -- mark_ever_converged() would have to delete or overwrite
     # whatever is there, and it deliberately never does either.
+    #
+    # Classified RELATIVE TO `dir_fd`, never by pathname, for the same reason
+    # every write is. Holding the descriptor while still resolving
+    # `{segments_dir}/.ever_converged.<seg>` afresh made the ordering above
+    # buy less than it looked: review reproduced a `segments/` re-pointed to
+    # directory B for the length of the census and restored to A before the
+    # end, and the run reported B's sentinel as A's protection with
+    # `success: true` and `segments_dir_replaced: null` -- the identity
+    # sample compared A to A and agreed, because by then it was A again,
+    # while A had no sentinel at all. `ever_converged_path()` still builds
+    # the Path (the basename is what the lookup needs, and the full path is
+    # what an operator-facing detail string should name); only the
+    # RESOLUTION moves onto the descriptor. With the writer's EEXIST re-read
+    # bound the same way, no lookup this run makes resolves `segments/` by
+    # pathname any more, so the swapped-away-and-back interleaving is closed
+    # without a locking protocol -- the process already holds the directory
+    # open. It closes WHICH DIRECTORY and nothing about the entries in it:
+    # see check_segments_dir_identity() for what still survives.
     already_sentineled = []
     missing_sentinels = []
     ambiguous_sentinels = []
     for seg in ever_converged_segs:
         state, detail = classify_ever_converged_sentinel(
-            ever_converged_path(seg, segments_dir)
+            ever_converged_path(seg, segments_dir), dir_fd=dir_fd
         )
         if state == SENTINEL_PRESENT:
             already_sentineled.append(seg)

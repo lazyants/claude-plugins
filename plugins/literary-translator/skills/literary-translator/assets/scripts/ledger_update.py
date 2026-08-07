@@ -191,7 +191,7 @@ def _sentinel_entry_kind(mode: int) -> str:
     return f"a non-regular entry (st_mode {stat.S_IFMT(mode):#o})"
 
 
-def classify_ever_converged_sentinel(path) -> "tuple[str, str]":
+def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
     """Three-state classification of the `.ever_converged.<seg>` entry at
     `path`: `(SENTINEL_ABSENT|SENTINEL_PRESENT|SENTINEL_AMBIGUOUS, detail)`.
 
@@ -261,10 +261,31 @@ def classify_ever_converged_sentinel(path) -> "tuple[str, str]":
     never depends on an errno that may be None. `lstat`, deliberately not
     `stat` -- a symlink is not something `mark_ever_converged()` can have
     (its O_CREAT|O_EXCL open refuses to write through one), so following a
-    link would only ask the question about some unrelated file. Note that
-    lstat still resolves symlinks in the PARENT components, so a project
-    whose whole `segments/` directory is a symlink is unaffected: only the
-    final `.ever_converged.<seg>` component is left unresolved.
+    link would only ask the question about some unrelated file. Either way
+    only the final `.ever_converged.<seg>` component is left unresolved:
+    WITHOUT `dir_fd` the PARENT components still resolve normally, so a
+    project whose whole `segments/` directory is a symlink is unaffected;
+    WITH `dir_fd` there are no parent components left to resolve, because
+    the caller already resolved them once, when it opened the descriptor.
+
+    `dir_fd` -- OPTIONAL, and today exactly one caller passes it:
+    backfill_ever_converged.py's census. Omitted (every other caller), the
+    lookup resolves the whole pathname afresh, which is the right thing for
+    a reader that holds nothing open. Passed, the BASENAME is looked up
+    relative to that descriptor instead, and `segments/` is not resolved by
+    pathname at all. The difference matters only for a caller that already
+    HOLDS the directory open and acts on its census afterwards, which is
+    exactly that one: it opens `segments/` once, does every write relative
+    to the descriptor, and samples directory identity at the end. A census
+    resolving the pathname afresh could therefore classify entries in a
+    DIFFERENT directory than the one being written to -- re-point
+    `segments/` at B for the length of the census and back to A before the
+    run ends, and B's sentinel is reported as A's protection while the
+    final identity sample compares A to A and agrees. Reproduced by review,
+    not theorised. Binding the census to the descriptor removes that
+    interleaving with no locking protocol at all, because the descriptor is
+    already held; a caller that holds none gains nothing here and passes
+    None.
 
     Anything that is neither ENOENT nor a regular file is AMBIGUOUS: it MAY
     be a converged segment whose sentinel this process cannot see. Each
@@ -279,7 +300,12 @@ def classify_ever_converged_sentinel(path) -> "tuple[str, str]":
     everywhere: it costs a finished translation, or a finished book.
     """
     try:
-        st = path.lstat()
+        # `path.name` is the basename and the descriptor is its parent, so
+        # the `dir_fd` branch resolves no part of `segments/` by pathname.
+        # `os.lstat` keeps `follow_symlinks` off exactly as `Path.lstat`
+        # does, so the FINAL component stays unresolved either way and both
+        # branches raise the same exceptions into the same handlers below.
+        st = path.lstat() if dir_fd is None else os.lstat(path.name, dir_fd=dir_fd)
     except FileNotFoundError:
         return (SENTINEL_ABSENT, "")
     except OSError as exc:

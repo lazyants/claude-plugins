@@ -1849,8 +1849,13 @@ def test_a_retarget_during_the_census_is_caught_too_not_only_during_the_writes(t
     swapped = []
     calls = []
 
-    def classify_then_retarget(path):
-        state = real_classify(path)
+    # `**kwargs` rather than a fixed signature: the census passes `dir_fd`
+    # and the writer's EEXIST re-read passes it too, while a mutant that
+    # reverts either call site passes neither. Forwarding whatever arrives
+    # keeps this test valid under both, which is what makes it usable as the
+    # mutation harness it doubles as.
+    def classify_then_retarget(path, **kwargs):
+        state = real_classify(path, **kwargs)
         calls.append(path)
         # Swap only once the census has read EVERY segment. Swapping earlier
         # sends the remaining lookups to the new empty directory, which puts
@@ -1891,6 +1896,129 @@ def test_a_retarget_during_the_census_is_caught_too_not_only_during_the_writes(t
         assert not backfill.ever_converged_path(seg, segments_dir).exists()
 
 
+def test_a_census_reads_the_descriptor_not_a_pathname_repointed_and_restored(tmp_path):
+    """The swapped-away-AND-BACK interleaving, which the identity check
+    cannot see and never could.
+
+    `check_segments_dir_identity()` samples ONCE, at the end. A `segments/`
+    symlink re-pointed at B for the length of the census and restored to A
+    before that sample makes the sample compare A to A and agree -- so for as
+    long as the census resolved `{segments_dir}/.ever_converged.<seg>` by
+    PATHNAME, it read B's entries and reported them as A's protection.
+    Reproduced on the descriptor-holding code: `success: true`,
+    `already_sentineled` naming segments, `segments_dir_replaced: null`, and A
+    without the sentinels. A run that says "already protected" is the one an
+    operator acts on by dispatching, so this is the false green that costs a
+    finished translation.
+
+    The fix is not another check. A second identity sample is defeated by the
+    same swap, and a locking protocol is not needed either: the run already
+    HOLDS the directory open, so classifying relative to that descriptor
+    leaves the swap no pathname to act on.
+
+    Note what is deliberately asserted NEGATIVE: `segments_dir_replaced` must
+    stay None. This interleaving is invisible to the identity check by
+    construction, so a non-None there would mean the assertions above are
+    being satisfied by the wrong mechanism -- the same reasoning that made
+    `success is False` an inadmissible causal assertion in the two retarget
+    tests above."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_census_symlink")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    # segments -> segments_a, the REAL directory (it already holds the
+    # fixture's one pre-existing sentinel); segments_b is the decoy the
+    # pathname is briefly re-pointed at. A symlinked `segments/` is an
+    # explicitly supported project shape -- that is why the open deliberately
+    # omits O_NOFOLLOW -- so this is a supported project, not a broken one.
+    dir_a = root / "segments_a"
+    dir_b = root / "segments_b"
+    os.rename(str(root / "segments"), str(dir_a))
+    os.mkdir(str(dir_b))
+    os.symlink("segments_a", str(root / "segments"))
+
+    # B holds a real sentinel for EVERY ever-converged segment, including the
+    # two A lacks. Under a pathname census that empties `missing_sentinels`
+    # entirely, so the run writes nothing and no per-segment error exists to
+    # redden it -- the false green in its purest form, exactly as reported.
+    for seg in EVER_CONVERGED:
+        (dir_b / f".ever_converged.{seg}").write_bytes(b"converged\n")
+
+    real_classify = backfill.classify_ever_converged_sentinel
+    census_calls = []
+    repointed = []
+    restored = []
+
+    def classify_then_swap(path, **kwargs):
+        # Re-point BEFORE the first lookup, so the entire census runs while
+        # the pathname names B.
+        if not repointed:
+            os.unlink(str(root / "segments"))
+            os.symlink("segments_b", str(root / "segments"))
+            repointed.append(True)
+        state = real_classify(path, **kwargs)
+        census_calls.append(path)
+        # ...and restore the moment the census ends, before anything else
+        # runs, so the end-of-run identity sample finds A where it started.
+        # That restoration is the whole point: it is what makes the false
+        # green reachable, and what a single identity sample cannot see.
+        if len(census_calls) == len(EVER_CONVERGED) and not restored:
+            os.unlink(str(root / "segments"))
+            os.symlink("segments_a", str(root / "segments"))
+            restored.append(True)
+        return state
+
+    setattr(backfill, "classify_ever_converged_sentinel", classify_then_swap)
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        setattr(backfill, "classify_ever_converged_sentinel", real_classify)
+
+    assert repointed and restored, (
+        "the test never performed the swap-and-restore it exists to model"
+    )
+    assert os.readlink(str(root / "segments")) == "segments_a", (
+        "the pathname must name A again by the end -- that is what makes the "
+        "identity sample agree, and the false green reachable"
+    )
+
+    # THE causal assertion. Neither segment whose only sentinel lives in B
+    # may be reported protected; only the one really present in A may be.
+    assert result["already_sentineled"] == ["seg_conv_presentinel"], (
+        f"only a sentinel that is really in the directory the descriptor "
+        f"names may be counted as protection; got "
+        f"{result['already_sentineled']} -- anything more means the census "
+        f"read the decoy through the re-pointed pathname"
+    )
+    assert result["missing_sentinels"] == MISSING_BEFORE_APPLY, (
+        f"the two segments A lacks must still be missing; got "
+        f"{result['missing_sentinels']}"
+    )
+    assert sorted(result["created"]) == MISSING_BEFORE_APPLY, (
+        f"and they must actually get their sentinels; got {result['created']}"
+    )
+    # NOT caught by the identity check -- see the docstring.
+    assert result["segments_dir_replaced"] is None, (
+        f"the pathname names A at the end, so the identity sample must agree: "
+        f"this case is closed by the census, not by that check; got "
+        f"{result['segments_dir_replaced']!r}"
+    )
+    assert result["directory_sync_error"] is None
+    assert result["ambiguous_sentinels"] == []
+    assert result["success"] is True
+
+    # The substance, in both directions: A really is protected now, and the
+    # decoy directory holds exactly what the test put there and nothing else.
+    for seg in EVER_CONVERGED:
+        assert (dir_a / f".ever_converged.{seg}").is_file(), (
+            f"{seg} must be protected in the directory the descriptor names, "
+            f"which is the one readers reach through the restored pathname"
+        )
+    assert sorted(p.name for p in dir_b.iterdir()) == sorted(
+        f".ever_converged.{seg}" for seg in EVER_CONVERGED
+    ), "nothing this run did may have reached the decoy directory"
+
+
 def test_a_dry_run_also_refuses_when_the_segments_dir_was_replaced(tmp_path):
     """The dry run is the mode an operator acts on, so it needs the check too.
 
@@ -1912,8 +2040,8 @@ def test_a_dry_run_also_refuses_when_the_segments_dir_was_replaced(tmp_path):
     real_classify = backfill.classify_ever_converged_sentinel
     swapped = []
 
-    def classify_then_retarget(path):
-        state = real_classify(path)
+    def classify_then_retarget(path, **kwargs):
+        state = real_classify(path, **kwargs)
         if not swapped:
             aside = tmp_path / "segments_aside_dry"
             os.rename(str(segments_dir), str(aside))
@@ -2054,8 +2182,8 @@ def test_the_staging_file_is_created_relative_to_the_descriptor_not_the_path(tmp
     census_calls = []
     repointed = []
 
-    def classify_then_repoint(path):
-        state = real_classify(path)
+    def classify_then_repoint(path, **kwargs):
+        state = real_classify(path, **kwargs)
         census_calls.append(path)
         # Only once the census has finished, so the writes -- and the staging
         # they need -- are what runs against the re-pointed path. Re-pointing
@@ -2185,8 +2313,8 @@ def test_an_apply_run_never_labels_a_raced_segment_as_a_dry_run(tmp_path, capsys
     census_calls = []
     raced = []
 
-    def classify_then_plant(path):
-        state = real_classify(path)
+    def classify_then_plant(path, **kwargs):
+        state = real_classify(path, **kwargs)
         census_calls.append(path)
         # After the census, plant a real sentinel for a segment it just
         # classified ABSENT. The writer's link() then gets EEXIST, re-reads
@@ -2225,6 +2353,124 @@ def test_an_apply_run_never_labels_a_raced_segment_as_a_dry_run(tmp_path, capsys
         f"- {seg}: missing at census -- created by something else during this run"
     ), f"got {line[0]!r}"
     assert rc == 0, captured.err
+
+
+def test_the_eexist_re_read_asks_the_descriptor_not_the_repointed_pathname(tmp_path):
+    """The same false green one call later, in the write path's last
+    pathname lookup.
+
+    `link()` publishes through `dir_fd`, so an EEXIST it raises is a
+    collision in the directory the DESCRIPTOR names. Re-reading that name by
+    pathname asks a DIFFERENT directory once `segments/` has been re-pointed
+    -- and that answer decides between "already_present", which
+    `mark_ever_converged()` means as "protected, nothing to do", and an
+    error. The file used to disclose this lookup as read-only and therefore
+    harmless; it cannot place, publish or strand a file, but a read that
+    manufactures "protected" out of another directory's file is the exact
+    failure this release exists to remove.
+
+    The interleaving, and it is the narrow one: the census finds the name
+    ABSENT in A; something plants a DANGLING SYMLINK there before the write
+    reaches it -- the entry the predicate exists to refuse, since O_EXCL and
+    link() both take EEXIST from one -- and the pathname is re-pointed at a B
+    holding a real regular file under that same name. Read by pathname, B
+    answers PRESENT and the segment is counted protected while A holds a
+    dangling link that no reader will ever resolve. Read through the
+    descriptor, A answers AMBIGUOUS and the run refuses.
+
+    The pathname is restored before the run ends, for the same reason as in
+    the census test: it keeps `check_segments_dir_identity()` out of the
+    verdict, so what is asserted below is this lookup and nothing else."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_eexist_fd")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    dir_a = root / "segments_a"
+    dir_b = root / "segments_b"
+    os.rename(str(root / "segments"), str(dir_a))
+    os.mkdir(str(dir_b))
+    os.symlink("segments_a", str(root / "segments"))
+
+    # The victim: a segment the census will find genuinely absent in A.
+    seg = MISSING_BEFORE_APPLY[0]
+    marker = f".ever_converged.{seg}"
+    (dir_b / marker).write_bytes(b"converged\n")
+
+    real_classify = backfill.classify_ever_converged_sentinel
+    census_calls = []
+    planted = []
+
+    def classify_then_plant_and_repoint(path, **kwargs):
+        state = real_classify(path, **kwargs)
+        census_calls.append(path)
+        # After the census, so the segment is already in `missing_sentinels`
+        # and the writer will try to create it.
+        if len(census_calls) == len(EVER_CONVERGED) and not planted:
+            os.symlink("no-such-target", str(dir_a / marker))
+            os.unlink(str(root / "segments"))
+            os.symlink("segments_b", str(root / "segments"))
+            planted.append(True)
+        return state
+
+    real_sync = backfill.sync_segments_dir
+    restored = []
+
+    def restore_then_sync(fd):
+        # The directory fsync is the first thing after the write loop, so
+        # this restores the pathname once every link has been attempted and
+        # before the identity sample runs.
+        if not restored:
+            os.unlink(str(root / "segments"))
+            os.symlink("segments_a", str(root / "segments"))
+            restored.append(True)
+        return real_sync(fd)
+
+    setattr(backfill, "classify_ever_converged_sentinel", classify_then_plant_and_repoint)
+    setattr(backfill, "sync_segments_dir", restore_then_sync)
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        setattr(backfill, "classify_ever_converged_sentinel", real_classify)
+        setattr(backfill, "sync_segments_dir", real_sync)
+
+    assert planted and restored, (
+        "the test never performed the plant-and-repoint it exists to model"
+    )
+    assert stat.S_ISLNK(os.lstat(str(dir_a / marker)).st_mode), (
+        "the planted entry must still be the dangling link -- the writer must "
+        "never delete or replace an entry it did not create"
+    )
+
+    # THE causal assertion: the segment is REFUSED, not laundered into
+    # "already_present" by a regular file sitting in another directory.
+    failed = {entry["seg"]: entry["error"] for entry in result["failed_to_create"]}
+    assert seg in failed, (
+        f"the entry that raised EEXIST is a dangling symlink in the directory "
+        f"the descriptor names, so this segment's protection is UNPROVEN and "
+        f"the run must say so; got failed_to_create={result['failed_to_create']} "
+        f"created={result['created']}"
+    )
+    assert "refusing to treat this as an existing sentinel" in failed[seg], (
+        f"got {failed[seg]!r}"
+    )
+    assert seg not in result["created"]
+    # Not caught by the identity check, by construction -- see the docstring.
+    assert result["segments_dir_replaced"] is None, (
+        f"the pathname names A again by the end, so the identity sample must "
+        f"agree; got {result['segments_dir_replaced']!r}"
+    )
+    assert result["directory_sync_error"] is None
+    assert result["success"] is False
+
+    # The other missing segment was unaffected and really did get protected.
+    other = MISSING_BEFORE_APPLY[1]
+    assert result["created"] == [other], result["created"]
+    assert (dir_a / f".ever_converged.{other}").is_file()
+    # And nothing this run did reached the decoy directory.
+    assert sorted(p.name for p in dir_b.iterdir()) == [marker], (
+        "no staging file, no link, nothing may have landed in the directory "
+        "the pathname was briefly re-pointed at"
+    )
 
 
 def test_a_dry_run_treats_an_invalid_utf8_ledger_as_missing_not_as_a_crash(tmp_path):

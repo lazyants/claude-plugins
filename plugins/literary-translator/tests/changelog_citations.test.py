@@ -53,7 +53,7 @@ CITATION_ANCHORS = {
     # the note grew past 448 while both original anchors stayed comfortably
     # inside the old range, so nothing failed. `not_evaluated` sits near the
     # new end and pins it.
-    "SKILL.md:419-544": [
+    "SKILL.md:419-554": [
         "#409 upgrade note",
         "backfill_ever_converged.py",
         "`not_evaluated`",
@@ -70,7 +70,7 @@ CITATION_ANCHORS = {
     "cache_key.py:146": ["segment_dispatch_driver.py"],
     "cache_key.py:152": ["DERIVATION_BUNDLE_MEMBERS"],
     "draft_ready.py:323-331": ["expect_token", "stale/straggler draft"],
-    "ledger_update.py:798-801": [
+    "ledger_update.py:824-827": [
         "current_draft_sha1 != reviewer_draft_sha1",
         "draft changed since review",
     ],
@@ -81,48 +81,48 @@ CITATION_ANCHORS = {
         "ORCHESTRATION_BUNDLE_MEMBERS",
         "select_segments.py",
     ],
-    "segment_dispatch_driver.py:741-742": ["def fatal(", "raise DriverError("],
-    "segment_dispatch_driver.py:2601-2602": [
+    "segment_dispatch_driver.py:742-743": ["def fatal(", "raise DriverError("],
+    "segment_dispatch_driver.py:2602-2603": [
         "translate_dispatch_token",
         'f"{run_id}:{seg}"',
     ],
-    "segment_dispatch_driver.py:2789-2804": [
+    "segment_dispatch_driver.py:2790-2805": [
         "_matched_review_round_label",
         "return None",
     ],
-    "segment_dispatch_driver.py:2891": ["draft_ok"],
-    "segment_dispatch_driver.py:2969": ['"action": "translate"'],
-    "segment_dispatch_driver.py:3073-3075": [
+    "segment_dispatch_driver.py:2894": ["draft_ok"],
+    "segment_dispatch_driver.py:2972": ['"action": "translate"'],
+    "segment_dispatch_driver.py:3076-3078": [
         "draft_matches_review",
         "current_sha1 == reviewed_sha1",
     ],
-    "segment_dispatch_driver.py:3223-3230": [
+    "segment_dispatch_driver.py:3226-3233": [
         "current_sha1 is None",
         "invocation never read",
     ],
-    "select_segments.py:810": ["HUMAN_ESCALATION_STATUSES"],
-    "select_segments.py:1192-1210": [
+    "select_segments.py:844": ["HUMAN_ESCALATION_STATUSES"],
+    "select_segments.py:1226-1244": [
         "ledger_segments.get(seg)",
         "HUMAN_ESCALATION_STATUSES",
         '"category": "human_escalation"',
         '"category": "recoverable"',
     ],
-    "select_segments.py:1201-1206": [
+    "select_segments.py:1235-1240": [
         "HUMAN_ESCALATION_STATUSES",
         'record.get("reason")',
     ],
-    "select_segments.py:1228": ["DEFAULT_ELIGIBLE_CATEGORIES"],
-    "select_segments.py:1378-1384": [
+    "select_segments.py:1262": ["DEFAULT_ELIGIBLE_CATEGORIES"],
+    "select_segments.py:1412-1418": [
         "classify_ever_converged_sentinel",
         "ambiguous_sentinels.append",
     ],
-    "select_segments.py:1386-1394": [
+    "select_segments.py:1420-1428": [
         "not clearable by --allow-retranslate-converged",
         "if ambiguous_sentinels:",
         "fatal(",
     ],
-    "select_segments.py:1428": ["allow_retranslate_converged"],
-    "select_segments.py:1428-1477": [
+    "select_segments.py:1462": ["allow_retranslate_converged"],
+    "select_segments.py:1462-1511": [
         "if previously_converged and not args.allow_retranslate_converged:",
         "second_loss",
         # The refusal itself, not just the condition guarding it. Without this
