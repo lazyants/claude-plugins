@@ -67,6 +67,17 @@ one the dispatch gate believes unprotected.
 - **AMBIGUOUS maps per caller, deliberately not uniformly.** The writer and the dispatch gate REFUSE;
   `final_audit.py` COUNTS, because an audit must never declare a converged book undeliverable on a
   stat failure; the backfill REPORTS UNPROTECTED.
+- **`final_audit.py`'s carve-out count and its ambiguity diagnostic now read ONE scan
+  (`scan_sentinel_states()`), not one `stat` each.** Routing both through the shared predicate was
+  not enough: they still asked the same path two separate questions — "is it absent?" and "is it
+  ambiguous?" — and a sentinel that changed between the two reads produced a segment counted as
+  carved out and reported by nothing, which is exactly the silence the count's own comment promised
+  was impossible. The reverse order warned about an entry that was never counted. Both callers now
+  consume one mapping, and a missing key raises rather than silently re-reading, so a drifted scan
+  cannot look like a correct one. Regression test included, with a non-vacuity block that runs the
+  pre-fix two-read shape and asserts it still produces the silent carve-out. What the scan does not
+  promise, stated in its docstring: it is not atomic ACROSS segments — only per segment, which is
+  where the defect was. Found in the fifth review round, in code four earlier rounds had read.
 - Pinned by a five-state matrix including `EACCES`, an `inspect.getsource` identity check across all
   four copies, and a census test that fails when a fifth script joins the contract in any of the
   spellings enumerated below — not "whenever a fifth script joins", which is what this line used to
@@ -77,21 +88,36 @@ one the dispatch gate believes unprotected.
   needles": measured on this tree, `*.py` scans 44 scripts while the plausible typo `*_*.py` scans
   42, still finds all four participants, and still satisfies every other assertion — it passed the
   floor this release replaces, which is why the floor is gone rather than raised.
-- **The census pins participants by five needles and its exceptions by ROLE at OCCURRENCE
-  granularity, not by name.** Two needles are exact spellings (the marker f-string, the predicate
-  `def`); a third, `def ever_converged_path`, is independent of how the marker filename is spelled;
-  a fourth scans the bare token `ever_converged`. The fifth is not a text scan at all — it folds
-  each literal expression to the string it BUILDS, so `".ever_" + "converged." + seg` is caught
-  although the source contains the token nowhere. An earlier revision of this entry called that
-  shape an accepted limit because closing it "needs AST/import analysis of import-free scripts";
-  `ast.parse()` imports nothing, so that rationale was simply wrong and the hole is closed.
-  The two files that mention the marker without participating are re-checked every run — and at
-  occurrence granularity, because both appear in every FILE-level set (their docstrings discuss the
-  marker), so file granularity could not tell discussing it from building it: a real participant
-  added inline to an exempted file passed the whole census. Measured, then fixed.
-  What remains, stated: `%`, `.format()`, `"".join()` of constants and separately formatted
-  f-string constants are not folded, and a name built from non-literals at runtime evades every
-  needle. Evasion now takes deliberate concealment; the census is narrower than complete.
+- **The census pins participants by six needles and re-checks its exceptions by ROLE, not by name.**
+  Two needles are exact spellings (the marker f-string, the predicate `def`); a third, `def
+  ever_converged_path`, is independent of how the marker filename is spelled; a fourth scans the
+  bare token `ever_converged`. The fifth is not a text scan at all — it folds each literal
+  expression to the string it BUILDS, so `".ever_" + "converged." + seg` is caught although the
+  source contains the token nowhere. An earlier revision of this entry called that shape an accepted
+  limit because closing it "needs AST/import analysis of import-free scripts"; `ast.parse()` imports
+  nothing, so that rationale was simply wrong and the hole is closed.
+  The sixth reads IDENTIFIERS rather than literals, and it exists because all five above share a
+  blind spot none of them records: they ask what a file SPELLS, and participation needs no spelling.
+  `provider.classify_ever_converged_sentinel(provider.ever_converged_path(seg))` is a genuine
+  participant with no `ever_converged` literal anywhere — measured, it passed all five. It also
+  closes a hole nobody had named: the `def` needles pin the two readers but never the WRITER, so a
+  third copy of `mark_ever_converged` could appear in an exempted file and move no set at all.
+  The two files that mention the marker without participating are re-checked every run at three
+  granularities, because file granularity cannot tell discussing the convention from using it — both
+  appear in the two LOOSE sets (`mentions_token`, `builds_token`) precisely because their docstrings
+  discuss the marker, though in none of the three definition sets. So each is re-asserted to carry no
+  definition, no token-bearing literal outside a docstring, and no API identifier. The first two of
+  those were each added after a mutant passed the census without them.
+  A seventh assertion is not a census question at all: the census can be exactly right about which
+  four files participate while one of them quietly reintroduces `ever_converged_path(seg).exists()`
+  — the raw read this release removed. That is now pinned too, including through a local bound in
+  the same scope.
+  What remains, stated: `%`, `.format()`, `"".join()` of constants and separately formatted f-string
+  constants are not folded; a path built from non-literals at runtime still evades the five literal
+  needles, though reaching the marker through the shared API trips the sixth; and the probe check
+  does not follow indirection across scopes. The residue is a file that reimplements the whole
+  convention from non-literal parts under its own names — concealment rather than drift. The census
+  is narrower than complete.
 
 The duplication is deliberate and stays. The reason previously given in those docstrings was false —
 this codebase does share modules between "self-contained" scripts. The real reason is stronger:
@@ -121,16 +147,25 @@ script would put its bytes outside the hash meant to cover them.
   is what survives — and whether the segment heals depends entirely on which fragment that is. No
   prior entry: stays `not_started`, selectable. Reached through `reopen_capped`: the cap has
   ALREADY been replaced by `in_progress` and confirmed on disk before dispatch, so the refusal
-  leaves `in_progress` — `recoverable`, selectable, genuinely self-healing. (The first draft of this
+  leaves `in_progress` — `recoverable`, selectable, and self-healing provided the segment carries no
+  `.ever_converged` sentinel (see the gate below; it screens every selected segment, not only the
+  `stale` ones, so a segment that converged in an earlier run is refused here too). (The first draft of this
   note claimed it left the old cap standing, which is backwards: making that reopen durable first is
   the whole point of that branch.) The general rule, rather than a list that kept coming out
   incomplete: **the refusal does not change the outcome at all — `select_segments.py` classifies
   whatever fragment was already there.** `not_started`, `pending`, `in_progress` and a `converged`
   fragment that reclassifies `stale` are all automatically re-selected; any `non_converged` — a cap
   this invocation did not reopen included — and any `blocked` become `human_escalation`
-  (select_segments.py:1192-1197), outside the default eligible set, and need a human. So: never
-  worse than the pre-fix behaviour, and self-healing exactly where the pre-existing state was
-  already selectable.
+  (select_segments.py:1192-1197), outside the default eligible set, and need a human.
+  **Re-selected is not re-dispatched, and one case turns on that.** A `stale` segment is in the
+  default eligible set (select_segments.py:1219), but Step 1's own sentinel gate then reads its
+  `.ever_converged` marker (select_segments.py:1369-1373) and, on `SENTINEL_PRESENT`, refuses the
+  dispatch unless the operator passes `--allow-retranslate-converged` (select_segments.py:1419);
+  on `SENTINEL_AMBIGUOUS` it refuses earlier still, and that one the flag does not clear
+  (select_segments.py:1377-1385). So a reclassified `stale` heals only with an operator in the loop
+  — which is the intended design, not a defect, but calling it automatic was wrong. Everywhere else
+  the rule holds: never worse than the pre-fix behaviour, and self-healing without intervention
+  exactly where the pre-existing state was already selectable AND carries no sentinel.
 - **The A→B→A revert is still undetected, and the window is wider than "while a review is in
   flight".** The review's `draft_sha1` binding catches any single change to a draft between review
   and convergence, but not an exact revert; `review.schema.json` concedes that hash-first-then-read

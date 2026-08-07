@@ -752,7 +752,7 @@ def fatal(message: str, exit_code: int = 1, **extra) -> NoReturn:
 # json"), and _read_review_obj()'s copy of the same. The REAL protection is
 # cross-file, not "this script never does it": select_segments.py's own
 # load_candidate_segments() fatals on any manifest.json `seg` failing its
-# validate_seg() (select_segments.py:764-786, the check at :778-780) --
+# validate_seg() (select_segments.py:904-915, the regex check at :912-915) --
 # every `seg` this script ever operates on already came from THAT
 # validated output (the `segs` list Step 1's own gate returns), never from
 # an unvalidated source, before this script ever builds a path from one.
@@ -2829,7 +2829,7 @@ def _translate_redispatched_since(dirs: dict, seg: str, review_path: Path) -> bo
     The ledger fragment is the durable evidence the sha1 alone is not: a
     retranslate always writes a FRESH runs/ledger.d/{seg}.json (a new file
     mtime, stamped by ledger_update.py's own now_iso8601() at write time,
-    ledger_update.py:712) strictly after the review it invalidates; a fix
+    ledger_update.py:930) strictly after the review it invalidates; a fix
     turn edits the draft directly and never goes through process_segment()
     at all, so it writes no ledger fragment -- the fragment's mtime stays
     exactly where the LAST translate dispatch (the original one, or an
@@ -3090,7 +3090,7 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         # was written -- or the sha1 simply could not be recomputed) must
         # NEVER fall through to already_converged: ledger_update.py's own
         # independent check (enrich_converged_fields, ledger_update.py:
-        # 499-502) refuses that convergence write outright, and with no
+        # 789-792) refuses that convergence write outright, and with no
         # branch that ever re-dispatches a review in that case, every later
         # invocation would repeat the SAME refused write forever -- a
         # live-lock, not a transient failure. There is also nothing to FIX

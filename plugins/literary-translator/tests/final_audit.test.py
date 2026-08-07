@@ -1597,6 +1597,62 @@ def test_count_stale_previously_converged_field_gating_matrix(tmp_path):
     assert fa.count_stale_previously_converged(classification) == 1
 
 
+def test_carveout_count_and_ambiguity_report_read_one_scan(tmp_path):
+    """The carve-out count and the operator diagnostic must never disagree
+    about the SAME segment's sentinel.
+
+    Both ask a question of `.ever_converged.<seg>` -- "is it absent?" and "is
+    it ambiguous?" -- and each used to answer with its own `stat`. Two
+    independent reads of one path make the pair non-atomic, so a sentinel that
+    changes between them produces a segment counted as converged that nothing
+    reports: precisely the silence count_stale_previously_converged()'s own
+    comment promises is impossible ("The ambiguity is never silent").
+
+    A DIRECTORY at the sentinel path is the ambiguous case: the predicate
+    refuses to read it as a converged marker, and the carve-out counts it
+    anyway because refusing would declare a finished book undeliverable over
+    an unreadable dotfile (see that function's comment)."""
+    fa = load_final_audit_module()
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    fa.SEGMENTS_DIR = segments_dir  # isolate from the real plugin tree
+    sentinel = segments_dir / ".ever_converged.seg_amb"
+    sentinel.mkdir()  # a directory -> AMBIGUOUS, never ABSENT
+
+    classification = {
+        "seg_amb": {
+            "category": "stale",
+            "stale_reason": ["cache_key_mismatch"],
+            "mismatched_fields": ["plugin_bundle_hash"],
+        },
+    }
+    assert fa.scan_sentinel_states(classification)["seg_amb"][0] == fa.SENTINEL_AMBIGUOUS
+
+    # main()'s shape: one scan, then both consumers. The tree is mutated in
+    # between -- a concurrent dispatch, an operator cleaning up the broken
+    # path, anything -- and neither answer moves, because neither re-reads.
+    states = fa.scan_sentinel_states(classification)
+    shutil.rmtree(sentinel)
+    assert fa.count_stale_previously_converged(classification, states) == 1
+    assert [a["seg"] for a in fa.collect_ambiguous_sentinels(classification, states)] == [
+        "seg_amb"
+    ], "counted as carved out, so it MUST also appear in the operator diagnostic"
+
+    # Non-vacuity: the same sequence with two independent reads -- the pre-fix
+    # shape, still reachable by passing no scan -- produces exactly the silent
+    # carve-out. Without this block the assertions above would also pass on
+    # code that re-stats, since nothing else here forces the mutation to matter.
+    sentinel.mkdir()
+    counted_solo = fa.count_stale_previously_converged(classification)  # sees AMBIGUOUS
+    shutil.rmtree(sentinel)
+    ambiguous_solo = fa.collect_ambiguous_sentinels(classification)  # sees ABSENT
+    assert counted_solo == 1 and ambiguous_solo == [], (
+        "this is the defect the shared scan removes: counted as converged, "
+        "reported by nothing. If this assertion ever fails, the two reads have "
+        "become atomic by some other means and this test should be revisited."
+    )
+
+
 # ---------------------------------------------------------------------------
 # 18. #208 fixture E: hard_failures keeps priority over incompleteness -- a
 #     converged segment with a genuine coverage defect, alongside a second,

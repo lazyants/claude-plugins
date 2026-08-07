@@ -1115,7 +1115,7 @@ SAFE_STALE_CARVEOUT_FIELDS = frozenset(
 )
 
 
-def count_stale_previously_converged(classification):
+def count_stale_previously_converged(classification, sentinel_states=None):
     """How many of the whole-project completeness gate's own 'stale'
     segments carry the #409 ever-converged sentinel AND went stale for a
     reason that can never, by itself, change the segment's own translated
@@ -1148,6 +1148,12 @@ def count_stale_previously_converged(classification):
     dict `completeness_counts['stale']` is tallied from on the
     select_segments.py side, so this count can never exceed
     completeness_counts['stale']."""
+    # Either the caller hands us the shared scan (main() does, so the count and
+    # the diagnostic below cannot disagree) or we make our own. Never a
+    # per-segment fallback: a missing key must raise, not silently re-stat, or
+    # a drifted scan and a correct one would behave identically.
+    if sentinel_states is None:
+        sentinel_states = scan_sentinel_states(classification)
     n = 0
     for seg, entry in classification.items():
         category = entry.get("category") if isinstance(entry, dict) else entry
@@ -1180,16 +1186,41 @@ def count_stale_previously_converged(classification):
         # refuses for this very segment. Sentinel respected in one place and
         # not the other is how "tokens saved, book undeliverable" happens.
         #
-        # The ambiguity is never silent: main() reports every ambiguous entry
-        # on stderr (see report_ambiguous_sentinels()), so a human sees the
-        # broken path even though the audit does not block on it.
-        state, _detail = classify_ever_converged_sentinel(ever_converged_path(seg))
+        # The ambiguity is never silent -- and that guarantee is why this
+        # function and collect_ambiguous_sentinels() below must read ONE scan
+        # rather than each stat the path themselves. With two independent
+        # reads, a sentinel that vanishes between them is counted as carved out
+        # here and reported by nothing: `counted_as_converged=1`, no diagnostic,
+        # exactly the silence this comment promises cannot happen. The reverse
+        # order warns the operator about an entry that was never counted.
+        # Neither is reachable once both consume `sentinel_states`.
+        state, _detail = sentinel_states[seg]
         if state != SENTINEL_ABSENT:
             n += 1
     return n
 
 
-def collect_ambiguous_sentinels(classification):
+def scan_sentinel_states(classification):
+    """One authoritative read of every classified segment's `.ever_converged`
+    entry, as `{seg: (state, detail)}`.
+
+    Exists so the carve-out count and the operator diagnostic can never
+    disagree about the SAME path. They ask different questions of the same
+    sentinel -- "is it absent?" and "is it ambiguous?" -- and answering each
+    with its own `stat` makes the pair non-atomic for no benefit.
+
+    What this does NOT promise: the scan is not atomic ACROSS segments. A
+    sentinel written while it runs may be seen by a later segment's read and
+    not an earlier one. That is inherent to auditing a live tree and it is
+    harmless here, because every consumer treats segments independently; the
+    defect this closes was two answers about ONE segment."""
+    return {
+        seg: classify_ever_converged_sentinel(ever_converged_path(seg))
+        for seg in sorted(classification)
+    }
+
+
+def collect_ambiguous_sentinels(classification, sentinel_states=None):
     """Every segment in `classification` whose `.ever_converged.<seg>` entry is
     neither absent nor a regular file, as `[{"seg": ..., "detail": ...}]`.
 
@@ -1206,9 +1237,11 @@ def collect_ambiguous_sentinels(classification):
     Scans EVERY classified segment, not only the carve-out candidates: a
     broken sentinel on a reusable or converged segment is the same latent
     problem, and it will bite at the next cache-key move rather than now."""
+    if sentinel_states is None:
+        sentinel_states = scan_sentinel_states(classification)
     out = []
     for seg in sorted(classification):
-        state, detail = classify_ever_converged_sentinel(ever_converged_path(seg))
+        state, detail = sentinel_states[seg]
         if state == SENTINEL_AMBIGUOUS:
             out.append({"seg": seg, "detail": detail})
     return out
@@ -1371,7 +1404,14 @@ def main():
     # for the full rationale. completeness_counts itself is left unchanged
     # (still the raw select_segments.py count); only project_complete is
     # computed net of the carve-out.
-    stale_previously_converged = count_stale_previously_converged(classification_by_seg)
+    # ONE read of the sentinel tree, shared by the count and the diagnostic
+    # below. They previously stat'd each path independently, which made the
+    # "ambiguity is never silent" guarantee false under concurrent mutation:
+    # AMBIGUOUS then ABSENT counts a segment as carved out and reports nothing.
+    sentinel_states = scan_sentinel_states(classification_by_seg)
+    stale_previously_converged = count_stale_previously_converged(
+        classification_by_seg, sentinel_states
+    )
 
     # Diagnostic only -- deliberately computed BEFORE the summary so it prints
     # even when the audit goes on to pass. count_stale_previously_converged()
@@ -1381,7 +1421,9 @@ def main():
     # Never folded into hard_failures/warnings: this is a filesystem problem
     # for an operator to repair, not a translation defect, and inflating the
     # warning count would make it look like the book has an issue.
-    ambiguous_sentinels = collect_ambiguous_sentinels(classification_by_seg)
+    ambiguous_sentinels = collect_ambiguous_sentinels(
+        classification_by_seg, sentinel_states
+    )
 
     # Rollup invariant, enforced procedurally: project_complete is true if
     # and only if every one of completeness_counts' non-'stale' four values
