@@ -3513,19 +3513,38 @@ def _cap_still_binds_what_was_reviewed(seg: str, ctx: "DispatchContext", action:
     `runs/.driver.lock` excludes another DRIVER; codex_job.py never
     acquires it -- it takes only its own per-segment
     `.codex_job.<seg>.lock` -- and the default workflow launches
-    codex_job.py DETACHED, independently of any driver. So a promotion
-    carrying the same draft_sha1 and the same dispatch_token but a
-    different verdict can land inside this window, and this helper accepts
-    it. The flock does not close it, and the sha half does not either,
-    because the draft need not change for the verdict to.
+    codex_job.py DETACHED, independently of any driver. So the flock does
+    not close this window, and the sha half does not either, because the
+    draft need not change for the verdict to.
 
-    Reachability, so this is not read as narrower than it is: the two
-    facts compared are the two that a same-round re-promotion legitimately
-    preserves, which is exactly when a verdict can differ. The human case
-    (findings applied by hand) does change the DRAFT and IS caught by the
-    sha half. The remaining exposure is the detached-job case above, plus
-    the two-machines-on-sync-replicated-storage case
-    acquire_driver_lock()'s own docstring discloses.
+    Reachability, so this is read neither narrower NOR WIDER than it is --
+    the retraction above was itself over-corrected on review, and the
+    ordinary detached-job route does NOT reach this on its own. A competing
+    codex_job.py serializes on the per-segment `.codex_job.<seg>.lock` and
+    then calls `safe_adopt()` BEFORE it would launch or promote anything
+    (codex_job.py:1300); a canonical review.json that still passes
+    `review_ready.py --expect-token` is ADOPTED, leaving the artifact
+    byte-identical rather than replacing it. SKILL.md additionally forbids
+    running the default Workflow and this driver against one project
+    concurrently.
+
+    What actually reaches the residual is therefore narrower than "a
+    detached job", and all of it lies outside that cooperating path:
+      - a WRITER THAT NEVER TAKES THE PER-SEGMENT LOCK -- a human editing
+        review.json, an ad-hoc script, a restored backup;
+      - an ABA in which the canonical stops passing `review_ready.py`
+        between this driver's read and the job's `safe_adopt()` (removed,
+        truncated, momentarily unreadable), so the job relaunches and
+        promotes a fresh verdict at the SAME draft_sha1 and dispatch_token;
+      - the two-machines-on-sync-replicated-storage case
+        acquire_driver_lock()'s own docstring discloses, where the flock is
+        not a shared kernel object in the first place.
+
+    One correction to the human case, which an earlier revision put on the
+    wrong side of the line: applying findings to the DRAFT changes
+    draft_sha1 and IS caught by the sha half, but editing review.json ALONE
+    -- flipping a verdict without touching the draft -- changes neither
+    bound fact and is not caught.
 
     Closing it means binding the verdict itself (`clean`, `coverage_ok`,
     an artifact digest) rather than mirroring the convergence write's

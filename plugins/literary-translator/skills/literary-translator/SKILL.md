@@ -448,14 +448,26 @@ genuinely zero-segment result is expected rather than a broken read).
 **After `--apply`, four things decide whether the protection is actually
 up, and `missing_sentinels` alone is not one of them:**
 
-- **`$?` / `success`** — non-zero and `false` mean at least one sentinel
-  this run set out to create was NOT created. The run reports which in
-  `failed_to_create`. Do not dispatch on a failed backfill.
+- **`$?` / `success`** — non-zero and `false` mean the run did not finish
+  what it set out to do. Two different shapes produce it, so read the
+  payload rather than assuming: a per-segment failure carries
+  `failed_to_create`, while a fatal abort (an unreadable ledger, a segment
+  id that fails the path-safety check) carries only `success` and `error`
+  and has **no `failed_to_create` key at all** — a script that indexes it
+  blindly will crash on exactly the runs that matter. Either way, do not
+  dispatch on a failed backfill.
 - **`failed_to_create`** — each entry names a segment left unprotected and
-  why. Resolve every one before W5.
-- **`ambiguous_sentinels`** — a path that is neither absent nor a regular
-  file. Never repaired automatically and never counted as protected;
-  each needs a human to look at the path.
+  why. Resolve every one before W5. One error text is worth reading
+  closely: a sentinel whose *directory entry could not be synced* was in
+  fact created and is deliberately left in place, so that segment is
+  protected today but may not survive a crash — re-running is what settles
+  it.
+- **`ambiguous_sentinels`** — a path whose protection status could not be
+  established. That covers both a path that is demonstrably not a regular
+  file (a directory, a symlink, a dangling symlink) and one whose state
+  could not be read at all, where it may in truth be absent or perfectly
+  fine. Never repaired automatically and never counted as protected; each
+  needs a human to look at the path.
 - **`not_evaluated`** — segments this script never considered, because
   their current ledger status is not one it can read as converged. A
   segment that converged and was later re-dispatched has had that

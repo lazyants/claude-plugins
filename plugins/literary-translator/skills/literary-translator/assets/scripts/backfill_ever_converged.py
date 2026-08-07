@@ -90,10 +90,21 @@ backfills what the ledger can still prove.
 ## Sentinel-write contract
 
 Creates ``{durable_root}/segments/.ever_converged.{seg}`` for each missing
-segment EXACTLY as ``ledger_update.py:mark_ever_converged()`` does: same
-filename convention, same content (``b"converged\\n"``), same mode (``0o644``),
-same ``O_CREAT | O_EXCL | O_WRONLY`` idempotent-create semantics (never
-deletes or overwrites an existing sentinel). Duplicated here rather than
+segment with the same OBSERVABLE contract as
+``ledger_update.py:mark_ever_converged()``: same filename convention, same
+content (``b"converged\\n"``), same mode (``0o644``), and the same create-only
+idempotence -- an existing sentinel is never deleted, replaced, or
+overwritten, and finding one is a no-op rather than an error.
+
+The MECHANISM differs, deliberately. The sibling opens the public name with
+``O_CREAT | O_EXCL | O_WRONLY`` and writes into it. This copy stages the
+bytes in a uniquely-named temp file, fsyncs them, and only then publishes
+the name with ``os.link()`` -- which raises ``FileExistsError`` exactly as
+``O_EXCL`` would, so create-only idempotence survives the change. See
+``mark_ever_converged()`` for why: publishing the name before the bytes are
+durable forces a choice between leaving residue at the public name and
+unlinking a name this call no longer provably owns, and the second option
+can destroy another writer's protection. Duplicated here rather than
 imported for the bundle-hash reason spelled out in
 ``classify_ever_converged_sentinel()`` below -- NOT for the "no shared lib
 between self-contained scripts" convention, which is already false in this
@@ -171,6 +182,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import NoReturn
 
@@ -405,14 +417,47 @@ def classify_ever_converged_sentinel(path) -> "tuple[str, str]":
     )
 
 
+def _cleanup_staging(tmp_fd, tmp_path) -> None:
+    """Best-effort removal of the staging file (and its fd) used by
+    mark_ever_converged().
+
+    Deliberately silent. Unlike the public sentinel name, the staging file is
+    owned unambiguously by one call -- tempfile.mkstemp() picked a name no
+    other process holds -- so failing to remove it cannot destroy anyone's
+    protection and cannot be mistaken for a sentinel by any reader, which
+    matches on the exact `.ever_converged.{seg}` name. Leaking one is untidy;
+    reporting it would bury the real error that caused the cleanup."""
+    if tmp_fd is not None:
+        try:
+            os.close(tmp_fd)
+        except OSError:
+            pass
+    if tmp_path is not None:
+        try:
+            os.unlink(str(tmp_path))
+        except OSError:
+            pass
+
+
 def mark_ever_converged(seg: str, segments_dir: Path) -> str:
-    """Duplicate of ledger_update.py's own `mark_ever_converged()` -- same
-    filename, same content (`b"converged\\n"`), same mode (`0o644`), same
-    idempotent `O_CREAT | O_EXCL | O_WRONLY` create-only semantics (never
-    deletes or overwrites an existing sentinel), and, post-review
-    correction, the SAME property that all three OS calls this function
-    makes -- open, write, close -- get a clean, non-raising outcome, never
-    an uncaught OSError escaping past this function's own contract.
+    """Same OBSERVABLE contract as ledger_update.py's own
+    `mark_ever_converged()` -- same filename, same content
+    (`b"converged\\n"`), same mode (`0o644`), the same create-only
+    idempotence (an existing sentinel is never deleted, replaced, or
+    overwritten; finding one is a no-op) -- and, post-review correction, the
+    SAME property that EVERY OS call this function makes gets a clean,
+    non-raising outcome, never an uncaught OSError escaping past this
+    function's own contract.
+
+    The MECHANISM is no longer the sibling's single `O_CREAT | O_EXCL |
+    O_WRONLY` open. This copy stages, fsyncs, then publishes with
+    `os.link()`, and syncs the parent directory afterwards -- so the OS
+    calls to keep non-raising are mkstemp, fchmod, write, fsync, close,
+    link, and the directory open/fsync, not three. `os.link()` is what
+    keeps create-only idempotence intact across the change: it raises
+    `FileExistsError` on an existing target exactly as `O_EXCL` does, where
+    `os.rename()` would silently clobber. The reasoning for staging at all
+    is in the block comment below.
 
     NO LONGER byte-identical to the sibling, and this docstring says so
     explicitly rather than leaving the old claim to go stale silently a
@@ -435,125 +480,130 @@ def mark_ever_converged(seg: str, segments_dir: Path) -> str:
         report nothing to show the operator, and an uncaught OSError would
         crash the whole backfill run over one segment's sentinel.
 
-    A write failure still attempts a best-effort close() of the now-broken
-    fd before returning its own "error: ..." string, so a failed write
-    never also leaks a file descriptor -- but a SECONDARY close error
-    during that cleanup is swallowed rather than reported, since the write
-    error is the one actually worth surfacing. A close() that fails on its
-    own (write succeeded; some filesystems, notably NFS, defer reporting a
-    write error until close()) gets the identical "error: ..." treatment.
+    Any failure before the link runs `_cleanup_staging()`, which closes the
+    fd if still open and removes the temp file, so a failed attempt leaks
+    neither a descriptor nor a file. A secondary error during that cleanup
+    is swallowed rather than reported, since the original error is the one
+    worth surfacing. A close() that fails on its own (write succeeded; some
+    filesystems, notably NFS, defer reporting a write error until close())
+    gets the identical "error: ..." treatment.
+
+    ONE failure leaves the public name in place: a directory-fsync error
+    after a successful link. That is deliberate and documented at the call
+    site -- past the link the name may already be another reader's
+    protection, so removing it is exactly the destruction staging exists to
+    prevent. It is still reported, so the segment lands in
+    `failed_to_create` and the run fails: the sentinel exists, but its
+    durability is unproven, and only a re-run can settle that.
 
     No shared message-building helper, unlike the sibling's own fix:
     ledger_update.py's stderr text is a multi-sentence explanation
-    genuinely at risk of drifting if hand-duplicated three times, which is
-    exactly why it factored one out. This copy's outcome is the single
-    f-string `f"error: {exc}"`, already identical at each of its three call
-    sites below -- nothing for a helper to centralize that repeating it
-    three times does not already give for free.
+    genuinely at risk of drifting if hand-duplicated, which is exactly why
+    it factored one out. This copy's generic outcome is the single f-string
+    `f"error: {exc}"` at two call sites below -- nothing for a helper to
+    centralize that repeating it twice does not already give for free.
     """
     path = ever_converged_path(seg, segments_dir)
+
+    # STAGE THEN LINK. The public name is never published until the bytes
+    # behind it are already durable, so no failure path here ever has to
+    # remove a file at the public name -- which is what makes this safe.
+    #
+    # The previous shape created the public name with O_CREAT|O_EXCL, then
+    # wrote, fsynced, and on any failure unlinked it again. That unlink was a
+    # BLOCKER: O_EXCL proves only that this call installed the entry at open
+    # time, it does not reserve the pathname. Between the failed write and the
+    # unlink, another actor can remove our incomplete inode and install a
+    # REAL, fully-synced sentinel -- and the unlink then deletes THAT.
+    # Reproduced, twice, including via replacement of `segments/` itself. A
+    # cleanup that can destroy protection somebody else established is worse
+    # than the residue it was cleaning up.
+    #
+    # Staging removes the dilemma rather than narrowing it. A failure before
+    # the link leaves only a uniquely-named temp file, which no reader can
+    # mistake for a sentinel (`classify_ever_converged_sentinel()` looks at
+    # the exact `.ever_converged.{seg}` name), and unlinking THAT is
+    # unambiguously safe because nothing else can hold it. There is no window
+    # in which a half-made file sits at the name readers consult.
+    #
+    # os.link() -- not os.rename() -- is what preserves the create-only
+    # contract this script shares with ledger_update.py's writer: link fails
+    # with EEXIST if the target exists, so an existing sentinel is still never
+    # replaced or overwritten. rename() would silently clobber it.
+    tmp_fd = None
+    tmp_path = None
     try:
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix=".ever_converged_staging.", dir=str(segments_dir)
+        )
+        tmp_path = Path(tmp_name)
+        # mkstemp is 0o600 by design; the sentinel's mode is part of the
+        # contract pinned against ledger_update.py's writer by a drift test.
+        os.fchmod(tmp_fd, 0o644)
+        os.write(tmp_fd, b"converged\n")
+        os.fsync(tmp_fd)
+        os.close(tmp_fd)
+        tmp_fd = None
     except OSError as exc:
-        # Every open failure OTHER than EEXIST is reported for THIS segment and
-        # lets the loop continue. Catching only FileExistsError meant an
-        # ordinary EACCES, EROFS, EIO, or a parent removed after the scan
-        # escaped to the top-level handler, abandoned every segment after this
-        # one, and printed `unexpected error` instead of the per-segment
-        # report -- so the operator lost both the partial protection and the
-        # list of what was left unprotected.
-        if not isinstance(exc, FileExistsError):
-            return f"error: {exc}"
-        # EEXIST is not proof a sentinel is there. O_CREAT|O_EXCL raises it for
-        # ANY existing entry -- a directory, and a DANGLING SYMLINK, both
-        # verified on this project's Python 3.14.6 -- and "already_present" is
-        # this function's way of saying "protected, nothing to do", which for
-        # those two is false. Kept in step with ledger_update.py's own copy,
-        # which makes the same distinction and returns False where this one
-        # returns an "error: ..." string (see the contract note above for why
-        # the two shapes differ deliberately).
-        #
-        # run() already filters ambiguous entries out before calling this, so
-        # in practice this branch is the RACE: the path was a clean ENOENT
-        # during the scan and something occupied it before this open. That is
-        # precisely the case a bare `return "already_present"` would report as
-        # a successful backfill.
+        _cleanup_staging(tmp_fd, tmp_path)
+        return f"error: {exc}"
+
+    try:
+        os.link(str(tmp_path), str(path))
+    except FileExistsError:
+        # Someone else got there first. EEXIST is not proof a real sentinel is
+        # there -- O_CREAT|O_EXCL and link() both raise it for ANY existing
+        # entry, including a directory and a DANGLING SYMLINK, both verified
+        # on this project's Python 3.14.6 -- and "already_present" is this
+        # function's way of saying "protected, nothing to do", which for those
+        # two is false. Kept in step with ledger_update.py's own copy.
+        _cleanup_staging(None, tmp_path)
         state, detail = classify_ever_converged_sentinel(path)
         if state == SENTINEL_PRESENT:
             return "already_present"
         if state == SENTINEL_ABSENT:
             return (
-                "error: the entry reported by O_CREAT|O_EXCL as already "
-                "existing had vanished by the time it was examined; retry"
+                "error: the entry reported by link() as already existing had "
+                "vanished by the time it was examined; retry"
             )
         return f"error: {detail}; refusing to treat this as an existing sentinel"
+    except OSError as exc:
+        # Every other link failure -- EACCES, EROFS, EIO, EXDEV, a parent
+        # removed after the scan -- is reported for THIS segment and lets the
+        # loop continue, rather than escaping to the top-level handler and
+        # abandoning every segment after it.
+        _cleanup_staging(None, tmp_path)
+        return f"error: {exc}"
 
-    # Content is deliberately fixed, with no timestamp -- see
-    # ledger_update.py's own mark_ever_converged() docstring for why.
-    # fsync the marker AND its parent directory before reporting "created".
-    # This marker is the durable record that outlives the ledger, and the
-    # ledger fragment it backs is itself fsynced in a DIFFERENT directory --
-    # so without this, a power or kernel crash can preserve `converged` while
-    # losing the marker's directory entry. That asymmetry is exactly the state
-    # the selector reads as ABSENT, which authorizes retranslating converged
-    # work. A marker not worth syncing is not worth calling durable.
-    # RETRY LAUNDERING is the trap here, and it is why every failure path
-    # below removes the file it created. `O_CREAT|O_EXCL` succeeded, so a
-    # regular marker now exists. If a later step fails and that file is left
-    # behind, the failure is reported once -- and then the NEXT run classifies
-    # the residue as SENTINEL_PRESENT, a direct retry returns
-    # `already_present`, and neither ever completes the fsync. First run says
-    # `success: false`, retry says `success: true`, and the marker's
-    # durability was never established by anyone. A false green reached by
-    # retrying an honest red is worse than the original red.
+    # The link is what published the name, and a directory entry is not
+    # durable until its directory is synced. Without this a crash can lose the
+    # entry while the ledger fragment it backs -- fsynced in a DIFFERENT
+    # directory -- survives, which is exactly the asymmetry the dispatch gate
+    # reads as ABSENT and clears for retranslation.
     #
-    # Removing it is safe precisely because this branch owns the file: EXCL
-    # proved no marker existed a moment ago, so the unlink cannot destroy
-    # protection somebody else established.
-    def _abandon(reason: str) -> str:
-        try:
-            os.unlink(str(path))
-        except OSError as unlink_exc:
-            return (
-                f"error: {reason}; the partially-created sentinel could NOT be "
-                f"removed either ({unlink_exc}), so a regular file with "
-                f"unproven durability is now at {path}. Remove it by hand "
-                f"before re-running, or this segment will be reported as "
-                f"already protected when it is not"
-            )
-        return f"error: {reason}"
-
-    try:
-        os.write(fd, b"converged\n")
-        os.fsync(fd)
-    except OSError as exc:
-        try:
-            os.close(fd)
-        except OSError:
-            pass  # best-effort cleanup; already reporting the write failure
-        return _abandon(str(exc))
-
-    try:
-        os.close(fd)
-    except OSError as exc:
-        return _abandon(str(exc))
-
-    # The file's own fsync does not persist the NAME. Without the directory
-    # fsync the entry can still be absent after a crash, which is the failure
-    # this function exists to prevent.
+    # A failure here does NOT unlink: the name is already published and, from
+    # this point on, may legitimately be another reader's protection. It is
+    # reported so the segment lands in `failed_to_create` and the run fails,
+    # which is the honest answer -- the sentinel exists but its durability is
+    # unproven.
+    dir_fd = None
     try:
         dir_fd = os.open(str(segments_dir), os.O_RDONLY)
-    except OSError as exc:
-        return _abandon(f"sentinel written but its directory could not be opened to sync: {exc}")
-    try:
         os.fsync(dir_fd)
     except OSError as exc:
-        return _abandon(f"sentinel written but its directory entry could not be synced: {exc}")
+        return (
+            f"error: the sentinel for {seg!r} was created, but its directory "
+            f"entry could not be synced ({exc}), so it may not survive a "
+            f"crash. It is NOT removed -- it is a valid marker now and "
+            f"another reader may already be relying on it. Re-run to sync it"
+        )
     finally:
-        try:
-            os.close(dir_fd)
-        except OSError:
-            pass  # best-effort; the fsync above is what mattered
+        if dir_fd is not None:
+            try:
+                os.close(dir_fd)
+            except OSError:
+                pass  # best-effort; the fsync above is what mattered
+        _cleanup_staging(None, tmp_path)
 
     return "created"
 
@@ -593,8 +643,38 @@ class FatalError(Exception):
     JSON payload on stdout (exit 1), never a bare traceback."""
 
 
+def _json_line(payload) -> str:
+    """`json.dumps(..., ensure_ascii=False)`, falling back to ASCII escaping
+    when the result cannot be encoded for stdout.
+
+    A ledger is JSON, and JSON can carry a LONE SURROGATE -- a lone-surrogate escape as a
+    segment id or a status. `ensure_ascii=False` keeps it verbatim, and
+    printing it then raises UnicodeEncodeError from the print itself, OUTSIDE
+    every handler here: the process dies with a traceback and no JSON at all,
+    exactly where this script's contract promises a failure payload. Escaping
+    is strictly better than crashing -- the operator still gets the report,
+    with the offending value shown as an escape rather than as bytes the
+    terminal cannot represent.
+
+    stdout keeps this deterministic-JSON treatment rather than a stream-level
+    error handler, so the bytes emitted are always valid JSON chosen here
+    rather than whatever an encoder substituted. STDERR is different -- it
+    carries the human summary, not a parseable contract -- and is reconfigured
+    with `errors="backslashreplace"` in main() instead. It has to be: the
+    summary prints segment ids and statuses BEFORE this payload is emitted, so
+    an unencodable one killed the process before stdout was ever reached, and
+    guarding stdout alone fixed nothing."""
+    line = json.dumps(payload, ensure_ascii=False)
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        line.encode(encoding)
+    except UnicodeEncodeError:
+        return json.dumps(payload, ensure_ascii=True)
+    return line
+
+
 def fatal(message: str, **extra) -> NoReturn:
-    raise FatalError(json.dumps({"success": False, "error": message, **extra}, ensure_ascii=False))
+    raise FatalError(_json_line({"success": False, "error": message, **extra}))
 
 
 def read_json(path: Path, what: str):
@@ -974,6 +1054,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # The human summary printed below carries segment ids and statuses straight
+    # from the ledger, and a ledger is JSON: any of them can be a lone
+    # surrogate that stderr's encoder cannot represent. Unguarded, that raises
+    # UnicodeEncodeError from the print itself -- BEFORE the JSON payload on
+    # stdout is reached -- so the process dies emitting no report at all.
+    # Guarding stdout alone fixed nothing, because stderr goes first. A
+    # mangled character in a diagnostic line costs nothing next to that.
+    # getattr, not a direct call: sys.stderr is only guaranteed to be a
+    # TextIO, and a test harness or a caller that replaced it with a plain
+    # file-like object has no `reconfigure`. Losing the setting is harmless
+    # -- it only widens what stderr can render -- so a miss is silent.
+    reconfigure = getattr(sys.stderr, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(errors="backslashreplace")
+        except (OSError, ValueError):
+            pass  # a non-standard stderr; the stdout payload still stands
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
@@ -985,7 +1082,7 @@ def main(argv=None) -> int:
         return 1
     except Exception as exc:  # pragma: no cover -- defensive catch-all
         print(
-            json.dumps({"success": False, "error": f"unexpected error: {exc}"}, ensure_ascii=False),
+            _json_line({"success": False, "error": f"unexpected error: {exc}"}),
             file=sys.stdout,
         )
         return 1
@@ -1049,12 +1146,12 @@ def main(argv=None) -> int:
         )
     print("\n" + "=" * 70, file=sys.stderr)
 
-    print(json.dumps(result, ensure_ascii=False))
+    print(_json_line(result))
     # Exit status tracks `success`, so a caller that checks only `$?` learns
-    # the same thing the JSON says. (An earlier version of this comment said
-    # SKILL.md tells the operator to check the exit code. It does not -- it
-    # names `missing_sentinels` only. The upgrade note is being widened to
-    # name the fields that actually decide whether protection is up.)
+    # the same thing the JSON says. SKILL.md's #409 upgrade note names this
+    # field first, ahead of `missing_sentinels`, because a non-empty
+    # `missing_sentinels` says what the run INTENDED and `success` says
+    # whether it got there.
     return 0 if result["success"] else 1
 
 

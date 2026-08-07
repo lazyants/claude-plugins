@@ -53,7 +53,7 @@ CITATION_ANCHORS = {
     # the note grew past 448 while both original anchors stayed comfortably
     # inside the old range, so nothing failed. `not_evaluated` sits near the
     # new end and pins it.
-    "SKILL.md:419-468": [
+    "SKILL.md:419-479": [
         "#409 upgrade note",
         "backfill_ever_converged.py",
         "`not_evaluated`",

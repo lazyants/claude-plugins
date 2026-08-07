@@ -41,6 +41,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -880,13 +881,12 @@ def test_a_healthy_project_reports_no_ambiguous_sentinels(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_write_failure_after_sentinel_create_is_reported_as_a_clean_error_string(tmp_path):
-    """mark_ever_converged()'s O_CREAT|O_EXCL open() publishes the sentinel's
-    NAME in segments/ before the single os.write() that fills it in ever
-    runs. Pre-fix, an OSError from that write was OUTSIDE the try/except
-    producing this function's documented string-outcome contract -- it
-    propagated as an uncaught exception instead, on exactly the failure that
-    contract exists to cover. The caller (run(), under --apply) has no
-    handling for an exception here; only for the three documented outcomes.
+    """Pre-fix, an OSError from mark_ever_converged()'s os.write() was
+    OUTSIDE the try/except producing this function's documented
+    string-outcome contract -- it propagated as an uncaught exception
+    instead, on exactly the failure that contract exists to cover. The
+    caller (run(), under --apply) has no handling for an exception here;
+    only for the three documented outcomes.
 
     Genuinely only reachable in-process, matching ledger_update.test.py's
     own reasoning for its sibling test: there is no portable, reliable way
@@ -920,21 +920,33 @@ def test_write_failure_after_sentinel_create_is_reported_as_a_clean_error_string
     )
     assert "No space left on device" in outcome
 
-    # The name published by O_CREAT|O_EXCL must be REMOVED again. This
-    # assertion used to say the opposite, on the premise that leaving it was
-    # harmless "because every consumer only calls .exists()". That premise
-    # died twice over: this release replaced those `.exists()` reads with
+    # Nothing may appear at the public name. This assertion used to say the
+    # OPPOSITE, on the premise that residue there was harmless "because every
+    # consumer only calls .exists()". That premise died twice over: this
+    # release replaced those `.exists()` reads with
     # classify_ever_converged_sentinel(), and -- the reason that matters --
-    # leaving the name launders a retry. The residue reads as
-    # SENTINEL_PRESENT, so the next run reports the segment already protected
-    # and never completes the fsync the first run failed to. Run 1 red, run 2
-    # green, durability never established by either.
+    # residue launders a retry. It reads as SENTINEL_PRESENT, so the next run
+    # reports the segment already protected and never completes the fsync the
+    # first run failed to. Run 1 red, run 2 green, durability never
+    # established by either.
+    #
+    # The first repair made the failing path unlink the name it had created,
+    # which was a BLOCKER of its own (it could delete a sentinel another
+    # writer had since installed). Staging is what makes this assertion hold
+    # WITHOUT any unlink of the public name: the write that fails here goes
+    # to the temp file, so the public name was never created in the first
+    # place. Hence `not path.exists()` and no stray staging file either --
+    # the second half is what would go red if cleanup regressed.
     path = backfill.ever_converged_path(seg, segments_dir)
     assert not path.exists(), (
-        "a sentinel whose write failed must not be left on disk: EXCL proved "
-        "no marker existed a moment earlier, so this function owns the file "
-        "and must take it back rather than leave a marker whose durability "
-        "nothing has established"
+        "a failed write must leave NOTHING at the public sentinel name: the "
+        "bytes are staged elsewhere and the name is only published, by "
+        "os.link(), once they are durable"
+    )
+    strays = [p.name for p in segments_dir.iterdir()]
+    assert strays == [], (
+        f"the staging file must be cleaned up on a failed write, or the next "
+        f"run's segments/ fills with debris; found {strays}"
     )
 
 
@@ -1332,6 +1344,99 @@ def test_a_failed_create_does_not_launder_into_a_successful_retry(tmp_path):
     assert path.read_bytes() == b"converged\n"
 
 
+def test_a_failed_create_never_destroys_another_writers_sentinel(tmp_path):
+    """The interleaving that made the FIRST cleanup attempt a BLOCKER.
+
+    That version created the public name with O_CREAT|O_EXCL and unlinked it
+    again on failure, reasoning that EXCL proved the call owned the file. EXCL
+    proves only that this call installed the entry at open time -- it does not
+    reserve the pathname. Between the failed write and the unlink, another
+    actor can remove the incomplete inode and install a real, fully-synced
+    sentinel, and the unlink then deletes THAT: a cleanup that destroys
+    protection somebody else established, which is strictly worse than the
+    residue it was cleaning up.
+
+    The failing write here performs exactly that substitution, so the test
+    reproduces the race deterministically rather than hoping to hit it."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_no_destroy")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segRace"
+    path = backfill.ever_converged_path(seg, segments_dir)
+    other_writer_content = b"converged\n"
+
+    real_write = backfill.os.write
+
+    def failing_write_that_lets_another_writer_in(fd, data):
+        # Stand in for the concurrent actor: whatever this call staged, a real
+        # sentinel is now at the public name.
+        if not path.exists():
+            path.write_bytes(other_writer_content)
+        raise OSError(28, "No space left on device")
+
+    backfill.os.write = failing_write_that_lets_another_writer_in
+    try:
+        outcome = backfill.mark_ever_converged(seg, segments_dir)
+    finally:
+        backfill.os.write = real_write
+
+    assert outcome.startswith("error: "), outcome
+    assert path.exists(), (
+        "the other writer's sentinel was destroyed by this call's cleanup -- "
+        "a failed create must never remove a marker it did not create"
+    )
+    assert path.read_bytes() == other_writer_content
+
+    # No staging file may be left lying around in segments/ either.
+    strays = [p.name for p in segments_dir.iterdir() if "staging" in p.name]
+    assert strays == [], f"staging files left behind: {strays}"
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["segment_id", "status"],
+    ids=["surrogate-in-segment-id", "surrogate-in-status"],
+)
+def test_a_lone_surrogate_still_produces_a_json_payload_not_a_traceback(tmp_path, where):
+    """A ledger is JSON, and JSON can carry a lone surrogate.
+
+    `json.dumps(..., ensure_ascii=False)` keeps it verbatim and the PRINT then
+    raises UnicodeEncodeError -- from outside every handler in this script, so
+    the process dies with a traceback and emits no JSON at all, exactly where
+    the output contract promises a failure payload. Both carriers matter: a
+    surrogate segment id is caught by validation but is then interpolated into
+    the fatal payload, and a surrogate STATUS travels through `not_evaluated`
+    to the success payload, which validation never touches."""
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    ledger = root / "runs" / "ledger.json"
+    doc = json.loads(ledger.read_text())
+    if where == "segment_id":
+        doc["segments"]["\ud800"] = {"status": "in_progress"}
+    else:
+        doc["segments"]["seg_surrogate_status"] = {"status": "\ud800"}
+    ledger.write_text(json.dumps(doc, ensure_ascii=True))
+
+    proc = run_backfill(root)
+
+    # The message names the SYMPTOM and shows stderr, deliberately without
+    # naming a cause. An earlier version asserted the cause ("the run died
+    # before emitting its payload"), which cost three rounds of repairing
+    # already-correct guards: the script had stopped importing entirely, and
+    # a non-importable module produces this identical empty stdout. Read the
+    # stderr below before believing any theory about why.
+    assert proc.stdout.strip(), (
+        f"no JSON on stdout. Could be the surrogate this test is about, or "
+        f"anything that stops the script reaching its final print at all -- "
+        f"a SyntaxError included. stderr tail: {proc.stderr[-800:]!r}"
+    )
+    payload = json.loads(proc.stdout)
+    assert isinstance(payload, dict) and "success" in payload
+    assert "UnicodeEncodeError" not in proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
 def test_an_unsafe_segment_id_is_refused_even_when_it_is_not_converged(tmp_path):
     """Segment ids are validated before the status branch, not inside it.
 
@@ -1354,7 +1459,111 @@ def test_an_unsafe_segment_id_is_refused_even_when_it_is_not_converged(tmp_path)
         f"an unsafe segment id must be refused wherever it appears, not "
         f"reported; got rc={proc.returncode} stdout={proc.stdout[:400]!r}"
     )
-    assert "../unsafe" not in json.loads(proc.stdout).get("not_evaluated", "")
+    payload = json.loads(proc.stdout)
+    # Assert the SPECIFIC refusal, not merely that something failed. Without
+    # this, any unrelated fatal -- an unreadable ledger, a merge error --
+    # satisfies rc != 0, and the absence check below passes vacuously because
+    # a fatal payload has no `not_evaluated` key for `../unsafe` to be in.
+    assert payload.get("success") is False
+    assert "unsafe segment id" in payload.get("error", ""), (
+        f"the run must fail BECAUSE of the id, not for some unrelated "
+        f"reason that happens to also be fatal; got {payload!r}"
+    )
+    assert "../unsafe" in payload.get("error", "")
+    assert "../unsafe" not in json.dumps(payload.get("not_evaluated", []))
+
+
+def test_a_staging_fsync_failure_never_publishes_the_public_name(tmp_path):
+    """The durability barrier sits BEFORE publication, so a failure at it
+    must leave the public name untouched.
+
+    Covers the gap review found after the stage-then-link rewrite: the write
+    and close seams had tests, the fsync seam did not, so a regression that
+    linked first and fsynced afterwards -- reintroducing exactly the residue
+    window staging removed -- would have gone green."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_fsync_failure")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segFsyncFail"
+
+    real_fsync = backfill.os.fsync
+
+    def failing_fsync(fd):
+        raise OSError(5, "Input/output error")  # EIO
+
+    backfill.os.fsync = failing_fsync
+    try:
+        outcome = backfill.mark_ever_converged(seg, segments_dir)
+    finally:
+        backfill.os.fsync = real_fsync
+
+    assert outcome.startswith("error: "), (
+        f"an fsync-time OSError must produce the documented string outcome, "
+        f"not an uncaught exception; got {outcome!r}"
+    )
+    assert "Input/output error" in outcome
+
+    path = backfill.ever_converged_path(seg, segments_dir)
+    assert not path.exists(), (
+        "bytes that were never fsynced must not be reachable under the "
+        "sentinel name -- that is the entire point of staging before linking"
+    )
+    assert list(segments_dir.iterdir()) == [], (
+        "the staging file must be cleaned up when the fsync fails"
+    )
+
+
+def test_a_directory_fsync_failure_keeps_the_sentinel_and_still_reports_failure(tmp_path):
+    """The one failure that deliberately leaves the public name in place.
+
+    Past the link the name may already be another reader's protection, so
+    removing it is precisely the destruction staging exists to prevent. The
+    honest report is therefore "it exists, its durability is unproven" --
+    which must still count as a FAILURE so the run does not claim protection
+    it cannot vouch for. Both halves are asserted here because they pull in
+    opposite directions and a plausible "fix" for either breaks the other."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_dir_fsync")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segDirFsyncFail"
+
+    real_fsync = backfill.os.fsync
+    calls = []
+
+    def fsync_failing_only_on_a_directory(fd):
+        # Distinguish by what the fd actually refers to rather than by call
+        # order: an ordering assumption would silently stop testing the
+        # directory seam the moment another fsync is added ahead of it.
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            calls.append("dir")
+            raise OSError(5, "Input/output error")  # EIO
+        calls.append("file")
+        return real_fsync(fd)
+
+    backfill.os.fsync = fsync_failing_only_on_a_directory
+    try:
+        outcome = backfill.mark_ever_converged(seg, segments_dir)
+    finally:
+        backfill.os.fsync = real_fsync
+
+    assert calls == ["file", "dir"], (
+        f"the test must have reached the directory fsync via a successful "
+        f"file fsync; got {calls}"
+    )
+    assert outcome.startswith("error: "), (
+        f"an unsynced directory entry means durability is unproven, so this "
+        f"cannot report success; got {outcome!r}"
+    )
+    assert "could not be synced" in outcome
+
+    path = backfill.ever_converged_path(seg, segments_dir)
+    assert path.is_file(), (
+        "the sentinel must NOT be removed here: the link already published "
+        "the name, so from this point on another reader may be relying on it"
+    )
+    assert path.read_bytes() == b"converged\n"
+    strays = [p.name for p in segments_dir.iterdir() if "staging" in p.name]
+    assert strays == [], f"staging files left behind: {strays}"
 
 
 if __name__ == "__main__":
