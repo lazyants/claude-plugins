@@ -68,23 +68,30 @@ one the dispatch gate believes unprotected.
   `final_audit.py` COUNTS, because an audit must never declare a converged book undeliverable on a
   stat failure; the backfill REPORTS UNPROTECTED.
 - Pinned by a five-state matrix including `EACCES`, an `inspect.getsource` identity check across all
-  four copies, and a census test that fails if a fifth script joins the contract without being
-  listed. The census checks its own scan pattern by walking the same tree a second way (`os.walk`
+  four copies, and a census test that fails when a fifth script joins the contract in any of the
+  spellings enumerated below — not "whenever a fifth script joins", which is what this line used to
+  claim and which a mutation disproved twice. The census checks its own scan pattern by walking the
+  same tree a second way (`os.walk`
   plus a suffix test, no pattern matching) and requiring the two to agree — not by a floor on the
   count, which cannot separate "scanned everything" from "scanned almost everything and kept the
   needles": measured on this tree, `*.py` scans 44 scripts while the plausible typo `*_*.py` scans
   42, still finds all four participants, and still satisfies every other assertion — it passed the
   floor this release replaces, which is why the floor is gone rather than raised.
-- **The census pins participants by four needles and its exceptions by ROLE, not by name.** Two
-  needles are exact spellings (the marker f-string, the predicate `def`); a third, `def
-  ever_converged_path`, is independent of how the marker filename is spelled, so a participant
-  building the path as `".ever_converged." + seg` still trips it. A fourth, loose needle scans the
-  bare token `ever_converged` and pins the two files that mention it without participating — and
-  those two are re-asserted every run to carry none of the three executable signals, because a
-  name-only whitelist is how a listed file quietly becomes a participant. Stated rather than papered
-  over: this is a source-TEXT census, so a participant that never spells `ever_converged`
-  contiguously evades all four. Closing that needs AST/import analysis of scripts that are
-  deliberately import-free; the needles are chosen so evasion takes concealment, not drift.
+- **The census pins participants by five needles and its exceptions by ROLE at OCCURRENCE
+  granularity, not by name.** Two needles are exact spellings (the marker f-string, the predicate
+  `def`); a third, `def ever_converged_path`, is independent of how the marker filename is spelled;
+  a fourth scans the bare token `ever_converged`. The fifth is not a text scan at all — it folds
+  each literal expression to the string it BUILDS, so `".ever_" + "converged." + seg` is caught
+  although the source contains the token nowhere. An earlier revision of this entry called that
+  shape an accepted limit because closing it "needs AST/import analysis of import-free scripts";
+  `ast.parse()` imports nothing, so that rationale was simply wrong and the hole is closed.
+  The two files that mention the marker without participating are re-checked every run — and at
+  occurrence granularity, because both appear in every FILE-level set (their docstrings discuss the
+  marker), so file granularity could not tell discussing it from building it: a real participant
+  added inline to an exempted file passed the whole census. Measured, then fixed.
+  What remains, stated: `%`, `.format()`, `"".join()` of constants and separately formatted
+  f-string constants are not folded, and a name built from non-literals at runtime evades every
+  needle. Evasion now takes deliberate concealment; the census is narrower than complete.
 
 The duplication is deliberate and stays. The reason previously given in those docstrings was false —
 this codebase does share modules between "self-contained" scripts. The real reason is stronger:
@@ -116,10 +123,14 @@ script would put its bytes outside the hash meant to cover them.
   ALREADY been replaced by `in_progress` and confirmed on disk before dispatch, so the refusal
   leaves `in_progress` — `recoverable`, selectable, genuinely self-healing. (The first draft of this
   note claimed it left the old cap standing, which is backwards: making that reopen durable first is
-  the whole point of that branch.) A cap this invocation did NOT reopen, or a `blocked` fragment:
-  stays `human_escalation` (select_segments.py:1192-1197), outside the default eligible set, and
-  needs a human. So: never worse than the pre-fix behaviour, self-healing on the two paths that
-  matter, and recoverable-by-hand on the rest.
+  the whole point of that branch.) The general rule, rather than a list that kept coming out
+  incomplete: **the refusal does not change the outcome at all — `select_segments.py` classifies
+  whatever fragment was already there.** `not_started`, `pending`, `in_progress` and a `converged`
+  fragment that reclassifies `stale` are all automatically re-selected; any `non_converged` — a cap
+  this invocation did not reopen included — and any `blocked` become `human_escalation`
+  (select_segments.py:1192-1197), outside the default eligible set, and need a human. So: never
+  worse than the pre-fix behaviour, and self-healing exactly where the pre-existing state was
+  already selectable.
 - **The A→B→A revert is still undetected, and the window is wider than "while a review is in
   flight".** The review's `draft_sha1` binding catches any single change to a draft between review
   and convergence, but not an exact revert; `review.schema.json` concedes that hash-first-then-read

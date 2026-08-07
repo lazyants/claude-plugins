@@ -1892,7 +1892,7 @@ SENTINEL_SCRIPTS = (
     "backfill_ever_converged.py",  # the already_sentineled scan (reader+writer)
 )
 
-def _folded_str_literals(src):
+def _folded_str_literals(src, skip_docstrings=False):
     """Every string a module's source CONSTRUCTS from literals alone: plain
     constants, `+` concatenations of them, and the literal parts of f-strings.
 
@@ -1905,9 +1905,19 @@ def _folded_str_literals(src):
     looks like a working one.
 
     `ast.parse()` reads source only: no import, no execution, so it is safe for
-    scripts that are deliberately import-free. Genuinely dynamic construction
-    (`"".join(parts)`, `getattr`, a name assembled from a config value) still
-    evades it, and no source-level check closes that."""
+    scripts that are deliberately import-free.
+
+    KNOWN GAPS, measured rather than guessed: `%` interpolation, `.format()`,
+    `"".join()` of constants, and f-string constants formatted separately are
+    NOT folded, and an f-string's `{...}` holes are treated as empty, which can
+    join two literal fragments that runtime would keep apart (a false POSITIVE,
+    the safe direction here). So this narrows evasion to shapes no participant
+    would reach for by accident; it does not make evasion impossible.
+
+    `skip_docstrings` drops module/class/function docstrings, which is what
+    separates a file that DISCUSSES the convention from one that BUILDS it.
+    Without it the two are indistinguishable at file granularity, and a
+    whitelisted file can host a real participant inside its own exemption."""
     import ast
 
     def fold(node):
@@ -1927,7 +1937,28 @@ def _folded_str_literals(src):
         tree = ast.parse(src)
     except SyntaxError:  # not our problem here -- other tests own syntax
         return []
-    return [s for node in ast.walk(tree) if (s := fold(node)) is not None]
+
+    skipped = set()
+    if skip_docstrings:
+        for node in ast.walk(tree):
+            body = getattr(node, "body", None)
+            if not isinstance(
+                node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+            ) or not body:
+                continue
+            first = body[0]
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                skipped.add(id(first.value))
+
+    return [
+        s
+        for node in ast.walk(tree)
+        if id(node) not in skipped and (s := fold(node)) is not None
+    ]
 
 
 # Scripts that mention `ever_converged` WITHOUT touching the marker: the
@@ -1979,11 +2010,23 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
     error it was: `ast.parse()` reads source and imports nothing, so the
     rationale for leaving the hole open did not survive being checked.
 
-    KNOWN LIMIT, now genuinely narrow: a participant that builds the name
-    dynamically -- `"".join(parts)`, `getattr`, a value read from config --
-    evades all five, because no source-level check can see it. Evasion now
-    requires deliberate concealment rather than ordinary drift, which is the
-    property this test can actually hold.
+    The non-participant exemptions are checked at OCCURRENCE granularity, not
+    file granularity. Both listed files already appear in every file-level
+    token set, because their docstrings discuss the marker -- so a file-level
+    role check cannot tell "discusses the convention" from "builds it", and a
+    real participant added inline to a listed file passed this whole census.
+    Measured, not hypothetical. The role check therefore re-scans each listed
+    file with docstrings dropped and requires ZERO remaining sites.
+
+    KNOWN LIMITS, measured rather than asserted: the folder handles `+`,
+    implicit adjacency and f-string literal parts, but NOT `%`, `.format()`,
+    `"".join()` of constants, or separately formatted f-string constants; and
+    it treats f-string holes as empty, which can join fragments runtime keeps
+    apart (a false POSITIVE -- the safe direction). A name built from
+    non-literals at runtime evades every needle here. So this narrows evasion
+    to shapes nobody reaches for by accident; it does not make the census
+    complete, and an earlier revision of this docstring overclaimed exactly
+    that.
 
     THE SCAN PATTERN IS ITSELF A DEPENDENCY, and a narrowed one is the
     failure this guard exists to catch, so it is checked by INDEPENDENT
@@ -2082,13 +2125,37 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
         f"text scan above misses them."
     )
     # A name on the non-participant list is not taken on trust: each one is
-    # re-checked every run for all four executable participation signals. The
+    # re-checked every run for every executable participation signal. The
     # failure this closes is a listed file QUIETLY BECOMING a participant, where
     # the listing that excused its prose mention would otherwise excuse its code.
+    #
+    # `builds_token` cannot be used here, and that gap was a MEASURED
+    # false-green, not a theoretical one: both listed files are ALREADY in
+    # `builds_token` because their docstrings discuss the marker, so a real
+    # participant added inline -- `(segments_dir / (".ever_" + "converged." +
+    # seg)).lstat()` -- changed none of the five sets and passed every
+    # assertion. File granularity cannot separate DISCUSSING the convention
+    # from BUILDING it; occurrence granularity can. Hence the docstring-skipping
+    # scan: for these two files the count of non-docstring token sites is 0,
+    # and the mutant above makes it 1.
     for name in SENTINEL_NON_PARTICIPANTS:
         assert name not in path_builders | predicate_copies | path_helpers, (
             f"{name} is on SENTINEL_NON_PARTICIPANTS but now carries an "
             f"executable participation signal. It is a participant: move it to "
+            f"SENTINEL_SCRIPTS and give it the shared predicate."
+        )
+        executable_sites = [
+            s
+            for s in _folded_str_literals(
+                (scripts_dir / name).read_text(encoding="utf-8"), skip_docstrings=True
+            )
+            if "ever_converged" in s
+        ]
+        assert not executable_sites, (
+            f"{name} is on SENTINEL_NON_PARTICIPANTS but builds a string "
+            f"containing `ever_converged` OUTSIDE a docstring: "
+            f"{executable_sites}. Its exemption covers discussing the "
+            f"convention, not touching the marker -- move it to "
             f"SENTINEL_SCRIPTS and give it the shared predicate."
         )
     assert path_builders == expected, (
