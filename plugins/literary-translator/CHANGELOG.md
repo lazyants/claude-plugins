@@ -110,12 +110,25 @@ one the dispatch gate believes unprotected.
   those were each added after a mutant passed the census without them.
   A seventh assertion is not a census question at all: the census can be exactly right about which
   four files participate while one of them quietly reintroduces `ever_converged_path(seg).exists()`
-  — the raw read this release removed. That is now pinned too, including through a local bound in
-  the same scope.
-  What remains, stated: `%`, `.format()`, `"".join()` of constants and separately formatted f-string
-  constants are not folded; a path built from non-literals at runtime still evades the five literal
-  needles, though reaching the marker through the shared API trips the sixth; and the probe check
-  does not follow indirection across scopes. The residue is a file that reimplements the whole
+  — the raw read this release removed. That is now pinned too: through a local, an alias of that
+  local, an alias of the function itself, a `Path(...)` wrapper, a lambda or class body, a
+  comprehension, and the module-function spellings (`os.path.exists`, `os.stat`) as well as the
+  method ones.
+  **That guard's reach is asserted as a table, not described in prose** (`test_sentinel_probe_guard_
+  reach_is_measured_not_claimed`), because its first revision disclosed exactly one limit while
+  actually having four FALSE POSITIVES — it reported `p = sentinel; p = other; p.exists()`, a probe
+  written before the binding, a comprehension shadowing an outer name, and a bound method never
+  called. A limits section that overstates a guard's reach reads exactly like a careful one, which
+  is why this one is executable: 16 constructs, each run before being written down, and any change
+  to the helper that moves a row fails the test. Names are now TAINTED by any other binding in the
+  same scope, which trades misses for silence on correct code — a guard that fires on valid code
+  gets deleted, and that is the failure direction to avoid.
+  What remains, stated and pinned by that table: `%`, `.format()`, `"".join()` of constants and
+  separately formatted f-string constants are not folded; a path built from non-literals at runtime
+  still evades the five literal needles, though reaching the marker through the shared API trips the
+  sixth; the probe guard does not follow indirection across scopes, does not track a name that is
+  also rebound elsewhere in its scope, and deliberately ignores `.open()`/`.read_bytes()`, which are
+  legitimate content reads after classification. The residue is a file that reimplements the whole
   convention from non-literal parts under its own names — concealment rather than drift. The census
   is narrower than complete.
 
