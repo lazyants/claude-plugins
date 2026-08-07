@@ -145,10 +145,22 @@ stderr. Success:
 ``{"success": true, "durable_root": ..., "applied": bool, "ledger_path": ...,
 "ledger_source": "existing" | "freshly_merged",
 "ever_converged_segs": [...], "already_sentineled": [...],
-"missing_sentinels": [...], "created": [...], "failed_to_create": [...],
-"counts": {...}}``. Failure: ``{"success": false, "error": ...}``. Exit 0 on
-success, 1 on any fatal condition -- callers should read stdout, not rely on
-the exit code alone.
+"missing_sentinels": [...], "ambiguous_sentinels": [...],
+"not_evaluated": [...], "created": [...], "failed_to_create": [...],
+"counts": {...}}``. Fatal failure: ``{"success": false, "error": ...}``.
+
+``success`` is NOT only about fatal conditions. It is false, and the exit
+code 1, whenever ``failed_to_create`` is non-empty -- a run that set out to
+create sentinels and created none of them is not a success, however cleanly
+it ran. Such a payload carries the full report, not an ``error`` field.
+
+``ambiguous_sentinels`` and ``not_evaluated`` do NOT make ``success`` false:
+neither is a failure to do the work, and both are reported precisely so that
+``success: true`` cannot be read as "every segment that ever converged is
+protected now". ``not_evaluated`` names what this script never considered
+(see the Known limitation above); a segment there may or may not have
+converged, and nothing here can tell. Read both fields before concluding a
+project is protected.
 """
 
 import argparse
@@ -485,6 +497,32 @@ def mark_ever_converged(seg: str, segments_dir: Path) -> str:
     # losing the marker's directory entry. That asymmetry is exactly the state
     # the selector reads as ABSENT, which authorizes retranslating converged
     # work. A marker not worth syncing is not worth calling durable.
+    # RETRY LAUNDERING is the trap here, and it is why every failure path
+    # below removes the file it created. `O_CREAT|O_EXCL` succeeded, so a
+    # regular marker now exists. If a later step fails and that file is left
+    # behind, the failure is reported once -- and then the NEXT run classifies
+    # the residue as SENTINEL_PRESENT, a direct retry returns
+    # `already_present`, and neither ever completes the fsync. First run says
+    # `success: false`, retry says `success: true`, and the marker's
+    # durability was never established by anyone. A false green reached by
+    # retrying an honest red is worse than the original red.
+    #
+    # Removing it is safe precisely because this branch owns the file: EXCL
+    # proved no marker existed a moment ago, so the unlink cannot destroy
+    # protection somebody else established.
+    def _abandon(reason: str) -> str:
+        try:
+            os.unlink(str(path))
+        except OSError as unlink_exc:
+            return (
+                f"error: {reason}; the partially-created sentinel could NOT be "
+                f"removed either ({unlink_exc}), so a regular file with "
+                f"unproven durability is now at {path}. Remove it by hand "
+                f"before re-running, or this segment will be reported as "
+                f"already protected when it is not"
+            )
+        return f"error: {reason}"
+
     try:
         os.write(fd, b"converged\n")
         os.fsync(fd)
@@ -493,12 +531,12 @@ def mark_ever_converged(seg: str, segments_dir: Path) -> str:
             os.close(fd)
         except OSError:
             pass  # best-effort cleanup; already reporting the write failure
-        return f"error: {exc}"
+        return _abandon(str(exc))
 
     try:
         os.close(fd)
     except OSError as exc:
-        return f"error: {exc}"
+        return _abandon(str(exc))
 
     # The file's own fsync does not persist the NAME. Without the directory
     # fsync the entry can still be absent after a crash, which is the failure
@@ -506,11 +544,11 @@ def mark_ever_converged(seg: str, segments_dir: Path) -> str:
     try:
         dir_fd = os.open(str(segments_dir), os.O_RDONLY)
     except OSError as exc:
-        return f"error: sentinel written but its directory could not be opened to sync: {exc}"
+        return _abandon(f"sentinel written but its directory could not be opened to sync: {exc}")
     try:
         os.fsync(dir_fd)
     except OSError as exc:
-        return f"error: sentinel written but its directory entry could not be synced: {exc}"
+        return _abandon(f"sentinel written but its directory entry could not be synced: {exc}")
     finally:
         try:
             os.close(dir_fd)
@@ -717,11 +755,25 @@ def run(args, dirs: dict) -> dict:
     ever_converged_segs = []
     not_evaluated = []
     for seg, record in ledger_segments.items():
+        # Validation runs for EVERY segment, before the status branch decides
+        # anything. It used to run only on the converged branch, which was
+        # sound while that branch was the only one producing output -- adding
+        # `not_evaluated` created a second path to stdout and would otherwise
+        # have carried an unvalidated id straight out through it. Two ways
+        # that bites: `../unsafe` reaching a caller that treats the reported
+        # id as a path, and a lone surrogate reaching `json.dumps(...,
+        # ensure_ascii=False)`, which raises UnicodeEncodeError from OUTSIDE
+        # main()'s handler and produces no JSON at all -- a crash where the
+        # contract promises a failure payload.
+        problem = validate_seg(seg)
+        if problem is not None:
+            fatal(f"materialized ledger.json: unsafe segment id: {problem}", seg=seg)
         status = record.get("status") if isinstance(record, dict) else None
-        if status in WAS_CONVERGED_STATUSES:
-            problem = validate_seg(seg)
-            if problem is not None:
-                fatal(f"materialized ledger.json: unsafe segment id: {problem}", seg=seg)
+        # `status in <frozenset>` raises TypeError on an unhashable value, and
+        # a ledger is JSON: a status of `[]` or `{}` is malformed but entirely
+        # parseable. Testing the type first keeps a malformed record inside
+        # the report it belongs in instead of aborting the whole run.
+        if isinstance(status, str) and status in WAS_CONVERGED_STATUSES:
             ever_converged_segs.append(seg)
         else:
             not_evaluated.append({"seg": seg, "status": status})
@@ -998,9 +1050,11 @@ def main(argv=None) -> int:
     print("\n" + "=" * 70, file=sys.stderr)
 
     print(json.dumps(result, ensure_ascii=False))
-    # Exit status tracks `success`, so a caller that checks only `$?` -- which
-    # is what the SKILL.md upgrade note tells an operator to do -- learns the
-    # same thing the JSON says.
+    # Exit status tracks `success`, so a caller that checks only `$?` learns
+    # the same thing the JSON says. (An earlier version of this comment said
+    # SKILL.md tells the operator to check the exit code. It does not -- it
+    # names `missing_sentinels` only. The upgrade note is being widened to
+    # name the fields that actually decide whether protection is up.)
     return 0 if result["success"] else 1
 
 

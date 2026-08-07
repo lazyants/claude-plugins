@@ -920,13 +920,21 @@ def test_write_failure_after_sentinel_create_is_reported_as_a_clean_error_string
     )
     assert "No space left on device" in outcome
 
-    # The write failure must not also leak the file descriptor: the fd is
-    # closed as a best-effort cleanup before the error string is returned.
+    # The name published by O_CREAT|O_EXCL must be REMOVED again. This
+    # assertion used to say the opposite, on the premise that leaving it was
+    # harmless "because every consumer only calls .exists()". That premise
+    # died twice over: this release replaced those `.exists()` reads with
+    # classify_ever_converged_sentinel(), and -- the reason that matters --
+    # leaving the name launders a retry. The residue reads as
+    # SENTINEL_PRESENT, so the next run reports the segment already protected
+    # and never completes the fsync the first run failed to. Run 1 red, run 2
+    # green, durability never established by either.
     path = backfill.ever_converged_path(seg, segments_dir)
-    assert path.exists(), (
-        "O_CREAT|O_EXCL already published the sentinel's name before the "
-        "write failed -- that is documented as harmless (every consumer "
-        "only calls .exists()), so the name must still be there"
+    assert not path.exists(), (
+        "a sentinel whose write failed must not be left on disk: EXCL proved "
+        "no marker existed a moment earlier, so this function owns the file "
+        "and must take it back rather than leave a marker whose durability "
+        "nothing has established"
     )
 
 
@@ -1280,6 +1288,73 @@ def test_failed_creation_reports_failure_in_both_json_and_exit_code(tmp_path):
     # against a script that reported failure but had written the file anyway.
     for seg in MISSING_BEFORE_APPLY:
         assert not sentinel_path(root, seg).exists()
+
+
+def test_a_failed_create_does_not_launder_into_a_successful_retry(tmp_path):
+    """The failure mode that makes an honest red worse than useless.
+
+    A post-create error (write, fsync, close, directory sync) happens after
+    O_CREAT|O_EXCL has already published the name. If that file is left
+    behind, the NEXT attempt classifies it SENTINEL_PRESENT and returns
+    `already_present` -- a success -- without ever completing the fsync the
+    first attempt failed. Run 1 reports failure, run 2 reports protection, and
+    no run ever established durability. The operator sees the second result.
+    """
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_no_laundering")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segLaunder"
+
+    real_write = backfill.os.write
+
+    def failing_write(fd, data):
+        raise OSError(28, "No space left on device")
+
+    backfill.os.write = failing_write
+    try:
+        first = backfill.mark_ever_converged(seg, segments_dir)
+    finally:
+        backfill.os.write = real_write
+
+    assert first.startswith("error: "), first
+
+    # The retry must do real work, not inherit a half-made marker.
+    second = backfill.mark_ever_converged(seg, segments_dir)
+    assert second == "created", (
+        f"the retry must genuinely create the sentinel, not report "
+        f"`already_present` off the residue of the failed attempt; got {second!r}"
+    )
+
+    # And the marker it left is the real thing, not the empty file the failed
+    # write would have left -- which is what makes this test able to tell a
+    # true retry from a laundered one.
+    path = backfill.ever_converged_path(seg, segments_dir)
+    assert path.read_bytes() == b"converged\n"
+
+
+def test_an_unsafe_segment_id_is_refused_even_when_it_is_not_converged(tmp_path):
+    """Segment ids are validated before the status branch, not inside it.
+
+    `not_evaluated` gave non-converged records their first route to stdout.
+    Validation sat on the converged branch only, so an id like `../unsafe`
+    -- rejected outright when it was converged -- travelled straight out
+    through the new list, with `success: true` alongside it."""
+    root = setup_mixed_project(tmp_path)
+    write_fragment(root, "seg_in_progress", in_progress_fragment())
+    prime_materialized_ledger(root)
+
+    ledger = root / "runs" / "ledger.json"
+    doc = json.loads(ledger.read_text())
+    doc["segments"]["../unsafe"] = {"status": "in_progress"}
+    ledger.write_text(json.dumps(doc))
+
+    proc = run_backfill(root)
+
+    assert proc.returncode != 0, (
+        f"an unsafe segment id must be refused wherever it appears, not "
+        f"reported; got rc={proc.returncode} stdout={proc.stdout[:400]!r}"
+    )
+    assert "../unsafe" not in json.loads(proc.stdout).get("not_evaluated", "")
 
 
 if __name__ == "__main__":

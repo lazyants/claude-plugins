@@ -49,7 +49,15 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 CITATION_ANCHORS = {
-    "SKILL.md:419-448": ["#409 upgrade note", "backfill_ever_converged.py"],
+    # Anchored at BOTH ends on purpose. This citation drifted once already:
+    # the note grew past 448 while both original anchors stayed comfortably
+    # inside the old range, so nothing failed. `not_evaluated` sits near the
+    # new end and pins it.
+    "SKILL.md:419-468": [
+        "#409 upgrade note",
+        "backfill_ever_converged.py",
+        "`not_evaluated`",
+    ],
     "cache_key.py:139": ["ledger_update.py"],
     "cache_key.py:146": ["segment_dispatch_driver.py"],
     "cache_key.py:152": ["DERIVATION_BUNDLE_MEMBERS"],

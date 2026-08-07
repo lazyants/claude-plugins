@@ -3505,18 +3505,34 @@ def _cap_still_binds_what_was_reviewed(seg: str, ctx: "DispatchContext", action:
     widened. A replacement review.json carrying BOTH the same draft_sha1
     and the same dispatch_token is therefore indistinguishable here even if
     its verdict differs (a hand-flipped `clean`, different findings). That
-    is narrow by construction and not the reported failure: the only
-    automatic writer of review.json is codex_job.py's promotion, and this
-    driver dispatches this segment's jobs synchronously from one worker
-    while holding the project-wide flock, so no promotion for this segment
-    can land inside this window -- EXCEPT under the one case
-    acquire_driver_lock()'s own docstring already discloses that flock
-    cannot exclude (two machines against a sync-replicated durable root),
-    which is not narrowed here. Otherwise the writer in practice is a
-    human, and a human applying findings changes the DRAFT, which the sha
-    half above catches. Closing the residual would mean binding the whole
-    verdict, which is a stricter contract than the convergence write
-    itself has.
+    is narrow by construction, and NOT as narrow as an earlier version of
+    this docstring claimed. That version argued the residual was
+    unreachable because the only automatic writer of review.json is
+    codex_job.py's promotion and this driver holds the project-wide flock
+    across the window. **That argument is wrong and is retracted.**
+    `runs/.driver.lock` excludes another DRIVER; codex_job.py never
+    acquires it -- it takes only its own per-segment
+    `.codex_job.<seg>.lock` -- and the default workflow launches
+    codex_job.py DETACHED, independently of any driver. So a promotion
+    carrying the same draft_sha1 and the same dispatch_token but a
+    different verdict can land inside this window, and this helper accepts
+    it. The flock does not close it, and the sha half does not either,
+    because the draft need not change for the verdict to.
+
+    Reachability, so this is not read as narrower than it is: the two
+    facts compared are the two that a same-round re-promotion legitimately
+    preserves, which is exactly when a verdict can differ. The human case
+    (findings applied by hand) does change the DRAFT and IS caught by the
+    sha half. The remaining exposure is the detached-job case above, plus
+    the two-machines-on-sync-replicated-storage case
+    acquire_driver_lock()'s own docstring discloses.
+
+    Closing it means binding the verdict itself (`clean`, `coverage_ok`,
+    an artifact digest) rather than mirroring the convergence write's
+    pair, or moving the precondition into ledger_update.py so the
+    non_converged write carries its own the way a converged one does.
+    Neither is done here. This is a KNOWN OPEN RACE, not a residual that
+    argument has disposed of.
     """
     reviewed_sha1 = action.get("reviewed_sha1")
     reviewed_token = action.get("reviewed_token")

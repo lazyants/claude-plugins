@@ -443,9 +443,29 @@ W5 runs; a genuinely fresh project that has never converged anything
 reports zero and needs no action. Re-run with `--apply` to actually write
 the missing sentinels (add `--allow-merge` too if the dry run refused for
 lack of an existing `runs/ledger.json`; `--allow-empty` to confirm a
-genuinely zero-segment result is expected rather than a broken read). See
-`backfill_ever_converged.py`'s own module docstring for the full mechanism
-and CLI contract.
+genuinely zero-segment result is expected rather than a broken read).
+
+**After `--apply`, four things decide whether the protection is actually
+up, and `missing_sentinels` alone is not one of them:**
+
+- **`$?` / `success`** — non-zero and `false` mean at least one sentinel
+  this run set out to create was NOT created. The run reports which in
+  `failed_to_create`. Do not dispatch on a failed backfill.
+- **`failed_to_create`** — each entry names a segment left unprotected and
+  why. Resolve every one before W5.
+- **`ambiguous_sentinels`** — a path that is neither absent nor a regular
+  file. Never repaired automatically and never counted as protected;
+  each needs a human to look at the path.
+- **`not_evaluated`** — segments this script never considered, because
+  their current ledger status is not one it can read as converged. A
+  segment that converged and was later re-dispatched has had that
+  convergence **erased** from the ledger, so it cannot be recovered here.
+  On a project that converged segments before the sentinel existed, these
+  must be inventoried by hand — the script makes no claim about them, and
+  `success: true` does not cover them.
+
+See `backfill_ever_converged.py`'s own module docstring for the full
+mechanism and CLI contract.
 
 ## Step 0b — Resolve verse-policy adapter
 
