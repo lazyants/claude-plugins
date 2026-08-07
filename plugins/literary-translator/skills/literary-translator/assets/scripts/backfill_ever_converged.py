@@ -442,7 +442,16 @@ def mark_ever_converged(seg: str, segments_dir: Path) -> str:
     path = ever_converged_path(seg, segments_dir)
     try:
         fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
+    except OSError as exc:
+        # Every open failure OTHER than EEXIST is reported for THIS segment and
+        # lets the loop continue. Catching only FileExistsError meant an
+        # ordinary EACCES, EROFS, EIO, or a parent removed after the scan
+        # escaped to the top-level handler, abandoned every segment after this
+        # one, and printed `unexpected error` instead of the per-segment
+        # report -- so the operator lost both the partial protection and the
+        # list of what was left unprotected.
+        if not isinstance(exc, FileExistsError):
+            return f"error: {exc}"
         # EEXIST is not proof a sentinel is there. O_CREAT|O_EXCL raises it for
         # ANY existing entry -- a directory, and a DANGLING SYMLINK, both
         # verified on this project's Python 3.14.6 -- and "already_present" is
@@ -469,8 +478,16 @@ def mark_ever_converged(seg: str, segments_dir: Path) -> str:
 
     # Content is deliberately fixed, with no timestamp -- see
     # ledger_update.py's own mark_ever_converged() docstring for why.
+    # fsync the marker AND its parent directory before reporting "created".
+    # This marker is the durable record that outlives the ledger, and the
+    # ledger fragment it backs is itself fsynced in a DIFFERENT directory --
+    # so without this, a power or kernel crash can preserve `converged` while
+    # losing the marker's directory entry. That asymmetry is exactly the state
+    # the selector reads as ABSENT, which authorizes retranslating converged
+    # work. A marker not worth syncing is not worth calling durable.
     try:
         os.write(fd, b"converged\n")
+        os.fsync(fd)
     except OSError as exc:
         try:
             os.close(fd)
@@ -482,6 +499,23 @@ def mark_ever_converged(seg: str, segments_dir: Path) -> str:
         os.close(fd)
     except OSError as exc:
         return f"error: {exc}"
+
+    # The file's own fsync does not persist the NAME. Without the directory
+    # fsync the entry can still be absent after a crash, which is the failure
+    # this function exists to prevent.
+    try:
+        dir_fd = os.open(str(segments_dir), os.O_RDONLY)
+    except OSError as exc:
+        return f"error: sentinel written but its directory could not be opened to sync: {exc}"
+    try:
+        os.fsync(dir_fd)
+    except OSError as exc:
+        return f"error: sentinel written but its directory entry could not be synced: {exc}"
+    finally:
+        try:
+            os.close(dir_fd)
+        except OSError:
+            pass  # best-effort; the fsync above is what mattered
 
     return "created"
 
@@ -664,14 +698,35 @@ def resolve_ledger_segments(args, dirs: dict):
 def run(args, dirs: dict) -> dict:
     ledger_segments, ledger_path, ledger_source = resolve_ledger_segments(args, dirs)
 
+    # WHAT THIS CANNOT SEE, and why it is reported rather than silently
+    # omitted. Eligibility is the segment's CURRENT status, because that is
+    # the only convergence evidence the ledger keeps: ledger_update.py builds
+    # each fragment entirely fresh, so a segment that converged and later went
+    # back to `in_progress` (a full replace) has had that convergence ERASED.
+    # For a project that converged before sentinels existed, such a segment
+    # has no sentinel, no ledger evidence, and nothing here can distinguish it
+    # from one that never converged at all -- so this script cannot protect
+    # it, and the operator has to inventory it by hand.
+    #
+    # This does NOT fail the run. `in_progress` segments are ordinary on a
+    # live project, so failing on their presence would fail nearly every real
+    # invocation and the flag would simply be bypassed -- which protects less
+    # than reporting it does. What it must not do is let the caller read
+    # `success: true` as "every segment that ever converged is protected now",
+    # which is a claim this script is not in a position to make.
     ever_converged_segs = []
+    not_evaluated = []
     for seg, record in ledger_segments.items():
-        if isinstance(record, dict) and record.get("status") in WAS_CONVERGED_STATUSES:
+        status = record.get("status") if isinstance(record, dict) else None
+        if status in WAS_CONVERGED_STATUSES:
             problem = validate_seg(seg)
             if problem is not None:
                 fatal(f"materialized ledger.json: unsafe segment id: {problem}", seg=seg)
             ever_converged_segs.append(seg)
+        else:
+            not_evaluated.append({"seg": seg, "status": status})
     ever_converged_segs.sort()
+    not_evaluated.sort(key=lambda entry: entry["seg"])
 
     if not ever_converged_segs and not args.allow_empty:
         fatal(
@@ -752,8 +807,22 @@ def run(args, dirs: dict) -> dict:
                 )
         created.sort()
 
+    # `success` is NOT unconditional, and this is the whole point of the
+    # script. Its caller is an operator running it before a W5 dispatch to
+    # raise the #409 protection, and the exit code is what they read to decide
+    # the protection is up. A run where every single create failed used to
+    # print `success: true` and exit 0, reporting the failures only in a
+    # stderr warning and an array nobody is required to look at -- so the
+    # operator dispatches believing converged work is protected when none of
+    # it is. Unprotected-but-reported-protected is the one outcome that
+    # destroys finished work, so it fails loudly instead.
+    #
+    # `ambiguous_sentinels` does NOT fail the run: those are reported,
+    # untouched, and were never claimed as protected. `not_evaluated` does
+    # not either -- see its own note above.
+    ok = not failed_to_create
     return {
-        "success": True,
+        "success": ok,
         "durable_root": str(dirs["durable_root"]),
         "applied": bool(args.apply),
         "ledger_path": ledger_path,
@@ -766,6 +835,11 @@ def run(args, dirs: dict) -> dict:
         # that "no ambiguous entries found" is distinguishable from "nothing
         # looked", which an absent key would not be.
         "ambiguous_sentinels": ambiguous_sentinels,
+        # Segments this script did not consider at all, with the status that
+        # excluded each. Any of them MAY have converged before sentinels
+        # existed; the ledger no longer records it either way. Reported so
+        # "protected" is never read as "complete".
+        "not_evaluated": not_evaluated,
         "created": created,
         "failed_to_create": failed_to_create,
         "counts": {
@@ -773,6 +847,7 @@ def run(args, dirs: dict) -> dict:
             "already_sentineled": len(already_sentineled),
             "missing_sentinels": len(missing_sentinels),
             "ambiguous_sentinels": len(ambiguous_sentinels),
+            "not_evaluated": len(not_evaluated),
             "created": len(created),
             "failed_to_create": len(failed_to_create),
         },
@@ -897,9 +972,23 @@ def main(argv=None) -> int:
     print(
         f"\nalready sentineled: {result['counts']['already_sentineled']}\n"
         f"missing sentinels:  {result['counts']['missing_sentinels']}\n"
-        f"ambiguous:          {result['counts']['ambiguous_sentinels']}",
+        f"ambiguous:          {result['counts']['ambiguous_sentinels']}\n"
+        f"not evaluated:      {result['counts']['not_evaluated']}",
         file=sys.stderr,
     )
+    if result["counts"]["not_evaluated"]:
+        print(
+            f"\nbackfill_ever_converged.py: note: "
+            f"{result['counts']['not_evaluated']} segment(s) were NOT "
+            f"evaluated, because their current ledger status is not one this "
+            f"script can read as converged. A segment that converged and was "
+            f"later replaced no longer records that anywhere -- so this run "
+            f"protects the segments it names and makes NO claim about the "
+            f"rest. If this project converged segments before the sentinel "
+            f"existed, inventory the not_evaluated set by hand before the "
+            f"next W5 dispatch.",
+            file=sys.stderr,
+        )
     if result["applied"]:
         print(
             f"created this run:   {result['counts']['created']}\n"
@@ -909,7 +998,10 @@ def main(argv=None) -> int:
     print("\n" + "=" * 70, file=sys.stderr)
 
     print(json.dumps(result, ensure_ascii=False))
-    return 0
+    # Exit status tracks `success`, so a caller that checks only `$?` -- which
+    # is what the SKILL.md upgrade note tells an operator to do -- learns the
+    # same thing the JSON says.
+    return 0 if result["success"] else 1
 
 
 if __name__ == "__main__":

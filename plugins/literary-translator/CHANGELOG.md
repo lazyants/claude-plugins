@@ -154,6 +154,39 @@ this codebase does share modules between "self-contained" scripts. The real reas
 transitive import is INVISIBLE, so extracting the predicate into a shared module imported by a member
 script would put its bytes outside the hash meant to cover them.
 
+### Fixed — `backfill_ever_converged.py` could report success having protected nothing
+
+These four are pre-existing on `main`, not regressions in this release. They are fixed here because
+this is the release that tells operators to RUN that script: the Migration note below and SKILL.md's
+"#409 upgrade note" both make it the recommended step before the next W5 dispatch. A latent defect in
+a script nobody was told to run becomes an active one the moment it is the instruction.
+
+- **`success` and the exit code now track `failed_to_create`.** Both were unconditional — `"success":
+  True` and `return 0` — so a run in which every single sentinel creation failed was
+  indistinguishable, by the two channels a caller actually reads, from a run in which all of them
+  succeeded. The failures were reported only in a stderr warning and a JSON array nothing obliged the
+  caller to inspect. The operator's reading of that exit code is what authorizes the dispatch, so the
+  one outcome that must never be silent is "protected nothing".
+- **The sentinel and its parent directory are `fsync`ed before the write is reported as `created`.**
+  Neither was synced, while the ledger fragment the marker backs *is* fsynced, in a different
+  directory. A crash between the two could therefore persist `converged` while losing the marker's
+  directory entry — and that exact asymmetry is the state the dispatch gate reads as ABSENT and
+  clears for retranslation.
+- **Every open failure other than `EEXIST` is now reported per segment instead of aborting the run.**
+  Only `FileExistsError` was caught, so an ordinary `EACCES`, `EROFS`, `EIO`, or a parent removed
+  after the scan escaped to the top-level handler, abandoned every segment after it, and printed
+  `unexpected error` in place of the per-segment report — losing both the partial protection and the
+  record of what was left unprotected.
+- **New `not_evaluated` report.** Eligibility is the segment's CURRENT status, because that is the
+  only convergence evidence the ledger keeps — `ledger_update.py` writes each fragment fresh, so a
+  segment that converged and was later re-dispatched has had that convergence erased. Such a segment
+  is unprotectable by this script and was previously omitted in silence while the run reported
+  success. It is now named, with the status that excluded it. This deliberately does NOT fail the
+  run: `in_progress` segments are ordinary on a live project, so failing on their presence would fail
+  nearly every real invocation and the check would simply be bypassed — which protects less than
+  reporting does. What it must not do is let `success: true` be read as "everything that ever
+  converged is protected now", which is a claim this script cannot make.
+
 ### Known limitations
 
 - **The codex-job budget overspend is unbounded, and is NOT fixed here.** The review reported it as

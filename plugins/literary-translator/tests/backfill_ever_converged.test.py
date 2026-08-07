@@ -39,6 +39,7 @@ with the same small fixture script `ledger_merge.test.py`/
 """
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -458,9 +459,25 @@ def test_dry_run_writes_nothing_and_reports_correct_ids(tmp_path):
         # silently disappearing from this report is how a segment stops being
         # counted anywhere at all.
         "ambiguous_sentinels": 0,
+        # 1.20.0: the segments this script did not consider at all. It is not
+        # an error bucket -- it is the script declining to imply that
+        # `success: true` means every segment that ever converged is now
+        # protected. It cannot know that: a segment that converged and was
+        # later replaced no longer records the convergence anywhere.
+        "not_evaluated": 3,
         "created": 0,
         "failed_to_create": 0,
     }
+    # Every non-converged segment appears with the status that excluded it.
+    # `seg_in_progress` is precisely the dangerous shape: on a project that
+    # converged before sentinels existed, a segment in this state may have
+    # converged and been replaced, and nothing distinguishes it from one that
+    # never converged. It must be NAMED rather than silently dropped.
+    assert payload["not_evaluated"] == [
+        {"seg": "seg_blocked", "status": "blocked"},
+        {"seg": "seg_in_progress", "status": "in_progress"},
+        {"seg": "seg_non_converged", "status": "non_converged"},
+    ]
 
     after = sentinel_files(root)
     assert after == before, "dry run must not create (or touch) any sentinel file"
@@ -1207,6 +1224,62 @@ def test_root_forward_args_never_forwards_a_relative_plugin_root(tmp_path, monke
     expected_plugin_root = str((tmp_path / "plugin_dir").resolve())
     assert args[2:4] == ["--plugin-root", expected_plugin_root]
     assert "plugin_dir" != args[3], "must be resolved, not the raw fragment"
+
+
+# ---------------------------------------------------------------------------
+# A run that protected NOTHING must not report success.
+#
+# This script's entire operational role is to be run before a W5 dispatch so
+# an operator can conclude the #409 protection is up; SKILL.md's upgrade note
+# tells them to run it and check the result. It used to hardcode
+# `"success": True` and `return 0` regardless of `failed_to_create`, surfacing
+# per-segment failures only in a stderr warning and a JSON array nobody is
+# obliged to read. So the run where every create failed was indistinguishable
+# by exit code from the run where every create succeeded -- and the operator
+# dispatches over converged work believing it is protected.
+#
+# Reaching `failed_to_create` deterministically also required fixing the open
+# path: only FileExistsError was caught, so a plain EACCES escaped to the
+# top-level handler and aborted the whole run instead of being reported for
+# that segment.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_failed_creation_reports_failure_in_both_json_and_exit_code(tmp_path):
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    segments_dir = root / "segments"
+    original_mode = segments_dir.stat().st_mode
+    segments_dir.chmod(0o555)  # readable/traversable, not writable
+    try:
+        proc = run_backfill(root, "--apply")
+    finally:
+        segments_dir.chmod(original_mode)
+
+    payload = parse_stdout(proc)
+
+    # The run completed and reported per segment -- it did not abort at the
+    # first failure, which is what makes the report trustworthy at all.
+    assert payload["created"] == []
+    assert [entry["seg"] for entry in payload["failed_to_create"]] == MISSING_BEFORE_APPLY
+    assert payload["counts"]["failed_to_create"] == len(MISSING_BEFORE_APPLY)
+
+    # ...and both channels say so. The exit code is the one an operator's
+    # `&&` actually reads.
+    assert payload["success"] is False, (
+        "a run that created no sentinel it set out to create must not report "
+        "success -- that is the reading which authorizes the dispatch"
+    )
+    assert proc.returncode != 0, (
+        f"exit code must track success; got {proc.returncode} with "
+        f"failed_to_create={payload['failed_to_create']!r}"
+    )
+
+    # The sentinel genuinely is not there. Without this the test would pass
+    # against a script that reported failure but had written the file anyway.
+    for seg in MISSING_BEFORE_APPLY:
+        assert not sentinel_path(root, seg).exists()
 
 
 if __name__ == "__main__":
