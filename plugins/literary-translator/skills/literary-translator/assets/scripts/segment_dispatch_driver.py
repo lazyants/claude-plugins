@@ -3538,12 +3538,15 @@ def _cap_still_binds_what_was_reviewed(seg: str, ctx: "DispatchContext", action:
         promotes a fresh verdict at the SAME draft_sha1 and dispatch_token;
       - the same outcome WITHOUT any change to the canonical: `safe_adopt()`
         reads its gate through `_gate()`, which returns None when the gate
-        could not RUN at all -- exhausted poll budget, timeout, spawn
-        failure -- and `_ok(None)` is false, so a perfectly valid canonical
-        is treated as unadoptable. The job then launches, and if the
-        transient clears it promotes a different verdict at the same bound
-        pair. Worth separating from the ABA case: nothing about the artifact
-        has to change for this one, only the checker's luck;
+        could not RUN at all -- a timeout, or a spawn failure -- and
+        `_ok(None)` is false, so a perfectly valid canonical is treated as
+        unadoptable. The job then launches, and if the transient clears it
+        promotes a different verdict at the same bound pair. Worth
+        separating from the ABA case: nothing about the artifact has to
+        change for this one, only the checker's luck. NOT reachable via an
+        exhausted poll budget, though that also makes `_gate()` return None:
+        `launch()` immediately re-reads the same exhausted `poll_timeout()`
+        and returns None too, so that path cannot promote anything;
       - the two-machines-on-sync-replicated-storage case
         acquire_driver_lock()'s own docstring discloses, where the flock is
         not a shared kernel object in the first place.

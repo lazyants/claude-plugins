@@ -1670,8 +1670,17 @@ def test_a_failed_directory_sync_does_not_launder_into_a_green_retry(tmp_path):
 
     dir_syncs = []
 
+    # Identify the directory by INODE, not merely by "is a directory". A
+    # bare S_ISDIR count is satisfied by any directory fsync at all, so an
+    # unrelated one elsewhere in the process would make this test green
+    # without the segments directory ever being synced -- the assertion
+    # would then be about the wrong file.
+    segments_id = (os.stat(root / "segments").st_dev,
+                   os.stat(root / "segments").st_ino)
+
     def counting_fsync(fd):
-        if stat.S_ISDIR(os.fstat(fd).st_mode):
+        st = os.fstat(fd)
+        if stat.S_ISDIR(st.st_mode) and (st.st_dev, st.st_ino) == segments_id:
             dir_syncs.append(fd)
         return real_fsync(fd)
 
@@ -1693,6 +1702,81 @@ def test_a_failed_directory_sync_does_not_launder_into_a_green_retry(tmp_path):
     )
     assert second["success"] is True
     assert second["directory_sync_error"] is None
+
+
+def test_a_segments_dir_replaced_mid_run_fails_instead_of_reporting_created(tmp_path):
+    """Holding one descriptor makes the run self-consistent, NOT correct.
+
+    Every link, unlink and fsync goes to the directory `dir_fd` names. The
+    readers -- select_segments.py, final_audit.py -- resolve
+    `{durable_root}/segments` by PATHNAME, every time. Replace that pathname
+    mid-run and the two stop being the same directory: the sentinels land
+    where the descriptor points, and nobody who looks the path up will ever
+    see them.
+
+    Review found the previous version of this claiming the case "fails closed
+    with ENOENT". It does not. ENOENT needs the retarget to precede mkstemp;
+    arriving between mkstemp and link, the link SUCCEEDS in the old directory
+    and the run reports `created` for a name absent from the directory the
+    dispatch gate reads. That is a false success -- the worst shape this
+    script has, because the operator's next action is to dispatch.
+
+    A single process cannot make a pathname stable against a concurrent
+    renamer, so the fix reports rather than repairs. This test pins the
+    reporting: the run must FAIL, and it must not claim the sentinels are
+    where a reader would look."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_retarget")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+    segments_dir = root / "segments"
+
+    real_link = backfill.os.link
+    swapped = []
+
+    def link_then_retarget(src, dst, **kwargs):
+        # Publish into the ORIGINAL directory, exactly as the real sequence
+        # does, and only then move that directory out from under the
+        # pathname -- the interleaving that survives the descriptor binding.
+        result = real_link(src, dst, **kwargs)
+        if not swapped:
+            aside = tmp_path / "segments_aside"
+            os.rename(str(segments_dir), str(aside))
+            os.mkdir(str(segments_dir))
+            swapped.append(aside)
+        return result
+
+    backfill.os.link = link_then_retarget
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        backfill.os.link = real_link
+
+    assert swapped, "the test never performed the retarget it exists to model"
+
+    # THE causal assertion, and deliberately first. `success is False` is NOT
+    # sufficient evidence here and asserting it alone would be near-vacuous:
+    # segments processed AFTER the swap stage into the new directory while
+    # the link resolves through the old descriptor, so they fail ENOENT on
+    # their own and redden the run without the identity check existing at
+    # all. Measured against a mutant with the check removed: `success` was
+    # already False, and only these two assertions went red.
+    assert result["directory_sync_error"] is not None, (
+        "the run must detect that the directory it wrote to is no longer the "
+        "one its path names -- per-segment ENOENT on the segments that came "
+        "after the swap is a side effect, not the detection"
+    )
+    assert "REPLACED" in result["directory_sync_error"], (
+        f"the error must name the retarget as the cause rather than "
+        f"blaming the fsync; got {result['directory_sync_error']!r}"
+    )
+    assert result["success"] is False
+
+    # And the substantive claim: the sentinel really is invisible under the
+    # path readers use. If this ever stops holding, the failure above has
+    # become over-strict rather than protective.
+    for seg in result["created"]:
+        assert not backfill.ever_converged_path(seg, segments_dir).exists()
+        assert (swapped[0] / f".ever_converged.{seg}").is_file()
 
 
 if __name__ == "__main__":

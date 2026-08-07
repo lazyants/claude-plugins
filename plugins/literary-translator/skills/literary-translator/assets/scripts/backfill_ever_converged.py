@@ -458,7 +458,7 @@ def _cleanup_staging(tmp_fd, tmp_name, dir_fd) -> None:
             pass
 
 
-def sync_segments_dir(dir_fd: int):
+def sync_segments_dir(dir_fd: int, segments_dir: Path):
     """fsync the segments directory, ONCE, after every sentinel this run
     creates has been linked and every staging name unlinked.
 
@@ -491,11 +491,51 @@ def sync_segments_dir(dir_fd: int):
         os.fsync(dir_fd)
     except OSError as exc:
         return (
-            f"error: the sentinels this run created are linked, but the "
-            f"segments directory could not be synced ({exc}), so those "
-            f"entries may not survive a crash. They are NOT removed -- they "
-            f"are valid markers now and another reader may already be relying "
-            f"on them. Re-run once the directory is writable to sync them"
+            f"error: this run's sentinels are linked, but the segments "
+            f"directory could not be synced ({exc}), so those entries may "
+            f"not survive a crash. They are NOT removed -- they are valid "
+            f"markers now and another reader may already be relying on them. "
+            f"Re-run once the directory is writable to sync them"
+        )
+
+    # IDENTITY CHECK, and the reason it cannot be skipped: holding one
+    # descriptor makes every operation above agree with ITSELF, which is not
+    # the same as agreeing with the readers. Those resolve
+    # `{durable_root}/segments` by PATHNAME every time
+    # (select_segments.py:1370, final_audit.py). If the pathname was
+    # retargeted mid-run -- renamed aside and replaced, a symlink re-pointed
+    # -- then every link, unlink and fsync here landed correctly in the
+    # directory this descriptor names, and NONE of it is visible to anyone
+    # who looks the path up afterwards.
+    #
+    # Review found the previous version claiming this case "fails closed with
+    # ENOENT". It does not. ENOENT only happens when the retarget precedes
+    # mkstemp; when it lands between mkstemp and link, the link SUCCEEDS in
+    # the old directory and the run reports `created` for a name absent from
+    # the directory anyone will read. Binding the operations to an inode
+    # cannot fix that -- it is the readers' resolution that has moved.
+    #
+    # So this reports rather than repairs, which is the honest answer: a
+    # single process cannot make a pathname stable against a concurrent
+    # renamer. What it CAN do is refuse to call the run a success.
+    try:
+        held = os.fstat(dir_fd)
+        current = os.stat(str(segments_dir))
+    except OSError as exc:
+        return (
+            f"error: this run's sentinels are linked and synced, but the "
+            f"identity of {segments_dir} could not be confirmed afterwards "
+            f"({exc}), so it is unknown whether they are visible under the "
+            f"path the dispatch gate reads. Re-run to establish it"
+        )
+    if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+        return (
+            f"error: {segments_dir} was REPLACED while this run was writing "
+            f"to it (it now names a different directory). Every sentinel "
+            f"this run linked went into the directory that path named at "
+            f"the start, and readers resolving the path now will not see "
+            f"them. Nothing was removed. Establish which directory the "
+            f"project should be using, then re-run"
         )
     return None
 
@@ -503,19 +543,22 @@ def sync_segments_dir(dir_fd: int):
 def mark_ever_converged(seg: str, segments_dir: Path, dir_fd: int) -> str:
     """Same OBSERVABLE contract as ledger_update.py's own
     `mark_ever_converged()` -- same filename, same content
-    (`b"converged\\n"`), same mode (`0o644`), the same create-only
-    idempotence (an existing sentinel is never deleted, replaced, or
-    overwritten; finding one is a no-op) -- and, post-review correction, the
-    SAME property that EVERY OS call this function makes gets a clean,
-    non-raising outcome, never an uncaught OSError escaping past this
-    function's own contract.
+    (`b"converged\\n"`), the same mode (`0o644 & ~umask`, matching what the
+    sibling's `os.open(..., 0o644)` produces once the kernel has masked it),
+    the same create-only idempotence (an existing sentinel is never deleted,
+    replaced, or overwritten; finding one is a no-op) -- and, post-review
+    correction, the SAME property that EVERY OS call this function makes
+    gets a clean, non-raising outcome, never an uncaught OSError escaping
+    past this function's own contract.
 
     The MECHANISM is no longer the sibling's single `O_CREAT | O_EXCL |
-    O_WRONLY` open. This copy stages, fsyncs, then publishes with
-    `os.link()`, and syncs the parent directory afterwards -- so the OS
-    calls to keep non-raising are mkstemp, fchmod, write, fsync, close,
-    link, and the directory open/fsync, not three. `os.link()` is what
-    keeps create-only idempotence intact across the change: it raises
+    O_WRONLY` open. This copy stages, fsyncs the STAGED FILE, then publishes
+    with `os.link()` -- so the OS calls to keep non-raising are mkstemp,
+    fchmod, write, fsync, close, link and the staging unlink, not three.
+    This function does NOT sync the directory; `sync_segments_dir()` does
+    that once per run, and its docstring explains why a per-segment version
+    could not settle durability at all. `os.link()` is what keeps
+    create-only idempotence intact across the change: it raises
     `FileExistsError` on an existing target exactly as `O_EXCL` does, where
     `os.rename()` would silently clobber. The reasoning for staging at all
     is in the block comment below.
@@ -990,6 +1033,7 @@ def run(args, dirs: dict) -> dict:
             dir_fd = os.open(str(segments_dir), os.O_RDONLY)
         except OSError as exc:
             fatal(f"could not open segments directory {segments_dir}: {exc}")
+        synced = False
         try:
             for seg in missing_sentinels:
                 outcome = mark_ever_converged(seg, segments_dir, dir_fd)
@@ -1014,7 +1058,8 @@ def run(args, dirs: dict) -> dict:
             # makes a retry settle a previous run's unsynced entries instead
             # of skipping straight past them via `already_sentineled`. See
             # sync_segments_dir()'s docstring for the laundering it closes.
-            directory_sync_error = sync_segments_dir(dir_fd)
+            directory_sync_error = sync_segments_dir(dir_fd, segments_dir)
+            synced = True
             if directory_sync_error is not None:
                 print(
                     f"backfill_ever_converged.py: warning: "
@@ -1022,6 +1067,18 @@ def run(args, dirs: dict) -> dict:
                     file=sys.stderr,
                 )
         finally:
+            if not synced:
+                # An exception is escaping -- a FatalError from inside the
+                # loop, or anything unforeseen. The sync above never ran, so
+                # whatever this run already linked would be left unsynced.
+                # The run is already failing and this cannot rescue it; it
+                # only avoids leaving durable-looking work that is not
+                # durable. Best-effort by design: raising here would replace
+                # the real error with a less informative one.
+                try:
+                    os.fsync(dir_fd)
+                except OSError:
+                    pass
             try:
                 os.close(dir_fd)
             except OSError:

@@ -205,10 +205,13 @@ that "three and one" count while the list grew to six.
   `fsync` it, then publish with `os.link()` — which raises `FileExistsError` on an existing target
   exactly as `O_EXCL` does, so create-only idempotence is preserved and an existing sentinel is
   still never touched (`os.rename()` would have clobbered it). Every failure before the link tries to remove
-  only the temp file, which no reader can mistake for a sentinel. One failure deliberately leaves
-  the name in place — a directory-`fsync` error *after* a successful link, where the name may
-  already be another reader's protection — and reports the segment in `failed_to_create` anyway,
-  because the sentinel exists but its durability is unproven.
+  only the temp file, which no reader can mistake for a sentinel. Directory durability is NOT
+  established here: `sync_segments_dir()` does it once per run, unconditionally, and a failure
+  there is reported as one run-level `directory_sync_error` rather than against any segment —
+  those sentinels are linked and deliberately left in place, since past the link the name may
+  already be another reader's protection. That same run-level sync is also what makes a retry
+  settle a previous run's unsynced entries, which a per-segment version could not do: the retry
+  finds every sentinel already present, creates nothing, and syncs anyway.
 - **Segment ids are validated before the status branch, not inside it.** Adding `not_evaluated` gave
   non-converged records their first route to stdout, and validation sat on the converged branch
   only — so `../unsafe` travelled out through the new list with `success: true` beside it, and a
