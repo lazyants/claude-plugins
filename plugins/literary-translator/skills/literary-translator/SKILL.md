@@ -460,12 +460,15 @@ up, and `missing_sentinels` alone is not one of them:**
   as optional. Either way, do not dispatch on a failed backfill.
 - **`failed_to_create`** — each entry names a segment left unprotected and
   why. Resolve every one before W5.
-- **`directory_sync_error`** — non-null means every sentinel this run
-  created was linked, but the directory entries were not proven durable, so
-  a crash can still take them away while the ledger fragments they back
-  survive. It fails the run on its own. Re-running genuinely does settle it:
-  the directory sync is unconditional, so a retry re-syncs even when it
-  creates nothing and finds every sentinel already present.
+- **`directory_sync_error`** — non-null for either of two failures, and
+  the string says which. *The directory could not be synced*: the sentinels
+  are where readers look but may not survive a crash — re-running settles
+  it, because the sync is unconditional and a retry re-syncs even when it
+  creates nothing. *`segments/` was REPLACED while the run was working in
+  it*: the sentinels are durable but in a directory the path no longer
+  names, so no reader will see them — **including any this run reported as
+  already protected**. That one is not fixed by re-running; establish which
+  directory the project should be using first. Either way it fails the run.
 - **`ambiguous_sentinels`** — a path whose protection status could not be
   established. That covers both a path that is demonstrably not a regular
   file (a directory, a symlink, a dangling symlink) and one whose state

@@ -1779,5 +1779,94 @@ def test_a_segments_dir_replaced_mid_run_fails_instead_of_reporting_created(tmp_
         assert (swapped[0] / f".ever_converged.{seg}").is_file()
 
 
+def test_a_retarget_during_the_census_is_caught_too_not_only_during_the_writes(tmp_path):
+    """The census is the part that DECIDES; covering only the writes is
+    useless if what got fooled was the decision.
+
+    The earlier version of the identity check opened its descriptor AFTER the
+    sentinel census, so this interleaving sailed through: directory A holds a
+    real sentinel, the census reads A and files that segment under
+    `already_sentineled`, A is renamed aside and an empty B takes the
+    pathname, the descriptor opens B, the segment is not in
+    `missing_sentinels` so B never receives a marker -- and the final
+    comparison finds the descriptor and the pathname agreeing perfectly,
+    because both now name B. `success: true`, and the dispatch gate reads B
+    and sees nothing.
+
+    Note what makes it nastier than the write-window case: this run writes
+    NOTHING, so no per-segment error appears anywhere to redden it. The only
+    thing standing between it and a false green is the descriptor predating
+    the census."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_census_retarget")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+    segments_dir = root / "segments"
+
+    # Give every converged segment a real sentinel first, so the census puts
+    # them all in `already_sentineled` and the run has no writes to do.
+    first = _apply_run(backfill, root)
+    assert first["success"] is True and first["created"], (
+        "setup must actually raise the sentinels the census will later read"
+    )
+    # `missing_sentinels` is the CENSUS result, so it is non-empty on a run
+    # that had work to do -- it names what this run went on to create. The
+    # precondition that matters is the state AFTER: a second census must find
+    # nothing missing, which is what makes the run under test a pure
+    # already_sentineled read with no writes.
+    baseline = _apply_run(backfill, root)
+    assert baseline["missing_sentinels"] == [] and baseline["created"] == [], (
+        f"the project must be fully protected before the census test runs; "
+        f"missing={baseline['missing_sentinels']}"
+    )
+
+    census_size = len(baseline["already_sentineled"])
+    assert census_size, "the fixture must have segments for the census to read"
+
+    real_classify = backfill.classify_ever_converged_sentinel
+    swapped = []
+    calls = []
+
+    def classify_then_retarget(path):
+        state = real_classify(path)
+        calls.append(path)
+        # Swap only once the census has read EVERY segment. Swapping earlier
+        # sends the remaining lookups to the new empty directory, which puts
+        # those segments in `missing_sentinels` and makes the run attempt
+        # writes -- a different (and self-reddening) case. The one being
+        # modelled here is the census completing normally against A and the
+        # pathname moving before anything else happens, so the run has no
+        # work to do and nothing else can go red.
+        if len(calls) == census_size and not swapped:
+            aside = tmp_path / "segments_aside_census"
+            os.rename(str(segments_dir), str(aside))
+            os.mkdir(str(segments_dir))
+            swapped.append(aside)
+        return state
+
+    # setattr, not attribute assignment: the module object is dynamically
+    # loaded, so a static checker cannot see this name on it.
+    setattr(backfill, "classify_ever_converged_sentinel", classify_then_retarget)
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        setattr(backfill, "classify_ever_converged_sentinel", real_classify)
+
+    assert swapped, "the test never performed the retarget it exists to model"
+    assert result["created"] == [] and not result["failed_to_create"], (
+        "this run must write nothing -- that is what makes the case "
+        "dangerous, and what makes every other signal stay green"
+    )
+    assert result["directory_sync_error"] is not None, (
+        "a census read from a directory the path no longer names cannot "
+        "support a claim that anything is protected"
+    )
+    assert "REPLACED" in result["directory_sync_error"]
+    assert result["success"] is False
+
+    # The substance: what the census called protected is not visible.
+    for seg in result["already_sentineled"]:
+        assert not backfill.ever_converged_path(seg, segments_dir).exists()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
