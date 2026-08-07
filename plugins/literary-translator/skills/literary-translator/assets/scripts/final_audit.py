@@ -933,8 +933,11 @@ def classify_ever_converged_sentinel(path) -> "tuple[str, str]":
     fails when a fifth copy appears or one of the four goes away.
 
     Why three states, and why not `Path.exists()`. `exists()` answers the
-    wrong question twice over, and BOTH wrong answers point at "absent" --
-    the one direction that authorizes destroying converged work:
+    wrong question three ways, and NOT all of them in the same direction --
+    an earlier draft of this docstring said "twice over, and BOTH point at
+    absent", which is the claim the CHANGELOG had to correct. Two of the
+    three do point at "absent", and that is the direction that authorizes
+    destroying converged work:
 
       1. It FOLLOWS symlinks, so a DANGLING symlink named as the sentinel
          reads as absent -- while the writer's `os.open(O_CREAT|O_EXCL)` gets
@@ -951,6 +954,12 @@ def classify_ever_converged_sentinel(path) -> "tuple[str, str]":
          swallowed ELOOP/ENOTDIR/EBADF -- so no supported version answers
          this correctly, and the version-dependence is itself a reason not
          to route a data-loss guard through `exists()`.)
+      3. In the OTHER direction: a DIRECTORY at the marker's path is
+         `exists() == True`, so `exists()` reports converged a segment the
+         writer never marked. That one cannot destroy finished work, which is
+         why it went unnoticed -- but it is the reason "exists() at least
+         fails safe in one direction" is false, and the reason the fix is a
+         third state rather than a flipped default.
 
     So: only ENOENT means absent, and it is determined by catching
     FileNotFoundError rather than by comparing `exc.errno`, so the verdict

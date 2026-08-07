@@ -115,22 +115,26 @@ one the dispatch gate believes unprotected.
   comprehension, and the module-function spellings (`os.path.exists`, `os.stat`) as well as the
   method ones.
   **That guard's reach is asserted as a table, not described in prose** (`test_sentinel_probe_guard_
-  reach_is_measured_not_claimed`), because its first revision disclosed exactly one limit while
-  actually having four FALSE POSITIVES — it reported `p = sentinel; p = other; p.exists()`, a probe
-  written before the binding, a comprehension shadowing an outer name, and a bound method never
-  called. A limits section that overstates a guard's reach reads exactly like a careful one, which
-  is why this one is executable: 16 constructs, each run before being written down, and any change
-  to the helper that moves a row fails the test. Names are now TAINTED by any other binding in the
-  same scope, which trades misses for silence on correct code — a guard that fires on valid code
-  gets deleted, and that is the failure direction to avoid.
+  reach_is_measured_not_claimed`) — and it took three revisions to earn that sentence. The first
+  disclosed exactly one limit while having four false POSITIVES and eight misses. Its replacement
+  disclosed three limits while having four *different* false positives and three more misses: the
+  API's own name was seeded as a path source and no taint could remove it, so a parameter or loop
+  variable called `ever_converged_path` was reported as a raw sentinel read; and aliases were
+  resolved before assignments tainted their source, so `alias = marker` outlived `marker` being
+  rebound in an `else` branch. Both revisions read exactly like careful engineering, which is the
+  point: **a limits section that overstates a guard's reach is indistinguishable from an accurate
+  one.** Taint, aliasing and the function-alias set are now resolved as ONE fixpoint rather than
+  three ordered passes, which is what makes the stated rule true instead of merely intended. No
+  count of rows is quoted here or in the test — the previous revision of this bullet said "16
+  constructs" when the table held 18, which is the same rot one level down.
   What remains, stated and pinned by that table: `%`, `.format()`, `"".join()` of constants and
   separately formatted f-string constants are not folded; a path built from non-literals at runtime
   still evades the five literal needles, though reaching the marker through the shared API trips the
   sixth; the probe guard does not follow indirection across scopes, does not track a name that is
-  also rebound elsewhere in its scope, and deliberately ignores `.open()`/`.read_bytes()`, which are
-  legitimate content reads after classification. The residue is a file that reimplements the whole
-  convention from non-literal parts under its own names — concealment rather than drift. The census
-  is narrower than complete.
+  also bound to anything else in its scope (the deliberate cost of having no false positives), and
+  ignores `.open()`/`.read_bytes()`, which are legitimate content reads after classification. The
+  residue is a file that reimplements the whole convention from non-literal parts under its own
+  names — concealment rather than drift. The census is narrower than complete.
 
 The duplication is deliberate and stays. The reason previously given in those docstrings was false —
 this codebase does share modules between "self-contained" scripts. The real reason is stronger:

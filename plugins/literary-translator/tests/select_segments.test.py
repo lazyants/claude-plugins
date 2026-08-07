@@ -1973,6 +1973,8 @@ SENTINEL_API_NAMES = (
     "classify_ever_converged_sentinel",
     "mark_ever_converged",
 )
+# The one API name the probe guard below tracks as a VALUE, not just a mention.
+SENTINEL_PATH_FN = "ever_converged_path"
 
 # Filesystem reads that must never be applied to the sentinel path directly.
 # Replacing exactly these with the three-state predicate IS the 1.20.0 change,
@@ -2013,6 +2015,14 @@ def _sentinel_api_refs(src):
     rebinds the name without using the API, and reporting it as participation
     would be a false red on code that is doing nothing of the kind.
 
+    ATTRIBUTES count in EVERY context, load or store, and that asymmetry is the
+    whole point. `provider.ever_converged_path = path_builder` is an injected
+    provider being WIRED UP -- participation in the most direct sense -- and an
+    earlier revision narrowed attributes along with bare names, which put that
+    exact shape back through the census untouched in an exempted file. The
+    narrowing was described in its own commit message as applying to bare names
+    and silently applied to attributes too.
+
     ATTRIBUTE matching is deliberately by NAME ALONE, so any object's
     `.ever_converged_path` counts. That is the whole point -- reaching the
     helpers through an injected provider is exactly the participation shape the
@@ -2037,8 +2047,7 @@ def _sentinel_api_refs(src):
             if isinstance(node.ctx, ast.Load):
                 hits.add(node.id)
         elif isinstance(node, ast.Attribute) and node.attr in SENTINEL_API_NAMES:
-            if isinstance(node.ctx, ast.Load):
-                hits.add(node.attr)
+            hits.add(node.attr)  # every context -- see the docstring
         elif isinstance(node, ast.alias):
             if node.name in SENTINEL_API_NAMES or node.asname in SENTINEL_API_NAMES:
                 hits.add(node.asname or node.name)
@@ -2052,6 +2061,13 @@ def _callee_name(func):
     if isinstance(func, ast.Attribute):
         return func.attr
     return None
+
+
+def _names_bound_by(target):
+    """Every bare name a binding target introduces, however nested: `a`,
+    `(a, b)`, `[a, *rest]`, `obj.attr` (which binds nothing itself but whose
+    base name must not be trusted afterwards)."""
+    return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
 
 
 def _walk_one_scope(scope):
@@ -2074,34 +2090,44 @@ def _unmediated_sentinel_probes(src):
     probe instead of being handed to the shared three-state predicate.
 
     Recognises the path however this scope spells it: a direct
-    `ever_converged_path(...)` call, a call through a local alias of that
-    function, a name bound to either, an alias of such a name, and any of those
-    inside a passthrough wrapper like `Path(...)`. Recognises the read as either
-    a method (`p.exists()`) or a module function (`os.path.exists(p)`).
+    `ever_converged_path(...)` call, a call through a local or attribute alias
+    of that function, a name bound to either, an alias of such a name, and any
+    of those inside a passthrough wrapper like `Path(...)` -- including when the
+    wrapper's result is what gets bound. Recognises the read as a method
+    (`p.exists()`) or a module function, positional or keyword
+    (`os.stat(path=p)`).
 
-    THE DESIGN RULE, and it is not symmetric: a name this scope ever binds to
+    THE DESIGN RULE, and it is not symmetric: a name this scope binds to
     anything else -- rebinding, a loop or comprehension target, a parameter, a
-    `with`/`except` target, a `global`/`nonlocal` -- is TAINTED and never
-    treated as the sentinel, even if it was also bound to it. That deliberately
-    trades misses for silence on correct code. A guard that goes red on valid
-    future code gets deleted, and this one had four such false positives when
-    it tracked bindings as an unordered whole-scope set: `p = sentinel; p =
-    other; p.exists()` was reported, as was a probe written BEFORE the sentinel
-    binding, a comprehension shadowing an outer name, and a bound method that
-    was never called.
+    `with`/`except` target, a `global`/`nonlocal`, a `del`, an import, a nested
+    def/class, tuple or attribute unpacking -- is TAINTED and never treated as
+    the sentinel. **`ever_converged_path` itself is subject to that rule**, so a
+    parameter or loop variable that happens to carry the API's name is not a
+    sentinel source. That deliberately trades misses for silence on correct
+    code: a guard that goes red on valid future code gets deleted, and two
+    successive revisions of this helper were deleted-in-waiting for exactly
+    that reason.
+
+    TAINT, ALIASING AND THE FUNCTION-ALIAS SET ARE ONE FIXPOINT, not three
+    passes. They were three passes, and it was wrong in a way no single-shape
+    test would show: aliases were propagated before ordinary assignments
+    tainted their source, so `alias = marker` survived `marker` later being
+    rebound in an `else` branch and `alias.exists()` was reported as a raw
+    sentinel read. Resolving them together is what makes the stated rule
+    actually true rather than merely intended.
 
     KNOWN MISSES, every one measured against a mutant rather than reasoned
     about, and pinned by
     test_sentinel_probe_guard_reach_is_measured_not_claimed:
       - indirection across scopes (a helper returns the path; its caller probes
         the result). Closing this needs real interprocedural dataflow.
-      - a name that is bound to the sentinel and ALSO rebound elsewhere in the
+      - a name bound to the sentinel and ALSO bound to anything else in the
         same scope -- tainted by the rule above, so a genuine probe on it is
-        not reported.
-      - reads other than the enumerated ones: `p.open()`, `p.read_bytes()`.
-        Left out on purpose -- they are legitimate after classification, when
-        code reads the marker's CONTENT, so including them would reintroduce
-        exactly the false-positive class this revision removed."""
+        not reported. This is the deliberate cost of having no false positives.
+      - reads outside the enumerated sets: `p.open()`, `p.read_bytes()`. Left
+        out on purpose -- they are legitimate after classification, when code
+        reads the marker's CONTENT, so including them would reintroduce exactly
+        the false-positive class this revision exists to remove."""
     try:
         tree = ast.parse(src)
     except SyntaxError:  # other tests own syntax
@@ -2112,14 +2138,28 @@ def _unmediated_sentinel_probes(src):
         n for n in ast.walk(tree) if isinstance(n, _SCOPE_NODES) and n is not tree
     ]
 
+    # Taint is per-scope, but ONE binding is file-wide in effect: if the module
+    # binds the API's name to anything other than a `def` -- an import, a
+    # reassignment -- then no function in the file can be calling the real
+    # builder, and every scope must know that. The genuine shape in these
+    # scripts is a module-level `def ever_converged_path`, which is NOT a
+    # hijack and must keep tripping the guard from inside every function.
+    module_hijacks_api_name = False
+    for node in _walk_one_scope(tree):
+        if isinstance(node, ast.alias):
+            if (node.asname or node.name.split(".")[0]) == SENTINEL_PATH_FN:
+                module_hijacks_api_name = True
+        elif isinstance(node, ast.Assign):
+            if any(
+                isinstance(t, ast.Name) and t.id == SENTINEL_PATH_FN
+                for t in node.targets
+            ):
+                module_hijacks_api_name = True
+
     for scope in scopes:
         nodes = list(_walk_one_scope(scope))
-        tainted = set()
+        tainted = {SENTINEL_PATH_FN} if module_hijacks_api_name else set()
         assigns = []
-        fn_aliases = {"ever_converged_path"}
-
-        def is_path_call(node):
-            return isinstance(node, ast.Call) and _callee_name(node.func) in fn_aliases
 
         if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             a = scope.args
@@ -2128,21 +2168,24 @@ def _unmediated_sentinel_probes(src):
                     tainted.add(arg.arg)
         for node in nodes:
             if isinstance(node, (ast.For, ast.AsyncFor)):
-                tainted |= {
-                    s.id for s in ast.walk(node.target) if isinstance(s, ast.Name)
-                }
+                tainted |= _names_bound_by(node.target)
             elif isinstance(node, ast.withitem) and node.optional_vars is not None:
-                tainted |= {
-                    s.id
-                    for s in ast.walk(node.optional_vars)
-                    if isinstance(s, ast.Name)
-                }
+                tainted |= _names_bound_by(node.optional_vars)
             elif isinstance(node, ast.ExceptHandler) and node.name:
                 tainted.add(node.name)
             elif isinstance(node, (ast.Global, ast.Nonlocal)):
                 tainted.update(node.names)
             elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
                 tainted.add(node.target.id)
+            elif isinstance(node, ast.Delete):
+                for target in node.targets:
+                    tainted |= _names_bound_by(target)
+            elif isinstance(node, ast.alias):
+                tainted.add(node.asname or node.name.split(".")[0])
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if node is not scope:
+                    tainted.add(node.name)
+
         if isinstance(
             scope, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
         ):
@@ -2150,62 +2193,42 @@ def _unmediated_sentinel_probes(src):
                 # A comprehension target taints -- EXCEPT when it iterates a
                 # literal sequence holding the sentinel, where the target IS
                 # the path.
-                elts = gen.iter.elts if isinstance(gen.iter, (ast.List, ast.Tuple)) else []
-                sentinel_elts = [e for e in elts if is_path_call(e)]
-                for s in ast.walk(gen.target):
-                    if isinstance(s, ast.Name):
+                elts = (
+                    gen.iter.elts if isinstance(gen.iter, (ast.List, ast.Tuple)) else []
+                )
+                sentinel_elts = [
+                    e
+                    for e in elts
+                    if isinstance(e, ast.Call) and _callee_name(e.func) == SENTINEL_PATH_FN
+                ]
+                for name_node in ast.walk(gen.target):
+                    if isinstance(name_node, ast.Name):
                         if sentinel_elts:
-                            assigns.append((s.id, sentinel_elts[0]))
+                            assigns.append((name_node.id, sentinel_elts[0]))
                         else:
-                            tainted.add(s.id)
+                            tainted.add(name_node.id)
 
         for node in nodes:
             if isinstance(node, ast.Assign):
-                for t in node.targets:
-                    if isinstance(t, ast.Name):
-                        assigns.append((t.id, node.value))
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        assigns.append((target.id, node.value))
                     else:  # tuple/attribute/subscript unpacking -- never tracked
-                        tainted |= {
-                            s.id for s in ast.walk(t) if isinstance(s, ast.Name)
-                        }
+                        tainted |= _names_bound_by(target)
             elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
                 if isinstance(node.target, ast.Name) and node.value is not None:
                     assigns.append((node.target.id, node.value))
 
-        changed = True
-        while changed:  # `fn = ever_converged_path`, transitively
-            changed = False
-            for name, value in assigns:
-                if (
-                    isinstance(value, ast.Name)
-                    and value.id in fn_aliases
-                    and name not in fn_aliases
-                ):
-                    fn_aliases.add(name)
-                    changed = True
-
+        fn_aliases = set() if SENTINEL_PATH_FN in tainted else {SENTINEL_PATH_FN}
         bound = set()
-        changed = True
-        while changed:  # names bound to the path, and aliases of those
-            changed = False
-            for name, value in assigns:
-                if name in bound or name in tainted:
-                    continue
-                if is_path_call(value) or (
-                    isinstance(value, ast.Name) and value.id in bound
-                ):
-                    bound.add(name)
-                    changed = True
-        for name, value in assigns:  # bound to something else TOO -> tainted
-            if name in bound and not (
-                is_path_call(value)
-                or (isinstance(value, ast.Name) and value.id in bound)
-            ):
-                tainted.add(name)
-        bound -= tainted
+
+        def is_fn_expr(node):
+            return (isinstance(node, ast.Name) and node.id in fn_aliases) or (
+                isinstance(node, ast.Attribute) and node.attr == SENTINEL_PATH_FN
+            )
 
         def is_sentinel_expr(node):
-            if is_path_call(node):
+            if isinstance(node, ast.Call) and _callee_name(node.func) in fn_aliases:
                 return True
             if isinstance(node, ast.Name) and node.id in bound:
                 return True
@@ -2214,6 +2237,34 @@ def _unmediated_sentinel_probes(src):
             ):
                 return any(is_sentinel_expr(arg) for arg in node.args)
             return False
+
+        # One fixpoint over three interdependent sets. Bounded rather than
+        # `while True`: taint only grows and the other two only shrink under
+        # it, so this converges in a few passes -- the cap is a backstop
+        # against a future edit making it oscillate, not a real limit.
+        for _ in range(64):
+            before = (frozenset(tainted), frozenset(fn_aliases), frozenset(bound))
+            for name, value in assigns:
+                if name in tainted:
+                    fn_aliases.discard(name)
+                    bound.discard(name)
+                    continue
+                if is_fn_expr(value):
+                    fn_aliases.add(name)
+                elif name in fn_aliases:
+                    fn_aliases.discard(name)
+                    tainted.add(name)
+                if is_sentinel_expr(value):
+                    bound.add(name)
+                elif name in bound:
+                    bound.discard(name)
+                    tainted.add(name)
+            if SENTINEL_PATH_FN in tainted:
+                fn_aliases.discard(SENTINEL_PATH_FN)
+            bound -= tainted
+            fn_aliases -= tainted
+            if (frozenset(tainted), frozenset(fn_aliases), frozenset(bound)) == before:
+                break
 
         for node in nodes:
             if not isinstance(node, ast.Call):
@@ -2225,14 +2276,15 @@ def _unmediated_sentinel_probes(src):
                 and func.attr in FS_READ_PROBES
                 and is_sentinel_expr(func.value)
             ):
-                hits.append(
-                    f"line {node.lineno}: .{func.attr}() on the sentinel path"
-                )
+                hits.append(f"line {node.lineno}: .{func.attr}() on the sentinel path")
             # NOT an elif: `exists` and `stat` appear in BOTH lists, so
             # `os.path.exists(sentinel)` matches the branch above on its
             # RECEIVER (`os.path`, not a sentinel) and would never reach here.
+            # Keywords as well as positionals -- `os.stat(path=...)` is the
+            # same read spelled differently.
             if _callee_name(func) in FS_READ_FUNCS and any(
-                is_sentinel_expr(arg) for arg in node.args
+                is_sentinel_expr(arg)
+                for arg in [*node.args, *(kw.value for kw in node.keywords)]
             ):
                 hits.append(
                     f"line {node.lineno}: {_callee_name(func)}() on the sentinel path"
@@ -2254,14 +2306,20 @@ SENTINEL_NON_PARTICIPANTS = (
 def test_sentinel_probe_guard_reach_is_measured_not_claimed():
     """The exact reach of `_unmediated_sentinel_probes()`, as a table.
 
-    A guard's limits section is prose, and prose rots silently: the previous
-    revision disclosed ONE limit (cross-scope indirection) while actually
-    having four false POSITIVES and eight more false negatives. Nobody could
-    have noticed, because a limits section that overstates a guard's reach
-    reads exactly like a careful one. So the reach is asserted here instead --
-    every row was run before being written down, and a change to the helper
-    that alters any row fails this test and forces the docstring to be updated
-    with it.
+    A guard's limits section is prose, and prose rots silently. Two successive
+    revisions of this helper proved it: the first disclosed ONE limit while
+    having four false POSITIVES and eight misses; the replacement disclosed
+    three limits while having four DIFFERENT false positives and three more
+    misses. Both read like careful engineering, because a limits section that
+    overstates a guard's reach is indistinguishable from an accurate one. So
+    the reach is asserted here instead -- every row was run before being
+    written down, and a change to the helper that moves any row fails this test
+    and forces the docstring to be corrected with it.
+
+    No count is stated anywhere, deliberately. The previous revision's prose
+    said "16 constructs" when the table held 18, which is the same rot one
+    level down; a number that must be maintained by hand is a claim, and this
+    file has enough of those.
 
     The two halves are not equally serious. A row marked GREEN that should be
     RED is a miss: the guard is a tripwire, not a proof, and a miss leaves
@@ -2301,6 +2359,66 @@ def f(seg):
     def g(p):
         return p.exists()
     return g
+""",
+        # Round 7: the API's OWN NAME is subject to the taint rule. Every one
+        # of these was a false positive -- `fn_aliases` seeded the name
+        # unconditionally and no taint could ever remove it.
+        "the API name itself used as a parameter": """
+def f(ever_converged_path, seg):
+    return ever_converged_path(seg).exists()
+""",
+        "the API name rebound to an ordinary builder": """
+def f(seg):
+    ever_converged_path = ordinary_path
+    return ever_converged_path(seg).exists()
+""",
+        "the API name as a loop target": """
+def f(paths):
+    for ever_converged_path in paths:
+        if ever_converged_path(1).exists():
+            return True
+""",
+        # Round 7: an alias must not outlive the taint of what it came from.
+        "alias of a name tainted in another branch": """
+def f(seg, use_marker):
+    if use_marker:
+        marker = ever_converged_path(seg)
+        classify(marker)
+        return False
+    else:
+        marker = ordinary_path(seg)
+    alias = marker
+    return alias.exists()
+""",
+        "sentinel binding deleted, then rebound by an import": """
+def f(seg):
+    marker = ever_converged_path(seg)
+    classify(marker)
+    del marker
+    from fixtures import ordinary_marker as marker
+    return marker.exists()
+""",
+        "try/except rebinding": """
+def f(seg):
+    try:
+        m = ever_converged_path(seg)
+        classify(m)
+    except OSError:
+        m = ordinary_path(seg)
+    return m.exists()
+""",
+        # The module hijacks the API's name, so no function in the file can be
+        # calling the real builder. Per-scope taint alone missed this: the
+        # binding is at module level and the use is inside a function.
+        "module-level reassignment of the API name": """
+ever_converged_path = ordinary_builder
+def f(seg):
+    return ever_converged_path(seg).exists()
+""",
+        "module-level import of the API name from elsewhere": """
+from other_module import ever_converged_path
+def f(seg):
+    return ever_converged_path(seg).exists()
 """,
         # DISCLOSED MISSES -- green on purpose, and each one is a real gap.
         "MISS: indirection across scopes": """
@@ -2366,6 +2484,32 @@ def f(seg):
         "wrapped in Path()": """
 def f(seg):
     return Path(ever_converged_path(seg)).exists()
+""",
+        # Round 7 misses: the previous table tested each of these one step
+        # short of the shape that actually occurs.
+        "the Path() wrapper's result is what gets BOUND": """
+def f(seg):
+    p = Path(ever_converged_path(seg))
+    return p.exists()
+""",
+        "function alias taken from an attribute": """
+def f(provider, seg):
+    fn = provider.ever_converged_path
+    return fn(seg).exists()
+""",
+        "module-function read passed by KEYWORD": """
+import os
+def f(seg):
+    return os.stat(path=ever_converged_path(seg))
+""",
+        # The shape every one of these four scripts actually has: the builder
+        # is defined at module level and probed from inside a function. The
+        # module-hijack rule above must NOT suppress this one.
+        "module-level def, probed inside a function": """
+def ever_converged_path(seg):
+    return SEGMENTS_DIR / f".ever_converged.{seg}"
+def f(seg):
+    return ever_converged_path(seg).exists()
 """,
     }
 
