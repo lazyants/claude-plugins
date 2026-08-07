@@ -460,15 +460,28 @@ up, and `missing_sentinels` alone is not one of them:**
   as optional. Either way, do not dispatch on a failed backfill.
 - **`failed_to_create`** — each entry names a segment left unprotected and
   why. Resolve every one before W5.
-- **`directory_sync_error`** — non-null for either of two failures, and
-  the string says which. *The directory could not be synced*: the sentinels
-  are where readers look but may not survive a crash — re-running settles
-  it, because the sync is unconditional and a retry re-syncs even when it
-  creates nothing. *`segments/` was REPLACED while the run was working in
-  it*: the sentinels are durable but in a directory the path no longer
-  names, so no reader will see them — **including any this run reported as
-  already protected**. That one is not fixed by re-running; establish which
-  directory the project should be using first. Either way it fails the run.
+- **`directory_sync_error`** — the directory could not be `fsync`ed. The
+  sentinels are where readers look, but may not survive a crash. Re-running
+  settles it: the sync is unconditional, so a retry re-syncs even when it
+  creates nothing and finds every sentinel already present.
+- **`segments_dir_replaced`** — `segments/` names a different directory than
+  the one the run worked in. Everything the run examined and linked belongs
+  to the old one, so the **whole report is about a directory readers will
+  not consult** — including any segment it called already protected. Not
+  fixed by re-running; establish which directory the project should be using
+  first. Checked in dry runs too, because a dry run's `missing_sentinels` is
+  what this note tells you to act on.
+
+  **Known limitation, disclosed rather than fixed.** That check samples
+  identity once, at the end. It catches a path that is displaced *at that
+  moment*. It cannot prove the path named one directory for the whole run:
+  a path swapped away and back again compares equal, while the census in
+  between may have read the other directory. The damaging shape is the other
+  directory holding a sentinel this one lacks — the segment is then reported
+  protected and is not. Closing it needs a locking protocol that whatever
+  moves `segments/` also honours, which is outside this script. In practice
+  this requires something actively renaming `segments/` underneath a running
+  backfill; if that is happening, stop it before trusting any report here.
 - **`ambiguous_sentinels`** — a path whose protection status could not be
   established. That covers both a path that is demonstrably not a regular
   file (a directory, a symlink, a dangling symlink) and one whose state

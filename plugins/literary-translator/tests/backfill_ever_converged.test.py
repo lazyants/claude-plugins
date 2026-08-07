@@ -1760,14 +1760,19 @@ def test_a_segments_dir_replaced_mid_run_fails_instead_of_reporting_created(tmp_
     # their own and redden the run without the identity check existing at
     # all. Measured against a mutant with the check removed: `success` was
     # already False, and only these two assertions went red.
-    assert result["directory_sync_error"] is not None, (
+    assert result["segments_dir_replaced"] is not None, (
         "the run must detect that the directory it wrote to is no longer the "
         "one its path names -- per-segment ENOENT on the segments that came "
         "after the swap is a side effect, not the detection"
     )
-    assert "REPLACED" in result["directory_sync_error"], (
-        f"the error must name the retarget as the cause rather than "
-        f"blaming the fsync; got {result['directory_sync_error']!r}"
+    # Asserted on the FIELD, not on words in a sentence. Review pointed out
+    # that a free-text string is not a contract a caller can depend on, which
+    # is why displacement got its own key instead of a phrase inside
+    # `directory_sync_error`.
+    assert result["directory_sync_error"] is None, (
+        f"the fsync itself succeeded here, so this must be reported as "
+        f"displacement and nothing else; got "
+        f"{result['directory_sync_error']!r}"
     )
     assert result["success"] is False
 
@@ -1856,11 +1861,11 @@ def test_a_retarget_during_the_census_is_caught_too_not_only_during_the_writes(t
         "this run must write nothing -- that is what makes the case "
         "dangerous, and what makes every other signal stay green"
     )
-    assert result["directory_sync_error"] is not None, (
+    assert result["segments_dir_replaced"] is not None, (
         "a census read from a directory the path no longer names cannot "
         "support a claim that anything is protected"
     )
-    assert "REPLACED" in result["directory_sync_error"]
+    assert result["directory_sync_error"] is None
     assert result["success"] is False
 
     # The substance: what the census called protected is not visible.

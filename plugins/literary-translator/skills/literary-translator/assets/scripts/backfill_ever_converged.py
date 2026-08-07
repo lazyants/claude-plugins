@@ -172,14 +172,16 @@ empty result) -- so consume ``error`` and treat anything else as optional.
 
 ``success`` is NOT only about fatal conditions. It is false, and the exit
 code 1, whenever ``failed_to_create`` is non-empty OR
-``directory_sync_error`` is non-null. That field carries TWO distinct
-failures, both fatal to the run's central claim: the directory could not be
-fsynced (entries are where readers look, but may not survive a crash), or
-``segments/`` was REPLACED mid-run (entries are durable, but in a directory
-the path no longer names, so no reader will see them -- including segments
-this run reported as already protected). Read the string; it says which, and
-names both when both happened. Such a payload carries the full report, not
-an ``error`` field.
+``directory_sync_error`` is non-null, OR ``segments_dir_replaced`` is.
+They are separate keys because they are separate failures and an operator
+acts on them differently. ``directory_sync_error``: the directory could not
+be fsynced, so entries are where readers look but may not survive a crash --
+re-running settles it. ``segments_dir_replaced``: ``segments/`` names a
+different directory than the one this run worked in, so the whole report
+describes a directory readers will not consult, including segments it called
+already protected -- re-running does not settle that. Test the KEYS, never
+words inside the strings. Such a payload carries the full report, not an
+``error`` field.
 
 ``ambiguous_sentinels`` and ``not_evaluated`` do NOT make ``success`` false:
 neither is a failure to do the work, and both are reported precisely so that
@@ -462,7 +464,7 @@ def _cleanup_staging(tmp_fd, tmp_name, dir_fd) -> None:
             pass
 
 
-def sync_segments_dir(dir_fd: int, segments_dir: Path):
+def sync_segments_dir(dir_fd: int):
     """fsync the segments directory, ONCE, after every sentinel this run
     creates has been linked and every staging name unlinked.
 
@@ -498,65 +500,69 @@ def sync_segments_dir(dir_fd: int, segments_dir: Path):
     displaced directory are ones no reader will find at all -- both produce
     the asymmetry the dispatch gate reads as ABSENT and
     clears for retranslation."""
-    fsync_error = None
     try:
         os.fsync(dir_fd)
     except OSError as exc:
-        # Recorded, NOT returned yet. Returning here would report only the
-        # fsync when the pathname had ALSO been displaced, and displacement
-        # is the more serious of the two: unsynced entries are at least where
-        # a reader will look, while displaced ones are not. Review caught the
-        # early return hiding exactly that combination.
-        fsync_error = (
+        return (
             f"error: this run's sentinels are linked, but the segments "
             f"directory could not be synced ({exc}), so those entries may "
             f"not survive a crash. They are NOT removed -- they are valid "
             f"markers now and another reader may already be relying on them. "
             f"Re-run once the directory is writable to sync them"
         )
+    return None
 
-    # IDENTITY CHECK, and the reason it cannot be skipped: holding one
-    # descriptor makes every operation above agree with ITSELF, which is not
-    # the same as agreeing with the readers. Those resolve
-    # `{durable_root}/segments` by PATHNAME every time
-    # (select_segments.py:1370, final_audit.py). If the pathname was
-    # retargeted mid-run -- renamed aside and replaced, a symlink re-pointed
-    # -- then every link, unlink and fsync here landed correctly in the
-    # directory this descriptor names, and NONE of it is visible to anyone
-    # who looks the path up afterwards.
-    #
-    # Review found the previous version claiming this case "fails closed with
-    # ENOENT". It does not. ENOENT only happens when the retarget precedes
-    # mkstemp; when it lands between mkstemp and link, the link SUCCEEDS in
-    # the old directory and the run reports `created` for a name absent from
-    # the directory anyone will read. Binding the operations to an inode
-    # cannot fix that -- it is the readers' resolution that has moved.
-    #
-    # So this reports rather than repairs, which is the honest answer: a
-    # single process cannot make a pathname stable against a concurrent
-    # renamer. What it CAN do is refuse to call the run a success.
+
+def check_segments_dir_identity(dir_fd: int, segments_dir: Path):
+    """Report whether `segments_dir` still names the directory this run has
+    been working in. Returns None, or an "error: ..." string.
+
+    SEPARATE from sync_segments_dir(), and separately reported, because the
+    two failures are not the same failure and an operator acts on them
+    differently: an unsynced directory is settled by re-running, a replaced
+    one is not settled by anything this script can do. Folding both into one
+    string also meant a caller had to match on the word "REPLACED" to tell
+    them apart, which is not a contract worth asking anyone to depend on.
+
+    Runs in DRY RUN TOO, which is the point of hoisting it here. SKILL.md
+    tells the operator that a dry run's `missing_sentinels` decides whether
+    backfilling is needed at all, so a census that read a directory the path
+    no longer names can talk them out of running `--apply` and straight into
+    a W5 dispatch. Review found that gap: the descriptor used to be opened
+    only under `--apply`, leaving the dry-run census with no identity check
+    of any kind.
+
+    WHAT THIS DOES NOT PROVE, stated because two previous versions of this
+    file claimed otherwise and were wrong both times. It samples identity
+    ONCE, at the end. That detects a pathname that is displaced AT THAT
+    INSTANT. It does NOT prove the pathname named this directory throughout
+    the run, and it cannot: a path swapped to B and back to A before the
+    sample compares equal, while the census in between may have read B. The
+    destructive shape is B holding a sentinel that A lacks -- the segment is
+    reported protected and A is left bare. Nothing a single process can do
+    closes that; it needs a locking protocol the directory's mutators also
+    honour. It is disclosed in the CHANGELOG and SKILL.md rather than
+    papered over here."""
     try:
         held = os.fstat(dir_fd)
         current = os.stat(str(segments_dir))
     except OSError as exc:
         return (
-            f"error: this run's sentinels are linked and synced, but the "
-            f"identity of {segments_dir} could not be confirmed afterwards "
-            f"({exc}), so it is unknown whether they are visible under the "
-            f"path the dispatch gate reads. Re-run to establish it"
+            f"error: the identity of {segments_dir} could not be confirmed "
+            f"({exc}), so it is unknown whether this run's work is visible "
+            f"under the path the dispatch gate reads. Re-run to establish it"
         )
     if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
-        also = " (its directory sync ALSO failed)" if fsync_error else ""
         return (
-            f"error: {segments_dir} was REPLACED while this run was working "
-            f"in it (it now names a different directory){also}. Everything "
-            f"this run examined and linked belongs to the directory that "
-            f"path named when the run started, and readers resolving the "
-            f"path now will not see any of it -- including segments this run "
-            f"reported as already protected. Nothing was removed. Establish "
-            f"which directory the project should be using, then re-run"
+            f"error: {segments_dir} names a DIFFERENT directory than the one "
+            f"this run has been working in. Everything this run examined and "
+            f"linked belongs to the directory that path named when the run "
+            f"started, so this run's report -- including any segment it "
+            f"called already protected -- describes a directory readers will "
+            f"not consult. Nothing was removed. Establish which directory "
+            f"the project should be using, then re-run"
         )
-    return fsync_error
+    return None
 
 
 def mark_ever_converged(seg: str, segments_dir: Path, dir_fd: int) -> str:
@@ -1022,18 +1028,38 @@ def run(args, dirs: dict) -> dict:
     # across the part of the run that WRITES is useless when the part that
     # DECIDES what to write is what got fooled.
     #
-    # Opened before the census, the comparison at the end proves one thing
-    # worth proving: the pathname named this same directory for the whole
-    # span from before the first sentinel was looked up to after the last one
-    # was synced. A leak on a `fatal()` path is deliberate -- fatal exits the
-    # process, and the kernel reclaims the descriptor.
-    dir_fd = None
-    if args.apply:
-        try:
-            dir_fd = os.open(str(segments_dir), os.O_RDONLY)
-        except OSError as exc:
-            fatal(f"could not open segments directory {segments_dir}: {exc}")
+    # Opened before the census, the comparison at the end covers the census
+    # as well as the writes. It still proves LESS than it looks: one sample
+    # detects a path displaced at that instant, not a path swapped away and
+    # back. See check_segments_dir_identity() for exactly what survives that
+    # gap and why it is disclosed rather than closed. It is opened in DRY RUN
+    # too -- the dry run's census is what the operator acts on.
+    try:
+        dir_fd = os.open(str(segments_dir), os.O_RDONLY)
+    except OSError as exc:
+        fatal(f"could not open segments directory {segments_dir}: {exc}")
 
+    try:
+        return _run_with_segments_dir(
+            args, dirs, ledger_path, ledger_source, ever_converged_segs,
+            not_evaluated, segments_dir, dir_fd,
+        )
+    finally:
+        # fatal() RAISES; it does not exit. Review verified the descriptor
+        # stayed live after a FatalError escaped an in-process run() call, so
+        # the old "the kernel reclaims it" note was true only for the CLI and
+        # false for every test and library caller.
+        try:
+            os.close(dir_fd)
+        except OSError:
+            pass
+
+
+def _run_with_segments_dir(args, dirs, ledger_path, ledger_source,
+                           ever_converged_segs, not_evaluated,
+                           segments_dir, dir_fd) -> dict:
+    """The half of run() that needs the segments-directory descriptor. Split
+    out purely so one `finally` can own closing it."""
     already_sentineled = []
     missing_sentinels = []
     ambiguous_sentinels = []
@@ -1076,11 +1102,6 @@ def run(args, dirs: dict) -> dict:
         # directory A, then report `created` for a name absent from the
         # directory anyone would go on to read.
         #
-        # The open above sits under this same `args.apply`, and `fatal()`
-        # raises rather than returning, so the descriptor is an int by the
-        # time control reaches here. Stated for the type checker, which
-        # cannot see across the two guards.
-        assert dir_fd is not None
         synced = False
         try:
             for seg in missing_sentinels:
@@ -1106,7 +1127,7 @@ def run(args, dirs: dict) -> dict:
             # makes a retry settle a previous run's unsynced entries instead
             # of skipping straight past them via `already_sentineled`. See
             # sync_segments_dir()'s docstring for the laundering it closes.
-            directory_sync_error = sync_segments_dir(dir_fd, segments_dir)
+            directory_sync_error = sync_segments_dir(dir_fd)
             synced = True
             if directory_sync_error is not None:
                 print(
@@ -1127,10 +1148,6 @@ def run(args, dirs: dict) -> dict:
                     os.fsync(dir_fd)
                 except OSError:
                     pass
-            try:
-                os.close(dir_fd)
-            except OSError:
-                pass  # best-effort; the fsync above is what mattered
         created.sort()
 
     # `success` is NOT unconditional, and this is the whole point of the
@@ -1147,15 +1164,30 @@ def run(args, dirs: dict) -> dict:
     # untouched, and were never claimed as protected. `not_evaluated` does
     # not either -- see its own note above.
     #
-    # `directory_sync_error` DOES fail the run, for the same reason, and it
-    # covers two failures rather than one: entries not proven durable (the
-    # fsync failed), and entries not VISIBLE (`segments/` was replaced while
-    # the run was working in it). Either way, reporting success would tell
-    # the operator protection is up when it is not.
-    ok = not failed_to_create and directory_sync_error is None
+    # `directory_sync_error` and `segments_dir_replaced` each fail the run,
+    # for the same reason and independently: entries not proven durable, and
+    # entries not VISIBLE under the path readers resolve. Either way,
+    # reporting success would tell the operator protection is up when it is
+    # not.
+    # Checked in DRY RUN TOO: the dry run's `missing_sentinels` is what
+    # SKILL.md tells the operator to act on, so a census that read a
+    # directory the path no longer names must not come back clean.
+    segments_dir_replaced = check_segments_dir_identity(dir_fd, segments_dir)
+    if segments_dir_replaced is not None:
+        print(
+            f"backfill_ever_converged.py: warning: {segments_dir_replaced}.",
+            file=sys.stderr,
+        )
+
+    ok = (
+        not failed_to_create
+        and directory_sync_error is None
+        and segments_dir_replaced is None
+    )
     return {
         "success": ok,
         "directory_sync_error": directory_sync_error,
+        "segments_dir_replaced": segments_dir_replaced,
         "durable_root": str(dirs["durable_root"]),
         "applied": bool(args.apply),
         "ledger_path": ledger_path,
