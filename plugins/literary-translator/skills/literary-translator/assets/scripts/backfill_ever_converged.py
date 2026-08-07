@@ -92,9 +92,16 @@ backfills what the ledger can still prove.
 Creates ``{durable_root}/segments/.ever_converged.{seg}`` for each missing
 segment with the same OBSERVABLE contract as
 ``ledger_update.py:mark_ever_converged()``: same filename convention, same
-content (``b"converged\\n"``), same mode (``0o644``), and the same create-only
-idempotence -- an existing sentinel is never deleted, replaced, or
-overwritten, and finding one is a no-op rather than an error.
+content (``b"converged\\n"``), same mode, and the same create-only idempotence
+-- an existing sentinel is never deleted, replaced, or overwritten, and
+finding one is a no-op rather than an error.
+
+The mode is ``0o644 & ~umask``, not a flat ``0o644``, and the mask is applied
+by hand for a specific reason: the sibling sets its mode through
+``os.open(..., 0o644)``, which the KERNEL masks, while this script sets it on
+an already-created ``mkstemp`` file via ``fchmod``, which does not. Under any
+non-default umask a flat ``0o644`` would silently diverge from the writer this
+script is pinned against -- ``0o600`` vs ``0o644`` at umask ``077``.
 
 The MECHANISM differs, deliberately. The sibling opens the public name with
 ``O_CREAT | O_EXCL | O_WRONLY`` and writes into it. This copy stages the
@@ -158,12 +165,17 @@ stderr. Success:
 "ever_converged_segs": [...], "already_sentineled": [...],
 "missing_sentinels": [...], "ambiguous_sentinels": [...],
 "not_evaluated": [...], "created": [...], "failed_to_create": [...],
-"counts": {...}}``. Fatal failure: ``{"success": false, "error": ...}``.
+"directory_sync_error": null, "counts": {...}}``. Fatal failure:
+``{"success": false, "error": ...}``, sometimes with one or two extra
+context keys (``seg`` for an unsafe segment id, ``ledger_path`` for an
+empty result) -- so consume ``error`` and treat anything else as optional.
 
 ``success`` is NOT only about fatal conditions. It is false, and the exit
-code 1, whenever ``failed_to_create`` is non-empty -- a run that set out to
-create sentinels and created none of them is not a success, however cleanly
-it ran. Such a payload carries the full report, not an ``error`` field.
+code 1, whenever ``failed_to_create`` is non-empty OR
+``directory_sync_error`` is non-null -- a run that set out to create
+sentinels and created none of them is not a success, and neither is one
+whose sentinels are linked but whose directory entries are not proven
+durable. Such a payload carries the full report, not an ``error`` field.
 
 ``ambiguous_sentinels`` and ``not_evaluated`` do NOT make ``success`` false:
 neither is a failure to do the work, and both are reported precisely so that
@@ -417,29 +429,78 @@ def classify_ever_converged_sentinel(path) -> "tuple[str, str]":
     )
 
 
-def _cleanup_staging(tmp_fd, tmp_path) -> None:
-    """Best-effort removal of the staging file (and its fd) used by
-    mark_ever_converged().
+def _cleanup_staging(tmp_fd, tmp_name, dir_fd) -> None:
+    """BEST-EFFORT removal of the staging file (and its fd) used by
+    mark_ever_converged(). Errors are swallowed, so a leaked staging file is
+    possible on both the failure AND the success path -- the docstrings say
+    "best-effort" rather than "removed" for exactly that reason.
 
     Deliberately silent. Unlike the public sentinel name, the staging file is
     owned unambiguously by one call -- tempfile.mkstemp() picked a name no
     other process holds -- so failing to remove it cannot destroy anyone's
     protection and cannot be mistaken for a sentinel by any reader, which
     matches on the exact `.ever_converged.{seg}` name. Leaking one is untidy;
-    reporting it would bury the real error that caused the cleanup."""
+    reporting it would bury the real error that caused the cleanup.
+
+    Unlinks relative to `dir_fd`, never by pathname, for the same reason the
+    link does: the directory this call staged into is identified by an OPEN
+    DESCRIPTOR, so a `segments/` that gets retargeted mid-run cannot redirect
+    the removal into whatever now answers to that path."""
     if tmp_fd is not None:
         try:
             os.close(tmp_fd)
         except OSError:
             pass
-    if tmp_path is not None:
+    if tmp_name is not None:
         try:
-            os.unlink(str(tmp_path))
+            os.unlink(tmp_name, dir_fd=dir_fd)
         except OSError:
             pass
 
 
-def mark_ever_converged(seg: str, segments_dir: Path) -> str:
+def sync_segments_dir(dir_fd: int):
+    """fsync the segments directory, ONCE, after every sentinel this run
+    creates has been linked and every staging name unlinked.
+
+    This is where directory durability is actually established, and it is a
+    whole-run step rather than a per-segment one because a per-segment version
+    could not settle it. Review found the hole: a first run whose directory
+    fsync failed left the sentinel published and reported the segment in
+    `failed_to_create`, and the RETRY then classified that same file as
+    SENTINEL_PRESENT during the pre-write scan, put it in
+    `already_sentineled`, never called mark_ever_converged() for it at all,
+    and so never reached the fsync that had failed. First run red, second run
+    green, directory durability established by NEITHER -- the identical
+    red-then-laundered-green shape this release exists to remove, one layer up
+    from the residue version of it.
+
+    Syncing the directory unconditionally at the end of every --apply run
+    closes that: a retry re-syncs regardless of whether it created anything,
+    so it genuinely does settle the previous run's unsynced entries. One
+    fsync commits every link and every staging unlink in this directory, so
+    it is also cheaper than the per-segment version it replaces.
+
+    Takes the descriptor, not the path -- the same reason link and unlink do.
+
+    Returns None on success, or an "error: ..." string. The caller fails the
+    run on a non-None return: sentinels whose directory entry is not durable
+    are exactly the ones a crash can lose while the ledger fragment they back
+    survives, which is the asymmetry the dispatch gate reads as ABSENT and
+    clears for retranslation."""
+    try:
+        os.fsync(dir_fd)
+    except OSError as exc:
+        return (
+            f"error: the sentinels this run created are linked, but the "
+            f"segments directory could not be synced ({exc}), so those "
+            f"entries may not survive a crash. They are NOT removed -- they "
+            f"are valid markers now and another reader may already be relying "
+            f"on them. Re-run once the directory is writable to sync them"
+        )
+    return None
+
+
+def mark_ever_converged(seg: str, segments_dir: Path, dir_fd: int) -> str:
     """Same OBSERVABLE contract as ledger_update.py's own
     `mark_ever_converged()` -- same filename, same content
     (`b"converged\\n"`), same mode (`0o644`), the same create-only
@@ -481,20 +542,25 @@ def mark_ever_converged(seg: str, segments_dir: Path) -> str:
         crash the whole backfill run over one segment's sentinel.
 
     Any failure before the link runs `_cleanup_staging()`, which closes the
-    fd if still open and removes the temp file, so a failed attempt leaks
-    neither a descriptor nor a file. A secondary error during that cleanup
-    is swallowed rather than reported, since the original error is the one
-    worth surfacing. A close() that fails on its own (write succeeded; some
-    filesystems, notably NFS, defer reporting a write error until close())
-    gets the identical "error: ..." treatment.
+    fd if still open and TRIES to remove the temp file. "Tries" is the exact
+    word: that helper swallows its own errors, so a leaked descriptor or a
+    leaked staging file remains possible and this docstring does not promise
+    otherwise. Leaking one is untidy and nothing more -- the name is unique
+    to this call and no reader matches it -- whereas reporting it would bury
+    the error that caused the cleanup. A secondary error during cleanup is
+    swallowed for the same reason. A close() that fails on its own (write
+    succeeded; some filesystems, notably NFS, defer reporting a write error
+    until close()) gets the identical "error: ..." treatment.
 
-    ONE failure leaves the public name in place: a directory-fsync error
-    after a successful link. That is deliberate and documented at the call
-    site -- past the link the name may already be another reader's
-    protection, so removing it is exactly the destruction staging exists to
-    prevent. It is still reported, so the segment lands in
-    `failed_to_create` and the run fails: the sentinel exists, but its
-    durability is unproven, and only a re-run can settle that.
+    NO failure here leaves anything at the public name, and this function no
+    longer syncs the directory at all. It used to, per segment, and that was
+    the defect: a failed per-segment directory fsync left the sentinel
+    published and the segment in `failed_to_create`, after which a retry
+    classified that same file as SENTINEL_PRESENT, skipped the writer
+    entirely, and returned success without ever reaching the fsync that had
+    failed. Directory durability is now established once per run by
+    `sync_segments_dir()`, which runs unconditionally so that a retry
+    genuinely does settle what a previous run left unsynced.
 
     No shared message-building helper, unlike the sibling's own fix:
     ledger_update.py's stderr text is a multi-sentence explanation
@@ -531,25 +597,35 @@ def mark_ever_converged(seg: str, segments_dir: Path) -> str:
     # with EEXIST if the target exists, so an existing sentinel is still never
     # replaced or overwritten. rename() would silently clobber it.
     tmp_fd = None
-    tmp_path = None
+    tmp_name = None
     try:
-        tmp_fd, tmp_name = tempfile.mkstemp(
+        tmp_fd, tmp_abs = tempfile.mkstemp(
             prefix=".ever_converged_staging.", dir=str(segments_dir)
         )
-        tmp_path = Path(tmp_name)
-        # mkstemp is 0o600 by design; the sentinel's mode is part of the
-        # contract pinned against ledger_update.py's writer by a drift test.
-        os.fchmod(tmp_fd, 0o644)
+        tmp_name = os.path.basename(tmp_abs)
+        # mkstemp is 0o600 by design, so the mode has to be set explicitly --
+        # and it must come out EQUAL to what ledger_update.py's writer
+        # produces, because a drift test pins the two together. That writer
+        # uses `os.open(..., 0o644)`, whose mode the kernel MASKS. fchmod does
+        # not mask, so a bare fchmod(0o644) diverges from the sibling under
+        # any non-default umask: at umask 077 the ledger writes 0o600 while
+        # this would publish 0o644. Apply the umask by hand to keep them
+        # identical. Reading it requires setting it (there is no getumask),
+        # hence the immediate restore; this script is single-threaded, so no
+        # other file can be created in that window.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.fchmod(tmp_fd, 0o644 & ~umask)
         os.write(tmp_fd, b"converged\n")
         os.fsync(tmp_fd)
         os.close(tmp_fd)
         tmp_fd = None
     except OSError as exc:
-        _cleanup_staging(tmp_fd, tmp_path)
+        _cleanup_staging(tmp_fd, tmp_name, dir_fd)
         return f"error: {exc}"
 
     try:
-        os.link(str(tmp_path), str(path))
+        os.link(tmp_name, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except FileExistsError:
         # Someone else got there first. EEXIST is not proof a real sentinel is
         # there -- O_CREAT|O_EXCL and link() both raise it for ANY existing
@@ -557,7 +633,7 @@ def mark_ever_converged(seg: str, segments_dir: Path) -> str:
         # on this project's Python 3.14.6 -- and "already_present" is this
         # function's way of saying "protected, nothing to do", which for those
         # two is false. Kept in step with ledger_update.py's own copy.
-        _cleanup_staging(None, tmp_path)
+        _cleanup_staging(None, tmp_name, dir_fd)
         state, detail = classify_ever_converged_sentinel(path)
         if state == SENTINEL_PRESENT:
             return "already_present"
@@ -568,43 +644,25 @@ def mark_ever_converged(seg: str, segments_dir: Path) -> str:
             )
         return f"error: {detail}; refusing to treat this as an existing sentinel"
     except OSError as exc:
-        # Every other link failure -- EACCES, EROFS, EIO, EXDEV, a parent
-        # removed after the scan -- is reported for THIS segment and lets the
+        # Every other link failure -- EACCES, EROFS, EIO, a parent removed
+        # after the scan, or ENOENT because `segments/` was retargeted since
+        # mkstemp staged into it -- is reported for THIS segment and lets the
         # loop continue, rather than escaping to the top-level handler and
-        # abandoning every segment after it.
-        _cleanup_staging(None, tmp_path)
+        # abandoning every segment after it. The retarget case fails CLOSED
+        # here precisely because the link is bound to the descriptor: the
+        # staging file is not in the directory `dir_fd` names, so nothing is
+        # published and the error says so.
+        _cleanup_staging(None, tmp_name, dir_fd)
         return f"error: {exc}"
 
-    # The link is what published the name, and a directory entry is not
-    # durable until its directory is synced. Without this a crash can lose the
-    # entry while the ledger fragment it backs -- fsynced in a DIFFERENT
-    # directory -- survives, which is exactly the asymmetry the dispatch gate
-    # reads as ABSENT and clears for retranslation.
-    #
-    # A failure here does NOT unlink: the name is already published and, from
-    # this point on, may legitimately be another reader's protection. It is
-    # reported so the segment lands in `failed_to_create` and the run fails,
-    # which is the honest answer -- the sentinel exists but its durability is
-    # unproven.
-    dir_fd = None
-    try:
-        dir_fd = os.open(str(segments_dir), os.O_RDONLY)
-        os.fsync(dir_fd)
-    except OSError as exc:
-        return (
-            f"error: the sentinel for {seg!r} was created, but its directory "
-            f"entry could not be synced ({exc}), so it may not survive a "
-            f"crash. It is NOT removed -- it is a valid marker now and "
-            f"another reader may already be relying on it. Re-run to sync it"
-        )
-    finally:
-        if dir_fd is not None:
-            try:
-                os.close(dir_fd)
-            except OSError:
-                pass  # best-effort; the fsync above is what mattered
-        _cleanup_staging(None, tmp_path)
-
+    # The staging name is removed HERE, before the directory is synced, and
+    # that ordering is deliberate. sync_segments_dir() runs once at the end of
+    # the run and commits this unlink together with the link above, so a crash
+    # cannot resurrect a staging entry that a later fsync had already been
+    # told to forget. Per-segment fsync would have committed the link while
+    # the staging name still existed and left the unlink uncommitted --
+    # correct-looking, and the wrong order.
+    _cleanup_staging(None, tmp_name, dir_fd)
     return "created"
 
 
@@ -917,26 +975,57 @@ def run(args, dirs: dict) -> dict:
 
     created = []
     failed_to_create = []
+    directory_sync_error = None
     if args.apply:
-        for seg in missing_sentinels:
-            outcome = mark_ever_converged(seg, segments_dir)
-            if outcome == "created":
-                created.append(seg)
-            elif outcome == "already_present":
-                # Raced with something else that created it since our
-                # already_sentineled snapshot above -- not an error, just not
-                # newly created by THIS invocation.
-                pass
-            else:
-                failed_to_create.append({"seg": seg, "error": outcome})
+        # ONE descriptor for the whole apply pass. Every link, every staging
+        # unlink, and the final fsync are relative to it, so they all reach
+        # the same directory INODE even if the `segments/` pathname is
+        # retargeted (symlink re-pointed, directory renamed aside and
+        # replaced) while the run is in flight. Resolving the path afresh at
+        # each step was a MAJOR: a retarget between publishing a link and
+        # syncing could fsync directory B while the sentinel lived in
+        # directory A, then report `created` for a name absent from the
+        # directory anyone would go on to read.
+        try:
+            dir_fd = os.open(str(segments_dir), os.O_RDONLY)
+        except OSError as exc:
+            fatal(f"could not open segments directory {segments_dir}: {exc}")
+        try:
+            for seg in missing_sentinels:
+                outcome = mark_ever_converged(seg, segments_dir, dir_fd)
+                if outcome == "created":
+                    created.append(seg)
+                elif outcome == "already_present":
+                    # Raced with something else that created it since our
+                    # already_sentineled snapshot above -- not an error, just
+                    # not newly created by THIS invocation.
+                    pass
+                else:
+                    failed_to_create.append({"seg": seg, "error": outcome})
+                    print(
+                        f"backfill_ever_converged.py: warning: could not "
+                        f"create sentinel for {seg!r}: {outcome}. Convergence "
+                        f"for this segment is still recorded in the ledger; "
+                        f"only the #409 durable-sentinel protection is not "
+                        f"yet raised for it.",
+                        file=sys.stderr,
+                    )
+            # UNCONDITIONAL, even when this run created nothing: that is what
+            # makes a retry settle a previous run's unsynced entries instead
+            # of skipping straight past them via `already_sentineled`. See
+            # sync_segments_dir()'s docstring for the laundering it closes.
+            directory_sync_error = sync_segments_dir(dir_fd)
+            if directory_sync_error is not None:
                 print(
-                    f"backfill_ever_converged.py: warning: could not create "
-                    f"sentinel for {seg!r}: {outcome}. Convergence for this "
-                    f"segment is still recorded in the ledger; only the "
-                    f"#409 durable-sentinel protection is not yet raised for "
-                    f"it.",
+                    f"backfill_ever_converged.py: warning: "
+                    f"{directory_sync_error}.",
                     file=sys.stderr,
                 )
+        finally:
+            try:
+                os.close(dir_fd)
+            except OSError:
+                pass  # best-effort; the fsync above is what mattered
         created.sort()
 
     # `success` is NOT unconditional, and this is the whole point of the
@@ -952,9 +1041,15 @@ def run(args, dirs: dict) -> dict:
     # `ambiguous_sentinels` does NOT fail the run: those are reported,
     # untouched, and were never claimed as protected. `not_evaluated` does
     # not either -- see its own note above.
-    ok = not failed_to_create
+    #
+    # `directory_sync_error` DOES fail the run, for the same reason: the
+    # sentinels are linked but their directory entries are not proven durable,
+    # so reporting success would tell the operator protection is up when a
+    # crash can still take it away.
+    ok = not failed_to_create and directory_sync_error is None
     return {
         "success": ok,
+        "directory_sync_error": directory_sync_error,
         "durable_root": str(dirs["durable_root"]),
         "applied": bool(args.apply),
         "ledger_path": ledger_path,

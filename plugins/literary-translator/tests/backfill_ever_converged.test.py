@@ -39,6 +39,7 @@ with the same small fixture script `ledger_merge.test.py`/
 """
 import importlib.util
 import json
+import contextlib
 import os
 import shutil
 import stat
@@ -54,6 +55,32 @@ BACKFILL_SCRIPT_SRC = ASSETS_DIR / "scripts" / "backfill_ever_converged.py"
 LEDGER_MERGE_SRC = ASSETS_DIR / "scripts" / "ledger_merge.py"
 LEDGER_UPDATE_SRC = ASSETS_DIR / "scripts" / "ledger_update.py"
 SCHEMAS_SRC = ASSETS_DIR / "schemas"
+
+@contextlib.contextmanager
+def _segments_dir_fd(segments_dir):
+    """mark_ever_converged() takes the segments-directory DESCRIPTOR, not just
+    its path, so every link and unlink lands in the directory this run opened
+    even if the pathname is retargeted mid-run. The in-process tests below
+    have to supply one; run() opens exactly one for the whole apply pass."""
+    fd = os.open(str(segments_dir), os.O_RDONLY)
+    try:
+        yield fd
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            # Best-effort, mirroring run()'s own close. Tests that inject a
+            # failing os.close() patch the shared `os` module, so an
+            # unprotected close here would raise from the HARNESS and be
+            # indistinguishable from the script failing to handle it.
+            pass
+
+
+def call_mark(backfill, seg, segments_dir):
+    """mark_ever_converged() under a freshly-opened descriptor."""
+    with _segments_dir_fd(segments_dir) as fd:
+        return backfill.mark_ever_converged(seg, segments_dir, fd)
+
 
 assert BACKFILL_SCRIPT_SRC.is_file(), f"backfill_ever_converged.py not found at {BACKFILL_SCRIPT_SRC}"
 assert LEDGER_MERGE_SRC.is_file(), f"ledger_merge.py not found at {LEDGER_MERGE_SRC}"
@@ -605,7 +632,7 @@ def test_mark_ever_converged_never_overwrites_an_existing_sentinel(tmp_path):
     presentinel = segments_dir / f".ever_converged.{seg}"
     presentinel.write_bytes(PRESENTINEL_CONTENT)
 
-    outcome = backfill.mark_ever_converged(seg, segments_dir)
+    outcome = call_mark(backfill, seg, segments_dir)
 
     assert outcome == "already_present"
     assert presentinel.read_bytes() == PRESENTINEL_CONTENT, (
@@ -693,7 +720,22 @@ def _load_module(path, name):
     return mod
 
 
-def test_sentinel_write_is_byte_identical_to_ledger_update_writer(tmp_path):
+@pytest.mark.parametrize("umask_value", [0o022, 0o077], ids=["umask-022", "umask-077"])
+def test_sentinel_write_is_byte_identical_to_ledger_update_writer(tmp_path, umask_value):
+    """Parametrized over the umask because the two writers reach the mode by
+    DIFFERENT syscalls: ledger_update.py's `os.open(..., 0o644)` is masked by
+    the kernel, while this script sets the mode on a 0o600 mkstemp file. A
+    bare fchmod(0o644) therefore agrees with the sibling at the default 022
+    and diverges at 077 -- 0o644 against 0o600 -- so the identity this test
+    asserts held only for the umask the suite happened to run under."""
+    old_umask = os.umask(umask_value)
+    try:
+        _assert_writers_agree(tmp_path)
+    finally:
+        os.umask(old_umask)
+
+
+def _assert_writers_agree(tmp_path):
     writer = _load_module(LEDGER_UPDATE_SRC, "ledger_update_real")
     backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_ever_converged_real")
 
@@ -705,7 +747,7 @@ def test_sentinel_write_is_byte_identical_to_ledger_update_writer(tmp_path):
 
     ok = writer.mark_ever_converged(seg, dir_a)
     assert ok is True, "precondition: the real writer must succeed"
-    outcome = backfill.mark_ever_converged(seg, dir_b)
+    outcome = call_mark(backfill, seg, dir_b)
     assert outcome == "created", "precondition: the backfill writer must succeed"
 
     path_a = writer.ever_converged_path(seg, dir_a)
@@ -729,7 +771,7 @@ def test_sentinel_write_is_byte_identical_to_ledger_update_writer(tmp_path):
 
     # And: never overwritten by either writer, on a second call.
     assert writer.mark_ever_converged(seg, dir_a) is True
-    assert backfill.mark_ever_converged(seg, dir_b) == "already_present"
+    assert call_mark(backfill, seg, dir_b) == "already_present"
     assert path_a.read_bytes() == path_b.read_bytes()
 
 
@@ -769,7 +811,7 @@ def test_both_writers_refuse_a_non_regular_entry_at_the_sentinel_path(tmp_path):
             f"{seg}: ledger_update.py accepted a non-regular entry as proof "
             f"of prior marking"
         )
-        outcome = backfill.mark_ever_converged(seg, dir_b)
+        outcome = call_mark(backfill, seg, dir_b)
         assert outcome.startswith("error:"), (
             f"{seg}: backfill_ever_converged.py reported {outcome!r} for a "
             f"non-regular entry -- 'already_present' means 'protected, "
@@ -782,7 +824,7 @@ def test_both_writers_refuse_a_non_regular_entry_at_the_sentinel_path(tmp_path):
         writer.ever_converged_path(seg, dir_a).write_bytes(b"converged\n")
         backfill.ever_converged_path(seg, dir_b).write_bytes(b"converged\n")
         assert writer.mark_ever_converged(seg, dir_a) is True
-        assert backfill.mark_ever_converged(seg, dir_b) == "already_present"
+        assert call_mark(backfill, seg, dir_b) == "already_present"
 
 
 def test_a_dangling_symlink_is_bucketed_ambiguous_never_missing(tmp_path):
@@ -906,7 +948,7 @@ def test_write_failure_after_sentinel_create_is_reported_as_a_clean_error_string
 
     backfill.os.write = failing_write
     try:
-        outcome = backfill.mark_ever_converged(seg, segments_dir)
+        outcome = call_mark(backfill, seg, segments_dir)
     finally:
         backfill.os.write = real_write
 
@@ -969,7 +1011,7 @@ def test_close_failure_after_successful_write_is_reported_as_a_clean_error_strin
 
     backfill.os.close = failing_close
     try:
-        outcome = backfill.mark_ever_converged(seg, segments_dir)
+        outcome = call_mark(backfill, seg, segments_dir)
     finally:
         backfill.os.close = real_close
 
@@ -1324,14 +1366,14 @@ def test_a_failed_create_does_not_launder_into_a_successful_retry(tmp_path):
 
     backfill.os.write = failing_write
     try:
-        first = backfill.mark_ever_converged(seg, segments_dir)
+        first = call_mark(backfill, seg, segments_dir)
     finally:
         backfill.os.write = real_write
 
     assert first.startswith("error: "), first
 
     # The retry must do real work, not inherit a half-made marker.
-    second = backfill.mark_ever_converged(seg, segments_dir)
+    second = call_mark(backfill, seg, segments_dir)
     assert second == "created", (
         f"the retry must genuinely create the sentinel, not report "
         f"`already_present` off the residue of the failed attempt; got {second!r}"
@@ -1376,7 +1418,7 @@ def test_a_failed_create_never_destroys_another_writers_sentinel(tmp_path):
 
     backfill.os.write = failing_write_that_lets_another_writer_in
     try:
-        outcome = backfill.mark_ever_converged(seg, segments_dir)
+        outcome = call_mark(backfill, seg, segments_dir)
     finally:
         backfill.os.write = real_write
 
@@ -1474,36 +1516,51 @@ def test_an_unsafe_segment_id_is_refused_even_when_it_is_not_converged(tmp_path)
 
 
 def test_a_staging_fsync_failure_never_publishes_the_public_name(tmp_path):
-    """The durability barrier sits BEFORE publication, so a failure at it
-    must leave the public name untouched.
+    """The durability barrier sits BEFORE publication, so the public name must
+    not exist AT THE MOMENT the fsync runs.
 
-    Covers the gap review found after the stage-then-link rewrite: the write
-    and close seams had tests, the fsync seam did not, so a regression that
-    linked first and fsynced afterwards -- reintroducing exactly the residue
-    window staging removed -- would have gone green."""
+    The assertion is inside the callback deliberately, and the first version of
+    this test is why. It checked only the post-state -- error returned, public
+    name absent, directory empty -- and review showed all three also hold on
+    the OLD public-name-first implementation, whose failure path unlinked what
+    it had published. Both orderings converge on the same wreckage, so a test
+    that inspects the aftermath cannot tell them apart, and this one passed
+    against the very implementation it was written to forbid. Ordering is only
+    observable from inside the window."""
     backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_fsync_failure")
     segments_dir = tmp_path / "segments"
     segments_dir.mkdir()
     seg = "segFsyncFail"
+    path = backfill.ever_converged_path(seg, segments_dir)
 
     real_fsync = backfill.os.fsync
+    observed = {}
 
     def failing_fsync(fd):
+        # THE assertion of this test: at the durability barrier, the sentinel
+        # name must still be unpublished. Recorded rather than asserted here
+        # so a failure surfaces as this test's own message and not as an
+        # exception escaping through the code under test.
+        observed["public_name_existed_at_fsync"] = os.path.lexists(str(path))
         raise OSError(5, "Input/output error")  # EIO
 
     backfill.os.fsync = failing_fsync
     try:
-        outcome = backfill.mark_ever_converged(seg, segments_dir)
+        outcome = call_mark(backfill, seg, segments_dir)
     finally:
         backfill.os.fsync = real_fsync
 
+    assert observed.get("public_name_existed_at_fsync") is False, (
+        "the sentinel name was ALREADY published when the durability barrier "
+        "ran, so a crash there leaves bytes nothing has synced reachable "
+        "under the name readers consult -- stage, fsync, THEN link"
+    )
     assert outcome.startswith("error: "), (
         f"an fsync-time OSError must produce the documented string outcome, "
         f"not an uncaught exception; got {outcome!r}"
     )
     assert "Input/output error" in outcome
 
-    path = backfill.ever_converged_path(seg, segments_dir)
     assert not path.exists(), (
         "bytes that were never fsynced must not be reachable under the "
         "sentinel name -- that is the entire point of staging before linking"
@@ -1513,57 +1570,129 @@ def test_a_staging_fsync_failure_never_publishes_the_public_name(tmp_path):
     )
 
 
-def test_a_directory_fsync_failure_keeps_the_sentinel_and_still_reports_failure(tmp_path):
-    """The one failure that deliberately leaves the public name in place.
+def _apply_run(backfill, root):
+    """Drive run() IN-PROCESS under --apply, so os.fsync can be patched.
 
-    Past the link the name may already be another reader's protection, so
-    removing it is precisely the destruction staging exists to prevent. The
-    honest report is therefore "it exists, its durability is unproven" --
-    which must still count as a FAILURE so the run does not claim protection
-    it cannot vouch for. Both halves are asserted here because they pull in
-    opposite directions and a plausible "fix" for either breaks the other."""
+    run_backfill() shells out, which is the right harness for output-contract
+    tests but cannot reach a syscall seam inside the child."""
+    # No --plugin-root: that flag names a PLUGIN root (assets/scripts/...),
+    # while the fixture is a DURABLE root. Left unset, ledger_merge.py
+    # resolves module-relative to the real plugin copy, which is what the
+    # subprocess harness effectively uses too.
+    args = backfill.build_arg_parser().parse_args(
+        ["--durable-root", str(root), "--apply"]
+    )
+    return backfill.run(args, backfill.resolve_dirs(str(root), None))
+
+
+def _fsync_failing_only_on_a_directory(real_fsync):
+    """Distinguish the directory seam by WHAT THE FD REFERS TO, never by call
+    order or call count -- an ordering assumption stops testing this seam the
+    moment another fsync is added ahead of it, silently."""
+    def failing(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(5, "Input/output error")  # EIO
+        return real_fsync(fd)
+    return failing
+
+
+def test_a_directory_fsync_failure_keeps_the_sentinels_and_still_fails_the_run(tmp_path):
+    """The one failure that deliberately leaves published names in place.
+
+    Past the link a name may already be another reader's protection, so
+    removing it is the destruction staging exists to prevent. The honest
+    report is "they exist, their durability is unproven" -- which must still
+    FAIL the run, so it cannot claim protection it cannot vouch for. Both
+    halves are asserted because they pull in opposite directions and a
+    plausible fix for either breaks the other."""
     backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_dir_fsync")
-    segments_dir = tmp_path / "segments"
-    segments_dir.mkdir()
-    seg = "segDirFsyncFail"
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+    segments_dir = root / "segments"
 
     real_fsync = backfill.os.fsync
-    calls = []
-
-    def fsync_failing_only_on_a_directory(fd):
-        # Distinguish by what the fd actually refers to rather than by call
-        # order: an ordering assumption would silently stop testing the
-        # directory seam the moment another fsync is added ahead of it.
-        if stat.S_ISDIR(os.fstat(fd).st_mode):
-            calls.append("dir")
-            raise OSError(5, "Input/output error")  # EIO
-        calls.append("file")
-        return real_fsync(fd)
-
-    backfill.os.fsync = fsync_failing_only_on_a_directory
+    backfill.os.fsync = _fsync_failing_only_on_a_directory(real_fsync)
     try:
-        outcome = backfill.mark_ever_converged(seg, segments_dir)
+        result = _apply_run(backfill, root)
     finally:
         backfill.os.fsync = real_fsync
 
-    assert calls == ["file", "dir"], (
-        f"the test must have reached the directory fsync via a successful "
-        f"file fsync; got {calls}"
+    assert result["created"], "the test must have actually created sentinels"
+    assert result["success"] is False, (
+        "an unsynced segments directory means the entries this run published "
+        "may not survive a crash, so the run cannot report success"
     )
-    assert outcome.startswith("error: "), (
-        f"an unsynced directory entry means durability is unproven, so this "
-        f"cannot report success; got {outcome!r}"
-    )
-    assert "could not be synced" in outcome
+    assert "could not be synced" in (result["directory_sync_error"] or "")
 
-    path = backfill.ever_converged_path(seg, segments_dir)
-    assert path.is_file(), (
-        "the sentinel must NOT be removed here: the link already published "
-        "the name, so from this point on another reader may be relying on it"
-    )
-    assert path.read_bytes() == b"converged\n"
-    strays = [p.name for p in segments_dir.iterdir() if "staging" in p.name]
+    for seg in result["created"]:
+        path = backfill.ever_converged_path(seg, segments_dir)
+        assert path.is_file(), (
+            f"{seg}'s sentinel must NOT be removed: the link already "
+            f"published the name, so another reader may be relying on it"
+        )
+        assert path.read_bytes() == b"converged\n"
+    strays = [q.name for q in segments_dir.iterdir() if "staging" in q.name]
     assert strays == [], f"staging files left behind: {strays}"
+
+
+def test_a_failed_directory_sync_does_not_launder_into_a_green_retry(tmp_path):
+    """The retry must actually re-sync, not skip the work via
+    `already_sentineled`.
+
+    This is the defect review found in the per-segment version of the fsync.
+    Run 1 published the sentinel and failed its directory fsync, reporting the
+    segment in `failed_to_create`. Run 2's pre-write scan then classified that
+    same published file as SENTINEL_PRESENT, filed it under
+    `already_sentineled`, never called the writer for it, and so never reached
+    the fsync that had failed -- returning `success: true` having established
+    nothing. Red then green, durability proven by neither: the exact
+    laundering shape this release exists to remove, one layer up from the
+    residue version of it.
+
+    The assertion that matters is therefore NOT "run 2 is green" but "run 2
+    actually fsynced the directory". A retry that goes green by skipping the
+    work looks identical from the outside, which is why the first version of
+    this fix shipped with the hole."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_sync_retry")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    real_fsync = backfill.os.fsync
+    backfill.os.fsync = _fsync_failing_only_on_a_directory(real_fsync)
+    try:
+        first = _apply_run(backfill, root)
+    finally:
+        backfill.os.fsync = real_fsync
+
+    assert first["created"] and first["success"] is False, (
+        "run 1 must have published sentinels and failed on the directory sync"
+    )
+
+    dir_syncs = []
+
+    def counting_fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            dir_syncs.append(fd)
+        return real_fsync(fd)
+
+    backfill.os.fsync = counting_fsync
+    try:
+        second = _apply_run(backfill, root)
+    finally:
+        backfill.os.fsync = real_fsync
+
+    assert second["created"] == [], (
+        "run 2 should find the sentinels already published -- that is the "
+        "very condition under which the old code skipped the sync"
+    )
+    assert dir_syncs, (
+        "run 2 created nothing, so it never called the writer -- and it did "
+        "NOT fsync the segments directory either. Run 1's unsynced entries "
+        "are still unsynced while the run reports success. That is the "
+        "laundering, and it is invisible from the payload alone"
+    )
+    assert second["success"] is True
+    assert second["directory_sync_error"] is None
 
 
 if __name__ == "__main__":
