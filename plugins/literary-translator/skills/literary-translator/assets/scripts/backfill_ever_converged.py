@@ -36,9 +36,15 @@ module docstring). A version of this script that always shelled out to it
 was therefore never actually dry: invoking it with no flags still mutated
 the live project directory -- exactly the kind of concurrent-write collision
 this plugin's own conventions exist to prevent, since a real project may
-have other sessions actively working in it. "Dry run" here means ZERO
-filesystem writes of any kind, not merely "no sentinel file", so how the
-ledger is obtained depends on the mode:
+have other sessions actively working in it. "Dry run" here means the script
+issues NO MUTATING OPERATION and changes NO PROJECT CONTENT -- not a
+re-materialized ledger, not one sentinel file -- rather than the stronger
+"zero filesystem writes of any kind" this once claimed. That stronger
+wording was literally false and the test that appeared to prove it could not
+have: reading ``ledger.json`` advances its access time (verified on APFS),
+and the guard records only mtime and size. Access-time updates and the
+explicitly authorized ``--allow-merge`` write are the two exceptions; both
+are named. How the ledger is obtained depends on the mode:
 
   - Under ``--apply``: always re-materializes fresh via ``ledger_merge.py``
     immediately before writing any sentinel. The merge is a legitimate part
@@ -99,7 +105,7 @@ finding one is a no-op rather than an error.
 The mode is ``0o644 & ~umask``, not a flat ``0o644``, and the mask is applied
 by hand for a specific reason: the sibling sets its mode through
 ``os.open(..., 0o644)``, which the KERNEL masks, while this script sets it on
-an already-created ``mkstemp`` file via ``fchmod``, which does not. Under any
+an already-created staging file via ``fchmod``, which does not. Under any
 non-default umask a flat ``0o644`` would silently diverge from the writer this
 script is pinned against -- ``0o600`` vs ``0o644`` at umask ``077``.
 
@@ -133,9 +139,10 @@ source of truth.
         today's self-anchored behavior byte-for-byte.
 
     --apply
-        Without it (the default), this script is DRY RUN: it makes ZERO
-        filesystem writes of any kind -- not a re-materialized
-        ``runs/ledger.json``, not one sentinel file -- and only reports what
+        Without it (the default), this script is DRY RUN: it issues no
+        mutating operation and changes no project content -- not a
+        re-materialized ``runs/ledger.json``, not one sentinel file; see the
+        module docstring for the two named exceptions -- and only reports what
         it would do. With it, ``runs/ledger.json`` is freshly re-materialized
         and missing sentinels are actually created.
 
@@ -165,31 +172,53 @@ stderr. Success:
 "ever_converged_segs": [...], "already_sentineled": [...],
 "missing_sentinels": [...], "ambiguous_sentinels": [...],
 "not_evaluated": [...], "created": [...], "failed_to_create": [...],
-"directory_sync_error": null, "counts": {...}}``. Fatal failure:
+"directory_sync_error": null, "segments_dir_replaced": null,
+"counts": {...}}``. Fatal failure:
 ``{"success": false, "error": ...}``, sometimes with one or two extra
 context keys (``seg`` for an unsafe segment id, ``ledger_path`` for an
 empty result) -- so consume ``error`` and treat anything else as optional.
 
 ``success`` is NOT only about fatal conditions. It is false, and the exit
-code 1, whenever ``failed_to_create`` is non-empty OR
-``directory_sync_error`` is non-null, OR ``segments_dir_replaced`` is.
+code 1, whenever ``failed_to_create`` is non-empty OR ``ambiguous_sentinels``
+is non-empty OR ``directory_sync_error`` is non-null, OR
+``segments_dir_replaced`` is.
 They are separate keys because they are separate failures and an operator
 acts on them differently. ``directory_sync_error``: the directory could not
 be fsynced, so entries are where readers look but may not survive a crash --
-re-running settles it. ``segments_dir_replaced``: ``segments/`` names a
-different directory than the one this run worked in, so the whole report
-describes a directory readers will not consult, including segments it called
-already protected -- re-running does not settle that. Test the KEYS, never
-words inside the strings. Such a payload carries the full report, not an
-``error`` field.
+re-running settles it. ``segments_dir_replaced``: EITHER ``segments/`` now
+names a different directory than the one this run worked in -- so the whole
+report describes a directory readers will not consult, including segments it
+called already protected, and re-running does not settle that -- OR the
+identity could not be DETERMINED because ``fstat``/``stat`` failed, which
+re-running may well settle. The two need different responses, so read the
+string to tell them apart; use the KEY to decide whether the run is
+trustworthy at all, which it is not in either case. Such a payload carries
+the full report, not an ``error`` field.
 
-``ambiguous_sentinels`` and ``not_evaluated`` do NOT make ``success`` false:
-neither is a failure to do the work, and both are reported precisely so that
-``success: true`` cannot be read as "every segment that ever converged is
-protected now". ``not_evaluated`` names what this script never considered
-(see the Known limitation above); a segment there may or may not have
-converged, and nothing here can tell. Read both fields before concluding a
-project is protected.
+``ambiguous_sentinels`` names paths whose protection could not be established
+and which this script will not repair. It DOES make ``success`` false, and did
+not until security review showed what the exemption bought: with ``segments/``
+readable but not searchable, every lstat under it fails, EVERY segment lands
+in this bucket, ``missing_sentinels`` comes back empty -- and the run reported
+``success: true`` and exit 0, which is what an operator reads before
+dispatching. An entry here is a segment whose protection is UNPROVEN, which
+for a dispatch decision has the same standing as ``failed_to_create``.
+
+Note what that does and does not claim. The bucket is empty on a project whose
+sentinel paths can all be read, which is the ordinary case -- but a transient
+``lstat`` failure (``ESTALE`` after a network-filesystem failover, ``EIO``)
+puts a perfectly good sentinel here too. Failing is still right: the entry may
+be fine, and this script cannot show that it is. Re-running settles that class
+on its own; the entries that persist need a human.
+
+``not_evaluated`` does NOT make ``success`` false, and that asymmetry is the
+reason these are separate buckets: it names what this script never considered
+(see the Known limitation above), and it is non-empty on any project with
+segments outside ``converged``/``stale`` -- every ordinary mixed or live one.
+Failing on it would redden those runs while proving no protection defect. A
+segment there may or may not have converged, and nothing here can tell -- so
+``success: true`` still cannot be read as "every segment that ever converged
+is protected now". Read the field before concluding a project is protected.
 """
 
 import argparse
@@ -197,10 +226,10 @@ import errno
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import NoReturn
 
@@ -435,6 +464,80 @@ def classify_ever_converged_sentinel(path) -> "tuple[str, str]":
     )
 
 
+STAGING_PREFIX = ".ever_converged_staging."
+_STAGING_NAME_ATTEMPTS = 32
+
+
+def sentinel_mode() -> int:
+    """The mode a published sentinel must carry: `0o644 & ~umask`, which is
+    what ledger_update.py's writer produces once the kernel has masked its
+    `os.open(..., 0o644)`. A drift test pins the two together, and `fchmod`
+    does NOT mask, so this script has to apply the umask by hand.
+
+    Reading the umask requires setting it (there is no getumask), so this
+    briefly widens the process-wide umask to 0. Hoisted out of the per-segment
+    write for exactly that reason: the window is process-wide, not call-local,
+    and this module has in-process callers by design (several tests drive
+    `run()` and `mark_ever_converged()` directly, alongside the subprocess
+    harness most of the suite uses). The caller opens it at most ONCE per run
+    and not at all when there is nothing to create. It cannot be removed
+    entirely without a getumask this interpreter does not have."""
+    umask = os.umask(0)
+    os.umask(umask)
+    return 0o644 & ~umask
+
+
+def _open_staging(dir_fd: int) -> "tuple[int, str]":
+    """Create this call's staging file RELATIVE TO `dir_fd` and return
+    `(fd, name)`. Raises OSError on failure, like the `os.open` it wraps.
+
+    Replaces `tempfile.mkstemp(dir=str(segments_dir))`, which was the one
+    mutating call left in the write path that still resolved `segments/`
+    afresh BY PATHNAME. Review reproduced the consequence: with `segments/`
+    re-pointed between the descriptor's open and the staging call, the staging
+    file was created in the NEW directory while the link and the cleanup both
+    operated on the old one -- so the run failed closed, correctly, and leaked
+    a file into a directory of the retargeter's choosing that THIS INVOCATION
+    could never remove, since `_cleanup_staging()` unlinks relative to the
+    descriptor. The identity check is not a defence against it, and an
+    earlier draft of this docstring got the reason wrong: the check DOES fire
+    on that interleaving (the test asserts exactly that). What it cannot do is
+    see the stranded file -- it compares directory IDENTITY and never the
+    entries under either directory, so it can say "this path moved" and never
+    "and it left this behind". It says nothing at all when the path is
+    re-pointed and restored before the final sample.
+
+    With the whole write path descriptor-relative there is no pathname
+    resolution left in it at all, so a retarget can no longer place, publish,
+    or strand anything.
+
+    `mkstemp`'s other job -- picking a name nothing else holds -- is done here
+    by `O_EXCL` over a 64-bit random suffix (`token_hex(8)` is 8 BYTES, 16 hex
+    characters), retried on the structurally possible collision. `O_EXCL` is
+    what actually establishes exclusivity; the entropy only keeps the retry
+    loop from mattering. `0o600` matches what mkstemp created;
+    the caller widens it to the sentinel's own mode on this descriptor BEFORE
+    writing the bytes, which is safe under a staging name no reader consults --
+    the public name is not published until those bytes are durable."""
+    for _ in range(_STAGING_NAME_ATTEMPTS):
+        name = f"{STAGING_PREFIX}{secrets.token_hex(8)}"
+        try:
+            fd = os.open(
+                name,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+                dir_fd=dir_fd,
+            )
+        except FileExistsError:
+            continue
+        return fd, name
+    raise OSError(
+        errno.EEXIST,
+        f"could not find an unused staging name after "
+        f"{_STAGING_NAME_ATTEMPTS} attempts",
+    )
+
+
 def _cleanup_staging(tmp_fd, tmp_name, dir_fd) -> None:
     """BEST-EFFORT removal of the staging file (and its fd) used by
     mark_ever_converged(). Errors are swallowed, so a leaked staging file is
@@ -442,11 +545,18 @@ def _cleanup_staging(tmp_fd, tmp_name, dir_fd) -> None:
     "best-effort" rather than "removed" for exactly that reason.
 
     Deliberately silent. Unlike the public sentinel name, the staging file is
-    owned unambiguously by one call -- tempfile.mkstemp() picked a name no
+    owned unambiguously by one call -- `_open_staging()` picked a name no
     other process holds -- so failing to remove it cannot destroy anyone's
     protection and cannot be mistaken for a sentinel by any reader, which
     matches on the exact `.ever_converged.{seg}` name. Leaking one is untidy;
     reporting it would bury the real error that caused the cleanup.
+
+    NOTHING SWEEPS old staging files, and adding a sweeper would be a mistake.
+    A run cannot tell a leaked `.ever_converged_staging.*` from one a
+    CONCURRENT invocation is writing into right now, so a sweep is the same
+    "cleanup that can destroy work this call does not own" that the stage-then-
+    link design exists to remove -- one layer down. A stale staging file costs
+    an inode; deleting a live one costs a sentinel.
 
     Unlinks relative to `dir_fd`, never by pathname, for the same reason the
     link does: the directory this call staged into is identified by an OPEN
@@ -486,20 +596,16 @@ def sync_segments_dir(dir_fd: int):
     fsync commits every link and every staging unlink in this directory, so
     it is also cheaper than the per-segment version it replaces.
 
-    Takes BOTH the descriptor and the path, and needs both: the descriptor
-    to sync the directory this run actually worked in, and the path to check
-    afterwards that the two are still the same directory. See the identity
-    check below for why holding a descriptor alone proves nothing to the
-    readers.
+    Takes the descriptor ONLY, and does exactly one job: fsync. Whether the
+    path still names this directory is a different question with a different
+    remedy, so it is `check_segments_dir_identity()`'s job and lands in its
+    own output key.
 
-    Returns None on success, or an "error: ..." string covering EITHER an
-    fsync failure OR a detected replacement (and naming both when both
-    happened). The caller fails the run on a non-None return: sentinels whose
-    directory entry is not durable are exactly the ones a crash can lose
-    while the ledger fragment they back survives, and sentinels in a
-    displaced directory are ones no reader will find at all -- both produce
-    the asymmetry the dispatch gate reads as ABSENT and
-    clears for retranslation."""
+    Returns None on success, or an "error: ..." string. The caller fails the
+    run on a non-None return: sentinels whose directory entry is not durable
+    are exactly the ones a crash can lose while the ledger fragment they back
+    survives, which produces the asymmetry the dispatch gate reads as ABSENT
+    and clears for retranslation."""
     try:
         os.fsync(dir_fd)
     except OSError as exc:
@@ -565,7 +671,8 @@ def check_segments_dir_identity(dir_fd: int, segments_dir: Path):
     return None
 
 
-def mark_ever_converged(seg: str, segments_dir: Path, dir_fd: int) -> str:
+def mark_ever_converged(seg: str, segments_dir: Path, dir_fd: int,
+                        mode=None) -> str:
     """Same OBSERVABLE contract as ledger_update.py's own
     `mark_ever_converged()` -- same filename, same content
     (`b"converged\\n"`), the same mode (`0o644 & ~umask`, matching what the
@@ -576,10 +683,21 @@ def mark_ever_converged(seg: str, segments_dir: Path, dir_fd: int) -> str:
     gets a clean, non-raising outcome, never an uncaught OSError escaping
     past this function's own contract.
 
+    `mode` is that mode, computed ONCE per run by the caller so the
+    process-wide umask window `sentinel_mode()` needs is opened once rather
+    than once per segment; passing None (the standalone/library call) computes
+    it here instead, so the contract is unchanged for a direct caller.
+
     The MECHANISM is no longer the sibling's single `O_CREAT | O_EXCL |
     O_WRONLY` open. This copy stages, fsyncs the STAGED FILE, then publishes
-    with `os.link()` -- so the OS calls to keep non-raising are mkstemp,
-    fchmod, write, fsync, close, link and the staging unlink, not three.
+    with `os.link()` -- so the OS calls to keep non-raising are the staging
+    open, fchmod, write, fsync, close, link and the staging unlink, not three.
+    Every one of them is bound to `dir_fd`, so nothing on this function's
+    WRITE path resolves the `segments/` pathname at all. The one call that
+    still does is the EEXIST classification below, and it only READS: after a
+    retarget it can misreport WHOSE entry it examined, but it cannot place,
+    publish or strand a file. `segments_dir` otherwise survives only to derive
+    the sentinel's BASENAME, which touches nothing.
     This function does NOT sync the directory; `sync_segments_dir()` does
     that once per run, and its docstring explains why a per-segment version
     could not settle durability at all. `os.link()` is what keeps
@@ -620,15 +738,10 @@ def mark_ever_converged(seg: str, segments_dir: Path, dir_fd: int) -> str:
     succeeded; some filesystems, notably NFS, defer reporting a write error
     until close()) gets the identical "error: ..." treatment.
 
-    NO failure here leaves anything at the public name, and this function no
-    longer syncs the directory at all. It used to, per segment, and that was
-    the defect: a failed per-segment directory fsync left the sentinel
-    published and the segment in `failed_to_create`, after which a retry
-    classified that same file as SENTINEL_PRESENT, skipped the writer
-    entirely, and returned success without ever reaching the fsync that had
-    failed. Directory durability is now established once per run by
-    `sync_segments_dir()`, which runs unconditionally so that a retry
-    genuinely does settle what a previous run left unsynced.
+    NO failure here leaves anything at the public name. Directory durability
+    is deliberately not this function's job: `sync_segments_dir()` establishes
+    it once per run, and its docstring holds the account of the per-segment
+    version that came before and the green retry that version laundered.
 
     No shared message-building helper, unlike the sibling's own fix:
     ledger_update.py's stderr text is a multi-sentence explanation
@@ -667,23 +780,19 @@ def mark_ever_converged(seg: str, segments_dir: Path, dir_fd: int) -> str:
     tmp_fd = None
     tmp_name = None
     try:
-        tmp_fd, tmp_abs = tempfile.mkstemp(
-            prefix=".ever_converged_staging.", dir=str(segments_dir)
-        )
-        tmp_name = os.path.basename(tmp_abs)
-        # mkstemp is 0o600 by design, so the mode has to be set explicitly --
-        # and it must come out EQUAL to what ledger_update.py's writer
-        # produces, because a drift test pins the two together. That writer
-        # uses `os.open(..., 0o644)`, whose mode the kernel MASKS. fchmod does
-        # not mask, so a bare fchmod(0o644) diverges from the sibling under
-        # any non-default umask: at umask 077 the ledger writes 0o600 while
-        # this would publish 0o644. Apply the umask by hand to keep them
-        # identical. Reading it requires setting it (there is no getumask),
-        # hence the immediate restore; this script is single-threaded, so no
-        # other file can be created in that window.
-        umask = os.umask(0)
-        os.umask(umask)
-        os.fchmod(tmp_fd, 0o644 & ~umask)
+        tmp_fd, tmp_name = _open_staging(dir_fd)
+        # Staging is created 0o600, so the published mode has to be set
+        # explicitly -- and it must come out EQUAL to what ledger_update.py's
+        # writer produces, because a drift test pins the two together. That
+        # writer uses `os.open(..., 0o644)`, whose mode the kernel MASKS.
+        # fchmod does not mask, so a bare fchmod(0o644) diverges from the
+        # sibling under any non-default umask: at umask 077 the ledger writes
+        # 0o600 while this would publish 0o644. `sentinel_mode()` applies the
+        # umask by hand to keep them identical; the caller passes it in so its
+        # process-wide read happens once per run rather than once per segment.
+        if mode is None:
+            mode = sentinel_mode()
+        os.fchmod(tmp_fd, mode)
         os.write(tmp_fd, b"converged\n")
         os.fsync(tmp_fd)
         os.close(tmp_fd)
@@ -713,13 +822,13 @@ def mark_ever_converged(seg: str, segments_dir: Path, dir_fd: int) -> str:
         return f"error: {detail}; refusing to treat this as an existing sentinel"
     except OSError as exc:
         # Every other link failure -- EACCES, EROFS, EIO, a parent removed
-        # after the scan, or ENOENT because `segments/` was retargeted since
-        # mkstemp staged into it -- is reported for THIS segment and lets the
-        # loop continue, rather than escaping to the top-level handler and
-        # abandoning every segment after it. The retarget case fails CLOSED
-        # here precisely because the link is bound to the descriptor: the
-        # staging file is not in the directory `dir_fd` names, so nothing is
-        # published and the error says so.
+        # after the scan -- is reported for THIS segment and lets the loop
+        # continue, rather than escaping to the top-level handler and
+        # abandoning every segment after it. A `segments/` retargeted mid-run
+        # no longer reaches here at all: staging is now created relative to
+        # `dir_fd` too, so source and destination are the same directory
+        # INODE by construction and the retarget cannot separate them. It is
+        # caught at the end instead, by check_segments_dir_identity().
         _cleanup_staging(None, tmp_name, dir_fd)
         return f"error: {exc}"
 
@@ -773,8 +882,8 @@ def _json_line(payload) -> str:
     """`json.dumps(..., ensure_ascii=False)`, falling back to ASCII escaping
     when the result cannot be encoded for stdout.
 
-    A ledger is JSON, and JSON can carry a LONE SURROGATE -- a lone-surrogate escape as a
-    segment id or a status. `ensure_ascii=False` keeps it verbatim, and
+    A ledger is JSON, and JSON can carry a LONE SURROGATE escape -- as a
+    segment id or as a status. `ensure_ascii=False` keeps it verbatim, and
     printing it then raises UnicodeEncodeError from the print itself, OUTSIDE
     every handler here: the process dies with a traceback and no JSON at all,
     exactly where this script's contract promises a failure payload. Escaping
@@ -808,6 +917,15 @@ def read_json(path: Path, what: str):
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         fatal(f"{what} not found at {path}")
+    except UnicodeDecodeError as exc:
+        # NOT covered by the OSError below -- UnicodeDecodeError is a
+        # ValueError. Uncaught it escaped this function entirely and surfaced
+        # as main()'s defensive catch-all ("unexpected error: ..."), which is
+        # the payload shape reserved for a bug in this script, not for a
+        # malformed input file. Fatal is right here (unlike in
+        # read_existing_ledger below): this reader only ever runs on a ledger
+        # THIS script just merged.
+        fatal(f"{what} at {path} is not valid UTF-8: {exc}")
     except OSError as exc:
         fatal(f"could not read {what} at {path}: {exc}")
     try:
@@ -860,7 +978,9 @@ def run_ledger_merge(dirs: dict, durable_root_str=None, plugin_root_str=None) ->
 
 
 def load_ledger_segments(merge_result: dict, durable_root: Path) -> "tuple[dict, str]":
-    ledger_path = Path(merge_result.get("ledger_path") or (durable_root / "runs" / "ledger.json"))
+    ledger_path = Path(
+        merge_result.get("ledger_path") or (durable_root / "runs" / "ledger.json")
+    )
     doc = read_json(ledger_path, "materialized ledger.json")
     segments = doc.get("segments")
     if not isinstance(segments, dict):
@@ -885,7 +1005,14 @@ def read_existing_ledger(durable_root: Path):
         return None
     try:
         doc = json.loads(ledger_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        # UnicodeDecodeError is a ValueError, so neither of the other two
+        # covered it and a ledger holding invalid UTF-8 escaped this function
+        # -- landing in main()'s catch-all instead of the refusal with the
+        # actionable next step, and contradicting this docstring's "never
+        # raises/fatals" in the one case an operator cannot distinguish from
+        # a corrupt file. The existing corrupt-ledger test uses invalid JSON,
+        # which is a different exception.
         return None
     if not isinstance(doc, dict):
         return None
@@ -902,13 +1029,23 @@ def resolve_ledger_segments(args, dirs: dict):
     `(ledger_segments, ledger_path, ledger_source)`, where `ledger_source`
     is `"existing"` or `"freshly_merged"`.
     """
+
+    def merge_fresh():
+        """Re-materialize via ledger_merge.py and load the result. Spelled
+        once because BOTH the --apply path and the --allow-merge path take it
+        with the identical inputs; only the CONDITIONS for reaching it
+        differ."""
+        merge_result = run_ledger_merge(dirs, args.durable_root, args.plugin_root)
+        segments, ledger_path = load_ledger_segments(
+            merge_result, dirs["durable_root"]
+        )
+        return segments, ledger_path, "freshly_merged"
+
     if args.apply:
         # The merge is a legitimate part of doing the work -- always fresh,
         # immediately before any sentinel write, never the stale-tolerant
         # existing-file path below.
-        merge_result = run_ledger_merge(dirs, args.durable_root, args.plugin_root)
-        segments, ledger_path = load_ledger_segments(merge_result, dirs["durable_root"])
-        return segments, ledger_path, "freshly_merged"
+        return merge_fresh()
 
     existing = read_existing_ledger(dirs["durable_root"])
     if existing is not None:
@@ -916,9 +1053,7 @@ def resolve_ledger_segments(args, dirs: dict):
         return segments, ledger_path, "existing"
 
     if args.allow_merge:
-        merge_result = run_ledger_merge(dirs, args.durable_root, args.plugin_root)
-        segments, ledger_path = load_ledger_segments(merge_result, dirs["durable_root"])
-        return segments, ledger_path, "freshly_merged"
+        return merge_fresh()
 
     fatal(
         "no usable materialized ledger.json found at "
@@ -998,23 +1133,9 @@ def run(args, dirs: dict) -> dict:
         )
 
     segments_dir = dirs["segments_dir"]
-    # Three buckets, not two. `.exists()` here used to fold two very different
-    # states into "already sentineled": a real regular sentinel, and a
-    # DIRECTORY sitting at the sentinel path (exists() is True for one). It
-    # also folded a dangling symlink and an EACCES lookup into "missing", so
-    # this script would report a sentinel CREATED for a segment whose path it
-    # had not actually written -- the writer's O_CREAT|O_EXCL gets EEXIST from
-    # a dangling link and, pre-fix, called that success.
-    #
-    # AMBIGUOUS is reported, never repaired and never counted as protected.
-    # This script is the REPAIR tool, so the branch that cannot mislead is the
-    # one that says "I could not verify this and I did not touch it": claiming
-    # protection that was never verified is what leaves a segment looking safe
-    # while the dispatch gate can still retranslate it. Blind repair is wrong
-    # for the same reason -- mark_ever_converged() would have to delete or
-    # overwrite whatever is there, and it deliberately never does either.
-    # The descriptor is acquired HERE, before the census below, and the
-    # ordering is the entire protection -- not an optimisation.
+    # The descriptor is acquired HERE, before the census in
+    # _run_with_segments_dir() below, and the ordering is the entire
+    # protection -- not an optimisation.
     #
     # Review found the previous version opening it AFTER the census, which
     # left the census itself outside everything the identity check covers.
@@ -1034,15 +1155,30 @@ def run(args, dirs: dict) -> dict:
     # back. See check_segments_dir_identity() for exactly what survives that
     # gap and why it is disclosed rather than closed. It is opened in DRY RUN
     # too -- the dry run's census is what the operator acts on.
+    #
+    # O_DIRECTORY, never a bare O_RDONLY. Review reproduced what the bare form
+    # costs: a `segments` that is a REGULAR FILE opens fine, fsyncs fine, and
+    # compares equal to itself in the identity check -- so every structural
+    # check in this script agrees with every other one while every sentinel
+    # lookup underneath them returns ENOTDIR. The open is the one place that
+    # can tell a directory from a file for free, and the right place to refuse.
+    #
+    # NOT O_NOFOLLOW, and that omission is deliberate -- the sibling
+    # backfill_resume_gate_ack.py DOES pass it, so aligning the two "for
+    # consistency" is a live temptation. A symlinked `segments/` is explicitly
+    # supported here (see classify_ever_converged_sentinel()'s docstring), and
+    # O_NOFOLLOW would refuse every project that has one. The retarget risk a
+    # symlink carries is handled by holding this descriptor and checking
+    # identity at the end, not by refusing the symlink.
     try:
-        dir_fd = os.open(str(segments_dir), os.O_RDONLY)
+        dir_fd = os.open(str(segments_dir), os.O_RDONLY | os.O_DIRECTORY)
     except OSError as exc:
         fatal(f"could not open segments directory {segments_dir}: {exc}")
 
     try:
         return _run_with_segments_dir(
             args, dirs, ledger_path, ledger_source, ever_converged_segs,
-            not_evaluated, segments_dir, dir_fd,
+            not_evaluated, dir_fd,
         )
     finally:
         # fatal() RAISES; it does not exit. Review verified the descriptor
@@ -1056,15 +1192,34 @@ def run(args, dirs: dict) -> dict:
 
 
 def _run_with_segments_dir(args, dirs, ledger_path, ledger_source,
-                           ever_converged_segs, not_evaluated,
-                           segments_dir, dir_fd) -> dict:
+                           ever_converged_segs, not_evaluated, dir_fd) -> dict:
     """The half of run() that needs the segments-directory descriptor. Split
     out purely so one `finally` can own closing it."""
+    segments_dir = dirs["segments_dir"]
+
+    # THE CENSUS. Three buckets, not two. `.exists()` here used to fold two
+    # very different states into "already sentineled": a real regular
+    # sentinel, and a DIRECTORY sitting at the sentinel path (exists() is True
+    # for one). It also folded a dangling symlink and an EACCES lookup into
+    # "missing", so this script would report a sentinel CREATED for a segment
+    # whose path it had not actually written -- the writer's O_CREAT|O_EXCL
+    # gets EEXIST from a dangling link and, pre-fix, called that success.
+    #
+    # AMBIGUOUS is reported, never repaired and never counted as protected --
+    # and it FAILS THE RUN (see the `ok` computation below). This script is the
+    # REPAIR tool, so the branch that cannot mislead is the one that says "I
+    # could not verify this and I did not touch it": claiming protection that
+    # was never verified is what leaves a segment looking safe while the
+    # dispatch gate can still retranslate it. Blind repair is wrong for the
+    # same reason -- mark_ever_converged() would have to delete or overwrite
+    # whatever is there, and it deliberately never does either.
     already_sentineled = []
     missing_sentinels = []
     ambiguous_sentinels = []
     for seg in ever_converged_segs:
-        state, detail = classify_ever_converged_sentinel(ever_converged_path(seg, segments_dir))
+        state, detail = classify_ever_converged_sentinel(
+            ever_converged_path(seg, segments_dir)
+        )
         if state == SENTINEL_PRESENT:
             already_sentineled.append(seg)
         elif state == SENTINEL_ABSENT:
@@ -1103,9 +1258,20 @@ def _run_with_segments_dir(args, dirs, ledger_path, ledger_source,
         # directory anyone would go on to read.
         #
         synced = False
+        # ONCE per run, not once per segment -- and ZERO times when there is
+        # nothing to create. sentinel_mode() has to widen the process-wide
+        # umask to read it, and that window is visible to any other thread in
+        # the process; this module has in-process callers by design, so the
+        # window is real. N segments opened it N times for no benefit, since
+        # the umask cannot change under our own feet. The `if missing_sentinels`
+        # is not an optimization: hoisting it unconditionally was itself caught
+        # as a regression, because the idempotent no-op re-run -- the one an
+        # operator repeats most often, over a fully protected project -- used
+        # to open no window at all and would have started opening one.
+        mode = sentinel_mode() if missing_sentinels else None
         try:
             for seg in missing_sentinels:
-                outcome = mark_ever_converged(seg, segments_dir, dir_fd)
+                outcome = mark_ever_converged(seg, segments_dir, dir_fd, mode)
                 if outcome == "created":
                     created.append(seg)
                 elif outcome == "already_present":
@@ -1160,9 +1326,32 @@ def _run_with_segments_dir(args, dirs, ledger_path, ledger_source,
     # it is. Unprotected-but-reported-protected is the one outcome that
     # destroys finished work, so it fails loudly instead.
     #
-    # `ambiguous_sentinels` does NOT fail the run: those are reported,
-    # untouched, and were never claimed as protected. `not_evaluated` does
-    # not either -- see its own note above.
+    # `ambiguous_sentinels` fails it too, and used not to. The argument for
+    # exempting it -- "those are reported, untouched, and were never claimed as
+    # protected" -- confuses the PAYLOAD with the SIGNAL. An ambiguous entry is
+    # a segment this script has left unprotected and cannot repair, which is
+    # the same standing as `failed_to_create`; `success: true` and exit 0 are
+    # what the operator actually reads before dispatching, so exempting it
+    # published a clean verdict over exactly the state this script exists to
+    # rule out. Security review reproduced the extreme of it with nothing more
+    # exotic than `chmod 444 segments`: every lstat under it fails EACCES, so
+    # EVERY segment lands in AMBIGUOUS, `missing_sentinels` comes back EMPTY,
+    # and a dry run whose census established nothing at all was indistinguish-
+    # able at the `success`/`missing_sentinels`/exit-code level from a
+    # perfectly healthy project. SKILL.md already told operators to treat
+    # `ambiguous_sentinels` as one of the things that decides whether the
+    # protection is up; this makes the code agree with that instead of
+    # contradicting it. The bucket is empty whenever the sentinel paths can be
+    # read -- NOT "on every healthy project", which overstates it: a transient
+    # ESTALE or EIO puts a genuinely fine sentinel here, and failing is still
+    # correct, because the entry may be fine and this cannot show that it is.
+    #
+    # `not_evaluated` still does NOT fail the run -- see its own note above.
+    # That asymmetry is deliberate and is the reason the two are separate
+    # buckets: `not_evaluated` holds every segment whose status is not
+    # converged/stale, so it is non-empty on any ordinary mixed or live
+    # project, and failing on it would redden those runs without proving a
+    # single protection defect.
     #
     # `directory_sync_error` and `segments_dir_replaced` each fail the run,
     # for the same reason and independently: entries not proven durable, and
@@ -1181,6 +1370,7 @@ def _run_with_segments_dir(args, dirs, ledger_path, ledger_source,
 
     ok = (
         not failed_to_create
+        and not ambiguous_sentinels
         and directory_sync_error is None
         and segments_dir_replaced is None
     )
@@ -1232,8 +1422,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Actually re-materialize runs/ledger.json and create the missing "
-            "sentinel files. Without this flag the script makes ZERO "
-            "filesystem writes and only reports what it would do."
+            "sentinel files. Without this flag the script issues no mutating "
+            "operation and changes no project content -- not a "
+            "re-materialized runs/ledger.json, not one sentinel file -- and "
+            "only reports what it would do."
         ),
     )
     parser.add_argument(
@@ -1242,10 +1434,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Without a pre-existing runs/ledger.json, a dry run refuses by "
             "default rather than silently re-materializing one (that write "
-            "would break the 'dry run makes zero writes' guarantee). Pass "
-            "this flag to explicitly authorize exactly that one write "
-            "(never a sentinel write) for this run. Ignored under --apply, "
-            "which always re-materializes regardless."
+            "would break the 'a dry run changes no project content' "
+            "guarantee). Pass this flag to explicitly authorize exactly that "
+            "one write (never a sentinel write) for this run. Ignored under "
+            "--apply, which always re-materializes regardless."
         ),
     )
     parser.add_argument(
@@ -1320,12 +1512,15 @@ def main(argv=None) -> int:
         )
         return 1
 
-    mode = "APPLY" if result["applied"] else "DRY RUN (pass --apply to write)"
+    # `mode_label`, not `mode`: this module's other `mode` is the sentinel's
+    # PERMISSION BITS (sentinel_mode(), mark_ever_converged()'s parameter), and
+    # one name for two unrelated things in one file reads as a shared concept.
+    mode_label = "APPLY" if result["applied"] else "DRY RUN (pass --apply to write)"
     print("=" * 70, file=sys.stderr)
     print("BACKFILL EVER-CONVERGED SENTINELS", file=sys.stderr)
     print("=" * 70, file=sys.stderr)
     print(f"durable_root: {result['durable_root']}", file=sys.stderr)
-    print(f"mode: {mode}", file=sys.stderr)
+    print(f"mode: {mode_label}", file=sys.stderr)
     print(
         f"ledger source: {result['ledger_source']} ({result['ledger_path']})",
         file=sys.stderr,
@@ -1335,21 +1530,40 @@ def main(argv=None) -> int:
         f"{result['counts']['ever_converged']}",
         file=sys.stderr,
     )
+    # One membership test per bucket, so every branch below reads the same way
+    # -- the mixed `seg in <list>` / `any(entry["seg"] == seg ...)` spelling it
+    # replaces made the two dict-carrying buckets look like a different kind of
+    # question than the two plain-list ones.
+    already_sentineled = set(result["already_sentineled"])
+    created = set(result["created"])
+    failed_to_create = {entry["seg"] for entry in result["failed_to_create"]}
+    ambiguous_sentinels = {entry["seg"] for entry in result["ambiguous_sentinels"]}
     for seg in result["ever_converged_segs"]:
-        if seg in result["already_sentineled"]:
+        if seg in already_sentineled:
             status = "already sentineled"
-        elif seg in result["created"]:
+        elif seg in created:
             status = "CREATED"
-        elif any(f["seg"] == seg for f in result["failed_to_create"]):
+        elif seg in failed_to_create:
             status = "FAILED to create"
-        elif any(a["seg"] == seg for a in result["ambiguous_sentinels"]):
+        elif seg in ambiguous_sentinels:
             # Listed as its own status rather than falling through to "missing
             # sentinel": the entry is NOT missing, and calling it missing is
             # exactly the misreading that let a dangling symlink pass as a
             # successful backfill.
             status = "AMBIGUOUS -- not protected, not modified"
         else:
-            status = "missing sentinel (dry run)"
+            # Only a dry run leaves a missing sentinel merely missing. Under
+            # --apply, reaching here means the segment was absent at census
+            # time and is present now without THIS run creating it: something
+            # else won the race, which mark_ever_converged() reports as
+            # "already_present" and the buckets deliberately do not record.
+            # The old unconditional "(dry run)" label printed a mode the run
+            # was not in, on the one line an operator reads per segment.
+            status = (
+                "missing at census -- created by something else during this run"
+                if result["applied"]
+                else "missing sentinel (dry run)"
+            )
         print(f"  - {seg}: {status}", file=sys.stderr)
     print(
         f"\nalready sentineled: {result['counts']['already_sentineled']}\n"

@@ -201,14 +201,19 @@ that "three and one" count while the list grew to six.
   twice, including by replacing `segments/` itself. A cleanup that can destroy protection somebody
   else established is strictly worse than the residue it cleans up.
 
-  **Disclosed residual, because five rounds of review were spent learning it cannot be closed
-  here.** A `--apply` run holds one descriptor for `segments/` and checks, at the end, that the
-  path still names that same directory — reported as `segments_dir_replaced`, and checked in dry
-  runs too. That is a single sample: it catches a path displaced *at that moment*, not a path
-  swapped away and back, whose census may have read the other directory while the comparison still
-  comes out equal. The damaging shape is the other directory holding a sentinel this one lacks.
-  Closing it needs a locking protocol honoured by whatever renames `segments/`, which this script
-  cannot impose. It is stated in SKILL.md's upgrade note rather than papered over.
+  **Disclosed residual, because six rounds of review were spent learning it cannot be closed
+  here.** A run holds one descriptor for `segments/` and checks, at the end, that the path still
+  names that directory — reported as `segments_dir_replaced`, in dry runs too. That is a single
+  sample, and the census it is meant to vouch for reads each sentinel once by pathname with
+  nothing revalidating it afterwards. **A segment can therefore be reported protected when it is
+  not, and the result is silent retranslation** — `select_segments.py` gates only the segments it
+  finds PRESENT, so a marker that has since gone absent leaves that segment eligible and the
+  refusal never fires. Renaming `segments/` is one way to get there and not a precondition: a
+  transient mount overlay, network-filesystem failover or snapshot switching, a sync/restore tool
+  rewriting entries in place (which preserves the directory inode entirely), or a sentinel deleted
+  after the census classified it PRESENT all do it. Closing it needs a locking protocol honoured
+  by everything that can touch `segments/`, which this script cannot impose. Full statement in
+  SKILL.md's upgrade note; treat a clean run as evidence about the moment it ran.
 
   The shipped fix stages instead: write to a uniquely-named temp file in the same directory,
   `fsync` it, then publish with `os.link()` — which raises `FileExistsError` on an existing target
@@ -237,6 +242,49 @@ that "three and one" count while the list grew to six.
   nearly every real invocation and the check would simply be bypassed — which protects less than
   reporting does. What it must not do is let `success: true` be read as "everything that ever
   converged is protected now", which is a claim this script cannot make.
+- **A census that established nothing no longer reports `success: true`.** `ambiguous_sentinels`
+  used to be exempt from the run's verdict, on the argument that those entries are reported,
+  untouched, and never claimed as protected. That confuses the payload with the signal: `success`
+  and the exit code are what an operator reads before dispatching, and an ambiguous entry is a
+  segment left unprotected that this script cannot repair — the same standing as
+  `failed_to_create`. Security review reproduced the extreme with nothing more exotic than
+  `chmod 444 segments`, which a botched restore produces without an attacker: every `lstat`
+  underneath fails `EACCES`, so EVERY segment lands in `ambiguous_sentinels`,
+  `missing_sentinels` comes back EMPTY, and the run reported `success: true` and exit 0. Three
+  fields did differ (`already_sentineled`, `ambiguous_sentinels`, `counts`) — but `missing_sentinels`
+  and `success`, the two the operator is told to decide on, matched a healthy project exactly, with
+  only a stderr warning to say otherwise. SKILL.md's dry-run instruction reads an empty
+  `missing_sentinels` as "no backfill needed", and its five-point checklist was gated on "after
+  `--apply`" — so the operator following that note never reached the one field that would have
+  shown the truth. The bucket now fails the run in both modes, the checklist is no longer gated on
+  `--apply`, and the dry-run instruction says to read `$?` first. What the bucket claims is bounded:
+  it is empty whenever the sentinel paths can be READ, not "on every healthy project" — a transient
+  `lstat` failure (`ESTALE` after a network-filesystem failover, `EIO`) puts a perfectly good
+  sentinel in it, and failing is still right, because the entry may be fine and the script cannot
+  show that it is. `not_evaluated`
+  deliberately stays exempt for the opposite reason: it holds every segment outside
+  `converged`/`stale`, so it is non-empty on any ordinary mixed or live project, and failing on it
+  would redden those runs without proving a single protection defect.
+- **`segments/` is opened `O_DIRECTORY`, and the write path no longer resolves its pathname at
+  all.** Two same-shaped holes found in the same review. A bare `O_RDONLY` open succeeds on a
+  REGULAR FILE, `fsync` on it succeeds, and the identity check then compares that file against
+  itself and agrees — every structural check in the script agreeing with every other one while
+  every sentinel lookup underneath returns `ENOTDIR`. And `tempfile.mkstemp(dir=str(segments_dir))`
+  was the one mutating call left resolving `segments/` afresh by pathname: with the path re-pointed
+  after the descriptor was open, staging landed in the NEW directory while the link and the cleanup
+  both operated on the old one, so the run failed closed — correctly — and stranded a file in a
+  directory of the retargeter's choosing that the run itself could never remove, since cleanup
+  unlinks relative to the descriptor. The identity check is no defence there: it compares directory
+  IDENTITY and never the entries under either directory, so it fires on the retarget and still
+  cannot see, name, or remove what was left behind. Staging is now created relative to `dir_fd`
+  (`O_CREAT|O_EXCL` over a 64-bit random suffix, which is the other job `mkstemp` was doing —
+  `O_EXCL` is what establishes exclusivity, the entropy only keeps the retry loop from mattering),
+  so source and destination are the same directory inode by construction. Also in this round: the
+  process-wide umask window needed to compute the sentinel's mode is opened at most once per run
+  instead of once per segment, and **not at all when there is nothing to create** — hoisting it
+  unconditionally was itself caught in review, because the idempotent no-op re-run over a fully
+  protected project used to open no window and would have started opening one. And the per-segment
+  summary no longer labels a raced segment "(dry run)" during an `--apply` run.
 
 ### Known limitations
 
@@ -292,7 +340,7 @@ that "three and one" count while the list grew to six.
 
 ### Migration
 
-This release moves TWO bundle hashes, not one. `plugin_bundle_hash` moves because two of the five scripts it changes are `PLUGIN_BUNDLE_MEMBERS` entries — `ledger_update.py` (cache_key.py:139) and `segment_dispatch_driver.py` (cache_key.py:146) — the same class of consequence the driver's first addition to that tuple carried in 1.18.0. `orchestration_bundle_hash` moves independently, because `select_segments.py` is an `ORCHESTRATION_BUNDLE_MEMBERS` entry (scaffold_setup.py:63-68) and that marker is a second unconditional input to the same resume digest (resume_setup.py:723-725). The two causes are separate and either alone would be enough for the fresh-`RUN_ID` consequence below; the reclassification-to-`stale` consequence comes from `plugin_bundle_hash` only. At the next Step 0a bundle refresh, every already-converged mass segment reclassifies as `stale`; the `.ever_converged` sentinel gate `select_segments.py` has refused to dispatch a segment carrying that sentinel without `--allow-retranslate-converged` since 1.18.0 (the refusal itself is select_segments.py:1428-1477; the sentinel check that feeds it is select_segments.py:1378-1384, `classify_ever_converged_sentinel()` — this release replaces the `.exists()` that used to sit there, see below) — but that protection covers only a segment whose `.ever_converged.{seg}` sentinel was actually written. A project that converged segments before `segment_dispatch_driver.py` entered `PLUGIN_BUNDLE_MEMBERS` (before 1.18.0) and was never backfilled has no sentinels at all, and this release moves `plugin_bundle_hash` again on top of that pre-existing gap: see SKILL.md's own "#409 upgrade note" (SKILL.md:419-500) — before the next W5 dispatch on any such project, run `python3 ${durable_root}/scripts/backfill_ever_converged.py` (dry run by default). `missing_sentinels` is NOT sufficient to conclude the protection is up: after `--apply`, read `$?`/`success`, `failed_to_create`, `ambiguous_sentinels` and `not_evaluated` as well — the upgrade note now enumerates what each one means, and a segment listed in `not_evaluated` is one this script cannot protect at all. The same `plugin_bundle_hash` is also an unconditional input to `resume_setup.py`'s `compute_input_digest()` for both `kind="mass"` and `kind="glossary"` (it folds into the digest at resume_setup.py:729-736; resume_setup.py:719-722 only reads the marker value), so this release also invalidates the resume identity of any in-flight run of either kind at its next `resolve_run()`, minting a fresh `RUN_ID` rather than matching the existing digest. No script this release changes is a `DERIVATION_BUNDLE_MEMBERS` entry — that tuple is exactly `("bootstrap_names.py", "segpack.py")` (cache_key.py:152), and the diff touches neither — so no project routes to `blocked_needs_regeneration` because of this release. Checked against all five changed scripts rather than the driver alone, since membership is per file.
+This release moves TWO bundle hashes, not one. `plugin_bundle_hash` moves because two of the five scripts it changes are `PLUGIN_BUNDLE_MEMBERS` entries — `ledger_update.py` (cache_key.py:139) and `segment_dispatch_driver.py` (cache_key.py:146) — the same class of consequence the driver's first addition to that tuple carried in 1.18.0. `orchestration_bundle_hash` moves independently, because `select_segments.py` is an `ORCHESTRATION_BUNDLE_MEMBERS` entry (scaffold_setup.py:63-68) and that marker is a second unconditional input to the same resume digest (resume_setup.py:723-725). The two causes are separate and either alone would be enough for the fresh-`RUN_ID` consequence below; the reclassification-to-`stale` consequence comes from `plugin_bundle_hash` only. At the next Step 0a bundle refresh, every already-converged mass segment reclassifies as `stale`; the `.ever_converged` sentinel gate `select_segments.py` has refused to dispatch a segment carrying that sentinel without `--allow-retranslate-converged` since 1.18.0 (the refusal itself is select_segments.py:1428-1477; the sentinel check that feeds it is select_segments.py:1378-1384, `classify_ever_converged_sentinel()` — this release replaces the `.exists()` that used to sit there, see below) — but that protection covers only a segment whose `.ever_converged.{seg}` sentinel was actually written. A project that converged segments before `segment_dispatch_driver.py` entered `PLUGIN_BUNDLE_MEMBERS` (before 1.18.0) and was never backfilled has no sentinels at all, and this release moves `plugin_bundle_hash` again on top of that pre-existing gap: see SKILL.md's own "#409 upgrade note" (SKILL.md:419-544) — before the next W5 dispatch on any such project, run `python3 ${durable_root}/scripts/backfill_ever_converged.py` (dry run by default). `missing_sentinels` is NOT sufficient to conclude the protection is up, in EITHER mode: read `$?`/`success`, `failed_to_create`, `directory_sync_error`, `segments_dir_replaced`, `ambiguous_sentinels` and `not_evaluated` as well — the upgrade note now enumerates what each one means, and a segment listed in `not_evaluated` is one this script cannot protect at all. The same `plugin_bundle_hash` is also an unconditional input to `resume_setup.py`'s `compute_input_digest()` for both `kind="mass"` and `kind="glossary"` (it folds into the digest at resume_setup.py:729-736; resume_setup.py:719-722 only reads the marker value), so this release also invalidates the resume identity of any in-flight run of either kind at its next `resolve_run()`, minting a fresh `RUN_ID` rather than matching the existing digest. No script this release changes is a `DERIVATION_BUNDLE_MEMBERS` entry — that tuple is exactly `("bootstrap_names.py", "segpack.py")` (cache_key.py:152), and the diff touches neither — so no project routes to `blocked_needs_regeneration` because of this release. Checked against all five changed scripts rather than the driver alone, since membership is per file.
 
 A fresh `RUN_ID` costs more than resume bookkeeping. `translate_dispatch_token(run_id, seg)` is a pure function of `run_id` and `seg` (segment_dispatch_driver.py:2601-2602), so under the new `RUN_ID` `draft_ready.py`'s `--expect-token` check fails against the `dispatch_token` every existing draft actually carries, since it was written under the old one (draft_ready.py:323-331; the enforcing `sys.exit(1)` is line 331). In `derive_next_action()`'s `if not draft_ok:` branch, the fix-vs-fresh-translate discriminator is `_matched_review_round_label()` (segment_dispatch_driver.py:2789-2804), which by design matches only a review carrying THIS run's token — a review written under the old `RUN_ID` is not read as fix evidence — so with no matching prior review the branch falls through to `{"action": "translate"}` (the `if not draft_ok:` branch opens at segment_dispatch_driver.py:2891; the return is segment_dispatch_driver.py:2969). Concretely: any segment with a draft that is not yet converged — `recoverable` and `human_escalation` alike (select_segments.py:1192-1210) — is re-translated from scratch on its next dispatch after upgrading, discarding whatever was applied to that draft by hand. The `.ever_converged` sentinel protects a segment that has converged at least once, ever — not one whose current status merely happens to be non-converged: a segment re-dispatched under `--allow-retranslate-converged` and capped again would still carry the sentinel from its earlier convergence. `seg64` and `seg66` never converged at all, so they specifically have none: the only path this release opens for them to reach completion is that re-translate, and the findings already applied to them by hand are discarded in the process.
 

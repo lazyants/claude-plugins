@@ -53,12 +53,17 @@ CITATION_ANCHORS = {
     # the note grew past 448 while both original anchors stayed comfortably
     # inside the old range, so nothing failed. `not_evaluated` sits near the
     # new end and pins it.
-    "SKILL.md:419-500": [
+    "SKILL.md:419-544": [
         "#409 upgrade note",
         "backfill_ever_converged.py",
         "`not_evaluated`",
         "`directory_sync_error`",
         "`segments_dir_replaced`",
+        "`ambiguous_sentinels`",
+        # The citation claims the note covers BOTH modes. Anchored, because
+        # gating this list on `--apply` is precisely the defect that let a
+        # dry run whose census established nothing read as a healthy project.
+        "They govern BOTH modes",
         "Known limitation",
     ],
     "cache_key.py:139": ["ledger_update.py"],
