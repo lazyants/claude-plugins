@@ -1962,10 +1962,10 @@ def _folded_str_literals(src, skip_docstrings=False):
     ]
 
 
-# The sentinel's public API. Every needle above this line looks at STRING
-# LITERALS; these are IDENTIFIERS, and a file can become a genuine participant
-# without containing the token in any literal at all -- calling the helpers
-# through an injected provider needs no string whatsoever. Measured: a
+# The sentinel's public API. Every literal needle above looks at STRINGS; these
+# are IDENTIFIERS, and a file can become a genuine participant without
+# containing the token in any literal at all -- calling the helpers through an
+# injected provider needs no string whatsoever. Measured: a
 # `provider.classify_ever_converged_sentinel(provider.ever_converged_path(seg))`
 # added to a whitelisted file passed every literal-based needle here.
 SENTINEL_API_NAMES = (
@@ -1973,18 +1973,12 @@ SENTINEL_API_NAMES = (
     "classify_ever_converged_sentinel",
     "mark_ever_converged",
 )
-# The one API name the probe guard below tracks as a VALUE, not just a mention.
-SENTINEL_PATH_FN = "ever_converged_path"
 
-# Filesystem reads that must never be applied to the sentinel path directly.
-# Replacing exactly these with the three-state predicate IS the 1.20.0 change,
-# so a new one is not a new bug class -- it is this release regressing.
-FS_READ_PROBES = ("exists", "is_file", "is_dir", "is_symlink", "stat", "lstat")
-# The same reads spelled as module functions taking the path as an ARGUMENT.
-# `os.path.exists(p)` recreates the old disagreement exactly as well as
-# `p.exists()` does, and an earlier revision of this guard caught only the
-# method form -- measured, not assumed.
-FS_READ_FUNCS = ("exists", "isfile", "isdir", "islink", "lexists", "stat", "lstat")
+
+def _names_bound_by(target):
+    """Every bare name a binding target introduces, however nested: `a`,
+    `(a, b)`, `[a, *rest]`."""
+    return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
 
 
 def _sentinel_api_refs(src):
@@ -2040,180 +2034,45 @@ def _sentinel_api_refs(src):
     return hits
 
 
-def _callee_name(func):
-    """The bare name a call targets: `f` -> 'f', `os.path.exists` -> 'exists'."""
-    if isinstance(func, ast.Name):
-        return func.id
-    if isinstance(func, ast.Attribute):
-        return func.attr
-    return None
-
-
 def _api_names_bound_by(src):
-    """Sentinel API names this file binds by ASSIGNMENT rather than by `def`.
+    """Sentinel API names this file binds by any STATIC binding form other than
+    `def` -- assignment, annotated assignment, walrus, augmented assignment, a
+    `for`/`with`/`except`/`match` target, or a class definition.
 
     `mark_ever_converged = write_marker` publishes the writer under its public
     name while matching none of the census needles: not a `def`, not an import
     alias, not a Load of the name, and carrying no `ever_converged` literal.
     Used by the exemption role check, which is a promise not to touch the
-    convention -- a stricter bar than the census's "which files use it"."""
+    convention -- a stricter bar than the census's "which files use it".
+
+    NOT exhaustive, and the earlier claim that it refused these "by any means"
+    was wrong: a binding built at runtime -- `globals().update(...)`,
+    `setattr()` with a computed name, a dict export consumed elsewhere -- is
+    not visible to any static walk. What is enumerated is every form that
+    appears in this codebase; the rest is disclosed rather than implied."""
     try:
         tree = ast.parse(src)
     except SyntaxError:
         return set()
+    api = set(SENTINEL_API_NAMES)
     bound = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                bound |= _names_bound_by(target) & set(SENTINEL_API_NAMES)
-        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
-            bound |= _names_bound_by(node.target) & set(SENTINEL_API_NAMES)
-    return bound
-
-
-def _file_shadows_sentinel_path_fn(tree):
-    """True if this file binds `ever_converged_path` to anything other than a
-    module-level `def`.
-
-    One pass, no scoping, no ordering: the question is only "is this name ever
-    something other than the builder in this file", and a coarse yes is enough
-    to make the probe guard abstain. Everything subtler than this was tried in
-    three previous revisions and was wrong every time."""
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            args = node.args
-            if any(
-                arg is not None and arg.arg == SENTINEL_PATH_FN
-                for arg in [
-                    *args.posonlyargs,
-                    *args.args,
-                    *args.kwonlyargs,
-                    args.vararg,
-                    args.kwarg,
-                ]
-            ):
-                return True
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if SENTINEL_PATH_FN in _names_bound_by(target):
-                    return True
-        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
-            if SENTINEL_PATH_FN in _names_bound_by(node.target):
-                return True
+                bound |= _names_bound_by(target) & api
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr, ast.AugAssign)):
+            bound |= _names_bound_by(node.target) & api
         elif isinstance(node, (ast.For, ast.AsyncFor)):
-            if SENTINEL_PATH_FN in _names_bound_by(node.target):
-                return True
+            bound |= _names_bound_by(node.target) & api
         elif isinstance(node, ast.withitem) and node.optional_vars is not None:
-            if SENTINEL_PATH_FN in _names_bound_by(node.optional_vars):
-                return True
-        elif isinstance(node, ast.alias):
-            if (node.asname or node.name.split(".")[0]) == SENTINEL_PATH_FN:
-                return True
-        elif isinstance(node, ast.MatchAs) and node.name == SENTINEL_PATH_FN:
-            return True
-    return False
-
-
-def _names_bound_by(target):
-    """Every bare name a binding target introduces, however nested."""
-    return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
-
-
-def _unmediated_sentinel_probes(src):
-    """Raw filesystem reads applied DIRECTLY to an `ever_converged_path(...)`
-    call -- `ever_converged_path(seg).exists()`, `os.path.exists(
-    ever_converged_path(seg))`, and the same through a `*args` literal.
-
-    DELIBERATELY SYNTACTIC, DELIBERATELY NARROW, AND THAT IS THE WHOLE POINT.
-    Three previous revisions tracked bindings so that `p = ever_converged_path(
-    seg); p.exists()` would also be caught. Each was wrong in BOTH directions,
-    and each fix was larger than the one before:
-
-      - revision 1 keyed bindings file-wide and reported four legitimate
-        `path.lstat()` calls, because `path` is the predicate's own parameter
-        name in another function;
-      - revision 2 keyed them per-scope as an unordered set and reported
-        `p = sentinel; p = other; p.exists()`, a probe written before its
-        binding, a comprehension shadowing an outer name, and a bound method
-        never called;
-      - revision 3 resolved taint, aliasing and function-aliases as one
-        fixpoint, and STILL reported a `match` capture, a walrus in a default
-        argument, a class-scope comprehension iterable, and a 64-deep alias
-        chain that silently exceeded its own convergence bound.
-
-    Twelve of sixteen constructs wrong, then seven of twenty-eight, then four
-    more. The lesson is not that the fourth attempt would have been correct: a
-    test-side reimplementation of dataflow analysis has its own defect rate,
-    that rate was measurably worse than the drift it was catching, and a guard
-    that reports correct code is one a maintainer deletes rather than debugs.
-    So this asks only a question it can answer exactly.
-
-    WHAT IT CATCHES: the shape someone actually writes when reintroducing the
-    bug -- reaching for `.exists()` on the path expression itself. WHAT IT
-    MISSES: everything through a variable, an alias, or another function. The
-    `inspect.getsource` identity test and the six-needle census are what pin
-    the contract; this is a tripwire on the single most likely regression, not
-    a proof that no raw read exists.
-
-    ONE SHADOWING CHECK SURVIVES, and it is a whole-file veto rather than any
-    kind of scope analysis: if the file binds the name `ever_converged_path` to
-    anything other than a `def` -- a parameter, an assignment, a loop target,
-    an import -- this guard cannot tell which call reaches the real builder, so
-    it declines to answer for that file and reports nothing. That is the only
-    false positive the syntactic form has (a parameter shadowing the name was
-    measured producing one), and "no opinion" is the right answer to give
-    rather than a red on correct code. None of the four participants shadows
-    it; each defines it at module level."""
-    try:
-        tree = ast.parse(src)
-    except SyntaxError:  # other tests own syntax
-        return []
-
-    if _file_shadows_sentinel_path_fn(tree):
-        return []
-
-    def is_path_call(node):
-        return (
-            isinstance(node, ast.Call)
-            and _callee_name(node.func) == SENTINEL_PATH_FN
-        )
-
-    def call_arguments(call):
-        """Positional, keyword, and the elements of a literal `*args` -- the
-        same read spelled three ways."""
-        for arg in call.args:
-            if isinstance(arg, ast.Starred) and isinstance(
-                arg.value, (ast.Tuple, ast.List)
-            ):
-                yield from arg.value.elts
-            else:
-                yield arg
-        for kw in call.keywords:
-            yield kw.value
-
-    hits = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if (
-            isinstance(func, ast.Attribute)
-            and func.attr in FS_READ_PROBES
-            and is_path_call(func.value)
-        ):
-            hits.append(
-                f"line {node.lineno}: ever_converged_path(...).{func.attr}()"
-            )
-        # NOT an elif: `exists` and `stat` appear in BOTH lists, so
-        # `os.path.exists(sentinel)` matches the branch above on its RECEIVER
-        # (`os.path`, not a sentinel) and would never reach here.
-        if _callee_name(func) in FS_READ_FUNCS and any(
-            is_path_call(arg) for arg in call_arguments(node)
-        ):
-            hits.append(
-                f"line {node.lineno}: {_callee_name(func)}(ever_converged_path(...))"
-            )
-    return hits
+            bound |= _names_bound_by(node.optional_vars) & api
+        elif isinstance(node, ast.ExceptHandler) and node.name in api:
+            bound.add(node.name)
+        elif isinstance(node, ast.MatchAs) and node.name in api:
+            bound.add(node.name)
+        elif isinstance(node, ast.ClassDef) and node.name in api:
+            bound.add(node.name)
+    return bound
 
 
 # Scripts that mention `ever_converged` WITHOUT touching the marker: the
@@ -2225,120 +2084,6 @@ SENTINEL_NON_PARTICIPANTS = (
     "backfill_resume_gate_ack.py",  # mirrors the shape for `.resume_gate_ack`
     "resume_setup.py",              # cites mark_ever_converged()'s O_EXCL semantics
 )
-
-
-def test_sentinel_probe_guard_reach_is_measured_not_claimed():
-    """The exact reach of `_unmediated_sentinel_probes()`, as a table.
-
-    A guard's limits section is prose, and prose rots silently. Three
-    successive revisions of this helper proved it: each disclosed fewer limits
-    than it had, and each read like careful engineering, because a limits
-    section that overstates a guard's reach is indistinguishable from an
-    accurate one. The reach is therefore asserted rather than described, and
-    every row below was run before it was written down.
-
-    The helper is now purely syntactic, so this table is short and the green
-    rows are almost all deliberate misses. That is the trade the fourth
-    revision made on purpose: see the helper's own docstring for the three
-    measured failures that bought it."""
-    must_be_red = {
-        "direct probe on the call": """
-def f(seg):
-    return ever_converged_path(seg).exists()
-""",
-        "direct probe, non-exists reader": """
-def f(seg):
-    return ever_converged_path(seg).lstat()
-""",
-        "os.path.exists() on the call": """
-import os
-def f(seg):
-    return os.path.exists(ever_converged_path(seg))
-""",
-        "module-function read passed by KEYWORD": """
-import os
-def f(seg):
-    return os.stat(path=ever_converged_path(seg))
-""",
-        "module-function read through a literal *args": """
-import os
-def f(seg):
-    return os.stat(*(ever_converged_path(seg),))
-""",
-    }
-    must_be_green = {
-        # Not misses -- ordinary code that must never be reported.
-        "an unrelated path probed": """
-def f(root):
-    return root.exists()
-""",
-        "the predicate's own parameter": """
-def classify_ever_converged_sentinel(path):
-    return path.lstat()
-""",
-        "a content read after classification": """
-def f(seg):
-    p = ever_converged_path(seg)
-    state, _ = classify_ever_converged_sentinel(p)
-    return p.read_bytes() if state == SENTINEL_PRESENT else None
-""",
-        # The whole-file veto: the name is shadowed somewhere, so the guard
-        # abstains for this file rather than guessing. "No opinion" beats a red
-        # on correct code -- that preference is why the binding analysis is gone.
-        "the API's name reused as a parameter": """
-def f(ever_converged_path, seg):
-    return ever_converged_path(seg).exists()
-""",
-        "the API's name rebound at module level": """
-ever_converged_path = ordinary_builder
-def f(seg):
-    return ever_converged_path(seg).exists()
-""",
-        "the API's name captured by a match statement": """
-def f(x, seg):
-    match x:
-        case ever_converged_path:
-            return ever_converged_path(seg).exists()
-""",
-        # DISCLOSED MISSES. Everything that reaches the path through a name.
-        "MISS: bound to a local, then probed": """
-def f(seg):
-    p = ever_converged_path(seg)
-    return p.exists()
-""",
-        "MISS: wrapped in Path() before probing": """
-def f(seg):
-    return Path(ever_converged_path(seg)).exists()
-""",
-        "MISS: indirection across scopes": """
-def a(seg):
-    return ever_converged_path(seg)
-def b(seg):
-    return a(seg).exists()
-""",
-        "MISS: a read outside the enumerated sets": """
-def f(seg):
-    return ever_converged_path(seg).read_bytes()
-""",
-    }
-
-    false_positives = {
-        label: _unmediated_sentinel_probes(src)
-        for label, src in must_be_green.items()
-        if _unmediated_sentinel_probes(src)
-    }
-    assert not false_positives, (
-        f"the probe guard reports code that is not a raw sentinel read: "
-        f"{false_positives}. A guard that fires on valid code gets deleted, "
-        f"which is how this helper lost its binding analysis."
-    )
-    missed = [
-        label for label, src in must_be_red.items() if not _unmediated_sentinel_probes(src)
-    ]
-    assert not missed, (
-        f"the probe guard no longer catches: {missed}. Each is a direct raw "
-        f"read of the sentinel path that the three-state predicate replaced."
-    )
 
 
 def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
@@ -2399,12 +2144,27 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
     the WRITER, so a third copy of `mark_ever_converged` could appear in a
     whitelisted file and move none of the five sets.
 
-    Finally, one assertion here is not a census question at all. The census
-    can be exactly right about WHICH four files participate while one of them
-    quietly reintroduces `ever_converged_path(seg).exists()` -- the raw read
-    this release removed. Four review rounds went into the population and
-    none asked what the population DOES, so `_unmediated_sentinel_probes()`
-    pins that too.
+    WHAT THIS CENSUS DOES NOT ASK, and deliberately no longer tries to: it
+    pins WHICH files participate, never what they DO with the marker. A
+    participant that quietly reintroduces `ever_converged_path(seg).exists()`
+    -- the raw read this release removed -- passes every needle here.
+
+    A guard for that existed for four rounds and was removed. It tried to
+    recognise a raw read through variable bindings, and across three revisions
+    it was wrong on 12 of 16 constructs, then 7 of 28, then on a `match`
+    capture, a walrus in a default argument, a class-scope comprehension
+    iterable and a 64-deep alias chain. The narrowed syntactic replacement then
+    needed a whole-file veto to avoid firing on a shadowed parameter, and that
+    veto could be tripped by an UNRELATED shadow elsewhere in a participant --
+    silently disabling enforcement for that whole file, which is worse than no
+    guard because it looks like one. Four consecutive review rounds found their
+    only defects inside it and none in the code it was watching. A tripwire
+    whose own defect rate exceeds the drift it catches is not a tripwire, and
+    the honest disclosure is this paragraph rather than a fifth attempt.
+
+    What still pins the contract: the six needles below (WHO participates), the
+    `inspect.getsource` identity check (all four copies byte-identical), and
+    the five-state matrix (what the predicate ANSWERS).
 
     KNOWN LIMITS, measured rather than asserted: the folder handles `+`,
     implicit adjacency and f-string literal parts, but NOT `%`, `.format()`,
@@ -2456,7 +2216,6 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
     mentions_token = set()
     builds_token = set()
     api_refs = set()
-    unmediated_probes = []
     scanned = set()
     for py in sorted(scripts_dir.rglob("*.py")):
         src = py.read_text(encoding="utf-8")
@@ -2482,7 +2241,6 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
         # _sentinel_api_refs()'s docstring.
         if _sentinel_api_refs(src):
             api_refs.add(rel)
-        unmediated_probes.extend(f"{rel}: {h}" for h in _unmediated_sentinel_probes(src))
 
     # The scan above is the one input every assertion below inherits, and a
     # narrowed pattern keeps them all green (see docstring). Enumerate the same
@@ -2537,18 +2295,6 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
         f"provider -- or defines its own copy of the writer -- is invisible to "
         f"all of them. Add it to SENTINEL_SCRIPTS with the shared predicate, or "
         f"remove the reference."
-    )
-    # Not a census question but the same failure shape one level down: the
-    # census can confirm exactly four participants while one of them quietly
-    # reintroduces the raw `.exists()` read this release removed. Four rounds of
-    # review went into WHICH FILES participate; nothing asked what they DO.
-    assert not unmediated_probes, (
-        f"the sentinel path is read with a raw filesystem probe instead of the "
-        f"shared three-state predicate: {unmediated_probes}. `.exists()` cannot "
-        f"distinguish a converged marker from a directory, a dangling symlink, "
-        f"or an unreadable parent -- collapsing all three to a bare bool is the "
-        f"exact defect 1.20.0 removed. Route it through "
-        f"classify_ever_converged_sentinel() and handle AMBIGUOUS explicitly."
     )
     # A name on the non-participant list is not taken on trust: each one is
     # re-checked every run for every executable participation signal. The

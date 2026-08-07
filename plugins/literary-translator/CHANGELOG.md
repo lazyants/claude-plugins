@@ -114,39 +114,44 @@ one the dispatch gate believes unprotected.
   local, an alias of the function itself, a `Path(...)` wrapper, a lambda or class body, a
   comprehension, and the module-function spellings (`os.path.exists`, `os.stat`) as well as the
   method ones.
-  **That guard is now deliberately syntactic, and getting there cost three failed revisions worth
-  recording.** Each tracked variable bindings so that `p = ever_converged_path(seg); p.exists()`
-  would also be caught, and each was wrong in BOTH directions while reading like careful
-  engineering. Measured against its own table: revision 1 was wrong on 12 of 16 constructs (four of
-  them FALSE POSITIVES, which is the direction that gets a guard deleted rather than fixed);
-  revision 2 fixed those and was wrong on 7 of 28, including a parameter merely *named*
-  `ever_converged_path`; revision 3 resolved taint and aliasing as one fixpoint and was still wrong
-  on a `match` capture, a walrus in a default argument, a class-scope comprehension iterable, and a
-  64-deep alias chain that silently exceeded its own convergence bound. **A test-side
-  reimplementation of dataflow analysis has its own defect rate, and here that rate was measurably
-  worse than the drift it was catching.** The binding analysis is gone. What remains asks only a
-  question it can answer exactly — a raw read applied directly to the call — plus a whole-file veto:
-  if a file binds `ever_converged_path` to anything but a `def`, the guard abstains rather than
-  guess. "No opinion" is a better answer than a red on correct code.
-  Its reach is asserted as a table rather than described (`test_sentinel_probe_guard_reach_is_
-  measured_not_claimed`), because a limits section that overstates a guard is indistinguishable
-  from an accurate one — that is exactly how three revisions shipped. Most rows in it are now
-  deliberate MISSES: anything reaching the path through a variable, an alias, a wrapper, or another
-  function is not caught. The `inspect.getsource` identity check and the six needles are what pin
-  the contract; this is a tripwire on the single most likely regression, not a proof.
+  **A seventh check was attempted and has been REMOVED, which is worth recording as plainly as the
+  six that stayed.** The census pins WHICH files participate, never what they DO, so a participant
+  that quietly reintroduces `ever_converged_path(seg).exists()` — the raw read this release exists
+  to remove — passes every needle. A guard for that shipped in four successive revisions and was
+  wrong every time, measured against its own table: 12 of 16 constructs, then 7 of 28, then a
+  `match` capture and a walrus in a default argument and a 64-deep alias chain that silently blew
+  its own convergence bound; the narrowed syntactic replacement then needed a whole-file veto to
+  stop firing on a shadowed parameter, and that veto could be tripped by an UNRELATED shadow
+  elsewhere in a participant — silently disabling enforcement for that whole file, which is worse
+  than no guard because it still looks like one.
+  Four consecutive review rounds found their only defects inside that guard and none in the code it
+  was watching. **A tripwire whose own defect rate exceeds the drift it catches is not a tripwire**,
+  and a test-side reimplementation of dataflow analysis is how you get one. What pins the contract
+  is unchanged and was never in question: the six needles (who participates), the
+  `inspect.getsource` identity check (all four copies byte-identical), and the five-state matrix
+  (what the predicate answers). **A raw read reintroduced inside an existing participant is not
+  guarded** — stated here rather than left to be discovered, because that is the disclosure the
+  four broken versions were substituting for.
   What remains on the census itself: `%`, `.format()`, `"".join()` of constants and separately
   formatted f-string constants are not folded, and a path built from non-literals at runtime still
   evades the five literal needles — though reaching the marker through the shared API trips the
   sixth. The residue is a file that reimplements the whole convention from non-literal parts under
   its own names, which is concealment rather than drift. The census is narrower than complete.
 - **Every line-number citation in this entry is now checked by content, not by arithmetic**
-  (`tests/changelog_citations.test.py`). Each declares an anchor string that must appear inside the
-  range it cites. This exists because the obvious check is worthless and was in place for three
-  rounds while being so: it verified that line N existed in a file of at least N lines, which
-  cannot fail on drift — a citation that slides nine rows still points at a line that exists. It
-  reported clean while **eight** citations pointed at unrelated code, moved by a docstring edit made
-  two rounds earlier in four files at once. The anchor check fails at the commit that moves the
-  code, and refuses both an un-anchored citation and an anchor nothing cites.
+  (`tests/changelog_citations.test.py`). Each declares the strings that must appear inside the range
+  it cites, and it took two tries to make that mean anything. The first checker verified only that
+  line N existed in a file of at least N lines — which cannot fail on drift, since a citation that
+  slides nine rows still points at a line that exists. It reported clean for three rounds while
+  **eight** citations pointed at unrelated code, moved by a docstring edit made two rounds earlier
+  in four files at once. The second matched a single anchor anywhere in the range, and was defeated
+  by inserting lines *inside* a wide range: the claim slid past the end while the anchor sat safely
+  near the start. So anchors are a LIST spanning the claim, all of which must be present.
+  Both failure modes are pinned by mutation, along with two discovery gaps the first version had —
+  citations whose file extension was not in a hardcoded list were invisible to it entirely, as was
+  everything after a `##` inside a fenced code block. It refuses an un-anchored citation and an
+  anchor nothing cites, so neither half can rot.
+  **This does not verify that a citation is CORRECT, only that it has not moved since it was
+  anchored.** A citation anchored to the wrong lines in the first place stays wrong and stays green.
 
 The duplication is deliberate and stays. The reason previously given in those docstrings was false —
 this codebase does share modules between "self-contained" scripts. The real reason is stronger:
