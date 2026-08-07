@@ -65,6 +65,7 @@ CITATION_ANCHORS = {
         "ORCHESTRATION_BUNDLE_MEMBERS",
         "select_segments.py",
     ],
+    "segment_dispatch_driver.py:741-742": ["def fatal(", "raise DriverError("],
     "segment_dispatch_driver.py:2601-2602": [
         "translate_dispatch_token",
         'f"{run_id}:{seg}"',

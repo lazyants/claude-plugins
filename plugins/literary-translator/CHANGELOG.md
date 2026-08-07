@@ -30,7 +30,8 @@ limitations below rather than left implied.
   at round label `"final"` instead of capping. Both previously resolved an ambiguity toward
   `cap_reached`, which is the one outcome a human must undo by hand. The captured cause is not
   re-raised: `fatal()` raises a NEW `DriverError` whose message interpolates the original's text and
-  names what was refused (segment_dispatch_driver.py:3223-3230). Chosen for the operator's sake, but
+  names what was refused (segment_dispatch_driver.py:3223-3230; the raise itself is
+  segment_dispatch_driver.py:741-742). Chosen for the operator's sake, but
   it means the original's `exit_code` and extra fields do not survive, so nothing may match on the
   original exception object.
 - **The reopen is written AND confirmed on disk before the review is dispatched.** A crash in that
