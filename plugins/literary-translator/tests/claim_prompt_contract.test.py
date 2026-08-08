@@ -369,6 +369,71 @@ def test_fix_round_dropping_claimed_token_names_the_lost_claim_for_a_colon_beari
     assert "idempotent" in result.stdout.lower()
 
 
+def test_draft_ready_treats_a_foreign_token_with_no_claim_record_as_recoverable_not_refused(tmp_path):
+    """The FOREIGN-shaped mismatch has a twin the original fixture for the
+    SUPERSEDED test (above, in Part 2b) used to conflate with the live-record
+    case: the draft's CURRENT token names some OTHER run T, but T holds NO
+    claim record at all. Nobody actually claimed the segment out from under
+    this run -- the token was rewritten some other way (by hand, or by a fix
+    round that invented rather than preserved it) -- so this is closer to the
+    LOST case in REMEDY even though `_claim_note()` reaches it through the
+    FOREIGN branch (T's parsed run id != this run's own): re-claiming under
+    THIS run's own --run-id is the correct recovery, and the refusal must not
+    tell the operator it "will be refused", because select_segments.py's own
+    reclaim guard only refuses when the foreign run's claim record classifies
+    non-ABSENT, and T's classifies CLAIM_ABSENT here.
+
+    THE MUTATION THAT MAKES THIS FAIL: delete the `if foreign_state ==
+    claim_record.CLAIM_ABSENT:` branch from draft_ready.py's `_claim_note()`
+    (i.e. let a foreign CLAIM_ABSENT record fall through to the CLAIM_AMBIGUOUS
+    wording below it, which reports T's ownership as merely UNREADABLE/
+    undetermined rather than saying outright that T holds no record at all --
+    a milder but still wrong understatement). Measured: this drops "NO claim
+    record" from the message and fails the assertion for it below; the
+    SUPERSEDED/"will be refused" assertions do not by themselves catch this
+    particular mutation (the AMBIGUOUS wording says neither), which is why
+    the "NO claim record" assertion is this test's load-bearing one.
+
+    This run's own claim record IS real (write_real_claim(), the shipped
+    claim_record.py); the foreign token is a direct edit with no record ever
+    published behind it -- the shape this fixture is FOR, and the one the
+    SUPERSEDED test's own fixture used to produce by mistake."""
+    root = make_durable_root(tmp_path)
+    run_id = "20260808T000000Z"
+    seg = "seg01"
+    expect_token = f"{run_id}:{seg}"
+    foreign_run_id = "20260813T000000Z"
+    _, payload = write_real_claim(root, run_id, seg, profile="from-cap")
+    draft = clean_draft(seg, dispatch_token=f"{foreign_run_id}:{seg}")
+    write_segment(root, seg, clean_segpack(), draft)
+    assert not (root / "runs" / foreign_run_id).exists(), (
+        "fixture precondition: the foreign run must hold NO claim record at all"
+    )
+
+    result = run_draft_ready(root, seg, "--expect-token", expect_token)
+
+    assert result.returncode == 1, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    out = result.stdout
+    assert foreign_run_id in out, f"the refusal must name the foreign run on the token: {out!r}"
+    assert "NO claim record" in out or "no claim record" in out.lower(), (
+        f"the refusal must say nobody actually holds the segment: {out!r}"
+    )
+    assert "SUPERSEDED" not in out, (
+        f"nobody holds a live claim, so this must not be reported as a "
+        f"superseded authorization: {out!r}"
+    )
+    assert "will be refused" not in out and "it will be refused" not in out, (
+        f"the selector does not refuse this reclaim (the foreign run holds no "
+        f"record), so the message must not promise a refusal that will not "
+        f"happen: {out!r}"
+    )
+    assert "the claim was LOST" not in out, (
+        f"this is reached through the FOREIGN branch, not the plain LOST "
+        f"branch, even though the remedy is the same: {out!r}"
+    )
+    assert payload["profile"] in out, "the refusal should still name this run's own claim's profile"
+
+
 # =============================================================================
 # Part 2 -- claim_record.py's own re-claim idempotency (D9 rule 2: "a
 # re-claim after a lost token is the same authorization being reapplied,
@@ -806,25 +871,44 @@ def test_lost_token_recovery_runs_the_command_draft_ready_advertises(tmp_path):
 
 
 def test_draft_ready_reports_a_FOREIGN_claim_as_superseded_not_lost(tmp_path):
-    """A segment claimed by run A, then claimed OUT FROM UNDER it by run B, must
-    be reported to the operator as SUPERSEDED -- never as the "claim was LOST"
-    case, whose advertised remedy is to re-claim under run A.
+    """A segment claimed by run A, then claimed OUT FROM UNDER it by run B --
+    where B itself holds a LIVE claim record -- must be reported to the
+    operator as SUPERSEDED -- never as the "claim was LOST" case, whose
+    advertised remedy is to re-claim under run A.
 
     This is the operator-facing half of the cross-run ownership defect a third
     review round found. Run A's own claim record survives run B's claim (nothing
     releases a claim), and the draft's token no longer matches A's, so the state
     is byte-for-byte the one the LOST branch was written to explain. It read that
     state as "a fix round dropped my token" and told the operator to re-claim
-    under A -- which is precisely the reclaim the selector now refuses. Following
-    that advice could only ever produce a second, more confusing failure.
+    under A -- which is precisely the reclaim the selector refuses when B's own
+    claim outranks A's. Following that advice could only ever produce a second,
+    more confusing failure.
+
+    A LATER review round found this fixture asserting SUPERSEDED/"NOT the fix"
+    while never actually publishing a claim record for B -- i.e. asserting the
+    live-record branch while building the record-absent one. `_claim_note()`
+    now looks B's OWN record up before saying anything (see its docstring), so
+    the fixture has to make that record real or it exercises a different branch
+    entirely (covered by test_draft_ready_treats_a_foreign_token_with_no_
+    claim_record_as_recoverable_not_refused below). B's claim record is
+    published directly through the same real, shipped claim_record.py Part 1
+    already drives via write_real_claim() -- not by re-running the real
+    selector a second time, which would need a second, independently satisfied
+    #409 evidence-scan precondition this test has no stake in establishing.
 
     THE MUTATION THAT MAKES THIS FAIL: delete the `actual_run_id != run_id`
     branch from draft_ready.py's `_claim_note()` CLAIM_PRESENT arm, i.e. restore
     the single LOST message for every present record. The LOST assertion below
-    then finds its string and the test fails on it.
+    then finds its string and the test fails on it. (A narrower mutation --
+    deleting just the `foreign_state == claim_record.CLAIM_PRESENT` return and
+    letting it fall through to the CLAIM_ABSENT wording -- also fails this
+    test's SUPERSEDED/"NOT the fix" assertions, while leaving the sibling test
+    below green, which is exactly the boundary between the two tests.)
 
-    Nothing is mocked: the claim is minted by the real select_segments.py and the
-    real draft_ready.py is driven as a subprocess."""
+    Run A's claim is minted by the real select_segments.py; run B's claim
+    record is published by the real claim_record.py directly. The real
+    draft_ready.py is driven as a subprocess."""
     seg = "seg01"
     root = make_claim_capable_root(tmp_path, seg=seg)
     token_a = f"{CLAIM_RUN_ID}:{seg}"
@@ -839,13 +923,21 @@ def test_draft_ready_reports_a_FOREIGN_claim_as_superseded_not_lost(tmp_path):
     cr = _claim_record_module()
     assert cr.claimed_path(CLAIM_RUN_ID, seg, root / "runs").is_file()
 
-    # ---- run B claims it out from under A --------------------------------
-    # Only the TOKEN moves, which is the point: draft_content_sha1() projects
-    # dispatch_token out, so this transition is invisible to every content hash
-    # in the system. A's record is left exactly where it was.
+    # ---- run B claims it out from under A, for real -----------------------
+    # The TOKEN move is a direct edit (draft_content_sha1() projects
+    # dispatch_token out, so this transition is invisible to every content
+    # hash in the system, and A's record is left exactly where it was) --
+    # but B's own CLAIM RECORD is published for real, through the identical
+    # write_claim_record() path the selector itself uses. Skipping this used
+    # to be the fixture's own bug: it asserted B "has since claimed this
+    # segment legitimately" while never writing evidence that B claimed
+    # anything at all.
     doc = read_draft_doc(root, seg)
     doc["dispatch_token"] = token_b
     write_draft_doc(root, seg, doc)
+    write_real_claim(root, run_b, seg, profile="from-cap",
+                      source_run_id=CLAIM_RUN_ID, previous_dispatch_token=token_a,
+                      claimed_at="2026-08-13T00:00:00Z")
 
     # ---- A's readiness probe must not call this "lost" --------------------
     refusal = run_draft_ready(root, seg, "--expect-token", token_a)
@@ -862,6 +954,13 @@ def test_draft_ready_reports_a_FOREIGN_claim_as_superseded_not_lost(tmp_path):
     assert "SUPERSEDED" in out, f"A's record must be called superseded: {out!r}"
     assert "NOT the fix" in out, (
         f"re-claiming under A must be named as NOT the remedy: {out!r}"
+    )
+    # #438 round 5: the refusal must NOT promise a specific outcome from the
+    # selector's own reclaim guard -- that guard (owned by select_segments.py,
+    # not this file) decides on evidence (claim age) this note cannot see.
+    assert "it will be refused" not in out, (
+        f"the note cannot establish the selector's actual verdict from here, "
+        f"so it must not assert one with certainty: {out!r}"
     )
 
 

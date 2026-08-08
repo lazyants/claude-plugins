@@ -50,32 +50,46 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # only pins where the range STARTS, and a claim can slide out of the far end.
 CITATION_ANCHORS = {
     # --- claim_record.py: the shared contract module -----------------------
-    "claim_record.py:190-236": ["_RUN_ID_DIR_RE.fullmatch", '".." in run_id'],
+    "claim_record.py:190-236": [
+        "def validate_run_id","_RUN_ID_DIR_RE.fullmatch", '".." in run_id'],
     # Anchored at BOTH ends: the validate call pins where the range starts,
     # the raise pins that the refusal itself is still inside it. A claimed
     # path that merely VALIDATES and then returns anyway would keep the first
     # anchor and lose the claim.
     "claim_record.py:241-269": ["def claimed_path", "raise ValueError"],
-    "claim_record.py:273-307": ["lstat()", "S_ISREG"],
-    "claim_record.py:467-476": ["pre_claim_review", "cache_key_at_claim"],
-    "claim_record.py:534-586": ["_O_DIRECTORY", "os.fsync"],
+    "claim_record.py:273-307": [
+        "def classify_claim_record","lstat()", "S_ISREG"],
+    "claim_record.py:467-476": [
+        "CLAIM_RECORD_FIELDS = (","pre_claim_review", "cache_key_at_claim"],
+    "claim_record.py:534-586": [
+        "def fsync_directory","_O_DIRECTORY", "os.fsync"],
     # --- select_segments.py: the only component that may MINT a claim ------
-    "select_segments.py:3040": ["write_claim_record"],
+    "select_segments.py:3156": ["write_claim_record"],
     # The fresh-evidence collision refusal the snapshot paragraph cites as the
     # reason a freshly minted id is NOT guaranteed clean. Anchored on the
     # arming condition and on the word the refusal itself uses, so a version
     # that kept the condition but stopped refusing loses an anchor.
-    "select_segments.py:2860-2868": ['args.run_resume == "false"', "launder"],
+    "select_segments.py:2976-2984": ['args.run_resume == "false"', "launder"],
     # The cross-run ownership refusal. Anchored at BOTH ends: the predicate's
     # fourth condition pins where it starts, the refusal message pins that the
     # refusal itself is still inside the range. A version that evaluated the
     # predicate and then fell through would keep the first anchor.
-    "select_segments.py:2373-2412": ["already_claimed_by_this_run", "OWNED BY RUN"],
+    # The cross-run ownership refusal, now decided by claim AGE. Anchored on
+    # both timestamps AND the strict comparison: a version that read the two
+    # `claimed_at` values and then compared them the wrong way, or with >=,
+    # would keep the first two anchors, so the operator that decides the
+    # verdict is pinned explicitly.
+    "select_segments.py:2490-2499": [
+        "this_claimed_at = _claim_record_claimed_at",
+        "this_claimed_at",
+        "foreign_claimed_at",
+        "this_claimed_at > foreign_claimed_at",
+    ],
     # The re-stamp, and the hash it is checked against. Both anchored: the
     # ordering claim in the entry is about these two calls in this order.
-    "select_segments.py:3092-3096": ["rewrite_draft_dispatch_token", "expected_content_sha1"],
-    "select_segments.py:2426": ["os.O_EXCL", "_O_NOFOLLOW"],
-    "select_segments.py:2467-2472": ["staged_sha1 != expected_content_sha1", "Something replaced or edited"],
+    "select_segments.py:3207-3211": ["rewrite_draft_dispatch_token", "expected_content_sha1"],
+    "select_segments.py:2542": ["os.O_EXCL", "_O_NOFOLLOW"],
+    "select_segments.py:2583-2588": ["staged_sha1 != expected_content_sha1", "Something replaced or edited"],
     # --- the two components that may only REFUSE ---------------------------
     "codex_job.py:1431-1433": ["_refuse_claimed_translate()", "claimed-segment-refused"],
     # Anchored on all three: the entry's claim is specifically that the run id

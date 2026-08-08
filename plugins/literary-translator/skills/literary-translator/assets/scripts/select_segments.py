@@ -2134,13 +2134,31 @@ def _unlink_quietly(path: Path) -> None:
         pass
 
 
+def _claim_record_claimed_at(claim_record_mod, state: str, payload) -> "str | None":
+    """The trusted `claimed_at` out of a claim-record read, or None when it
+    cannot be trusted: `state` is anything but CLAIM_PRESENT (ABSENT -- no
+    record to trust; AMBIGUOUS -- unreadable, torn, or not valid JSON,
+    which cannot be trusted either), `payload` did not come back as a dict
+    (read_claim_record()'s own contract says it always does on
+    CLAIM_PRESENT, but this reads the field defensively rather than
+    assuming its own caller upheld that), or the `claimed_at` key is
+    missing or not a non-empty string (a hand-edited or otherwise
+    malformed record). Used by rewrite_draft_dispatch_token()'s #438 round
+    5 ownership-age check on BOTH sides of the comparison, so "cannot
+    establish this side's timestamp" collapses to the same None on either
+    side rather than two differently-named failure modes."""
+    if state != claim_record_mod.CLAIM_PRESENT or not isinstance(payload, dict):
+        return None
+    value = payload.get("claimed_at")
+    return value if isinstance(value, str) and value else None
+
+
 def rewrite_draft_dispatch_token(
     seg: str,
     durable_root: Path,
     new_token: str,
     *,
     expected_content_sha1: str,
-    already_claimed_by_this_run: bool = False,
 ):
     """D4/#438: the actual "claim the draft into this run" state change --
     re-stamps segments/{seg}.draft.json's own `dispatch_token` field to
@@ -2157,7 +2175,7 @@ def rewrite_draft_dispatch_token(
     population (no `.ever_converged` sentinel) would leave nothing at all
     refusing it and the segment would simply be retranslated.
 
-    #438 ROUND 4: ALSO REFUSES an OLD run REASSERTING a SUPERSEDED
+    #438 ROUND 4/5: ALSO REFUSES an OLD run REASSERTING a SUPERSEDED
     authorization -- the defect three review rounds kept finding under
     different disguises. Ownership lives in TWO places: the claim record
     (per-run, so a run can only ever see its OWN claims) and the draft's
@@ -2174,9 +2192,28 @@ def rewrite_draft_dispatch_token(
     draft back to itself, taking the segment away from its current owner
     with no record deleted, no warning, nothing but the token moving.
 
-    Refuses ONLY when ALL FOUR of these hold, evaluated against the draft's
-    CURRENT `dispatch_token` -- i.e. before this call's own write touches
-    it:
+    ROUND 4 refused this on a fourth condition, `already_claimed_by_this_run`,
+    threaded in from write_claim_record()'s own `published` result: True
+    exactly when THIS run's own claim record for `seg` already existed
+    before this call. That is UNSOUND -- it proves this run's record
+    EXISTS, never that this run APPLIED the authorization it recorded. The
+    two are indistinguishable on disk, and the second is a documented,
+    supported recovery: this run publishes its claim record (record-first,
+    by design), then crashes -- or the record's own directory fsync
+    reports failure -- BEFORE this rewrite ever runs. On retry, the record
+    already exists, `already_claimed_by_this_run` came back True, and
+    ROUND 4 refused the retry even though the draft's current owner is
+    exactly the run this one legitimately superseded. That directly
+    contradicted this function's own "a crash between the two writes...
+    and a re-claim recovers cleanly" guarantee above.
+
+    ROUND 5 replaces the proxy with the fact it was standing in for.
+    Every claim record carries `claimed_at` (claim_record.py's own
+    CLAIM_RECORD_FIELDS), so the question ROUND 4 approximated -- "did
+    THIS run's authorization come before or after the current owner's?" --
+    is answered directly: compare the two timestamps. Refuses ONLY when
+    ALL of these hold, evaluated against the draft's CURRENT
+    `dispatch_token` -- i.e. before this call's own write touches it:
 
       1. that token parses to a run id (draft_run_id() -- None on an
          absent or malformed token skips this whole check unconditionally,
@@ -2186,34 +2223,57 @@ def rewrite_draft_dispatch_token(
          `new_token`, which every caller in this codebase mints as
          draft_dispatch_token_for(run_id, seg) -- an idempotent same-run
          re-stamp never reaches this branch at all);
-      3. that OTHER run's OWN claim record for this seg is still live --
-         classify_claim_record() on claimed_path(), never CLAIM_ABSENT.
-         AMBIGUOUS (unreadable, or something other than a regular file)
-         counts as LIVE, the same safe direction claim_record.py's module
-         docstring requires of every reader: a record this call cannot
-         read cannot be ruled out as released;
-      4. `already_claimed_by_this_run` is True.
+      3. that OTHER run's OWN claim record for this seg is not
+         CLAIM_ABSENT -- read_claim_record() on claimed_path(), never
+         classify_claim_record() alone, because condition 4 below needs to
+         BELIEVE a field out of it, not merely detect its presence
+         (claim_record.py's own module docstring: "Any consumer about to
+         BELIEVE A FIELD must go through read_claim_record()"). AMBIGUOUS
+         (unreadable, torn, not valid JSON) counts as "cannot rule out",
+         which condition 4 folds into "not comparable" below rather than
+         re-deciding the same safe direction a second way;
+      4. this run's OWN claim record's `claimed_at` is NOT PROVABLY more
+         recent than the other run's -- i.e. the comparison refuses unless
+         it can show THIS run is the later claimant. A `claimed_at` this
+         call cannot trust on EITHER side (that side's record ABSENT,
+         AMBIGUOUS, or PRESENT but missing or malformed the field) makes
+         the comparison itself untrustworthy, and that also refuses -- see
+         `_claim_record_claimed_at()` above. `claimed_at` is
+         second-resolution ISO8601 (claim_record.py's own field), so a TIE
+         is possible and is deliberately NOT "allow": strict `>` is what
+         makes a tie refuse, because this run is not PROVABLY the later
+         claimant on a tie either.
 
-    CONDITION 4 CARRIES THE WHOLE DISTINCTION and is supplied by the
-    caller rather than reconstructed here, because by the time this
-    function runs the record-first ordering above GUARANTEES this run's
-    own record for `seg` already exists on disk -- either just published
-    or already there -- so "does my own record exist right now" cannot
-    tell a fresh claim apart from a reapplication; both answer yes. Only
-    run()'s own write_claim_record() call, immediately before this one,
-    still holds that distinction (`published` vs the "already claimed by
-    this run" branch), which is why it is threaded through as a plain
-    boolean instead of re-derived from disk state that no longer carries
-    it. WITHOUT condition 4, a run's very FIRST, genuinely fresh claim over
-    a segment some OTHER run still has a live (never-released) record for
-    -- the ordinary new-owner transition, and exactly what --from-cap /
-    --from-converged re-review exists to authorize -- would be refused
-    right alongside the reapplication this exists to catch, because
-    conditions 1-3 alone cannot tell "first claim" from "reclaim" apart.
-    Defaults to False, which is what every direct unit-test call in this
-    project already gets implicitly (a single, isolated claim event with no
-    earlier record of its own to reapply) -- the default is the correct
-    answer for those calls, not merely a permissive placeholder.
+    THIS RUN'S OWN `claimed_at` IS READ FRESH OFF DISK, never computed as
+    "now" at this call -- by the time this function runs, the record-first
+    ordering above GUARANTEES this run's own record for `seg` already
+    exists (either just published, moments ago, or already there from an
+    earlier invocation), and reading its ACTUAL value is what makes the
+    crash-retry recovery reachable: a resumed run's own record still
+    carries the ORIGINAL claim's timestamp, not the retry's, which is
+    exactly the value that must lose to a genuinely later foreign claim in
+    the A -> B -> A regression this whole check exists to catch. A
+    freshly-computed "now" would make a resumed run look newer than
+    literally everything, and the refusal this check exists to perform
+    would never fire again.
+
+    Both directions this predicate must get right, worked through:
+      * A -> B -> A (the reported regression): A's own claimed_at is from
+        its FIRST, original claim -- earlier than B's, which came later
+        and legitimately superseded it. A's retry compares older-than-B
+        and refuses. Correct.
+      * A publishes its claim record, crashes before this rewrite ever
+        runs, retries while the draft still names an OLDER, still-live B:
+        A's own claimed_at (from the record it just published) is newer
+        than B's. The retry compares newer-than-B and proceeds. Correct --
+        this is the regression ROUND 4 introduced and ROUND 5 fixes.
+      * A fresh claim by a brand-new run C over a segment some OLD run
+        still holds a live (never-released) record for: C's own
+        claimed_at is from the record C's caller just published, i.e.
+        "now" relative to the old run's claim. Proceeds. Correct, and
+        structurally the SAME case as the crash-retry recovery above --
+        both are "this run's own claim record is more recent than the
+        name on the draft".
 
     A refusal here is EARLY -- before the staged-file dance below even
     starts, so there is no temp file to unlink. This refuses the STAMP
@@ -2363,9 +2423,10 @@ def rewrite_draft_dispatch_token(
     current_token = doc.get("dispatch_token")
     already_stamped = current_token == new_token
 
-    # #438 round 4: refuse a REAPPLICATION of a superseded authorization --
-    # see this function's own docstring for the four-part predicate and why
-    # `already_claimed_by_this_run` cannot be reconstructed here. Checked
+    # #438 round 5: refuse a REAPPLICATION of a superseded authorization --
+    # see this function's own docstring for the predicate and why it
+    # compares `claimed_at` instead of trusting whether this run's own
+    # record merely exists (round 4's proxy, now known unsound). Checked
     # BEFORE any staging IO: a refusal here is about whether to stamp at
     # all, not about the identity of bytes already being written.
     current_owner = draft_run_id(current_token)
@@ -2374,7 +2435,6 @@ def rewrite_draft_dispatch_token(
         current_owner is not None
         and this_run_id is not None
         and current_owner != this_run_id
-        and already_claimed_by_this_run
     ):
         claim_record = _import_claim_record()
         runs_dir = durable_root / "runs"
@@ -2394,22 +2454,78 @@ def rewrite_draft_dispatch_token(
                 f"still live rather than assumed released. Resolve {seg!r}'s "
                 f"ownership by hand before this run may touch it again"
             )
-        foreign_state, foreign_detail = claim_record.classify_claim_record(foreign_claim_path)
+        # read_claim_record(), never classify_claim_record() alone -- the
+        # age check below BELIEVES `claimed_at`, a field, so this must go
+        # through the reader that owns believing fields (claim_record.py's
+        # own module docstring). classify_claim_record() would still
+        # answer "present or not" correctly, but reading a field off its
+        # PRESENT verdict is precisely the mistake that docstring forbids.
+        foreign_state, foreign_payload, foreign_detail = claim_record.read_claim_record(
+            foreign_claim_path
+        )
         if foreign_state != claim_record.CLAIM_ABSENT:
-            detail = f" ({foreign_detail})" if foreign_detail else ""
-            return False, (
-                f"refusing to re-stamp segment {seg!r}'s dispatch_token to "
-                f"{new_token!r}: segment {seg!r} is currently OWNED BY RUN "
-                f"{current_owner!r} (its own claim record for {seg!r} is still "
-                f"{foreign_state}{detail}, never CLAIM_ABSENT), and this run "
-                f"({this_run_id!r}) is only REASSERTING an older authorization it "
-                f"already used once before -- not a fresh claim. Taking {seg!r} "
-                f"back from {current_owner!r} now would silently discard whatever "
-                f"it did with it. There is no automated release: if "
-                f"{current_owner!r} genuinely should give up {seg!r}, resolve that "
-                f"by hand first, then issue a FRESH claim for this run (never a "
-                f"re-run of the old one) to re-authorize it"
+            # A foreign claim record for `seg` exists, or cannot be ruled
+            # out as existing (AMBIGUOUS) -- refuse UNLESS this run's OWN
+            # claim over `seg` is PROVABLY the more recent one. This run's
+            # own record is read fresh off disk, never computed as "now":
+            # the record-first ordering above guarantees it already exists
+            # by the time this call runs, and reading its ACTUAL
+            # `claimed_at` (rather than assuming "now") is what lets a
+            # resumed run's retry still compare as OLDER than a genuinely
+            # later foreign claim -- see this function's own docstring for
+            # the three worked cases.
+            try:
+                this_claim_path = claim_record.claimed_path(this_run_id, seg, runs_dir)
+            except ValueError as exc:
+                this_state, this_payload, this_detail = (
+                    claim_record.CLAIM_AMBIGUOUS,
+                    None,
+                    f"this run's own RUN_ID cannot be used to look up its claim record ({exc})",
+                )
+            else:
+                this_state, this_payload, this_detail = claim_record.read_claim_record(
+                    this_claim_path
+                )
+
+            this_claimed_at = _claim_record_claimed_at(claim_record, this_state, this_payload)
+            foreign_claimed_at = _claim_record_claimed_at(claim_record, foreign_state, foreign_payload)
+            # Strict `>`, not `>=`: `claimed_at` is second-resolution, so a
+            # tie is possible, and a tie does not PROVE this run is the
+            # later claimant. Refuse on a tie, the same safe direction as
+            # every other "cannot establish" branch here.
+            this_run_is_newer = (
+                this_claimed_at is not None
+                and foreign_claimed_at is not None
+                and this_claimed_at > foreign_claimed_at
             )
+            if not this_run_is_newer:
+                detail = f" ({foreign_detail})" if foreign_detail else ""
+                # Named ONLY when it is the reason the comparison could not
+                # be won -- this run's own claimed_at is untrustworthy
+                # (not the ordinary A -> B -> A case, where it is simply
+                # older). An operator staring at a refused retry needs to
+                # know WHICH side broke the comparison; the ordinary case
+                # already says enough via `foreign_state` above.
+                this_claim_note = (
+                    f" This run's OWN claim record for {seg!r} is {this_state}"
+                    f"{f' ({this_detail})' if this_detail else ''}, so its "
+                    f"claimed_at cannot be compared at all."
+                    if this_claimed_at is None
+                    else ""
+                )
+                return False, (
+                    f"refusing to re-stamp segment {seg!r}'s dispatch_token to "
+                    f"{new_token!r}: segment {seg!r} is currently OWNED BY RUN "
+                    f"{current_owner!r} (its own claim record for {seg!r} is still "
+                    f"{foreign_state}{detail}), and this run ({this_run_id!r}) "
+                    f"cannot show its OWN claim over {seg!r} is more recent than "
+                    f"{current_owner!r}'s.{this_claim_note} Taking {seg!r} back from "
+                    f"{current_owner!r} now would risk silently discarding whatever "
+                    f"it did with it. There is no automated release: if "
+                    f"{current_owner!r} genuinely should give up {seg!r}, resolve "
+                    f"that by hand first, then issue a FRESH claim for this run "
+                    f"(never a re-run of the old one) to re-authorize it"
+                )
 
     doc["dispatch_token"] = new_token
 
@@ -3079,22 +3195,20 @@ def run(args, dirs: dict) -> dict:
             # gates just evaluated is the draft that gets stamped", which is
             # a statement about one invocation.
             #
-            # `already_claimed_by_this_run=not published`: #438 round 4.
-            # `published` is False on EXACTLY the "already claimed by this
-            # run" EEXIST branch above (the other failure branch already
-            # `continue`d, so nothing else reaches here with it False) --
-            # the one place left that still knows whether THIS run's own
-            # record for `seg` predates this invocation, which
-            # rewrite_draft_dispatch_token() cannot reconstruct once the
-            # record-first write above has already made it exist either
-            # way. See that function's own docstring for the four-part
-            # predicate this feeds.
+            # #438 round 4 threaded `already_claimed_by_this_run=not
+            # published` through here -- round 5 removes that parameter
+            # entirely. It is no longer needed: rewrite_draft_dispatch_token()
+            # now reads THIS run's own claim record's `claimed_at` straight
+            # off disk (the record-first write above guarantees it already
+            # exists by the time this call runs) instead of asking the
+            # caller whether that record predates this invocation. See that
+            # function's own docstring for the age-based predicate this was
+            # replaced with.
             token_ok, token_detail = rewrite_draft_dispatch_token(
                 seg,
                 dirs["durable_root"],
                 draft_dispatch_token_for(run_id, seg),
                 expected_content_sha1=extras["current_draft_sha1"],
-                already_claimed_by_this_run=not published,
             )
             if not token_ok:
                 write_failures.append(f"{seg}: dispatch_token rewrite failed: {token_detail}")

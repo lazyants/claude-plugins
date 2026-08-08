@@ -45,20 +45,31 @@ id, the claim was genuinely LOST after the fact, almost always by a fix
 round that failed to copy the draft's dispatch_token byte for byte (see
 mass-translate-wf.template.js's fixPrompt()), and the refusal points at
 the re-claim that restores it -- which is idempotent, not a second
-authorization. If the current token instead parses to a DIFFERENT run,
-that run has since claimed the segment legitimately: this run's own
-record is a superseded authorization, not evidence of loss, and the
-refusal says so instead of sending the operator to reclaim the segment
-back out from under the run that now owns it. Either way the refusal
-names the claim's profile and claim time instead of leaving the operator
-to guess.
+authorization. If the current token instead parses to a DIFFERENT run T,
+_claim_note() does not assume what that means from the parse alone -- it
+looks T's OWN claim record up before characterising anything, because a
+run id sitting on a token is not evidence that run holds anything.
+T holding a live claim record is the FOREIGN case proper: T has since
+claimed the segment, this run's own record is a superseded authorization,
+and the refusal says so without promising a specific outcome from the
+selector's own reclaim guard (whether that guard admits or refuses is not
+something this note can evaluate from here). T holding NO claim record at
+all means nobody currently holds the segment despite the foreign-looking
+token -- closer to the LOST case in remedy, and the refusal does not turn
+the operator away from the fix that will actually work. T's record being
+unreadable, or T's parsed run id not itself being safe to look up, means
+ownership could not be determined at all, and the refusal says so instead
+of guessing either way. Either way the refusal names the claim's profile
+and claim time instead of leaving the operator to guess, for both this
+run's record and, when reachable, T's.
 
 Exactly TWO states degrade silently to the original pre-#438 message:
 CLAIM_ABSENT (the ordinary stale/straggler case the plain message already
 describes correctly) and claim_record.py not being co-located, which every
 caller that predates #438 still is. An unreadable or ambiguous record, a
 run component that is not usable as a claim-path component, a CLAIM_PRESENT
-record whose LOST-vs-FOREIGN clause differs by case (see above), and any
+record whose LOST-vs-FOREIGN clause differs by case -- and, within FOREIGN
+itself, further by what T's own record shows (see above) -- and any
 unexpected failure of the lookup itself each get their OWN clause -- see
 _claim_note()'s own docstring for why an anomaly must never be reported
 with the same silence as an absence.
@@ -289,15 +300,33 @@ def _claim_note(run_id, seg, durable_root, current_token):
         that did not copy dispatch_token byte for byte (see
         mass-translate-wf.template.js's fixPrompt()) -- and the clause
         names the re-claim that restores it.
-      * `current_token` parses to a run id that is NOT this run's own
-        `run_id`: a DIFFERENT run has since claimed the segment
-        legitimately. FOREIGN, not lost: this run's own record is a
-        superseded authorization, not evidence anything was dropped, and
-        the clause must NOT send the operator to reclaim it -- re-running
-        the claim step under THIS run's --run-id would take the segment
-        back from the run that now owns it, which is exactly the
-        unauthorized reclaim #438 exists to gate (and, now that gate
-        exists, would simply be refused).
+      * `current_token` parses to a run id T that is NOT this run's own
+        `run_id`: FOREIGN-shaped, but this clause does not stop at parsing
+        -- it looks T's OWN claim record up (runs/<T>/.claimed.<seg>, the
+        identical claim_record.read_claim_record() call used for this run's
+        own record above) before characterising anything, because a parsed
+        run id says only that some other run's id is on the token, never
+        that the run actually holds a claim. Three sub-outcomes:
+
+          - T holds a live claim record (CLAIM_PRESENT): T has since
+            claimed the segment legitimately, this run's own record above
+            is a superseded authorization, and the clause must NOT send
+            the operator to reclaim it -- but it also must NOT promise a
+            specific outcome from the selector's own reclaim guard (D9),
+            which decides on evidence this note cannot see from here. The
+            selector's own guard is authoritative on whether a reclaim is
+            admitted, not this note.
+          - T holds NO claim record (CLAIM_ABSENT): nobody currently holds
+            the segment despite the foreign-looking token -- closer to the
+            LOST case in REMEDY (re-claiming under this run's own --run-id
+            is the correct recovery and is not refused merely because the
+            token currently names T) even though it is reached through the
+            FOREIGN branch.
+          - T's record is unreadable (CLAIM_AMBIGUOUS), or T's parsed run
+            id is not itself safe to use as a claim-path component: which
+            run owns the segment could not be determined at all. The
+            clause says so and defers to the selector's own guard rather
+            than asserting either LOST or FOREIGN.
       * `current_token` parses to run id `run_id` ITSELF, differing only
         in its trailing `:seg[:r<label>]` component: still this run's own
         token, so it is treated as the LOST case above -- re-claiming
@@ -383,23 +412,104 @@ def _claim_note(run_id, seg, durable_root, current_token):
         claimed_at = payload.get("claimed_at") if isinstance(payload, dict) else None
         actual_run_id = _claim_run_id(current_token)
         if actual_run_id is not None and actual_run_id != run_id:
+            # FOREIGN-shaped: the draft's current token names some OTHER
+            # run T. Parsing a run id off the token is not evidence T holds
+            # anything -- T's OWN claim record has to be looked up before
+            # this clause may say what happened, the same way this run's
+            # own record was looked up above. See this function's own
+            # docstring for the three reachable sub-outcomes.
+            problem = claim_record.validate_run_id(actual_run_id)
+            if problem is not None:
+                return (
+                    f" -- a claim record for run {run_id!r} IS present for "
+                    f"this segment (profile={profile!r}, "
+                    f"claimed_at={claimed_at!r}), and the draft's CURRENT "
+                    f"dispatch_token now names a DIFFERENT run, "
+                    f"{actual_run_id!r} -- but that name is not usable as a "
+                    f"run id ({problem}), so no claim record could be "
+                    f"looked up for it and which run actually owns {seg!r} "
+                    f"now could not be determined. Do not assume either "
+                    f"this run's record above or the foreign token is still "
+                    f"in force; the selector's own guard decides, not this "
+                    f"note. Resolve {seg!r}'s ownership by hand before "
+                    f"reclaiming it."
+                )
+            try:
+                foreign_path = claim_record.claimed_path(actual_run_id, seg, runs_dir)
+                foreign_state, foreign_payload, foreign_detail = claim_record.read_claim_record(foreign_path)
+            except Exception as exc:
+                return (
+                    f" -- a claim record for run {run_id!r} IS present for "
+                    f"this segment (profile={profile!r}, "
+                    f"claimed_at={claimed_at!r}), and the draft's CURRENT "
+                    f"dispatch_token now names a DIFFERENT run, "
+                    f"{actual_run_id!r} -- but that run's own claim record "
+                    f"could not even be looked up ({exc!r}), so which run "
+                    f"actually owns {seg!r} now could not be determined. "
+                    f"Treated as UNDETERMINED, never assumed either claimed "
+                    f"or released. Resolve {seg!r}'s ownership by hand "
+                    f"before reclaiming it."
+                )
+            if foreign_state == claim_record.CLAIM_PRESENT:
+                f_profile = foreign_payload.get("profile") if isinstance(foreign_payload, dict) else None
+                f_claimed_at = foreign_payload.get("claimed_at") if isinstance(foreign_payload, dict) else None
+                return (
+                    f" -- a claim record for run {run_id!r} IS present for "
+                    f"this segment (profile={profile!r}, "
+                    f"claimed_at={claimed_at!r}), but the draft's CURRENT "
+                    f"dispatch_token now names a DIFFERENT run, "
+                    f"{actual_run_id!r}, which itself holds a live claim "
+                    f"record for {seg!r} (profile={f_profile!r}, "
+                    f"claimed_at={f_claimed_at!r}): that run has since "
+                    f"claimed this segment, and this run's own record above "
+                    f"is a SUPERSEDED authorization -- nothing was "
+                    f"overwritten or dropped; the segment was claimed out "
+                    f"from under this run by {actual_run_id!r}. Re-running "
+                    f"select_segments.py's claim step for {seg} under THIS "
+                    f"run's --run-id {run_id!r} would take the segment back "
+                    f"from {actual_run_id!r} and is NOT the fix -- it is the "
+                    f"unauthorized reclaim #438 exists to gate, and the "
+                    f"selector's own guard refuses it whenever "
+                    f"{actual_run_id!r}'s claim outranks this run's. This "
+                    f"note has no way to establish from here which way that "
+                    f"resolves, so treat it as neither a guaranteed refusal "
+                    f"nor a green light. Work under {actual_run_id!r} "
+                    f"instead, or make a deliberate decision to take "
+                    f"ownership back if that is genuinely intended: this "
+                    f"note does not make that call for you."
+                )
+            if foreign_state == claim_record.CLAIM_ABSENT:
+                return (
+                    f" -- a claim record for run {run_id!r} IS present for "
+                    f"this segment (profile={profile!r}, "
+                    f"claimed_at={claimed_at!r}), and the draft's CURRENT "
+                    f"dispatch_token now names a DIFFERENT run, "
+                    f"{actual_run_id!r} -- but {actual_run_id!r} holds NO "
+                    f"claim record for {seg!r}: nobody currently holds this "
+                    f"segment, so despite the foreign-looking token this is "
+                    f"closer to the LOST case than to a legitimate foreign "
+                    f"claim. The token was most likely rewritten (by a fix "
+                    f"round, or by hand) without going through "
+                    f"select_segments.py's claim step at all. Re-running "
+                    f"that claim step for {seg} under THIS run's --run-id "
+                    f"{run_id!r} is the correct recovery and is admitted on "
+                    f"the strength of the record above; it is not refused "
+                    f"merely because the token currently names "
+                    f"{actual_run_id!r}."
+                )
+            # CLAIM_AMBIGUOUS -- T's own record exists but could not be read.
+            f_detail = f" ({foreign_detail})" if foreign_detail else ""
             return (
                 f" -- a claim record for run {run_id!r} IS present for this "
                 f"segment (profile={profile!r}, claimed_at={claimed_at!r}), "
-                f"but the draft's CURRENT dispatch_token now names a "
-                f"DIFFERENT run, {actual_run_id!r}: that run has since "
-                f"claimed this segment legitimately and its claim is the "
-                f"one in force now, not lost. This run's own record above "
-                f"is a SUPERSEDED authorization -- nothing was overwritten "
-                f"or dropped; the segment was claimed out from under this "
-                f"run by {actual_run_id!r}. Re-running select_segments.py's "
-                f"claim step for {seg} under THIS run's --run-id {run_id!r} "
-                f"would take the segment back from {actual_run_id!r} and is "
-                f"NOT the fix -- it is the unauthorized reclaim #438 exists "
-                f"to gate, and it will be refused. Work under "
-                f"{actual_run_id!r} instead, or make a deliberate decision "
-                f"to take ownership back if that is genuinely intended: "
-                f"this note does not make that call for you."
+                f"and the draft's CURRENT dispatch_token now names a "
+                f"DIFFERENT run, {actual_run_id!r} -- but "
+                f"{actual_run_id!r}'s own claim record is "
+                f"unreadable{f_detail}, so which run actually owns {seg!r} "
+                f"now could not be determined. Do not assume either record "
+                f"is authoritative; the selector refuses rather than guess "
+                f"when it cannot tell either, so resolve {seg!r}'s "
+                f"ownership by hand before reclaiming it."
             )
         return (
             f" -- a claim record for run {run_id!r} IS present for this "
