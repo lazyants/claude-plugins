@@ -641,6 +641,38 @@ def write_claim_record(path: Path, payload: dict):
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+    # ENCODE BEFORE CREATING THE PATH -- the ordering is the fix, not a
+    # micro-optimisation. `ensure_ascii=False` means json.dumps() happily
+    # returns a str containing a LONE SURROGATE, because json.loads() decodes
+    # a "\ud800" escape into one and `dispatch_token` (hence
+    # `previous_dispatch_token` here) is an arbitrary string that no schema
+    # rejects and no content hash sees -- draft_content_sha1() projects
+    # dispatch_token out. Encoding that str to UTF-8 raises
+    # UnicodeEncodeError, which is a ValueError and NOT an OSError, so the
+    # write-path `except OSError` below never caught it.
+    #
+    # This is the WRITE-side twin of the bug read_claim_record() already
+    # fixed for UnicodeDecodeError, and it failed worse: the exclusive create
+    # had ALREADY happened, so the exception escaped this function entirely
+    # -- breaking its "returns a verdict, does not raise" contract -- and
+    # left a ZERO-BYTE regular file behind. That file classifies PRESENT
+    # (classify_claim_record() is lstat + S_ISREG and never opens it) but
+    # reads AMBIGUOUS, which is precisely the pair no gate can recover from:
+    # every retry sees a claim that exists and cannot be parsed, so the
+    # segment is unclaimable until someone deletes the file by hand.
+    #
+    # Doing the encode here makes the failure unreachable rather than
+    # handled: nothing has been created yet, so the state stays ABSENT --
+    # which every gate already refuses safely -- and the caller gets the
+    # ordinary (False, detail) it knows how to report.
+    try:
+        blob = body.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        return (
+            False,
+            f"could not encode the claim record as UTF-8, so nothing was "
+            f"created: {exc}",
+        )
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, CLAIM_MODE)
     except FileExistsError:
@@ -665,11 +697,17 @@ def write_claim_record(path: Path, payload: dict):
     except OSError as exc:
         return (False, f"could not create the claim record: {exc}")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(body)
+        # Binary mode over the pre-encoded bytes: text mode would re-do the
+        # encode HERE, after the path exists, which is the window the block
+        # above exists to remove. `UnicodeError` stays in the except list
+        # even though it is now unreachable -- if anyone moves the encode
+        # back inside this block, the partial entry gets unlinked instead of
+        # stranding the segment.
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(blob)
             handle.flush()
             os.fsync(handle.fileno())
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         # A record that exists but was never fully written is worse than no
         # record: its pre-claim baseline would be trusted and wrong. Remove
         # the partial entry so the state stays ABSENT, which every gate

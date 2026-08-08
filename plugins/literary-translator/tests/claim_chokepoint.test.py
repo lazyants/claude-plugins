@@ -758,3 +758,95 @@ def test_a_claim_record_with_invalid_utf8_returns_ambiguous_rather_than_raising(
         "the detail must name the file: UnicodeDecodeError carries the offending "
         "byte and no filename, so %r on its own is not actionable" % (detail,)
     )
+
+
+def test_an_unencodable_claim_record_leaves_NO_entry_rather_than_a_zero_byte_one(tmp_path):
+    """write_claim_record() must RETURN a verdict for a payload that cannot be
+    encoded as UTF-8, and must leave the claim path ABSENT.
+
+    The WRITE-side twin of the decode bug pinned by the test above, and it
+    failed strictly worse. `json.dumps(..., ensure_ascii=False)` happily
+    returns a str containing a LONE SURROGATE, because `json.loads()` decodes
+    a "\\ud800" escape into one and `dispatch_token` -- hence
+    `previous_dispatch_token` in the record -- is an arbitrary string that no
+    schema rejects and that no content hash inspects (draft_content_sha1()
+    projects dispatch_token out, which is the whole point of that projection).
+    Encoding that str raises UnicodeEncodeError, a ValueError and NOT an
+    OSError, so the `except OSError` on the write never caught it.
+
+    Why worse than the read side: the exclusive `os.open` had ALREADY created
+    the entry by the time the encode ran, so the exception escaped the function
+    -- breaking its "returns a verdict, does not raise" contract -- and left a
+    ZERO-BYTE regular file behind. That file lands on precisely the pair no
+    gate can recover from: classify_claim_record() is lstat + S_ISREG and
+    reports PRESENT without opening it, while read_claim_record() reports
+    AMBIGUOUS. Every subsequent attempt therefore sees a claim that exists and
+    cannot be parsed, and O_CREAT|O_EXCL refuses to overwrite it -- so the
+    segment is permanently unclaimable until a human deletes the file.
+
+    The fix is an ORDERING, not a handler: the encode happens before the path
+    is created, so the failure is unreachable rather than cleaned up, and the
+    state stays ABSENT -- which every gate already refuses safely.
+
+    THE MUTATION THAT MAKES THIS FAIL: move the `body.encode("utf-8")` back
+    inside the write block (i.e. restore `os.fdopen(fd, "w", encoding="utf-8")`
+    + `handle.write(body)`). Measured on a scratch copy: write_claim_record()
+    raises `UnicodeEncodeError: 'utf-8' codec can't encode character '\\ud800'
+    in position 132: surrogates not allowed`, the test errors out on the call,
+    and the path is left present at size 0.
+
+    The ABSENCE assertion is the load-bearing one -- a returned (False, detail)
+    that still left the entry behind would strand the segment just the same."""
+    path = claim_record.claimed_path("RUN1", "c001", tmp_path / "durable" / "runs")
+    payload = claim_record.build_claim_record(**dict(
+        {field: None for field in claim_record.CLAIM_RECORD_FIELDS},
+        seg="c001", profile="from-cap", run_id="RUN1",
+        claimed_at="2026-08-08T09:00:00Z",
+        # A lone surrogate, exactly as json.loads('"\\ud800"') yields it.
+        previous_dispatch_token="old:c001:\ud800",
+    ))
+
+    ok, detail = claim_record.write_claim_record(path, payload)
+
+    assert ok is False, f"an unencodable payload must not report success: {detail!r}"
+    assert not path.exists(), (
+        "the claim path must be ABSENT after an encode failure -- a zero-byte "
+        "record classifies PRESENT and reads AMBIGUOUS, which makes the segment "
+        "unclaimable forever"
+    )
+    state, _ = claim_record.classify_claim_record(path)
+    assert state == claim_record.CLAIM_ABSENT, (
+        f"the lstat classifier must see nothing here, got {state!r}"
+    )
+    assert "encode" in detail, (
+        f"the detail must say the record could not be encoded, so an operator is "
+        f"not sent looking for a disk fault: {detail!r}"
+    )
+
+
+def test_a_normal_claim_record_is_written_byte_identically_after_the_encode_move(tmp_path):
+    """The encode-first fix must not change the bytes on disk. The write moved
+    from text mode (`os.fdopen(fd, "w", encoding="utf-8")`) to binary over
+    pre-encoded bytes, and a silent difference there -- a newline translation,
+    a BOM, a changed separator -- would invalidate every pre-claim baseline
+    this record exists to carry, without any test noticing.
+
+    Asserted against the serialization the record's own reader expects, not
+    against a frozen literal, so this stays true when a field is added."""
+    path = claim_record.claimed_path("RUN1", "c001", tmp_path / "durable" / "runs")
+    payload = claim_record.build_claim_record(**dict(
+        {field: None for field in claim_record.CLAIM_RECORD_FIELDS},
+        seg="c001", profile="from-cap", run_id="RUN1",
+        claimed_at="2026-08-08T09:00:00Z",
+        previous_dispatch_token="old:c001",
+    ))
+
+    ok, detail = claim_record.write_claim_record(path, payload)
+    assert ok, detail
+
+    expected = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+    assert path.read_bytes() == expected.encode("utf-8"), (
+        "binary-mode write must reproduce the text-mode bytes exactly"
+    )
+    state, read_back, _ = claim_record.read_claim_record(path)
+    assert state == claim_record.CLAIM_PRESENT and read_back == payload

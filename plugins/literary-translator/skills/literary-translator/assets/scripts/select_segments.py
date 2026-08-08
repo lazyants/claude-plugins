@@ -2580,6 +2580,26 @@ def rewrite_draft_dispatch_token(
     doc["dispatch_token"] = new_token
 
     tmp_path = dp.parent / f"{dp.name}.tmp.{os.getpid()}"
+    # Serialize and ENCODE before creating the temp entry, for the reason
+    # spelled out at claim_record.py's write_claim_record(): `ensure_ascii=
+    # False` can return a str holding a LONE SURROGATE (json.loads() decodes
+    # a "\ud800" escape into one, and the draft this doc came from is
+    # arbitrary caller data), and encoding that raises UnicodeEncodeError --
+    # a ValueError, NOT an OSError. With the encode inside the write block
+    # below, that exception escaped past the `except OSError`, so
+    # _unlink_quietly(tmp_path) never ran and the temp file was STRANDED. The
+    # name is `{draft}.tmp.{pid}`, so the next attempt in this same process
+    # then hit its own leftover on the O_EXCL create and refused for a reason
+    # that had nothing to do with the draft. Encoding first means an
+    # unencodable draft is refused before anything exists on disk.
+    try:
+        blob = (json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=False)
+                + "\n").encode("utf-8")
+    except UnicodeEncodeError as exc:
+        return False, (
+            f"could not encode the re-stamped draft as UTF-8, so nothing was "
+            f"created: {exc}"
+        )
     try:
         # 0o644, matching claim_record.py's own CLAIM_MODE and, under the
         # usual umask, exactly what the `open(tmp_path, "w")` this replaced
@@ -2609,8 +2629,7 @@ def rewrite_draft_dispatch_token(
         # write here would produce a truncated draft that the staged-hash
         # check below would then correctly refuse -- turning a recoverable
         # write into an unexplained mismatch.
-        payload = json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
-        view = memoryview(payload.encode("utf-8"))
+        view = memoryview(blob)
         while view:
             view = view[os.write(fd, view):]
         os.fsync(fd)
