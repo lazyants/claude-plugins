@@ -2298,6 +2298,252 @@ def test_rewrite_skips_the_ownership_check_on_the_idempotent_same_run_path(tmp_p
 
 
 # ---------------------------------------------------------------------------
+# 17b. #438 round 5 BLOCKER: `_claim_record_claimed_at()` used to trust any
+# non-empty string as `claimed_at` and the age check compared the two sides
+# with plain `>`, i.e. LEXICALLY. A malformed-but-non-empty value (a hand
+# edit, torn write, or corrupted record) can sort lexically on EITHER side
+# of a real ISO8601 timestamp -- "0" sorts BELOW every "20XX-..." string,
+# while "z"/"9" sort ABOVE every one of them -- so depending on which side
+# carried the malformed value, the OLD comparison could be tricked into
+# ALLOWING an overwrite the age check exists to refuse. The fix parses
+# `claimed_at` into a real `datetime` (matching `_claim_now_iso8601()`'s own
+# format exactly) and returns None for anything that fails to parse, so a
+# malformed value collapses to the same "cannot establish" as a missing
+# field on EITHER side, and the comparison itself can never be won by
+# corrupted text.
+# ---------------------------------------------------------------------------
+
+def test_rewrite_refuses_a_foreign_claimed_at_that_would_sort_lexically_older(tmp_path):
+    """Foreign malformed value "0" sorts BELOW any real "20XX-..." timestamp
+    as plain text, so under the pre-fix lexical `>` this run's own genuine
+    claimed_at ("2026-01-01T00:00:00Z") compared as newer than the foreign
+    "0" and the rewrite would have been ALLOWED -- silently overwriting a
+    segment whose actual foreign claim state could not be established at
+    all (the value doesn't even parse). Must refuse.
+
+    MUTATION: revert `_claim_record_claimed_at()` to its pre-fix body
+    (`return value if isinstance(value, str) and value else None`, no
+    parsing) -- OBSERVED RED: with the mutation applied, this test fails
+    because the call succeeds and stamps RUN_ID's token over the malformed
+    foreign record."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    draft = clean_draft(seg)
+    draft["dispatch_token"] = f"{OTHER_RUN_ID}:{seg}"
+    write_draft_doc(root, seg, draft)
+    _touch_claim_marker(root, OTHER_RUN_ID, seg, claimed_at="0")
+    _touch_claim_marker(root, RUN_ID, seg, claimed_at="2026-01-01T00:00:00Z")
+
+    mod = _load_select_segments_module(root)
+    ok, detail = mod.rewrite_draft_dispatch_token(
+        seg,
+        root,
+        f"{RUN_ID}:{seg}",
+        expected_content_sha1=draft_content_sha1_of(draft),
+    )
+    assert ok is False, (
+        "a foreign claim record whose claimed_at does not parse as a real timestamp must "
+        "refuse, never be read as 'older, safe to take'"
+    )
+    assert OTHER_RUN_ID in detail
+    on_disk = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert on_disk["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}"
+
+
+def test_rewrite_refuses_when_this_runs_own_claimed_at_would_sort_lexically_newer_as_z(tmp_path):
+    """This run's OWN record carries the malformed value "z", which sorts
+    ABOVE every real "20XX-..." timestamp as plain text -- the measured
+    example from the #438 round 5 report (`"z" > "2026-01-02T00:00:00Z"` is
+    True under Python's string `>`). Under the pre-fix lexical comparison
+    this run would have looked infinitely newer than the foreign owner's
+    genuine claim and the rewrite would have been ALLOWED, even though this
+    run cannot actually establish when (or whether) it claimed at all.
+    Must refuse -- 'cannot establish' on this run's own side, exactly like
+    a missing record.
+
+    MUTATION: revert `_claim_record_claimed_at()` to its pre-fix body --
+    OBSERVED RED: the call then succeeds and RUN_ID's token is stamped over
+    OTHER_RUN_ID's live, genuinely-timestamped claim."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    draft = clean_draft(seg)
+    draft["dispatch_token"] = f"{OTHER_RUN_ID}:{seg}"
+    write_draft_doc(root, seg, draft)
+    _touch_claim_marker(root, OTHER_RUN_ID, seg, claimed_at="2026-01-01T00:00:00Z")
+    _touch_claim_marker(root, RUN_ID, seg, claimed_at="z")
+
+    mod = _load_select_segments_module(root)
+    ok, detail = mod.rewrite_draft_dispatch_token(
+        seg,
+        root,
+        f"{RUN_ID}:{seg}",
+        expected_content_sha1=draft_content_sha1_of(draft),
+    )
+    assert ok is False, (
+        "this run's own claimed_at not parsing as a real timestamp must refuse, never be "
+        "read as 'infinitely new'"
+    )
+    assert OTHER_RUN_ID in detail
+    on_disk = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert on_disk["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}"
+
+
+def test_rewrite_refuses_when_this_runs_own_claimed_at_would_sort_lexically_newer_as_9(tmp_path):
+    """The report's OTHER measured example (`"9" > "2026-01-02T00:00:00Z"`
+    is True) -- same shape as the "z" case above with a different malformed
+    value, confirming the fix is not accidentally keyed to one specific
+    string.
+
+    MUTATION: revert `_claim_record_claimed_at()` to its pre-fix body --
+    OBSERVED RED, same failure shape as the "z" case."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    draft = clean_draft(seg)
+    draft["dispatch_token"] = f"{OTHER_RUN_ID}:{seg}"
+    write_draft_doc(root, seg, draft)
+    _touch_claim_marker(root, OTHER_RUN_ID, seg, claimed_at="2026-01-01T00:00:00Z")
+    _touch_claim_marker(root, RUN_ID, seg, claimed_at="9")
+
+    mod = _load_select_segments_module(root)
+    ok, detail = mod.rewrite_draft_dispatch_token(
+        seg,
+        root,
+        f"{RUN_ID}:{seg}",
+        expected_content_sha1=draft_content_sha1_of(draft),
+    )
+    assert ok is False
+    assert OTHER_RUN_ID in detail
+    on_disk = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert on_disk["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}"
+
+
+def test_rewrite_refuses_a_foreign_claimed_at_that_is_prose_not_a_timestamp(tmp_path):
+    """"not a date" starts with a lowercase letter, which already sorted
+    ABOVE any real "20XX-..." timestamp under the pre-fix lexical `>` --
+    so this specific shape refused even before the fix (this run's own
+    genuine claimed_at never lexically beat it). Included for the shape
+    coverage the #438 round 5 report explicitly asked for ("a malformed
+    non-empty string ... must REFUSE, not allow"), not as a mutation
+    catcher: reverting `_claim_record_claimed_at()` to its pre-fix body
+    does NOT turn this one red, since the lexical comparison already
+    refused it by accident. Still must refuse post-fix, and for the
+    PRINCIPLED reason (the value fails to parse), not the accidental one."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    draft = clean_draft(seg)
+    draft["dispatch_token"] = f"{OTHER_RUN_ID}:{seg}"
+    write_draft_doc(root, seg, draft)
+    _touch_claim_marker(root, OTHER_RUN_ID, seg, claimed_at="not a date")
+    _touch_claim_marker(root, RUN_ID, seg, claimed_at="2026-06-01T00:00:00Z")
+
+    mod = _load_select_segments_module(root)
+    ok, detail = mod.rewrite_draft_dispatch_token(
+        seg,
+        root,
+        f"{RUN_ID}:{seg}",
+        expected_content_sha1=draft_content_sha1_of(draft),
+    )
+    assert ok is False
+    assert OTHER_RUN_ID in detail
+    on_disk = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert on_disk["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}"
+
+
+def test_rewrite_refuses_a_foreign_claimed_at_that_is_a_json_number_not_a_string(tmp_path):
+    """A `claimed_at` written as a bare JSON number (not a string at all) is
+    rejected by the `isinstance(value, str)` guard that predates this fix --
+    already correct before this round, and unaffected by the parsing change
+    (a non-string never reaches `datetime.strptime()`). Included because the
+    #438 round 5 report explicitly listed "a number" among the malformed
+    shapes to confirm, not because this fix changed it: reverting
+    `_claim_record_claimed_at()` to its pre-fix body does NOT turn this one
+    red."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    draft = clean_draft(seg)
+    draft["dispatch_token"] = f"{OTHER_RUN_ID}:{seg}"
+    write_draft_doc(root, seg, draft)
+    marker = root / "runs" / OTHER_RUN_ID / f".claimed.{seg}"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps({"seg": seg, "run_id": OTHER_RUN_ID, "claimed_at": 20260101000000}),
+        encoding="utf-8",
+    )
+    _touch_claim_marker(root, RUN_ID, seg, claimed_at="2026-06-01T00:00:00Z")
+
+    mod = _load_select_segments_module(root)
+    ok, detail = mod.rewrite_draft_dispatch_token(
+        seg,
+        root,
+        f"{RUN_ID}:{seg}",
+        expected_content_sha1=draft_content_sha1_of(draft),
+    )
+    assert ok is False
+    assert OTHER_RUN_ID in detail
+    on_disk = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert on_disk["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}"
+
+
+def test_rewrite_refuses_on_a_tie_permanently_across_a_retry(tmp_path):
+    """A `claimed_at` TIE is PERMANENT for the losing run, not something a
+    retry can wait out -- confirmed by reading claim_record.py's
+    write_claim_record() (O_CREAT|O_EXCL: a claim record is write-once and
+    NEVER overwritten) together with run_select()'s own claim loop
+    (select_segments.py's "already claimed by this run" branch), which on a
+    same-run retry re-reads and reports the EXISTING record verbatim rather
+    than writing a fresh one. So RUN_ID's own claimed_at is fixed at its
+    FIRST claim forever, and if that fixed value ties OTHER_RUN_ID's, no
+    number of retries changes anything on disk for the age check to see.
+
+    Proven here at the rewrite_draft_dispatch_token() level, which is what
+    a retry actually re-invokes: called twice in a row against the SAME
+    on-disk tie, both calls refuse identically and RUN_ID's own claim
+    record is byte-for-byte unchanged in between -- there is no 'the clock
+    ticked over' state for a second call to observe."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    draft = clean_draft(seg)
+    draft["dispatch_token"] = f"{OTHER_RUN_ID}:{seg}"
+    write_draft_doc(root, seg, draft)
+    tied_at = "2026-01-01T00:00:00Z"
+    _touch_claim_marker(root, OTHER_RUN_ID, seg, claimed_at=tied_at)
+    own_marker = _touch_claim_marker(root, RUN_ID, seg, claimed_at=tied_at)
+    own_record_before = own_marker.read_bytes()
+
+    mod = _load_select_segments_module(root)
+    first_ok, first_detail = mod.rewrite_draft_dispatch_token(
+        seg,
+        root,
+        f"{RUN_ID}:{seg}",
+        expected_content_sha1=draft_content_sha1_of(draft),
+    )
+    assert first_ok is False, "a claimed_at tie must refuse on the first attempt"
+    assert own_marker.read_bytes() == own_record_before, (
+        "RUN_ID's own claim record must not be mutated by a refused attempt -- it is "
+        "write-once by design, never a place this check may write a fresh timestamp to"
+    )
+
+    second_ok, second_detail = mod.rewrite_draft_dispatch_token(
+        seg,
+        root,
+        f"{RUN_ID}:{seg}",
+        expected_content_sha1=draft_content_sha1_of(draft),
+    )
+    assert second_ok is False, (
+        "a retry must refuse IDENTICALLY: RUN_ID's own claimed_at can never advance (its "
+        "record is write-once), so nothing about the tie changed and there is no "
+        "'wait for the clock' recovery"
+    )
+    assert own_marker.read_bytes() == own_record_before, (
+        "a second, refused attempt must still leave RUN_ID's own record untouched"
+    )
+    on_disk = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert on_disk["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}", (
+        "the draft's token must still name OTHER_RUN_ID after BOTH refused attempts"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 18. #438 round 4/5, END TO END: the same defect through the REAL admission
 # pipeline and real wall-clock `claimed_at` values -- a unit test of the
 # predicate alone (section 17, hand-picked timestamps) cannot catch a wiring

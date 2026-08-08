@@ -64,12 +64,12 @@ CITATION_ANCHORS = {
     "claim_record.py:534-586": [
         "def fsync_directory","_O_DIRECTORY", "os.fsync"],
     # --- select_segments.py: the only component that may MINT a claim ------
-    "select_segments.py:3156": ["write_claim_record"],
+    "select_segments.py:3200": ["write_claim_record"],
     # The fresh-evidence collision refusal the snapshot paragraph cites as the
     # reason a freshly minted id is NOT guaranteed clean. Anchored on the
     # arming condition and on the word the refusal itself uses, so a version
     # that kept the condition but stopped refusing loses an anchor.
-    "select_segments.py:2976-2984": ['args.run_resume == "false"', "launder"],
+    "select_segments.py:3020-3028": ['args.run_resume == "false"', "launder"],
     # The cross-run ownership refusal. Anchored at BOTH ends: the predicate's
     # fourth condition pins where it starts, the refusal message pins that the
     # refusal itself is still inside the range. A version that evaluated the
@@ -79,7 +79,7 @@ CITATION_ANCHORS = {
     # `claimed_at` values and then compared them the wrong way, or with >=,
     # would keep the first two anchors, so the operator that decides the
     # verdict is pinned explicitly.
-    "select_segments.py:2490-2499": [
+    "select_segments.py:2534-2543": [
         "this_claimed_at = _claim_record_claimed_at",
         "this_claimed_at",
         "foreign_claimed_at",
@@ -87,9 +87,16 @@ CITATION_ANCHORS = {
     ],
     # The re-stamp, and the hash it is checked against. Both anchored: the
     # ordering claim in the entry is about these two calls in this order.
-    "select_segments.py:3207-3211": ["rewrite_draft_dispatch_token", "expected_content_sha1"],
-    "select_segments.py:2542": ["os.O_EXCL", "_O_NOFOLLOW"],
-    "select_segments.py:2583-2588": ["staged_sha1 != expected_content_sha1", "Something replaced or edited"],
+    "select_segments.py:3251-3255": [
+        # The assignment, not the bare name: this function is discussed in a
+        # comment immediately above the call, and a bare-name anchor matched
+        # THAT, silently starting the citation in prose about the code
+        # rather than at the code.
+        "token_ok, token_detail = rewrite_draft_dispatch_token",
+        "expected_content_sha1",
+    ],
+    "select_segments.py:2586": ["os.O_EXCL", "_O_NOFOLLOW"],
+    "select_segments.py:2627-2632": ["staged_sha1 != expected_content_sha1", "Something replaced or edited"],
     # --- the two components that may only REFUSE ---------------------------
     "codex_job.py:1431-1433": ["_refuse_claimed_translate()", "claimed-segment-refused"],
     # Anchored on all three: the entry's claim is specifically that the run id

@@ -49,12 +49,26 @@ authorization. If the current token instead parses to a DIFFERENT run T,
 _claim_note() does not assume what that means from the parse alone -- it
 looks T's OWN claim record up before characterising anything, because a
 run id sitting on a token is not evidence that run holds anything.
-T holding a live claim record is the FOREIGN case proper: T has since
-claimed the segment, this run's own record is a superseded authorization,
-and the refusal says so without promising a specific outcome from the
-selector's own reclaim guard (whether that guard admits or refuses is not
-something this note can evaluate from here). T holding NO claim record at
-all means nobody currently holds the segment despite the foreign-looking
+T holding a live claim record is the FOREIGN case proper, and as of round 6
+it is no longer a single verdict: select_segments.py's own reclaim guard
+(rewrite_draft_dispatch_token()) now admits or refuses a retry by comparing
+the two records' `claimed_at`, parsed into instants, with strict `>` --
+this note performs the IDENTICAL comparison so its wording cannot
+contradict what the guard is about to do. This run's own claim being the
+PROVABLY LATER one means T's token is stale relative to it -- most likely a
+crash between claiming and stamping -- and the refusal names the retry as
+the remedy, not a superseded claim. T's claim being the PROVABLY LATER one
+is the original SUPERSEDED case: T claimed the segment legitimately and the
+refusal does not send the operator to reclaim it. The two `claimed_at`
+values being IDENTICAL is a TIE neither side provably wins, reported as its
+own case -- and since a same-run retry reuses this run's existing claim
+record untouched, the refusal does not advise waiting and retrying, because
+waiting can never change a tie. Either `claimed_at` missing, malformed, or
+read off a record that is not itself CLAIM_PRESENT leaves the comparison
+unable to run at all, and the refusal says ownership could not be
+established rather than guessing which of the above applies. T holding NO
+claim record at all means nobody currently holds the segment despite the
+foreign-looking
 token -- closer to the LOST case in remedy, and the refusal does not turn
 the operator away from the fix that will actually work. T's record being
 unreadable, or T's parsed run id not itself being safe to look up, means
@@ -97,6 +111,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Self-anchored by default: this script always lives at
@@ -274,6 +289,34 @@ def _claim_run_id(token):
     return run_id
 
 
+def _claim_instant(value):
+    """Parse a claim record's `claimed_at` field into a naive UTC
+    `datetime`, or None when it cannot be trusted. Mirrors the STRPTIME
+    parse inside select_segments.py's own `_claim_record_claimed_at()` --
+    the function rewrite_draft_dispatch_token()'s #438 round 5/6 ownership-
+    age check uses on BOTH sides of its own comparison -- against
+    `_claim_now_iso8601()`'s one and only writer format: second-resolution
+    UTC with a literal trailing 'Z', never a numeric offset or a timezone
+    name. NOT imported: this script is
+    a LEAF and does not resolve sibling SCRIPTS (see this file's module
+    docstring), only the shared claim_record MODULE -- but duplicated
+    deliberately, because _claim_note() below has to agree with the
+    selector's own guard on which of two claims is later, and a lexical
+    string compare instead of a parsed one lets a malformed value
+    impersonate the newest possible claimant (e.g. the string "z" sorts
+    after any real timestamp). Anything but a non-empty string, or a string
+    that does not match the exact format end to end, returns None -- the
+    same signal a missing field produces, so a caller comparing two of
+    these results with `is not None` treats "malformed" and "absent"
+    identically, which is the safe direction."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+
+
 def _claim_note(run_id, seg, durable_root, current_token):
     """Best-effort clause to append to a dispatch_token-mismatch refusal
     when this run's OWN claim record explains it. NEVER fatal and never
@@ -308,14 +351,44 @@ def _claim_note(run_id, seg, durable_root, current_token):
         run id says only that some other run's id is on the token, never
         that the run actually holds a claim. Three sub-outcomes:
 
-          - T holds a live claim record (CLAIM_PRESENT): T has since
-            claimed the segment legitimately, this run's own record above
-            is a superseded authorization, and the clause must NOT send
-            the operator to reclaim it -- but it also must NOT promise a
-            specific outcome from the selector's own reclaim guard (D9),
-            which decides on evidence this note cannot see from here. The
-            selector's own guard is authoritative on whether a reclaim is
-            admitted, not this note.
+          - T holds a live claim record (CLAIM_PRESENT): round 6 replaced
+            the single "superseded" verdict with the same comparison
+            select_segments.py's own reclaim guard performs --
+            rewrite_draft_dispatch_token() now admits or refuses a retry
+            by comparing the two records' `claimed_at`, parsed into
+            instants via _claim_instant() above, with strict `>`. This
+            clause performs the IDENTICAL comparison rather than a
+            weaker or independent one, because a note that disagreed with
+            the guard it is describing would be actively misleading.
+            Four outcomes, evaluated against `claimed_at` (this run's own,
+            already read above) and `f_claimed_at` (T's, read here):
+
+              * both parse and THIS run's is strictly LATER: T's token is
+                stale relative to this run's own claim -- most likely a
+                crash between claiming and stamping (the exact D9
+                crash-recovery case #438 restores) -- and the clause names
+                the retry as the remedy. This run's record is explicitly
+                NOT called superseded.
+              * both parse and T's is strictly LATER: the original
+                SUPERSEDED wording -- T claimed the segment legitimately,
+                this run's own record above is a superseded authorization,
+                and the clause must NOT send the operator to reclaim it.
+              * both parse and are IDENTICAL (a second-resolution tie):
+                neither side is provably later, so the clause says so
+                explicitly -- and, because a same-run retry reuses this
+                run's EXISTING claim record (whose `claimed_at` therefore
+                never changes), it does NOT tell the operator to wait and
+                retry; a tie needs a different run identity or a manual
+                ownership decision.
+              * either side fails to parse (missing, not a string, or not
+                read off a CLAIM_PRESENT record): the comparison cannot
+                run at all, and the clause says ownership could not be
+                established rather than asserting any of the above.
+
+            In every one of the four the selector's own guard remains
+            authoritative on whether a reclaim is actually admitted --
+            this clause only characterises what the claim ages on disk
+            show, which is the same evidence the guard itself reads.
           - T holds NO claim record (CLAIM_ABSENT): nobody currently holds
             the segment despite the foreign-looking token -- closer to the
             LOST case in REMEDY (re-claiming under this run's own --run-id
@@ -453,30 +526,121 @@ def _claim_note(run_id, seg, durable_root, current_token):
             if foreign_state == claim_record.CLAIM_PRESENT:
                 f_profile = foreign_payload.get("profile") if isinstance(foreign_payload, dict) else None
                 f_claimed_at = foreign_payload.get("claimed_at") if isinstance(foreign_payload, dict) else None
+                # #438 round 6: T holding a live record is no longer a
+                # single verdict -- see this function's own docstring for
+                # the four-way split. this_instant/foreign_instant mirror
+                # EXACTLY what select_segments.py's own reclaim guard
+                # compares (rewrite_draft_dispatch_token(), strict `>` over
+                # _claim_record_claimed_at()'s parsed instants), via
+                # _claim_instant() above -- so this note cannot describe an
+                # outcome the guard itself would not produce.
+                this_instant = _claim_instant(claimed_at)
+                foreign_instant = _claim_instant(f_claimed_at)
+                if this_instant is not None and foreign_instant is not None:
+                    if this_instant > foreign_instant:
+                        # THIS run's own claim outranks T's. T's token is
+                        # stale relative to it, not the other way around --
+                        # do not call this run's record superseded.
+                        return (
+                            f" -- a claim record for run {run_id!r} IS present for "
+                            f"this segment (profile={profile!r}, "
+                            f"claimed_at={claimed_at!r}), and the draft's CURRENT "
+                            f"dispatch_token now names a DIFFERENT run, "
+                            f"{actual_run_id!r}, which itself holds a live claim "
+                            f"record for {seg!r} (profile={f_profile!r}, "
+                            f"claimed_at={f_claimed_at!r}) -- but THIS run's own "
+                            f"claim is the LATER of the two. {actual_run_id!r}'s "
+                            f"token is stale relative to this run's own claim, "
+                            f"most likely because this run claimed {seg!r} and "
+                            f"then crashed before stamping the draft's "
+                            f"dispatch_token -- the crash-between-claim-and-stamp "
+                            f"recovery #438 restores. This run's record above is "
+                            f"NOT superseded: re-running select_segments.py's "
+                            f"claim step for {seg} under THIS run's --run-id "
+                            f"{run_id!r} is the remedy, and the selector's own "
+                            f"guard admits it on the strength of the claim ages "
+                            f"above."
+                        )
+                    if this_instant < foreign_instant:
+                        # T's claim outranks this run's -- the original
+                        # SUPERSEDED case, wording unchanged from round 5.
+                        return (
+                            f" -- a claim record for run {run_id!r} IS present for "
+                            f"this segment (profile={profile!r}, "
+                            f"claimed_at={claimed_at!r}), but the draft's CURRENT "
+                            f"dispatch_token now names a DIFFERENT run, "
+                            f"{actual_run_id!r}, which itself holds a live claim "
+                            f"record for {seg!r} (profile={f_profile!r}, "
+                            f"claimed_at={f_claimed_at!r}): that run has since "
+                            f"claimed this segment, and this run's own record above "
+                            f"is a SUPERSEDED authorization -- nothing was "
+                            f"overwritten or dropped; the segment was claimed out "
+                            f"from under this run by {actual_run_id!r}. Re-running "
+                            f"select_segments.py's claim step for {seg} under THIS "
+                            f"run's --run-id {run_id!r} would take the segment back "
+                            f"from {actual_run_id!r} and is NOT the fix -- it is the "
+                            f"unauthorized reclaim #438 exists to gate: the "
+                            f"selector's guard refuses it whenever {actual_run_id!r}'s "
+                            f"claim outranks this run's, and both claim ages are "
+                            f"printed above, so that is settled here rather than "
+                            f"guessed at -- {actual_run_id!r} claimed later, and the "
+                            f"reclaim WILL be refused. Work under {actual_run_id!r} "
+                            f"instead, or make a deliberate decision to take "
+                            f"ownership back if that is genuinely intended: this "
+                            f"note does not make that call for you."
+                        )
+                    # IDENTICAL claimed_at -- a second-resolution TIE that
+                    # neither side provably wins. The selector refuses a
+                    # tie the same safe direction as an older claim, but
+                    # unlike an older claim a tie is PERMANENT for this
+                    # run: a same-run retry reuses the SAME claim record
+                    # (claim_record.py's write is exclusive), so its
+                    # claimed_at can never change and waiting cannot break
+                    # the tie -- do not advise a retry here.
+                    return (
+                        f" -- a claim record for run {run_id!r} IS present for "
+                        f"this segment (profile={profile!r}, "
+                        f"claimed_at={claimed_at!r}), and the draft's CURRENT "
+                        f"dispatch_token now names a DIFFERENT run, "
+                        f"{actual_run_id!r}, which itself holds a live claim "
+                        f"record for {seg!r} (profile={f_profile!r}, "
+                        f"claimed_at={f_claimed_at!r}) -- the two records carry "
+                        f"the IDENTICAL claimed_at, a TIE neither side provably "
+                        f"wins. The selector's own guard refuses a tie the same "
+                        f"safe direction as an older claim, and that refusal is "
+                        f"PERMANENT for this run: a same-run retry reuses this "
+                        f"run's EXISTING claim record, so its claimed_at can "
+                        f"never change and waiting cannot break the tie. Do NOT "
+                        f"re-run the claim step expecting a different outcome; "
+                        f"{seg!r}'s ownership needs either a fresh run under a "
+                        f"different --run-id, or a deliberate manual decision, "
+                        f"before either side may proceed."
+                    )
+                # At least one side's claimed_at could not be trusted --
+                # missing, not a string, or not parseable against the exact
+                # format claim_record.py's one writer emits -- so which
+                # claim is later could not be established at all. Named
+                # ONLY when it is the reason the comparison could not be
+                # run, mirroring select_segments.py's own this_claim_note.
+                bad_side = (
+                    f"this run's own claim record's claimed_at ({claimed_at!r})"
+                    if this_instant is None
+                    else f"{actual_run_id!r}'s claim record's claimed_at ({f_claimed_at!r})"
+                )
                 return (
-                    f" -- a claim record for run {run_id!r} IS present for "
-                    f"this segment (profile={profile!r}, "
-                    f"claimed_at={claimed_at!r}), but the draft's CURRENT "
-                    f"dispatch_token now names a DIFFERENT run, "
-                    f"{actual_run_id!r}, which itself holds a live claim "
-                    f"record for {seg!r} (profile={f_profile!r}, "
-                    f"claimed_at={f_claimed_at!r}): that run has since "
-                    f"claimed this segment, and this run's own record above "
-                    f"is a SUPERSEDED authorization -- nothing was "
-                    f"overwritten or dropped; the segment was claimed out "
-                    f"from under this run by {actual_run_id!r}. Re-running "
-                    f"select_segments.py's claim step for {seg} under THIS "
-                    f"run's --run-id {run_id!r} would take the segment back "
-                    f"from {actual_run_id!r} and is NOT the fix -- it is the "
-                    f"unauthorized reclaim #438 exists to gate, and the "
-                    f"selector's own guard refuses it whenever "
-                    f"{actual_run_id!r}'s claim outranks this run's. This "
-                    f"note has no way to establish from here which way that "
-                    f"resolves, so treat it as neither a guaranteed refusal "
-                    f"nor a green light. Work under {actual_run_id!r} "
-                    f"instead, or make a deliberate decision to take "
-                    f"ownership back if that is genuinely intended: this "
-                    f"note does not make that call for you."
+                    f" -- a claim record for run {run_id!r} IS present for this "
+                    f"segment (profile={profile!r}, claimed_at={claimed_at!r}), "
+                    f"and the draft's CURRENT dispatch_token now names a "
+                    f"DIFFERENT run, {actual_run_id!r}, which itself holds a live "
+                    f"claim record for {seg!r} (profile={f_profile!r}, "
+                    f"claimed_at={f_claimed_at!r}) -- but {bad_side} does not "
+                    f"parse as a timestamp, so which claim is later could not be "
+                    f"established. The selector's own guard refuses whenever it "
+                    f"cannot show this run's own claim is provably the later one "
+                    f"(the same safe direction it takes on a tie), so treat this "
+                    f"as UNDETERMINED -- neither a guaranteed refusal nor a "
+                    f"green light. Resolve {seg!r}'s ownership by hand before "
+                    f"reclaiming it."
                 )
             if foreign_state == claim_record.CLAIM_ABSENT:
                 return (

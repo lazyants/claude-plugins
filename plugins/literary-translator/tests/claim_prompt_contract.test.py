@@ -964,6 +964,170 @@ def test_draft_ready_reports_a_FOREIGN_claim_as_superseded_not_lost(tmp_path):
     )
 
 
+def test_draft_ready_reports_this_runs_later_claim_as_the_remedy_not_superseded(tmp_path):
+    """The case round 5's FOREIGN/CLAIM_PRESENT wording got wrong: it is
+    unconditional, but the selector's own reclaim guard
+    (rewrite_draft_dispatch_token(), round 5) does not unconditionally
+    refuse a foreign-looking token any more -- it ADMITS a retry whenever
+    THIS run's own claimed_at is provably later than the foreign run's,
+    which is exactly the D9 crash-between-claim-and-stamp recovery: this
+    run claims the segment (its own record is written FIRST, by design),
+    then crashes before the rewrite ever stamps the draft's dispatch_token,
+    leaving the draft still naming whichever run held it before. Run B's
+    own claim record here is real and OLDER than run A's -- B is not who
+    the segment belongs to any more, A is -- so telling A's retry it is
+    "superseded" and "NOT the fix" is exactly backwards: the selector will
+    ADMIT that retry, not refuse it.
+
+    THE MUTATION THAT MAKES THIS FAIL, OBSERVED: reverting _claim_note()'s
+    foreign/CLAIM_PRESENT branch to the pre-round-6 unconditional SUPERSEDED
+    return (deleting the this_instant/foreign_instant comparison entirely)
+    makes this test's SUPERSEDED/"NOT the fix" absence-assertions find their
+    strings and fail -- confirmed by temporarily applying that revert and
+    running this test alone; it failed on the SUPERSEDED assertion. The
+    sibling SUPERSEDED test above stays green either way, since its own
+    fixture's foreign claim really is the later one."""
+    root = make_durable_root(tmp_path)
+    run_id = "20260808T000000Z"
+    seg = "seg01"
+    expect_token = f"{run_id}:{seg}"
+    foreign_run_id = "20260805T000000Z"
+    # This run's own claim is the LATER of the two -- the selector's own
+    # guard admits a retry on exactly this fact.
+    _, payload = write_real_claim(root, run_id, seg, profile="from-cap",
+                                   claimed_at="2026-08-08T10:00:00Z")
+    write_real_claim(root, foreign_run_id, seg, profile="from-cap",
+                      claimed_at="2026-08-08T09:00:00Z")
+    draft = clean_draft(seg, dispatch_token=f"{foreign_run_id}:{seg}")
+    write_segment(root, seg, clean_segpack(), draft)
+
+    result = run_draft_ready(root, seg, "--expect-token", expect_token)
+
+    assert result.returncode == 1, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    out = result.stdout
+    assert foreign_run_id in out, f"the refusal must name the foreign run on the token: {out!r}"
+    assert "SUPERSEDED" not in out, (
+        f"this run's own claim is the LATER one -- it must not be called "
+        f"superseded: {out!r}"
+    )
+    assert "NOT the fix" not in out, (
+        f"the retry IS the remedy the selector will admit here, not a "
+        f"refused reclaim: {out!r}"
+    )
+    assert "the claim was LOST" not in out, (
+        f"this is reached through the FOREIGN branch and characterised by "
+        f"claim age, not the plain LOST branch: {out!r}"
+    )
+    assert "crashed before stamping" in out, (
+        f"the refusal should name the crash-recovery shape this run is in: {out!r}"
+    )
+    assert "remedy" in out, f"the refusal must point at the retry as the remedy: {out!r}"
+    assert payload["profile"] in out, "the refusal should still name this run's own claim's profile"
+
+
+def test_draft_ready_reports_a_tie_in_claim_age_as_permanent_not_a_retry(tmp_path):
+    """A claimed_at TIE is the one outcome a same-run retry can NEVER fix:
+    claim_record.py's write is exclusive (see
+    test_write_claim_record_is_exclusive_so_a_reclaim_cannot_rewrite_the_
+    baseline above), so re-running the claim step reuses THIS run's
+    EXISTING record untouched -- its claimed_at cannot change no matter how
+    many times it is retried. The refusal must say so explicitly rather
+    than folding a tie into the ordinary SUPERSEDED wording (which at least
+    implies retrying is pointless for a DIFFERENT reason) or, worse, into
+    wording that could read as "try again".
+
+    THE MUTATION THAT MAKES THIS FAIL, OBSERVED: changing draft_ready.py's
+    tie-branch guard from `this_instant < foreign_instant` (strict) to
+    `this_instant <= foreign_instant` folds an equal claimed_at into the
+    SUPERSEDED branch instead of the dedicated TIE branch. Applying that
+    one-character edit and running this test alone failed the "TIE" /
+    "PERMANENT" presence assertions below (the SUPERSEDED wording appeared
+    instead)."""
+    root = make_durable_root(tmp_path)
+    run_id = "20260808T000000Z"
+    seg = "seg01"
+    expect_token = f"{run_id}:{seg}"
+    foreign_run_id = "20260813T000000Z"
+    tied_claimed_at = "2026-08-08T09:00:00Z"
+    write_real_claim(root, run_id, seg, profile="from-cap", claimed_at=tied_claimed_at)
+    write_real_claim(root, foreign_run_id, seg, profile="from-cap", claimed_at=tied_claimed_at)
+    draft = clean_draft(seg, dispatch_token=f"{foreign_run_id}:{seg}")
+    write_segment(root, seg, clean_segpack(), draft)
+
+    result = run_draft_ready(root, seg, "--expect-token", expect_token)
+
+    assert result.returncode == 1, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    out = result.stdout
+    assert "TIE" in out, f"the refusal must name this as a tie: {out!r}"
+    assert "PERMANENT" in out, f"the refusal must say the tie cannot be broken by retrying: {out!r}"
+    assert "SUPERSEDED" not in out, f"a tie is not the same as being outranked: {out!r}"
+    assert "Do NOT re-run the claim step" in out, (
+        f"the refusal must not read as advice to wait and retry -- a tied "
+        f"claimed_at cannot change on a same-run retry: {out!r}"
+    )
+    assert "different --run-id" in out or "manual" in out, (
+        f"the refusal should point at an actual way out of a tie (a "
+        f"different run identity or a manual decision), not silence: {out!r}"
+    )
+
+
+def test_draft_ready_reports_an_unparseable_claim_age_as_undetermined(tmp_path):
+    """A hand-edited or otherwise malformed claimed_at on either side makes
+    the age comparison impossible to run at all. The refusal must say so
+    (UNDETERMINED) rather than defaulting to either the SUPERSEDED or the
+    later-claim-is-the-remedy wording -- the same safe direction
+    claim_record.py's own three-state discipline uses everywhere else in
+    this file, and the same direction select_segments.py's own
+    _claim_record_claimed_at() takes (None on anything that does not parse,
+    which this run's _claim_instant() mirrors).
+
+    THE MUTATION THAT MAKES THIS FAIL, OBSERVED: changing _claim_instant()'s
+    `except ValueError: return None` to instead `return value` (a
+    fall-through meant to compare the raw, unparsed strings lexically
+    instead of refusing to compare at all). Applying that edit and running
+    this test alone did NOT produce the lexical-comparison outcome
+    predicted in an earlier draft of this comment -- `this_instant >
+    foreign_instant` then compares a bare `str` (this run's unparsed
+    value) against a `datetime` (the foreign run's, which parsed cleanly),
+    and Python's `>` refuses mixed str/datetime with an uncaught
+    TypeError. That escapes _claim_note() uncaught (nothing downstream of
+    the CLAIM_PRESENT age comparison is wrapped in a try/except), crashing
+    draft_ready.py before any line is printed: stdout comes back empty and
+    the UNDETERMINED assertion below fails against ''. Both the predicted
+    and the actual failure are the SAME underlying point -- a lexical
+    fallback here is unsound, whether it silently picks a wrong winner or
+    crashes outright -- but only the actual, observed one is asserted."""
+    root = make_durable_root(tmp_path)
+    run_id = "20260808T000000Z"
+    seg = "seg01"
+    expect_token = f"{run_id}:{seg}"
+    foreign_run_id = "20260813T000000Z"
+    write_real_claim(root, run_id, seg, profile="from-cap",
+                      claimed_at="not-a-real-timestamp")
+    write_real_claim(root, foreign_run_id, seg, profile="from-cap",
+                      claimed_at="2026-08-13T00:00:00Z")
+    draft = clean_draft(seg, dispatch_token=f"{foreign_run_id}:{seg}")
+    write_segment(root, seg, clean_segpack(), draft)
+
+    result = run_draft_ready(root, seg, "--expect-token", expect_token)
+
+    assert result.returncode == 1, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    out = result.stdout
+    assert "UNDETERMINED" in out, f"the refusal must say ownership could not be established: {out!r}"
+    assert "does not parse as a timestamp" in out, f"the refusal must name the malformed side: {out!r}"
+    assert "this run's own claim record's claimed_at" in out, (
+        f"the refusal must name WHICH side is unparseable: {out!r}"
+    )
+    assert "SUPERSEDED" not in out, (
+        f"a malformed claimed_at must not be silently treated as a definite "
+        f"outcome: {out!r}"
+    )
+    assert "NOT the fix" not in out, (
+        f"neither definite outcome may be asserted when the comparison "
+        f"cannot run at all: {out!r}"
+    )
+
+
 def test_a_token_less_draft_with_no_claim_record_is_still_refused(tmp_path):
     """The control the recovery test needs, and the reason the recovery is
     not a general hole: the SAME token-less draft, with no claim record for

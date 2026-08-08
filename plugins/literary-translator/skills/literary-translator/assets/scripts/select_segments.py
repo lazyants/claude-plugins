@@ -2134,23 +2134,53 @@ def _unlink_quietly(path: Path) -> None:
         pass
 
 
-def _claim_record_claimed_at(claim_record_mod, state: str, payload) -> "str | None":
-    """The trusted `claimed_at` out of a claim-record read, or None when it
-    cannot be trusted: `state` is anything but CLAIM_PRESENT (ABSENT -- no
-    record to trust; AMBIGUOUS -- unreadable, torn, or not valid JSON,
-    which cannot be trusted either), `payload` did not come back as a dict
-    (read_claim_record()'s own contract says it always does on
-    CLAIM_PRESENT, but this reads the field defensively rather than
-    assuming its own caller upheld that), or the `claimed_at` key is
-    missing or not a non-empty string (a hand-edited or otherwise
-    malformed record). Used by rewrite_draft_dispatch_token()'s #438 round
-    5 ownership-age check on BOTH sides of the comparison, so "cannot
-    establish this side's timestamp" collapses to the same None on either
-    side rather than two differently-named failure modes."""
+def _claim_record_claimed_at(claim_record_mod, state: str, payload) -> "datetime | None":
+    """The trusted `claimed_at` out of a claim-record read, PARSED into a
+    naive UTC `datetime`, or None when it cannot be trusted: `state` is
+    anything but CLAIM_PRESENT (ABSENT -- no record to trust; AMBIGUOUS --
+    unreadable, torn, or not valid JSON, which cannot be trusted either),
+    `payload` did not come back as a dict (read_claim_record()'s own
+    contract says it always does on CLAIM_PRESENT, but this reads the
+    field defensively rather than assuming its own caller upheld that),
+    the `claimed_at` key is missing or not a non-empty string (a
+    hand-edited or otherwise malformed record), or the string does not
+    parse against `_claim_now_iso8601()`'s own format (this file's one
+    writer of the field -- match it exactly rather than accepting anything
+    that merely looks like a timestamp).
+
+    Parsing, not merely trusting-if-string, is the point: the
+    caller compares two of this function's return values with plain `>`,
+    and BEFORE this a non-empty string that fails to parse as a real
+    timestamp (a hand-edited "z", a truncated "9", empty-looking noise)
+    still fell through `isinstance(value, str) and value` and got compared
+    LEXICALLY -- under which `"z" > "2026-01-02T00:00:00Z"` and
+    `"9" > "2026-01-02T00:00:00Z"` are both True, so a malformed record
+    could impersonate the newest possible claimant and win the ownership
+    check the comparison exists to enforce. Returning a parsed `datetime`
+    instead removes the vector entirely: anything that does not parse
+    returns None, exactly like a missing field, and None on either side
+    already refuses via the caller's `is not None` guards -- never via a
+    comparison that could raise.
+
+    Used by rewrite_draft_dispatch_token()'s #438 round 5 ownership-age
+    check on BOTH sides of the comparison, so "cannot establish this
+    side's timestamp" collapses to the same None on either side rather
+    than two differently-named failure modes."""
     if state != claim_record_mod.CLAIM_PRESENT or not isinstance(payload, dict):
         return None
     value = payload.get("claimed_at")
-    return value if isinstance(value, str) and value else None
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        # Byte-for-byte the format _claim_now_iso8601() writes: seconds
+        # resolution, UTC, literal trailing "Z" (not %z/%Z -- the writer
+        # never emits a numeric offset or a timezone name, only this exact
+        # literal). strptime requires an EXACT match end to end, so
+        # anything with extra precision, a numeric offset, or garbage
+        # anywhere in the string raises rather than silently truncating.
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
 
 
 def rewrite_draft_dispatch_token(
@@ -2243,6 +2273,20 @@ def rewrite_draft_dispatch_token(
          is possible and is deliberately NOT "allow": strict `>` is what
          makes a tie refuse, because this run is not PROVABLY the later
          claimant on a tie either.
+
+    A TIE IS PERMANENT FOR THIS RUN, NOT TRANSIENT -- it is not "refused
+    until the clock ticks over". This run's own claim record is
+    write-once (claim_record.py's write_claim_record() uses
+    O_CREAT|O_EXCL and never overwrites an existing entry), and a same-run
+    retry that finds its own record already published takes the
+    "already claimed by this run" branch above, which re-reads and
+    reports the EXISTING record rather than writing a fresh one -- so this
+    run's `claimed_at` is fixed at its FIRST claim and never advances no
+    matter how many times the caller retries. If that fixed value ties the
+    foreign owner's, no amount of waiting or retrying closes the gap: the
+    only way out is a fresh claim under a run id that has never claimed
+    `seg` before (a new `claimed_at`, published after the tied foreign
+    claim), never a retry of this same run.
 
     THIS RUN'S OWN `claimed_at` IS READ FRESH OFF DISK, never computed as
     "now" at this call -- by the time this function runs, the record-first
