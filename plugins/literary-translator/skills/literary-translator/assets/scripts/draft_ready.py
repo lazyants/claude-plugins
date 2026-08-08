@@ -391,12 +391,17 @@ def _claim_note(run_id, seg, durable_root, current_token):
                 established rather than asserting any of the above.
 
             In every one of the four the selector's own guard remains
-            authoritative on whether a reclaim is actually admitted. The
-            two PROVABLE branches do name the outcome it will reach --
-            they read the same records through the same parse and the
-            same strict `>`, so hedging there would be a hedge about
-            arithmetic -- while the TIE and UNPARSEABLE branches assert
-            no outcome beyond "not provably this run's".
+            authoritative on whether a reclaim is actually admitted, but
+            THREE of the four do name the decision it will reach, because
+            they read the same records through the same parse and the same
+            strict `>` -- hedging there would be a hedge about arithmetic.
+            Later ADMITS, older REFUSES, and a tie REFUSES (and that tie
+            branch additionally says the refusal is permanent, which is a
+            claim about the selector's behaviour, not merely about the
+            evidence). Only the UNPARSEABLE branch asserts no outcome: with
+            an unusable ordering key on either side there is nothing to
+            compare, so it says only that this run's claim is not provably
+            the later one.
           - T holds NO claim record (CLAIM_ABSENT): nobody currently holds
             the segment despite the foreign-looking token -- closer to the
             LOST case in REMEDY (re-claiming under this run's own --run-id
