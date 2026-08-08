@@ -1351,11 +1351,11 @@ def run_select_segments(
     selector subsequently refuses; run() pays it deliberately and reports
     the id, rather than shipping a flag that cannot work."""
     if (run_id is None) != (run_resume is None):
-        # Mirrors select_segments.py's own pairing rule (select_segments.py:
-        # 1972) rather than letting the child refuse an argv this function
-        # built: a caller that resolved a run id but forgot to relay
-        # resume_setup.py's `resume` alongside it has a bug HERE, and the
-        # child's refusal would name the argv, not the caller.
+        # Mirrors select_segments.py's own run() pairing rule ("--run-id and
+        # --run-resume must be given TOGETHER or not at all") rather than
+        # letting the child refuse an argv this function built: a caller that
+        # resolved a run id but forgot to relay resume_setup.py's `resume`
+        # has a bug HERE, and the child would name the argv, not the caller.
         fatal(
             "run_select_segments(): run_id and run_resume must be given TOGETHER or "
             f"not at all -- got run_id={run_id!r} run_resume={run_resume!r}. "
@@ -3021,8 +3021,8 @@ def build_codex_job_argv(*, kind: str, seg: str, companion_path: str, durable_ro
     before --disp. Nothing excepts it from the comparison either --
     tests/segment_dispatch_driver.test.py calls
     _assert_argv_positionally_equivalent() with
-    excepted_value_flags=("--disp", "--prompt-file") only (that file's
-    :4318 and :4378) -- so this field is already compared name, position
+    excepted_value_flags=("--disp", "--prompt-file") only, at BOTH of its
+    call sites -- so this field is already compared name, position
     and value on both the translate and the review path. An earlier
     revision of this paragraph said the template emitted no --run-id at
     all and called the resulting divergence "a known, disclosed gap": that

@@ -153,11 +153,12 @@ CLAIM_PREFIX = ".claimed."
 CLAIM_MODE = 0o644
 
 # getattr, not os.O_DIRECTORY: the flag does not exist on every platform
-# Python runs on, and the same guarded idiom is already in codex_job.py:113
-# and scaffold_setup.py:88. Falling back to 0 keeps the open legal there and
-# leaves whatever the platform's own directory-open semantics are to decide
-# -- fsync_directory() below treats a refusal as a durability failure either
-# way, so the fallback can never turn into a silent success.
+# Python runs on, and the same guarded idiom already spells codex_job.py's
+# and scaffold_setup.py's own `_O_DIRECTORY`. Falling back to 0 keeps the
+# open legal there and leaves whatever the platform's own directory-open
+# semantics are to decide -- fsync_directory() below treats a refusal as a
+# durability failure either way, so the fallback can never turn into a
+# silent success.
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 
@@ -257,8 +258,8 @@ def claimed_path(run_id: str, seg: str, runs_dir: Path) -> Path:
     split, sanitize or rewrite it, because the round trip through this path
     is how the driver finds the record the selector wrote. Nor is validation
     missing from the system: every reader checks `seg` on its own way in --
-    select_segments.py:1423 (parse_claim_requests()), codex_job.py:1505
-    (main()), segment_dispatch_driver.py:1395 (parse_claims_field()).
+    select_segments.py's parse_claim_requests(), codex_job.py's main(), and
+    segment_dispatch_driver.py's parse_claims_field().
     """
     problem = validate_run_id(run_id)
     if problem is not None:

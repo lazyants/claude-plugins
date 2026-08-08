@@ -1540,7 +1540,7 @@ def _build_parser():
     p.add_argument("--expect-token", required=True, dest="expect_token")
     # #438: REQUIRED, never derived from --expect-token. Splitting --expect-token
     # at its first colon would recover a RUN_ID in the common case (the same
-    # derivation select_segments.py:565 already uses), but a malformed token then
+    # derivation select_segments.py's draft_run_id() uses), but a malformed token
     # yields no run id, which yields "no claim record found", which reads as
     # "not claimed" and proceeds -- trading a loud failure for a silent one. See
     # D8's own reasoning in the #438 plan.

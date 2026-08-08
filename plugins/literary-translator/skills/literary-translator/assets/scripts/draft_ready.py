@@ -250,12 +250,12 @@ def _claim_run_id(token):
 
 def _claim_note(run_id, seg, durable_root):
     """Best-effort clause to append to a dispatch_token-mismatch refusal
-    when this run's OWN claim record explains it. Returns "" whenever there
-    is nothing useful to say -- including claim_record.py not being
-    co-located (the pre-#438 fixture/deployment contract every existing
-    caller still uses), a missing runs/ tree, or any other unexpected
-    failure: enriching a message must never be able to crash the readiness
-    probe or change its exit code.
+    when this run's OWN claim record explains it. NEVER fatal and never
+    able to change this probe's exit code: enriching a message must not be
+    able to crash the check it enriches, so every failure below becomes
+    TEXT rather than an exception -- and only the two states listed further
+    down (claim_record.py not co-located; CLAIM_ABSENT) return "" and leave
+    the plain pre-#438 message standing unchanged.
 
     CLAIM_PRESENT is the only state worth a positive claim: it means THIS
     run legitimately claimed `seg`, so a token that no longer matches is

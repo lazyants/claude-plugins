@@ -49,88 +49,39 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 CITATION_ANCHORS = {
-    # Anchored at BOTH ends on purpose. This citation drifted once already:
-    # the note grew past 448 while both original anchors stayed comfortably
-    # inside the old range, so nothing failed. `not_evaluated` sits near the
-    # new end and pins it.
-    "SKILL.md:419-554": [
-        "#409 upgrade note",
-        "backfill_ever_converged.py",
-        "`not_evaluated`",
-        "`directory_sync_error`",
-        "`segments_dir_replaced`",
-        "`ambiguous_sentinels`",
-        # The citation claims the note covers BOTH modes. Anchored, because
-        # gating this list on `--apply` is precisely the defect that let a
-        # dry run whose census established nothing read as a healthy project.
-        "They govern BOTH modes",
-        "Known limitation",
+    # --- claim_record.py: the shared contract module -----------------------
+    "claim_record.py:187-233": ["_RUN_ID_DIR_RE.fullmatch", '".." in run_id'],
+    # Anchored at BOTH ends: the validate call pins where the range starts,
+    # the raise pins that the refusal itself is still inside it. A claimed
+    # path that merely VALIDATES and then returns anyway would keep the first
+    # anchor and lose the claim.
+    "claim_record.py:238-266": ["def claimed_path", "raise ValueError"],
+    "claim_record.py:270-304": ["lstat()", "S_ISREG"],
+    "claim_record.py:417-426": ["pre_claim_review", "cache_key_at_claim"],
+    "claim_record.py:484-536": ["_O_DIRECTORY", "os.fsync"],
+    # --- select_segments.py: the only component that may MINT a claim ------
+    "select_segments.py:2852": ["write_claim_record"],
+    # The re-stamp, and the hash it is checked against. Both anchored: the
+    # ordering claim in the entry is about these two calls in this order.
+    "select_segments.py:2893-2897": ["rewrite_draft_dispatch_token", "expected_content_sha1"],
+    "select_segments.py:2267": ["os.O_EXCL", "_O_NOFOLLOW"],
+    "select_segments.py:2308-2313": ["staged_sha1 != expected_content_sha1", "Something replaced or edited"],
+    # --- the two components that may only REFUSE ---------------------------
+    "codex_job.py:1431-1433": ["_refuse_claimed_translate()", "claimed-segment-refused"],
+    # Anchored on all three: the entry's claim is specifically that the run id
+    # is resolved BEFORE selection and forwarded WITH its resume value, so
+    # losing any one of the three would falsify the sentence.
+    "segment_dispatch_driver.py:4857-4878": [
+        "resolve_run_id(",
+        "run_select_segments(",
+        "run_resume=run_resume_literal",
     ],
-    "cache_key.py:149": ["ledger_update.py"],
-    "cache_key.py:156": ["segment_dispatch_driver.py"],
-    "cache_key.py:163": ["DERIVATION_BUNDLE_MEMBERS"],
-    "draft_ready.py:491-492": ["expect_token", "stale/straggler draft"],
-    "ledger_update.py:824-827": [
-        "current_draft_sha1 != reviewer_draft_sha1",
-        "draft changed since review",
-    ],
-    "resume_setup.py:719-722": ["version = {", "plugin_bundle_hash"],
-    "resume_setup.py:723-725": ["orchestration_bundle_hash", "_read_marker"],
-    "resume_setup.py:729-736": ["digest_input = {", "_sha256_hex"],
-    "scaffold_setup.py:63-68": [
-        "ORCHESTRATION_BUNDLE_MEMBERS",
-        "select_segments.py",
-    ],
-    "segment_dispatch_driver.py:760-761": ["def fatal(", "raise DriverError("],
-    "segment_dispatch_driver.py:2972-2973": [
-        "translate_dispatch_token",
-        'f"{run_id}:{seg}"',
-    ],
-    "segment_dispatch_driver.py:3199-3214": [
-        "_matched_review_round_label",
-        "return None",
-    ],
-    "segment_dispatch_driver.py:3303": ["draft_ok"],
-    "segment_dispatch_driver.py:3381": ['"action": "translate"'],
-    "segment_dispatch_driver.py:3485-3486": [
-        "draft_matches_review",
-        "current_sha1 == reviewed_sha1",
-    ],
-    "segment_dispatch_driver.py:3635-3641": [
-        "current_sha1 is None",
-        "invocation never read",
-    ],
-    "select_segments.py:875": ["HUMAN_ESCALATION_STATUSES"],
-    "select_segments.py:1257-1275": [
-        "ledger_segments.get(seg)",
-        "HUMAN_ESCALATION_STATUSES",
-        '"category": "human_escalation"',
-        '"category": "recoverable"',
-    ],
-    "select_segments.py:1266-1270": [
-        "HUMAN_ESCALATION_STATUSES",
-        'record.get("reason")',
-    ],
-    "select_segments.py:1293": ["DEFAULT_ELIGIBLE_CATEGORIES"],
-    "select_segments.py:2461-2467": [
-        "classify_ever_converged_sentinel",
-        "ambiguous_sentinels.append",
-    ],
-    "select_segments.py:2470-2477": [
-        "not clearable by --allow-retranslate-converged",
-        "if ambiguous_sentinels:",
-        "fatal(",
-    ],
-    "select_segments.py:2765": ["allow_retranslate_converged"],
-    "select_segments.py:2947-2996": [
-        "if previously_converged and not args.allow_retranslate_converged:",
-        "second_loss",
-        # The refusal itself, not just the condition guarding it. Without this
-        # the call could be refactored out of the range while every other
-        # anchor stayed put.
-        "fatal(",
-        "previously_converged=previously_converged",
-    ],
+    # --- the default template path -----------------------------------------
+    "mass-translate-wf.template.js:974": ["--kind translate", "--run-id "],
+    "mass-translate-wf.template.js:1036": ["--kind review", "--run-id "],
+    # --- migration: the two bundle registrations ---------------------------
+    "cache_key.py:157": ['"claim_record.py"'],
+    "scaffold_setup.py:73": ['"claim_record.py"'],
 }
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an

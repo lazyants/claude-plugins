@@ -1357,9 +1357,9 @@ def select_only_segs(only_segs: list, classification: dict):
 # D10) and POPULATIONS.md for the full design. This section implements the
 # SELECTOR half only: it validates admission and WRITES the durable claim
 # record (claim_record.py), then reports the authorization in this script's
-# own JSON output for the driver to consume (D3). It never rewrites a
-# draft's own dispatch_token -- claim_record.py's own module docstring:
-# "This record has two readers (the selector admits, the driver acts)".
+# own JSON output for the driver to consume (D3). It ALSO re-stamps the
+# draft's own dispatch_token (D4, rewrite_draft_dispatch_token() below),
+# strictly AFTER that record is durable -- see that function's docstring.
 # ---------------------------------------------------------------------------
 
 def _import_claim_record():
@@ -1636,7 +1636,7 @@ def evaluate_fresh_segpack_precondition(seg: str, durable_root: Path, canon_entr
     name that gained a target only in the CURRENT canon, or lost the one it
     had). Returns a list of mismatch dicts (empty == fresh); a single dict
     carrying only 'error' means the segpack itself could not be evaluated."""
-    sp = read_json_nonfatal(segpack_path(seg, durable_root), f"segpack for segment {seg!r}")
+    sp = read_segpack_nonfatal(seg, durable_root)
     if isinstance(sp, str):
         return [{"error": sp}]
     names = sp.get("names")
@@ -2048,8 +2048,13 @@ def evaluate_claim_admission(
             "written only on the convergence path); no historical baseline exists to compare "
             "against"
         )
-    machinery_only = bool(moved_fields) and all(
-        m["field"] in MACHINERY_ONLY_CACHE_KEY_FIELDS for m in moved_fields
+    # TRI-STATE, and produced in ONE place rather than half here and half at
+    # the `extras` key below: None is "no movement to characterise", a
+    # different fact from False -- see claim_record.py's own field commentary.
+    machinery_only = (
+        all(m["field"] in MACHINERY_ONLY_CACHE_KEY_FIELDS for m in moved_fields)
+        if moved_fields
+        else None
     )
 
     extras = {
@@ -2073,7 +2078,7 @@ def evaluate_claim_admission(
         # commentary.
         "pre_claim_cache_key": stored_cache_key if isinstance(stored_cache_key, dict) else None,
         "cache_key_moved_fields": moved_fields,
-        "cache_key_movement_machinery_only": machinery_only if moved_fields else None,
+        "cache_key_movement_machinery_only": machinery_only,
         "cache_key_note": cache_key_note,
         # D10: captured BEFORE the claim voids the stored review's standing
         # -- otherwise the only record of what the operator was shown at
@@ -2146,11 +2151,6 @@ def rewrite_draft_dispatch_token(
     draft re-stamped for this run with NO record, which for --from-cap's
     population (no `.ever_converged` sentinel) would leave nothing at all
     refusing it and the segment would simply be retranslated.
-
-    Idempotent: a draft already carrying `new_token` is a no-op, not an
-    error -- a re-claim in the same run must not be mistaken for a second
-    authorization (D9). Returns (True, "") on success or no-op, (False,
-    detail) on failure -- never raises.
 
     Atomic (temp file + fsync + os.replace + a directory fsync, the same
     discipline ledger_update.py's write_fragment_atomically() and
@@ -2893,7 +2893,7 @@ def run(args, dirs: dict) -> dict:
             token_ok, token_detail = rewrite_draft_dispatch_token(
                 seg,
                 dirs["durable_root"],
-                f"{run_id}:{seg}",
+                draft_dispatch_token_for(run_id, seg),
                 expected_content_sha1=extras["current_draft_sha1"],
             )
             if not token_ok:
