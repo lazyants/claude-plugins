@@ -483,14 +483,26 @@ def _companion_file(tmp_path):
 
 
 def _argv(tmp_path, **over):
+    """#438: `--run-id` is part of the DEFAULT argv, and defaults to the run
+    component of the default `--expect-token` so the two agree.
+
+    It was absent before, which made every usage test below pass for the WRONG
+    reason once main() started refusing a missing --run-id: `test_usage_missing_
+    companion` (say) got its exit 2 from the --run-id check, several checks
+    earlier, and would have kept passing even if the companion check had been
+    deleted outright. A caller that wants to exercise the run-id checks
+    themselves overrides `run_id`; `run_id=None` omits the flag entirely."""
     d = dict(kind="translate", companion=_companion_file(tmp_path), cwd=str(tmp_path),
              seg="c001", prompt_file=_prompt_file(tmp_path), expect_token="RUN:c001",
-             disp="d1", deadline_sec="600")
+             disp="d1", deadline_sec="600", run_id="RUN")
     d.update(over)
-    return ["--kind", d["kind"], "--companion", d["companion"], "--cwd", d["cwd"],
+    argv = ["--kind", d["kind"], "--companion", d["companion"], "--cwd", d["cwd"],
             "--seg", d["seg"], "--prompt-file", d["prompt_file"],
             "--expect-token", d["expect_token"], "--disp", d["disp"],
             "--deadline-sec", d["deadline_sec"], "--node", "node"]
+    if d["run_id"] is not None:
+        argv += ["--run-id", d["run_id"]]
+    return argv
 
 
 def test_usage_bad_seg(tmp_path):
@@ -531,10 +543,88 @@ def test_job_out_count_must_be_exactly_one(tmp_path, text):
 
 
 # --------------------------------------------------------------------------- #
+# in-process white-box: --run-id SHAPE, and its consistency with --expect-token
+# (#438 M3). main() previously checked only that --run-id was non-blank, then
+# handed the raw value to claim_record.claimed_path(); and nothing tied the
+# claim NAMESPACE (--run-id) to the run the token dispatches for.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("bad_run_id", ["../x", "/tmp/elsewhere", "z..poison",
+                                        "a/../..", " RUN", "."])
+def test_usage_run_id_shape_is_fatal_not_a_traceback(tmp_path, capsys, bad_run_id):
+    """A --run-id that is not usable as a single path component must exit 2
+    with a message naming the FLAG. The --expect-token is built to AGREE with
+    the bad value on purpose: with an agreeing token, the namespace check
+    below cannot fire, so the only thing that can produce the 2 is the shape
+    check itself. Delete that check and the value reaches
+    claim_record.claimed_path(), which now raises -- a refusal reached through
+    an exception, reported as `reason: error: ValueError(...)`, is not an
+    acceptable answer to a mistyped flag and is not exit 2 either."""
+    argv = _argv(tmp_path, run_id=bad_run_id, expect_token="%s:c001" % bad_run_id)
+    assert codex_job.main(argv) == 2
+    err = capsys.readouterr().err
+    assert "--run-id" in err, err
+    assert "--expect-token" not in err, (
+        "this must be refused by the SHAPE check, not by the namespace check -- "
+        "got: %s" % err
+    )
+
+
+@pytest.mark.parametrize("token", ["RUN-A:c001", "RUN-A:c001:r2"])
+def test_usage_expect_token_and_run_id_must_name_the_same_run(tmp_path, capsys, token):
+    """The claim namespace must be the run the token dispatches for. With a
+    claim on record under RUN-A, `--expect-token RUN-A:c001 --run-id RUN-B`
+    looked the claim up under RUN-B, found nothing, and read CLAIM_ABSENT as
+    "not claimed" -- so the D8 chokepoint could be walked straight past by a
+    direct invocation. Both values here are individually valid, so nothing
+    EARLIER in main() can produce this exit 2: delete the namespace check and
+    main() falls through into job.run(). Covers the review-shaped
+    RUN:seg:r<label> token too, whose run component is still everything before
+    the FIRST colon."""
+    assert codex_job.main(_argv(tmp_path, expect_token=token, run_id="RUN-B")) == 2
+    err = capsys.readouterr().err
+    assert "--expect-token" in err and "RUN-A" in err and "RUN-B" in err, err
+
+
+def test_usage_agreeing_token_and_run_id_clear_both_new_checks(tmp_path, capsys):
+    """The control the two tests above need: a matching pair must PASS both new
+    checks rather than being refused by a check that refuses everything. Proven
+    by leaving exactly one LATER defect in the argv (a --companion that does not
+    exist) and asserting the exit 2 comes from THAT check -- main() cannot reach
+    the companion check without having cleared the run-id shape and namespace
+    checks, both of which sit above it."""
+    argv = _argv(tmp_path, run_id="RUN", expect_token="RUN:c001",
+                 companion=str(tmp_path / "definitely_not_here.mjs"))
+    assert codex_job.main(argv) == 2
+    err = capsys.readouterr().err
+    assert "--companion" in err, err
+    assert "--run-id" not in err and "--expect-token" not in err, err
+
+
+def test_usage_token_with_no_run_component_is_left_alone(tmp_path, capsys):
+    """The deliberate non-derivation rule, pinned. A token carrying NO run
+    component (no colon at all) must NOT be refused: codex_job.py never DERIVES
+    a run id from --expect-token -- deriving one is what would turn a malformed
+    token into "no claim record" -> "not claimed" -> proceed -- so there is
+    nothing to compare and nothing to refuse, and the gates refuse a malformed
+    token on their own account. Drop the `token_colon` guard from the namespace
+    check and this argv is refused with the token message instead."""
+    argv = _argv(tmp_path, run_id="RUN", expect_token="notoken",
+                 companion=str(tmp_path / "definitely_not_here.mjs"))
+    assert codex_job.main(argv) == 2          # from the companion check, below both
+    err = capsys.readouterr().err
+    assert "--companion" in err, err
+    assert "--expect-token" not in err, err
+
+
+# --------------------------------------------------------------------------- #
 # in-process white-box: time ceilings + finalize-tail (case o)
 # --------------------------------------------------------------------------- #
 def _mkjob(tmp_path, kind="translate", seg="c001", tok="RUN:c001", disp="d1",
-           deadline=100, poll=1):
+           deadline=100, poll=1, run_id=None):
+    """`run_id` defaults to None -- the pre-#438 white-box shape every existing
+    caller below relies on, in which the D8 claim guard is a no-op by
+    construction (see codex_job.py's own __init__ docstring). Pass it explicitly
+    to exercise the guard."""
     seg_dir = tmp_path / "durable" / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
     root = tmp_path / "durable"
@@ -542,7 +632,7 @@ def _mkjob(tmp_path, kind="translate", seg="c001", tok="RUN:c001", disp="d1",
     return codex_job.CodexJob(
         kind=kind, seg=seg, tok=tok, disp=disp, root=str(root), companion=companion,
         prompt_text=PROMPT_ONE, prompt_file=_prompt_file(tmp_path), deadline_sec=deadline,
-        poll_sec=poll, effort="high", node="node")
+        poll_sec=poll, effort="high", node="node", run_id=run_id)
 
 
 def _seed_sandbox(tmp_path, job, content=None, mode="file"):
@@ -976,6 +1066,149 @@ def test_run_no_budget_adopt_falls_through_to_launch(tmp_path, monkeypatch):
     assert rc == 1
     assert launch_called["v"] is True               # launch WAS attempted -- no starvation
     assert os.path.exists(job.pending)               # adopt_pending's False path never deleted it
+
+
+def _write_claim(job, run_id=None, profile="from-converged"):
+    """A REAL claim record at runs/<run_id>/.claimed.<seg>, written through
+    claim_record.py's own builder + writer -- never hand-rolled JSON, so a
+    drift in that module's field set or write discipline surfaces here too.
+
+    The payload is every declared field defaulted to None, overridden with the
+    few this file's assertions read. Deliberately built from
+    CLAIM_RECORD_FIELDS rather than by naming all of them: nothing in a claim
+    ORDERING test depends on what the record SAYS (classify_claim_record() is
+    an lstat and never opens the file), so spelling the full field list here
+    would couple these tests to a field set they never read, while this shape
+    still fails loudly if a field is REMOVED from the builder.
+
+    `codex_job.claim_record` -- the module object the DRIVER itself imported --
+    is used rather than a second independent load, so the record these tests
+    write and the record the guard reads can never be produced by two different
+    copies of the module."""
+    cr = codex_job.claim_record
+    run_id = job.run_id if run_id is None else run_id
+    path = cr.claimed_path(run_id, job.seg, Path(job.root) / "runs")
+    payload = cr.build_claim_record(**dict(
+        {field: None for field in cr.CLAIM_RECORD_FIELDS},
+        seg=job.seg, profile=profile, run_id=run_id,
+        operator_invocation="pytest tests/codex_job_driver.test.py",
+        claimed_at="2026-08-08T00:00:00Z"))
+    ok, detail = cr.write_claim_record(path, payload)
+    assert ok, detail
+    return path
+
+
+def test_claimed_segment_refuses_before_adopt_pending_can_promote(tmp_path, monkeypatch):
+    """#438 F1: adopt_pending() is a SECOND route that overwrites the canonical
+    draft (os.replace(self.pending, self.canonical)), so the D8 claim guard has
+    to sit ABOVE it, not merely above launch().
+
+    The state exercised is exactly the one D8 exists for: a CLAIMED segment
+    whose draft is missing/invalid, so safe_adopt() fails. A same-run deferred
+    attempt is sitting in the pending slot and would pass every candidate gate
+    (a CROSS-run one is already refused by the gates' own --expect-token check,
+    which is why the reachable case is same-run). With the guard below
+    adopt_pending(), that attempt is promoted over the claimed draft and the
+    pre_claim_content_sha1 baseline the claim exists to preserve is destroyed.
+
+    `calls == []` is the ORDERING assertion, and the one that makes this test
+    about placement rather than outcome: adopt_pending() cannot run a single
+    gate without being reached, so an empty call log proves the refusal
+    happened first. Move the guard back below adopt_pending() and this test
+    reports rc 0 / reason 'adopted-pending' / a promoted canonical / a consumed
+    pending / two recorded gate calls -- five independent failures."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100, run_id="RUN")
+    claim_path = _write_claim(job)
+    Path(job.pending).write_text(
+        json.dumps({"dispatch_token": job.tok, "seg": job.seg}), encoding="utf-8")
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    monkeypatch.setattr(job, "_gate", gate)
+    launched = {"v": False}
+
+    def spy_launch():
+        launched["v"] = True
+        return True
+    monkeypatch.setattr(job, "launch", spy_launch)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert job.reason == "claimed-segment-refused"
+    assert calls == [], (
+        "adopt_pending() ran its candidate gates -- the D8 guard is BELOW it "
+        "again, and a same-run deferred attempt can be promoted over a claimed "
+        "draft: %r" % (calls,)
+    )
+    assert os.path.exists(job.pending), "a refused claim must not consume the pending"
+    assert not os.path.exists(job.canonical), "the claimed draft's slot must be untouched"
+    assert launched["v"] is False
+    assert job.seg in job.error_detail and str(claim_path) in job.error_detail
+
+
+def test_unclaimed_segment_with_a_run_id_still_adopts_a_valid_pending(tmp_path, monkeypatch):
+    """The control the test above needs: moving the guard UP must not break the
+    #213 adoption path for the ordinary case. Same fixture, same run_id wired in
+    -- only the claim record is absent -- and adopt_pending() must still run its
+    gates and promote. A guard that refused unconditionally, or one that read
+    CLAIM_ABSENT as "cannot rule out a claim", would pass the refusal test above
+    for entirely the wrong reason and fails here."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100, run_id="RUN")
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    monkeypatch.setattr(job, "_gate", gate)
+    launched = {"v": False}
+
+    def spy_launch():
+        launched["v"] = True
+        return True
+    monkeypatch.setattr(job, "launch", spy_launch)
+
+    rc = job.run()
+
+    assert rc == 0
+    assert job.reason == "adopted-pending"
+    assert calls == ["draft_ready.py", "validate_draft.py"]
+    assert launched["v"] is False
+    assert os.path.exists(job.canonical)
+    assert not os.path.exists(job.pending)
+
+
+def test_unusable_run_id_refuses_the_translate_rather_than_crashing(tmp_path, monkeypatch):
+    """claim_record.claimed_path() now RAISES on a run id it cannot safely turn
+    into a path. main() rejects such a value at usage time, but a caller that
+    constructs CodexJob() directly can still reach the guard with one -- and the
+    guard owns the answer: an unusable run id means the claim state cannot be
+    determined AT ALL, which is strictly worse than an unreadable record, so it
+    REFUSES. Let the ValueError escape instead and run()'s generic handler turns
+    a deliberate refusal into `reason: error: ValueError(...)`, which reads like
+    a driver crash; map it to "not claimed" instead and launch() overwrites a
+    draft nobody checked the claim state of."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100, run_id="../x")
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    monkeypatch.setattr(job, "_gate", gate)
+    launched = {"v": False}
+
+    def spy_launch():
+        launched["v"] = True
+        return True
+    monkeypatch.setattr(job, "launch", spy_launch)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert job.reason == "claimed-segment-refused", (
+        "an unusable run id must be a REFUSAL, not a crash reported as one: %r"
+        % (job.reason,)
+    )
+    assert launched["v"] is False
+    assert calls == []
+    assert "../x" in job.error_detail and "cannot be ruled out" in job.error_detail
 
 
 def test_run_safe_adopt_cleans_stale_pending(tmp_path, monkeypatch):

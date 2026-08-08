@@ -312,10 +312,19 @@ Forwards `--only-segs`/`--allow-retranslate-converged`/`--allow-empty`/
 `--from-cap`/`--from-converged` verbatim to `select_segments.py` -- see
 that script's own module docstring for their exact semantics; this
 script adds no independent meaning to any of them. `--from-cap`/
-`--from-converged` (#438) request claim VALIDATION for the named ids
-against this (read-only) Step 1 gate call -- never a run_id, and never
-the commit that actually writes a claim (D1a's two-phase split; the
-commit's own driving is owned elsewhere and still in flux). Whatever
+`--from-converged` (#438) request claim admission for the named ids from
+the Step 1 gate call, and that admission is SINGLE-PHASE: the one
+`select_segments.py` invocation this driver makes both validates the ids
+and, for every id that passes, writes the durable claim record and
+re-stamps the draft's own `dispatch_token`. There is no separate commit
+call, here or anywhere else -- an earlier revision of the design split
+admission into validate/commit and was abandoned; nothing in this file
+drives a second phase, and no future caller should be built expecting
+one. Because the write is part of THAT call, the claim needs a RUN_ID
+before it, so `run()` resolves the run id BEFORE selection whenever a
+claim flag is present and forwards it as `--run-id`/`--run-resume` (see
+`run_select_segments()` and `run()`'s own call site for the #409 Step 3
+ordering property that makes resolving early safe). Whatever
 `select_segments.py` reports back in its own `claims` field is read back,
 validated (see `parse_claims_field()`), and folded into the dispatch
 context -- fatal on anything missing, malformed, or mismatched (#438 D3).
@@ -957,9 +966,33 @@ def claim_refusal_for_translate(ctx: "DispatchContext", seg: str) -> "str | None
     this run cannot prove is unclaimed -- so the safe default flips:
     failing to block here is the destructive direction D8 exists to
     prevent, while over-blocking on a record this run cannot read only
-    leaves the segment recoverable for the next invocation."""
+    leaves the segment recoverable for the next invocation.
+
+    claimed_path() RAISES ValueError on a run id it will not build a path
+    from (#438: it validates with claim_record.py's own validate_run_id()
+    rather than trusting its callers, so a reader cannot forget). That
+    exception is mapped to a REFUSAL here, in the same direction as the
+    two returns below: a run id this driver cannot even name a claim
+    record for is strictly WORSE than a record it cannot read -- it means
+    D8 has no way to look, so it cannot possibly clear the segment.
+    run() validates the resolved run id with accepted_run_id() before it
+    ever becomes ctx.run_id, so this cannot fire on the shipped path; it
+    is caught here anyway so the property holds by inspection of THIS
+    function rather than by tracing which caller built the context --
+    the same reasoning _call_resume_setup() states for repeating its own
+    caller's leaf check. Letting it escape instead would reach main()'s
+    defensive catch-all as `unexpected error`, exit 2, killing a whole
+    batch over one segment."""
     claim_record_mod = _load_claim_record_module(ctx.dirs["scripts_dir"])
-    path = claim_record_mod.claimed_path(ctx.run_id, seg, ctx.dirs["runs_dir"])
+    try:
+        path = claim_record_mod.claimed_path(ctx.run_id, seg, ctx.dirs["runs_dir"])
+    except ValueError as exc:
+        return (
+            f"segment {seg!r}'s claim record path could not be built for run id "
+            f"{ctx.run_id!r} ({exc}) -- refusing the translate dispatch rather than "
+            f"dispatching under a run id whose claim records this driver cannot "
+            f"even look for (#438 D8)"
+        )
     state, detail = claim_record_mod.classify_claim_record(path)
     if state == claim_record_mod.CLAIM_ABSENT:
         return None
@@ -1256,6 +1289,7 @@ def run_select_segments(
     from_cap=None,
     from_converged=None,
     run_id=None,
+    run_resume=None,
     durable_root_str=None,
     plugin_root_str=None,
 ) -> dict:
@@ -1269,25 +1303,76 @@ def run_select_segments(
     (missing script, bad subprocess, unparseable output).
 
     `from_cap`/`from_converged` (#438 D1/D2): forwarded verbatim to
-    select_segments.py's own like-named flags, requesting a claim
-    VALIDATION for the named ids under the `--from-cap`/`--from-converged`
-    profile respectively. See run()'s own call site and
-    parse_claims_field() below for how the resulting authorization is
-    read back out of select_segments.py's JSON payload -- never assumed
-    from these arguments alone.
+    select_segments.py's own like-named flags, requesting claim ADMISSION
+    for the named ids under the `--from-cap`/`--from-converged` profile
+    respectively. Admission is SINGLE-PHASE -- this one call validates
+    the ids AND writes each admitted id's durable claim record plus its
+    draft's re-stamped dispatch_token, all before it returns. See run()'s
+    own call site and parse_claims_field() below for how the resulting
+    authorization is read back out of select_segments.py's JSON payload
+    -- never assumed from these arguments alone.
 
-    `run_id`: forwarded as select_segments.py's own `--run-id` whenever
-    given. run()'s own call site currently ALWAYS passes `run_id=None`
-    here -- a codex BLOCKER on an earlier revision (which resolved run_id
-    before this call, whenever a claim was requested) found that
-    resolve_run_id() -> resume_setup.py writes runs/<ID>/input.digest as a
-    side effect, which the #409 Step 3 gate reads as PROOF a historical
-    gate ran, so minting it before this call could manufacture evidence
-    that gate must not have. select_segments.py's own claim admission is
-    a two-phase validate/commit (D1a); this parameter exists for whatever
-    later drives the commit phase, once its own contract (owned
-    elsewhere, still in flux) lands -- not for this call, which is
-    validate-only and must never carry a run_id."""
+    `run_id`/`run_resume`: forwarded as select_segments.py's own
+    `--run-id`/`--run-resume`, which that script requires as a PAIR (it
+    refuses either one alone -- "--run-id and --run-resume must be given
+    TOGETHER or not at all" -- before any gate work runs) and requires
+    outright whenever a claim is requested ("a claim (--from-converged/
+    --from-cap) was requested but --run-id was not given" -- a claim
+    re-stamps a draft's authorization TO a run, so there is no such thing
+    as a claim without one). `run_resume` is the literal string
+    "true"/"false" relaying resume_setup.py's own boolean `resume` field,
+    not a Python bool -- see run_resume_literal() below, which is the only
+    sanctioned way to produce it.
+
+    An EARLIER revision of this driver passed `run_id=None` here
+    unconditionally and documented that it must never carry one: that
+    text described a two-phase validate/commit design (D1a) that was
+    abandoned, and it made `--from-cap`/`--from-converged` dead on
+    arrival on this path -- select_segments.py fatals on a claim without
+    a --run-id, so every claim the driver forwarded was refused at the
+    gate. The hazard that reasoning was built on was real but is closed
+    elsewhere now: resolve_run_id() -> resume_setup.py writes
+    runs/<ID>/input.digest as a side effect, and the #409 Step 3 gate
+    reads a digest as proof the resume-integrity gate ran for that id, so
+    minting an id before this call used to be able to manufacture that
+    evidence. select_segments.py's Step 3 evidence is now a ONE-SHOT
+    SNAPSHOT taken before that invocation writes anything -- its "#409
+    Step 3: evidence scan" block calls scan_dispatching_run_ids() and
+    scan_workflow_run_ids() exactly once each and states the rule
+    normatively ("Step 3's evidence is a property of the tree AS THIS
+    INVOCATION FOUND IT") -- and a FRESH id (`--run-resume false`) that
+    collides with pre-existing dispatch evidence is refused outright
+    ("was reported FRESH by resume_setup.py ... but this project already
+    has dispatch evidence bearing that exact id"). A freshly minted id
+    carries no drafts and no runs/workflows/ directory of its own, so it
+    never enters the evidence set at all and the digest written for it
+    proves nothing to the gate either way. The remaining honest cost of
+    resolving early is an ORPHANED runs/<ID>/ directory whenever the
+    selector subsequently refuses; run() pays it deliberately and reports
+    the id, rather than shipping a flag that cannot work."""
+    if (run_id is None) != (run_resume is None):
+        # Mirrors select_segments.py's own pairing rule (select_segments.py:
+        # 1972) rather than letting the child refuse an argv this function
+        # built: a caller that resolved a run id but forgot to relay
+        # resume_setup.py's `resume` alongside it has a bug HERE, and the
+        # child's refusal would name the argv, not the caller.
+        fatal(
+            "run_select_segments(): run_id and run_resume must be given TOGETHER or "
+            f"not at all -- got run_id={run_id!r} run_resume={run_resume!r}. "
+            "select_segments.py refuses the pair split (its own --run-resume carries "
+            "resume_setup.py's 'resume' field, which is what lets its #409 Step 3 "
+            "fresh-evidence check tell a resumed id from a freshly minted one).",
+            exit_code=2,
+        )
+    if run_resume is not None and run_resume not in ("true", "false"):
+        fatal(
+            f"run_select_segments(): run_resume must be the literal string 'true' or "
+            f"'false' (select_segments.py's own --run-resume choices), got "
+            f"{run_resume!r} -- build it with run_resume_literal(), never by "
+            "formatting a Python bool.",
+            exit_code=2,
+        )
+
     select_segments_script = dirs["select_segments_script"]
     _refuse_unless_executable_leaf(select_segments_script, "select_segments.py")
 
@@ -1303,7 +1388,7 @@ def run_select_segments(
     if from_converged is not None:
         cmd += ["--from-converged", from_converged]
     if run_id is not None:
-        cmd += ["--run-id", run_id]
+        cmd += ["--run-id", run_id, "--run-resume", run_resume]
     cmd += _root_forward_args(dirs, durable_root_str, plugin_root_str)
 
     try:
@@ -2227,6 +2312,67 @@ def _call_resume_setup(script: Path, payload: dict, dirs: dict, durable_root_str
     return result
 
 
+def accepted_run_id(run_result: dict) -> str:
+    """The `effectiveRunId` out of a resolve_run_id() payload, validated
+    with this file's own validate_run_id() before any caller is allowed to
+    build a path or an argv out of it.
+
+    resume_setup.py mints and validates its own ids, so in practice this
+    check passes -- which is exactly why it was missing here, and exactly
+    why it belongs. Every downstream consumer of this value splices it,
+    UNQUOTED, into something that trusts it: claim_record.claimed_path()
+    builds `runs/<RUN_ID>/.claimed.<seg>` from it (and, since #438, RAISES
+    on an unsafe one rather than returning a path outside the durable
+    root), build_codex_job_argv() passes it to codex_job.py as `--run-id`,
+    and translate_dispatch_token()/review_dispatch_token() bake it into
+    every dispatch_token this run writes. Taking `run_result["effective
+    RunId"]` unchecked made all of that conditional on a SIBLING script's
+    behaviour rather than on anything provable here -- and this driver
+    already owned an identical validate_run_id() it simply never applied
+    to the one id it actually runs on.
+
+    Refuses with exit 2 (an environment/contract failure, not a gate
+    refusal): a resume_setup.py that answers with a run id this driver
+    cannot safely use is a broken install or a tampered sibling, never a
+    project-state decision an operator can act on."""
+    run_id = run_result.get("effectiveRunId")
+    problem = validate_run_id(run_id)
+    if problem is not None:
+        fatal(
+            f"resume_setup.py returned an unusable effectiveRunId: {problem} "
+            f"This driver refuses to build claim paths, dispatch tokens or "
+            f"codex_job.py argv out of it.",
+            exit_code=2,
+        )
+    return run_id
+
+
+def run_resume_literal(run_result: dict) -> str:
+    """resolve_run_id()'s own boolean `resume` field as the literal string
+    select_segments.py's `--run-resume` accepts ("true"/"false", its
+    argparse `choices`).
+
+    Deliberately strict about the field being a real bool rather than
+    coercing whatever is there with a truth test. `--run-resume` is a
+    RELAY, and select_segments.py's #409 Step 3 fresh-evidence check
+    branches on the two literals in OPPOSITE directions: "false" arms a
+    refusal (a fresh id colliding with pre-existing dispatch evidence),
+    "true" arms a different, weaker one (a resumed id with no digest). A
+    missing or non-bool `resume` silently coerced to False would relay a
+    verdict this driver never actually received into a security gate --
+    the one place a plausible default is worse than a refusal."""
+    resume = run_result.get("resume")
+    if not isinstance(resume, bool):
+        fatal(
+            f"resume_setup.py's 'resume' field is {resume!r}, not a JSON boolean -- "
+            f"select_segments.py's --run-resume relays exactly this field into its "
+            f"#409 Step 3 fresh-evidence check, and a guessed value there would be a "
+            f"claim about the resume-integrity gate that nothing actually made.",
+            exit_code=2,
+        )
+    return "true" if resume else "false"
+
+
 # ---------------------------------------------------------------------------
 # Phase 2 -- resolve the codex-companion.mjs path by running
 # resolve_codex_companion.py, ABORT on any non-zero exit. `dirs[
@@ -2867,16 +3013,25 @@ def build_codex_job_argv(*, kind: str, seg: str, companion_path: str, durable_ro
     claim check only actually gates a translate, but its CLI makes the
     flag required on every invocation regardless of kind.
 
-    UNLIKE `node_bin` above, `--run-id` genuinely widens the equivalence
-    surface rather than staying outside it: as of this writing
-    mass-translate-wf.template.js's own translateDrivePrompt/
-    reviewDrivePrompt do NOT emit `--run-id` at all (the template's own
-    codex_job.py launch predates #438), so the byte-equivalence test's
-    field-for-field comparison will disagree on this ONE field until the
-    template is updated to match -- a known, disclosed gap on the DEFAULT
-    dispatch path, not a defect in this function. See this driver's own
-    module docstring / #438 tracking for the template-side fix this
-    still needs."""
+    UNLIKE `node_bin` above, `--run-id` is INSIDE the equivalence surface,
+    and both sides emit it: mass-translate-wf.template.js's own
+    translateDrivePrompt (template:974) and reviewDrivePrompt
+    (template:1036) splice `--run-id " + RUN_ID + "` in the same argv
+    position this function does, immediately after --expect-token and
+    before --disp. Nothing excepts it from the comparison either --
+    tests/segment_dispatch_driver.test.py calls
+    _assert_argv_positionally_equivalent() with
+    excepted_value_flags=("--disp", "--prompt-file") only (that file's
+    :4318 and :4378) -- so this field is already compared name, position
+    and value on both the translate and the review path. An earlier
+    revision of this paragraph said the template emitted no --run-id at
+    all and called the resulting divergence "a known, disclosed gap": that
+    was true of the template as it stood when #438 started and stopped
+    being true in the same commit, so it is corrected rather than kept.
+    Do NOT re-add an exception for this flag to the equivalence test to
+    "fix" a failure here -- a disagreement on --run-id now means the two
+    dispatch paths genuinely stamp different ids, which is the defect the
+    comparison exists to catch."""
     argv = [
         "--kind", kind,
         "--companion", companion_path,
@@ -4539,12 +4694,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         metavar="SEG1,SEG2,...",
         help=(
             "#438: forwarded verbatim to select_segments.py's own --from-cap "
-            "-- request claim VALIDATION for the named ids under the "
+            "-- request claim ADMISSION for the named ids under the "
             "'--from-cap' admission profile (capped, human_escalation "
-            "segments with a non-clean stored review). This call is "
-            "read-only (D1a); it does not itself write a claim. Never a "
-            "blanket authorization: only the ids named here, validated and "
-            "reported back in this run's 'claims'."
+            "segments with a non-clean stored review). Admission is "
+            "single-phase and it WRITES: every id that passes gets a durable "
+            "claim record plus a re-stamped draft dispatch_token, inside the "
+            "one gate call, so this driver resolves a RUN_ID before it (and "
+            "leaves runs/<RUN_ID>/ behind even if the gate then refuses). "
+            "Never a blanket authorization: only the ids named here, admitted "
+            "and reported back in this run's 'claims'."
         ),
     )
     parser.add_argument(
@@ -4553,11 +4711,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         metavar="SEG1,SEG2,...",
         help=(
             "#438: forwarded verbatim to select_segments.py's own "
-            "--from-converged -- request claim VALIDATION for the named "
+            "--from-converged -- request claim ADMISSION for the named "
             "ids under the '--from-converged' admission profile (previously "
-            "converged segments whose draft has since drifted). This call "
-            "is read-only (D1a); it does not itself write a claim. Never a "
-            "blanket authorization: only the ids named here."
+            "converged segments whose draft has since drifted). Admission is "
+            "single-phase and it WRITES -- see --from-cap's own help text for "
+            "what that costs. Never a blanket authorization: only the ids "
+            "named here."
         ),
     )
     parser.add_argument(
@@ -4637,31 +4796,77 @@ def run(args, dirs: dict) -> dict:
                 if problem is not None:
                     fatal(f"{flag_name}: unsafe segment id: {problem}", exit_code=2)
 
-    # #438 D1a, REVERTED after a codex BLOCKER: an earlier revision of this
-    # function resolved run_id HERE, before select_segments.py ever ran,
-    # whenever --from-cap/--from-converged was given -- reasoning that
-    # resolve_run_id() reads no `segs` (true) so nothing else at this point
-    # was missing an input (also true, and also NOT the issue). The actual
-    # defect: resolve_run_id() -> resume_setup.py WRITES runs/<ID>/
-    # input.digest as a side effect, and select_segments.py's #409 Step 3
-    # gate treats a matching input.digest as proof a historical gate ran --
-    # so minting it before the selector could MANUFACTURE the evidence
-    # Step 3 checks for, laundering a skipped-gate case D7 requires be
-    # refused. It also orphans runs/<ID>/ whenever the selector
-    # subsequently refuses (an S-gate, a profile condition, D6, the
-    # --allow-retranslate-converged overlap rejection) -- refusing without
-    # side effects is the property this whole operation sells. select_
-    # segments.py's own claim admission is being split into a two-phase
-    # validate/commit (D1a) that keeps run_id resolution in its ORIGINAL
-    # position below, unchanged from before #438 -- this function does not
-    # yet drive a phase-2 commit call itself (that lands with the claim
-    # write, which is select_segments.py's, not this driver's -- see the
-    # module docstring's own claim-record discussion). --from-cap/
-    # --from-converged are still forwarded to this (validate-only) call;
-    # what changed is that no run_id is forwarded alongside them.
     lock_fd = acquire_driver_lock(durable_root, session_id=session_id)
     append_journal(durable_root, session_id, {"type": "driver_started", "pid": os.getpid()})
     try:
+        # #438: a claim is SINGLE-PHASE and the ONE select_segments.py call
+        # below is what writes it, so the run id it re-stamps drafts to must
+        # exist BEFORE that call. Resolved here, once, and reused verbatim
+        # as ctx.run_id further down rather than resolved a second time
+        # after selection.
+        #
+        # Stated as measured, not as a scare: a second resolve does NOT
+        # produce a different id today. resume_setup.py recomputes the same
+        # input_digest, finds the runs/<ID>/input.digest this invocation
+        # just wrote, and RESUMES the same id (verified by mutating this
+        # branch to resolve unconditionally: same id, same dispatch, still
+        # green). What the single resolution buys is therefore not a bug fix
+        # but the removal of a dependency: reusing the value makes "the id
+        # the claim stamped onto the drafts IS the id the dispatch loop runs
+        # under" true by construction here, instead of true because a
+        # sibling script's digest matching happens to be stable across a
+        # window in which THIS invocation has already written to the tree.
+        # If it ever were not -- a fresh second id -- every draft the claim
+        # re-stamped would be orphaned, derive_next_action() would fall
+        # through to "translate", and D8's guard would not catch it (it
+        # looks for a record under the DISPATCH run's id, and the record
+        # would be filed under the other one). It also saves a second full
+        # resume_setup.py round trip, which costs a per-segment cache_key.py
+        # spawn each.
+        #
+        # An earlier revision refused to do this and passed no run id at
+        # all, which made --from-cap/--from-converged DEAD ON ARRIVAL here:
+        # select_segments.py fatals on a claim without --run-id, so every
+        # claim this driver forwarded was refused at the gate. The hazard
+        # that revision named was real -- resolve_run_id() -> resume_setup.py
+        # writes runs/<ID>/input.digest, and #409 Step 3 reads a digest as
+        # proof the resume-integrity gate ran for that id -- but it is closed
+        # on the selector's side now, not worked around here. See
+        # run_select_segments()'s own docstring for the full account of what
+        # closed it (the one-shot evidence snapshot, plus the fresh-id-with-
+        # pre-existing-evidence refusal) and why a newly minted id cannot
+        # enter that evidence set to begin with.
+        #
+        # The cost that is NOT closed, and is accepted here deliberately:
+        # ANY refusal after this point leaves an ORPHANED runs/<ID>/
+        # directory behind -- a selector refusal (an S-gate, a profile
+        # condition, D6, the --allow-retranslate-converged overlap
+        # rejection), and equally this driver's own volume cap below, which
+        # runs after the gate. Resolution is therefore
+        # gated on a claim actually having been requested -- an ordinary
+        # dispatch keeps its original "refuse with no side effects"
+        # property, unchanged from before #438 -- and the id is journalled
+        # the moment it is minted so an operator triaging a refusal can see
+        # which directory this invocation created.
+        claim_requested = args.from_cap is not None or args.from_converged is not None
+        translate_cfg = None
+        run_result = None
+        run_id = None
+        if claim_requested:
+            translate_cfg = load_translate_config(durable_root)
+            run_result = resolve_run_id(
+                dirs, translate_cfg=translate_cfg,
+                plugin_root_str=args.plugin_root, durable_root_str=args.durable_root,
+            )
+            run_id = accepted_run_id(run_result)
+            append_journal(
+                durable_root, session_id,
+                {
+                    "type": "run_id_resolved", "run_id": run_id,
+                    "resume": run_result.get("resume"), "before_selection": True,
+                },
+            )
+
         select_result = run_select_segments(
             dirs,
             only_segs=args.only_segs,
@@ -4669,6 +4874,8 @@ def run(args, dirs: dict) -> dict:
             allow_empty=args.allow_empty,
             from_cap=args.from_cap,
             from_converged=args.from_converged,
+            run_id=run_id,
+            run_resume=run_resume_literal(run_result) if run_result is not None else None,
             durable_root_str=args.durable_root,
             plugin_root_str=args.plugin_root,
         )
@@ -4747,21 +4954,40 @@ def run(args, dirs: dict) -> dict:
                 "success": True, "session_id": session_id, "durable_root": str(durable_root),
                 "segs": segs, "counts": select_result.get("counts"), "engine": engine_cfg,
                 "dispatched": False, "results": [], "claims": claims,
+                # Always present, `null` on the ordinary path that never got
+                # as far as resolving one -- never a key that appears only
+                # sometimes. On a claim invocation this is the id whose
+                # runs/<ID>/ directory now exists on disk, which an operator
+                # reading an empty-SEGS result needs to be told about
+                # (nothing else in this payload would mention it).
+                "run_id": run_id,
+                "resume": run_result.get("resume") if run_result is not None else None,
                 "note": "nothing to dispatch (SEGS is empty).",
             }
             append_journal(durable_root, session_id, {"type": "driver_exit", "success": True})
             return result
 
-        translate_cfg = load_translate_config(durable_root)
-        run_result = resolve_run_id(
-            dirs, translate_cfg=translate_cfg,
-            plugin_root_str=args.plugin_root, durable_root_str=args.durable_root,
-        )
-        run_id = run_result["effectiveRunId"]
-        append_journal(
-            durable_root, session_id,
-            {"type": "run_id_resolved", "run_id": run_id, "resume": run_result.get("resume")},
-        )
+        # Resolved ONCE per invocation. On a claim invocation both are
+        # already in hand from before the selector ran (the claim's own
+        # writes are stamped with THIS id, so re-resolving here could hand
+        # the dispatch loop a different one and orphan every draft the claim
+        # just re-stamped); on an ordinary invocation this is the original,
+        # unchanged pre-#438 position, after both gates have passed and with
+        # no side effect paid for a run that refused.
+        if run_result is None:
+            translate_cfg = load_translate_config(durable_root)
+            run_result = resolve_run_id(
+                dirs, translate_cfg=translate_cfg,
+                plugin_root_str=args.plugin_root, durable_root_str=args.durable_root,
+            )
+            run_id = accepted_run_id(run_result)
+            append_journal(
+                durable_root, session_id,
+                {
+                    "type": "run_id_resolved", "run_id": run_id,
+                    "resume": run_result.get("resume"), "before_selection": False,
+                },
+            )
 
         companion_path = resolve_companion_path(dirs, node_bin=args.node)
 

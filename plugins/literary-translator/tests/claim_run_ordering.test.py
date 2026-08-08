@@ -66,9 +66,11 @@ SCHEMAS_DIR = ASSETS_DIR / "schemas"
 
 RESUME_SETUP_SRC = SCRIPTS_DIR / "resume_setup.py"
 SELECT_SEGMENTS_SRC = SCRIPTS_DIR / "select_segments.py"
+CLAIM_RECORD_SRC = SCRIPTS_DIR / "claim_record.py"
 
 assert RESUME_SETUP_SRC.is_file(), f"resume_setup.py not found at {RESUME_SETUP_SRC}"
 assert SELECT_SEGMENTS_SRC.is_file(), f"select_segments.py not found at {SELECT_SEGMENTS_SRC}"
+assert CLAIM_RECORD_SRC.is_file(), f"claim_record.py not found at {CLAIM_RECORD_SRC}"
 
 
 def _load_module(name, path):
@@ -343,6 +345,48 @@ def test_resume_setup_minted_run_id_is_accepted_by_select_segments_own_validator
         f"select_segments.py's own validate_run_id() rejected a RUN_ID "
         f"resume_setup.py itself just minted ({run_id!r}): {problem}"
     )
+
+
+def test_resume_setup_minted_run_id_is_accepted_by_the_chokepoints_own_validator(tmp_path):
+    """Part 2, step 3 -- the SECOND interface point the inverted order crosses,
+    and the one that fails closed if it is wrong.
+
+    D1a's minted RUN_ID does not stop at select_segments.py: it is threaded on
+    to every codex_job.py dispatch as `--run-id`, where the D8 chokepoint uses
+    it to build runs/<RUN_ID>/.claimed.<seg>. codex_job.py's main() now REFUSES
+    a --run-id that claim_record.py's own validate_run_id() rejects, with a
+    usage exit 2 -- so a validator that disagreed with the minter would not
+    degrade gracefully: EVERY translate and review dispatch of that run would
+    die at usage time, after the claim step had already re-stamped the drafts.
+
+    Deliberately checks a REAL minted value from a real subprocess run rather
+    than a hand-typed guess at the format, exactly as the select_segments.py
+    test above does -- tests/run_id_pattern_drift.test.py already pins that the
+    copies AGREE with each other on an adversarial probe corpus, which is a
+    different property from "the value the minter actually produces clears the
+    consumer". Tighten claim_record's pattern (a fixed length, a lowercase-only
+    class, a stricter timestamp shape) and this fails here rather than in
+    production on the first dispatch of a claim run."""
+    root = _make_ordering_root(tmp_path)
+    proc, parsed = _run_resume_setup(root, mass_payload())
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert parsed is not None and parsed.get("success") is True, parsed
+    run_id = parsed["effectiveRunId"]
+
+    claim_record = _load_module("claim_record_under_test_ordering", CLAIM_RECORD_SRC)
+    problem = claim_record.validate_run_id(run_id)
+    assert problem is None, (
+        f"claim_record.py's validate_run_id() -- the copy codex_job.py's own "
+        f"--run-id check calls -- rejected a RUN_ID resume_setup.py itself just "
+        f"minted ({run_id!r}): {problem}. Every dispatch of a claim run would "
+        f"exit 2 at usage time."
+    )
+    # The value must also survive the path join it exists for: claimed_path()
+    # raises on anything validate_run_id() refuses, and a colon-bearing seg id
+    # (a real, shipped shape) must still round-trip through it untouched.
+    path = claim_record.claimed_path(run_id, "FRONTBACK:errata_02", Path("/durable/runs"))
+    assert path.name == ".claimed.FRONTBACK:errata_02", path
+    assert path.parent.name == run_id, path
 
 
 def test_manifest_change_still_forces_fresh_run_even_with_segs_absent(tmp_path):

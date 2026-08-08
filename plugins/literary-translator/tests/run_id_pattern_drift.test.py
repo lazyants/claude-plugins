@@ -93,6 +93,11 @@ EXPECTED_COPIES = frozenset(
         ("segment_dispatch_driver.py", "_RUN_ID_DIR_RE"),
         ("select_segments.py", "_RUN_ID_DIR_RE"),
         ("backfill_resume_gate_ack.py", "_RUN_ID_RE"),
+        # #438: claim_record.py builds runs/<RUN_ID>/.claimed.<seg>, so it owns
+        # the same rejection its writers do -- an unsafe run id must not be able
+        # to relocate a claim path out of the durable root. Registered here
+        # deliberately, and byte-identical to the owner's literal.
+        ("claim_record.py", "_RUN_ID_DIR_RE"),
     }
 )
 

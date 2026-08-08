@@ -5,15 +5,27 @@ Why this file exists (D8, PLAN.md): the default W5 dispatch path
 (`mass-translate-wf.template.js`) has NO claim-aware guard of its own --
 `translateStage` is nine flagless lines that unconditionally invoke
 `codex_job.py --kind translate`. So the refusal that keeps a claimed segment
-from ever being re-translated has to live HERE, immediately before `launch()`
-(`:1323`), the only route in codex_job.py that can overwrite a canonical draft.
+from ever being re-translated has to live HERE, inside codex_job.py itself.
+
+WHERE EXACTLY, AND WHY THIS FILE'S FIRST ANSWER WAS WRONG. Until 1.21.0 this
+docstring said the guard sat "immediately before `launch()`, the only route
+in codex_job.py that can overwrite a canonical draft". The premise was false,
+and the same file already contradicted it: `_canonical_replaceable()`'s own
+docstring names TWO write sites it guards, and the second one is
+`adopt_pending()`, which ends in `os.replace(self.pending, self.canonical)`.
+The guard now sits between `safe_adopt()` and `adopt_pending()` -- above BOTH
+remaining routes that can overwrite a canonical draft, and still below the
+one that makes the healthy case work. The regression lock for that placement
+is `test_claimed_segment_with_a_valid_pending_keeps_the_claimed_drafts_bytes`
+below, which is also the only test in this file that watches real bytes being
+destroyed rather than a return code changing.
 
 THE DIRECTION THAT MATTERS MOST IS THE NEGATIVE ONE (asserted first, and in
 every case below): a HEALTHY claimed segment already flows correctly TODAY
 via `safe_adopt()` -- the translate "dispatch" degrades into a no-op adoption,
 and it returns 0 having launched nothing, long before reaching the new guard.
-A guard placed naively right after `--kind` parsing (rather than immediately
-before `launch()`) would refuse that already-working flow. Every test here
+A guard placed naively right after `--kind` parsing (rather than below
+`safe_adopt()`) would refuse that already-working flow. Every test here
 invokes `codex_job.py --kind translate` DIRECTLY (constructing a real
 `CodexJob` and calling its real `.run()`, in-process -- never through
 `segment_dispatch_driver.py`, which already had its own derived-action check
@@ -27,8 +39,10 @@ placement and three-state read discipline relative to `safe_adopt()` /
 mirrors codex_job_driver.test.py's own white-box layer (`_gate_recorder`).
 
 Claim records are written through claim_record.py's OWN `build_claim_record`
-+ `write_claim_record` -- never hand-rolled JSON -- so a fixture drift in
-claim_record's own field set or write discipline shows up here too.
++ `write_claim_record` -- never hand-rolled JSON -- so this file's fixtures
+exercise the real write discipline (exclusive create, directory fsync) rather
+than a stand-in for it. See `_write_claim()` for exactly which field-set
+drift that does and does not catch.
 """
 
 import importlib.util
@@ -107,16 +121,33 @@ def _write_draft(job):
 def _write_claim(root, run_id, seg, profile="from-converged"):
     """A real claim record via claim_record.py's own writer (never hand-rolled
     JSON) at runs/<run_id>/.claimed.<seg> -- exactly what a genuine D4 claim
-    leaves on disk."""
+    leaves on disk.
+
+    The payload is every declared field defaulted to None, overridden with the
+    handful whose values this file's own assertions or narrative depend on.
+    Built from CLAIM_RECORD_FIELDS rather than by spelling all fourteen out,
+    because nothing in this file ever reads a record FIELD -- the chokepoint's
+    own predicate, classify_claim_record(), is an lstat and never opens the
+    file -- so a hand-listed field set here would couple these tests to
+    evidence they never consult.
+
+    Be precise about which drift this still catches, since the shape looks
+    like it catches both: a field REMOVED from build_claim_record() fails here
+    immediately (an unexpected keyword argument), while a field ADDED to
+    CLAIM_RECORD_FIELDS is absorbed as None and is silently fine. That is the
+    correct trade for a fixture, but it is not the "any field-set drift shows
+    up here" this file used to claim; the field set itself is pinned by
+    claim_record's own dedicated tests, not by this one."""
     runs_dir = Path(root) / "runs"
     path = claim_record.claimed_path(run_id, seg, runs_dir)
-    payload = claim_record.build_claim_record(
+    payload = claim_record.build_claim_record(**dict(
+        {field: None for field in claim_record.CLAIM_RECORD_FIELDS},
         seg=seg, profile=profile, run_id=run_id, source_run_id="SOURCE-RUN-0",
         previous_dispatch_token="SOURCE-RUN-0:%s" % seg,
         pre_claim_content_sha1="0" * 40,
         operator_invocation="pytest tests/claim_chokepoint.test.py",
-        cache_key={}, claimed_at="2026-08-08T00:00:00Z",
-    )
+        claimed_at="2026-08-08T00:00:00Z",
+    ))
     ok, detail = claim_record.write_claim_record(path, payload)
     assert ok, detail
     return path
@@ -130,6 +161,33 @@ def _stub_gate(pass_names=("draft_ready.py", "validate_draft.py")):
     def _gate(args, timeout):
         return SimpleNamespace(returncode=0 if args[0] in pass_names else 1,
                                stdout="", stderr="")
+    return _gate
+
+
+def _recording_gate(record, *, canonical_rejects=()):
+    """A `job._gate` replacement that tells the CANONICAL gate calls apart
+    from the CANDIDATE ones and records every call it serves.
+
+    The two are distinguished exactly the way codex_job.py itself builds
+    them: `safe_adopt()` runs `[script, seg, ...]` against the canonical
+    draft, while `adopt_pending()` appends `--candidate-file <pending>`. So a
+    scenario where the canonical draft is invalid but a deferred attempt
+    would validate cleanly -- the only state in which adopt_pending() can
+    destroy a claimed draft -- is expressible without stubbing out
+    safe_adopt() or adopt_pending() themselves, which is the point: this
+    file's subject is WHERE the guard sits relative to those two real
+    methods, and a test that replaces either of them can no longer observe
+    that.
+
+    `record["calls"]` is the ordered list of (script, is_candidate) pairs
+    actually served. Never a claim about the real gate scripts' own content
+    checks (see this file's module docstring)."""
+    def _gate(args, timeout):
+        is_candidate = "--candidate-file" in args
+        record["calls"].append((args[0], is_candidate))
+        if not is_candidate and args[0] in canonical_rejects:
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
     return _gate
 
 
@@ -149,10 +207,10 @@ def test_healthy_claimed_segment_adopts_and_returns_0_launching_nothing(
     """Direction 1 -- the one a naive guard would break. A HEALTHY claimed
     segment must ADOPT via safe_adopt() and return 0, launching nothing, with
     the canonical draft's bytes byte-identical. A guard placed immediately
-    after --kind parsing (rather than immediately before launch()) would
-    refuse this already-working flow instead. Covers a colon-bearing segment
-    id (D1: segment ids contain colons in both books, and the claim record
-    filename must tolerate it)."""
+    after --kind parsing (rather than below safe_adopt(), where it actually
+    sits) would refuse this already-working flow instead. Covers a
+    colon-bearing segment id (D1: segment ids contain colons in both books,
+    and the claim record filename must tolerate it)."""
     tok = "RUN1:%s" % seg
     job = _mkjob(tmp_path, seg=seg, tok=tok, run_id="RUN1")
     _write_draft(job)
@@ -218,6 +276,125 @@ def test_claimed_segment_with_invalid_draft_refuses_before_launch(tmp_path, monk
 
     assert rc == 1
     assert job.reason == "claimed-segment-refused"
+    assert launch_record["called"] is False
+
+
+def test_claimed_segment_with_a_valid_pending_keeps_the_claimed_drafts_bytes(
+        tmp_path, monkeypatch):
+    """Direction 2, the case that actually DESTROYS bytes -- and the reason
+    the guard moved above adopt_pending().
+
+    Every other refusal test in this file proves a return code. This one
+    proves the thing the return code exists to protect: the claimed draft's
+    own bytes, on disk, after run() returns. The state is the exact one D8
+    exists for -- a segment claimed by this run whose canonical draft no
+    longer validates, so safe_adopt() fails -- with one addition that makes
+    it destructive: a SAME-RUN deferred attempt is sitting in the pending
+    slot and would pass every candidate gate. (A CROSS-run pending is
+    already refused by those gates' own --expect-token check, which is why
+    the reachable case is same-run.)
+
+    With the guard below adopt_pending(), that attempt is promoted by
+    `os.replace(self.pending, self.canonical)` over the claimed draft, and
+    the hand-edited content the claim exists to preserve -- the content
+    `pre_claim_content_sha1` is the only durable record of -- is gone before
+    anything ever consults the claim record. Nothing downstream can recover
+    it: the bytes are not backed up anywhere, and the promoted attempt
+    carries the same dispatch_token, so every later gate reports a perfectly
+    healthy segment.
+
+    THE MUTATION THAT MAKES THIS FAIL: move the
+    `self._refuse_claimed_translate()` block in codex_job.py's run() back
+    below the `if self.adopt_pending():` line. Then rc becomes 0, reason
+    becomes "adopted-pending", the canonical holds `pending_text` instead of
+    `claimed_text`, the pending file is consumed, and two candidate gate
+    calls appear in the record -- five independent assertion failures, one
+    of which (the canonical's bytes) is the operator-visible damage itself.
+    Measured against a scratch copy of codex_job.py carrying exactly that
+    swap: all five fire.
+
+    Nothing here is stubbed except `_gate` and `launch`: safe_adopt() and
+    adopt_pending() are the REAL methods, so the ordering being asserted is
+    the real one and not a rearrangement of test doubles."""
+    seg = "c001"
+    job = _mkjob(tmp_path, seg=seg, tok="RUN1:%s" % seg, run_id="RUN1")
+    claimed_text = json.dumps({
+        "seg": seg, "blocks": {"p1": "hand-fixed after the cap"}, "footnotes": {},
+        "verses": {}, "names": [], "notes": [], "dispatch_token": job.tok,
+    }, indent=2)
+    Path(job.canonical).parent.mkdir(parents=True, exist_ok=True)
+    Path(job.canonical).write_text(claimed_text, encoding="utf-8")
+    # A deferred attempt from a prior dispatch of THIS run: same token (so the
+    # candidate gates' own --expect-token check would pass), different bytes.
+    pending_text = json.dumps({
+        "seg": seg, "blocks": {"p1": "a fresh machine translation"}, "footnotes": {},
+        "verses": {}, "names": [], "notes": [], "dispatch_token": job.tok,
+    }, indent=2)
+    Path(job.pending).write_text(pending_text, encoding="utf-8")
+    claim_path = _write_claim(job.root, "RUN1", seg)
+
+    # The canonical draft fails validate_draft.py (so safe_adopt() returns
+    # False and control reaches the chokepoint); the pending CANDIDATE passes
+    # both gates, so adopt_pending() would promote it if it were ever reached.
+    gate_record = {"calls": []}
+    monkeypatch.setattr(
+        job, "_gate", _recording_gate(gate_record, canonical_rejects=("validate_draft.py",)))
+    launch_record = {"called": False}
+    monkeypatch.setattr(job, "launch", _spy_launch(launch_record))
+
+    rc = job.run()
+
+    assert rc == 1
+    assert job.reason == "claimed-segment-refused"
+    assert Path(job.canonical).read_text(encoding="utf-8") == claimed_text, (
+        "the claimed draft's bytes were overwritten -- adopt_pending() promoted a "
+        "deferred attempt over a claimed segment, destroying the very content "
+        "pre_claim_content_sha1 was recorded to protect"
+    )
+    assert Path(job.pending).read_text(encoding="utf-8") == pending_text, (
+        "a refused claim must leave the deferred attempt exactly as it found it -- "
+        "neither promoted nor discarded"
+    )
+    assert not any(is_candidate for _script, is_candidate in gate_record["calls"]), (
+        "adopt_pending() ran its own candidate gates, so it was REACHED -- the guard "
+        "is below it again: %r" % (gate_record["calls"],)
+    )
+    assert launch_record["called"] is False
+    assert seg in job.error_detail
+    assert str(claim_path) in job.error_detail
+
+
+def test_unclaimed_segment_with_a_valid_pending_still_adopts_it(tmp_path, monkeypatch):
+    """The control the test above cannot do without: moving the guard ABOVE
+    adopt_pending() must not disable adoption for an UNCLAIMED segment.
+    Identical fixture -- same invalid canonical, same valid same-run pending
+    -- with the claim record simply absent. A guard that refused
+    unconditionally, or one that read CLAIM_ABSENT as "cannot rule out a
+    claim", would satisfy every assertion in the test above for entirely the
+    wrong reason and fails here instead."""
+    seg = "c001"
+    job = _mkjob(tmp_path, seg=seg, tok="RUN1:%s" % seg, run_id="RUN1")
+    Path(job.canonical).parent.mkdir(parents=True, exist_ok=True)
+    Path(job.canonical).write_text(
+        json.dumps({"seg": seg, "dispatch_token": job.tok}), encoding="utf-8")
+    pending_text = json.dumps({"seg": seg, "dispatch_token": job.tok, "promoted": True})
+    Path(job.pending).write_text(pending_text, encoding="utf-8")
+    # no claim record at all
+
+    gate_record = {"calls": []}
+    monkeypatch.setattr(
+        job, "_gate", _recording_gate(gate_record, canonical_rejects=("validate_draft.py",)))
+    launch_record = {"called": False}
+    monkeypatch.setattr(job, "launch", _spy_launch(launch_record))
+
+    rc = job.run()
+
+    assert rc == 0
+    assert job.reason == "adopted-pending"
+    assert Path(job.canonical).read_text(encoding="utf-8") == pending_text, (
+        "the deferred attempt must be promoted over the unclaimed canonical"
+    )
+    assert not Path(job.pending).exists(), "a promoted pending is consumed"
     assert launch_record["called"] is False
 
 

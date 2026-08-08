@@ -25,6 +25,27 @@ field()'s own exhaustive malformation matrix and D8's driver-side refusal
 (claim_run_ordering.test.py). This file's own job is narrower and specific:
 prove the WIRES between those pieces carry the REAL shape end to end.
 
+## The two hops, and why calling the functions was not enough
+
+The first hop (test_claim_end_to_end_real_selector_through_real_ledger_merge_
+preserves_draft_bytes) drives select_segments.py for real and then calls
+parse_claims_field() and CodexJob.safe_adopt() as FUNCTIONS. That proves the
+shapes fit. It cannot prove anything about the ORCHESTRATION meant to hand
+them to each other -- and did not: while this file was green, `--from-cap`
+was completely non-functional through segment_dispatch_driver.py, whose run()
+forwarded the claim flags with run_id=None into a selector that fatals on
+exactly that combination. A test that calls the pieces can never fail on the
+wire between them, which is the same producer/consumer trap this file's own
+opening paragraph claims to close.
+
+So the second hop, at the bottom of this file, drives the driver's own CLI
+end to end -- and it is the only place in the suite that does so over the
+REAL draft_ready.py/validate_draft.py (tests/segment_dispatch_driver.test.py
+has its own claim end-to-end test, but its subject is the driver's logic, so
+its leaf gates are fakes that only check a file exists). It also asserts the
+record-first ORDER on disk rather than merely observing that both writes
+landed, which says nothing about which landed first.
+
 ## History: a gap this file found, then watched close
 
 This file's first revision found and documented a real gap: at the time it
@@ -76,10 +97,20 @@ not a copy of it). Only cache_key.py is stubbed (same fixture stand-in
 select_segments.test.py/claim_selector.test.py/ledger_merge.test.py already
 use), since its own 15-field hashing algorithm has its own dedicated test
 file.
+
+The orchestration hop adds two more fakes and no others: resolve_codex_
+companion.py (which would otherwise go looking for a real codex install on
+this machine) and codex_job.py itself -- the ONE genuinely unfakeable leaf,
+since a real invocation spends a real paid codex turn against a real model.
+That fake accepts the REAL argv shape, logs the raw argv it was handed, and
+writes the artifact a successful turn would have produced. Everything it
+stands in for is covered against the real CodexJob in tests/codex_job_
+driver.test.py and tests/claim_chokepoint.test.py.
 """
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -213,7 +244,13 @@ SOURCE_RUN_ID = "20260801T090000Z"
 # draft_sha1.py).
 # ---------------------------------------------------------------------------
 
-def make_durable_root(tmp_path):
+def make_durable_root(tmp_path, profile=None):
+    """`profile` defaults to DEFAULT_PROFILE (the three sections the REAL
+    validate_draft.py's own load_profile() requires). The driver hop at the
+    bottom of this file passes a superset -- the same three sections plus
+    the engine/source/target keys segment_dispatch_driver.py reads -- rather
+    than a second root builder, so both hops are provably staged from the
+    same tree."""
     root = tmp_path / "durable_root"
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
@@ -235,7 +272,10 @@ def make_durable_root(tmp_path):
     (root / "runs" / "ledger.d").mkdir(parents=True)
     (root / "segments").mkdir()
     profile_path = root / "profile.yml"
-    profile_path.write_text(yaml.safe_dump(DEFAULT_PROFILE, sort_keys=False), encoding="utf-8")
+    profile_path.write_text(
+        yaml.safe_dump(profile if profile is not None else DEFAULT_PROFILE, sort_keys=False),
+        encoding="utf-8",
+    )
     (root / ".literary-translator-root.json").write_text(
         json.dumps({"owner_profile_path": str(profile_path)}), encoding="utf-8"
     )
@@ -652,10 +692,15 @@ def test_claim_end_to_end_real_selector_through_real_ledger_merge_preserves_draf
     # Part B -- the feature closed: admission itself (Part A's real
     # select_segments.py call, above) now performs BOTH the durable
     # claim-record write AND the draft's dispatch_token rewrite, in that
-    # order, inside the SAME invocation (select_segments.py:2423-2439 --
-    # landed by `selector` after this test's first revision pinned the
-    # opposite as a characterization; D1a's normative order is record
-    # first, rewrite second, both before this function ever returns).
+    # order, inside the SAME invocation (select_segments.py's claim write
+    # loop calls rewrite_draft_dispatch_token() immediately after
+    # write_claim_record() -- landed by `selector` after this test's first
+    # revision pinned the opposite as a characterization; D1a's normative
+    # order is record first, rewrite second, both before that loop's
+    # iteration ends). The ORDER itself is asserted separately, and on
+    # disk, by test_a_failed_token_rewrite_leaves_the_record_not_the_token
+    # further down -- both outcomes landing says nothing about which
+    # landed first.
     # =======================================================================
     new_token = f"{RUN_ID}:{seg}"
     after_admission_doc = read_draft_doc(root, seg)
@@ -674,6 +719,15 @@ def test_claim_end_to_end_real_selector_through_real_ledger_merge_preserves_draf
     # CodexJob built for the OLD source-run token no longer matches what is
     # actually on disk -- the draft genuinely moved, this is not a
     # bookkeeping-only claim record with the draft untouched.
+    #
+    # safe_adopt() is called deliberately in ISOLATION for both controls
+    # below: what is being read out of it is one bit -- "does the token on
+    # disk satisfy this run's gates" -- and driving the whole of CodexJob.run()
+    # to learn it would additionally exercise the lease, the sandbox and a
+    # launch against a companion path that does not exist. It is NOT standing
+    # in for the D8 chokepoint or for the dispatch path: those are driven
+    # through the real CodexJob.run() in tests/claim_chokepoint.test.py and
+    # through the real driver CLI at the bottom of this file.
     job_stale_token = CODEX_JOB_MOD.CodexJob(
         kind="translate", seg=seg, tok=f"{SOURCE_RUN_ID}:{seg}", disp="d0", root=str(root),
         companion="/fake/codex-companion.mjs", prompt_text="", prompt_file=str(root / "unused_prompt.txt"),
@@ -704,8 +758,17 @@ def test_claim_end_to_end_real_selector_through_real_ledger_merge_preserves_draf
     # called in-process, loaded from its real source) is a no-op, not a
     # second authorization or an error -- a re-claim in the same run must
     # not be mistaken for one.
+    #
+    # `expected_content_sha1` is keyword-only and REQUIRED (it closes the
+    # TOCTOU between admission and the stamp), and `baseline_content_sha1`
+    # is exactly the right value to pass: it is this draft's content sha1
+    # with dispatch_token projected out, computed before anything touched
+    # the draft, and asserted unchanged three lines below. A no-op re-claim
+    # still has to prove it is stamping the draft it gated.
     # =======================================================================
-    ok2, detail2 = SELECT_MOD.rewrite_draft_dispatch_token(seg, root, new_token)
+    ok2, detail2 = SELECT_MOD.rewrite_draft_dispatch_token(
+        seg, root, new_token, expected_content_sha1=baseline_content_sha1
+    )
     assert ok2, detail2
     idempotent_doc = read_draft_doc(root, seg)
     assert idempotent_doc["dispatch_token"] == new_token
@@ -791,3 +854,370 @@ def test_claim_end_to_end_real_selector_through_real_ledger_merge_preserves_draf
         "the draft's own bytes must be unchanged apart from the token, end "
         "to end through the entire real claim chain"
     )
+
+
+# ---------------------------------------------------------------------------
+# The ORCHESTRATION hop -- the same claim, driven through the REAL
+# segment_dispatch_driver.py CLI instead of by calling its functions.
+#
+# WHY THIS SECTION EXISTS, stated bluntly because the gap it closes is this
+# file's own: everything above drives select_segments.py directly and then
+# calls parse_claims_field() and CodexJob.safe_adopt() as FUNCTIONS. That
+# proves the shapes fit; it cannot prove anything about the orchestration
+# that is supposed to pass them to each other -- and it did not. While this
+# file was green, `--from-cap` was completely non-functional through the
+# driver: run() forwarded the claim flags to select_segments.py with
+# run_id=None, and the real selector fatals on exactly that combination, so
+# every claim invocation exited 1 and dispatched nothing. A test that calls
+# the pieces can never fail on the wire between them.
+#
+# tests/segment_dispatch_driver.test.py has its own claim end-to-end test and
+# it is deliberately NOT duplicated here. That one stages FAKE draft_ready.py
+# and validate_draft.py (its subject is the driver's own logic, so its leaf
+# gates only check that a file exists, and S1/S2 pass trivially). This one
+# stages the REAL ones, which is this file's whole reason for being: the
+# claim seam and the real leaf gates exercised in the same invocation, which
+# neither file covered before. Only the paid codex turn itself is faked -- a
+# leaf, and the docstring of the fake says so.
+# ---------------------------------------------------------------------------
+
+RESUME_SETUP_SRC = SCRIPTS_SRC_DIR / "resume_setup.py"
+
+for _src in (SEGMENT_DISPATCH_DRIVER_SRC, RESUME_SETUP_SRC):
+    assert _src.is_file(), f"required sibling script not found at {_src}"
+
+# DEFAULT_PROFILE (what the REAL validate_draft.py needs) plus exactly the
+# keys segment_dispatch_driver.py's own load_engine_config()/
+# load_translate_config() read. Built by extension, never by rewriting the
+# three sections above, so the two hops cannot drift into gating different
+# drafts.
+DRIVER_PROFILE = dict(
+    DEFAULT_PROFILE,
+    engine={
+        "max_fix_rounds": 2,
+        "max_codex_jobs_per_batch": 400,
+        "batch_agent_cap": 10000,
+        "effort": "high",
+    },
+    source={"language": {"code": "fr"}},
+    target={"language": {"code": "en"}},
+)
+
+FAKE_RESOLVE_CODEX_COMPANION_PY = """#!/usr/bin/env python3
+import argparse
+import json
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--durable-root", required=True)
+    p.add_argument("--node", default="node")
+    p.add_argument("--search-glob", action="append", default=None)
+    p.add_argument("--timeout-sec", type=int, default=30)
+    p.parse_args()
+    print(json.dumps({"companion_path": "/fake/codex-companion.mjs"}))
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+# The ONE faked leaf, and the only thing in this whole chain that is faked:
+# a real codex_job.py invocation spends a real, paid codex turn against a
+# real model. Everything it is a stand-in for is covered by
+# tests/codex_job_driver.test.py and tests/claim_chokepoint.test.py against
+# the real CodexJob.
+#
+# It accepts the REAL argv shape (so a flag this driver stops forwarding is a
+# parse error here, loudly, rather than a silently ignored difference), logs
+# the raw argv it was handed -- never a reconstruction, so the test observes
+# what was actually sent -- and writes the artifact a successful turn would
+# have produced. The review's draft_sha1 comes from the REAL, staged
+# draft_sha1.py rather than a second hand-rolled hash, for the same reason
+# the driver itself refuses to keep an eighth copy of that algorithm.
+FAKE_CODEX_JOB_PY = """#!/usr/bin/env python3
+import argparse
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+
+def _real_draft_sha1_module():
+    path = Path(__file__).resolve().parent / "draft_sha1.py"
+    spec = importlib.util.spec_from_file_location("draft_sha1_fixture", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--kind", required=True)
+    p.add_argument("--run-id", default=None)
+    p.add_argument("--companion", required=True)
+    p.add_argument("--cwd", required=True)
+    p.add_argument("--seg", required=True)
+    p.add_argument("--prompt-file", required=True)
+    p.add_argument("--expect-token", required=True)
+    p.add_argument("--disp", required=True)
+    p.add_argument("--deadline-sec", required=True)
+    p.add_argument("--effort", default="high")
+    p.add_argument("--model", default=None)
+    p.add_argument("--plugin-root", default=None)
+    p.add_argument("--node", default="node")
+    args = p.parse_args()
+
+    cwd = Path(args.cwd)
+    with open(cwd / "test_fixture_argv_log.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": args.kind, "seg": args.seg, "argv": sys.argv[1:]}) + "\\n")
+
+    segments_dir = cwd / "segments"
+    if args.kind == "translate":
+        # Deliberately DESTRUCTIVE, and nothing here should ever reach it: a
+        # translate dispatch for a claimed segment overwrites the operator's
+        # hand-edited draft, which is the exact outcome #438 exists to
+        # prevent. Writing a recognizable replacement makes that outcome
+        # visible as changed BYTES rather than only as a log line.
+        (segments_dir / (args.seg + ".draft.json")).write_text(
+            json.dumps({"seg": args.seg, "blocks": {"p1": "A FRESH MACHINE TRANSLATION"},
+                        "footnotes": {}, "verses": {}, "names": [], "notes": [],
+                        "dispatch_token": args.expect_token}),
+            encoding="utf-8")
+    else:
+        draft_path = segments_dir / (args.seg + ".draft.json")
+        review = {
+            "clean": True, "coverage_ok": True, "findings": [],
+            "draft_sha1": _real_draft_sha1_module().draft_content_sha1(draft_path),
+            "dispatch_token": args.expect_token,
+        }
+        (segments_dir / (args.seg + ".review.json")).write_text(
+            json.dumps(review), encoding="utf-8")
+
+    print(json.dumps({"ok": True, "kind": args.kind, "seg": args.seg, "jobId": "fake-job",
+                      "job_status": "completed", "timed_out": False, "adopted": False,
+                      "reason": "promoted", "error_detail": None}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
+
+
+def make_driver_root(tmp_path, seg):
+    """make_durable_root()'s tree plus everything the driver's own CLI needs:
+    the REAL segment_dispatch_driver.py and resume_setup.py, the REAL
+    mass-translate-wf.template.js, the two bundle-hash markers resume_setup.py
+    FATALs without, and the two fakes named above. The P2 (--from-cap)
+    segment is built by the SAME build_from_cap_segment() the selector hop
+    uses."""
+    root = make_durable_root(tmp_path, profile=DRIVER_PROFILE)
+    scripts_dir = root / "scripts"
+    shutil.copy2(SEGMENT_DISPATCH_DRIVER_SRC, scripts_dir / "segment_dispatch_driver.py")
+    shutil.copy2(RESUME_SETUP_SRC, scripts_dir / "resume_setup.py")
+    (scripts_dir / "resolve_codex_companion.py").write_text(
+        FAKE_RESOLVE_CODEX_COMPANION_PY, encoding="utf-8")
+    (scripts_dir / "codex_job.py").write_text(FAKE_CODEX_JOB_PY, encoding="utf-8")
+    templates_dir = root / "templates"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, templates_dir / "mass-translate-wf.template.js")
+    (root / "runs" / ".plugin_bundle_hash").write_text("fixture-plugin-bundle-hash\n", encoding="utf-8")
+    (root / "runs" / ".orchestration_bundle_hash").write_text(
+        "fixture-orchestration-bundle-hash\n", encoding="utf-8")
+
+    fixture_keys = {}
+    build_from_cap_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+    return root
+
+
+def run_driver(root, *extra_args, timeout=90):
+    return subprocess.run(
+        [sys.executable, str(root / "scripts" / "segment_dispatch_driver.py"), *extra_args],
+        capture_output=True, text=True, timeout=timeout, cwd=str(root),
+    )
+
+
+def read_argv_log(root):
+    log_path = root / "test_fixture_argv_log.jsonl"
+    if not log_path.is_file():
+        return []
+    return [json.loads(ln) for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def minted_run_dirs(root):
+    """Every runs/<ID>/ this invocation created -- i.e. every one carrying an
+    input.digest except the source run the fixture pre-seeded. The run id is
+    minted by resume_setup.py from the wall clock, so it is READ BACK from
+    disk here rather than predicted."""
+    return sorted(
+        p.name for p in (root / "runs").iterdir()
+        if p.is_dir() and (p / "input.digest").is_file() and p.name != SOURCE_RUN_ID
+    )
+
+
+@_needs_node
+def test_from_cap_claim_through_the_real_driver_cli_over_the_real_leaf_gates(tmp_path):
+    """#438's headline capability through the REAL segment_dispatch_driver.py
+    CLI, against the REAL select_segments.py AND the REAL draft_ready.py /
+    validate_draft.py -- the combination no other file exercises. Only the
+    paid codex turn is faked.
+
+    What each assertion is load-bearing for:
+
+      * `claims == {seg: "from-cap"}` and a claim record at exactly the path
+        claim_record.claimed_path() computes: the selector's output survived
+        the driver's own parse (the historical dict-vs-list seam) and the
+        record landed where every reader looks for it -- computed by the real
+        module, never spelled out as a path literal here;
+      * the re-stamped token: the draft belongs to the run that is dispatching
+        it. If the id the claim stamped ever diverged from the id the dispatch
+        loop runs under, draft_ready.py --expect-token refuses, the driver
+        falls through to "translate", and the hand-edited draft is destroyed;
+      * `kinds == ["review"]` AND the draft's own bytes: a claimed segment is
+        RE-REVIEWED, never re-translated. The bytes assertion is the one that
+        matters -- the fake codex_job.py writes a recognizably different draft
+        on a translate dispatch, so a regression here shows up as the
+        operator's own text being gone, not merely as a wrong label.
+
+    THE MUTATION THAT MAKES THIS FAIL: revert run()'s pre-selection block in
+    segment_dispatch_driver.py to pass `run_id=None` into
+    run_select_segments() (the abandoned two-phase contract). The real
+    selector then fatals with "a claim ... was requested but --run-id was not
+    given", the driver exits 1, and nothing is claimed or dispatched. That
+    was the shipped state while every claim test in this file passed."""
+    seg = "seg01"
+    root = make_driver_root(tmp_path, seg)
+    baseline_content_sha1 = draft_content_sha1_of(read_draft_doc(root, seg))
+    hand_fixed_text = read_draft_doc(root, seg)["blocks"]["p1"]
+    assert "Hand-fixed after the cap." in hand_fixed_text, (
+        "the fixture's own premise: this draft carries an edit a re-translation "
+        "would destroy"
+    )
+
+    proc = run_driver(root, "--only-segs", seg, "--from-cap", seg)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True, payload
+    assert payload["claims"] == {seg: "from-cap"}, payload
+
+    run_id = payload["run_id"]
+    assert isinstance(run_id, str) and run_id, payload
+    assert minted_run_dirs(root) == [run_id], (
+        "the id reported back must be the one whose run directory this "
+        "invocation actually created"
+    )
+
+    claim_mod = _load_module(CLAIM_RECORD_SRC, "claim_record_for_driver_e2e")
+    record_path = claim_mod.claimed_path(run_id, seg, root / "runs")
+    assert record_path.is_file(), f"no claim record at {record_path}"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["seg"] == seg and record["run_id"] == run_id, record
+    assert record["profile"] == "from-cap", record
+    assert record["previous_dispatch_token"] == f"{SOURCE_RUN_ID}:{seg}", record
+    assert record["pre_claim_content_sha1"] == baseline_content_sha1, (
+        "the record's pre-claim baseline must be the hash of the draft as it was "
+        "BEFORE the claim -- that value is the whole point of writing the record"
+    )
+
+    after = read_draft_doc(root, seg)
+    assert after["dispatch_token"] == f"{run_id}:{seg}", after
+    assert after["blocks"]["p1"] == hand_fixed_text, (
+        "the operator's hand-edited bytes must survive the whole run -- a translate "
+        "dispatch would have replaced them with the fake's marker text"
+    )
+    assert draft_content_sha1_of(after) == baseline_content_sha1
+
+    kinds = [entry["kind"] for entry in read_argv_log(root)]
+    assert kinds == ["review"], (
+        f"a claimed, hand-edited draft must be RE-REVIEWED, never re-translated -- "
+        f"got dispatches: {kinds}"
+    )
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses directory permissions, so the token rewrite cannot be "
+           "made to fail and the ordering stays unobservable",
+)
+def test_a_failed_token_rewrite_leaves_the_record_not_the_token(tmp_path):
+    """RECORD-FIRST IS NORMATIVE, and this is the test that asserts the ORDER
+    rather than the two outcomes. Both landing proves nothing about which
+    landed first, and the ordering is the entire crash-safety argument: a
+    crash between the two writes must leave the draft on its OLD token PLUS a
+    durable record (recoverable -- every existing gate still refuses the old
+    token, and a re-claim is idempotent), never a re-stamped draft with NO
+    record, which D8's guard cannot refuse because it sees no record and
+    reads "unclaimed".
+
+    The order is made observable by taking the token rewrite away from a run
+    that has already written its record: segments/ is made unwritable, so
+    rewrite_draft_dispatch_token()'s exclusive temp-file create fails with
+    EACCES while the claim record's own write (into runs/<RUN_ID>/) is
+    unaffected. That is a real failure of the real function on the real
+    ordering -- not a monkeypatched stand-in -- and it reproduces exactly the
+    on-disk state a crash between the two writes would leave.
+
+    THE MUTATION THAT MAKES THIS FAIL: swap the two calls in
+    select_segments.py's claim write loop so the draft is re-stamped before
+    write_claim_record() runs. The rewrite then fails FIRST, the loop's
+    `continue` is reached before the record is ever written, and the claim
+    record assertion below finds nothing on disk -- while the "old token
+    intact" assertion still passes, which is why both are needed.
+
+    Note what is deliberately NOT asserted: that the invocation reports
+    failure is checked, but the ORPHANED runs/<RUN_ID>/ directory a refused
+    claim leaves behind is a disclosed cost of single-phase admission, pinned
+    in tests/segment_dispatch_driver.test.py rather than re-litigated here.
+
+    No @_needs_node marker, unlike the test above: this invocation is refused
+    by the Step 1 gate, so it never reaches call_template_functions() and
+    never spawns node."""
+    seg = "seg01"
+    root = make_driver_root(tmp_path, seg)
+    old_token = f"{SOURCE_RUN_ID}:{seg}"
+    baseline_content_sha1 = draft_content_sha1_of(read_draft_doc(root, seg))
+    segments_dir = root / "segments"
+
+    # r-x: every gate can still READ the draft and the segpack (S1/S2 must
+    # genuinely pass, or this test would be asserting the ordering of a claim
+    # that was never admitted), but nothing can create the temp file the
+    # re-stamp stages into.
+    os.chmod(segments_dir, 0o555)
+    try:
+        proc = run_driver(root, "--only-segs", seg, "--from-cap", seg)
+    finally:
+        os.chmod(segments_dir, 0o755)
+
+    assert proc.returncode != 0, (
+        f"a token rewrite that cannot land must fail the invocation, not be "
+        f"reported as a claim: stdout={proc.stdout!r}"
+    )
+    assert "dispatch_token rewrite failed" in proc.stdout, proc.stdout
+
+    minted = minted_run_dirs(root)
+    assert len(minted) == 1, f"expected exactly one minted run directory, got {minted}"
+    claim_mod = _load_module(CLAIM_RECORD_SRC, "claim_record_for_ordering_e2e")
+    record_path = claim_mod.claimed_path(minted[0], seg, root / "runs")
+
+    assert record_path.is_file(), (
+        f"RECORD-FIRST VIOLATED: the token rewrite failed, so if the record is not "
+        f"on disk it was never written before the rewrite was attempted. Expected a "
+        f"claim record at {record_path}"
+    )
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["previous_dispatch_token"] == old_token, record
+
+    after = read_draft_doc(root, seg)
+    assert after["dispatch_token"] == old_token, (
+        "the draft must still hold its OLD token -- the state every existing gate "
+        "already refuses safely, which is what makes a record-without-token "
+        "recoverable"
+    )
+    assert draft_content_sha1_of(after) == baseline_content_sha1, (
+        "a refused rewrite must install nothing at all"
+    )
+    assert read_argv_log(root) == [], "nothing may be dispatched after a failed claim"

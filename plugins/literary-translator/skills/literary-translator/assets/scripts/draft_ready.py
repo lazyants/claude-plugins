@@ -41,10 +41,17 @@ a generic stale/straggler draft: it means a claim THIS run made was LOST,
 almost always by a fix round that failed to copy the draft's dispatch_token
 byte for byte (see mass-translate-wf.template.js's fixPrompt()). The
 refusal names the claim's profile and claim time instead of leaving the
-operator to guess, and says a re-claim is idempotent, not a second
-authorization. Absent, unreadable, or ambiguous claim state -- including
-claim_record.py not being co-located, which every caller that predates
-#438 still is -- degrades silently to the original pre-#438 message.
+operator to guess, and points at the re-claim that restores it -- which is
+idempotent, not a second authorization.
+
+Exactly TWO states degrade silently to the original pre-#438 message:
+CLAIM_ABSENT (the ordinary stale/straggler case the plain message already
+describes correctly) and claim_record.py not being co-located, which every
+caller that predates #438 still is. An unreadable or ambiguous record, a
+run component that is not usable as a claim-path component, and any
+unexpected failure of the lookup itself each get their OWN clause -- see
+_claim_note()'s own docstring for why an anomaly must never be reported
+with the same silence as an absence.
 
 Usage: python3 draft_ready.py SEG [--expect-token TOK] [--durable-root PATH]
 
@@ -260,17 +267,72 @@ def _claim_note(run_id, seg, durable_root):
     discipline it is reported as unreadable, never asserted as a claim.
     CLAIM_ABSENT says nothing: that is the ordinary pre-#438 stale/
     straggler case and the plain message already covers it correctly.
+
+    NOTHING HERE RETURNS "" FOR AN ANOMALY ANY MORE. The only two states
+    that produce an empty clause are the two that genuinely have nothing to
+    say: claim_record.py is not co-located (a pre-#438 deployment, which
+    cannot have claims at all), and CLAIM_ABSENT. Every other outcome --
+    an unusable run component, an unreadable record, an unexpected failure
+    of the lookup itself -- gets a clause of its own. An anomaly that
+    returned "" was reported identically to "no claim exists", which is
+    the same collapse of "cannot tell" into "nothing there" that
+    claim_record.py's three-state predicate exists to prevent one layer
+    down; reproducing it in the layer that PRINTS the result would hide
+    the anomaly from the one operator positioned to act on it.
     """
     try:
         import claim_record  # sibling module, #438 -- optional at runtime
     except ImportError:
         return ""
+
+    # VALIDATED BEFORE THE PATH IS BUILT, not after. `run_id` was partitioned
+    # out of --expect-token by _claim_run_id() above, and --expect-token is a
+    # free-form caller-supplied string with no schema `pattern` anywhere
+    # behind it -- so `--expect-token /tmp/x:seg_001` used to build
+    # /tmp/x/.claimed.seg_001, read whatever regular file happened to sit
+    # there, and echo its `profile` and `claimed_at` to stdout as if they
+    # described this run's own claim. claim_record.claimed_path() now refuses
+    # such a value by raising, but a refusal reached through an exception is
+    # not the same as never asking: checking here keeps the ANSWER specific
+    # (this token's run component is unusable) instead of collapsing into the
+    # generic lookup-failed clause below. Refusing an odd value costs nothing
+    # -- this note is message enrichment and never a decision.
+    problem = claim_record.validate_run_id(run_id)
+    if problem is not None:
+        return (
+            f" -- NOTE: no claim record was consulted, because the expected "
+            f"token's own run component {run_id!r} is not usable as one "
+            f"({problem}) -- nothing was read from disk under that name"
+        )
+
     try:
         runs_dir = durable_root / "runs"
         path = claim_record.claimed_path(run_id, seg, runs_dir)
         state, payload, detail = claim_record.read_claim_record(path)
-    except Exception:
-        return ""
+    except Exception as exc:
+        # THE NARROWING IS IN THE RESULT, NOT IN THE CLASS, and that is a
+        # decision rather than an oversight. Narrowing to (OSError, ValueError)
+        # and letting anything else propagate was the alternative, and it
+        # breaks this helper's never-fatal contract (see this docstring's
+        # opening) for no gain: an escaping exception replaces the readiness
+        # probe's own "[seg] not ready: ..." line with a traceback at the SAME
+        # exit code 1, so the poller reading that line loses its only
+        # diagnostic and gains nothing -- the enrichment lookup would have
+        # taken down the check it was enriching. What actually changed is that
+        # an unexpected failure is now REPORTED instead of being mapped onto
+        # the same "" that CLAIM_ABSENT returns, which is the collapse the
+        # finding was about. The
+        # enumerated shapes are already handled without reaching here --
+        # classify_claim_record() absorbs every lstat OSError into
+        # CLAIM_AMBIGUOUS and read_claim_record() absorbs the read/parse
+        # failures, and claimed_path()'s ValueError is pre-empted by the
+        # validation above -- so reaching this line at all is itself the
+        # anomaly worth naming.
+        return (
+            f" -- WARNING: this run's claim state for {seg!r} could not be "
+            f"determined ({exc!r}); treated as NOT claimed (the safe "
+            f"direction), never assumed claimed"
+        )
 
     if state == claim_record.CLAIM_PRESENT:
         profile = payload.get("profile") if isinstance(payload, dict) else None
@@ -281,9 +343,13 @@ def _claim_note(run_id, seg, durable_root):
             f"claim was LOST, not merely absent -- something after the "
             f"claim (most likely a fix round) overwrote or dropped the "
             f"draft's dispatch_token instead of preserving it byte for "
-            f"byte. Re-claim {seg} under the same profile to restore it; "
-            f"re-claiming an already-claimed segment in this run is "
-            f"idempotent and is not a second authorization."
+            f"byte. To restore it, re-run select_segments.py's claim step "
+            f"for {seg} under that same profile with --run-id {run_id!r}: "
+            f"the re-claim is admitted on the strength of the record above, "
+            f"so the draft's missing or foreign dispatch_token is not what "
+            f"blocks it, and it re-stamps the token. Re-claiming a segment "
+            f"this run already holds a record for is idempotent and is not "
+            f"a second authorization."
         )
     if state == claim_record.CLAIM_AMBIGUOUS:
         return (

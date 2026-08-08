@@ -684,6 +684,256 @@ def test_relative_durable_root_does_not_resolve_twice(tmp_path):
 
 
 # ===========================================================================
+# #438 -- the claim seam, driven through the REAL select_segments.py.
+#
+# Why here and not in tests/claim_driver.test.py: that file substitutes a
+# FAKE select_segments.py for every CLI-level test (see its own module
+# docstring for why), and a fake cannot refuse the way the real script does.
+# It did not: the driver forwarded --from-cap with no --run-id, the real
+# select_segments.py fatals on exactly that combination, and every
+# fake-selector test went green over a capability that was dead on arrival.
+# The tests below stage the REAL script, on the REAL admission path, and
+# assert what actually landed on disk.
+# ===========================================================================
+
+# The run this fixture's draft was dispatched under BEFORE the claim -- the
+# id its dispatch_token names, and the id whose runs/<ID>/input.digest keeps
+# the #409 Step 3 evidence scan satisfied (a draft token IS dispatch
+# evidence; an evidence-bearing id with no digest refuses the whole
+# invocation, which would mask what these tests are about).
+CLAIM_SOURCE_RUN_ID = "20260801T090000Z"
+
+HAND_FIXED_TEXT = "hola -- hand-fixed after the cap"
+
+
+def from_cap_project(tmp_path, seg="seg01", **kwargs):
+    """A fully phase2-staged durable_root holding exactly one segment in the
+    --from-cap population (POPULATIONS.md P2, the same shape
+    tests/claim_selector.test.py and tests/claim_end_to_end.test.py build for
+    the selector's own unit tests): materialized ledger status
+    non_converged/reason=cap, NO .ever_converged sentinel, a stored review
+    that is clean:false WITH findings, and a draft whose bytes were edited
+    by hand after the cap and whose dispatch_token still names the run it was
+    dispatched under. Classified human_escalation, so it reaches `segs` only
+    via --only-segs -- exactly as a real operator would have to name it."""
+    root = make_durable_root(tmp_path, profile_yaml=FULL_PROFILE_YAML, **kwargs)
+    stage_phase2_scripts(root)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, {seg: make_cache_key(seg)})
+
+    # `names`/`canon_map` are what select_segments.py's D6 fresh-segpack
+    # precondition reads (both empty == nothing to disagree with the current
+    # canon about); blocks/footnotes/verses are what the REAL ledger_update.py
+    # reads when it records a convergence.
+    (root / "segments" / f"segpack_{seg}.json").write_text(
+        json.dumps(
+            {"seg": seg, "blocks": [], "footnotes": [], "verses": [], "names": [], "canon_map": {}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (root / "canon.json").write_text(json.dumps({"entries": {}}, ensure_ascii=False), encoding="utf-8")
+
+    (root / "segments" / f"{seg}.draft.json").write_text(
+        json.dumps({
+            "seg": seg,
+            "blocks": {"p1": HAND_FIXED_TEXT},
+            "dispatch_token": f"{CLAIM_SOURCE_RUN_ID}:{seg}",
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    # S3 requires runs/<source_run_id>/ to exist at all; #409 Step 3
+    # separately requires a digest for any id carrying dispatch evidence.
+    source_run_dir = root / "runs" / CLAIM_SOURCE_RUN_ID
+    source_run_dir.mkdir(parents=True, exist_ok=True)
+    (source_run_dir / "input.digest").write_text("stub-source-run-digest\n", encoding="utf-8")
+
+    (root / "segments" / f"{seg}.review.json").write_text(
+        json.dumps({
+            "clean": False,
+            "coverage_ok": True,
+            "findings": [
+                {"loc": "p1", "severity": "medium", "issue": "awkward phrasing", "suggest": "rephrase"}
+            ],
+            "draft_sha1": "0" * 40,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    write_fragment(root, seg, {
+        "timestamp": "2026-01-01T00:00:00Z", "status": "non_converged", "reason": "cap", "rounds": 4,
+    })
+    return root
+
+
+def read_argv_log(root):
+    log_path = root / "test_fixture_argv_log.jsonl"
+    if not log_path.is_file():
+        return []
+    return [json.loads(ln) for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def minted_run_dirs(root):
+    """Every runs/<ID>/ directory carrying an input.digest EXCEPT the one the
+    fixture pre-seeded -- i.e. the run directories THIS invocation created."""
+    return sorted(
+        p.name for p in (root / "runs").iterdir()
+        if p.is_dir() and (p / "input.digest").is_file() and p.name != CLAIM_SOURCE_RUN_ID
+    )
+
+
+def test_from_cap_claim_admitted_end_to_end_through_the_real_selector(tmp_path):
+    """#438's headline capability, end to end through this driver's own CLI
+    against the REAL select_segments.py: --from-cap admits the segment, the
+    claim record and the re-stamped draft token land, and the driver then
+    RE-REVIEWS the hand-edited draft instead of re-translating it.
+
+    Before the fix this could not pass at all, and that was measured, not
+    assumed: reverting run()'s call site to `run_id=None` (the abandoned
+    two-phase contract) makes this exact invocation exit 1 with
+    "a claim (--from-converged/--from-cap) was requested but --run-id was
+    not given", dispatching nothing.
+
+    `kinds == ["review"]` is the assertion that protects the operator's
+    bytes. If the run id the claim stamped onto the draft ever diverged
+    from the id the dispatch loop runs under, draft_ready.py's
+    --expect-token check would fail, the driver would fall through to
+    "translate", and the hand-edited draft this whole operation exists to
+    preserve would be overwritten by a fresh translation -- the claim record
+    would not stop it either, since D8's guard looks for a record under the
+    DISPATCH run's id and one filed under the other id reads as ABSENT.
+
+    Note honestly what that assertion does NOT catch: making run() resolve
+    the id a SECOND time after selection leaves this test green. Measured --
+    resume_setup.py recomputes the same digest, finds the run directory the
+    first resolve just created, and resumes the SAME id, so nothing
+    diverges. The single-resolution property is pinned instead by the
+    `run_id_resolved` count on the journal at the end of this test, which
+    that same mutation does move (1 -> 2)."""
+    root = from_cap_project(tmp_path)
+
+    proc = run_driver(root, "--only-segs", "seg01", "--from-cap", "seg01", timeout=60)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True, payload
+    assert payload["segs"] == ["seg01"], payload
+    assert payload["claims"] == {"seg01": "from-cap"}, payload
+
+    run_id = payload["run_id"]
+    assert isinstance(run_id, str) and run_id, payload
+    assert minted_run_dirs(root) == [run_id], (
+        "the id reported back must be the one whose run directory this "
+        "invocation actually created"
+    )
+
+    # The durable claim record: written by the REAL select_segments.py, under
+    # the REAL claim_record.py's own path convention, for THIS run id.
+    claim_mod = _load_module(CLAIM_RECORD_SRC, "claim_record_for_from_cap_e2e")
+    record_path = claim_mod.claimed_path(run_id, "seg01", root / "runs")
+    assert record_path.is_file(), f"no claim record at {record_path}"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["seg"] == "seg01", record
+    assert record["profile"] == "from-cap", record
+    assert record["run_id"] == run_id, record
+    assert record["source_run_id"] == CLAIM_SOURCE_RUN_ID, record
+    assert record["previous_dispatch_token"] == f"{CLAIM_SOURCE_RUN_ID}:seg01", record
+
+    # `operator_invocation` is select_segments.py's own " ".join(sys.argv),
+    # written into the durable record by the child process itself -- so this
+    # asserts what the REAL selector was actually handed, with no fixture
+    # instrumentation standing in between. Both halves of the pair, because
+    # select_segments.py refuses either one alone.
+    invocation = record["operator_invocation"]
+    assert f"--run-id {run_id}" in invocation, invocation
+    assert "--run-resume false" in invocation, invocation
+    assert "--from-cap seg01" in invocation, invocation
+
+    # D4: the draft now belongs to THIS run -- and only its token moved.
+    draft = json.loads((root / "segments" / "seg01.draft.json").read_text(encoding="utf-8"))
+    assert draft["dispatch_token"] == f"{run_id}:seg01", draft
+
+    kinds = [entry["kind"] for entry in read_argv_log(root)]
+    assert kinds == ["review"], (
+        f"a claimed, hand-edited draft must be RE-REVIEWED, never re-translated -- "
+        f"got dispatches: {kinds}"
+    )
+    assert draft["blocks"]["p1"] == HAND_FIXED_TEXT, (
+        "the hand-edited draft bytes must survive the whole run untouched; a "
+        "translate dispatch would have replaced them"
+    )
+    assert payload["summary"]["converged"] == ["seg01"], payload
+
+    # D11: the round budget restarts at 1 after a claim -- the stored review
+    # carried no token this run recognizes, so nothing matched and round "1"
+    # was dispatched fresh.
+    fragment = json.loads((root / "runs" / "ledger.d" / "seg01.json").read_text(encoding="utf-8"))
+    assert fragment["rounds"] == 1, fragment
+
+    # The run id is resolved BEFORE the gate on a claim invocation (it has to
+    # be -- the gate is what writes the claim), exactly once.
+    journal = DRIVER.journal_path(root, payload["session_id"])
+    types = [json.loads(ln)["type"] for ln in journal.read_text(encoding="utf-8").splitlines()]
+    assert types[:4] == [
+        "driver_started", "run_id_resolved", "step1_gate_passed", "volume_check_passed",
+    ], types
+    assert types.count("run_id_resolved") == 1, types
+
+
+def test_a_refused_claim_still_refuses_and_leaves_exactly_one_orphaned_run_dir(tmp_path):
+    """The disclosed cost of resolving the run id before the gate, pinned as
+    behavior rather than left as a comment: a claim the selector refuses
+    leaves the runs/<ID>/ directory resume_setup.py already created. One
+    directory, no dispatch, exit 1 -- the refusal is still a refusal.
+
+    The refusal here is a genuine profile-condition failure, not a synthetic
+    one: this fixture's segment is the --from-cap population (non_converged/
+    reason=cap, no sentinel), and --from-converged requires the opposite of
+    both."""
+    root = from_cap_project(tmp_path)
+
+    proc = run_driver(root, "--only-segs", "seg01", "--from-converged", "seg01", timeout=60)
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "seg01" in payload["error"], payload
+    assert read_argv_log(root) == [], "nothing may be dispatched after a refused claim"
+    assert len(minted_run_dirs(root)) == 1, (
+        "exactly one run directory is created before the gate on a claim "
+        "invocation -- more than one would mean the id was resolved twice, "
+        "none would mean this test is no longer exercising the pre-gate "
+        "resolution it exists to pin"
+    )
+    assert not list((root / "runs").glob("*/.claimed.*")), (
+        "a refused claim must leave no claim record anywhere"
+    )
+
+
+def test_an_ordinary_dispatch_creates_no_run_dir_when_the_gate_refuses(tmp_path):
+    """The counterpart property, unchanged from before #438 and worth keeping
+    unchanged: with no claim flag there is nothing to resolve early, so a
+    Step 1 refusal costs no side effect at all. Uses the previously-converged
+    refusal (the gate's own headline case) as the refusing condition."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01"])
+    current_key = make_cache_key("current")
+    write_fixture_cache_keys(root, {"seg01": current_key})
+    stored = dict(current_key)
+    stored["style_contract_hash"] = "style_contract_hash-OLD"
+    write_fragment(root, "seg01", converged_fragment(stored, "0" * 40))
+    mark_ever_converged(root, "seg01")
+
+    proc = run_driver(root)
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    run_dirs = [p.name for p in (root / "runs").iterdir() if p.is_dir() and (p / "input.digest").is_file()]
+    assert run_dirs == [], (
+        "an invocation with no claim flag must not resolve a run id (and so "
+        f"must create no run directory) before the gate has passed: {run_dirs}"
+    )
+
+
+# ===========================================================================
 # Property 7 -- the volume refusal, engine.max_codex_jobs_per_batch.
 # Formula and boundary must match mass-translate-wf.template.js's own
 # preflight for this SAME knob exactly: CODEX_JOBS_PER_SEG = max_fix_rounds

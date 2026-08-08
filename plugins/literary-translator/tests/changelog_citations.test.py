@@ -69,7 +69,7 @@ CITATION_ANCHORS = {
     "cache_key.py:149": ["ledger_update.py"],
     "cache_key.py:156": ["segment_dispatch_driver.py"],
     "cache_key.py:163": ["DERIVATION_BUNDLE_MEMBERS"],
-    "draft_ready.py:425-426": ["expect_token", "stale/straggler draft"],
+    "draft_ready.py:491-492": ["expect_token", "stale/straggler draft"],
     "ledger_update.py:824-827": [
         "current_draft_sha1 != reviewer_draft_sha1",
         "draft changed since review",
@@ -81,22 +81,22 @@ CITATION_ANCHORS = {
         "ORCHESTRATION_BUNDLE_MEMBERS",
         "select_segments.py",
     ],
-    "segment_dispatch_driver.py:751-752": ["def fatal(", "raise DriverError("],
-    "segment_dispatch_driver.py:2826-2827": [
+    "segment_dispatch_driver.py:760-761": ["def fatal(", "raise DriverError("],
+    "segment_dispatch_driver.py:2972-2973": [
         "translate_dispatch_token",
         'f"{run_id}:{seg}"',
     ],
-    "segment_dispatch_driver.py:3044-3059": [
+    "segment_dispatch_driver.py:3199-3214": [
         "_matched_review_round_label",
         "return None",
     ],
-    "segment_dispatch_driver.py:3148": ["draft_ok"],
-    "segment_dispatch_driver.py:3226": ['"action": "translate"'],
-    "segment_dispatch_driver.py:3330-3331": [
+    "segment_dispatch_driver.py:3303": ["draft_ok"],
+    "segment_dispatch_driver.py:3381": ['"action": "translate"'],
+    "segment_dispatch_driver.py:3485-3486": [
         "draft_matches_review",
         "current_sha1 == reviewed_sha1",
     ],
-    "segment_dispatch_driver.py:3480-3486": [
+    "segment_dispatch_driver.py:3635-3641": [
         "current_sha1 is None",
         "invocation never read",
     ],
@@ -112,17 +112,17 @@ CITATION_ANCHORS = {
         'record.get("reason")',
     ],
     "select_segments.py:1293": ["DEFAULT_ELIGIBLE_CATEGORIES"],
-    "select_segments.py:2048-2054": [
+    "select_segments.py:2461-2467": [
         "classify_ever_converged_sentinel",
         "ambiguous_sentinels.append",
     ],
-    "select_segments.py:2057-2064": [
+    "select_segments.py:2470-2477": [
         "not clearable by --allow-retranslate-converged",
         "if ambiguous_sentinels:",
         "fatal(",
     ],
-    "select_segments.py:2352": ["allow_retranslate_converged"],
-    "select_segments.py:2491-2540": [
+    "select_segments.py:2765": ["allow_retranslate_converged"],
+    "select_segments.py:2947-2996": [
         "if previously_converged and not args.allow_retranslate_converged:",
         "second_loss",
         # The refusal itself, not just the condition guarding it. Without this

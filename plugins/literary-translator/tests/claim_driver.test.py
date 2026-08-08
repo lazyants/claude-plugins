@@ -22,18 +22,28 @@ keeps this file from reaching into.
 
 ## Fixture strategy
 
-Deliberately NEVER stages the REAL select_segments.py for any CLI-level
-(`run_driver()`) test in this file: at the time this file was written,
-select_segments.py was mid-edit by a parallel teammate and its own
-`import claim_record` broke the PRE-EXISTING
-tests/segment_dispatch_driver.test.py fixture (that file's own
-`make_durable_root()` never copies claim_record.py) -- a live, reported
-regression, unrelated to this file, that this file sidesteps entirely by
-using its own small, fully-controlled FAKE_SELECT_SEGMENTS_PY wherever a
-CLI-level test needs *a* select_segments.py subprocess to exist. Every
-CLI-level test here is about THIS driver's own argv-forwarding/response-
-parsing code, never about which ids select_segments.py itself would
-admit.
+Deliberately NEVER stages the REAL select_segments.py -- nor the REAL
+resume_setup.py -- for any CLI-level (`run_driver()`) test in this file.
+Both are replaced by small, fully-controlled fakes
+(FAKE_SELECT_SEGMENTS_PY, FAKE_RESUME_SETUP_PY) that record the argv they
+were handed and answer with a fixed payload. Every CLI-level test here is
+about THIS driver's own argv-forwarding/response-parsing code -- which
+values reach which subprocess, in which order -- never about which ids
+select_segments.py itself would admit, nor about which RUN_ID
+resume_setup.py would mint.
+
+That split is deliberate and it has a matching obligation: a fake cannot
+refuse the way the real script does, so a fake-only suite can go green
+over a seam that is completely broken in production. It did exactly that
+once already -- the driver forwarded `--from-cap` with no `--run-id`, the
+real select_segments.py fatals on that combination, and this file's fake
+happily answered `success: true` for every one of those runs. The
+end-to-end proof that the driver drives the REAL select_segments.py
+through a REAL claim therefore lives in
+tests/segment_dispatch_driver.test.py
+(`test_from_cap_claim_admitted_end_to_end_through_the_real_selector`),
+which stages the real script and asserts the claim actually lands. Do not
+let this file become the only coverage of that seam again.
 
 D8/D11 tests call `process_segment()`/`claim_refusal_for_translate()`
 directly against a hand-built DispatchContext (mirroring
@@ -100,19 +110,41 @@ CLAIM_RECORD = _load_module(CLAIM_RECORD_SRC, "claim_record_for_fixtures")
 
 
 # select_segments.py reports `claims` as a JSON object KEYED BY SEGMENT ID,
-# each value the full claim_record.py payload (build_claim_record()'s own
-# CLAIM_RECORD_FIELDS) plus that script's own D6/D10 reporting-only fields.
+# each value the full claim_record.py payload -- build_claim_record()'s own
+# CLAIM_RECORD_FIELDS, and nothing else. The D6/D10 reporting fields
+# (cache_key_moved_fields/cache_key_movement_machinery_only/cache_key_note/
+# pre_claim_review) used to be spread on top of the record at that call site;
+# they are FIELDS OF THE RECORD now, so the wire value and the on-disk value
+# are the same object rather than two shapes one line apart.
 # `_claim_entry()` builds a minimal-but-valid value for that shape so each
 # test below only has to vary the ONE field it is actually probing.
 def _claim_entry(seg, profile="from-cap", **overrides):
     entry = {
         "seg": seg, "profile": profile, "run_id": "RUN-A", "source_run_id": "SOME-OLDER-RUN",
         "previous_dispatch_token": f"SOME-OLDER-RUN:{seg}", "pre_claim_content_sha1": "sha1",
-        "operator_invocation": "test invocation", "cache_key": {"input_sha1": "x"},
+        "pre_claim_review": {
+            "dispatch_token": f"SOME-OLDER-RUN:{seg}:r1", "clean": False,
+            "coverage_ok": True, "findings_count": 1,
+        },
+        "pre_claim_cache_key": None,
+        "cache_key_at_claim": {"input_sha1": "x"},
+        "cache_key_moved_fields": [],
+        "cache_key_movement_machinery_only": None,
+        "cache_key_note": "no recorded cache_key on this fragment",
+        "operator_invocation": "test invocation",
         "claimed_at": "2026-08-08T00:00:00Z",
     }
     entry.update(overrides)
     return entry
+
+
+def test_claim_entry_fixture_matches_the_shipped_record_field_set():
+    """The fixture above claims to mirror claim_record.py's own record shape.
+    Pinned, not asserted in prose: a field added to (or renamed in)
+    CLAIM_RECORD_FIELDS without this fixture following makes every
+    parse_claims_field() test below exercise a shape the real selector never
+    emits -- passing for a payload production cannot produce."""
+    assert tuple(_claim_entry("seg01")) == CLAIM_RECORD.CLAIM_RECORD_FIELDS
 
 
 def test_parse_claims_field_missing_field_is_fatal():
@@ -240,16 +272,39 @@ def test_claim_refusal_for_translate_returns_none_when_absent(tmp_path):
     assert DRIVER.claim_refusal_for_translate(ctx, "seg01") is None
 
 
+def _fixture_claim_payload(claim_mod, seg, run_id, profile="from-cap", cache_key=None):
+    """One place building the 14-field claim_record.py payload every fixture
+    in this file needs. build_claim_record() is keyword-only with every field
+    REQUIRED (no defaults), so a field added to CLAIM_RECORD_FIELDS is a
+    TypeError here rather than a fixture that silently drifts from the record
+    production writes -- which is the whole point of that signature, and the
+    reason this helper spells all fourteen out instead of passing **kwargs."""
+    return claim_mod.build_claim_record(
+        seg=seg,
+        profile=profile,
+        run_id=run_id,
+        source_run_id="SOME-OLDER-RUN",
+        previous_dispatch_token=f"SOME-OLDER-RUN:{seg}",
+        pre_claim_content_sha1="pre-claim-sha1",
+        pre_claim_review={
+            "dispatch_token": f"SOME-OLDER-RUN:{seg}:r1", "clean": False,
+            "coverage_ok": True, "findings_count": 1,
+        },
+        pre_claim_cache_key=None,
+        cache_key_at_claim=cache_key if cache_key is not None else {"input_sha1": "x"},
+        cache_key_moved_fields=[],
+        cache_key_movement_machinery_only=None,
+        cache_key_note="no recorded cache_key on this fragment",
+        operator_invocation="test invocation",
+        claimed_at="2026-08-08T00:00:00Z",
+    )
+
+
 def test_claim_refusal_for_translate_refuses_when_present(tmp_path):
     ctx = _minimal_ctx(tmp_path)
     path = CLAIM_RECORD.claimed_path(ctx.run_id, "seg01", ctx.dirs["runs_dir"])
     ok, detail = CLAIM_RECORD.write_claim_record(
-        path,
-        CLAIM_RECORD.build_claim_record(
-            "seg01", "from-cap", ctx.run_id, "SOME-OLDER-RUN",
-            "SOME-OLDER-RUN:seg01", "pre-claim-sha1", "test invocation",
-            {"input_sha1": "x"}, "2026-08-08T00:00:00Z",
-        ),
+        path, _fixture_claim_payload(CLAIM_RECORD, "seg01", ctx.run_id),
     )
     assert ok, detail
 
@@ -288,6 +343,30 @@ def test_claim_refusal_for_translate_refuses_on_permission_denied(tmp_path):
     assert refusal is not None
 
 
+def test_claim_refusal_for_translate_refuses_an_unsafe_run_id_instead_of_crashing(tmp_path):
+    """#438: claimed_path() RAISES ValueError on a run id it will not build
+    a path from, rather than silently returning one that escapes the durable
+    root. This call site must map that to a REFUSAL, in the same direction as
+    its AMBIGUOUS case -- a run id whose claim records cannot even be looked
+    for is strictly worse than a record that cannot be read, so D8 must not
+    clear the segment.
+
+    Letting the exception escape instead would reach main()'s defensive
+    catch-all as "unexpected error", exit 2 -- one bad run id killing a whole
+    batch rather than one segment. run() validates the resolved run id before
+    it ever becomes ctx.run_id, so a real dispatch cannot reach this; the
+    guard is here so the property holds by inspection of the function rather
+    than by tracing whoever built the context."""
+    ctx = _minimal_ctx(tmp_path, run_id="../evil")
+
+    refusal = DRIVER.claim_refusal_for_translate(ctx, "seg01")
+
+    assert refusal is not None, "an unsafe run id must never read as 'not claimed'"
+    assert "seg01" in refusal
+    assert "../evil" in refusal
+    assert "#438 D8" in refusal
+
+
 def test_claim_refusal_for_translate_handles_a_colon_bearing_seg_id(tmp_path):
     ctx = _minimal_ctx(tmp_path)
     seg = "FRONTBACK:errata_02"
@@ -295,12 +374,7 @@ def test_claim_refusal_for_translate_handles_a_colon_bearing_seg_id(tmp_path):
 
     path = CLAIM_RECORD.claimed_path(ctx.run_id, seg, ctx.dirs["runs_dir"])
     ok, detail = CLAIM_RECORD.write_claim_record(
-        path,
-        CLAIM_RECORD.build_claim_record(
-            seg, "from-cap", ctx.run_id, "SOME-OLDER-RUN",
-            f"SOME-OLDER-RUN:{seg}", "pre-claim-sha1", "test invocation",
-            {"input_sha1": "x"}, "2026-08-08T00:00:00Z",
-        ),
+        path, _fixture_claim_payload(CLAIM_RECORD, seg, ctx.run_id),
     )
     assert ok, detail
     refusal = DRIVER.claim_refusal_for_translate(ctx, seg)
@@ -606,10 +680,7 @@ def _write_claim(driver_mod, root, run_id, seg, profile):
     path = claim_mod.claimed_path(run_id, seg, root / "runs")
     ok, detail = claim_mod.write_claim_record(
         path,
-        claim_mod.build_claim_record(
-            seg, profile, run_id, "SOME-OLDER-RUN", f"SOME-OLDER-RUN:{seg}",
-            "pre-claim-sha1", "test invocation", make_cache_key(seg), "2026-08-08T00:00:00Z",
-        ),
+        _fixture_claim_payload(claim_mod, seg, run_id, profile=profile, cache_key=make_cache_key(seg)),
     )
     assert ok, detail
     return path
@@ -709,19 +780,19 @@ def _run_d11_restart_scenario(tmp_path, profile):
     driver_mod, ctx = _fixture_ctx(root, run_id="RUN-CURRENT")
     _write_claim(driver_mod, root, "RUN-CURRENT", seg, profile)
 
-    # STAND-IN FOR THE SELECTOR'S COMMIT PHASE, NOT A PROVEN PRODUCTION
-    # PATH: the actual draft-token rewrite is select_segments.py's own
-    # write, landing together with the claim record (record first, token
-    # second, per the lead's ruling) -- as of this test, that rewrite does
-    # not exist anywhere in the tree yet (confirmed: neither select_
-    # segments.py nor codex_job.py performs it; see the #438 thread).
-    # This line manually reproduces its EFFECT (the draft's dispatch_token
-    # already equal to THIS run's translate token, #438 D4) so D8/D11 can
-    # be tested against the state a real claim is SUPPOSED to leave behind.
-    # Do not read this as evidence the production path does it -- once the
-    # rewrite lands, the end-to-end test proving the real path produces
-    # this same state is owned by whoever builds the commit phase, not by
-    # this fixture.
+    # STAND-IN for the state a real admission leaves behind, reproduced by
+    # hand so this unit can vary D11's inputs freely. The production write
+    # is select_segments.py's own, inside the SINGLE-PHASE admission call
+    # (claim record first, dispatch_token second -- its admission loop
+    # calls rewrite_draft_dispatch_token() immediately after
+    # write_claim_record() succeeds); there is no separate commit phase and
+    # there never will be. This line reproduces its EFFECT only (the draft's
+    # dispatch_token already equal to THIS run's translate token, #438 D4).
+    # The proof that the REAL path produces this same state is not here:
+    # tests/claim_end_to_end.test.py asserts it against the real selector,
+    # and tests/segment_dispatch_driver.test.py::test_from_cap_claim_
+    # admitted_end_to_end_through_the_real_selector asserts the driver
+    # reaches it through its own CLI.
     draft = {"seg": seg, "blocks": {"p1": "hola"}, "dispatch_token": driver_mod.translate_dispatch_token("RUN-CURRENT", seg)}
     draft_path = root / "segments" / f"{seg}.draft.json"
     draft_path.write_text(json.dumps(draft), encoding="utf-8")
@@ -784,6 +855,7 @@ def test_d11_restart_at_1_after_a_claim_from_converged_profile(tmp_path):
 FAKE_SELECT_SEGMENTS_PY = """#!/usr/bin/env python3
 import argparse
 import json
+import sys
 from pathlib import Path
 
 
@@ -795,6 +867,7 @@ def main():
     p.add_argument("--from-cap", default=None)
     p.add_argument("--from-converged", default=None)
     p.add_argument("--run-id", default=None)
+    p.add_argument("--run-resume", default=None, choices=("true", "false"))
     p.add_argument("--durable-root", default=None)
     p.add_argument("--plugin-root", default=None)
     args = p.parse_args()
@@ -807,9 +880,17 @@ def main():
     # segs/claims keeps every CLI-level test in this section on the cheap
     # --allow-empty early-return path, with no need for the driver's full
     # dispatch machinery.
+    #
+    # --run-resume carries the real script's own `choices` so a driver that
+    # relayed a Python bool ("True"/"False") or an unset value is refused
+    # here rather than silently recorded. It does NOT reproduce the real
+    # script's pairing refusal or its claim-requires-a-run-id fatal: this
+    # fake cannot stand in for those, which is precisely why the real-
+    # selector test named in this file's module docstring exists.
     Path("test_fixture_select_segments_received.json").write_text(
         json.dumps({
-            "from_cap": args.from_cap, "from_converged": args.from_converged, "run_id": args.run_id,
+            "from_cap": args.from_cap, "from_converged": args.from_converged,
+            "run_id": args.run_id, "run_resume": args.run_resume, "argv": sys.argv[1:],
         }),
         encoding="utf-8",
     )
@@ -824,20 +905,78 @@ if __name__ == "__main__":
     main()
 """
 
+# The RUN_ID the fake resume_setup.py below always answers with. A shape no
+# wall clock would ever produce, so an assertion that this exact string
+# reached select_segments.py cannot pass by coincidence against a real
+# timestamp id.
+FAKE_RESOLVED_RUN_ID = "FAKERESOLVED0000Z"
+
+FAKE_RESUME_SETUP_PY = """#!/usr/bin/env python3
+import argparse
+import json
+from pathlib import Path
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--payload-file", required=True)
+    p.add_argument("--durable-root", default=None)
+    p.add_argument("--plugin-root", default=None)
+    args = p.parse_args()
+
+    # Proves this script RAN (and how many times), which is what the
+    # "an ordinary dispatch resolves no run id before selection" test
+    # asserts the absence of.
+    marker = Path("test_fixture_resume_setup_calls.jsonl")
+    with open(marker, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"payload": json.loads(Path(args.payload_file).read_text(encoding="utf-8"))}) + "\\n")
+
+    print(json.dumps({
+        "success": True,
+        "effectiveRunId": "__RUN_ID__",
+        "resume": False,
+        "run_dir": "runs/__RUN_ID__",
+        "input_digest": "fake-digest",
+    }))
+
+
+if __name__ == "__main__":
+    main()
+""".replace("__RUN_ID__", FAKE_RESOLVED_RUN_ID)
+
 
 def make_cli_root(tmp_path, name="durable_root"):
     """A durable_root for CLI-level (subprocess) driver invocations, with a
-    FAKE select_segments.py (never the real one -- see this file's own
-    module docstring for why) standing in for the real one make_durable_root()
-    stages. run() forwards --from-cap/--from-converged to this (validate-
-    only) call but never a run_id (#438 D1a, reverted after a codex
-    BLOCKER -- see run()'s own comment at its call site), so nothing here
-    needs resume_setup.py's own real machinery; every test in this section
-    either refuses locally before select_segments.py ever runs, or takes
-    the empty-SEGS early return."""
+    FAKE select_segments.py AND a FAKE resume_setup.py standing in for the
+    real ones make_durable_root() stages (never the real ones -- see this
+    file's own module docstring for why).
+
+    resume_setup.py has to be faked here as of #438: run() now resolves the
+    RUN_ID BEFORE the Step 1 gate call whenever --from-cap/--from-converged
+    is given, because admission is single-phase and select_segments.py
+    refuses a claim with no --run-id. The real resume_setup.py would need a
+    manifest, bundle-hash markers and per-segment cache keys this section
+    deliberately does not build; the fake answers with one fixed, recognizable
+    id so a test can assert THAT EXACT VALUE arrived at select_segments.py --
+    a stronger check than "some id was forwarded", since it also proves the
+    driver forwards the id it RESOLVED rather than one it invented."""
     root = make_durable_root(tmp_path, name=name)
     (root / "scripts" / "select_segments.py").write_text(FAKE_SELECT_SEGMENTS_PY, encoding="utf-8")
+    (root / "scripts" / "resume_setup.py").write_text(FAKE_RESUME_SETUP_PY, encoding="utf-8")
     return root
+
+
+def read_select_segments_received(root):
+    path = root / "test_fixture_select_segments_received.json"
+    assert path.is_file(), "select_segments.py was never invoked"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def resume_setup_call_count(root):
+    path = root / "test_fixture_resume_setup_calls.jsonl"
+    if not path.is_file():
+        return 0
+    return len([ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()])
 
 
 def run_driver(root, *extra_args, timeout=30):
@@ -874,41 +1013,150 @@ def test_from_converged_bad_id_refused_locally_before_select_segments_ever_runs(
     assert not (root / "test_fixture_select_segments_received.json").exists()
 
 
-def test_from_cap_and_from_converged_forwarded_verbatim_to_select_segments(tmp_path):
-    # #438 D1a: this call is validate-only -- --from-cap/--from-converged
-    # are forwarded, but run_id must NOT be (see run()'s own comment at
-    # its run_select_segments() call site for why an earlier revision that
-    # did was reverted: it let resume_setup.py mint runs/<ID>/input.digest
-    # before the selector could refuse, manufacturing evidence the #409
-    # Step 3 gate reads as proof a historical gate ran).
+def test_from_cap_and_from_converged_forwarded_with_the_resolved_run_id_pair(tmp_path):
+    """#438: the claim is SINGLE-PHASE, so the ONE Step 1 gate call must
+    carry the RUN_ID the claim will re-stamp drafts to -- select_segments.py
+    fatals on a claim with no --run-id, and refuses --run-id without its
+    paired --run-resume. The value forwarded must be the id run() actually
+    RESOLVED (the fake resume_setup.py's own recognizable
+    FAKE_RESOLVED_RUN_ID), never one this driver minted for itself.
+
+    This test replaces one that asserted the exact opposite -- `received[
+    "run_id"] is None`, "the validate-only call must never carry a run_id"
+    -- which pinned the abandoned two-phase design and, because the fake
+    selector cannot refuse the way the real one does, kept the suite green
+    while --from-cap was refused at the gate on every real invocation."""
     root = make_cli_root(tmp_path)
     proc = run_driver(root, "--from-cap", "seg01,seg02", "--from-converged", "seg03", "--allow-empty")
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
 
-    received = json.loads((root / "test_fixture_select_segments_received.json").read_text(encoding="utf-8"))
+    received = read_select_segments_received(root)
     assert received["from_cap"] == "seg01,seg02"
     assert received["from_converged"] == "seg03"
-    assert received["run_id"] is None, "the validate-only call must never carry a run_id"
+    assert received["run_id"] == FAKE_RESOLVED_RUN_ID, received
+    assert received["run_resume"] == "false", received
+    # The PAIR, adjacent and in this order, not merely both present
+    # somewhere in the argv -- select_segments.py reads them as one relay.
+    argv = received["argv"]
+    assert "--run-id" in argv, argv
+    idx = argv.index("--run-id")
+    assert argv[idx:idx + 4] == ["--run-id", FAKE_RESOLVED_RUN_ID, "--run-resume", "false"], argv
 
     payload = parse_stdout(proc)
     assert payload["claims"] == {}
+    # The resolved id is reported even on the empty-SEGS early return: it
+    # names the runs/<ID>/ directory this invocation created, and nothing
+    # else in the payload would.
+    assert payload["run_id"] == FAKE_RESOLVED_RUN_ID, payload
+    assert payload["resume"] is False, payload
+    assert resume_setup_call_count(root) == 1, (
+        "the run id must be resolved EXACTLY once per invocation -- a second "
+        "resolution could hand the dispatch loop a different id than the claim "
+        "stamped onto the drafts"
+    )
 
 
-def test_run_select_segments_forwards_an_explicit_run_id_when_given(tmp_path):
-    """run()'s own call site never passes a run_id (see the test above),
-    but run_select_segments() itself must still forward one when a FUTURE
-    caller (#438 D1a's still-unbuilt commit-phase driver) supplies one --
-    called directly here, bypassing run() entirely, so this stays covered
-    even though nothing in this driver currently exercises it end to end."""
+def test_an_ordinary_dispatch_resolves_no_run_id_before_selection(tmp_path):
+    """The property the pre-#438 ordering existed to protect, kept: with no
+    claim flag, nothing is resolved before the Step 1 gate, so a gate refusal
+    still costs no side effect at all. Proven by resume_setup.py never having
+    run by the time select_segments.py answers with an empty selection (the
+    empty-SEGS early return happens before the ordinary path's own
+    resolution)."""
+    root = make_cli_root(tmp_path)
+    proc = run_driver(root, "--allow-empty")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+    received = read_select_segments_received(root)
+    assert received["run_id"] is None, received
+    assert received["run_resume"] is None, received
+    assert resume_setup_call_count(root) == 0, (
+        "an invocation with no claim flag must not resolve (and therefore must "
+        "not create) a run directory before the gate has passed"
+    )
+    payload = parse_stdout(proc)
+    assert payload["run_id"] is None, payload
+
+
+def test_run_select_segments_forwards_an_explicit_run_id_and_resume_when_given(tmp_path):
+    """run_select_segments() called directly, bypassing run(), so the argv
+    shape is pinned independently of which caller assembles it."""
     root = make_cli_root(tmp_path)
     driver_mod = _load_fixture_driver(root)
     dirs = driver_mod.resolve_dirs(None)
 
-    result = driver_mod.run_select_segments(dirs, run_id="EXPLICIT-RUN-ID")
+    result = driver_mod.run_select_segments(dirs, run_id="EXPLICIT-RUN-ID", run_resume="true")
 
     assert result["success"] is True
-    received = json.loads((root / "test_fixture_select_segments_received.json").read_text(encoding="utf-8"))
+    received = read_select_segments_received(root)
     assert received["run_id"] == "EXPLICIT-RUN-ID"
+    assert received["run_resume"] == "true"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"run_id": "EXPLICIT-RUN-ID"},
+        {"run_resume": "false"},
+    ],
+    ids=["run_id_without_run_resume", "run_resume_without_run_id"],
+)
+def test_run_select_segments_refuses_a_split_run_id_run_resume_pair(tmp_path, kwargs):
+    """select_segments.py refuses the pair split (its own :1972 fatal), and
+    so does this function -- refusing HERE names the caller's bug instead of
+    reporting a child's complaint about an argv this driver built. Refused
+    before the subprocess ever starts, proven by the fake selector's own
+    receipt file never appearing."""
+    root = make_cli_root(tmp_path)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+
+    with pytest.raises(driver_mod.DriverError, match="TOGETHER or not at all"):
+        driver_mod.run_select_segments(dirs, **kwargs)
+
+    assert not (root / "test_fixture_select_segments_received.json").exists(), (
+        "select_segments.py must never have been invoked with a half-built pair"
+    )
+
+
+def test_run_select_segments_refuses_a_non_literal_run_resume(tmp_path):
+    """A Python bool formatted into the flag ("True"/"False") is the exact
+    accident this guard exists for: argparse's own `choices` in the real
+    script would reject it, but only after the subprocess has been launched
+    and only as an opaque usage error attributed to the child."""
+    root = make_cli_root(tmp_path)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+
+    with pytest.raises(driver_mod.DriverError, match="literal string"):
+        driver_mod.run_select_segments(dirs, run_id="EXPLICIT-RUN-ID", run_resume=str(False))
+
+    assert not (root / "test_fixture_select_segments_received.json").exists()
+
+
+def test_run_resume_literal_refuses_a_missing_or_non_boolean_resume_field():
+    """--run-resume relays resume_setup.py's own `resume` field straight into
+    select_segments.py's #409 Step 3 fresh-evidence check. A missing field
+    coerced to False would arm the "fresh id" branch of that gate on a verdict
+    resume_setup.py never gave."""
+    assert DRIVER.run_resume_literal({"resume": True}) == "true"
+    assert DRIVER.run_resume_literal({"resume": False}) == "false"
+    for bad in ({}, {"resume": None}, {"resume": "false"}, {"resume": 0}):
+        with pytest.raises(DRIVER.DriverError, match="not a JSON boolean"):
+            DRIVER.run_resume_literal(bad)
+
+
+def test_accepted_run_id_refuses_an_unsafe_effective_run_id():
+    """The id resume_setup.py returns becomes a filesystem path segment
+    (runs/<RUN_ID>/.claimed.<seg>), a codex_job.py --run-id, and every
+    dispatch_token this run writes. Validated here rather than trusted
+    because it came from a sibling script."""
+    assert DRIVER.accepted_run_id({"effectiveRunId": "20260812T000000Z"}) == "20260812T000000Z"
+    for bad in ({}, {"effectiveRunId": None}, {"effectiveRunId": ""},
+                {"effectiveRunId": "../elsewhere"}, {"effectiveRunId": "z..poison"},
+                {"effectiveRunId": "run id with spaces"}):
+        with pytest.raises(DRIVER.DriverError, match="unusable effectiveRunId"):
+            DRIVER.accepted_run_id(bad)
 
 
 def test_claims_field_is_required_and_propagates_through_the_empty_segs_result(tmp_path):

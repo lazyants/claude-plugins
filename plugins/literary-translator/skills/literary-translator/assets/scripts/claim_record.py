@@ -59,6 +59,59 @@ gate then refuses it -- which is the safe state. Assuming a claim on an
 unreadable record would hand a re-review authorization to a segment nobody
 authorized.
 
+**EXISTENCE IS NOT VALIDITY -- the two readers here answer different
+questions and are not interchangeable.** classify_claim_record() is `lstat`
+plus `S_ISREG` and nothing more: it establishes that something occupies the
+path and that the something is a regular file. It never opens the file, so a
+ZERO-LENGTH record, a record holding `null`, and a record torn by a crash
+between the exclusive create and the fsync ALL classify PRESENT. The
+AMBIGUOUS verdict for a torn record comes from read_claim_record()'s JSON
+parse, never from the classifier.
+
+That split is deliberate, and both directions are load-bearing:
+
+  * A REFUSAL predicate should use classify_claim_record(). "Something is
+    sitting where this run's claim record goes" is already enough to refuse
+    a translate, and refusing without reading a byte means an unparseable
+    record cannot talk its way past the guard. Both D8 guards do exactly
+    this -- codex_job.py's _refuse_claimed_translate() (via _claim_state())
+    and segment_dispatch_driver.py's claim_refusal_for_translate() -- and
+    both map AMBIGUOUS to REFUSE.
+
+  * Any consumer about to BELIEVE A FIELD must go through
+    read_claim_record(). draft_ready.py's _claim_note() reads `profile` and
+    `claimed_at`; select_segments.py re-reads an already-claimed record
+    rather than reporting a freshly recomputed payload. Reading a field off
+    a classifier PRESENT is the mistake this paragraph exists to forbid:
+    PRESENT is not a promise that the file has contents, let alone the right
+    ones.
+
+No consumer gets this wrong today. That every one of them happens to respect
+an invariant nothing states is precisely the gap -- an unwritten invariant is
+one refactor away from being false, with nothing red when it stops holding.
+
+**RECORD-FIRST IS AN ORDERING ON DISK, NOT ON SOURCE LINES.** The selector
+writes this record and only then re-stamps the draft's dispatch_token, so
+that a crash in between leaves a record with no token (recoverable: every
+existing gate still refuses the old token, and a re-claim is idempotent)
+rather than a token with no record (which the D8 guard cannot refuse -- it
+sees no record and reads "unclaimed"). Source order alone does not buy that
+guarantee: a file created and fsynced is not reachable after a power loss
+until its DIRECTORY ENTRY is durable too, and the two writes land in two
+different directories. So write_claim_record() fsyncs the containing
+directory before returning success, and success is exactly what a caller is
+entitled to read as "the record is on disk". The other half of the ordering
+belongs to the caller: fsync_directory() below is exported for it, and
+select_segments.py must call it on the draft's own directory after its
+os.replace().
+
+This is a DIFFERENT failure from the already-disclosed residual about a
+crash between the exclusive create and the file fsync. That one leaves a
+record whose CONTENTS are missing (a zero-length file, which per the split
+above still classifies PRESENT); this one leaves a record whose DIRECTORY
+ENTRY is missing, so the record is not there at all. Closing either does
+nothing for the other.
+
 Unlike the four duplicated copies of the `.ever_converged` predicate, this
 one is SHARED by import (`import claim_record`, the flat sibling-import
 idiom already used for cache_key.py). A drift test and a census test pin
@@ -74,6 +127,7 @@ rewriting the token cannot change any draft's content sha1 and every
 import errno
 import json
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -98,6 +152,14 @@ CLAIM_PREFIX = ".claimed."
 # the writer passes so a drift test can pin the two together.
 CLAIM_MODE = 0o644
 
+# getattr, not os.O_DIRECTORY: the flag does not exist on every platform
+# Python runs on, and the same guarded idiom is already in codex_job.py:113
+# and scaffold_setup.py:88. Falling back to 0 keeps the open legal there and
+# leaves whatever the platform's own directory-open semantics are to decide
+# -- fsync_directory() below treats a refusal as a durability failure either
+# way, so the fallback can never turn into a silent success.
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
 
 def _claim_entry_kind(mode: int) -> str:
     """A human name for the st_mode of whatever occupies a claim path -- it
@@ -118,16 +180,89 @@ def _claim_entry_kind(mode: int) -> str:
     return f"an entry of unknown type (st_mode={mode:#o})"
 
 
+_RUN_ID_DIR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def validate_run_id(run_id):
+    """Return an error string if `run_id` is not a safe RUN_ID, else None.
+
+    Byte-for-byte the same check as select_segments.py's own
+    `validate_run_id()` (itself mirroring resume_setup.py's `RUN_ID_RE` and
+    `validate_run_id()`, the script that OWNS this contract because it mints
+    run ids and builds `runs/<RUN_ID>/` from them). The other copies of the
+    same decision live in backfill_resume_gate_ack.py, skeptic_setup.py and
+    segment_dispatch_driver.py, all spelled `validate_run_id`. DUPLICATED
+    rather than imported, per this project's "no shared lib between
+    self-contained scripts" convention, and pinned against drift by
+    tests/run_id_pattern_drift.test.py, which enumerates every module-level
+    `re.compile` whose variable name mentions RUN_ID across every shipped
+    script and compares both the PATTERN and the DECISION against the
+    owner's -- so this copy must be added to that test's `EXPECTED_COPIES`
+    roster as `("claim_record.py", "_RUN_ID_DIR_RE")` in the same change
+    that introduces it.
+
+    The regex alone is NOT the whole contract: `[A-Za-z0-9._-]` admits dots
+    freely, so `.`, `..` and any value CONTAINING `..` pass it and are
+    refused separately below. A copy carrying only the pattern therefore
+    ACCEPTS `z..poison` while the owner REFUSES it -- agreement on the
+    pattern is not agreement on the answer, which is why all three branches
+    are reproduced here rather than just the fullmatch.
+
+    WHY THIS MODULE NEEDS ITS OWN COPY AT ALL: the asymmetry that made
+    claimed_path() a path-traversal hole. The WRITER validated its run id
+    before minting a claim (select_segments.py:744, called from its claim
+    block) and every READER built the same path from an unvalidated one.
+    A run id can reach a reader from an untrusted place -- draft_ready.py's
+    `_claim_run_id()` derives it from a draft's own `dispatch_token`, a
+    field with no schema `pattern` -- and a relocated lookup returns
+    CLAIM_ABSENT, which every guard built on this record reads as "not
+    claimed" and proceeds. Validating in the reader was rejected for the
+    same reason: it leaves the next reader free to forget. It is validated
+    where the path is CONSTRUCTED, so no caller can bypass it.
+    """
+    if not isinstance(run_id, str) or not run_id:
+        return "run id must be a non-empty string."
+    if not _RUN_ID_DIR_RE.fullmatch(run_id):
+        return (
+            "run id must match [A-Za-z0-9][A-Za-z0-9._-]* (letters/digits/"
+            f"dot/underscore/hyphen only, no ':'); got {run_id!r}."
+        )
+    if run_id in (".", ".."):
+        return f"run id must not be '.' or '..'; got {run_id!r}."
+    if ".." in run_id:
+        return f"run id must not contain '..'; got {run_id!r}."
+    return None
+
+
 def claimed_path(run_id: str, seg: str, runs_dir: Path) -> Path:
     """`{runs_dir}/{run_id}/.claimed.{seg}`.
 
-    The `seg` component reaches a real filename and CAN CONTAIN A COLON --
-    `FRONTBACK:errata_02` is a shipped shape and `runs/ledger.d/
-    FRONTBACK:errata_02.json` already exists on disk. A colon is legal in a
-    POSIX filename; nothing here may split, sanitize or rewrite it, because
-    the round trip through this path is how the driver finds the record the
-    selector wrote.
+    RAISES ValueError when `run_id` fails validate_run_id() above -- it does
+    not return a sentinel path, and it does not fall back to a sanitized id.
+    Measured against the unvalidated version this replaces: `'/tmp/elsewhere'`
+    discarded `runs_dir` entirely (`Path` join semantics: an absolute
+    right-hand side wins), `'..'` and `'a/../..'` walked out of the durable
+    root, and `'  20260101T000000Z'` addressed a different directory that
+    merely looks like the right one. Every one of those produced a path whose
+    lookup then reported CLAIM_ABSENT, and ABSENT is the verdict every guard
+    built on this record treats as "nothing to refuse". The failure was
+    therefore silent AND fail-open, which is why it raises rather than
+    returning anything a caller could keep using: a claim path that cannot be
+    trusted must stop the operation, not quietly become a different path.
+
+    The `seg` component is DELIBERATELY NOT validated or sanitized here. It
+    reaches a real filename and CAN CONTAIN A COLON -- `FRONTBACK:errata_02`
+    is a shipped shape and `runs/ledger.d/FRONTBACK:errata_02.json` already
+    exists on disk. A colon is legal in a POSIX filename; nothing here may
+    split, sanitize or rewrite it, because the round trip through this path
+    is how the driver finds the record the selector wrote. Nor is validation
+    missing from the system: every reader checks `seg` on its own way in --
+    select_segments.py:1423 (parse_claim_requests()), codex_job.py:1505
+    (main()), segment_dispatch_driver.py:1395 (parse_claims_field()).
     """
+    problem = validate_run_id(run_id)
+    if problem is not None:
+        raise ValueError(f"unsafe RUN_ID for a claim path: {problem}")
     return runs_dir / run_id / f"{CLAIM_PREFIX}{seg}"
 
 
@@ -202,10 +337,82 @@ def read_claim_record(path: Path):
     return (CLAIM_PRESENT, payload, "")
 
 
-# The fields a claim record carries. `cache_key` is the FRESHLY COMPUTED key
-# at claim time -- recorded so that a LATER claim on the same segment has the
-# baseline this one lacked, which is the whole reason --from-cap cannot do a
-# cache-key comparison today.
+# ---------------------------------------------------------------------------
+# The record's contents.
+#
+# A claim VOIDS things: the stored review's standing (D10) and, for
+# --from-converged, the segment's previously-converged status. Evidence that
+# a claim destroys has to be captured in the record that destroys it, or the
+# only account of what the operator was shown at admission time is a line of
+# stdout from a process that has since exited. D6 says the admission evidence
+# is "recorded in the claim record"; D10 says the review evidence is
+# preserved before being voided. Both are fields here, not report lines.
+#
+# Field by field, beyond the six that were always self-explanatory (`seg`,
+# `profile`, `run_id`, `source_run_id`, `previous_dispatch_token`,
+# `pre_claim_content_sha1`, plus `operator_invocation` and `claimed_at`):
+#
+#   pre_claim_review
+#       D10. What the segment's review document said at the moment the claim
+#       was admitted, as `{"dispatch_token", "clean", "coverage_ok",
+#       "findings_count"}`, or None when the segment had no review document
+#       to preserve. A consumer may conclude: this claim was granted over a
+#       review with these verdicts -- and, when `clean` is True, that a
+#       passing review was deliberately set aside, which is the case an
+#       audit most wants to be able to find later. It may NOT conclude
+#       anything about the review document on disk NOW; the claim's whole
+#       purpose is to void it.
+#
+#   pre_claim_cache_key / cache_key_at_claim
+#       The MOVEMENT, as two endpoints rather than one value. `pre_claim_cache_key`
+#       is the `cache_key` recorded on the segment's own ledger fragment as
+#       read at admission -- what the key WAS when the work being re-reviewed
+#       was produced; None when the fragment carries none, which is always so
+#       for --from-cap (a cache_key is written only on the convergence path).
+#       `cache_key_at_claim` is the key freshly computed by this invocation --
+#       what it IS now.
+#
+#       WHY `cache_key` WAS RENAMED to `cache_key_at_claim` rather than kept
+#       as-is beside its new sibling: with two keys in one record, a bare
+#       `cache_key` no longer says which of the two it is, and this record
+#       sits one directory away from ledger fragments whose OWN `cache_key`
+#       field means the other one. Same argument as this module's
+#       "claim"/"adopt" naming rule: a name that can be misread during an
+#       incident will be, and the incident is the worst possible moment. The
+#       field is unreleased (1.21.0 is in flight), so the rename costs
+#       coordination, not compatibility.
+#
+#   cache_key_moved_fields
+#       The selector's derived diff of those two endpoints over the
+#       authoritative 15-field cache-key list: a list of
+#       `{"field", "pre_claim", "at_claim"}` for every field that differs,
+#       `[]` when none do. Derived rather than primary -- the two full keys
+#       above are the evidence -- but recorded because re-deriving it
+#       requires the 15-field list, and a consumer duplicating that list is
+#       a sixth copy of it appearing for the sake of reading a record.
+#
+#       A consumer must NOT read an empty list as "nothing moved": it is
+#       equally what a claim with NO baseline produces (`pre_claim_cache_key`
+#       is None, so there is nothing to diff). Those two are told apart by
+#       `pre_claim_cache_key is None`, and `cache_key_note` says which in
+#       words.
+#
+#   cache_key_movement_machinery_only
+#       True when every moved field is machinery-only (plugin_bundle_hash,
+#       schema_hash, derivation_bundle_hash -- a plugin upgrade rather than a
+#       content change), False when at least one content-bearing field moved,
+#       and None when there was no movement to characterise. Tri-state on
+#       purpose: `False` and "not applicable" are different facts and a
+#       two-valued field would report them identically. REPORTING only -- per
+#       D2 decision 5, no moved field refuses a claim.
+#
+#   cache_key_note
+#       A human-readable explanation when there is no baseline to compare
+#       against, else None. This is what keeps `pre_claim_cache_key: null`
+#       from being read as "the key was missing unexpectedly" when it is in
+#       fact the documented, expected shape for --from-cap.
+# ---------------------------------------------------------------------------
+
 CLAIM_RECORD_FIELDS = (
     "seg",
     "profile",
@@ -213,26 +420,48 @@ CLAIM_RECORD_FIELDS = (
     "source_run_id",
     "previous_dispatch_token",
     "pre_claim_content_sha1",
+    "pre_claim_review",
+    "pre_claim_cache_key",
+    "cache_key_at_claim",
+    "cache_key_moved_fields",
+    "cache_key_movement_machinery_only",
+    "cache_key_note",
     "operator_invocation",
-    "cache_key",
     "claimed_at",
 )
 
 
 def build_claim_record(
+    *,
     seg,
     profile,
     run_id,
     source_run_id,
     previous_dispatch_token,
     pre_claim_content_sha1,
+    pre_claim_review,
+    pre_claim_cache_key,
+    cache_key_at_claim,
+    cache_key_moved_fields,
+    cache_key_movement_machinery_only,
+    cache_key_note,
     operator_invocation,
-    cache_key,
     claimed_at,
 ):
     """Assemble a claim record payload with every field CLAIM_RECORD_FIELDS
     names, in that order. Built here rather than at each call site so the
-    field set has exactly one definition and a drift test can pin it."""
+    field set has exactly one definition and a drift test can pin it.
+
+    KEYWORD-ONLY, and every argument REQUIRED -- no defaults. Fourteen
+    positional parameters of which eight are strings is a shape where a
+    misordered call still runs and writes a record with `profile` in
+    `source_run_id`; the leading `*` makes that unexpressible. Requiring all
+    fourteen is the same reasoning one step further: a field added to
+    CLAIM_RECORD_FIELDS and forgotten at a call site must be a TypeError at
+    that call site, never a record silently missing the evidence it was
+    extended to carry. Both properties matter more than they would in an
+    ordinary constructor, because this record is the only durable account of
+    a state change that voids a review."""
     return {
         "seg": seg,
         "profile": profile,
@@ -240,15 +469,86 @@ def build_claim_record(
         "source_run_id": source_run_id,
         "previous_dispatch_token": previous_dispatch_token,
         "pre_claim_content_sha1": pre_claim_content_sha1,
+        "pre_claim_review": pre_claim_review,
+        "pre_claim_cache_key": pre_claim_cache_key,
+        "cache_key_at_claim": cache_key_at_claim,
+        "cache_key_moved_fields": cache_key_moved_fields,
+        "cache_key_movement_machinery_only": cache_key_movement_machinery_only,
+        "cache_key_note": cache_key_note,
         "operator_invocation": operator_invocation,
-        "cache_key": cache_key,
         "claimed_at": claimed_at,
     }
 
 
+def fsync_directory(directory) -> "str | None":
+    """Make `directory`'s own entry list durable. Returns None on success, or
+    an error string in the same shape validate_run_id() uses (None means "the
+    thing you asked about is fine").
+
+    EXPORTED because record-first ordering has two halves and this module
+    owns only one of them. Writing file A, then file B, guarantees nothing
+    across a power loss unless each file's DIRECTORY ENTRY is durable too:
+    fsync on the file commits its contents, not the link that makes it
+    findable. The claim record and the draft it authorizes live in different
+    directories, so each write needs its own call -- write_claim_record()
+    makes it for the record's directory, and select_segments.py must make it
+    for the draft's directory after its os.replace().
+
+    A FAILURE IS A FAILURE, never a shrug, and that is the deliberate choice
+    here. The precedent in this repo runs both ways: ledger_update.py's
+    write_fragment_atomically() swallows it (`pass  # best-effort directory-
+    entry durability; not fatal`), while backfill_ever_converged.py's sync of
+    the segments directory returns an error the caller fails the run on,
+    reasoning that a sentinel whose directory entry is not durable is exactly
+    the one a crash can lose while the ledger fragment it backs survives.
+    The claim record is the second case, not the first: the asymmetry it
+    protects against is token-without-record, the one state D8's guard cannot
+    refuse, because it sees no record and reads "unclaimed". A best-effort
+    sync would return success having established nothing, which is the shape
+    of the defect rather than its fix.
+
+    An open that fails is treated identically to an fsync that fails, and the
+    platform reality is the reason rather than an oversight: opening a
+    directory for fsync is not portable, and from in here a platform that
+    refuses the open is indistinguishable from a directory that has been
+    removed or made unreadable underneath us. Both mean the same thing to a
+    caller -- this code cannot establish that the entry is durable -- and
+    silently downgrading the first case to success would be an unprovable
+    guarantee dressed as a proven one. The remedy on such a platform is to
+    decide, deliberately and in the open, that this pipeline does not support
+    it, not to weaken this function until it stops saying so.
+
+    Deliberately NOT O_NOFOLLOW, and NOT an identity check. Its one job is
+    durability of whatever directory the caller just wrote into. Whether that
+    directory is still the one the caller means is a different question with
+    a different remedy, and it is kept separate for the same reason
+    backfill_ever_converged.py keeps its own sync and
+    check_segments_dir_identity() apart."""
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY | _O_DIRECTORY)
+    except OSError as exc:
+        return (
+            f"its directory entry is not durable: {directory} could not be "
+            f"opened for fsync ({exc})"
+        )
+    try:
+        os.fsync(dir_fd)
+    except OSError as exc:
+        return (
+            f"its directory entry is not durable: fsync on {directory} "
+            f"failed ({exc})"
+        )
+    finally:
+        os.close(dir_fd)
+    return None
+
+
 def write_claim_record(path: Path, payload: dict):
-    """Publish a claim record exclusively: `(True, "")` on a fresh write,
-    `(False, detail)` when this run has ALREADY claimed this segment.
+    """Publish a claim record exclusively: `(True, "")` on a fresh, DURABLE
+    write, `(False, detail)` otherwise -- the already-claimed case (detail
+    exactly `"already claimed by this run"`, which callers compare against
+    literally), an occupied-but-unusable path, a failed create or write, or
+    a directory whose entry list could not be made durable.
 
     O_CREAT|O_EXCL rather than a temp-file rename, because the exclusivity
     IS the semantic: a second claim of the same segment within the same run
@@ -261,6 +561,32 @@ def write_claim_record(path: Path, payload: dict):
 
     A claim into a LATER run lands on a different path by construction and
     is therefore a fresh authorization, never a standing permission.
+
+    SUCCESS MEANS DURABLE, which is what the caller's record-first ordering
+    rests on: the record's directory is fsynced before True is returned, so
+    a crash after this call cannot leave the re-stamped draft token on disk
+    with the record that authorizes it missing. A directory that cannot be
+    synced turns the write into a FAILURE -- see fsync_directory() for why
+    this one is not best-effort.
+
+    That failure does NOT unlink the record, and the difference from the
+    partial-write path below is the reason. There, the file's CONTENTS are
+    untrustworthy -- a record whose pre-claim baseline may be missing or torn
+    would be believed and be wrong -- so removing it is what keeps the state
+    honest. Here the contents are complete and fsynced and only the entry's
+    durability is unproven; and removing a valid record is the fail-OPEN
+    direction for every READER of it, since both D8 guards refuse a translate
+    on PRESENT/AMBIGUOUS and let one through on ABSENT. Deleting the record
+    would delete the guard in order to fix a durability doubt.
+
+    The already-claimed branch syncs too, for the case that makes it matter:
+    a retry after a sync failure finds the record already there, takes that
+    branch, and would otherwise return the idempotent "already claimed by
+    this run" -- which the caller reads as permission to re-stamp the token
+    -- having never established the durability the first attempt failed to.
+    When the sync fails there, the detail deliberately does NOT equal the
+    literal "already claimed by this run" the caller compares against, so it
+    lands on that caller's write-failure path instead.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
@@ -274,6 +600,15 @@ def write_claim_record(path: Path, payload: dict):
         # broken entry.
         state, detail = classify_claim_record(path)
         if state == CLAIM_PRESENT:
+            sync_problem = fsync_directory(path.parent)
+            if sync_problem is not None:
+                return (
+                    False,
+                    f"this run had already claimed this segment, but "
+                    f"{sync_problem} -- the existing record cannot be treated "
+                    f"as published, so the draft's dispatch_token must not be "
+                    f"re-stamped from it",
+                )
             return (False, "already claimed by this run")
         return (False, f"claim path is occupied but unusable: {detail}")
     except OSError as exc:
@@ -293,4 +628,11 @@ def write_claim_record(path: Path, payload: dict):
         except OSError:
             pass
         return (False, f"could not write the claim record: {exc}")
+    sync_problem = fsync_directory(path.parent)
+    if sync_problem is not None:
+        # Left on disk on purpose -- see the docstring's "does NOT unlink"
+        # paragraph. The record is complete; what is unproven is whether its
+        # directory entry survives a crash, and the answer to that is not to
+        # remove the entry.
+        return (False, f"the claim record was written but {sync_problem}")
     return (True, "")

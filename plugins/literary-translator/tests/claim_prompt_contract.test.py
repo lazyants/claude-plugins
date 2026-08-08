@@ -2,7 +2,7 @@
 across a fix round by a PROMPT LINE, not by code" -- plus draft_ready.py's
 own claim-aware --expect-token refusal.
 
-## Why this file exists, and why it is split in two parts
+## Why this file exists, and why it is split into parts
 
 D9 (PLAN.md) measured that the DEFAULT `mass-translate-wf.template.js`
 dispatch path has exactly ONE deterministic site that ever runs
@@ -29,6 +29,17 @@ mock-agent technique `tests/mass_translate_driver_smoke.test.py` and
 `tests/fix_prompt_self_check_removed.test.py` already use, duplicated here
 rather than imported (this plugin's "no shared lib between self-contained
 scripts/tests" convention).
+
+Part 2b covers the seam Parts 1 and 2 each only ever saw ONE side of, and
+which was BROKEN while both of them were green: the remedy draft_ready.py
+prints is only worth printing if running it works. It claims a segment
+through the REAL select_segments.py, drops the draft's dispatch_token the
+way a fix round would, reads the refusal draft_ready.py produces, and then
+runs the recovery THAT MESSAGE ITSELF NAMES -- taking the run id and the
+profile out of the printed text rather than out of a constant this file
+chose. Before #438's D9 recovery landed in the selector, that second
+invocation exited 1 and the advertised remedy did not exist; nothing in
+Parts 1 or 2 could go red over it.
 
 Part 3 covers a live, unrelated-to-D9 regression `chokepoint` introduced and
 this file's own author found while building the #438 end-to-end test:
@@ -57,7 +68,11 @@ exit-2.
   `segment_dispatch_driver.py`, or `codex_job.py` -- those belong to other
   teammates' scope for this issue. Part 3 LOADS `codex_job.py` in-process
   (read-only introspection of its own argparse parser) to avoid hand-listing
-  its flags, which is not the same as editing it.
+  its flags, and Part 2b RUNS the shipped `select_segments.py` as a
+  subprocess against a fixture root; neither is the same as editing them.
+- Part 2b does not re-prove the D1-D6 admission matrix (that is
+  `tests/claim_selector.test.py`'s file). It uses exactly one admissible
+  population and asserts only what crossing the seam produces.
 """
 import importlib.util
 import json
@@ -178,21 +193,31 @@ def write_real_claim(root, run_id, seg, *, profile="from-cap",
                       previous_dispatch_token="20260801T132418Z:seg01",
                       pre_claim_content_sha1="d" * 40,
                       operator_invocation="claim.py --profile from-cap --seg seg01",
-                      cache_key=None, claimed_at="2026-08-08T09:00:00Z"):
+                      claimed_at="2026-08-08T09:00:00Z", **overrides):
     """Publishes a REAL claim record via the shipped claim_record.py -- the
     exact write path draft_ready.py's own claim lookup (added in this
-    change) will later read. Returns (path, payload)."""
+    change) will later read. Returns (path, payload).
+
+    build_claim_record() is keyword-only with all fourteen fields REQUIRED
+    and no defaults, so the fields this fixture has no opinion about are
+    supplied as None from CLAIM_RECORD_FIELDS itself rather than spelled out
+    here. Part 1's subject is what draft_ready.py PRINTS about a record, and
+    it prints exactly two fields (`profile`, `claimed_at`); coupling this
+    helper to the full evidence set would make every future field addition
+    edit a fixture that never reads one. `**overrides` is the escape hatch
+    for a test that does care about one of them."""
     cr = _claim_record_module()
     runs_dir = root / "runs"
     path = cr.claimed_path(run_id, seg, runs_dir)
-    payload = cr.build_claim_record(
+    payload = cr.build_claim_record(**dict(
+        {field: None for field in cr.CLAIM_RECORD_FIELDS},
         seg=seg, profile=profile, run_id=run_id, source_run_id=source_run_id,
         previous_dispatch_token=previous_dispatch_token,
         pre_claim_content_sha1=pre_claim_content_sha1,
         operator_invocation=operator_invocation,
-        cache_key=cache_key if cache_key is not None else {},
         claimed_at=claimed_at,
-    )
+        **overrides,
+    ))
     ok, detail = cr.write_claim_record(path, payload)
     assert ok, f"fixture setup: real claim record write failed: {detail}"
     return path, payload
@@ -352,7 +377,7 @@ def test_fix_round_dropping_claimed_token_names_the_lost_claim_for_a_colon_beari
 # modify it.
 # =============================================================================
 
-def test_reclaim_after_a_lost_token_is_idempotent_not_a_second_authorization(tmp_path):
+def test_write_claim_record_is_exclusive_so_a_reclaim_cannot_rewrite_the_baseline(tmp_path):
     """Calls the REAL write_claim_record() twice for the identical
     (run, seg) -- the second call (an operator re-claiming after watching a
     fix round drop the token) must be refused as "already claimed by this
@@ -362,7 +387,18 @@ def test_reclaim_after_a_lost_token_is_idempotent_not_a_second_authorization(tmp
     stay byte-for-byte unchanged. A second payload built from DIFFERENT
     facts is used deliberately (not a copy of the first): if the write were
     NOT exclusive, this is the shape that would silently corrupt the
-    pre-claim baseline the whole claim mechanism rests on."""
+    pre-claim baseline the whole claim mechanism rests on.
+
+    WHAT THIS TEST DOES NOT COVER, stated because it used to be named as
+    though it did: it never drops a dispatch_token and it never invokes the
+    selector, so it cannot fail when the ADVERTISED recovery is unreachable
+    -- and for the whole of #438's first draft it was, while this test
+    stayed green. Calling write_claim_record() twice exercises one property
+    of claim_record.py (exclusivity), not the operator-visible remedy
+    draft_ready.py prints. That remedy is covered by
+    test_lost_token_recovery_runs_the_command_draft_ready_advertises() in
+    Part 2b, which drives the real selector for real; this test is the unit
+    that Part 2b's idempotency assertion rests on."""
     cr = _claim_record_module()
     root = tmp_path / "durable_root"
     runs_dir = root / "runs"
@@ -370,23 +406,25 @@ def test_reclaim_after_a_lost_token_is_idempotent_not_a_second_authorization(tmp
     seg = "seg01"
     path = cr.claimed_path(run_id, seg, runs_dir)
 
-    first_payload = cr.build_claim_record(
+    first_payload = cr.build_claim_record(**dict(
+        {field: None for field in cr.CLAIM_RECORD_FIELDS},
         seg=seg, profile="from-cap", run_id=run_id, source_run_id="20260801T132418Z",
         previous_dispatch_token="20260801T132418Z:seg01", pre_claim_content_sha1="a" * 40,
         operator_invocation="claim.py --profile from-cap --seg seg01",
-        cache_key={}, claimed_at="2026-08-08T09:00:00Z",
-    )
+        claimed_at="2026-08-08T09:00:00Z",
+    ))
     ok1, detail1 = cr.write_claim_record(path, first_payload)
     assert ok1, detail1
     before = path.read_text(encoding="utf-8")
 
-    second_payload = cr.build_claim_record(
+    second_payload = cr.build_claim_record(**dict(
+        {field: None for field in cr.CLAIM_RECORD_FIELDS},
         seg=seg, profile="from-cap", run_id=run_id, source_run_id="20260801T132418Z",
         previous_dispatch_token="A-DIFFERENT-VALUE-A-BROKEN-RECLAIM-MIGHT-SUPPLY",
         pre_claim_content_sha1="b" * 40,
         operator_invocation="claim.py --profile from-cap --seg seg01 (retry)",
-        cache_key={}, claimed_at="2026-08-08T09:05:00Z",
-    )
+        claimed_at="2026-08-08T09:05:00Z",
+    ))
     ok2, detail2 = cr.write_claim_record(path, second_payload)
 
     assert ok2 is False, "a re-claim of an already-claimed segment must not report a fresh success"
@@ -412,18 +450,381 @@ def test_reclaim_for_a_colon_bearing_id_is_also_idempotent(tmp_path):
     path = cr.claimed_path(run_id, seg, runs_dir)
     assert path.name == ".claimed.FRONTBACK:errata_02"
 
-    payload = cr.build_claim_record(
+    payload = cr.build_claim_record(**dict(
+        {field: None for field in cr.CLAIM_RECORD_FIELDS},
         seg=seg, profile="from-cap", run_id=run_id, source_run_id=run_id,
         previous_dispatch_token=f"{run_id}:{seg}", pre_claim_content_sha1="c" * 40,
         operator_invocation="claim.py --profile from-cap --seg FRONTBACK:errata_02",
-        cache_key={}, claimed_at="2026-08-08T09:10:00Z",
-    )
+        claimed_at="2026-08-08T09:10:00Z",
+    ))
     ok1, _ = cr.write_claim_record(path, payload)
     assert ok1
 
     ok2, detail2 = cr.write_claim_record(path, payload)
     assert ok2 is False
     assert detail2 == "already claimed by this run"
+
+
+# =============================================================================
+# Part 2b -- the ADVERTISED recovery, run for real.
+#
+# Part 1 proves draft_ready.py PRINTS a remedy. Part 2 proves claim_record.py
+# refuses to overwrite a record. Neither one ever ran the remedy, and for the
+# whole of #438's first draft the remedy did not work: select_segments.py's S3
+# refused a token-less draft before the claim block ever consulted an existing
+# record, so "re-run select_segments.py's claim step ... it re-stamps the
+# token" named a command that exits 1. Both files were green throughout. That
+# is the producer/consumer trap in its purest form -- the producer of the
+# instruction and the consumer of it were tested against separate fixtures and
+# nothing ever fed one into the other.
+#
+# So this part drives the REAL select_segments.py, twice, over a REAL
+# durable_root, and takes the second invocation's arguments FROM THE MESSAGE
+# draft_ready.py actually printed rather than from a constant this file
+# chose. The fixture is duplicated from tests/claim_selector.test.py's own
+# P2 (--from-cap) population rather than imported, per this plugin's "no
+# shared lib between self-contained scripts/tests" convention; --from-cap is
+# chosen over --from-converged for the same reason that file gives (no
+# .ever_converged bookkeeping, so the fixture's moving parts stay minimal).
+# =============================================================================
+
+SELECT_SEGMENTS_SRC = SCRIPTS_DIR / "select_segments.py"
+LEDGER_MERGE_SRC = SCRIPTS_DIR / "ledger_merge.py"
+VALIDATE_DRAFT_SRC = SCRIPTS_DIR / "validate_draft.py"
+SCHEMAS_SRC = ASSETS_DIR / "schemas"
+
+for _src in (SELECT_SEGMENTS_SRC, LEDGER_MERGE_SRC, VALIDATE_DRAFT_SRC):
+    assert _src.is_file(), f"required sibling script not found at {_src}"
+assert SCHEMAS_SRC.is_dir(), f"schemas dir not found at {SCHEMAS_SRC}"
+
+# The same fixture stand-in for cache_key.py every other selector-driving test
+# file in this suite uses -- its own 15-field hashing algorithm has a dedicated
+# test file, and re-proving it here would only make this fixture heavier.
+FAKE_CACHE_KEY_PY = """#!/usr/bin/env python3
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seg")
+    parser.add_argument("--field")
+    parser.add_argument("--durable-root", default=None)
+    args = parser.parse_args()
+    if args.durable_root:
+        durable_root = Path(args.durable_root).resolve()
+    else:
+        durable_root = Path(__file__).resolve().parent.parent
+    keys_path = durable_root / "test_fixture_cache_keys.json"
+    if not args.seg:
+        sys.stderr.write("fake cache_key.py: test stub requires --seg\\n")
+        return 1
+    data = json.loads(keys_path.read_text(encoding="utf-8"))
+    if args.seg not in data:
+        sys.stderr.write(f"fake cache_key.py: no fixture key for {args.seg}\\n")
+        return 1
+    print(json.dumps(data[args.seg]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
+
+# validate_draft.py's own load_profile() requires all three sections. Written
+# as literal YAML rather than yaml.safe_dump()'d so this file keeps its
+# stdlib-only import set (Parts 1-3 need no third-party module at all).
+CLAIM_PROFILE_YAML = (
+    "verse_policy:\n"
+    "  mode: full_rhymed_plus_literal\n"
+    "  threshold_lines: null\n"
+    "footnotes:\n"
+    "  apparatus_policy: translate_all\n"
+    "validation:\n"
+    '  untranslated_sentinel: "[TODO-UNTRANSLATED]"\n'
+)
+
+CACHE_KEY_FIELDS = [
+    "input_sha1", "style_contract_hash", "used_terms_hash", "pipeline_version",
+    "schema_hash", "prompt_hash", "agent_config_hash", "profile_semantics_hash",
+    "particle_config_hash", "source_extraction_hash", "source_input_hash",
+    "derivation_bundle_hash", "verse_map_hash", "note_map_hash", "plugin_bundle_hash",
+]
+
+FN_PH = "\u27e6FNREF_1\u27e7"
+V_PH_A = "\u27e6VERSE_vA\u27e7"
+
+CLAIM_RUN_ID = "20260812T000000Z"
+CLAIM_SOURCE_RUN_ID = "20260801T090000Z"
+
+
+def claim_segpack(seg):
+    return {
+        "seg": seg,
+        "blocks": [
+            {"id": "p1", "order_index": 0,
+             "source_html": f"<p>Some prose with a note {FN_PH} attached.</p>"},
+            {"id": "vblockA", "order_index": 1,
+             "source_html": "<p>Premiere ligne<br/>Deuxieme ligne</p>"},
+        ],
+        "footnotes": [{"n": 1, "source_text": "Une note en francais."}],
+        "verses": [{"vid": "vA", "placeholder": V_PH_A, "parent_block": "vblockA"}],
+        "names": [],
+        "canon_names": [],
+        "new_names": [],
+        "canon_map": {},
+        "generation_hashes": {
+            "source_extraction_hash": "sxh-0",
+            "source_input_hash": "sih-0",
+            "particle_config_hash": "pch-0",
+            "derivation_bundle_hash": "dbh-0",
+        },
+    }
+
+
+def claim_draft(seg, dispatch_token):
+    return {
+        "seg": seg,
+        "blocks": {
+            "p1": f"Some translated prose with a note {FN_PH} attached. Hand-fixed after the cap.",
+            "vblockA": V_PH_A,
+        },
+        "footnotes": {"1": "A translated note in English."},
+        "verses": {
+            "vA": {
+                "rendered": "First line rendered so\nSecond line rendered so",
+                "literal_gloss": "The first line means one thing, the second means another",
+            },
+        },
+        "names": [],
+        "notes": [],
+        "dispatch_token": dispatch_token,
+    }
+
+
+def make_claim_capable_root(tmp_path, seg="seg01", name="claim_root"):
+    """A durable_root the REAL select_segments.py can admit a --from-cap
+    claim in: every sibling it shells out to is the real shipped script
+    (ledger_merge.py, draft_ready.py, validate_draft.py, claim_record.py)
+    except cache_key.py, plus a single segment in the P2
+    population -- materialized ledger non_converged/reason=cap, NO
+    .ever_converged sentinel, a stored review that is clean:false WITH
+    findings, and a draft whose bytes were hand-edited after the cap while
+    its dispatch_token still names the run it was dispatched under."""
+    root = tmp_path / name
+    scripts_dir = root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    for src in (SELECT_SEGMENTS_SRC, LEDGER_MERGE_SRC,
+                DRAFT_READY_SRC, VALIDATE_DRAFT_SRC, CLAIM_RECORD_SRC):
+        shutil.copy2(src, scripts_dir / src.name)
+    (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
+    shutil.copytree(SCHEMAS_SRC, root / "schemas")
+
+    (root / "runs" / "ledger.d").mkdir(parents=True)
+    (root / "segments").mkdir()
+    profile_path = root / "profile.yml"
+    profile_path.write_text(CLAIM_PROFILE_YAML, encoding="utf-8")
+    (root / ".literary-translator-root.json").write_text(
+        json.dumps({"owner_profile_path": str(profile_path)}), encoding="utf-8"
+    )
+    (root / "canon.json").write_text(json.dumps({"entries": {}}), encoding="utf-8")
+    (root / "manifest.json").write_text(
+        json.dumps({"segments": [{"seg": seg}]}, ensure_ascii=False), encoding="utf-8"
+    )
+    (root / "test_fixture_cache_keys.json").write_text(
+        json.dumps({seg: {f: f"{f}-{seg}" for f in CACHE_KEY_FIELDS}}), encoding="utf-8"
+    )
+
+    (root / "segments" / f"segpack_{seg}.json").write_text(
+        json.dumps(claim_segpack(seg), ensure_ascii=False), encoding="utf-8"
+    )
+    write_draft_doc(root, seg, claim_draft(seg, f"{CLAIM_SOURCE_RUN_ID}:{seg}"))
+    (root / "segments" / f"{seg}.review.json").write_text(
+        json.dumps({
+            "clean": False, "coverage_ok": True,
+            "findings": [{"loc": "p1", "severity": "medium",
+                          "issue": "awkward phrasing", "suggest": "rephrase"}],
+            "draft_sha1": "0" * 40,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (root / "runs" / "ledger.d" / f"{seg}.json").write_text(
+        json.dumps({"timestamp": "2026-01-01T00:00:00Z", "status": "non_converged",
+                    "reason": "cap", "rounds": 4}, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    # S3 requires runs/<source_run_id>/ to exist; #409 Step 3 separately
+    # requires an input.digest for any id that carries dispatch evidence, and
+    # the draft's own dispatch_token IS dispatch evidence for the source run.
+    for run_id in (CLAIM_SOURCE_RUN_ID, CLAIM_RUN_ID):
+        run_dir = root / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "input.digest").write_text(
+            json.dumps({"digest": f"stub-{run_id}"}), encoding="utf-8"
+        )
+    return root
+
+
+def write_draft_doc(root, seg, doc):
+    (root / "segments" / f"{seg}.draft.json").write_text(
+        json.dumps(doc, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def read_draft_doc(root, seg):
+    return json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+
+
+def run_select(root, *extra_args, timeout=60):
+    return subprocess.run(
+        [sys.executable, str(root / "scripts" / "select_segments.py"), *extra_args],
+        capture_output=True, text=True, timeout=timeout, cwd=str(root),
+    )
+
+
+def test_lost_token_recovery_runs_the_command_draft_ready_advertises(tmp_path):
+    """D9 end to end, across the seam Part 1 and Part 2 each only saw one
+    side of: CLAIM (real selector) -> a fix round DROPS dispatch_token ->
+    draft_ready.py REFUSES and prints a remedy -> that exact remedy is run
+    (real selector again) -> the token is restored and the segment is READY.
+
+    The second invocation's run id and profile are PARSED OUT OF
+    draft_ready.py's own stdout, never taken from this file's constants.
+    That is the whole point: the assertion is not "a re-claim works", it is
+    "the command this tool tells an operator to run is the command that
+    works". A message that named a different run id, or a profile the
+    selector would refuse, passes every test in Part 1 and fails here.
+
+    THE MUTATIONS THAT MAKE THIS FAIL, one per hop:
+      * delete select_segments.py's evaluate_lost_token_recovery() call from
+        its S3 branch (i.e. restore the pre-#438 "refuse a token-less draft
+        outright") -- the second run_select() exits 1 and the token is never
+        restored. This is the state the whole feature shipped in until this
+        release, with Parts 1 and 2 green;
+      * make that recovery accept a DIFFERENT profile than the record's --
+        caught by the profile assertion below only because the profile fed
+        back in comes from the message;
+      * drop `--run-id {run_id!r}` from draft_ready.py's remedy sentence --
+        the regex below finds nothing and the test fails at the parse, which
+        is the correct place to fail: an operator would have had nothing to
+        run either;
+      * let the re-claim overwrite the durable record instead of taking
+        write_claim_record()'s "already claimed by this run" branch -- the
+        byte-comparison of the record fails.
+
+    Nothing is mocked. Node is not involved (Part 3's dependency, not
+    this one's)."""
+    seg = "seg01"
+    root = make_claim_capable_root(tmp_path, seg=seg)
+    token = f"{CLAIM_RUN_ID}:{seg}"
+
+    # ---- hop 1: the real claim ------------------------------------------
+    # --run-resume false: CLAIM_RUN_ID is a freshly minted id here (its
+    # input.digest is seeded exactly as resume_setup.py would leave one), and
+    # select_segments.py requires the --run-id/--run-resume pair together.
+    claim = run_select(root, "--only-segs", seg, "--from-cap", seg,
+                       "--run-id", CLAIM_RUN_ID, "--run-resume", "false")
+    assert claim.returncode == 0, f"stdout={claim.stdout!r} stderr={claim.stderr!r}"
+    assert read_draft_doc(root, seg)["dispatch_token"] == token, (
+        "the claim must re-stamp the draft before this test can lose the token"
+    )
+    cr = _claim_record_module()
+    record_path = cr.claimed_path(CLAIM_RUN_ID, seg, root / "runs")
+    assert record_path.is_file(), f"no claim record at {record_path}"
+    record_before = record_path.read_bytes()
+
+    # ---- hop 2: a fix round drops the token ------------------------------
+    # draft.schema.json makes dispatch_token OPTIONAL, so a re-emitted draft
+    # simply loses the field -- exactly what Part 3's prompt line exists to
+    # prevent and what this recovery exists to repair. Every other byte is
+    # left alone, so draft_content_sha1() (which projects dispatch_token out)
+    # is unchanged, which is what lets the re-claim's own staged-file
+    # identity check pass.
+    fixed = read_draft_doc(root, seg)
+    del fixed["dispatch_token"]
+    write_draft_doc(root, seg, fixed)
+
+    # ---- hop 3: draft_ready.py refuses, and advertises the remedy --------
+    refusal = run_draft_ready(root, seg, "--expect-token", token)
+    assert refusal.returncode == 1, f"stdout={refusal.stdout!r}"
+    assert "the claim was LOST" in refusal.stdout, refusal.stdout
+    advertised_run_id = re.search(r"--run-id '([^']+)'", refusal.stdout)
+    advertised_profile = re.search(r"profile='([^']+)'", refusal.stdout)
+    assert advertised_run_id is not None, (
+        f"the remedy must name the run id to re-claim under: {refusal.stdout!r}"
+    )
+    assert advertised_profile is not None, (
+        f"the remedy must name the profile to re-claim under: {refusal.stdout!r}"
+    )
+    assert "select_segments.py" in refusal.stdout, (
+        f"the remedy must name the script that performs it: {refusal.stdout!r}"
+    )
+
+    # ---- hop 4: run EXACTLY what the message said ------------------------
+    # The profile string in the message is the record's own value; it maps to
+    # the selector flag of the same name. Looked up rather than hardcoded so
+    # a record carrying an unknown profile fails HERE, naming it, instead of
+    # silently exercising --from-cap regardless of what was advertised.
+    profile_flag = {"from-cap": "--from-cap", "from-converged": "--from-converged"}
+    flag = profile_flag.get(advertised_profile.group(1))
+    assert flag is not None, (
+        f"draft_ready.py advertised profile {advertised_profile.group(1)!r}, which is not "
+        f"a profile select_segments.py offers a flag for -- the remedy is unrunnable"
+    )
+    # --run-resume true: this id is no longer fresh. resume_setup.py would
+    # find runs/<id>/input.digest and report a RESUME, and the driver forwards
+    # that verdict verbatim -- so 'true' is what a real re-claim of an
+    # existing run carries, not a convenience.
+    recovery = run_select(root, "--only-segs", seg, flag, seg,
+                          "--run-id", advertised_run_id.group(1), "--run-resume", "true")
+    assert recovery.returncode == 0, (
+        f"the recovery draft_ready.py itself advertises must WORK. "
+        f"stdout={recovery.stdout!r} stderr={recovery.stderr!r}"
+    )
+
+    # ---- hop 5: what the operator was promised, on disk -------------------
+    assert read_draft_doc(root, seg)["dispatch_token"] == token, (
+        "the advertised recovery promises 'it re-stamps the token' -- the draft must "
+        "carry this run's token again"
+    )
+    assert "lost-token recovery" in recovery.stderr, (
+        f"a recovery must never be silent: {recovery.stderr!r}"
+    )
+    assert record_path.read_bytes() == record_before, (
+        "the re-claim is the SAME authorization reapplied, not a second one -- the "
+        "durable record, including its pre-claim baseline, must be byte-identical"
+    )
+    ready = run_draft_ready(root, seg, "--expect-token", token)
+    assert ready.returncode == 0, (
+        f"after the advertised recovery the segment must actually be READY: "
+        f"stdout={ready.stdout!r} stderr={ready.stderr!r}"
+    )
+    assert f"[{seg}] READY" in ready.stdout
+
+
+def test_a_token_less_draft_with_no_claim_record_is_still_refused(tmp_path):
+    """The control the recovery test needs, and the reason the recovery is
+    not a general hole: the SAME token-less draft, with no claim record for
+    the run, must still be refused by the selector. If this ever passes, D9's
+    recovery has stopped being "this run's own record authorizes restoring
+    the token it wrote" and become "a missing token is fine"."""
+    seg = "seg01"
+    root = make_claim_capable_root(tmp_path, seg=seg)
+    fixed = read_draft_doc(root, seg)
+    del fixed["dispatch_token"]
+    write_draft_doc(root, seg, fixed)
+
+    proc = run_select(root, "--only-segs", seg, "--from-cap", seg,
+                      "--run-id", CLAIM_RUN_ID, "--run-resume", "false")
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "no dispatch_token" in proc.stdout, proc.stdout
+    assert not (root / "runs" / CLAIM_RUN_ID / f".claimed.{seg}").exists(), (
+        "a refused admission must not leave a claim record behind"
+    )
 
 
 # =============================================================================
