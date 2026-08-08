@@ -95,6 +95,10 @@ resume_setup = _load_module("resume_setup", RESUME_SETUP_SRC)
 # guards scaffold_setup.py's own local tuple.
 PLUGIN_BUNDLE_MEMBERS = cache_key.PLUGIN_BUNDLE_MEMBERS
 EXPECTED_ORCHESTRATION_BUNDLE_MEMBERS = (
+    # #438: registered in BOTH bundles -- it gates dispatch (plugin bundle)
+    # AND select_segments.py, an orchestration member that is deliberately
+    # not a plugin member, imports it (transitive-import invisibility).
+    "claim_record.py",
     "draft_ready.py",
     "ledger_merge.py",
     "language_smoke_report.py",
@@ -262,7 +266,7 @@ def test_scaffold_writes_plugin_bundle_marker(tmp_path):
 
 def test_scaffold_writes_orchestration_bundle_marker(tmp_path):
     """.orchestration_bundle_hash is written non-empty, equals an independent
-    sha1 over the four orchestration members, and is read back by
+    sha1 over the five orchestration members, and is read back by
     resume_setup._read_marker (its only reader -- it is NOT a cache_key
     field)."""
     root = _make_scaffold_root(tmp_path)
@@ -276,7 +280,7 @@ def test_scaffold_writes_orchestration_bundle_marker(tmp_path):
     expected = _independent_bundle_hash(root, EXPECTED_ORCHESTRATION_BUNDLE_MEMBERS)
     assert written == expected, (
         f"scaffold-written orchestration_bundle_hash {written!r} != independent "
-        f"recompute {expected!r} over the four orchestration members"
+        f"recompute {expected!r} over the five orchestration members"
     )
 
     round_tripped = resume_setup._read_marker(

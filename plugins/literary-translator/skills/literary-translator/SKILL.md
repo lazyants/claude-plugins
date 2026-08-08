@@ -1816,6 +1816,177 @@ plugin currently reads `needs_fix`, the driver's stdout, or its own journal
 Do not launch this driver unattended expecting it to complete a batch
 end-to-end — a `needs_fix` segment sits stalled until someone checks.
 
+**Claiming a segment for re-review (#438) — re-reviewing a hand-edited
+draft WITHOUT re-translating it.** A converged or capped segment's draft is
+sometimes hand-edited outside the plugin (a name-form fix, a phrasing
+tightening) after its stored review already exists. Ordinarily that draft
+is untouchable — `previously_converged` and the review-cap classification
+exist specifically to refuse re-dispatching finished or capped work — and
+nothing else in W5 lets an operator say "re-review THIS draft, exactly as
+it stands now, without re-translating it." A **claim** is the narrow,
+per-segment, per-run authorization that does exactly that: it never
+re-translates, and it clears the refusal gates for exactly the id(s) named
+and nothing else.
+
+**The step order for a claim run INVERTS the ordinary one — read this
+before running one, because it differs from every W5 run described above.**
+For an ordinary run, `select_segments.py` runs first (to produce `SEGS`)
+and `resume_setup.py` runs second, against that finalized set ("1.2.0: the
+deterministic pre-workflow step", above). **A claim run reverses this:
+`resume_setup.py` runs FIRST**, before `select_segments.py` is ever
+invoked, and `select_segments.py` takes the resolved RUN_ID explicitly
+rather than deriving anything from the ordinary flow:
+
+```
+# 1. Resolve RUN_ID first (kind=mass -- the SAME payload contract as an
+#    ordinary run's resume_setup.py call, above).
+python3 {durable_root}/scripts/resume_setup.py --payload-file {payload.json}
+# -> {"success": true, "effectiveRunId": RUN_ID, "resume": true|false,
+#     "run_dir": ..., "input_digest": ...}
+
+# 2. THEN select_segments.py -- --run-id and --run-resume copied VERBATIM
+#    from step 1's own output (see the --run-resume warning below).
+python3 {durable_root}/scripts/select_segments.py \
+    --from-cap SEG1[,SEG2,...] --only-segs SEG1[,SEG2,...] \
+    --run-id RUN_ID --run-resume true|false
+# or:
+python3 {durable_root}/scripts/select_segments.py \
+    --from-converged SEG1[,SEG2,...] \
+    --run-id RUN_ID --run-resume true|false
+```
+
+This is not a stylistic reordering — it is what makes the claim mechanism
+sound at all. The claim's own durable record lives at
+`runs/<RUN_ID>/.claimed.<seg>`, and it re-stamps the draft's own
+`dispatch_token` to `<RUN_ID>:<seg>`; BOTH need RUN_ID to already exist at
+admission time, which is only true once `resume_setup.py` has already run.
+Running the ordinary order (select first, resume second) for a claim would
+mean admitting against a RUN_ID that does not exist yet — this is not
+merely untested, it is unsound by construction.
+
+**Reversing the order is only safe because of a matching fix to the #409
+Step 3 gate — the ordering alone is not the whole story.** A freshly minted
+RUN_ID could otherwise manufacture the very evidence Step 3 checks for (a
+digest that PROVES the resume-integrity gate ran, when all it actually
+proves is that THIS invocation ran, moments ago). `select_segments.py`
+closes this by scanning Step 3's evidence exactly ONCE, at the very start
+of its own invocation, before either the claim-admission block or the
+fresh-evidence refusal ever runs — so an invocation can never see its own
+writes as pre-existing evidence, regardless of where a future edit moves
+the claim block relative to everything else.
+
+**`--run-resume` is a RELAY of `resume_setup.py`'s own `resume` field —
+NEVER an operator judgement call, and never a value to type from memory or
+convenience.** Copy the exact `true`/`false` value `resume_setup.py`'s own
+stdout reported in step 1 above, nothing else. Getting this wrong does not
+fail loudly — **it silently defeats a safety gate, in exactly ONE
+direction.** `select_segments.py` refuses a `--run-resume false` claim when
+this project's own evidence (a draft already carrying this exact RUN_ID, or
+a `runs/workflows/<RUN_ID>/` directory) shows the id is not actually fresh
+— but a `--run-resume true` attestation is trusted outright, with nothing
+on the code side verifying it against a genuinely resumed digest. A `true`
+typed for what is actually a `false` case sails straight through the one
+check meant to catch it. There is no way to make this self-verifying; the
+operator relaying the value correctly IS the safeguard.
+
+**The two admission profiles — exactly two, never more.** A third
+(`--from-incomplete`, for stalled/interrupted work) was designed and then
+deliberately DELETED from this feature: no implementable condition
+separates "bookkeeping incomplete" from "ordinary live work mid-flight" (the
+default path full-replaces the ledger to a two-key `in_progress` row before
+it ever dispatches, which is indistinguishable from a stall by any artifact
+on disk). Naming a segment under the wrong profile is refused BY NAME, not
+silently reclassified into the other one:
+
+- **`--from-converged SEG1[,SEG2,...]`** — for a segment that converged
+  CLEANLY at least once and was then hand-edited. Requires, in addition to
+  the shared gates below: a materialized ledger status of `converged` or
+  `stale`; a `.ever_converged.<seg>` sentinel present; a recorded
+  `reviewed_draft_sha1` that DIFFERS from the draft's current content sha1
+  (nothing to re-review if it still matches); and the stored review's
+  `clean` is `true`. A successfully-admitted `--from-converged` claim clears
+  the `previously_converged` refusal for exactly that id, and nothing else.
+- **`--from-cap SEG1[,SEG2,...]`** — for a segment that hit the review cap
+  (materialized status `non_converged`, `reason: "cap"`) and was then
+  hand-edited. Requires: NO `.ever_converged` sentinel; the stored review's
+  `clean` is `false` WITH non-empty `findings`. Because a capped segment is
+  `human_escalation`, `--only-segs` naming the same id(s) is ALSO required
+  — the same explicit-retry mechanism any other `human_escalation` retry
+  already needs, now doubled as a second, independent authorization.
+
+**Shared safety gates, both profiles, every requested id validated
+together in ONE pass (every failure reported at once — three sequential
+refusals would cost three round trips to learn three problems):**
+`validate_draft.py` passes; `draft_ready.py`'s structural checks pass; the
+draft's own `dispatch_token` names a run that actually exists under
+`runs/`; the stored review is schema-valid with `coverage_ok: true`; and
+the segpack's frozen `canon_map` still agrees with the CURRENT `canon.json`
+for every name it lists (a stale segpack is refused, naming the mismatched
+names, with a pointer to re-run `segpack.py` before claiming).
+
+**A claim never re-translates.** Admission itself never touches the
+draft's own text — only its `dispatch_token` is re-stamped, byte-identical
+content otherwise. A claim and `--allow-retranslate-converged` are mutually
+exclusive for the same id and rejected OUTRIGHT if both are given for it:
+one authorizes re-TRANSLATION, the other re-REVIEW, and "claim wins" would
+let one flag silently change what the other one means.
+
+**P3 — two units the plugin does NOT claim at all, handled entirely
+OUTSIDE it by a hand-driven procedure.** A third state exists that neither
+profile above covers: a segment stuck with genuinely incomplete
+bookkeeping — its stored review is stale, describing a draft that no longer
+exists in that form, and its token predates the run that should have
+converged it — rather than cleanly converged-and-edited or
+capped-and-edited. No implementable condition distinguishes this from
+ordinary live work mid-flight, so **there is no `select_segments.py` flag
+for it at all; do not look for one.** The currently known instances
+(`seg21`, `FRONTBACK:errata_02`) are handled entirely by hand, OUTSIDE any
+plugin script, in this exact order:
+
+1. **A fresh review of the current bytes, at the NEXT round label** (e.g.
+   `:r2` if the stale review was `:r1`) — dispatched however W5's ordinary
+   review step would dispatch one, against the draft exactly as it stands
+   today. Never assume the stale review's findings still describe today's
+   text.
+2. **If that fresh review comes back `clean: true`** — proceed straight to
+   the convergence write below.
+3. **If it comes back dirty** — run ONE fix round against ITS findings
+   (never the stale review's), re-review, and converge only once THAT
+   review is clean. Do not skip the fix round to force a convergence write
+   against a dirty review — see the THIRD bullet below (`ledger_update.py`
+   never reads `clean`/`coverage_ok`) for why that would succeed silently,
+   and be wrong.
+
+**The convergence write (`ledger_update.py`) is NOT auto-filled from the
+existing `in_progress` row — the operator supplies every field explicitly,
+and three of them are unenforced traps with no code-side safety net:**
+
+- `ledger_update.py` builds its fragment entirely fresh; it never reads the
+  prior on-disk fragment for values. The payload's `rounds` (an integer)
+  and a COMPLETE, freshly-computed 15-field `cache_key` (via the project's
+  own `cache_key.py` — never copied from an old fragment) are both
+  **required operator input**; only `n_blocks`/`n_footnotes`/`n_verses`/
+  `reviewed_draft_sha1` are filled in for you.
+- **`run_token` is OPTIONAL in the payload, and omitting it SILENTLY
+  DISABLES both token checks** (the draft-token equality check and the
+  review-token match). This procedure is only as safe as this one line: the
+  payload MUST carry `run_token: "<the draft's own existing RUN_ID>"` (the
+  run that never converged the segment — read it off the draft's CURRENT
+  `dispatch_token`, never invented or guessed). Only the content-sha1
+  re-check is unconditional; both token checks are not — a payload that
+  omits `run_token` is not the reviewed procedure, no matter how correct
+  everything else in it looks.
+- **`ledger_update.py` never reads `clean` or `coverage_ok` at all —
+  verified by search over the whole script.** It consumes only the
+  review's `draft_sha1` and `dispatch_token`. On the plugin's own dispatch
+  paths, the driver/template enforce the verdict before ever calling this
+  writer; this hand-driven route bypasses that enforcement entirely, so
+  **the operator IS the enforcement**: record convergence only against a
+  review whose own `clean` AND `coverage_ok` are both `true`. Nothing
+  downstream will catch a convergence recorded against a dirty review —
+  this is the single most dangerous way to get this procedure wrong, and
+  it fails completely silently.
+
 **W6 Consistency pass** — cross-segment sweep using `consistency_issues.md`
 as a lightweight, hand-maintained tracker after every batch, before the next
 starts. Never the output of an automated script, never read back in or

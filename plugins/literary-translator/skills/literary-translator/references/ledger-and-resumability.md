@@ -519,7 +519,7 @@ Exact byte-scope per field:
   catches a footnote-apparatus re-extraction change for this segment
   specifically.
 - **`plugin_bundle_hash`** (global) — sha1 of sorted,
-  filename-concatenated bytes of the thirteen generic scripts that directly
+  filename-concatenated bytes of the fourteen generic scripts that directly
   shape translate/review content (`ledger_update.py` included — its
   `reviewed_draft_sha1` binding-check logic directly determines
   correctness) plus the two workflow templates
@@ -573,7 +573,7 @@ membership.
 
 - **`plugin_bundle_hash`** (global, read from
   `${durable_root}/runs/.plugin_bundle_hash` — a marker file Step 0a writes
-  once per run, not recomputed per segment) — covers exactly **thirteen
+  once per run, not recomputed per segment) — covers exactly **fourteen
   scripts** (six pre-1.2.0, plus `review_ready.py` and `resume_setup.py`,
   new in 1.2.0, `glossary_batch_plan.py`, new in 1.3.5, `codex_job.py`,
   new in 1.4.7, `canon_senses.py`, added for RFC #215's homonym-split
@@ -582,13 +582,17 @@ membership.
   must be registered too, `fetch_citation.py`, added in 1.16.1 as the
   validated retrieval boundary for the W3 citation audit (#347) -- it
   decides which citations may be fetched at all, so its bytes shape review
-  content as directly as any validator, and `segment_dispatch_driver.py`,
-  added in #409 Step 4 as the W5 local driver — see below) plus the two
+  content as directly as any validator, `segment_dispatch_driver.py`,
+  added in #409 Step 4 as the W5 local driver — see below, and
+  `claim_record.py`, added in #438 as the re-review claim predicate: it
+  decides whether a segment was authorized for re-review at all, so a bug
+  in it either grants an authorization nobody named or drops one the
+  operator did) plus the two
   workflow templates: `validate_draft.py`, `canon_validate.py`,
   `cache_key.py`, `draft_sha1.py`, `review_artifact_check.py`,
   `ledger_update.py`, `review_ready.py`, `resume_setup.py`,
   `glossary_batch_plan.py`, `codex_job.py`, `canon_senses.py`,
-  `fetch_citation.py`, `segment_dispatch_driver.py`, plus
+  `fetch_citation.py`, `segment_dispatch_driver.py`, `claim_record.py`, plus
   `mass-translate-wf.template.js`/`glossary-pass-wf.template.js`. These are
   scripts that directly shape extraction/translation/review/validation
   content, or determine whether a convergence verdict was correctly

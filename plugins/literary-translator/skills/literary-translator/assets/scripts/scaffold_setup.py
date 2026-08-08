@@ -61,6 +61,16 @@ import cache_key
 # tests/scaffold_setup.test.py::test_orchestration_members_pinned against a
 # silent desync of resume_setup.py's resume-integrity digest.
 ORCHESTRATION_BUNDLE_MEMBERS = (
+    # #438: claim_record.py is registered in BOTH bundles, deliberately.
+    # It is a PLUGIN_BUNDLE_MEMBERS entry (it gates dispatch), and it is ALSO
+    # here because select_segments.py -- an orchestration member that is
+    # deliberately NOT a plugin-bundle member -- now imports it. Without this
+    # line a change to claim_record.py's bytes would move plugin_bundle_hash
+    # but leave orchestration_bundle_hash unchanged, even though the
+    # orchestration member's behavior changed. Same transitive-import
+    # invisibility that forced canon_senses.py to be registered once two
+    # members imported it.
+    "claim_record.py",
     "draft_ready.py",
     "ledger_merge.py",
     "language_smoke_report.py",

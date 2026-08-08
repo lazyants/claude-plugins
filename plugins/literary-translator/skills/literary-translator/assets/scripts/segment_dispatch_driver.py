@@ -305,14 +305,23 @@ re-invalidate converged work against.
     python3 segment_dispatch_driver.py
         [--durable-root PATH] [--plugin-root PATH]
         [--only-segs SEG1,SEG2,...] [--allow-retranslate-converged]
-        [--allow-empty] [--max-concurrent-codex-jobs N] [--node BIN]
+        [--allow-empty] [--from-cap SEG1,SEG2,...] [--from-converged SEG1,SEG2,...]
+        [--max-concurrent-codex-jobs N] [--node BIN]
 
-Forwards `--only-segs`/`--allow-retranslate-converged`/`--allow-empty`
-verbatim to `select_segments.py` -- see that script's own module
-docstring for their exact semantics; this script adds no independent
-meaning to any of them. `--max-concurrent-codex-jobs` (default 40) and
-`--node` are this driver's own -- see `build_arg_parser()`'s own help text
-for the concurrency default's justification.
+Forwards `--only-segs`/`--allow-retranslate-converged`/`--allow-empty`/
+`--from-cap`/`--from-converged` verbatim to `select_segments.py` -- see
+that script's own module docstring for their exact semantics; this
+script adds no independent meaning to any of them. `--from-cap`/
+`--from-converged` (#438) request claim VALIDATION for the named ids
+against this (read-only) Step 1 gate call -- never a run_id, and never
+the commit that actually writes a claim (D1a's two-phase split; the
+commit's own driving is owned elsewhere and still in flux). Whatever
+`select_segments.py` reports back in its own `claims` field is read back,
+validated (see `parse_claims_field()`), and folded into the dispatch
+context -- fatal on anything missing, malformed, or mismatched (#438 D3).
+`--max-concurrent-codex-jobs` (default 40) and `--node` are this driver's
+own -- see `build_arg_parser()`'s own help text for the concurrency
+default's justification.
 
 Exit 0 = every gate passed and the per-segment loop ran to completion
 (a completion that reports EVERY segment converged, needs_fix, or failed
@@ -873,6 +882,101 @@ def current_draft_sha1(seg: str, segments_dir: Path, scripts_dir: Path = SCRIPTS
 
 
 # ---------------------------------------------------------------------------
+# #438 D4/D8 -- the shared claim_record.py sibling, loaded the SAME
+# verify-then-reopen-by-path way _load_draft_sha1_module() loads
+# draft_sha1.py, and for the identical reason: this driver must never
+# trust whatever claim_record.py happens to sit beside its own execution
+# location via a bare `import claim_record` -- that would resolve against
+# sys.path[0] (this PROCESS's own physical directory) even when
+# dirs["scripts_dir"] names a different, trusted --plugin-root tree, the
+# same self-anchored-vs-redirected split every other in-process-executed
+# sibling in this file already accounts for. claim_record.py's own module
+# docstring calls this driver one of its two documented readers (the
+# other is select_segments.py's own admission check) and a third,
+# independently hand-rolled presence predicate is exactly the drift shape
+# the 1.19.1 sentinel bug came from -- sharing the import, not just the
+# convention, is what a drift test can actually pin.
+# ---------------------------------------------------------------------------
+
+
+def _load_claim_record_module(scripts_dir: Path = SCRIPTS_DIR):
+    """Loads the real sibling claim_record.py via importlib. See this
+    section's own comment above for why never a bare `import
+    claim_record`."""
+    path = scripts_dir / "claim_record.py"
+    verified_fd, verified_state = _open_regular_no_follow_walk(path)
+    if verified_fd is not None:
+        os.close(verified_fd)
+    if verified_state != "file":
+        fatal(
+            f"claim_record.py at {path} is not usable (state={verified_state}) "
+            f"-- refusing to import an executable that is not reachable "
+            f"without following a symlink somewhere on the way",
+            exit_code=2, artifact_path=str(path), artifact_state=verified_state,
+        )
+    spec = importlib.util.spec_from_file_location("claim_record", str(path))
+    if spec is None or spec.loader is None:
+        fatal(f"could not load claim_record.py from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def claim_refusal_for_translate(ctx: "DispatchContext", seg: str) -> "str | None":
+    """#438 D8: 'a claimed segment may NEVER be dispatched for
+    translation.' Returns None when `seg` may be translated, else a
+    human-readable refusal detail naming why.
+
+    This is the driver's OWN, earlier layer -- D8's own text is explicit
+    that it is a second layer, not what makes the design safe by itself
+    (codex_job.py's chokepoint, owned separately, is what actually stands
+    in front of launch()). What this check catches is D8's own named
+    residual scenario for this side: a claimed draft that went invalid or
+    missing between admission and dispatch, which would otherwise fall
+    through derive_next_action()'s `if not draft_ok:` branch to plain
+    {"action": "translate"} with nothing else in this file the wiser.
+    Placed BEFORE process_segment()'s own `write_ledger(..., {"status":
+    "in_progress"})` translate-branch write (never after), so a refusal
+    here loses neither the draft bytes nor the ledger fragment -- unlike
+    the default template path's own chokepoint, whose own residual
+    section states plainly that recordLedgerCall() already ran by the
+    time codex_job.py's refusal could fire.
+
+    Reads the ON-DISK claim record directly via claim_record.py's own
+    three-state predicate (classify_claim_record(), never Path.exists())
+    -- this driver is one of its two documented readers, and a THIRD,
+    independently hand-rolled presence test would repeat the exact drift
+    the 1.19.1 sentinel bug came from.
+
+    AMBIGUOUS maps to REFUSE here -- the OPPOSITE direction from
+    claim_record.py's own module-level guidance for ADMISSION ("the
+    AMBIGUOUS mapping is 'do not claim', never 'assume claimed'"). That
+    guidance is about GRANTING a new authorization, where the safe
+    default is to grant nothing. This call site decides whether to
+    CREATE new work -- a translate dispatch that would overwrite a draft
+    this run cannot prove is unclaimed -- so the safe default flips:
+    failing to block here is the destructive direction D8 exists to
+    prevent, while over-blocking on a record this run cannot read only
+    leaves the segment recoverable for the next invocation."""
+    claim_record_mod = _load_claim_record_module(ctx.dirs["scripts_dir"])
+    path = claim_record_mod.claimed_path(ctx.run_id, seg, ctx.dirs["runs_dir"])
+    state, detail = claim_record_mod.classify_claim_record(path)
+    if state == claim_record_mod.CLAIM_ABSENT:
+        return None
+    if state == claim_record_mod.CLAIM_PRESENT:
+        return (
+            f"segment {seg!r} holds a live claim record for this run at {path} -- "
+            f"a claimed segment may never be translated (#438 D8)"
+        )
+    # CLAIM_AMBIGUOUS
+    return (
+        f"segment {seg!r}'s claim record at {path} could not be read "
+        f"unambiguously ({detail}) -- refusing the translate dispatch rather "
+        f"than risk overwriting a draft this run cannot prove is unclaimed (#438 D8)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Property 3 -- one project-wide fcntl.flock, held by descriptor, never a
 # pid file.
 # ---------------------------------------------------------------------------
@@ -1149,6 +1253,9 @@ def run_select_segments(
     only_segs=None,
     allow_retranslate_converged=False,
     allow_empty=False,
+    from_cap=None,
+    from_converged=None,
+    run_id=None,
     durable_root_str=None,
     plugin_root_str=None,
 ) -> dict:
@@ -1160,7 +1267,27 @@ def run_select_segments(
     what a refusal means; this function itself never raises for a
     select_segments.py-side refusal, only for a genuine invocation failure
     (missing script, bad subprocess, unparseable output).
-    """
+
+    `from_cap`/`from_converged` (#438 D1/D2): forwarded verbatim to
+    select_segments.py's own like-named flags, requesting a claim
+    VALIDATION for the named ids under the `--from-cap`/`--from-converged`
+    profile respectively. See run()'s own call site and
+    parse_claims_field() below for how the resulting authorization is
+    read back out of select_segments.py's JSON payload -- never assumed
+    from these arguments alone.
+
+    `run_id`: forwarded as select_segments.py's own `--run-id` whenever
+    given. run()'s own call site currently ALWAYS passes `run_id=None`
+    here -- a codex BLOCKER on an earlier revision (which resolved run_id
+    before this call, whenever a claim was requested) found that
+    resolve_run_id() -> resume_setup.py writes runs/<ID>/input.digest as a
+    side effect, which the #409 Step 3 gate reads as PROOF a historical
+    gate ran, so minting it before this call could manufacture evidence
+    that gate must not have. select_segments.py's own claim admission is
+    a two-phase validate/commit (D1a); this parameter exists for whatever
+    later drives the commit phase, once its own contract (owned
+    elsewhere, still in flux) lands -- not for this call, which is
+    validate-only and must never carry a run_id."""
     select_segments_script = dirs["select_segments_script"]
     _refuse_unless_executable_leaf(select_segments_script, "select_segments.py")
 
@@ -1171,6 +1298,12 @@ def run_select_segments(
         cmd += ["--allow-retranslate-converged"]
     if allow_empty:
         cmd += ["--allow-empty"]
+    if from_cap is not None:
+        cmd += ["--from-cap", from_cap]
+    if from_converged is not None:
+        cmd += ["--from-converged", from_converged]
+    if run_id is not None:
+        cmd += ["--run-id", run_id]
     cmd += _root_forward_args(dirs, durable_root_str, plugin_root_str)
 
     try:
@@ -1195,6 +1328,97 @@ def run_select_segments(
     if not isinstance(payload, dict):
         fatal(f"select_segments.py printed a non-object JSON value: {payload!r}", exit_code=2)
     return payload
+
+
+# ---------------------------------------------------------------------------
+# #438 D3 -- fail-closed transport of the claim authorization from
+# select_segments.py's own JSON output into this driver's dispatch
+# context. The failure this closes: select_segments.py emits the
+# authorization, this driver ignores or loses the field but still
+# consumes `segs`, and a segment that was never actually admitted for
+# re-review gets translated -- the current #438 bug with a new flag on
+# top. So the field is REQUIRED on every invocation (an empty list when
+# no --from-cap/--from-converged ids were requested, never merely
+# absent), and every entry is validated the same way `segs` itself
+# already is.
+# ---------------------------------------------------------------------------
+
+# The two #438 D2 admission profiles, spelled identically to the CLI flag
+# names that request them (`--from-cap`/`--from-converged`) so a
+# mismatched literal is visible by inspection rather than needing a
+# lookup table.
+KNOWN_CLAIM_PROFILES = ("from-cap", "from-converged")
+
+
+def parse_claims_field(select_result: dict, segs: list) -> dict:
+    """Validates select_segments.py's own `claims` field and returns
+    `{seg: profile}`. select_segments.py reports `claims` as a JSON
+    object keyed by segment id, each value the full claim_record.py
+    payload (plus that script's own D6/D10 reporting-only fields) -- see
+    its own module docstring. This function extracts and validates only
+    what this driver's own D8/D11 logic needs (which ids are claimed and
+    under which profile: identity, safety, and subset-of-segs); it does
+    NOT re-validate the rest of the record's fields (previous_dispatch_
+    token, cache_key, ...) -- claim_refusal_for_translate() reads the
+    record's own on-disk copy directly via claim_record.py's shared
+    three-state predicate, which is this driver's actual source of truth
+    for D8. This field exists so a stripped/malformed/mismatched 'claims'
+    field is caught here, fail-closed, rather than silently proceeding to
+    consume `segs` regardless (#438 D3 -- "the selector emits the
+    authorization, the driver ignores or loses the field but still
+    consumes segs").
+
+    FATAL (never a silent default) on any of: the field missing
+    entirely; not a JSON object; a key that is not a safe segment id
+    (validate_seg()); a value that is not a JSON object, or whose own
+    'seg' disagrees with the key it is filed under, or whose 'profile' is
+    outside KNOWN_CLAIM_PROFILES; or a key that is NOT a member of THIS
+    SAME invocation's own `segs` (the authorization must be a SUBSET of
+    what was actually selected, never a superset that could smuggle in an
+    id this run never even considered dispatching)."""
+    claims = select_result.get("claims")
+    if claims is None:
+        fatal(
+            "select_segments.py's JSON output has no 'claims' field -- "
+            "refusing to proceed with an unauthenticated claim-authorization "
+            "channel (#438 D3)",
+            exit_code=2,
+        )
+    if not isinstance(claims, dict):
+        fatal(
+            f"select_segments.py's 'claims' field is not a JSON object: {claims!r} (#438 D3)",
+            exit_code=2,
+        )
+    segs_set = set(segs)
+    result = {}
+    for seg, entry in claims.items():
+        problem = validate_seg(seg)
+        if problem is not None:
+            fatal(f"claims key {seg!r} is an unsafe segment id ({problem}) (#438 D3)", exit_code=2)
+        if not isinstance(entry, dict):
+            fatal(f"claims[{seg!r}] is not a JSON object: {entry!r} (#438 D3)", exit_code=2)
+        entry_seg = entry.get("seg")
+        if entry_seg != seg:
+            fatal(
+                f"claims[{seg!r}]['seg'] is {entry_seg!r}, which disagrees with its own "
+                f"dict key -- refusing rather than guessing which is authoritative (#438 D3)",
+                exit_code=2,
+            )
+        profile = entry.get("profile")
+        if profile not in KNOWN_CLAIM_PROFILES:
+            fatal(
+                f"claims[{seg!r}]['profile'] must be one of {KNOWN_CLAIM_PROFILES}, got {profile!r} (#438 D3)",
+                exit_code=2,
+            )
+        if seg not in segs_set:
+            fatal(
+                f"claims names segment {seg!r}, which is not a member of this invocation's "
+                f"own 'segs' set -- the claim authorization must be a subset of what was "
+                f"actually selected (#438 D3)",
+                exit_code=2,
+            )
+        result[seg] = profile
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -2617,7 +2841,7 @@ def task_file_path(durable_root: Path, kind: str, seg: str, disp: str) -> Path:
 
 def build_codex_job_argv(*, kind: str, seg: str, companion_path: str, durable_root: Path,
                           prompt_file: Path, expect_token: str, disp: str, deadline_sec: int,
-                          effort: str, model: str, plugin_root_str, node_bin: str = "node") -> list:
+                          effort: str, model: str, plugin_root_str, run_id: str, node_bin: str = "node") -> list:
     """The exact codex_job.py argv this driver Popens, built from the SAME
     field values translateDrivePrompt/reviewDrivePrompt splice into their
     own nohup shell command (--kind/--companion/--cwd/--seg/--prompt-file/
@@ -2631,7 +2855,28 @@ def build_codex_job_argv(*, kind: str, seg: str, companion_path: str, durable_ro
     same as this driver's own --node default) -- it is appended only when
     the caller passed something other than codex_job.py's own "node"
     default, so the equivalence test's default-args comparison still
-    matches byte for byte."""
+    matches byte for byte.
+
+    `run_id` (#438 D8): codex_job.py's `--run-id` is now REQUIRED --
+    main() there returns exit 2 without it (never derived from
+    --expect-token: a malformed token would then read as "no claim
+    record", i.e. "not claimed", and proceed -- the exact silent
+    degradation D8 refuses). Always this driver's own `ctx.run_id`,
+    passed unconditionally (never omitted the way --model/--plugin-root
+    are), for both translate AND review dispatches -- codex_job.py's own
+    claim check only actually gates a translate, but its CLI makes the
+    flag required on every invocation regardless of kind.
+
+    UNLIKE `node_bin` above, `--run-id` genuinely widens the equivalence
+    surface rather than staying outside it: as of this writing
+    mass-translate-wf.template.js's own translateDrivePrompt/
+    reviewDrivePrompt do NOT emit `--run-id` at all (the template's own
+    codex_job.py launch predates #438), so the byte-equivalence test's
+    field-for-field comparison will disagree on this ONE field until the
+    template is updated to match -- a known, disclosed gap on the DEFAULT
+    dispatch path, not a defect in this function. See this driver's own
+    module docstring / #438 tracking for the template-side fix this
+    still needs."""
     argv = [
         "--kind", kind,
         "--companion", companion_path,
@@ -2639,6 +2884,7 @@ def build_codex_job_argv(*, kind: str, seg: str, companion_path: str, durable_ro
         "--seg", seg,
         "--prompt-file", str(prompt_file),
         "--expect-token", expect_token,
+        "--run-id", run_id,
         "--disp", disp,
         "--deadline-sec", str(deadline_sec),
         "--effort", effort,
@@ -2760,7 +3006,7 @@ class DispatchContext:
     construction (safe to share across ThreadPoolExecutor workers)."""
 
     def __init__(self, *, dirs, run_id, translate_cfg, companion_path,
-                 durable_root_str, plugin_root_str, node_bin, session_id):
+                 durable_root_str, plugin_root_str, node_bin, session_id, claims=None):
         self.dirs = dirs
         self.run_id = run_id
         self.translate_cfg = translate_cfg
@@ -2769,6 +3015,14 @@ class DispatchContext:
         self.plugin_root_str = plugin_root_str
         self.node_bin = node_bin
         self.session_id = session_id
+        # #438 D3: {seg: profile} for every id parse_claims_field() admitted
+        # from select_segments.py's own 'claims' field THIS invocation --
+        # never consulted directly by claim_refusal_for_translate() (which
+        # reads the on-disk record, the durable source of truth), but
+        # folded in here per D3's own requirement and reported alongside
+        # run()'s own journal/result for audit. {} when this run requested
+        # no claim.
+        self.claims = claims if claims is not None else {}
 
 
 def _run_gate(script: Path, argv_rest: list, ctx: "DispatchContext", *, supports_plugin_root: bool) -> bool:
@@ -3423,7 +3677,7 @@ def run_one_codex_job(ctx: "DispatchContext", *, kind: str, seg: str, round_labe
         prompt_file=task_file, expect_token=expect_token, disp=disp,
         deadline_sec=CODEX_DEADLINE_SEC, effort=ctx.translate_cfg["effort"],
         model=ctx.translate_cfg["model"], plugin_root_str=ctx.plugin_root_str,
-        node_bin=ctx.node_bin,
+        run_id=ctx.run_id, node_bin=ctx.node_bin,
     )
     append_journal(durable_root, ctx.session_id, {
         "type": "codex_dispatch_started", "seg": seg, "kind": kind,
@@ -3817,6 +4071,28 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               story as every other row
                                               here -- a human has to look.
       outcome="failed", reason=
+        "claimed-segment-translate-
+        refused"                          -- #438 D8: derive_next_action()
+                                              returned {"action":
+                                              "translate"} for a segment
+                                              this run's own on-disk claim
+                                              record still names -- the
+                                              claimed draft went invalid or
+                                              missing between admission and
+                                              dispatch (see
+                                              claim_refusal_for_translate()'s
+                                              own docstring). Checked and
+                                              returned BEFORE this
+                                              iteration's write_ledger()
+                                              call, so NEITHER the draft
+                                              bytes NOR the ledger fragment
+                                              are touched -- recoverable
+                                              next invocation once the
+                                              underlying draft problem is
+                                              fixed, exactly like
+                                              "invalid-post-fix-draft"
+                                              above.
+      outcome="failed", reason=
         "loop-exhausted-without-
         terminal-state"                   -- the defensive iteration cap
                                               bound below. NOT purely
@@ -4031,6 +4307,16 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 }
 
             if action["action"] == "translate":
+                # #438 D8: refuse BEFORE the ledger write below, never
+                # after -- see claim_refusal_for_translate()'s own
+                # docstring for why placement here (rather than after
+                # run_one_codex_job()) is what keeps the ledger fragment,
+                # not only the draft bytes, intact on refusal.
+                claim_refusal = claim_refusal_for_translate(ctx, seg)
+                if claim_refusal is not None:
+                    return {"seg": seg, "converged": False, "outcome": "failed",
+                            "reason": "claimed-segment-translate-refused",
+                            "detail": claim_refusal}
                 rec = write_ledger(
                     ctx.dirs, seg, {"status": "in_progress"},
                     durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
@@ -4248,6 +4534,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Forwarded verbatim to select_segments.py's own --allow-empty.",
     )
     parser.add_argument(
+        "--from-cap",
+        default=None,
+        metavar="SEG1,SEG2,...",
+        help=(
+            "#438: forwarded verbatim to select_segments.py's own --from-cap "
+            "-- request claim VALIDATION for the named ids under the "
+            "'--from-cap' admission profile (capped, human_escalation "
+            "segments with a non-clean stored review). This call is "
+            "read-only (D1a); it does not itself write a claim. Never a "
+            "blanket authorization: only the ids named here, validated and "
+            "reported back in this run's 'claims'."
+        ),
+    )
+    parser.add_argument(
+        "--from-converged",
+        default=None,
+        metavar="SEG1,SEG2,...",
+        help=(
+            "#438: forwarded verbatim to select_segments.py's own "
+            "--from-converged -- request claim VALIDATION for the named "
+            "ids under the '--from-converged' admission profile (previously "
+            "converged segments whose draft has since drifted). This call "
+            "is read-only (D1a); it does not itself write a claim. Never a "
+            "blanket authorization: only the ids named here."
+        ),
+    )
+    parser.add_argument(
         "--durable-root",
         default=None,
         metavar="PATH",
@@ -4314,7 +4627,38 @@ def run(args, dirs: dict) -> dict:
             problem = validate_seg(seg)
             if problem is not None:
                 fatal(f"--only-segs: unsafe segment id: {problem}", exit_code=2)
+    # #438: same fail-fast local validation --only-segs already gets above,
+    # before either flag value is ever spliced into the select_segments.py
+    # subprocess argv.
+    for flag_name, flag_value in (("--from-cap", args.from_cap), ("--from-converged", args.from_converged)):
+        if flag_value is not None:
+            for seg in (s.strip() for s in flag_value.split(",") if s.strip()):
+                problem = validate_seg(seg)
+                if problem is not None:
+                    fatal(f"{flag_name}: unsafe segment id: {problem}", exit_code=2)
 
+    # #438 D1a, REVERTED after a codex BLOCKER: an earlier revision of this
+    # function resolved run_id HERE, before select_segments.py ever ran,
+    # whenever --from-cap/--from-converged was given -- reasoning that
+    # resolve_run_id() reads no `segs` (true) so nothing else at this point
+    # was missing an input (also true, and also NOT the issue). The actual
+    # defect: resolve_run_id() -> resume_setup.py WRITES runs/<ID>/
+    # input.digest as a side effect, and select_segments.py's #409 Step 3
+    # gate treats a matching input.digest as proof a historical gate ran --
+    # so minting it before the selector could MANUFACTURE the evidence
+    # Step 3 checks for, laundering a skipped-gate case D7 requires be
+    # refused. It also orphans runs/<ID>/ whenever the selector
+    # subsequently refuses (an S-gate, a profile condition, D6, the
+    # --allow-retranslate-converged overlap rejection) -- refusing without
+    # side effects is the property this whole operation sells. select_
+    # segments.py's own claim admission is being split into a two-phase
+    # validate/commit (D1a) that keeps run_id resolution in its ORIGINAL
+    # position below, unchanged from before #438 -- this function does not
+    # yet drive a phase-2 commit call itself (that lands with the claim
+    # write, which is select_segments.py's, not this driver's -- see the
+    # module docstring's own claim-record discussion). --from-cap/
+    # --from-converged are still forwarded to this (validate-only) call;
+    # what changed is that no run_id is forwarded alongside them.
     lock_fd = acquire_driver_lock(durable_root, session_id=session_id)
     append_journal(durable_root, session_id, {"type": "driver_started", "pid": os.getpid()})
     try:
@@ -4323,6 +4667,8 @@ def run(args, dirs: dict) -> dict:
             only_segs=args.only_segs,
             allow_retranslate_converged=args.allow_retranslate_converged,
             allow_empty=args.allow_empty,
+            from_cap=args.from_cap,
+            from_converged=args.from_converged,
             durable_root_str=args.durable_root,
             plugin_root_str=args.plugin_root,
         )
@@ -4360,9 +4706,17 @@ def run(args, dirs: dict) -> dict:
                 durable_root, session_id,
                 {"type": "duplicate_segs_dropped", "duplicates": duplicate_segs},
             )
+
+        # #438 D3: validated on EVERY invocation, regardless of whether
+        # --from-cap/--from-converged were passed -- a select_segments.py
+        # that silently stopped emitting 'claims' at all must be refused
+        # here, not read as "nothing was claimed". See parse_claims_field()'s
+        # own docstring for the full validation list.
+        claims = parse_claims_field(select_result, segs)
+
         append_journal(
             durable_root, session_id,
-            {"type": "step1_gate_passed", "segs": segs, "counts": select_result.get("counts")},
+            {"type": "step1_gate_passed", "segs": segs, "counts": select_result.get("counts"), "claims": claims},
         )
 
         engine_cfg = load_engine_config(durable_root)
@@ -4392,7 +4746,7 @@ def run(args, dirs: dict) -> dict:
             result = {
                 "success": True, "session_id": session_id, "durable_root": str(durable_root),
                 "segs": segs, "counts": select_result.get("counts"), "engine": engine_cfg,
-                "dispatched": False, "results": [],
+                "dispatched": False, "results": [], "claims": claims,
                 "note": "nothing to dispatch (SEGS is empty).",
             }
             append_journal(durable_root, session_id, {"type": "driver_exit", "success": True})
@@ -4414,7 +4768,7 @@ def run(args, dirs: dict) -> dict:
         ctx = DispatchContext(
             dirs=dirs, run_id=run_id, translate_cfg=translate_cfg, companion_path=companion_path,
             durable_root_str=args.durable_root, plugin_root_str=args.plugin_root,
-            node_bin=args.node, session_id=session_id,
+            node_bin=args.node, session_id=session_id, claims=claims,
         )
 
         append_journal(
@@ -4457,6 +4811,7 @@ def run(args, dirs: dict) -> dict:
             "engine": engine_cfg,
             "dispatched": True,
             "results": segment_results,
+            "claims": claims,
             "summary": {
                 "converged": [r["seg"] for r in converged],
                 "needs_fix": [{"seg": r["seg"], "round_label": r.get("round_label")} for r in needs_fix],

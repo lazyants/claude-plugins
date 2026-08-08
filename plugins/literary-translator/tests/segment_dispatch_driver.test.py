@@ -55,6 +55,12 @@ TEMPLATES_SRC_DIR = ASSETS_DIR / "templates"
 DRIVER_SRC = SCRIPTS_SRC_DIR / "segment_dispatch_driver.py"
 SELECT_SEGMENTS_SRC = SCRIPTS_SRC_DIR / "select_segments.py"
 LEDGER_MERGE_SRC = SCRIPTS_SRC_DIR / "ledger_merge.py"
+# #438: the claim-record predicate. Staged at EVERY sibling-script staging
+# site below, not only the two that first failed -- select_segments.py
+# imports it lazily when a claim is requested, and the driver's own D8 guard
+# reads it on EVERY translate dispatch, so a fixture missing it fails as an
+# opaque DriverError rather than as a missing dependency.
+CLAIM_RECORD_SRC = SCRIPTS_SRC_DIR / "claim_record.py"
 CACHE_KEY_SRC = SCRIPTS_SRC_DIR / "cache_key.py"
 CODEX_JOB_SRC = SCRIPTS_SRC_DIR / "codex_job.py"
 DRAFT_SHA1_SRC = SCRIPTS_SRC_DIR / "draft_sha1.py"
@@ -135,6 +141,7 @@ def make_durable_root(tmp_path, name="durable_root", profile_yaml=DEFAULT_PROFIL
     shutil.copy2(DRIVER_SRC, scripts_dir / "segment_dispatch_driver.py")
     shutil.copy2(SELECT_SEGMENTS_SRC, scripts_dir / "select_segments.py")
     shutil.copy2(LEDGER_MERGE_SRC, scripts_dir / "ledger_merge.py")
+    shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
     if stage_codex_job:
         shutil.copy2(CODEX_JOB_SRC, scripts_dir / "codex_job.py")
@@ -392,6 +399,11 @@ def _load_real_draft_sha1():
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--kind", required=True)
+    # #438: the real codex_job.py now requires --run-id on every invocation.
+    # Accepted-and-ignored here so this fake does not error on an unrecognized
+    # flag before it can write its argv log -- the argv log is what the
+    # byte-equivalence tests assert against.
+    p.add_argument("--run-id", default=None)
     p.add_argument("--companion", required=True)
     p.add_argument("--cwd", required=True)
     p.add_argument("--seg", required=True)
@@ -498,6 +510,7 @@ def stage_phase2_sibling_scripts(scripts_dir, templates_dir):
     shutil.copy2(RESUME_SETUP_SRC, scripts_dir / "resume_setup.py")
     shutil.copy2(LEDGER_UPDATE_SRC, scripts_dir / "ledger_update.py")
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
+    shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
     (scripts_dir / "resolve_codex_companion.py").write_text(FAKE_RESOLVE_CODEX_COMPANION_PY, encoding="utf-8")
     (scripts_dir / "draft_ready.py").write_text(FAKE_DRAFT_READY_PY, encoding="utf-8")
     (scripts_dir / "validate_draft.py").write_text(FAKE_VALIDATE_DRAFT_PY, encoding="utf-8")
@@ -1184,6 +1197,7 @@ def test_current_draft_sha1_matches_the_cli(tmp_path):
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir()
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
+    shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
     segments_dir = tmp_path / "segments"
     segments_dir.mkdir()
     draft = {"seg": "seg01", "blocks": {"p1": "hello"}, "dispatch_token": "RUN:seg01"}
@@ -1207,6 +1221,7 @@ def test_current_draft_sha1_ignores_dispatch_token_changes_same_as_the_cli(tmp_p
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir()
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
+    shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
     segments_dir = tmp_path / "segments"
     segments_dir.mkdir()
 
@@ -1225,6 +1240,7 @@ def test_current_draft_sha1_fatals_on_missing_draft(tmp_path):
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir()
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
+    shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
     segments_dir = tmp_path / "segments"
     segments_dir.mkdir()
 

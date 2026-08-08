@@ -130,6 +130,16 @@ DURABLE_ROOT = Path(__file__).resolve().parents[1]
 # yet dispatch anything itself (see the driver's own module docstring) --
 # the moment it starts shipping as a Step-0a-copied script is the moment a
 # bug in its gating becomes exactly this class of defect.
+# claim_record.py (#438) belongs here by that SAME criterion, and more
+# directly than either: it owns the predicate that decides whether a segment
+# was authorized for re-review at all, so a bug in it either hands a
+# re-review authorization to a segment nobody named, or silently drops one
+# the operator did. Both are decisions a durable root scaffolded before the
+# fix would go on trusting. Note the criterion is not applied uniformly
+# today -- select_segments.py owns the existing dispatch gate and is NOT a
+# member; that asymmetry predates #438 and is recorded in OPEN.md rather
+# than changed here, because adding it would move plugin_bundle_hash for a
+# reason unrelated to this release.
 PLUGIN_BUNDLE_MEMBERS = (
     "validate_draft.py",
     "canon_validate.py",
@@ -144,6 +154,7 @@ PLUGIN_BUNDLE_MEMBERS = (
     "canon_senses.py",
     "fetch_citation.py",
     "segment_dispatch_driver.py",
+    "claim_record.py",
     "mass-translate-wf.template.js",
     "glossary-pass-wf.template.js",
 )

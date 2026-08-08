@@ -56,8 +56,19 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
 SCHEMAS_SRC_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "schemas"
 DRIVER_SRC = SCRIPTS_DIR / "codex_job.py"
+# #438: codex_job.py's own `import claim_record` (a plugin-path sibling,
+# resolved via its own sys.path.insert(SCRIPTS_DIR) -- see codex_job.py's
+# module comment) needs the real claim_record.py physically present
+# wherever a COPY of codex_job.py is staged for a real subprocess to run --
+# the in-process `exec_module` load just below this constant block gets it
+# for free (it loads codex_job.py from its REAL location, where
+# claim_record.py already lives), but a copy staged into a tmp_path
+# scripts/ dir for the SUBPROCESS suite below does not, and needs it copied
+# alongside explicitly (see build_root()/make_real_gate_root()).
+CLAIM_RECORD_SRC = SCRIPTS_DIR / "claim_record.py"
 
 assert DRIVER_SRC.is_file(), f"expected the driver at {DRIVER_SRC}"
+assert CLAIM_RECORD_SRC.is_file(), f"expected claim_record.py at {CLAIM_RECORD_SRC}"
 
 _spec = importlib.util.spec_from_file_location("codex_job_mod", str(DRIVER_SRC))
 assert _spec is not None and _spec.loader is not None
@@ -310,6 +321,10 @@ def build_root(tmp_path: Path):
     scripts = root / "scripts"
     scripts.mkdir()
     (scripts / "codex_job.py").write_text(DRIVER_SRC.read_text(encoding="utf-8"), encoding="utf-8")
+    # #438: codex_job.py's own `import claim_record` needs the real sibling
+    # physically present next to this staged copy -- see CLAIM_RECORD_SRC's
+    # own comment above.
+    (scripts / "claim_record.py").write_text(CLAIM_RECORD_SRC.read_text(encoding="utf-8"), encoding="utf-8")
     (scripts / "draft_ready.py").write_text(STUB_DRAFT_READY, encoding="utf-8")
     (scripts / "validate_draft.py").write_text(STUB_VALIDATE_DRAFT, encoding="utf-8")
     (scripts / "review_ready.py").write_text(STUB_REVIEW_READY, encoding="utf-8")
@@ -342,13 +357,28 @@ def spawn_driver(root, companion, fake_node, seg, tok, kind, disp, state,
         ctr.unlink()
     prompt = seg_dir / (".codex_task.%s.%s.%s" % (kind, seg, disp))
     prompt.write_text(PROMPT_ONE, encoding="utf-8")
-    # Mimic lane C's dispatch: the 8 FROZEN flags only (+ test-only --poll-sec/--node).
+    # Mimic lane C's dispatch: the 9 FROZEN flags only (+ test-only --poll-sec/--node).
     # NO --write/--fresh/--effort -> the driver must add workspace-write + fresh + effort
     # to the internal codex launch itself.
+    #
+    # #438: --run-id joined the frozen set once codex_job.py's own main() made it
+    # fatal-if-absent -- see codex_job.py's own comment on why it is hand-validated
+    # rather than argparse `required=True`. This is a hand-maintained registration
+    # surface (it must be edited whenever codex_job.py's CLI gains a new mandatory
+    # flag) and it drifted silently exactly once already -- see
+    # test_spawn_driver_argv_covers_every_mandatory_codex_job_flag below, which pins
+    # it against codex_job.py's own CLI so the NEXT drift fails loudly, by name,
+    # instead of as an opaque downstream error in every subprocess test in this file.
+    # RUN_ID is derived from `tok`'s own leading `RUN_ID:seg[...]` shape here ONLY
+    # because this fixture already threads a synthetic `tok` through every caller --
+    # codex_job.py itself must never derive it this way (see its own comment: a
+    # malformed --expect-token would then read as "no claim record" -> "not claimed"
+    # -> proceed, the exact silent-degradation shape #438 exists to refuse).
     argv = [
         sys.executable, str(root / "scripts" / "codex_job.py"),
         "--kind", kind, "--companion", companion, "--cwd", str(root), "--seg", seg,
-        "--prompt-file", str(prompt), "--expect-token", tok, "--disp", disp,
+        "--prompt-file", str(prompt), "--expect-token", tok,
+        "--run-id", tok.split(":", 1)[0], "--disp", disp,
         "--deadline-sec", str(deadline), "--poll-sec", str(poll),
         "--node", fake_node,
     ]
@@ -384,6 +414,53 @@ def read_calls(root, disp):
     if not p.exists():
         return []
     return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+
+
+def test_spawn_driver_argv_covers_every_mandatory_codex_job_flag(tmp_path):
+    """Registration-drift guard for spawn_driver()'s own "9 FROZEN flags" argv
+    (see its own comment) -- a hand-maintained list that must be edited
+    whenever codex_job.py's CLI gains a new mandatory flag. #438's own
+    --run-id drifted against this exact list once already: it landed in
+    codex_job.py, and every SUBPROCESS test in this file then failed with
+    an opaque downstream error (an IndexError two frames from the actual
+    cause) rather than a message naming the missing flag. This test fails
+    LOUDLY and by name instead.
+
+    Inspects the REAL argv spawn_driver() constructs (via subprocess.Popen's
+    own recorded `.args` -- never a second reimplementation of the flag
+    list) against the UNION of codex_job.py's own argparse `required=True`
+    dests (introspected directly from the real parser, so THAT half can
+    never drift silently) plus the hand-validated-fatal dests main() checks
+    in its own body. `--run-id` is optional at the argparse layer but fatal
+    if absent in main() (see codex_job.py's own comment on why), so it
+    cannot be introspected from argparse and is named here explicitly --
+    if a FUTURE flag joins that same hand-validated-fatal category, it must
+    be added to `_HAND_VALIDATED_FATAL_DESTS` alongside it or this test's
+    own coverage silently narrows."""
+    _HAND_VALIDATED_FATAL_DESTS = {"run_id"}
+    required_dests = {
+        action.dest
+        for action in codex_job._build_parser()._actions
+        if getattr(action, "required", False)
+    }
+    mandatory_dests = required_dests | _HAND_VALIDATED_FATAL_DESTS
+    mandatory_flags = {"--" + d.replace("_", "-") for d in mandatory_dests}
+
+    root, companion, node = build_root(tmp_path)
+    proc = spawn_driver(root, companion, node, "c001", "RUN1:c001", "translate", "Dspy",
+                        base_state("c001", "RUN1:c001", "translate", status_seq=["queued"]),
+                        popen=True)
+    try:
+        flags_present = {a for a in proc.args if isinstance(a, str) and a.startswith("--")}
+        missing = mandatory_flags - flags_present
+        assert not missing, (
+            f"spawn_driver()'s argv is missing mandatory codex_job.py flag(s) "
+            f"{sorted(missing)} -- codex_job.py's CLI contract moved and this "
+            f"fixture did not follow; see this test's own docstring."
+        )
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
 
 
 # --------------------------------------------------------------------------- #
@@ -1895,7 +1972,7 @@ def test_flock_auto_release_on_holder_sigkill(tmp_path):
 # (not this file's own honour-the-CLI stub), proving the cross-run dispatch_token
 # reject holds through the ACTUAL shipped validation logic.
 # --------------------------------------------------------------------------- #
-REAL_GATE_SCRIPTS = ("codex_job.py", "draft_ready.py", "validate_draft.py",
+REAL_GATE_SCRIPTS = ("codex_job.py", "claim_record.py", "draft_ready.py", "validate_draft.py",
                      "review_ready.py", "draft_sha1.py")
 
 

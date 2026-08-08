@@ -34,6 +34,18 @@ gap where a stale/straggler draft from a DIFFERENT run (or a pre-1.2.0
 draft with no dispatch_token at all) would otherwise look READY. Omit for
 the pre-1.2.0 behavior (no token check) -- backward compatible.
 
+1.21.0 addition, #438: a token mismatch's refusal message additionally
+consults this run's OWN claim record for the segment (best-effort, never
+fatal -- see _claim_note() below). When one is present, the mismatch is not
+a generic stale/straggler draft: it means a claim THIS run made was LOST,
+almost always by a fix round that failed to copy the draft's dispatch_token
+byte for byte (see mass-translate-wf.template.js's fixPrompt()). The
+refusal names the claim's profile and claim time instead of leaving the
+operator to guess, and says a re-claim is idempotent, not a second
+authorization. Absent, unreadable, or ambiguous claim state -- including
+claim_record.py not being co-located, which every caller that predates
+#438 still is -- degrades silently to the original pre-#438 message.
+
 Usage: python3 draft_ready.py SEG [--expect-token TOK] [--durable-root PATH]
 
 Self-anchoring by default: this script always lives at
@@ -201,6 +213,87 @@ def check_segpack_structure(segpack) -> list:
     return errs
 
 
+# ---------------------------------------------------------------------------
+# #438 -- claim-aware enrichment of the --expect-token mismatch refusal.
+# Deliberately best-effort and NEVER fatal: this script stays a LEAF for
+# every consumer that predates #438 (it shells out to nothing, and every
+# import here is optional). claim_record.py is the SHARED module #438
+# introduced (its own docstring documents the "flat sibling-import idiom
+# already used for cache_key.py" -- this is the third reader it names).
+# ---------------------------------------------------------------------------
+
+def _claim_run_id(token):
+    """The RUN_ID out of a dispatch token shaped <RUN_ID>:<seg>[:r<label>],
+    split on the FIRST colon only -- mirrors select_segments.py's own
+    draft_run_id() derivation byte for byte (duplicated, not imported: this
+    script is a LEAF and does not resolve sibling SCRIPTS, only the shared
+    claim_record MODULE below). A RUN_ID can never contain ':'
+    (resume_setup.py's validate_run_id() rejects it), while a seg id can
+    (FRONTBACK:errata_02 is a real, shipped shape), so splitting on the
+    first ':' is the only correct partition. Returns None on anything
+    malformed -- this is purely a message-enrichment lookup key, never a
+    security decision, so a None here just means the note stays empty."""
+    if not isinstance(token, str):
+        return None
+    run_id, sep, rest = token.partition(":")
+    if not sep or not run_id or not rest:
+        return None
+    return run_id
+
+
+def _claim_note(run_id, seg, durable_root):
+    """Best-effort clause to append to a dispatch_token-mismatch refusal
+    when this run's OWN claim record explains it. Returns "" whenever there
+    is nothing useful to say -- including claim_record.py not being
+    co-located (the pre-#438 fixture/deployment contract every existing
+    caller still uses), a missing runs/ tree, or any other unexpected
+    failure: enriching a message must never be able to crash the readiness
+    probe or change its exit code.
+
+    CLAIM_PRESENT is the only state worth a positive claim: it means THIS
+    run legitimately claimed `seg`, so a token that no longer matches is
+    the claim being LOST after the fact (most likely a fix round that did
+    not preserve dispatch_token byte for byte), not a foreign straggler.
+    CLAIM_AMBIGUOUS still gets a clause -- silently dropping a genuine
+    anomaly (an unreadable record) would hide it from the one operator
+    positioned to investigate -- but per claim_record.py's own documented
+    discipline it is reported as unreadable, never asserted as a claim.
+    CLAIM_ABSENT says nothing: that is the ordinary pre-#438 stale/
+    straggler case and the plain message already covers it correctly.
+    """
+    try:
+        import claim_record  # sibling module, #438 -- optional at runtime
+    except ImportError:
+        return ""
+    try:
+        runs_dir = durable_root / "runs"
+        path = claim_record.claimed_path(run_id, seg, runs_dir)
+        state, payload, detail = claim_record.read_claim_record(path)
+    except Exception:
+        return ""
+
+    if state == claim_record.CLAIM_PRESENT:
+        profile = payload.get("profile") if isinstance(payload, dict) else None
+        claimed_at = payload.get("claimed_at") if isinstance(payload, dict) else None
+        return (
+            f" -- a claim record for run {run_id!r} IS present for this "
+            f"segment (profile={profile!r}, claimed_at={claimed_at!r}): the "
+            f"claim was LOST, not merely absent -- something after the "
+            f"claim (most likely a fix round) overwrote or dropped the "
+            f"draft's dispatch_token instead of preserving it byte for "
+            f"byte. Re-claim {seg} under the same profile to restore it; "
+            f"re-claiming an already-claimed segment in this run is "
+            f"idempotent and is not a second authorization."
+        )
+    if state == claim_record.CLAIM_AMBIGUOUS:
+        return (
+            f" -- WARNING: this run's claim record for {seg!r} is "
+            f"unreadable ({detail}); treated as NOT claimed (the safe "
+            f"direction), never assumed claimed"
+        )
+    return ""
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Readiness probe for segments/{seg}.draft.json -- see this file's own module docstring.",
@@ -323,10 +416,14 @@ def main() -> None:
     if args.expect_token is not None:
         token = draft.get("dispatch_token")
         if token != args.expect_token:
+            note = ""
+            run_id = _claim_run_id(args.expect_token)
+            if run_id is not None:
+                note = _claim_note(run_id, seg, dirs["durable_root"])
             print(
                 f"[{seg}] not ready: dispatch_token mismatch "
                 f"(draft={token!r}, expected={args.expect_token!r}) -- "
-                f"stale/straggler draft from a different run"
+                f"stale/straggler draft from a different run{note}"
             )
             sys.exit(1)
 
