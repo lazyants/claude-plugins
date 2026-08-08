@@ -37,18 +37,28 @@ the pre-1.2.0 behavior (no token check) -- backward compatible.
 1.21.0 addition, #438: a token mismatch's refusal message additionally
 consults this run's OWN claim record for the segment (best-effort, never
 fatal -- see _claim_note() below). When one is present, the mismatch is not
-a generic stale/straggler draft: it means a claim THIS run made was LOST,
-almost always by a fix round that failed to copy the draft's dispatch_token
-byte for byte (see mass-translate-wf.template.js's fixPrompt()). The
-refusal names the claim's profile and claim time instead of leaving the
-operator to guess, and points at the re-claim that restores it -- which is
-idempotent, not a second authorization.
+a generic stale/straggler draft -- but it is also not automatically THIS
+run's claim being lost: _claim_note() compares the draft's ACTUAL current
+dispatch_token against this run's own record to tell the two reachable
+cases apart. If the current token is missing or does not parse to a run
+id, the claim was genuinely LOST after the fact, almost always by a fix
+round that failed to copy the draft's dispatch_token byte for byte (see
+mass-translate-wf.template.js's fixPrompt()), and the refusal points at
+the re-claim that restores it -- which is idempotent, not a second
+authorization. If the current token instead parses to a DIFFERENT run,
+that run has since claimed the segment legitimately: this run's own
+record is a superseded authorization, not evidence of loss, and the
+refusal says so instead of sending the operator to reclaim the segment
+back out from under the run that now owns it. Either way the refusal
+names the claim's profile and claim time instead of leaving the operator
+to guess.
 
 Exactly TWO states degrade silently to the original pre-#438 message:
 CLAIM_ABSENT (the ordinary stale/straggler case the plain message already
 describes correctly) and claim_record.py not being co-located, which every
 caller that predates #438 still is. An unreadable or ambiguous record, a
-run component that is not usable as a claim-path component, and any
+run component that is not usable as a claim-path component, a CLAIM_PRESENT
+record whose LOST-vs-FOREIGN clause differs by case (see above), and any
 unexpected failure of the lookup itself each get their OWN clause -- see
 _claim_note()'s own docstring for why an anomaly must never be reported
 with the same silence as an absence.
@@ -239,7 +249,12 @@ def _claim_run_id(token):
     (FRONTBACK:errata_02 is a real, shipped shape), so splitting on the
     first ':' is the only correct partition. Returns None on anything
     malformed -- this is purely a message-enrichment lookup key, never a
-    security decision, so a None here just means the note stays empty."""
+    security decision. Used on --expect-token in main() (a None there means
+    the note stays empty, since there is no run id to look a claim up
+    under) and, since #438's LOST-vs-FOREIGN split, on the draft's OWN
+    current dispatch_token inside _claim_note() (a None there instead means
+    the current token is unparseable, which is itself the LOST signal --
+    see _claim_note()'s docstring)."""
     if not isinstance(token, str):
         return None
     run_id, sep, rest = token.partition(":")
@@ -248,7 +263,7 @@ def _claim_run_id(token):
     return run_id
 
 
-def _claim_note(run_id, seg, durable_root):
+def _claim_note(run_id, seg, durable_root, current_token):
     """Best-effort clause to append to a dispatch_token-mismatch refusal
     when this run's OWN claim record explains it. NEVER fatal and never
     able to change this probe's exit code: enriching a message must not be
@@ -257,10 +272,38 @@ def _claim_note(run_id, seg, durable_root):
     down (claim_record.py not co-located; CLAIM_ABSENT) return "" and leave
     the plain pre-#438 message standing unchanged.
 
-    CLAIM_PRESENT is the only state worth a positive claim: it means THIS
-    run legitimately claimed `seg`, so a token that no longer matches is
-    the claim being LOST after the fact (most likely a fix round that did
-    not preserve dispatch_token byte for byte), not a foreign straggler.
+    CLAIM_PRESENT is the only state worth a positive claim, but it is NOT
+    a single verdict: this run's own claim record being present says only
+    that THIS run legitimately claimed `seg` at some point -- never, by
+    itself, that the CURRENT mismatch is that claim being lost. `seg`'s
+    own current dispatch_token can also have moved on legitimately, if a
+    later run claimed it after this one did. `current_token` -- the
+    draft's ACTUAL current dispatch_token, i.e. the exact value that just
+    failed to equal --expect-token back in main() -- is what tells the two
+    apart, by parsing it with _claim_run_id() the same way --expect-token
+    itself was parsed to get `run_id`:
+
+      * `current_token` missing or unparseable (`_claim_run_id() is None`):
+        nothing legible has claimed the segment since, so the token was
+        simply not preserved. Genuinely LOST -- most likely a fix round
+        that did not copy dispatch_token byte for byte (see
+        mass-translate-wf.template.js's fixPrompt()) -- and the clause
+        names the re-claim that restores it.
+      * `current_token` parses to a run id that is NOT this run's own
+        `run_id`: a DIFFERENT run has since claimed the segment
+        legitimately. FOREIGN, not lost: this run's own record is a
+        superseded authorization, not evidence anything was dropped, and
+        the clause must NOT send the operator to reclaim it -- re-running
+        the claim step under THIS run's --run-id would take the segment
+        back from the run that now owns it, which is exactly the
+        unauthorized reclaim #438 exists to gate (and, now that gate
+        exists, would simply be refused).
+      * `current_token` parses to run id `run_id` ITSELF, differing only
+        in its trailing `:seg[:r<label>]` component: still this run's own
+        token, so it is treated as the LOST case above -- re-claiming
+        under this run's own id is the correct, idempotent recovery, not
+        a reclaim from anyone else.
+
     CLAIM_AMBIGUOUS still gets a clause -- silently dropping a genuine
     anomaly (an unreadable record) would hide it from the one operator
     positioned to investigate -- but per claim_record.py's own documented
@@ -272,13 +315,14 @@ def _claim_note(run_id, seg, durable_root):
     that produce an empty clause are the two that genuinely have nothing to
     say: claim_record.py is not co-located (a pre-#438 deployment, which
     cannot have claims at all), and CLAIM_ABSENT. Every other outcome --
-    an unusable run component, an unreadable record, an unexpected failure
-    of the lookup itself -- gets a clause of its own. An anomaly that
-    returned "" was reported identically to "no claim exists", which is
-    the same collapse of "cannot tell" into "nothing there" that
-    claim_record.py's three-state predicate exists to prevent one layer
-    down; reproducing it in the layer that PRINTS the result would hide
-    the anomaly from the one operator positioned to act on it.
+    an unusable run component, an unreadable record, a LOST claim, a
+    FOREIGN claim, an unexpected failure of the lookup itself -- gets a
+    clause of its own. An anomaly that returned "" was reported identically
+    to "no claim exists", which is the same collapse of "cannot tell" into
+    "nothing there" that claim_record.py's three-state predicate exists to
+    prevent one layer down; reproducing it in the layer that PRINTS the
+    result would hide the anomaly from the one operator positioned to act
+    on it.
     """
     try:
         import claim_record  # sibling module, #438 -- optional at runtime
@@ -337,6 +381,26 @@ def _claim_note(run_id, seg, durable_root):
     if state == claim_record.CLAIM_PRESENT:
         profile = payload.get("profile") if isinstance(payload, dict) else None
         claimed_at = payload.get("claimed_at") if isinstance(payload, dict) else None
+        actual_run_id = _claim_run_id(current_token)
+        if actual_run_id is not None and actual_run_id != run_id:
+            return (
+                f" -- a claim record for run {run_id!r} IS present for this "
+                f"segment (profile={profile!r}, claimed_at={claimed_at!r}), "
+                f"but the draft's CURRENT dispatch_token now names a "
+                f"DIFFERENT run, {actual_run_id!r}: that run has since "
+                f"claimed this segment legitimately and its claim is the "
+                f"one in force now, not lost. This run's own record above "
+                f"is a SUPERSEDED authorization -- nothing was overwritten "
+                f"or dropped; the segment was claimed out from under this "
+                f"run by {actual_run_id!r}. Re-running select_segments.py's "
+                f"claim step for {seg} under THIS run's --run-id {run_id!r} "
+                f"would take the segment back from {actual_run_id!r} and is "
+                f"NOT the fix -- it is the unauthorized reclaim #438 exists "
+                f"to gate, and it will be refused. Work under "
+                f"{actual_run_id!r} instead, or make a deliberate decision "
+                f"to take ownership back if that is genuinely intended: "
+                f"this note does not make that call for you."
+            )
         return (
             f" -- a claim record for run {run_id!r} IS present for this "
             f"segment (profile={profile!r}, claimed_at={claimed_at!r}): the "
@@ -346,10 +410,10 @@ def _claim_note(run_id, seg, durable_root):
             f"byte. To restore it, re-run select_segments.py's claim step "
             f"for {seg} under that same profile with --run-id {run_id!r}: "
             f"the re-claim is admitted on the strength of the record above, "
-            f"so the draft's missing or foreign dispatch_token is not what "
-            f"blocks it, and it re-stamps the token. Re-claiming a segment "
-            f"this run already holds a record for is idempotent and is not "
-            f"a second authorization."
+            f"so the draft's missing dispatch_token is not what blocks it, "
+            f"and it re-stamps the token. Re-claiming a segment this run "
+            f"already holds a record for is idempotent and is not a second "
+            f"authorization."
         )
     if state == claim_record.CLAIM_AMBIGUOUS:
         return (
@@ -485,7 +549,7 @@ def main() -> None:
             note = ""
             run_id = _claim_run_id(args.expect_token)
             if run_id is not None:
-                note = _claim_note(run_id, seg, dirs["durable_root"])
+                note = _claim_note(run_id, seg, dirs["durable_root"], token)
             print(
                 f"[{seg}] not ready: dispatch_token mismatch "
                 f"(draft={token!r}, expected={args.expect_token!r}) -- "

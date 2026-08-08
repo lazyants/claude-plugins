@@ -2135,7 +2135,12 @@ def _unlink_quietly(path: Path) -> None:
 
 
 def rewrite_draft_dispatch_token(
-    seg: str, durable_root: Path, new_token: str, *, expected_content_sha1: str
+    seg: str,
+    durable_root: Path,
+    new_token: str,
+    *,
+    expected_content_sha1: str,
+    already_claimed_by_this_run: bool = False,
 ):
     """D4/#438: the actual "claim the draft into this run" state change --
     re-stamps segments/{seg}.draft.json's own `dispatch_token` field to
@@ -2151,6 +2156,70 @@ def rewrite_draft_dispatch_token(
     draft re-stamped for this run with NO record, which for --from-cap's
     population (no `.ever_converged` sentinel) would leave nothing at all
     refusing it and the segment would simply be retranslated.
+
+    #438 ROUND 4: ALSO REFUSES an OLD run REASSERTING a SUPERSEDED
+    authorization -- the defect three review rounds kept finding under
+    different disguises. Ownership lives in TWO places: the claim record
+    (per-run, so a run can only ever see its OWN claims) and the draft's
+    `dispatch_token` (global and mutable, whoever wrote it last). A run's
+    own claim record, once written, is NEVER released -- there is no
+    release mechanism -- so the SAME run_id claiming the SAME seg a second
+    time always lands on run()'s "already claimed by this run" EEXIST
+    branch, which correctly reads as "the SAME authorization being
+    reapplied" when nothing else has happened since. It reads that way
+    WRONGLY when a DIFFERENT run legitimately claimed the segment in
+    between: the resumed old run's own admission still passes (nothing in
+    S1-S5 asks WHO currently owns the draft, only whether the token names
+    SOME run that exists), so without this check it silently re-stamped the
+    draft back to itself, taking the segment away from its current owner
+    with no record deleted, no warning, nothing but the token moving.
+
+    Refuses ONLY when ALL FOUR of these hold, evaluated against the draft's
+    CURRENT `dispatch_token` -- i.e. before this call's own write touches
+    it:
+
+      1. that token parses to a run id (draft_run_id() -- None on an
+         absent or malformed token skips this whole check unconditionally,
+         which is what keeps D9's lost-token recovery reachable: a token
+         that is MISSING has nothing to compare against);
+      2. that run id is not THIS run's own id (parsed the same way off
+         `new_token`, which every caller in this codebase mints as
+         draft_dispatch_token_for(run_id, seg) -- an idempotent same-run
+         re-stamp never reaches this branch at all);
+      3. that OTHER run's OWN claim record for this seg is still live --
+         classify_claim_record() on claimed_path(), never CLAIM_ABSENT.
+         AMBIGUOUS (unreadable, or something other than a regular file)
+         counts as LIVE, the same safe direction claim_record.py's module
+         docstring requires of every reader: a record this call cannot
+         read cannot be ruled out as released;
+      4. `already_claimed_by_this_run` is True.
+
+    CONDITION 4 CARRIES THE WHOLE DISTINCTION and is supplied by the
+    caller rather than reconstructed here, because by the time this
+    function runs the record-first ordering above GUARANTEES this run's
+    own record for `seg` already exists on disk -- either just published
+    or already there -- so "does my own record exist right now" cannot
+    tell a fresh claim apart from a reapplication; both answer yes. Only
+    run()'s own write_claim_record() call, immediately before this one,
+    still holds that distinction (`published` vs the "already claimed by
+    this run" branch), which is why it is threaded through as a plain
+    boolean instead of re-derived from disk state that no longer carries
+    it. WITHOUT condition 4, a run's very FIRST, genuinely fresh claim over
+    a segment some OTHER run still has a live (never-released) record for
+    -- the ordinary new-owner transition, and exactly what --from-cap /
+    --from-converged re-review exists to authorize -- would be refused
+    right alongside the reapplication this exists to catch, because
+    conditions 1-3 alone cannot tell "first claim" from "reclaim" apart.
+    Defaults to False, which is what every direct unit-test call in this
+    project already gets implicitly (a single, isolated claim event with no
+    earlier record of its own to reapply) -- the default is the correct
+    answer for those calls, not merely a permissive placeholder.
+
+    A refusal here is EARLY -- before the staged-file dance below even
+    starts, so there is no temp file to unlink. This refuses the STAMP
+    itself, on a fact read straight off the live draft and the claim
+    records on disk; every other refusal in this function is instead about
+    the IDENTITY of the bytes being installed.
 
     Atomic (temp file + fsync + os.replace + a directory fsync, the same
     discipline ledger_update.py's write_fragment_atomically() and
@@ -2291,7 +2360,57 @@ def rewrite_draft_dispatch_token(
         return False, f"draft is not valid JSON, refusing to rewrite its dispatch_token: {exc}"
     if not isinstance(doc, dict):
         return False, "draft is not a JSON object, refusing to rewrite its dispatch_token"
-    already_stamped = doc.get("dispatch_token") == new_token
+    current_token = doc.get("dispatch_token")
+    already_stamped = current_token == new_token
+
+    # #438 round 4: refuse a REAPPLICATION of a superseded authorization --
+    # see this function's own docstring for the four-part predicate and why
+    # `already_claimed_by_this_run` cannot be reconstructed here. Checked
+    # BEFORE any staging IO: a refusal here is about whether to stamp at
+    # all, not about the identity of bytes already being written.
+    current_owner = draft_run_id(current_token)
+    this_run_id = draft_run_id(new_token)
+    if (
+        current_owner is not None
+        and this_run_id is not None
+        and current_owner != this_run_id
+        and already_claimed_by_this_run
+    ):
+        claim_record = _import_claim_record()
+        runs_dir = durable_root / "runs"
+        try:
+            foreign_claim_path = claim_record.claimed_path(current_owner, seg, runs_dir)
+        except ValueError as exc:
+            # current_owner came straight off the draft's own dispatch_token,
+            # a field with no schema pattern (see claimed_path()'s own "WHY
+            # THIS MODULE NEEDS ITS OWN COPY AT ALL"), so it can be unsafe.
+            # An id that cannot even be looked up cannot be shown released --
+            # refuse rather than assume it names nothing.
+            return False, (
+                f"refusing to re-stamp segment {seg!r}'s dispatch_token: this run "
+                f"({this_run_id!r}) already claimed {seg!r} once before, and the "
+                f"draft's CURRENT dispatch_token names run {current_owner!r}, whose "
+                f"claim record cannot even be looked up safely ({exc}) -- treated as "
+                f"still live rather than assumed released. Resolve {seg!r}'s "
+                f"ownership by hand before this run may touch it again"
+            )
+        foreign_state, foreign_detail = claim_record.classify_claim_record(foreign_claim_path)
+        if foreign_state != claim_record.CLAIM_ABSENT:
+            detail = f" ({foreign_detail})" if foreign_detail else ""
+            return False, (
+                f"refusing to re-stamp segment {seg!r}'s dispatch_token to "
+                f"{new_token!r}: segment {seg!r} is currently OWNED BY RUN "
+                f"{current_owner!r} (its own claim record for {seg!r} is still "
+                f"{foreign_state}{detail}, never CLAIM_ABSENT), and this run "
+                f"({this_run_id!r}) is only REASSERTING an older authorization it "
+                f"already used once before -- not a fresh claim. Taking {seg!r} "
+                f"back from {current_owner!r} now would silently discard whatever "
+                f"it did with it. There is no automated release: if "
+                f"{current_owner!r} genuinely should give up {seg!r}, resolve that "
+                f"by hand first, then issue a FRESH claim for this run (never a "
+                f"re-run of the old one) to re-authorize it"
+            )
+
     doc["dispatch_token"] = new_token
 
     tmp_path = dp.parent / f"{dp.name}.tmp.{os.getpid()}"
@@ -2959,11 +3078,23 @@ def run(args, dirs: dict) -> dict:
             # reachable. The property being enforced is "the draft these
             # gates just evaluated is the draft that gets stamped", which is
             # a statement about one invocation.
+            #
+            # `already_claimed_by_this_run=not published`: #438 round 4.
+            # `published` is False on EXACTLY the "already claimed by this
+            # run" EEXIST branch above (the other failure branch already
+            # `continue`d, so nothing else reaches here with it False) --
+            # the one place left that still knows whether THIS run's own
+            # record for `seg` predates this invocation, which
+            # rewrite_draft_dispatch_token() cannot reconstruct once the
+            # record-first write above has already made it exist either
+            # way. See that function's own docstring for the four-part
+            # predicate this feeds.
             token_ok, token_detail = rewrite_draft_dispatch_token(
                 seg,
                 dirs["durable_root"],
                 draft_dispatch_token_for(run_id, seg),
                 expected_content_sha1=extras["current_draft_sha1"],
+                already_claimed_by_this_run=not published,
             )
             if not token_ok:
                 write_failures.append(f"{seg}: dispatch_token rewrite failed: {token_detail}")

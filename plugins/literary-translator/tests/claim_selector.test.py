@@ -23,7 +23,12 @@ segpack is regenerated; the D5 clearance covering exactly its own
 successfully-admitted ids; the D5.3 overlap rejection with
 --allow-retranslate-converged; a colon-bearing segment id
 (FRONTBACK:errata_02) end to end; and the claim record's own idempotent
-re-claim.
+re-claim. Also #438 round 4: rewrite_draft_dispatch_token()'s refusal of an
+OLD run reasserting a SUPERSEDED authorization over a segment a DIFFERENT
+run now owns, unit-level (all four predicate conditions, isolated) and end
+to end (the actual defect -- claim, re-claim by another run, then the first
+run resumes and reclaims -- and the fresh-claim-over-a-live-foreign-record
+case a naive predicate would have broken instead).
 """
 import hashlib
 import importlib.util
@@ -337,6 +342,10 @@ def parse_stdout(proc):
 
 RUN_ID = "20260810T000000Z"
 SOURCE_RUN_ID = "20260801T090000Z"
+# A second, later, distinct claiming run -- #438 round 4's own two-owners
+# scenario (sections 17/18): RUN_ID claims, OTHER_RUN_ID legitimately
+# re-claims, RUN_ID resumes and must not be able to reclaim it back.
+OTHER_RUN_ID = "20260811T000000Z"
 
 
 def build_from_converged_segment(
@@ -1945,3 +1954,319 @@ def test_moved_cache_key_fields_name_both_endpoints_in_the_record(tmp_path):
         "coverage_ok": True,
         "findings_count": 0,
     }, record["pre_claim_review"]
+
+
+# ---------------------------------------------------------------------------
+# 17. #438 round 4: rewrite_draft_dispatch_token()'s refusal of an OLD run
+# REASSERTING a SUPERSEDED authorization -- the third review round found the
+# same defect class a third time, always through the same mechanism:
+# ownership is recorded in TWO places (the per-run claim record and the
+# draft's global, mutable dispatch_token), a run's own claim record is NEVER
+# released, so run()'s "already claimed by this run" EEXIST branch cannot
+# tell a resumed OLD claim apart from a genuinely reapplied one by disk state
+# alone -- and used to re-stamp the draft either way. Unit-level tests of the
+# four-part predicate in isolation, each pinned to exactly one condition;
+# section 18 below proves the same thing end to end, through the real
+# admission pipeline and run()'s own wiring of `already_claimed_by_this_run`.
+# ---------------------------------------------------------------------------
+
+def _touch_claim_marker(root, run_id, seg):
+    """A REGULAR file at claimed_path(run_id, seg, runs/) -- enough for
+    classify_claim_record() to read CLAIM_PRESENT, since it only lstat()s
+    and never parses the body. Content is irrelevant to the ownership check
+    under test, which calls classify_claim_record(), never
+    read_claim_record()."""
+    path = root / "runs" / run_id / f".claimed.{seg}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"seg": seg, "run_id": run_id}), encoding="utf-8")
+    return path
+
+
+def test_rewrite_refuses_reasserting_a_claim_another_run_now_owns(tmp_path):
+    """The regression predicate itself, in isolation: the draft's CURRENT
+    token names OTHER_RUN_ID, OTHER_RUN_ID's own claim record is still live,
+    and `already_claimed_by_this_run=True` (exactly what run() passes on the
+    "already claimed by this run" EEXIST branch -- this run's OWN record for
+    `seg` already existed before this call). All four predicate conditions
+    hold, so this must refuse.
+
+    MUTATION: delete the `and already_claimed_by_this_run` clause from the
+    `if` in rewrite_draft_dispatch_token() -- observed RED below (this test
+    then fails because the call succeeds and stamps RUN_ID's token)."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    draft = clean_draft(seg)
+    draft["dispatch_token"] = f"{OTHER_RUN_ID}:{seg}"
+    write_draft_doc(root, seg, draft)
+    before_bytes = (root / "segments" / f"{seg}.draft.json").read_bytes()
+    _touch_claim_marker(root, OTHER_RUN_ID, seg)
+
+    mod = _load_select_segments_module(root)
+    ok, detail = mod.rewrite_draft_dispatch_token(
+        seg,
+        root,
+        f"{RUN_ID}:{seg}",
+        expected_content_sha1=draft_content_sha1_of(draft),
+        already_claimed_by_this_run=True,
+    )
+    assert ok is False, "an old run reasserting a superseded authorization must be refused"
+    assert OTHER_RUN_ID in detail, (
+        f"the refusal must NAME the run that currently owns the segment. Got: {detail}"
+    )
+    assert seg in detail
+    assert "OWNED BY RUN" in detail, f"must say OWNED, not merely mismatched. Got: {detail}"
+
+    on_disk = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert on_disk["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}", (
+        "nothing may be installed -- the segment's current owner's token must survive"
+    )
+    assert (root / "segments" / f"{seg}.draft.json").read_bytes() == before_bytes
+    assert _staged_temp_files(root) == [], "an early refusal must never even stage a temp file"
+
+
+def test_rewrite_allows_a_fresh_claim_over_a_run_that_still_holds_a_live_claim(tmp_path):
+    """The case a NAIVE 'refuse whenever the named run's claim record is
+    still live' predicate would break, since a claim record is NEVER
+    released: `already_claimed_by_this_run=False` (this run's OWN first
+    claim of `seg` -- exactly what run() passes on the fresh
+    `published=True` branch) must succeed even though the draft names a run
+    whose own claim record is still very much present.
+
+    MUTATION: drop condition 4 entirely (refuse on a live foreign claim
+    alone, ignoring `already_claimed_by_this_run`) -- observed RED below."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    draft = clean_draft(seg)
+    draft["dispatch_token"] = f"{OTHER_RUN_ID}:{seg}"
+    write_draft_doc(root, seg, draft)
+    _touch_claim_marker(root, OTHER_RUN_ID, seg)
+
+    mod = _load_select_segments_module(root)
+    ok, detail = mod.rewrite_draft_dispatch_token(
+        seg,
+        root,
+        f"{RUN_ID}:{seg}",
+        expected_content_sha1=draft_content_sha1_of(draft),
+        already_claimed_by_this_run=False,
+    )
+    assert ok, detail
+    on_disk = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert on_disk["dispatch_token"] == f"{RUN_ID}:{seg}"
+
+
+def test_rewrite_skips_the_ownership_check_when_the_named_run_never_claimed(tmp_path):
+    """The ORDINARY claim: the draft carries the token of the run that
+    originally TRANSLATED it, and that run holds no claim record at all
+    (claimed_path() -> CLAIM_ABSENT). Condition 3 is false, so the check
+    must not fire even with already_claimed_by_this_run=True.
+
+    MUTATION: change `foreign_state != claim_record.CLAIM_ABSENT` to `True`
+    unconditionally -- observed RED below."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    draft = clean_draft(seg)
+    draft["dispatch_token"] = f"{SOURCE_RUN_ID}:{seg}"
+    write_draft_doc(root, seg, draft)
+    # No marker written for SOURCE_RUN_ID -- CLAIM_ABSENT is the point.
+    assert not (root / "runs" / SOURCE_RUN_ID / f".claimed.{seg}").exists()
+
+    mod = _load_select_segments_module(root)
+    ok, detail = mod.rewrite_draft_dispatch_token(
+        seg,
+        root,
+        f"{RUN_ID}:{seg}",
+        expected_content_sha1=draft_content_sha1_of(draft),
+        already_claimed_by_this_run=True,
+    )
+    assert ok, detail
+    on_disk = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert on_disk["dispatch_token"] == f"{RUN_ID}:{seg}"
+
+
+def test_rewrite_treats_an_ambiguous_foreign_claim_record_as_still_live(tmp_path):
+    """claimed_path() names a DIRECTORY instead of a regular file --
+    classify_claim_record() reports CLAIM_AMBIGUOUS, never CLAIM_ABSENT, and
+    this check's safe direction (per claim_record.py's own module contract)
+    is to treat AMBIGUOUS as LIVE: a record this call cannot read cannot be
+    ruled out as released. Must refuse, exactly like a confirmed-live one.
+
+    MUTATION: change `foreign_state != claim_record.CLAIM_ABSENT` to
+    `foreign_state == claim_record.CLAIM_PRESENT` -- observed RED below."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    draft = clean_draft(seg)
+    draft["dispatch_token"] = f"{OTHER_RUN_ID}:{seg}"
+    write_draft_doc(root, seg, draft)
+    marker = root / "runs" / OTHER_RUN_ID / f".claimed.{seg}"
+    marker.mkdir(parents=True)  # a directory, not a regular file -> AMBIGUOUS
+
+    mod = _load_select_segments_module(root)
+    ok, detail = mod.rewrite_draft_dispatch_token(
+        seg,
+        root,
+        f"{RUN_ID}:{seg}",
+        expected_content_sha1=draft_content_sha1_of(draft),
+        already_claimed_by_this_run=True,
+    )
+    assert ok is False, "an AMBIGUOUS foreign claim record must be treated as still live"
+    assert OTHER_RUN_ID in detail
+    on_disk = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert on_disk["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}"
+
+
+def test_rewrite_skips_the_ownership_check_when_the_token_is_absent(tmp_path):
+    """D9's lost-token recovery: the draft's CURRENT dispatch_token is
+    missing entirely, so condition 1 (draft_run_id() -> None) is false and
+    the whole check is skipped -- unconditionally, even with
+    already_claimed_by_this_run=True, since that is exactly the shape a
+    resumed run's OWN recovery re-claim takes.
+
+    MUTATION: fall back `current_owner` to this_run_id's own complement
+    (treat a missing token as "owned by someone, refuse anyway") instead of
+    None when draft_run_id() cannot parse the current token -- observed RED
+    below."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    draft = clean_draft(seg)
+    # No dispatch_token at all.
+    write_draft_doc(root, seg, draft)
+
+    mod = _load_select_segments_module(root)
+    ok, detail = mod.rewrite_draft_dispatch_token(
+        seg,
+        root,
+        f"{RUN_ID}:{seg}",
+        expected_content_sha1=draft_content_sha1_of(draft),
+        already_claimed_by_this_run=True,
+    )
+    assert ok, detail
+    on_disk = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert on_disk["dispatch_token"] == f"{RUN_ID}:{seg}"
+
+
+def test_rewrite_skips_the_ownership_check_on_the_idempotent_same_run_path(tmp_path):
+    """The idempotent re-stamp (D9): the draft's CURRENT token already names
+    THIS run, so condition 2 is false regardless of
+    already_claimed_by_this_run -- must remain a no-op, never a refusal."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    draft = clean_draft(seg)
+    draft["dispatch_token"] = f"{RUN_ID}:{seg}"
+    write_draft_doc(root, seg, draft)
+    before_bytes = (root / "segments" / f"{seg}.draft.json").read_bytes()
+
+    mod = _load_select_segments_module(root)
+    ok, detail = mod.rewrite_draft_dispatch_token(
+        seg,
+        root,
+        f"{RUN_ID}:{seg}",
+        expected_content_sha1=draft_content_sha1_of(draft),
+        already_claimed_by_this_run=True,
+    )
+    assert ok, detail
+    after_bytes = (root / "segments" / f"{seg}.draft.json").read_bytes()
+    assert after_bytes == before_bytes
+
+
+# ---------------------------------------------------------------------------
+# 18. #438 round 4, END TO END: the same defect through the REAL admission
+# pipeline and run()'s own wiring of `already_claimed_by_this_run` (never
+# reconstructed inside rewrite_draft_dispatch_token(), only threaded through
+# from write_claim_record()'s own `published` result -- see that call site's
+# comment) -- a unit test of the predicate alone (section 17) cannot catch a
+# wiring mistake at the call site; only this can.
+# ---------------------------------------------------------------------------
+
+def test_an_old_run_may_not_reclaim_a_segment_a_newer_run_now_owns(tmp_path):
+    """THE regression test for the reported defect. RUN_ID claims seg22;
+    OTHER_RUN_ID legitimately re-claims it (a genuine re-review -- both
+    admissions pass every REAL gate, S1/S2 subprocesses included); RUN_ID
+    then resumes and attempts to claim seg22 again. Before this fix: RUN_ID's
+    own claim record already exists, so the write hits the "already claimed
+    by this run" EEXIST branch, which used to re-stamp the draft
+    unconditionally -- RUN_ID silently takes the segment back from
+    OTHER_RUN_ID with no warning and nothing else changed. Must now be
+    refused, and OTHER_RUN_ID's token and claim record must be untouched."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    # resume_setup.py mints a fresh input.digest for a run BEFORE it ever
+    # dispatches (that is true of every real invocation, fresh or resumed --
+    # see #409 Step 3's own scan). Without it, a SECOND invocation from a
+    # DIFFERENT run id sees RUN_ID's own draft evidence with no digest behind
+    # it and refuses on that unrelated gate before this test's own subject
+    # is ever reached.
+    make_run_dir(root, RUN_ID)
+    first = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert first.returncode == 0, f"stdout={first.stdout!r} stderr={first.stderr!r}"
+    draft_after_first = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert draft_after_first["dispatch_token"] == f"{RUN_ID}:{seg}"
+
+    make_run_dir(root, OTHER_RUN_ID)
+    second = run_select(root, "--from-converged", seg, "--run-id", OTHER_RUN_ID, "--run-resume", "false")
+    assert second.returncode == 0, (
+        f"OTHER_RUN_ID's own fresh re-claim over seg22 (a genuine re-review) must succeed\n"
+        f"stdout={second.stdout!r} stderr={second.stderr!r}"
+    )
+    draft_after_second = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert draft_after_second["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}"
+    other_marker = root / "runs" / OTHER_RUN_ID / f".claimed.{seg}"
+    other_record_before = other_marker.read_bytes()
+
+    # Same precondition sections 10/15 already use for a real resumed run.
+    make_run_dir(root, RUN_ID)
+    third = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "true")
+    assert third.returncode != 0, (
+        f"RUN_ID reasserting its OLD authorization must be refused -- {OTHER_RUN_ID!r} "
+        f"currently owns this segment\nstdout={third.stdout!r} stderr={third.stderr!r}"
+    )
+    out = parse_stdout(third)
+    assert out["success"] is False
+    assert OTHER_RUN_ID in out["error"], out["error"]
+    assert seg in out["error"], out["error"]
+
+    draft_after_third = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert draft_after_third["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}", (
+        "the refusal must be REAL: OTHER_RUN_ID's token must still be on disk, never "
+        "reverted back to RUN_ID's"
+    )
+    assert other_marker.read_bytes() == other_record_before, (
+        "OTHER_RUN_ID's own durable claim record must be untouched by the refused attempt"
+    )
+
+
+def test_fresh_claim_by_a_new_run_succeeds_even_though_the_named_run_still_holds_a_claim(tmp_path):
+    """The case a naive 'refuse on any live foreign claim' predicate would
+    have broken, proven through the real pipeline: RUN_ID's own claim record
+    for seg22 is never released, so it stays live forever. OTHER_RUN_ID's
+    FIRST, genuinely fresh claim over the same segment -- the ordinary
+    new-owner / re-review transition -- must still succeed."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    # See the sibling test above for why this precedes the FIRST call too:
+    # a later, different run id's own invocation otherwise trips over RUN_ID's
+    # undocumented dispatch evidence on the unrelated #409 Step 3 gate.
+    make_run_dir(root, RUN_ID)
+    first = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert first.returncode == 0, f"stdout={first.stdout!r} stderr={first.stderr!r}"
+    assert (root / "runs" / RUN_ID / f".claimed.{seg}").is_file(), (
+        "precondition: RUN_ID's own claim record must exist and (by design) is never released"
+    )
+
+    make_run_dir(root, OTHER_RUN_ID)
+    second = run_select(root, "--from-converged", seg, "--run-id", OTHER_RUN_ID, "--run-resume", "false")
+    assert second.returncode == 0, (
+        f"OTHER_RUN_ID's FIRST claim of seg22 must succeed even though RUN_ID's own claim "
+        f"record for it is still live\nstdout={second.stdout!r} stderr={second.stderr!r}"
+    )
+    draft = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert draft["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}"

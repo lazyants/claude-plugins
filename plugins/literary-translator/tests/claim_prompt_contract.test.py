@@ -805,6 +805,66 @@ def test_lost_token_recovery_runs_the_command_draft_ready_advertises(tmp_path):
     assert f"[{seg}] READY" in ready.stdout
 
 
+def test_draft_ready_reports_a_FOREIGN_claim_as_superseded_not_lost(tmp_path):
+    """A segment claimed by run A, then claimed OUT FROM UNDER it by run B, must
+    be reported to the operator as SUPERSEDED -- never as the "claim was LOST"
+    case, whose advertised remedy is to re-claim under run A.
+
+    This is the operator-facing half of the cross-run ownership defect a third
+    review round found. Run A's own claim record survives run B's claim (nothing
+    releases a claim), and the draft's token no longer matches A's, so the state
+    is byte-for-byte the one the LOST branch was written to explain. It read that
+    state as "a fix round dropped my token" and told the operator to re-claim
+    under A -- which is precisely the reclaim the selector now refuses. Following
+    that advice could only ever produce a second, more confusing failure.
+
+    THE MUTATION THAT MAKES THIS FAIL: delete the `actual_run_id != run_id`
+    branch from draft_ready.py's `_claim_note()` CLAIM_PRESENT arm, i.e. restore
+    the single LOST message for every present record. The LOST assertion below
+    then finds its string and the test fails on it.
+
+    Nothing is mocked: the claim is minted by the real select_segments.py and the
+    real draft_ready.py is driven as a subprocess."""
+    seg = "seg01"
+    root = make_claim_capable_root(tmp_path, seg=seg)
+    token_a = f"{CLAIM_RUN_ID}:{seg}"
+    run_b = "20260813T000000Z"
+    token_b = f"{run_b}:{seg}"
+
+    # ---- run A takes the segment, for real -------------------------------
+    claim = run_select(root, "--only-segs", seg, "--from-cap", seg,
+                       "--run-id", CLAIM_RUN_ID, "--run-resume", "false")
+    assert claim.returncode == 0, f"stdout={claim.stdout!r} stderr={claim.stderr!r}"
+    assert read_draft_doc(root, seg)["dispatch_token"] == token_a
+    cr = _claim_record_module()
+    assert cr.claimed_path(CLAIM_RUN_ID, seg, root / "runs").is_file()
+
+    # ---- run B claims it out from under A --------------------------------
+    # Only the TOKEN moves, which is the point: draft_content_sha1() projects
+    # dispatch_token out, so this transition is invisible to every content hash
+    # in the system. A's record is left exactly where it was.
+    doc = read_draft_doc(root, seg)
+    doc["dispatch_token"] = token_b
+    write_draft_doc(root, seg, doc)
+
+    # ---- A's readiness probe must not call this "lost" --------------------
+    refusal = run_draft_ready(root, seg, "--expect-token", token_a)
+    assert refusal.returncode == 1, f"stdout={refusal.stdout!r}"
+    out = refusal.stdout
+
+    # The load-bearing assertion: this is the exact state the LOST branch used
+    # to claim, so its ABSENCE is what proves the two cases are now told apart.
+    assert "the claim was LOST" not in out, (
+        "run B owns this segment; reporting it as a LOST claim sends the "
+        f"operator to re-claim under run A, which the selector refuses: {out!r}"
+    )
+    assert run_b in out, f"the refusal must name the run that owns it now: {out!r}"
+    assert "SUPERSEDED" in out, f"A's record must be called superseded: {out!r}"
+    assert "NOT the fix" in out, (
+        f"re-claiming under A must be named as NOT the remedy: {out!r}"
+    )
+
+
 def test_a_token_less_draft_with_no_claim_record_is_still_refused(tmp_path):
     """The control the recovery test needs, and the reason the recovery is
     not a general hole: the SAME token-less draft, with no claim record for

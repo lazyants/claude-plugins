@@ -60,12 +60,22 @@ CITATION_ANCHORS = {
     "claim_record.py:467-476": ["pre_claim_review", "cache_key_at_claim"],
     "claim_record.py:534-586": ["_O_DIRECTORY", "os.fsync"],
     # --- select_segments.py: the only component that may MINT a claim ------
-    "select_segments.py:2921": ["write_claim_record"],
+    "select_segments.py:3040": ["write_claim_record"],
+    # The fresh-evidence collision refusal the snapshot paragraph cites as the
+    # reason a freshly minted id is NOT guaranteed clean. Anchored on the
+    # arming condition and on the word the refusal itself uses, so a version
+    # that kept the condition but stopped refusing loses an anchor.
+    "select_segments.py:2860-2868": ['args.run_resume == "false"', "launder"],
+    # The cross-run ownership refusal. Anchored at BOTH ends: the predicate's
+    # fourth condition pins where it starts, the refusal message pins that the
+    # refusal itself is still inside the range. A version that evaluated the
+    # predicate and then fell through would keep the first anchor.
+    "select_segments.py:2373-2412": ["already_claimed_by_this_run", "OWNED BY RUN"],
     # The re-stamp, and the hash it is checked against. Both anchored: the
     # ordering claim in the entry is about these two calls in this order.
-    "select_segments.py:2962-2966": ["rewrite_draft_dispatch_token", "expected_content_sha1"],
-    "select_segments.py:2307": ["os.O_EXCL", "_O_NOFOLLOW"],
-    "select_segments.py:2348-2353": ["staged_sha1 != expected_content_sha1", "Something replaced or edited"],
+    "select_segments.py:3092-3096": ["rewrite_draft_dispatch_token", "expected_content_sha1"],
+    "select_segments.py:2426": ["os.O_EXCL", "_O_NOFOLLOW"],
+    "select_segments.py:2467-2472": ["staged_sha1 != expected_content_sha1", "Something replaced or edited"],
     # --- the two components that may only REFUSE ---------------------------
     "codex_job.py:1431-1433": ["_refuse_claimed_translate()", "claimed-segment-refused"],
     # Anchored on all three: the entry's claim is specifically that the run id
