@@ -15,6 +15,30 @@ a foreground `task` inside a `run_in_background` Bash) rather than trusting the 
 and **judge liveness by log-mtime + `kill -0 <pid>`, never by a `status` that keeps lying `running`** after
 the worker died. `<CC>` below is the resolved `codex-companion.mjs`; the version bumps, so never hardcode it.
 
+**`kill -0 <pid>` is only as good as the pid, and `pgrep -f` is the wrong way to get one** — for a job
+launched directly as `codex exec ... > out 2> err` there is no state JSON to read `.pid` from, and
+`pgrep -f codex` matches the session's own zsh wrapper, whose command line contains `export
+CODEX_COMPANION_*` env assignments. Grepping the full command line therefore returns a shell that exits on
+its own schedule while the real worker runs on. **Identify the process by who holds the output file open:
+`lsof -t <job>.err`, keeping the pid whose `ps -p <pid> -o comm=` ends in `bin/codex`.** Measured: two
+successive monitors reported "PROCESS EXITED" for a job that was alive and writing — a false completion
+that reads exactly like a finished run and invites acting on an absent verdict. Corollary for any
+`until ! kill -0 $PID` waiter: verify the pid identifies the worker BEFORE arming the loop, because a
+waiter on the wrong pid returns promptly and looks like success.
+
+**Having the right pid does not mean you can read liveness off it — two follow-on traps, both measured
+2026-08-07 and both of which produced a confident "the job is stalled/dead" that was false.**
+(1) **The holder's `etime` is NOT the job's age.** A node+codex launcher/worker pair persists and is
+REUSED across runs, so a job launched two minutes ago is held by processes reporting hours of elapsed
+time. Reading that as "these are stale processes, my launch never took" inverts the diagnosis. Age
+tells you nothing; only the output file's growth does. (2) **Sample growth over ≥20 s, never a few
+seconds.** `stat -f%z` twice around an 8-second window caught a pause between writes and read as a
+stall, on a job that was in fact emitting ~5 KB/s. A dead job and a thinking one look identical over a
+short window — and a KILLED launch leaves a partial `.err` that is indistinguishable by size or content
+from a running one. Related: a `nohup … &` launch inside a FOREGROUND Bash tool call did not survive
+that call's 2-minute timeout (observed: SIGTERM to the call, no worker holding the file afterwards) —
+launch long runs with the Bash tool's own `run_in_background` instead.
+
 Read the reference file that matches the task:
 
 - **`references/codex-companion-runtime.md`** — read when driving a codex-rescue / `codex-companion.mjs`

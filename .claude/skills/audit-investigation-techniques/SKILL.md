@@ -1,11 +1,11 @@
 ---
 name: audit-investigation-techniques
-description: Techniques for multi-agent audit, gap-hunting, and research work — use when auditing another Claude Code session's behavior from its on-disk JSONL transcript, running a multi-agent sweep to file non-duplicate GitHub issues for repo/plugin gaps, or briefing Explore/research agents during planning (especially right after a merge, when the local tree lags origin/main and agents confidently report shipped code "doesn't exist").
+description: Techniques for multi-agent audit, gap-hunting, and research work — use when auditing another Claude Code session's behavior from its on-disk JSONL transcript, running a multi-agent sweep to file non-duplicate GitHub issues for repo/plugin gaps, briefing Explore/research agents during planning (especially right after a merge, when the local tree lags origin/main and agents confidently report shipped code "doesn't exist"), or bulk-classifying an existing corpus against a taxonomy with an LLM (relabelling an issue backlog, triage, tagging) where the rubric text alone miscalibrates against how the corpus actually drew its boundaries.
 ---
 
 # Multi-agent audit & investigation techniques
 
-Three recipes that share one spine: you fan work out to **fresh-context agents**, so every
+Four recipes that share one spine: you fan work out to **fresh-context agents**, so every
 prompt must carry a ground-truth brief, and every finding they return must be re-verified
 against **current** source before you act on it. The recurring failure is trusting an agent's
 map or verdict without that re-check — a wrong path, a stale tree, or your own fed-in premise
@@ -130,3 +130,28 @@ something you KNOW shipped in the version you're building on → it read the sta
 - **When you CAN mutate:** fast-forward first (`git merge --ff-only origin/main` on a clean tree) so the tree matches, then research normally.
 - The BUILD phase sidesteps this by cutting the worktree from origin/main (`git worktree add … origin/main`), but PLAN-phase research runs before that worktree exists — so it needs the explicit-ref briefing.
 - **Cross-check any agent's "doesn't exist" / "not wired" claim against origin/main yourself** before folding it into the plan.
+
+---
+
+## 4. Bulk-classifying an existing corpus (labels, severities, categories)
+
+For "assign `<taxonomy>` to N existing items" — relabelling an issue backlog, triage, tagging.
+
+**The taxonomy's own definitions are NOT the ground-truth brief.** Wordings like "user-visible
+breakage" vs "wrong but survivable" read as precise and are not: they leave the boundary to the
+classifier's priors, which do not match where this corpus actually drew it. Measured relabelling 92
+issues here — the rubric text alone put **38%** at the top severity against the repo's **7%**
+historical rate, inflating feature requests, RFCs and explicitly-deferred follow-ups into
+"breakage". Re-running with anchors dropped it to 17.6% and downgraded 26 issues.
+
+- **Seed the prompt with the corpus's own already-decided examples**, not just the definitions:
+  *every* instance of the rarest class (there are few, and that class is the boundary that gets
+  abused) plus a sample of each common one, each shown with its other labels. Then state the rules
+  those examples imply, and the expected shape ("a handful high, some medium, many low").
+- **Compare the produced distribution against the historical one BEFORE applying anything.** That
+  comparison is the only signal you get: every label is a valid taxonomy member and every axis is
+  answered, so a schema gate passes the whole miscalibrated set. Wrong calibration reads as diligence.
+- **Ask only for the axes actually missing, pass what the item already has, and validate that the
+  returned axis set equals the requested one.** Given a per-item `need`/`have`, a classifier still
+  occasionally answers an axis it wasn't asked for, or misreads `have` as already-satisfied and
+  returns nothing (2 of 92 here). Both are invisible without that equality check.

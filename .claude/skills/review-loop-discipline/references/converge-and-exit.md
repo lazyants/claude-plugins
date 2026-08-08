@@ -16,7 +16,9 @@
 - [The contrivance gradient — when the evasions outrun the threat model](#the-contrivance-gradient--when-the-evasions-outrun-the-threat-model)
 - [Review rounds are non-monotonic](#review-rounds-are-non-monotonic)
 - [Non-convergent loops: exit, document, escalate](#non-convergent-loops-exit-document-escalate)
+- Deleting a checker that has become the thing under review — see "know when to DELETE that checker"
 - [Don't engineer around a residual you've already judged acceptable](#dont-engineer-around-a-residual-youve-already-judged-acceptable)
+- […but state its NARROWEST true blocker — an overstated one hides a cheap fix](#state-the-residuals-narrowest-true-blocker)
 - [Symmetric scope-calibration: over-adding and under-fixing](#symmetric-scope-calibration-over-adding-and-under-fixing)
 - [Port the diminishing-returns check to the plan-review loop too](#port-the-diminishing-returns-check-to-the-plan-review-loop-too)
 - [Codex alone for plan/code review](#codex-alone-for-plancode-review)
@@ -130,6 +132,8 @@ correct.
 **A named cause is not a taken cause — get the reviewer to define DONE as a finished artifact, then score against it.** The move above gets you a cause; it does not tell you when you have finished acting on it, and *your own judgement of that is the unreliable part*. Verified 2026-07-29, same loop, later rounds: after the reviewer named "distributed contract ownership" I built the artifact it asked for, declared the cause taken in the next round's prompt — and the reviewer replied that the cause was **not new and had not been fully taken**. That happened **twice**, each time costing a full round, because "I added the thing you named" and "the property now holds" are different claims and only the second matters. What broke it was asking a different question: *describe what "fully taken" looks like as a finished artifact, so I can converge on your description of done rather than keep sampling findings*. The answer was five numbered criteria, and from that round on every review returned a **scorecard** — one criterion scored met and stayed met, the others came back with a named gap each. **The value is not the criteria, it is that "am I done?" stops being my opinion**: a plateau that looks identical from the inside (still 4 blockers) becomes visibly differentiated from the outside (1 of 5 met, and the remainder split into "conceptual" vs "drift I introduced"). Ask for it the round after a structural cause is named, not five rounds later.
 
 **While you are at it, gate your own drift mechanically.** In that same stretch, three consecutive rounds spent findings on damage the *previous* round's fix had caused — a column added to a table header but not its rows, a row number used twice after inserting an entry, citations left pointing at pre-renumber rows, an entrypoint specified in the design and absent from every inventory. That class is mechanically detectable, so a reviewer round spent on it is a wasted round. Write a pre-submit checker over the artifact's own structural invariants (uniform table columns, identifiers contiguous and unique, no cross-reference past the last entry, every declared thing present in the inventory that must list it) and run it before every round. Two caveats, both learned the same day: give each check a **minimum-count assertion** so it cannot pass by matching nothing, and **assume its first run's failures are the checker's own bugs** — both of the first run's were, and only the second run's green was worth anything.
+
+**And know when to DELETE that checker — track WHERE findings land, not only how many.** The paragraph above ends at "write the checker"; it has no exit condition for the case where the checker becomes the thing under review. Verified 2026-08-07 (literary-translator 1.20.0): five consecutive rounds found their only MAJORs **inside guards added by the round before, and none in the release code those guards were watching** — which codex re-confirmed sound at every commit. Count was useless as a signal here (findings went 1 → 2 → 2 → 3, i.e. *rising* while the artifact under review was already clean); **location was decisive**, and it is a cheap thing to tabulate each round. The guard was a test-side reimplementation of dataflow analysis, and its own measured defect rate dwarfed the drift it existed to catch: wrong on 12 of 16 constructs, then 7 of 28, then a `match` capture / walrus-in-default / class-scope comprehension / an alias chain past its own convergence bound, then a veto that an *unrelated* shadow elsewhere in a file could trip — silently disabling the check for that whole file while still looking like a guard, which is strictly worse than no guard. **Two tells that you are on the wrong side of this trade, both visible before the next round:** each revision is LARGER than the one it replaces, and a "narrowing" step needs its own exemption/veto to stop firing on correct code. Then the move is not a fifth revision — it is to delete the check, state the now-unguarded gap in the release note in one plain sentence, and keep the checks that answer questions exactly (here: identity of duplicated copies, a state matrix, a census of participants; deletion was net −190 lines). Ask the reviewer directly — *is this guard worth its own defect rate?* — and give it explicit permission to answer "delete it"; asked at round 5 rather than round 8, that question would have saved four rounds. **A guard whose defect rate exceeds the drift it catches is not a guard, and an honest disclosure outranks a broken tripwire** — the disclosure is what four failed revisions were substituting for.
 
 ## The loop's exit condition
 
@@ -337,6 +341,49 @@ The detour (a whole extra fix+review round) was avoidable: once a residual is SO
 bounded-acceptable, go straight to document-it-and-escalate rather than trying to satisfy the
 reviewer with a new design. If you DO build the mooting fix anyway, treat it as a full new change
 owing its own red-before-green + review (it is not a free "just make the warning go away").
+
+## …but state the residual's NARROWEST true blocker — an overstated one hides a cheap fix
+
+<a id="state-the-residuals-narrowest-true-blocker"></a>
+
+The section above guards against over-correcting a residual. This is its counterweight, and the
+more expensive direction: **the reason you write down for why a residual cannot be closed becomes
+the reason nobody — including you — looks again.** State a blocker wider than the true one and it
+reads as caution, so no reviewer attacks it and no later round reopens it, while a cheap partial
+fix sits inside the gap between the stated blocker and the real one.
+
+Verified 2026-08-07 (literary-translator 1.20.0). A backfill decided sentinel protection from a
+directory read once by pathname. The disclosure said closing it "needs a locking protocol honoured
+by everything that can touch `segments/`" — and that sentence survived several rounds, a
+`code-simplifier` pass and a security review untouched. It was false. The run already held an open
+descriptor for that directory; the census simply was not using it. The PR reviewer reproduced the
+consequence in one shot: a path re-pointed during the census and restored before the final identity
+sample yielded `success: true` with a segment reported protected over a directory holding no
+sentinel. The fix was one optional `dir_fd` parameter.
+
+Worse, the overstatement had already been reasoned INTO existence: the descriptor-relative census
+was considered in-round and **rejected on sound reasoning with an unsound conclusion** — "it
+removes the pathname race for the lookup but not the marker's own deletion after classification",
+i.e. rejected for not closing the whole class. Both halves of that were true; the decision was
+still wrong, because the half it did close was reachable with no exotic mechanism at all.
+
+Three checks, cheap, at the moment you write a disclosure rather than a round later:
+
+1. **Name the narrowest blocker, not the most defensible-sounding one.** "Needs a protocol every
+   writer honours" and "needs the census to use the descriptor we already hold" are very different
+   claims; only one of them is a reason to stop.
+2. **Ask what machinery is already in hand.** A residual whose fix needs new infrastructure is a
+   real residual; one whose fix needs an argument you already have is a deferral.
+3. **Split the class before accepting it.** Enumerate the mechanisms that reach the bad outcome and
+   mark each closed / partly closed / open. If any row comes out closed by something you already
+   built, the disclosure was never about that row — and the ones that stay open are what the issue
+   should say, at their real width. Here that turned one sweeping paragraph into two concrete
+   mechanisms a descriptor genuinely cannot see: entries rewritten **in place**, and a sentinel
+   deleted **after** classification.
+
+The asymmetry that makes this worth a rule: an UNDERSTATED limitation gets caught — someone hits
+the case it denied. An OVERSTATED one is self-protecting, because it reads exactly like the careful
+version of itself.
 
 ## Symmetric scope-calibration: over-adding and under-fixing
 
