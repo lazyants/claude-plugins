@@ -2148,9 +2148,9 @@ def _claim_record_claimed_at(claim_record_mod, state: str, payload) -> "datetime
     writer of the field -- match it exactly rather than accepting anything
     that merely looks like a timestamp).
 
-    Parsing, not merely trusting-if-string, is the point: the
-    caller compares two of this function's return values with plain `>`,
-    and BEFORE this a non-empty string that fails to parse as a real
+    Parsing, not merely trusting-if-string, is the point: the caller
+    compares two of this function's return values with plain `>`, and
+    BEFORE this a non-empty string that fails to parse as a real
     timestamp (a hand-edited "z", a truncated "9", empty-looking noise)
     still fell through `isinstance(value, str) and value` and got compared
     LEXICALLY -- under which `"z" > "2026-01-02T00:00:00Z"` and
@@ -2172,12 +2172,18 @@ def _claim_record_claimed_at(claim_record_mod, state: str, payload) -> "datetime
     if not isinstance(value, str) or not value:
         return None
     try:
-        # Byte-for-byte the format _claim_now_iso8601() writes: seconds
-        # resolution, UTC, literal trailing "Z" (not %z/%Z -- the writer
-        # never emits a numeric offset or a timezone name, only this exact
-        # literal). strptime requires an EXACT match end to end, so
-        # anything with extra precision, a numeric offset, or garbage
-        # anywhere in the string raises rather than silently truncating.
+        # The format _claim_now_iso8601() writes: seconds resolution, UTC,
+        # literal trailing "Z" (not %z/%Z -- the writer never emits a
+        # numeric offset or a timezone name, only this exact literal).
+        # strptime anchors the whole string, so anything with extra
+        # precision (".5Z"), a numeric offset ("+00:00"), or garbage
+        # anywhere raises rather than silently truncating. Stated as the
+        # GRAMMAR rather than as a byte-for-byte match, because it is not
+        # one: strptime's numeric fields accept unpadded values, so
+        # "2026-1-2T0:0:0Z" also parses. That is a widening of what is
+        # ACCEPTED, never of what wins -- an accepted value still becomes a
+        # real instant and is compared as one, which is the property the
+        # caller depends on. Nothing in this repo writes the unpadded form.
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError:
         return None

@@ -80,6 +80,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -935,9 +936,26 @@ def test_draft_ready_reports_a_FOREIGN_claim_as_superseded_not_lost(tmp_path):
     doc = read_draft_doc(root, seg)
     doc["dispatch_token"] = token_b
     write_draft_doc(root, seg, doc)
+    # B's claimed_at is derived from A's ACTUAL record rather than pinned to a
+    # literal date. A's claim is minted by the real selector, so its claimed_at
+    # is the REAL CLOCK -- and a hardcoded literal on B's side is therefore a
+    # dated time bomb, not a fixed fixture: it holds only until the wall clock
+    # passes it, after which A becomes the later claim and this test silently
+    # exercises the RECOVERY branch while still asserting SUPERSEDED. (It was
+    # written as "2026-08-13T00:00:00Z" and had four days left when a review
+    # caught it.) Reading A's own record and adding one second makes B provably
+    # later than A whenever the test runs, which is the property the test needs
+    # -- and it keeps A minted by the real write path rather than trading the
+    # bomb away for a weaker fixture.
+    a_state, a_payload, a_detail = cr.read_claim_record(
+        cr.claimed_path(CLAIM_RUN_ID, seg, root / "runs"))
+    assert a_state == cr.CLAIM_PRESENT, (
+        f"fixture setup: A's own record unreadable: {a_state} {a_detail}")
+    a_at = datetime.strptime(a_payload["claimed_at"], "%Y-%m-%dT%H:%M:%SZ")
+    b_at = (a_at + timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     write_real_claim(root, run_b, seg, profile="from-cap",
                       source_run_id=CLAIM_RUN_ID, previous_dispatch_token=token_a,
-                      claimed_at="2026-08-13T00:00:00Z")
+                      claimed_at=b_at)
 
     # ---- A's readiness probe must not call this "lost" --------------------
     refusal = run_draft_ready(root, seg, "--expect-token", token_a)
@@ -955,12 +973,23 @@ def test_draft_ready_reports_a_FOREIGN_claim_as_superseded_not_lost(tmp_path):
     assert "NOT the fix" in out, (
         f"re-claiming under A must be named as NOT the remedy: {out!r}"
     )
-    # #438 round 5: the refusal must NOT promise a specific outcome from the
-    # selector's own reclaim guard -- that guard (owned by select_segments.py,
-    # not this file) decides on evidence (claim age) this note cannot see.
-    assert "it will be refused" not in out, (
-        f"the note cannot establish the selector's actual verdict from here, "
-        f"so it must not assert one with certainty: {out!r}"
+    # #438 round 6 REVERSED round 5's contract here, and the old assertion
+    # survived the reversal only because it was VACUOUS -- it searched for a
+    # lowercase "it will be refused" while the message says "the reclaim WILL
+    # be refused", so it passed no matter what the note said. Round 5's rule
+    # was that the note must not promise a verdict, because it could not see
+    # the evidence the selector decides on. Round 6 removed that premise: the
+    # note now reads BOTH claim records and performs the identical comparison
+    # the guard performs, so on this branch the verdict IS established here,
+    # and hedging it would understate what the operator can rely on. Asserted
+    # POSITIVELY, in the message's own casing, so it cannot go vacuous again.
+    assert "WILL be refused" in out, (
+        f"both claim ages are known here, so the note must state the "
+        f"selector's verdict rather than hedge it: {out!r}"
+    )
+    assert "neither a guaranteed refusal" not in out, (
+        f"that hedge belongs to the UNDETERMINED branch, where the ages "
+        f"cannot be compared -- not here, where they can: {out!r}"
     )
 
 
