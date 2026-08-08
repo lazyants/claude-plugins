@@ -326,6 +326,7 @@ stdout either way; all human-readable detail on stderr.
 
 import argparse
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -752,7 +753,7 @@ def fatal(message: str, exit_code: int = 1, **extra) -> NoReturn:
 # json"), and _read_review_obj()'s copy of the same. The REAL protection is
 # cross-file, not "this script never does it": select_segments.py's own
 # load_candidate_segments() fatals on any manifest.json `seg` failing its
-# validate_seg() (select_segments.py:764-786, the check at :778-780) --
+# validate_seg() (select_segments.py:904-915, the regex check at :911) --
 # every `seg` this script ever operates on already came from THAT
 # validated output (the `segs` list Step 1's own gate returns), never from
 # an unvalidated source, before this script ever builds a path from one.
@@ -2829,7 +2830,7 @@ def _translate_redispatched_since(dirs: dict, seg: str, review_path: Path) -> bo
     The ledger fragment is the durable evidence the sha1 alone is not: a
     retranslate always writes a FRESH runs/ledger.d/{seg}.json (a new file
     mtime, stamped by ledger_update.py's own now_iso8601() at write time,
-    ledger_update.py:712) strictly after the review it invalidates; a fix
+    ledger_update.py:930) strictly after the review it invalidates; a fix
     turn edits the draft directly and never goes through process_segment()
     at all, so it writes no ledger fragment -- the fragment's mtime stays
     exactly where the LAST translate dispatch (the original one, or an
@@ -2859,8 +2860,20 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         fabricated (inauthentic) finding rather than a stale/absent
         review or a round advance -- see process_segment()'s own retry
         counter, which this marker exists for.
+      {"action": "review", "round_label": "final", "reopen_capped": True} -- a
+        re-review of a segment a PRIOR invocation may already have capped
+        terminally (#432). The marker tells process_segment() to make the
+        segment durably recoverable BEFORE it spends the codex job; it is
+        never a new action type, still plain "review" as far as dispatch
+        goes, exactly like the cause="fabricated_loc" marker above.
       {"action": "needs_fix", "round_label": ..., "findings": [...]}
-      {"action": "cap_reached", "findings": [...]}
+      {"action": "cap_reached", "findings": [...], "reviewed_sha1": ...,
+        "reviewed_token": ..., "reviewed_digest": ...} -- the draft sha1,
+        the dispatch_token AND a content digest of the review this cap
+        verdict was derived FROM, so process_segment() can refuse the
+        terminal write if any of them moved in between (a cap must describe
+        bytes a reviewer actually read, and a VERDICT a reviewer actually
+        reached -- the digest is what makes the second half true).
       {"action": "already_converged", "round_label": "1".."<max_fix_rounds>"|"final"}
       {"action": "invalid_post_fix_draft"} -- codex round-3 MAJOR, see the
         `if not draft_ok:` branch below for the full reasoning: an invalid
@@ -3042,10 +3055,24 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
     # compare the CURRENT draft's content sha1 against what THIS review
     # recorded at review time. Computed once, used by both branches below.
     reviewed_sha1 = review_obj.get("draft_sha1")
+    # The caught DriverError is KEPT, not discarded: the final-round branch
+    # below fails on it rather than folding an infrastructure failure into a
+    # content verdict (see that branch's own comment), and it is the only
+    # place the underlying cause -- "draft not found", "not valid JSON",
+    # "draft_sha1.py is not usable" -- survives to reach the operator.
+    # It is NOT re-raised: that branch calls fatal(), which raises a NEW
+    # DriverError carrying this one's text interpolated into a message that
+    # names what was refused. Deliberate -- the operator needs "refusing to
+    # record a terminal cap over a draft this invocation never read" more
+    # than it needs this exception's identity -- but it does mean the
+    # original's exit_code and any extra fields do not survive, so nothing
+    # downstream may match on the original exception object.
+    current_sha1_error = None
     try:
         current_sha1 = current_draft_sha1(seg, segments_dir, dirs["scripts_dir"])
-    except DriverError:
+    except DriverError as exc:
         current_sha1 = None
+        current_sha1_error = exc
     draft_matches_review = (
         current_sha1 is not None and reviewed_sha1 is not None and current_sha1 == reviewed_sha1
     )
@@ -3066,7 +3093,7 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         # was written -- or the sha1 simply could not be recomputed) must
         # NEVER fall through to already_converged: ledger_update.py's own
         # independent check (enrich_converged_fields, ledger_update.py:
-        # 499-502) refuses that convergence write outright, and with no
+        # 789-792) refuses that convergence write outright, and with no
         # branch that ever re-dispatches a review in that case, every later
         # invocation would repeat the SAME refused write forever -- a
         # live-lock, not a transient failure. There is also nothing to FIX
@@ -3077,7 +3104,156 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         return {"action": "review", "round_label": matched_round_label}
 
     if matched_round_label == "final":
-        return {"action": "cap_reached", "findings": review_obj.get("findings") or []}
+        # #432: cap_reached used to fire unconditionally here, on the
+        # theory that a non-clean mandatory final review is always the
+        # true terminal state. That theory misses the exact case the
+        # clean branch above (`if clean and coverage_ok:`, the
+        # "codex #392-class MAJOR" comment) was already fixed for on the
+        # OTHER side of this same fork: a review's own recorded
+        # draft_sha1 can go stale the moment the draft changes after the
+        # review was written, and staleness does not become less true
+        # just because the review happened to be non-clean instead of
+        # clean.
+        #
+        # The clean branch needs its guard because ledger_update.py's own
+        # enrich_converged_fields REFUSES a convergence write whose
+        # draft_sha1 disagrees with the current draft -- so without a
+        # re-dispatch, a stale-but-clean review would live-lock on that
+        # refused write forever. This branch has no equivalent write to
+        # refuse (cap_reached's own ledger write in process_segment() is
+        # unconditional -- {"status": "non_converged", "reason": "cap"}
+        # never carries or checks a draft_sha1), so the failure mode here
+        # is quieter but just as permanent: this function only ever READS
+        # review.json, so a stale non-clean review keeps matching "final"
+        # and keeps returning cap_reached, forever -- even after every
+        # one of its findings has been applied to the draft by hand and
+        # validate_draft_script confirms the result is clean. Verified on
+        # a real book run: two segments landed exactly here, every
+        # finding applied, draft valid, with no branch anywhere in this
+        # function that would ever re-read the corrected draft -- both
+        # were permanently reported as outcome="failed", reason="cap" on
+        # every subsequent invocation.
+        #
+        # Fixed with the SAME discriminator the clean branch already
+        # uses, not a second one: draft_matches_review (computed once,
+        # above, from the current_sha1/reviewed_sha1 already in scope
+        # here) is True only when this stored final verdict was written
+        # against the draft that exists right now -- exactly when
+        # cap_reached is honest. When it is False the draft moved since
+        # the review read it, so a fresh review is dispatched at the SAME
+        # "final" label (never a new round -- there is no round past
+        # "final"; _next_round_label() treats it as absorbing, and this
+        # is a re-check of what changed, not a round spent).
+        #
+        # AMBIGUITY IS NEVER TERMINAL HERE, and this is where this branch
+        # deliberately STOPS copying the not-clean/not-final branch below.
+        # An earlier version of this fix reused that branch's tri-state
+        # guard (`draft_matches_review or current_sha1 is None or
+        # reviewed_sha1 is None`) verbatim and called the two
+        # interchangeable. They are not: the guard's FORM is identical but
+        # its CONSEQUENCE is inverted. Down there, ambiguity yields
+        # needs_fix -- non-terminal, no ledger write, the segment comes
+        # back next invocation. Up here it yielded cap_reached -- a
+        # TERMINAL content verdict plus a {"status": "non_converged",
+        # "reason": "cap"} ledger write that select_segments.py's own
+        # HUMAN_ESCALATION_STATUSES then excludes from every later default
+        # selection (select_segments.py's classify_segment()). So the same
+        # "stay conservative" words bought caution on one branch and a
+        # permanent, unrecoverable verdict about a draft NOBODY READ on
+        # the other -- the exact #432 failure shape, re-entered through
+        # the guard added to fix it. The two ambiguities are also
+        # different conditions and are answered separately:
+        #
+        # current_sha1 is None -- INFRASTRUCTURE, not content. Note how
+        # narrow this is: draft_ok gated this whole path above, so
+        # draft_ready.py AND validate_draft.py both just passed on this
+        # segment; for current_draft_sha1() to fail moments later the
+        # draft has to have been deleted/mangled in that window, or
+        # draft_sha1.py itself is unusable. Neither is a fact about the
+        # translation, and neither is improved by writing a cap. Raised
+        # (never re-run -- `current_sha1_error` is the original DriverError
+        # captured above, and its text is interpolated verbatim, so the
+        # operator gets the real cause without a second, possibly
+        # differently-failing probe; the exception OBJECT is new, see the
+        # comment at the capture site) so it lands in process_segment()'s
+        # own `except Exception` and becomes
+        # outcome="failed", reason="unexpected-error:DriverError" -- which,
+        # per that function's docstring, writes NO terminal ledger entry
+        # and dispatches NO codex job, leaving the segment "recoverable"
+        # for select_segments.py exactly like every other infra failure in
+        # this driver. Cheaper than the alternative too: routing it to
+        # "review" would spend a real codex job judging a draft this
+        # process cannot even hash, and routing it to "needs_fix" is not
+        # merely wrong-in-principle but BROKEN at this label --
+        # process_segment()'s needs_fix branch calls
+        # `int(round_label)`, and int("final") raises ValueError.
+        #
+        # The GUARANTEE this makes, stated at its real width: ambiguity
+        # never MINTS a terminal verdict. It does not repair one already
+        # on disk. "No ledger write" equals "reachable by default
+        # selection" only when the existing fragment is in_progress or
+        # absent -- classify_segment() then reports recoverable/
+        # not_started, both inside select_segments.py's own
+        # DEFAULT_ELIGIBLE_CATEGORIES ({"not_started", "recoverable",
+        # "stale"}). A segment carrying a non_converged/cap fragment from
+        # a PRIOR run keeps it, stays human_escalation, and remains
+        # reachable only through the --only-segs override that brought it
+        # here. That asymmetry is chosen, not overlooked: reopening on
+        # this path would durably un-escalate a segment on the strength of
+        # an infrastructure failure, over a draft this process cannot even
+        # hash -- overturning a human-visible escalation on no evidence.
+        # The reopen below repairs a cap only where there IS evidence (a
+        # draft that demonstrably moved). Pinned by test_an_uncomputable_
+        # draft_sha1_leaves_a_pre_existing_cap_exactly_as_it_found_it.
+        #
+        # reviewed_sha1 is None -- the STORED REVIEW has no draft_sha1
+        # (hand-written, or predating the field). Re-reviewed, not capped:
+        # a cap here would be a terminal verdict resting on a review that
+        # cannot be tied to any draft at all, and unlike the infra case
+        # there is a real, bounded way forward, because the re-review
+        # cannot silently adopt the wrong draft -- review.schema.json
+        # REQUIRES draft_sha1 (verified: its own `required` list), and
+        # review_ready.py independently refuses to promote any candidate
+        # whose draft_sha1 differs from the draft it just hashed or whose
+        # dispatch_token differs from the expected one, so whatever comes
+        # back is bound to the current draft and this run or it does not
+        # land. Raising instead would be the #432 defect again with a new
+        # reason string: nothing on disk changes between invocations, so
+        # it would raise forever.
+        #
+        # Both non-terminal answers fall out of one condition, since
+        # draft_matches_review is False whenever reviewed_sha1 is None.
+        if current_sha1 is None:
+            fatal(
+                f"segment {seg!r}: a stored non-clean 'final' review cannot be "
+                f"judged against the current draft because the draft's own "
+                f"content sha1 could not be computed ({current_sha1_error}) "
+                f"-- refusing to record a terminal cap over a draft this "
+                f"invocation never read"
+            )
+        if draft_matches_review:
+            # reviewed_token and reviewed_digest travel with the verdict so
+            # process_segment() can bind the cap WRITE to the review this
+            # decision was made from, not merely to a review that happens to
+            # be on disk when the write runs -- see
+            # _cap_still_binds_what_was_reviewed(). The digest is taken from
+            # review_obj, the object THIS function parsed and judged, which
+            # is the whole point: a digest re-read from disk at write time
+            # would describe the replacement, not the reviewed verdict.
+            return {
+                "action": "cap_reached",
+                "findings": review_obj.get("findings") or [],
+                "reviewed_sha1": reviewed_sha1,
+                "reviewed_token": review_obj.get("dispatch_token"),
+                "reviewed_digest": _review_verdict_digest(review_obj),
+            }
+        # reopen_capped: a previous invocation may already have written the
+        # terminal {"status": "non_converged", "reason": "cap"} fragment
+        # this branch exists to undo. process_segment() must replace it
+        # with a recoverable record BEFORE spending the re-review -- see
+        # its own review branch for why a dispatch failure would otherwise
+        # leave the old cap standing.
+        return {"action": "review", "round_label": "final", "reopen_capped": True}
 
     # Not clean, not the mandatory final round -- a fix is needed before the
     # NEXT review round can be dispatched. Any ambiguity (can't compute
@@ -3091,9 +3267,16 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
 
 def _next_round_label(round_label: str, max_fix_rounds: int) -> str:
     """The round label immediately after `round_label` -- "final" stays
-    "final" (there is no round beyond the mandatory final one; a fresh
-    re-review of a stale "final" round is dispatched at the SAME label, see
-    derive_next_action()'s clean-but-stale branch)."""
+    "final" (there is no round beyond the mandatory final one). Neither of
+    derive_next_action()'s stale-verdict branches ROUTES THROUGH this
+    function to reach that no-advance outcome: the clean-but-stale branch
+    re-dispatches at `matched_round_label` (whatever round the stale
+    verdict was written for, "final" included), and the #432
+    non-clean-but-stale-final branch returns the literal "final" it has
+    just tested for. Same reason in both cases -- the stored verdict no
+    longer describes the current draft, so this is a re-check of the same
+    round, not an advance -- but they are two different mechanisms, not
+    one, and only the second is a hardcoded label."""
     if round_label == "final":
         return "final"
     next_round = int(round_label) + 1
@@ -3289,6 +3472,183 @@ def _read_review_obj(ctx: "DispatchContext", seg: str, fallback_findings=None) -
     return {"findings": fallback_findings}
 
 
+def _review_verdict_digest(review_obj: dict) -> str:
+    """sha256 over the WHOLE review object, in the sorted-key canonical form
+    review_artifact_check.py's own canonical_text() already uses for the
+    same artifact -- so this is the repo's existing notion of "the same
+    review", hashed, not a second one invented here.
+
+    Digest over the whole object rather than an enumerated list of
+    decision-bearing fields (`clean`, `coverage_ok`, `findings`): the
+    enumeration is what silently stops covering the verdict the day a field
+    is added. review.schema.json is `additionalProperties: false` over
+    exactly five properties TODAY, and review_ready.py refuses to promote
+    anything that does not validate against it, so an enumeration would be
+    complete right now -- and would go quietly incomplete at the next schema
+    change, with nothing failing to say so.
+
+    Hashed from an already-PARSED object, never from the file's raw bytes,
+    so a re-serialization that reorders keys or changes whitespace without
+    changing a single value is not mistaken for a different verdict. What is
+    NOT excused: findings[] element order, which is array order and part of
+    the value. That direction is the safe one anyway -- a mismatch refuses a
+    write and records nothing, so the segment simply comes back next
+    invocation and is re-derived from whatever is actually on disk."""
+    return hashlib.sha256(
+        json.dumps(review_obj, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _cap_still_binds_what_was_reviewed(seg: str, ctx: "DispatchContext", action: dict) -> "str | None":
+    """None if the terminal cap in `action` still describes the review and
+    the draft bytes it was derived from, or a human-readable reason string
+    if either moved in between.
+
+    Why this exists at all: derive_next_action()'s sha comparison is a
+    POINT-IN-TIME observation, and process_segment() commits the cap in a
+    LATER step. Nothing in this driver owns the draft -- a human applying
+    findings by hand (the exact workflow #432 was reported from) can edit
+    it inside that window, and the cap would then be recorded against
+    bytes no reviewer examined, terminally, with select_segments.py's own
+    HUMAN_ESCALATION_STATUSES excluding the segment from every later
+    default selection.
+
+    The CONVERGENCE write is already protected against its own version of
+    this, one layer down, and this mirrors that protection's SHAPE rather
+    than inventing a second discipline: ledger_update.py's
+    enrich_converged_fields() re-reads review.json, re-checks its
+    dispatch_token, re-hashes the draft on disk, and refuses the write
+    ("draft changed since review; cannot record convergence") if the
+    review's recorded draft_sha1 no longer matches. The non_converged
+    write goes through the same ledger_update.py and gets NONE of that --
+    those preconditions live entirely inside its `if fragment["status"]
+    == "converged":` arm -- so the check has to be made here, by the
+    caller, for the terminal write on the other side of the fork.
+
+    Deliberately compared against what derive_next_action() OBSERVED
+    (`reviewed_sha1`/`reviewed_token`, carried on the action), never
+    re-derived from whatever is on disk now: re-deriving would re-read the
+    same file the race can have replaced, so a swapped review.json would
+    simply be re-accepted on its own terms. Fixing this in ledger_update.py
+    instead -- making a non_converged write carry its own precondition,
+    the way a converged one does -- would close it for every caller, not
+    just this driver; that is a change to a file this driver does not own.
+
+    WIDER THAN THE CONVERGENCE WRITE'S PAIR, deliberately. An earlier
+    version of this helper bound only (draft_sha1, dispatch_token) -- the
+    SAME two facts enrich_converged_fields() binds a convergence write to,
+    mirrored rather than widened -- and disclosed the rest as an accepted
+    residual: a replacement review.json carrying BOTH the same draft_sha1
+    and the same dispatch_token was indistinguishable here however
+    different its verdict (a hand-flipped `clean`, different findings).
+    That is now CLOSED by also carrying `reviewed_digest`, a sha256 over
+    the whole review object derive_next_action() actually parsed (see
+    _review_verdict_digest() for why the whole object and not an
+    enumeration of `clean`/`coverage_ok`/`findings`). The provenance pair
+    is kept alongside it, not replaced: the digest subsumes it, but the
+    pair's own mismatch message names WHICH bound fact moved, which a
+    digest cannot.
+
+    Why the pair alone was not enough, kept because it is the argument the
+    widening rests on. It is not the flock: `runs/.driver.lock` excludes
+    another DRIVER, while codex_job.py never acquires it -- it takes only
+    its own per-segment `.codex_job.<seg>.lock` -- and the default workflow
+    launches codex_job.py DETACHED, independently of any driver. And it is
+    not the sha half, because the draft need not change for the verdict to.
+
+    Reachability, kept at its real width so the fix is read neither as
+    over- nor under-motivated -- the ordinary detached-job route does NOT
+    reach this on its own. A competing codex_job.py serializes on the
+    per-segment `.codex_job.<seg>.lock` and then calls `safe_adopt()`
+    BEFORE it would launch or promote anything (codex_job.py:1300); a
+    canonical review.json that still passes `review_ready.py
+    --expect-token` is ADOPTED, leaving the artifact byte-identical rather
+    than replacing it. SKILL.md additionally forbids running the default
+    Workflow and this driver against one project concurrently.
+
+    What reached it was therefore narrower than "a detached job", and all
+    of it lies outside that cooperating path:
+      - a WRITER THAT NEVER TAKES THE PER-SEGMENT LOCK -- a human editing
+        review.json, an ad-hoc script, a restored backup;
+      - an ABA in which the canonical stops passing `review_ready.py`
+        between this driver's read and the job's `safe_adopt()` (removed,
+        truncated, momentarily unreadable), so the job relaunches and
+        promotes a fresh verdict at the SAME draft_sha1 and dispatch_token;
+      - the same outcome WITHOUT any change to the canonical: `safe_adopt()`
+        reads its gate through `_gate()`, which returns None when the gate
+        could not RUN at all -- a timeout, or a spawn failure -- and
+        `_ok(None)` is false, so a perfectly valid canonical is treated as
+        unadoptable. The job then launches, and if the transient clears it
+        promotes a different verdict at the same bound pair. Worth
+        separating from the ABA case: nothing about the artifact has to
+        change for this one, only the checker's luck. NOT reachable via an
+        exhausted poll budget, though that also makes `_gate()` return None:
+        `launch()` immediately re-reads the same exhausted `poll_timeout()`
+        and returns None too, so that path cannot promote anything;
+      - the two-machines-on-sync-replicated-storage case
+        acquire_driver_lock()'s own docstring discloses, where the flock is
+        not a shared kernel object in the first place.
+    Every one of those replaces the ARTIFACT, so every one of them changes
+    the digest -- including the human case an earlier revision put on the
+    wrong side of the line: applying findings to the DRAFT changes
+    draft_sha1 and was always caught by the sha half, but editing
+    review.json ALONE -- flipping a verdict without touching the draft --
+    changed neither bound fact and used to pass.
+
+    RESIDUAL, and it is a DIFFERENT one, not this race narrowed: the whole
+    check is still check-then-write, so the DRAFT can be replaced between
+    the re-hash below and write_ledger() landing the cap. Nothing here
+    closes that window -- only moving the precondition into ledger_update.py,
+    so the non_converged write carries its own the way a converged one
+    does, would, and that is a file this driver does not own. Tracked in
+    CHANGELOG.md's Known limitations.
+    """
+    reviewed_sha1 = action.get("reviewed_sha1")
+    reviewed_token = action.get("reviewed_token")
+    reviewed_digest = action.get("reviewed_digest")
+    # fallback_findings deliberately omitted -- an unreadable/absent review
+    # yields {"findings": None}, whose missing draft_sha1 fails the
+    # comparison below, which is the correct answer for "the artifact this
+    # verdict came from is no longer there".
+    review_now = _read_review_obj(ctx, seg)
+    if review_now.get("draft_sha1") != reviewed_sha1 or review_now.get("dispatch_token") != reviewed_token:
+        return (
+            f"review artifact for segment {seg!r} changed between the cap "
+            f"decision and the cap write (decided from draft_sha1="
+            f"{reviewed_sha1!r}/dispatch_token={reviewed_token!r}, now "
+            f"draft_sha1={review_now.get('draft_sha1')!r}/dispatch_token="
+            f"{review_now.get('dispatch_token')!r})"
+        )
+    # The verdict itself, not merely its provenance. Compared against the
+    # digest of what derive_next_action() PARSED -- carried on the action
+    # for the same reason reviewed_sha1/reviewed_token are, since
+    # re-deriving it here would re-read the very file the race replaced and
+    # accept the substitute on its own terms. A cap_reached action with no
+    # reviewed_digest at all fails this too, which is the correct direction:
+    # refusing writes nothing.
+    digest_now = _review_verdict_digest(review_now)
+    if digest_now != reviewed_digest:
+        return (
+            f"review verdict for segment {seg!r} was replaced between the cap "
+            f"decision and the cap write by a DIFFERENT verdict carrying the "
+            f"same provenance (draft_sha1={reviewed_sha1!r}/dispatch_token="
+            f"{reviewed_token!r}; review content sha256 {reviewed_digest!r} "
+            f"-> {digest_now!r})"
+        )
+    try:
+        current_sha1 = current_draft_sha1(
+            seg, ctx.dirs["durable_root"] / "segments", ctx.dirs["scripts_dir"]
+        )
+    except DriverError as exc:
+        return f"could not re-hash the draft for segment {seg!r} before the cap write: {exc}"
+    if current_sha1 != reviewed_sha1:
+        return (
+            f"draft changed since review; cannot record the cap for segment "
+            f"{seg!r} (review={reviewed_sha1!r}, current={current_sha1!r})"
+        )
+    return None
+
+
 def process_segment(seg: str, ctx: "DispatchContext") -> dict:
     """The unit of work ONE ThreadPoolExecutor worker performs for ONE
     segment on ONE run() invocation: "dispatch translate, wait, then the
@@ -3312,11 +3672,37 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
 
       outcome="converged"                 -- ledger recorded, done.
       outcome="failed", reason="cap"      -- mandatory final review still
-                                              not clean; ledger recorded
+                                              not clean AND still judging
+                                              the draft that is on disk
+                                              right now; ledger recorded
                                               directly (fully mechanical,
                                               no fix dispatched on the
                                               final round -- matches
                                               runRound's own isFinal branch).
+      outcome="failed", reason=
+        "cap-write-draft-moved"           -- the cap above was NOT recorded:
+                                              the draft moved, or the review
+                                              artifact changed -- its
+                                              provenance OR its verdict --
+                                              between
+                                              derive_next_action()'s
+                                              decision and the write (see
+                                              _cap_still_binds_what_was_
+                                              reviewed()). NO ledger write,
+                                              so whatever fragment is on
+                                              disk survives: recoverable
+                                              where that is not_started or
+                                              the in_progress a reopen just
+                                              wrote, human_escalation where
+                                              an un-reopened cap or a
+                                              `blocked` is what was there.
+                                              Either way the next
+                                              invocation re-derives from
+                                              the draft and review that are
+                                              actually there -- a cap must
+                                              never describe bytes no
+                                              reviewer read, nor a verdict
+                                              no reviewer reached.
       outcome="needs_fix"                 -- STOPS here: applying findings
                                               to the draft is a real LLM
                                               content-editing turn this
@@ -3370,7 +3756,21 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               terminal ledger write, same
                                               recoverable-next-invocation
                                               story as every other row
-                                              here.
+                                              here. As of #432 this row is
+                                              also reached DELIBERATELY,
+                                              not only by accident:
+                                              derive_next_action()'s
+                                              non-clean-final branch raises
+                                              a DriverError carrying the
+                                              captured cause for a draft
+                                              whose sha1 could not be
+                                              computed, precisely
+                                              BECAUSE this row is
+                                              recoverable and spends no
+                                              codex job -- see that
+                                              branch's own comment for why
+                                              capping on that ambiguity was
+                                              the wrong answer.
       outcome="failed", reason=
         "review-fabricated-loc"           -- a fabricated (inauthentic)
                                               finding recurred on the ONE
@@ -3423,13 +3823,21 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               defensive: reachable (without
                                               the retry bound above) if a
                                               draft keeps changing out from
-                                              under a clean review every
-                                              single iteration -- see
+                                              under a review every single
+                                              iteration -- see
                                               derive_next_action()'s own
-                                              "clean but stale" branch,
-                                              which re-reviews at the SAME
+                                              "clean but stale" branch AND
+                                              (#432) its non-clean "final
+                                              but stale" branch, both of
+                                              which re-review at the SAME
                                               round label with no bound of
-                                              its own. Kept generic on
+                                              their own -- an operator who
+                                              keeps hand-editing the draft
+                                              between every mandatory final
+                                              review drives this exact
+                                              path, one real edit per
+                                              cycle, until this loop's own
+                                              iteration cap. Kept generic on
                                               purpose: unlike the
                                               fabricated-loc case, this path
                                               has no single template-known
@@ -3578,6 +3986,31 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 return {"seg": seg, "converged": True, "outcome": "converged"}
 
             if action["action"] == "cap_reached":
+                # The ONE terminal ledger write in this function that a
+                # later invocation cannot undo by itself, so it is the one
+                # that has to prove it still describes reviewed bytes AND
+                # the verdict reached over them -- see
+                # _cap_still_binds_what_was_reviewed() for the race, and for
+                # the convergence-side precondition it starts from and then
+                # widens. Refusing writes NOTHING, so whatever fragment is
+                # already on disk is what survives -- which is better than
+                # capping over unreviewed bytes in every case, but is only
+                # SELF-HEALING where that fragment is one select_segments.py
+                # still selects. It is, on the two paths that matter: a
+                # segment with no prior entry stays not_started, and a
+                # segment reached through reopen_capped has already had its
+                # cap replaced by in_progress (see that branch above, which
+                # makes the reopen durable BEFORE dispatch precisely so this
+                # is true). It is NOT self-healing on a segment carrying a
+                # cap this invocation did not reopen, or a `blocked`
+                # fragment: those stay human_escalation and need a human.
+                # Do not shorten this back to "no ledger write means the
+                # segment stays selectable" -- that sentence was in the
+                # 1.20.0 release note and was wrong.
+                bind_failure = _cap_still_binds_what_was_reviewed(seg, ctx, action)
+                if bind_failure is not None:
+                    return {"seg": seg, "converged": False, "outcome": "failed",
+                            "reason": "cap-write-draft-moved", "detail": bind_failure}
                 rec = write_ledger(
                     ctx.dirs, seg, {"status": "non_converged", "reason": "cap"},
                     durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
@@ -3624,6 +4057,61 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                         return {"seg": seg, "converged": False, "outcome": "failed",
                                 "reason": "review-fabricated-loc"}
                     fabricated_loc_retries += 1
+                if action.get("reopen_capped"):
+                    # #432, second half. derive_next_action() decided to
+                    # re-review a segment a PRIOR invocation may already
+                    # have capped, but that decision lives only in this
+                    # process's memory; the durable record still says
+                    # {"status": "non_converged", "reason": "cap"}, which
+                    # select_segments.py's classify_segment() maps to
+                    # human_escalation via HUMAN_ESCALATION_STATUSES and
+                    # EXCLUDES from the default dispatch set. Every way
+                    # this iteration can end without reaching a terminal
+                    # write -- the dispatch below failing or timing out,
+                    # the driver being killed after codex_job.py promotes
+                    # the review but before the convergence write, any
+                    # exception in the loop body -- would then leave that
+                    # cap standing as the only durable fact, and only an
+                    # explicit --only-segs override could ever pick the
+                    # segment up again. That directly contradicts this
+                    # function's own stated invariant for every non-
+                    # terminal failure (see its docstring: "NO terminal
+                    # ledger write, so the in_progress fragment already on
+                    # disk stays the durable record and select_segments.
+                    # py's 'recoverable' default retries this segment next
+                    # invocation") -- an invariant that silently assumes
+                    # the fragment on disk is ALREADY in_progress, which is
+                    # true for every other path here and false for exactly
+                    # this one.
+                    #
+                    # So the reopen is made durable FIRST and CONFIRMED
+                    # (ledger_update.py replaces the fragment wholesale --
+                    # its own "Full replace only" contract -- so `reason:
+                    # "cap"` is gone, not merely overlaid), and a failed
+                    # reopen returns without dispatching: spending a codex
+                    # job whose successful result could not be recorded
+                    # recoverably is the worse of the two failures. Note
+                    # the write is unconditional rather than gated on
+                    # reading the current fragment back -- a segment
+                    # reaching this branch that was never capped is
+                    # already in_progress, so writing in_progress is a
+                    # no-op for it, and this avoids adding a ledger READ
+                    # path to a driver that deliberately has none.
+                    rec = write_ledger(
+                        ctx.dirs, seg,
+                        # The note covers BOTH ways this branch is reached
+                        # -- the draft moved since the capped review, and
+                        # the capped review carrying no draft_sha1 at all
+                        # -- so it never claims an edit that did not happen.
+                        {"status": "in_progress",
+                         "note": "reopened for a fresh final review: the review this "
+                                 "segment was capped on no longer describes the draft "
+                                 "on disk (#432)"},
+                        durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
+                    )
+                    if not rec.get("success"):
+                        return {"seg": seg, "converged": False, "outcome": "failed",
+                                "reason": "ledger-write-failed", "detail": rec.get("error")}
                 result = run_one_codex_job(ctx, kind="review", seg=seg, round_label=round_label)
                 if not result["ok"]:
                     return {"seg": seg, "converged": False, "outcome": "failed", "stage": "review",

@@ -430,22 +430,129 @@ sentinel existed, has NO sentinels at all, so the gate has nothing to
 refuse with: the very first W5 dispatch after upgrading would sail through
 ungated and silently retranslate the whole book. Before the first W5
 dispatch on any project this plugin has touched before it had
-`segment_dispatch_driver.py`, run (dry run by default — zero filesystem
-writes):
+`segment_dispatch_driver.py`, run (dry run by default — issues no mutating
+operation and changes no project content; the script's own docstring
+explains why that is the exact wording and "zero filesystem writes" is not):
 
 ```
 python3 ${durable_root}/scripts/backfill_ever_converged.py
 ```
 
-and read the printed JSON's `missing_sentinels`/`counts` fields — a
-non-empty `missing_sentinels` means this project needs backfilling before
-W5 runs; a genuinely fresh project that has never converged anything
-reports zero and needs no action. Re-run with `--apply` to actually write
+**Check `$?` first, then** read the printed JSON's
+`missing_sentinels`/`counts` fields — a non-empty `missing_sentinels` means
+this project needs backfilling before W5 runs; a genuinely fresh project
+that has never converged anything reports zero and needs no action. **An
+empty `missing_sentinels` means "no action" only on a run that exited 0.**
+A census that could not read the directory at all classifies every segment
+`ambiguous` and reports `missing_sentinels: []` — the very field this note
+tells you to read, empty for the opposite of the reason you would assume.
+Other fields do differ (`already_sentineled` is empty too, and the `counts`
+follow), but none of them is what this note sends you to look at; `$?`,
+`success` and `ambiguous_sentinels` are what separate the two answers, which
+is why the dry run now fails on it. The checklist below applies to a
+dry run's failure exactly as it does to `--apply`'s. Re-run with `--apply` to
+write
 the missing sentinels (add `--allow-merge` too if the dry run refused for
 lack of an existing `runs/ledger.json`; `--allow-empty` to confirm a
-genuinely zero-segment result is expected rather than a broken read). See
-`backfill_ever_converged.py`'s own module docstring for the full mechanism
-and CLI contract.
+genuinely zero-segment result is expected rather than a broken read).
+
+**Six things decide whether the protection is actually up, and
+`missing_sentinels` alone is not one of them. They govern BOTH modes** —
+gating this list on `--apply` was itself the bug that let a dry run whose
+census established nothing read as a healthy project:
+
+- **`$?` / `success`** — non-zero and `false` mean the run did not finish
+  what it set out to do. Two different shapes produce it, so read the
+  payload rather than assuming: a per-segment failure carries
+  `failed_to_create`, while a fatal abort (an unreadable ledger, a segment
+  id that fails the path-safety check) has **no `failed_to_create` key at
+  all** — a script that indexes it blindly will crash on exactly the runs
+  that matter. A fatal payload always carries `error`, and may carry a
+  context key or two beside it (`seg` for an unsafe segment id,
+  `ledger_path` for an empty result), so consume `error` and treat the rest
+  as optional. Either way, do not dispatch on a failed backfill.
+- **`failed_to_create`** — each entry names a segment left unprotected and
+  why. Resolve every one before W5.
+- **`directory_sync_error`** — the directory could not be `fsync`ed. The
+  sentinels are where readers look, but may not survive a crash. Re-running
+  settles it: the sync is unconditional, so a retry re-syncs even when it
+  creates nothing and finds every sentinel already present.
+- **`segments_dir_replaced`** — set by **two different conditions**, so read
+  the string, not just the key. Either `segments/` now names a different
+  directory than the one the run worked in — everything the run examined and
+  linked belongs to the old one, so the **whole report is about a directory
+  readers will not consult**, including any segment it called already
+  protected, and re-running does not settle that — or the identity could not
+  be **determined** at all because `fstat`/`stat` failed, which re-running may
+  well settle. Use the key to decide the run is untrustworthy (it is, either
+  way); use the string to decide which of the two you are looking at. Checked
+  in dry runs too, because a dry run's `missing_sentinels` is what this note
+  tells you to act on.
+
+  **Known limitation, narrower than it was but not closed. Read this before
+  trusting a clean report on a live or networked project.** Every sentinel
+  lookup now goes through the directory descriptor the run holds — the census
+  and the writer's `EEXIST` re-read alike — so no read can land in a
+  different directory than the one the run opened. **That settles WHICH
+  DIRECTORY and nothing about the entries inside it**, and two mechanisms
+  reach a wrong answer without ever touching the pathname:
+
+  - a sync client or restore tool rewriting sentinel entries **in place**,
+    which leaves the directory inode unchanged, so the identity check sees
+    nothing wrong;
+  - a sentinel simply deleted after the census classified it PRESENT.
+
+  A third is only partly closed: network-filesystem failover, remount or
+  snapshot switching now surfaces as AMBIGUOUS and fails the run **if it
+  invalidates the descriptor**, but a silent switch that keeps it valid does
+  not.
+
+  **The consequence is silent retranslation, not just a wrong report.**
+  `select_segments.py` gates only the segments it finds PRESENT; a marker
+  that has since gone absent leaves that segment eligible, and the refusal
+  that would have protected converged work never fires. Closing what remains
+  needs a protocol honoured by everything that can write into `segments/`,
+  which is outside what this script can impose. Treat a clean run as evidence
+  about the moment it ran, and re-run it immediately before dispatching
+  rather than relying on an earlier result.
+
+  **Two earlier drafts of this note were wrong in opposite directions, which
+  is why it is worth reading rather than skimming.** The first said the
+  failure needs something renaming `segments/` — an understatement, since a
+  rename is one mechanism and not a precondition. The second said closing it
+  "needs a locking protocol honoured by everything that can touch
+  `segments/`" — an overstatement that survived several review rounds because
+  a limitation that sounds cautious never gets attacked. The descriptor was
+  already open; the census simply was not using it, and PR review reproduced
+  a clean report about a directory the project was not using.
+- **`ambiguous_sentinels`** — a path whose protection status could not be
+  established. That covers both a path that is demonstrably not a regular
+  file (a directory, a symlink, a dangling symlink) and one whose state
+  could not be read at all, where it may in truth be absent or perfectly
+  fine. Never repaired automatically and never counted as protected; each
+  needs a human to look at the path. **A non-empty bucket fails the run**
+  (`success: false`, exit 1) — an entry here is a segment whose protection is
+  UNPROVEN, which for a dispatch decision is the same standing as
+  `failed_to_create`. It is empty whenever the sentinel paths can be read,
+  which is the ordinary case; a transient `ESTALE`/`EIO` on a network
+  filesystem lands a perfectly good sentinel here too, and re-running settles
+  that class on its own. **An entry that persists needs a human, and there is
+  deliberately no `--allow-ambiguous` to wave it through** — unlike
+  `--allow-empty` and `--allow-merge`, which confirm a state the script
+  understands, such a flag would confirm one it explicitly could not
+  establish, which is the false clean this whole check exists to remove. Fix
+  the path (a directory, FIFO or symlink at a sentinel name means that segment
+  is genuinely unprotected), then re-run.
+- **`not_evaluated`** — segments this script never considered, because
+  their current ledger status is not one it can read as converged. A
+  segment that converged and was later re-dispatched has had that
+  convergence **erased** from the ledger, so it cannot be recovered here.
+  On a project that converged segments before the sentinel existed, these
+  must be inventoried by hand — the script makes no claim about them, and
+  `success: true` does not cover them.
+
+See `backfill_ever_converged.py`'s own module docstring for the full
+mechanism and CLI contract.
 
 ## Step 0b — Resolve verse-policy adapter
 

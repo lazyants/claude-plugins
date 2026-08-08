@@ -1363,6 +1363,81 @@ def test_completeness_gate_stale_with_ever_converged_sentinel_is_deliverable(tmp
     assert "stale_previously_converged=1" in result.stderr
 
 
+def test_an_ambiguous_sentinel_still_carves_out_and_is_reported(tmp_path):
+    """1.19.1 fail-closed predicate, final_audit's half -- and the half where
+    "fail-closed" points at the OPPOSITE ACTION from the dispatch gate's.
+
+    The other three consumers refuse when the sentinel is unreadable. Here
+    refusing IS the destructive branch: a dangling symlink read as "absent"
+    drops seg02 out of the carve-out, leaves stale_blocking at 1, and reports
+    a finished book as INCOMPLETE -- over a broken dotfile, with no way out,
+    because the operator's only route to a fresh sentinel is a retranslate
+    that select_segments.py's gate now correctly refuses for this very
+    segment. Sentinel respected in one place and not the other is exactly the
+    "tokens saved, book undeliverable" shape.
+
+    Fails against the unfixed code at `assert result.returncode == 0` (and at
+    project_complete/stale_previously_converged): pre-fix `.exists()` follows
+    the dangling link, returns False, the segment is not carved out, and the
+    audit exits 3."""
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02"))
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    corrupt_cache_key_field(root, "seg02", "plugin_bundle_hash")
+
+    link = root / "segments" / ".ever_converged.seg02"
+    link.symlink_to(root / "segments" / "no-such-target")
+    assert link.is_symlink() and not link.exists(), (
+        "precondition: a DANGLING link -- Path.exists() must report False "
+        "here, or the test is not exercising the reported bug"
+    )
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0, (
+        f"an unreadable sentinel must not turn a deliverable book into an "
+        f"undeliverable one -- the ledger already recorded this segment "
+        f"converged, which is what made it 'stale' rather than 'not_started'"
+        f":\nrc={result.returncode}\nstdout={result.stdout!r}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["project_complete"] is True
+    assert summary["stale_previously_converged"] == 1
+    assert summary["completeness_counts"]["stale"] == 1, (
+        "the raw stale count must stay visible, exactly as for a valid sentinel"
+    )
+    # Counted, but never silently: the operator is the only one who can repair
+    # the path, so the audit that relied on it has to say so.
+    assert "AMBIGUOUS EVER-CONVERGED SENTINELS" in result.stderr, result.stderr
+    assert "seg02" in result.stderr
+    assert "symbolic link" in result.stderr, (
+        "the report must name what is actually at the path, not just that "
+        "something is wrong"
+    )
+
+
+def test_a_valid_sentinel_produces_no_ambiguity_report(tmp_path):
+    """FALSE-POSITIVE BOUND for the test above. A healthy project must not
+    grow a scary AMBIGUOUS banner -- a warning that fires on the normal case
+    is one operators learn to skip past, which would cost exactly the
+    attention the banner exists to buy.
+
+    Green before and after the fix by design."""
+    root = make_durable_root(tmp_path, seg_ids=("seg01", "seg02"))
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    corrupt_cache_key_field(root, "seg02", "plugin_bundle_hash")
+    mark_ever_converged(root, "seg02")
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0, f"stderr:\n{result.stderr}"
+    assert parse_summary(result)["project_complete"] is True
+    assert "AMBIGUOUS EVER-CONVERGED SENTINELS" not in result.stderr
+
+
 def test_completeness_gate_stale_without_sentinel_still_exits_3(tmp_path):
     """Fail-safe half of the carve-out: a 'stale' segment with NO sentinel
     must still block delivery exactly as before (#208's pre-existing
@@ -1520,6 +1595,62 @@ def test_count_stale_previously_converged_field_gating_matrix(tmp_path):
     }
 
     assert fa.count_stale_previously_converged(classification) == 1
+
+
+def test_carveout_count_and_ambiguity_report_read_one_scan(tmp_path):
+    """The carve-out count and the operator diagnostic must never disagree
+    about the SAME segment's sentinel.
+
+    Both ask a question of `.ever_converged.<seg>` -- "is it absent?" and "is
+    it ambiguous?" -- and each used to answer with its own `stat`. Two
+    independent reads of one path make the pair non-atomic, so a sentinel that
+    changes between them produces a segment counted as converged that nothing
+    reports: precisely the silence count_stale_previously_converged()'s own
+    comment promises is impossible ("The ambiguity is never silent").
+
+    A DIRECTORY at the sentinel path is the ambiguous case: the predicate
+    refuses to read it as a converged marker, and the carve-out counts it
+    anyway because refusing would declare a finished book undeliverable over
+    an unreadable dotfile (see that function's comment)."""
+    fa = load_final_audit_module()
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    fa.SEGMENTS_DIR = segments_dir  # isolate from the real plugin tree
+    sentinel = segments_dir / ".ever_converged.seg_amb"
+    sentinel.mkdir()  # a directory -> AMBIGUOUS, never ABSENT
+
+    classification = {
+        "seg_amb": {
+            "category": "stale",
+            "stale_reason": ["cache_key_mismatch"],
+            "mismatched_fields": ["plugin_bundle_hash"],
+        },
+    }
+    assert fa.scan_sentinel_states(classification)["seg_amb"][0] == fa.SENTINEL_AMBIGUOUS
+
+    # main()'s shape: one scan, then both consumers. The tree is mutated in
+    # between -- a concurrent dispatch, an operator cleaning up the broken
+    # path, anything -- and neither answer moves, because neither re-reads.
+    states = fa.scan_sentinel_states(classification)
+    shutil.rmtree(sentinel)
+    assert fa.count_stale_previously_converged(classification, states) == 1
+    assert [a["seg"] for a in fa.collect_ambiguous_sentinels(classification, states)] == [
+        "seg_amb"
+    ], "counted as carved out, so it MUST also appear in the operator diagnostic"
+
+    # Non-vacuity: the same sequence with two independent reads -- the pre-fix
+    # shape, still reachable by passing no scan -- produces exactly the silent
+    # carve-out. Without this block the assertions above would also pass on
+    # code that re-stats, since nothing else here forces the mutation to matter.
+    sentinel.mkdir()
+    counted_solo = fa.count_stale_previously_converged(classification)  # sees AMBIGUOUS
+    shutil.rmtree(sentinel)
+    ambiguous_solo = fa.collect_ambiguous_sentinels(classification)  # sees ABSENT
+    assert counted_solo == 1 and ambiguous_solo == [], (
+        "this is the defect the shared scan removes: counted as converged, "
+        "reported by nothing. If this assertion ever fails, the two reads have "
+        "become atomic by some other means and this test should be revisited."
+    )
 
 
 # ---------------------------------------------------------------------------

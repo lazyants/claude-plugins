@@ -52,6 +52,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -934,6 +935,265 @@ def test_close_failure_after_successful_write_is_reported_as_a_clean_refusal(tmp
     assert "could not create the ever-converged sentinel" in stderr_lower
     assert "was not recorded" in stderr_lower
     assert "nothing on disk was lost" in stderr_lower
+
+
+# ---------------------------------------------------------------------------
+# 10b. EEXIST is not proof of prior marking (1.19.1 fail-closed correction).
+#
+# `os.open(O_CREAT|O_EXCL)` raises FileExistsError for ANY existing entry, not
+# only for a regular sentinel this function previously published: a directory
+# raises it, and so does a DANGLING SYMLINK. Pre-fix, the bare
+# `except FileExistsError: return True` reported all of them as successfully
+# marked. The dangling-symlink case is the data-loss one, because
+# select_segments.py's reader disagreed about that same path -- `Path.exists()`
+# follows the link and reports it ABSENT -- so the segment was recorded as
+# converged while the dispatch gate saw it as unprotected and retranslated it
+# on the next cache-key move. 1.19.1 moves plugin_bundle_hash for every
+# converged segment in every live project, which is exactly that move.
+#
+# Both halves now route through classify_ever_converged_sentinel(), duplicated
+# verbatim in the two scripts and drift-tested against each other in
+# tests/select_segments.test.py.
+# ---------------------------------------------------------------------------
+
+def test_a_dangling_symlink_is_not_accepted_as_a_prior_marking(tmp_path):
+    """FAILS on the unfixed code at `assert result is False` -- the pre-fix
+    `except FileExistsError: return True` returns True here, and the entry a
+    reader would look for was never published."""
+    ledger_update = _load_module("ledger_update_under_test_dangling", SCRIPT_SRC)
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segDangling"
+
+    link = segments_dir / f".ever_converged.{seg}"
+    link.symlink_to(segments_dir / "no-such-target")
+    assert link.is_symlink() and not link.exists(), (
+        "precondition: a DANGLING link -- the entry exists (so O_CREAT|O_EXCL "
+        "raises EEXIST) while Path.exists() reports absent, which is the "
+        "disagreement under test"
+    )
+
+    captured_stderr = io.StringIO()
+    real_stderr = ledger_update.sys.stderr
+    ledger_update.sys.stderr = captured_stderr
+    try:
+        result = ledger_update.mark_ever_converged(seg, segments_dir)
+    finally:
+        ledger_update.sys.stderr = real_stderr
+
+    assert result is False, (
+        "EEXIST from a dangling symlink is not proof this function ever "
+        "published a sentinel; returning True records convergence while the "
+        "reader still sees the segment as unprotected"
+    )
+    assert link.is_symlink(), "the writer must not silently replace the entry"
+    stderr_lower = captured_stderr.getvalue().lower()
+    assert "symbolic link" in stderr_lower, (
+        "the refusal must say what is actually at the path"
+    )
+    assert "was not recorded" in stderr_lower
+    assert "nothing on disk was lost" in stderr_lower
+
+
+def test_a_directory_is_not_accepted_as_a_prior_marking(tmp_path):
+    """Same branch, other non-regular entry. FAILS on the unfixed code at
+    `assert result is False` (pre-fix: True)."""
+    ledger_update = _load_module("ledger_update_under_test_dir", SCRIPT_SRC)
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segDirEntry"
+    (segments_dir / f".ever_converged.{seg}").mkdir()
+
+    captured_stderr = io.StringIO()
+    real_stderr = ledger_update.sys.stderr
+    ledger_update.sys.stderr = captured_stderr
+    try:
+        result = ledger_update.mark_ever_converged(seg, segments_dir)
+    finally:
+        ledger_update.sys.stderr = real_stderr
+
+    assert result is False
+    assert "a directory" in captured_stderr.getvalue().lower()
+
+
+def test_a_non_enoent_lstat_error_refuses_rather_than_recording_convergence(tmp_path):
+    """The arm that motivated the finding, writer side: the entry exists as
+    far as O_CREAT|O_EXCL is concerned, but examining it fails with something
+    other than ENOENT (EACCES here; ESTALE on a stale NFS handle is the same
+    shape). "Cannot tell" must refuse, never assume a valid sentinel.
+
+    The two halves are induced separately because no single filesystem state
+    produces both at once -- a directory this process cannot search makes
+    os.open() itself fail with EACCES, short-circuiting the FileExistsError
+    branch entirely. So os.open is patched to report EEXIST (what a racing
+    peer or a stale handle looks like) while the lstat failure is REAL.
+
+    FAILS on the unfixed code at `assert result is False`: the pre-fix branch
+    never examines the entry at all and returns True."""
+    ledger_update = _load_module("ledger_update_under_test_lstat_error", SCRIPT_SRC)
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    locked = segments_dir / "locked"
+    locked.mkdir()
+    seg = "segLstatError"
+    (locked / f".ever_converged.{seg}").write_text("converged\n", encoding="utf-8")
+
+    real_open = ledger_update.os.open
+    real_stderr = ledger_update.sys.stderr
+
+    def eexist_open(path, flags, mode=0o777):
+        # The fake ASSERTS on the flags rather than ignoring them: this test's
+        # premise is that EEXIST can only arise from an exclusive create, so a
+        # future edit that dropped O_EXCL (and with it the whole race-free
+        # publish) would otherwise leave this test green while testing a
+        # branch the real code could no longer reach.
+        assert flags & os.O_CREAT and flags & os.O_EXCL, (
+            f"mark_ever_converged must still open the sentinel with "
+            f"O_CREAT|O_EXCL; got flags={flags:#o}"
+        )
+        raise FileExistsError(17, "File exists")
+
+    captured_stderr = io.StringIO()
+    ledger_update.os.open = eexist_open
+    ledger_update.sys.stderr = captured_stderr
+    locked.chmod(0o000)
+    try:
+        probe_blocked = True
+        try:
+            (locked / f".ever_converged.{seg}").lstat()
+            probe_blocked = False
+        except PermissionError:
+            pass
+        if not probe_blocked:
+            pytest.skip(
+                "chmod 0o000 did not actually block lstat -- running as root "
+                "or in a sandbox that ignores permission bits; cannot induce "
+                "a non-ENOENT lookup error this way here"
+            )
+        result = ledger_update.mark_ever_converged(seg, locked)
+    finally:
+        locked.chmod(0o755)
+        ledger_update.os.open = real_open
+        ledger_update.sys.stderr = real_stderr
+
+    assert result is False, (
+        "a lookup that FAILED is not a lookup that found a valid sentinel; "
+        "recording convergence here asserts a protection nobody verified"
+    )
+    stderr_lower = captured_stderr.getvalue().lower()
+    assert "eacces" in stderr_lower, "the errno must reach the operator"
+    assert "was not recorded" in stderr_lower
+
+
+def test_an_eexist_whose_entry_has_vanished_refuses_and_says_to_retry(tmp_path):
+    """The remaining branch: os.open reports EEXIST and the follow-up lstat
+    gets a clean ENOENT -- the entry was removed in between. Refusing (rather
+    than looping) is the work-preserving call, and the operator-facing remedy
+    differs from every other arm, so it is asserted rather than assumed.
+
+    FAILS on the unfixed code at `assert result is False` (pre-fix: True, on
+    a path where nothing whatsoever exists)."""
+    ledger_update = _load_module("ledger_update_under_test_vanished", SCRIPT_SRC)
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segVanished"
+
+    real_open = ledger_update.os.open
+    real_stderr = ledger_update.sys.stderr
+
+    def eexist_open(path, flags, mode=0o777):
+        # The fake ASSERTS on the flags rather than ignoring them: this test's
+        # premise is that EEXIST can only arise from an exclusive create, so a
+        # future edit that dropped O_EXCL (and with it the whole race-free
+        # publish) would otherwise leave this test green while testing a
+        # branch the real code could no longer reach.
+        assert flags & os.O_CREAT and flags & os.O_EXCL, (
+            f"mark_ever_converged must still open the sentinel with "
+            f"O_CREAT|O_EXCL; got flags={flags:#o}"
+        )
+        raise FileExistsError(17, "File exists")
+
+    captured_stderr = io.StringIO()
+    ledger_update.os.open = eexist_open
+    ledger_update.sys.stderr = captured_stderr
+    try:
+        result = ledger_update.mark_ever_converged(seg, segments_dir)
+    finally:
+        ledger_update.os.open = real_open
+        ledger_update.sys.stderr = real_stderr
+
+    assert result is False
+    stderr_lower = captured_stderr.getvalue().lower()
+    assert "vanished" in stderr_lower
+    assert "just retry" in stderr_lower
+
+
+def test_an_existing_regular_sentinel_is_still_idempotently_accepted(tmp_path):
+    """FALSE-POSITIVE BOUND, and the one that matters most: the fix must not
+    turn the idempotent re-record path into a refusal. Every converged segment
+    in every live project re-enters this function on a re-record, so an
+    over-strict predicate here would refuse work that is genuinely protected.
+
+    Green both before and after the fix by design -- it exists to catch a fix
+    that over-blocks, which the discriminating tests above cannot see."""
+    ledger_update = _load_module("ledger_update_under_test_idempotent", SCRIPT_SRC)
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+
+    assert ledger_update.mark_ever_converged("segFresh", segments_dir) is True, (
+        "a clean create must still succeed"
+    )
+    assert ledger_update.mark_ever_converged("segFresh", segments_dir) is True, (
+        "and calling it again against the regular file it just wrote must "
+        "still be an idempotent no-op"
+    )
+    sentinel = segments_dir / ".ever_converged.segFresh"
+    assert sentinel.is_file() and sentinel.read_text(encoding="utf-8") == "converged\n"
+
+
+def test_a_dangling_symlink_sentinel_refuses_the_whole_converged_write(tmp_path):
+    """The end-to-end consequence, through the real CLI: a 'converged' payload
+    whose sentinel path holds a dangling symlink must be refused outright, with
+    NO ledger fragment written. Sibling of
+    test_sentinel_write_failure_refuses_to_record_convergence above, which
+    covers the same refusal for an un-creatable sentinel.
+
+    This is the test that pins the data-loss behavior rather than the helper's
+    return value. FAILS on the unfixed code at `assert result.returncode != 0`:
+    pre-fix mark_ever_converged() returns True for the dangling link, so the
+    fragment is written as 'converged' and the process exits 0 -- a segment
+    recorded as protected that the dispatch gate will happily retranslate."""
+    root = make_durable_root(tmp_path)
+    seg = "segDanglingE2E"
+    write_segpack_fixture(root, seg)
+    draft_sha1_value = write_draft_fixture(root, seg)
+    write_review_fixture(root, seg, draft_sha1_value)
+    payload_path = write_payload(
+        root, "pDanglingE2E",
+        {"status": "converged", "cache_key": FULL_CACHE_KEY, "rounds": 1},
+    )
+
+    segments_dir = root / "segments"
+    link = segments_dir / f".ever_converged.{seg}"
+    link.symlink_to(segments_dir / "no-such-target")
+
+    result = run_ledger_update(root, seg, payload_path)
+
+    assert result.returncode != 0, (
+        f"a sentinel path occupied by a dangling symlink must refuse the whole "
+        f"write, got rc={result.returncode}\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    stdout = json.loads(result.stdout.strip())
+    assert stdout["success"] is False
+    assert "sentinel" in stdout["error"].lower(), stdout["error"]
+    assert not (root / "runs" / "ledger.d" / f"{seg}.json").exists(), (
+        "no ledger fragment may be written for a 'converged' status whose "
+        "sentinel is not actually in place -- that is precisely the "
+        "looks-done-but-unprotected state the sentinel exists to prevent"
+    )
+    assert link.is_symlink(), "the entry the operator has to fix must survive"
+    assert "symbolic link" in result.stderr.lower(), result.stderr
 
 
 # ---------------------------------------------------------------------------

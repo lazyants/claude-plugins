@@ -67,10 +67,12 @@ cannot catch. Optional and backward-compatible when the payload omits it.
 
 import argparse
 import copy
+import errno
 import hashlib
 import json
 import os
 import re
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -157,12 +159,213 @@ def ever_converged_path(seg, segments_dir=SEGMENTS_DIR):
     return segments_dir / f".ever_converged.{seg}"
 
 
-def _report_sentinel_failure(path, exc):
+# ---------------------------------------------------------------------------
+# The shared sentinel-presence predicate. This block is an EXACT duplicate of
+# the copy in the other three sentinel scripts (search `SENTINEL_ABSENT` in
+# select_segments.py, final_audit.py and backfill_ever_converged.py) -- see
+# classify_ever_converged_sentinel()'s docstring for why it is duplicated
+# rather than imported, and which test pins the four copies together.
+# ---------------------------------------------------------------------------
+
+SENTINEL_ABSENT = "absent"
+SENTINEL_PRESENT = "present"
+SENTINEL_AMBIGUOUS = "ambiguous"
+
+
+def _sentinel_entry_kind(mode: int) -> str:
+    """A human name for the st_mode of whatever occupies a sentinel path --
+    it goes straight into an operator-facing message, which has to say what
+    is actually sitting there before it can ask anyone to fix it."""
+    if stat.S_ISLNK(mode):
+        return "a symbolic link"
+    if stat.S_ISDIR(mode):
+        return "a directory"
+    if stat.S_ISFIFO(mode):
+        return "a FIFO"
+    if stat.S_ISSOCK(mode):
+        return "a socket"
+    if stat.S_ISBLK(mode):
+        return "a block device"
+    if stat.S_ISCHR(mode):
+        return "a character device"
+    return f"a non-regular entry (st_mode {stat.S_IFMT(mode):#o})"
+
+
+def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
+    """Three-state classification of the `.ever_converged.<seg>` entry at
+    `path`: `(SENTINEL_ABSENT|SENTINEL_PRESENT|SENTINEL_AMBIGUOUS, detail)`.
+
+    THE SHARED PREDICATE. Every script that asks whether a segment has ever
+    converged calls this, and all four must agree on it:
+    ledger_update.py's `mark_ever_converged()` (the only writer),
+    select_segments.py's #409 Step 1 dispatch gate,
+    final_audit.py's `count_stale_previously_converged()` carve-out, and
+    backfill_ever_converged.py's `already_sentineled` scan.
+
+    DUPLICATED RATHER THAN IMPORTED because importing it would be a live
+    hazard -- NOT because of the "no shared lib between self-contained
+    scripts" convention, which is already false here (canon_validate.py and
+    glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports
+    cache_key.py). The real reason: ledger_update.py is a
+    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:100-107 records that that
+    tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS
+    INVISIBLE -- which is why canon_senses.py had to be registered
+    explicitly once two members imported it. A shared module would put this
+    predicate's bytes outside the hash meant to cover them, so WEAKENING
+    this guard would no longer move plugin_bundle_hash, and every durable
+    root scaffolded beforehand would go on trusting it: the exact
+    false-green cache_key.py:114-118 names. Consolidation stays possible --
+    it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the
+    same commit.
+
+    What keeps the four copies honest is ENFORCEMENT, not discipline. A
+    remembered convention rots -- this docstring's own first version cited
+    the false one -- while a test that fails loudly does not.
+    tests/select_segments.test.py's
+    test_sentinel_predicate_is_identical_in_all_four_scripts pins the copies
+    byte for byte and across the state matrix; its
+    test_exactly_these_four_scripts_participate_in_the_sentinel_contract
+    fails when a fifth copy appears or one of the four goes away.
+
+    Why three states, and why not `Path.exists()`. `exists()` answers the
+    wrong question three ways, and NOT all of them in the same direction --
+    an earlier draft of this docstring said "twice over, and BOTH point at
+    absent", which is the claim the CHANGELOG had to correct. Two of the
+    three do point at "absent", and that is the direction that authorizes
+    destroying converged work:
+
+      1. It FOLLOWS symlinks, so a DANGLING symlink named as the sentinel
+         reads as absent -- while the writer's `os.open(O_CREAT|O_EXCL)` gets
+         EEXIST from that same symlink and reports the segment successfully
+         marked. That split is the whole finding: a segment recorded as
+         converged that the gate then sees as unprotected and retranslates.
+         Verified on this project's Python (3.14.6): `exists()` -> False,
+         `os.open` -> FileExistsError, for one and the same dangling link.
+      2. Since Python 3.13 `exists()` swallows EVERY OSError and returns
+         False, so an EACCES/ESTALE/EIO on the lookup is reported as "this
+         segment never converged". Verified on 3.14.6: with an unreadable
+         parent directory `exists()` returns False while `lstat()` raises
+         EACCES. (On 3.8-3.12 the same call re-raised for EACCES but still
+         swallowed ELOOP/ENOTDIR/EBADF -- so no supported version answers
+         this correctly, and the version-dependence is itself a reason not
+         to route a data-loss guard through `exists()`.)
+      3. In the OTHER direction: a DIRECTORY at the marker's path is
+         `exists() == True`, so `exists()` reports converged a segment the
+         writer never marked. That one cannot destroy finished work, which is
+         why it went unnoticed -- but it is the reason "exists() at least
+         fails safe in one direction" is false, and the reason the fix is a
+         third state rather than a flipped default.
+
+    So: only ENOENT means absent, and it is determined by catching
+    FileNotFoundError rather than by comparing `exc.errno`, so the verdict
+    never depends on an errno that may be None. `lstat`, deliberately not
+    `stat` -- a symlink is not something `mark_ever_converged()` can have
+    (its O_CREAT|O_EXCL open refuses to write through one), so following a
+    link would only ask the question about some unrelated file. Either way
+    only the final `.ever_converged.<seg>` component is left unresolved:
+    WITHOUT `dir_fd` the PARENT components still resolve normally, so a
+    project whose whole `segments/` directory is a symlink is unaffected;
+    WITH `dir_fd` there are no parent components left to resolve, because
+    the caller already resolved them once, when it opened the descriptor.
+
+    `dir_fd` -- OPTIONAL, and today exactly one caller passes it:
+    backfill_ever_converged.py's census. Omitted (every other caller), the
+    lookup resolves the whole pathname afresh, which is the right thing for
+    a reader that holds nothing open. Passed, the BASENAME is looked up
+    relative to that descriptor instead, and `segments/` is not resolved by
+    pathname at all. The difference matters only for a caller that already
+    HOLDS the directory open and acts on its census afterwards, which is
+    exactly that one: it opens `segments/` once, does every write relative
+    to the descriptor, and samples directory identity at the end. A census
+    resolving the pathname afresh could therefore classify entries in a
+    DIFFERENT directory than the one being written to -- re-point
+    `segments/` at B for the length of the census and back to A before the
+    run ends, and B's sentinel is reported as A's protection while the
+    final identity sample compares A to A and agrees. Reproduced by review,
+    not theorised. Binding the census to the descriptor removes that
+    interleaving with no locking protocol at all, because the descriptor is
+    already held; a caller that holds none gains nothing here and passes
+    None.
+
+    Anything that is neither ENOENT nor a regular file is AMBIGUOUS: it MAY
+    be a converged segment whose sentinel this process cannot see. Each
+    caller then maps AMBIGUOUS to ITS OWN work-preserving side, and that is
+    deliberately NOT the same action in all four: the writer and the
+    dispatch gate REFUSE (never destroy or mis-record converged work), while
+    final_audit.py's carve-out COUNTS it (never declare a converged book
+    incomplete and therefore undeliverable) and backfill's scan reports it
+    unprotected (never claim protection it did not verify). One predicate,
+    four deliberate mappings -- see each call site's own comment. The
+    asymmetry is the reason a false "absent" is the unacceptable answer
+    everywhere: it costs a finished translation, or a finished book.
+    """
+    try:
+        # `path.name` is the basename and the descriptor is its parent, so
+        # the `dir_fd` branch resolves no part of `segments/` by pathname.
+        # `os.lstat` keeps `follow_symlinks` off exactly as `Path.lstat`
+        # does, so the FINAL component stays unresolved either way and both
+        # branches raise the same exceptions into the same handlers below.
+        st = path.lstat() if dir_fd is None else os.lstat(path.name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return (SENTINEL_ABSENT, "")
+    except OSError as exc:
+        # `OSError.errno` is typed `int | None` and genuinely can be None. A
+        # missing errno is the LEAST informative failure there is, so it
+        # lands on the ambiguous side like every other non-ENOENT outcome --
+        # never silently treated as "some other errno", and above all never
+        # as absence. The ENOENT verdict above does not consult `errno` at
+        # all (FileNotFoundError IS ENOENT by construction), so a None errno
+        # can never reach it, which is why this branch can be a plain guard
+        # rather than a three-way comparison.
+        if exc.errno is None:
+            return (SENTINEL_AMBIGUOUS, f"lstat failed with no errno: {exc}")
+        code = errno.errorcode.get(exc.errno, f"errno {exc.errno}")
+        return (SENTINEL_AMBIGUOUS, f"lstat failed with {code}: {exc.strerror or exc}")
+    if stat.S_ISREG(st.st_mode):
+        return (SENTINEL_PRESENT, "")
+    return (
+        SENTINEL_AMBIGUOUS,
+        f"the entry is {_sentinel_entry_kind(st.st_mode)}, not a regular file",
+    )
+
+
+_SENTINEL_REMEDY_OS = (
+    "Retry once the underlying OS problem (permissions/quota/I/O) is fixed."
+)
+
+_SENTINEL_REMEDY_OCCUPIED = (
+    "Nothing this script wrote is at that path: mark_ever_converged() only "
+    "ever publishes a REGULAR file (os.open with O_CREAT|O_EXCL|O_WRONLY), so "
+    "whatever occupies it came from somewhere else. Resolve it at the path "
+    "before retrying -- if you can establish that this segment really did "
+    "converge, replace the entry with a regular sentinel file whose contents "
+    "are the single line 'converged'; if it did not, remove the entry and let "
+    "the next convergence publish the sentinel itself. Do NOT simply delete "
+    "it to make this message go away: select_segments.py's dispatch gate "
+    "reads the same path, and deleting a sentinel is what makes a converged "
+    "segment eligible for silent retranslation."
+)
+
+_SENTINEL_REMEDY_VANISHED = (
+    "The filesystem is fine; just retry -- the next attempt's own "
+    "O_CREAT|O_EXCL open will create the sentinel."
+)
+
+
+def _report_sentinel_failure(path, exc, remedy=_SENTINEL_REMEDY_OS):
     """The one place this message is spelled out -- shared by every OSError
     exit from mark_ever_converged() below (open, write, and close alike),
     so a future edit to the wording can't drift into three copies the way
     the open-only version of this function once left the write/close paths
-    with no message at all (see mark_ever_converged()'s own docstring)."""
+    with no message at all (see mark_ever_converged()'s own docstring).
+
+    `remedy` is the only part that varies, and it is a parameter rather than
+    a second copy of this function for exactly that reason: the refusal's
+    consequence paragraph (convergence not recorded, status unchanged,
+    draft/review artifacts intact) is identical whatever went wrong, and the
+    only thing an OS error and an occupied path differ on is what the
+    operator should DO next. `exc` is interpolated, so it may be an exception
+    or a plain reason string."""
     sys.stderr.write(
         f"warning: could not create the ever-converged sentinel at {path}: "
         f"{exc}. Convergence was NOT recorded for this segment -- the "
@@ -170,8 +373,7 @@ def _report_sentinel_failure(path, exc):
         f"the segment stays whatever status it already had. Nothing on "
         f"disk was lost: the draft and review artifacts both survive "
         f"untouched; only the ledger's own 'converged' verdict is "
-        f"withheld. Retry once the underlying OS problem (permissions/"
-        f"quota/I/O) is fixed.\n"
+        f"withheld. {remedy}\n"
     )
 
 
@@ -226,22 +428,73 @@ def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
     BODY is read later (by a human or a future consumer, per its own
     docstring), so a torn write there corrupts information someone will
     parse. This sentinel's body is fixed, decorative, and never parsed by
-    anything -- every consumer (select_segments.py, final_audit.py,
-    backfill_ever_converged.py) checks only `.exists()`. And a torn write
-    here can never represent a FALSE fact: this function only ever runs
-    after every convergence precondition already passed, so any file left
-    at `path` -- complete or torn -- correctly asserts "this segment
-    converged at least once", which is true. A retry's own os.open()
-    O_CREAT|O_EXCL then hits FileExistsError against that leftover file and
-    treats it as already-marked, exactly as if the first attempt had fully
-    succeeded. So the ONLY thing worth guaranteeing here is that this
-    function itself never raises past its own documented contract -- not
-    that the sentinel's bytes are written atomically."""
+    anything -- all four consumers (select_segments.py, final_audit.py,
+    backfill_ever_converged.py and this function itself) ask only whether a
+    regular file is there, through the one shared
+    classify_ever_converged_sentinel() predicate above. And
+    a torn write here can never represent a FALSE fact -- with the scope of
+    that claim now stated, because leaving it implicit is what made the old
+    FileExistsError branch look safe. It holds only for an entry THIS
+    FUNCTION wrote: this function only ever runs after every convergence
+    precondition already passed, so a regular file left at `path` by a torn
+    run of it -- complete or torn -- correctly asserts "this segment
+    converged at least once", which is true. It says NOTHING about an entry
+    that arrived some other way, and the old branch silently generalized it
+    to every entry EEXIST can report (see the next paragraph). A retry's own
+    os.open() O_CREAT|O_EXCL then hits FileExistsError against that leftover
+    REGULAR file, the predicate classifies it as present, and it is treated
+    as already-marked, exactly as if the first attempt had fully succeeded. So
+    the ONLY thing worth guaranteeing here is that this function itself
+    never raises past its own documented contract -- not that the sentinel's
+    bytes are written atomically.
+
+    EEXIST ALONE IS NOT THAT PROOF, which is the fail-closed correction at
+    the FileExistsError branch below (third post-review correction).
+    O_CREAT|O_EXCL reports EEXIST for any existing entry, including a
+    directory and a dangling symlink; neither is a sentinel this function
+    wrote, and returning True for them recorded convergence with no
+    protection actually in place -- while the reader, which followed the
+    link, called the same path absent and retranslated the segment. See that
+    branch's own comment for the full mechanism."""
     path = ever_converged_path(seg, segments_dir)
     try:
         fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError:
-        return True          # already marked -- idempotent, nothing to do
+        # EEXIST is NOT proof that a previous run of this function published
+        # a sentinel here. O_CREAT|O_EXCL reports it for ANY existing entry:
+        # a directory raises it, and so does a DANGLING SYMLINK -- both
+        # verified on this project's Python 3.14.6. Returning True on those
+        # was the fail-OPEN half of a data-loss bug, because the reader in
+        # select_segments.py disagreed about the same path: `Path.exists()`
+        # follows the link and reports the dangling case ABSENT. So the
+        # segment was recorded as converged while the dispatch gate saw it as
+        # unprotected, and the next cache-key move retranslated it -- exactly
+        # the loss this sentinel exists to prevent, with the ledger asserting
+        # the protection was in place.
+        #
+        # Both halves now route through the SAME predicate
+        # (classify_ever_converged_sentinel, duplicated verbatim in both
+        # scripts, drift-tested against each other), so there is no longer a
+        # path where the writer says "marked" and the reader says "absent".
+        state, detail = classify_ever_converged_sentinel(path)
+        if state == SENTINEL_PRESENT:
+            return True      # already marked -- idempotent, nothing to do
+        if state == SENTINEL_ABSENT:
+            # Raced: the entry existed at os.open() and was gone by the lstat
+            # a moment later. Refuse rather than retry in-place -- a retry
+            # loop here would be racing the same unknown deleter, and the
+            # caller's refusal to record convergence is already the
+            # work-preserving outcome (nothing on disk is lost, and the next
+            # attempt simply creates the sentinel).
+            _report_sentinel_failure(
+                path,
+                "the entry reported by O_CREAT|O_EXCL as already existing had "
+                "vanished by the time it was examined",
+                _SENTINEL_REMEDY_VANISHED,
+            )
+            return False
+        _report_sentinel_failure(path, detail, _SENTINEL_REMEDY_OCCUPIED)
+        return False
     except OSError as exc:
         _report_sentinel_failure(path, exc)
         return False

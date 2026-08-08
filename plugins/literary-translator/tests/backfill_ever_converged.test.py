@@ -39,7 +39,10 @@ with the same small fixture script `ledger_merge.test.py`/
 """
 import importlib.util
 import json
+import contextlib
+import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -52,6 +55,32 @@ BACKFILL_SCRIPT_SRC = ASSETS_DIR / "scripts" / "backfill_ever_converged.py"
 LEDGER_MERGE_SRC = ASSETS_DIR / "scripts" / "ledger_merge.py"
 LEDGER_UPDATE_SRC = ASSETS_DIR / "scripts" / "ledger_update.py"
 SCHEMAS_SRC = ASSETS_DIR / "schemas"
+
+@contextlib.contextmanager
+def _segments_dir_fd(segments_dir):
+    """mark_ever_converged() takes the segments-directory DESCRIPTOR, not just
+    its path, so every link and unlink lands in the directory this run opened
+    even if the pathname is retargeted mid-run. The in-process tests below
+    have to supply one; run() opens exactly one for the whole apply pass."""
+    fd = os.open(str(segments_dir), os.O_RDONLY)
+    try:
+        yield fd
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            # Best-effort, mirroring run()'s own close. Tests that inject a
+            # failing os.close() patch the shared `os` module, so an
+            # unprotected close here would raise from the HARNESS and be
+            # indistinguishable from the script failing to handle it.
+            pass
+
+
+def call_mark(backfill, seg, segments_dir):
+    """mark_ever_converged() under a freshly-opened descriptor."""
+    with _segments_dir_fd(segments_dir) as fd:
+        return backfill.mark_ever_converged(seg, segments_dir, fd)
+
 
 assert BACKFILL_SCRIPT_SRC.is_file(), f"backfill_ever_converged.py not found at {BACKFILL_SCRIPT_SRC}"
 assert LEDGER_MERGE_SRC.is_file(), f"ledger_merge.py not found at {LEDGER_MERGE_SRC}"
@@ -453,9 +482,30 @@ def test_dry_run_writes_nothing_and_reports_correct_ids(tmp_path):
         "ever_converged": 3,
         "already_sentineled": 1,
         "missing_sentinels": 2,
+        # 1.19.1: the third bucket -- a sentinel path that is neither absent
+        # nor a regular file. Asserted as an exact dict on purpose: a bucket
+        # silently disappearing from this report is how a segment stops being
+        # counted anywhere at all.
+        "ambiguous_sentinels": 0,
+        # 1.20.0: the segments this script did not consider at all. It is not
+        # an error bucket -- it is the script declining to imply that
+        # `success: true` means every segment that ever converged is now
+        # protected. It cannot know that: a segment that converged and was
+        # later replaced no longer records the convergence anywhere.
+        "not_evaluated": 3,
         "created": 0,
         "failed_to_create": 0,
     }
+    # Every non-converged segment appears with the status that excluded it.
+    # `seg_in_progress` is precisely the dangerous shape: on a project that
+    # converged before sentinels existed, a segment in this state may have
+    # converged and been replaced, and nothing distinguishes it from one that
+    # never converged. It must be NAMED rather than silently dropped.
+    assert payload["not_evaluated"] == [
+        {"seg": "seg_blocked", "status": "blocked"},
+        {"seg": "seg_in_progress", "status": "in_progress"},
+        {"seg": "seg_non_converged", "status": "non_converged"},
+    ]
 
     after = sentinel_files(root)
     assert after == before, "dry run must not create (or touch) any sentinel file"
@@ -538,8 +588,8 @@ def test_apply_is_idempotent_on_a_second_run(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_existing_sentinel_is_never_overwritten_or_deleted(tmp_path):
-    """CLI-level: run()'s own missing_sentinels pre-filter (computed from an
-    `.exists()` snapshot BEFORE any write) already keeps an already-sentineled
+    """CLI-level: run()'s own missing_sentinels pre-filter (computed from a
+    classify_ever_converged_sentinel() snapshot BEFORE any write) already keeps an already-sentineled
     segment out of the create loop entirely, so this proves the end-to-end
     report/behavior is correct. It does NOT by itself exercise
     mark_ever_converged()'s own O_EXCL protection, since that pre-filter
@@ -582,7 +632,7 @@ def test_mark_ever_converged_never_overwrites_an_existing_sentinel(tmp_path):
     presentinel = segments_dir / f".ever_converged.{seg}"
     presentinel.write_bytes(PRESENTINEL_CONTENT)
 
-    outcome = backfill.mark_ever_converged(seg, segments_dir)
+    outcome = call_mark(backfill, seg, segments_dir)
 
     assert outcome == "already_present"
     assert presentinel.read_bytes() == PRESENTINEL_CONTENT, (
@@ -670,7 +720,23 @@ def _load_module(path, name):
     return mod
 
 
-def test_sentinel_write_is_byte_identical_to_ledger_update_writer(tmp_path):
+@pytest.mark.parametrize("umask_value", [0o022, 0o077], ids=["umask-022", "umask-077"])
+def test_sentinel_write_is_byte_identical_to_ledger_update_writer(tmp_path, umask_value):
+    """Parametrized over the umask because the two writers reach the mode by
+    DIFFERENT syscalls: ledger_update.py's `os.open(..., 0o644)` is masked by
+    the kernel, while this script sets the mode on an already-created 0o600
+    staging file. A bare fchmod(0o644) therefore agrees with the sibling at
+    the default 022 and diverges at 077 -- 0o644 against 0o600 -- so the
+    identity this test asserts held only for the umask the suite happened to
+    run under."""
+    old_umask = os.umask(umask_value)
+    try:
+        _assert_writers_agree(tmp_path)
+    finally:
+        os.umask(old_umask)
+
+
+def _assert_writers_agree(tmp_path):
     writer = _load_module(LEDGER_UPDATE_SRC, "ledger_update_real")
     backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_ever_converged_real")
 
@@ -682,7 +748,7 @@ def test_sentinel_write_is_byte_identical_to_ledger_update_writer(tmp_path):
 
     ok = writer.mark_ever_converged(seg, dir_a)
     assert ok is True, "precondition: the real writer must succeed"
-    outcome = backfill.mark_ever_converged(seg, dir_b)
+    outcome = call_mark(backfill, seg, dir_b)
     assert outcome == "created", "precondition: the backfill writer must succeed"
 
     path_a = writer.ever_converged_path(seg, dir_a)
@@ -706,8 +772,150 @@ def test_sentinel_write_is_byte_identical_to_ledger_update_writer(tmp_path):
 
     # And: never overwritten by either writer, on a second call.
     assert writer.mark_ever_converged(seg, dir_a) is True
-    assert backfill.mark_ever_converged(seg, dir_b) == "already_present"
+    assert call_mark(backfill, seg, dir_b) == "already_present"
     assert path_a.read_bytes() == path_b.read_bytes()
+
+
+def test_both_writers_refuse_a_non_regular_entry_at_the_sentinel_path(tmp_path):
+    """1.19.1: extends the drift pin above to the FileExistsError branch,
+    which is where the two writers could silently disagree while everything
+    tested above stayed green -- both write identical bytes on the happy
+    path, and that is all the byte-identity test exercises.
+
+    `os.open(O_CREAT|O_EXCL)` raises EEXIST for ANY existing entry, so a
+    dangling symlink and a directory both reach it. Neither is a sentinel
+    either writer wrote, and reporting them as marked/already_present claims
+    a protection nothing verified.
+
+    The two copies' outcome SHAPES differ on purpose (bool vs string, see
+    backfill's own mark_ever_converged docstring), so this pins the shared
+    decision -- refuse or accept -- rather than an identical return value.
+
+    Fails on the unfixed code at the first `is False` / `startswith("error:")`
+    assertion of each pair: pre-fix both writers report success."""
+    writer = _load_module(LEDGER_UPDATE_SRC, "ledger_update_nonregular")
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_nonregular")
+
+    dir_a = tmp_path / "writer_side"
+    dir_a.mkdir()
+    dir_b = tmp_path / "backfill_side"
+    dir_b.mkdir()
+
+    for seg, make_entry in (
+        ("segLink", lambda p: p.symlink_to(p.parent / "no-such-target")),
+        ("segDir", lambda p: p.mkdir()),
+    ):
+        make_entry(writer.ever_converged_path(seg, dir_a))
+        make_entry(backfill.ever_converged_path(seg, dir_b))
+
+        assert writer.mark_ever_converged(seg, dir_a) is False, (
+            f"{seg}: ledger_update.py accepted a non-regular entry as proof "
+            f"of prior marking"
+        )
+        outcome = call_mark(backfill, seg, dir_b)
+        assert outcome.startswith("error:"), (
+            f"{seg}: backfill_ever_converged.py reported {outcome!r} for a "
+            f"non-regular entry -- 'already_present' means 'protected, "
+            f"nothing to do', which is false here"
+        )
+
+    # FALSE-POSITIVE BOUND, in the same test because it is the same branch:
+    # a genuine regular sentinel must still be accepted idempotently by both.
+    for seg in ("segOK",):
+        writer.ever_converged_path(seg, dir_a).write_bytes(b"converged\n")
+        backfill.ever_converged_path(seg, dir_b).write_bytes(b"converged\n")
+        assert writer.mark_ever_converged(seg, dir_a) is True
+        assert call_mark(backfill, seg, dir_b) == "already_present"
+
+
+def test_a_dangling_symlink_is_bucketed_ambiguous_never_missing(tmp_path):
+    """CLI level. Pre-fix, `.exists()` followed the dangling link and put the
+    segment in `missing_sentinels`; --apply then called the writer, whose
+    O_CREAT|O_EXCL got EEXIST from that same link and returned
+    "already_present", so the run exited 0 having protected nothing and said
+    nothing. A repair tool reporting a repair it did not make is the worst
+    shape available here.
+
+    Fails on the unfixed code at `payload["ambiguous_sentinels"]` (KeyError:
+    the bucket does not exist) and, if that key is stubbed in, at the
+    `not in payload["missing_sentinels"]` assertion."""
+    root = setup_mixed_project(tmp_path)
+    seg = EVER_CONVERGED[0]
+    link = sentinel_path(root, seg)
+    link.symlink_to(root / "segments" / "no-such-target")
+
+    proc = run_backfill(root, "--apply")
+
+    assert proc.returncode == 1, (
+        f"an entry this script cannot verify and cannot repair leaves a "
+        f"segment unprotected, so the run must not exit 0; stderr={proc.stderr!r}"
+    )
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert payload["ambiguous_sentinels"] == [
+        {"seg": seg, "detail": "the entry is a symbolic link, not a regular file"}
+    ], payload
+    assert seg not in payload["missing_sentinels"], (
+        "the entry is NOT missing -- calling it missing is what let the "
+        "backfill report a sentinel it never wrote"
+    )
+    assert seg not in payload["already_sentineled"], (
+        "and it is not protected either; those are the only two buckets that "
+        "existed before, and it belongs to neither"
+    )
+    assert seg not in payload["created"]
+    assert link.is_symlink(), (
+        "the entry must survive untouched -- this script never replaces an "
+        "entry it did not write, and the operator needs it to diagnose"
+    )
+    assert "AMBIGUOUS" in proc.stderr and seg in proc.stderr, proc.stderr
+
+
+def test_a_directory_at_the_sentinel_path_is_not_counted_as_protected(tmp_path):
+    """The other half, and the one that fails LOUDEST pre-fix: `.exists()` is
+    True for a directory, so the pre-fix scan reported the segment as
+    `already_sentineled` -- a repair tool asserting protection that is not
+    there, which is exactly the state an operator runs this script to rule
+    out.
+
+    Fails on the unfixed code at `seg not in payload["already_sentineled"]`."""
+    root = setup_mixed_project(tmp_path)
+    seg = EVER_CONVERGED[0]
+    sentinel_path(root, seg).mkdir()
+
+    proc = run_backfill(root, "--apply")
+
+    assert proc.returncode == 1, f"stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert seg not in payload["already_sentineled"], (
+        "a directory is not a sentinel; counting it as one claims a "
+        "protection that does not exist"
+    )
+    assert [e["seg"] for e in payload["ambiguous_sentinels"]] == [seg], payload
+    assert payload["counts"]["ambiguous_sentinels"] == 1
+    assert sentinel_path(root, seg).is_dir(), "left untouched for the operator"
+
+
+def test_a_healthy_project_reports_no_ambiguous_sentinels(tmp_path):
+    """FALSE-POSITIVE BOUND for the two tests above: the new bucket must stay
+    empty on every normal run, and the two original buckets must still add up.
+    A predicate that over-blocks would strand a real backfill.
+
+    Green before and after the fix by design (modulo the new key)."""
+    root = setup_mixed_project(tmp_path)
+
+    proc = run_backfill(root, "--apply")
+
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["ambiguous_sentinels"] == []
+    assert payload["counts"]["ambiguous_sentinels"] == 0
+    assert sorted(payload["already_sentineled"] + payload["missing_sentinels"]) == EVER_CONVERGED, (
+        "with nothing ambiguous, the two original buckets must still "
+        "partition the ever-converged set exactly as before"
+    )
+    assert "AMBIGUOUS" not in proc.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -721,13 +929,12 @@ def test_sentinel_write_is_byte_identical_to_ledger_update_writer(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_write_failure_after_sentinel_create_is_reported_as_a_clean_error_string(tmp_path):
-    """mark_ever_converged()'s O_CREAT|O_EXCL open() publishes the sentinel's
-    NAME in segments/ before the single os.write() that fills it in ever
-    runs. Pre-fix, an OSError from that write was OUTSIDE the try/except
-    producing this function's documented string-outcome contract -- it
-    propagated as an uncaught exception instead, on exactly the failure that
-    contract exists to cover. The caller (run(), under --apply) has no
-    handling for an exception here; only for the three documented outcomes.
+    """Pre-fix, an OSError from mark_ever_converged()'s os.write() was
+    OUTSIDE the try/except producing this function's documented
+    string-outcome contract -- it propagated as an uncaught exception
+    instead, on exactly the failure that contract exists to cover. The
+    caller (run(), under --apply) has no handling for an exception here;
+    only for the three documented outcomes.
 
     Genuinely only reachable in-process, matching ledger_update.test.py's
     own reasoning for its sibling test: there is no portable, reliable way
@@ -747,7 +954,7 @@ def test_write_failure_after_sentinel_create_is_reported_as_a_clean_error_string
 
     backfill.os.write = failing_write
     try:
-        outcome = backfill.mark_ever_converged(seg, segments_dir)
+        outcome = call_mark(backfill, seg, segments_dir)
     finally:
         backfill.os.write = real_write
 
@@ -761,13 +968,33 @@ def test_write_failure_after_sentinel_create_is_reported_as_a_clean_error_string
     )
     assert "No space left on device" in outcome
 
-    # The write failure must not also leak the file descriptor: the fd is
-    # closed as a best-effort cleanup before the error string is returned.
+    # Nothing may appear at the public name. This assertion used to say the
+    # OPPOSITE, on the premise that residue there was harmless "because every
+    # consumer only calls .exists()". That premise died twice over: this
+    # release replaced those `.exists()` reads with
+    # classify_ever_converged_sentinel(), and -- the reason that matters --
+    # residue launders a retry. It reads as SENTINEL_PRESENT, so the next run
+    # reports the segment already protected and never completes the fsync the
+    # first run failed to. Run 1 red, run 2 green, durability never
+    # established by either.
+    #
+    # The first repair made the failing path unlink the name it had created,
+    # which was a BLOCKER of its own (it could delete a sentinel another
+    # writer had since installed). Staging is what makes this assertion hold
+    # WITHOUT any unlink of the public name: the write that fails here goes
+    # to the temp file, so the public name was never created in the first
+    # place. Hence `not path.exists()` and no stray staging file either --
+    # the second half is what would go red if cleanup regressed.
     path = backfill.ever_converged_path(seg, segments_dir)
-    assert path.exists(), (
-        "O_CREAT|O_EXCL already published the sentinel's name before the "
-        "write failed -- that is documented as harmless (every consumer "
-        "only calls .exists()), so the name must still be there"
+    assert not path.exists(), (
+        "a failed write must leave NOTHING at the public sentinel name: the "
+        "bytes are staged elsewhere and the name is only published, by "
+        "os.link(), once they are durable"
+    )
+    strays = [p.name for p in segments_dir.iterdir()]
+    assert strays == [], (
+        f"the staging file must be cleaned up on a failed write, or the next "
+        f"run's segments/ fills with debris; found {strays}"
     )
 
 
@@ -790,7 +1017,7 @@ def test_close_failure_after_successful_write_is_reported_as_a_clean_error_strin
 
     backfill.os.close = failing_close
     try:
-        outcome = backfill.mark_ever_converged(seg, segments_dir)
+        outcome = call_mark(backfill, seg, segments_dir)
     finally:
         backfill.os.close = real_close
 
@@ -1065,6 +1292,1238 @@ def test_root_forward_args_never_forwards_a_relative_plugin_root(tmp_path, monke
     expected_plugin_root = str((tmp_path / "plugin_dir").resolve())
     assert args[2:4] == ["--plugin-root", expected_plugin_root]
     assert "plugin_dir" != args[3], "must be resolved, not the raw fragment"
+
+
+# ---------------------------------------------------------------------------
+# A run that protected NOTHING must not report success.
+#
+# This script's entire operational role is to be run before a W5 dispatch so
+# an operator can conclude the #409 protection is up; SKILL.md's upgrade note
+# tells them to run it and check the result. It used to hardcode
+# `"success": True` and `return 0` regardless of `failed_to_create`, surfacing
+# per-segment failures only in a stderr warning and a JSON array nobody is
+# obliged to read. So the run where every create failed was indistinguishable
+# by exit code from the run where every create succeeded -- and the operator
+# dispatches over converged work believing it is protected.
+#
+# Reaching `failed_to_create` deterministically also required fixing the open
+# path: only FileExistsError was caught, so a plain EACCES escaped to the
+# top-level handler and aborted the whole run instead of being reported for
+# that segment.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_failed_creation_reports_failure_in_both_json_and_exit_code(tmp_path):
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    segments_dir = root / "segments"
+    original_mode = segments_dir.stat().st_mode
+    segments_dir.chmod(0o555)  # readable/traversable, not writable
+    try:
+        proc = run_backfill(root, "--apply")
+    finally:
+        segments_dir.chmod(original_mode)
+
+    payload = parse_stdout(proc)
+
+    # The run completed and reported per segment -- it did not abort at the
+    # first failure, which is what makes the report trustworthy at all.
+    assert payload["created"] == []
+    assert [entry["seg"] for entry in payload["failed_to_create"]] == MISSING_BEFORE_APPLY
+    assert payload["counts"]["failed_to_create"] == len(MISSING_BEFORE_APPLY)
+
+    # ...and both channels say so. The exit code is the one an operator's
+    # `&&` actually reads.
+    assert payload["success"] is False, (
+        "a run that created no sentinel it set out to create must not report "
+        "success -- that is the reading which authorizes the dispatch"
+    )
+    assert proc.returncode != 0, (
+        f"exit code must track success; got {proc.returncode} with "
+        f"failed_to_create={payload['failed_to_create']!r}"
+    )
+
+    # The sentinel genuinely is not there. Without this the test would pass
+    # against a script that reported failure but had written the file anyway.
+    for seg in MISSING_BEFORE_APPLY:
+        assert not sentinel_path(root, seg).exists()
+
+
+def test_a_failed_create_does_not_launder_into_a_successful_retry(tmp_path):
+    """The failure mode that makes an honest red worse than useless.
+
+    A post-create error (write, fsync, close, directory sync) happens after
+    O_CREAT|O_EXCL has already published the name. If that file is left
+    behind, the NEXT attempt classifies it SENTINEL_PRESENT and returns
+    `already_present` -- a success -- without ever completing the fsync the
+    first attempt failed. Run 1 reports failure, run 2 reports protection, and
+    no run ever established durability. The operator sees the second result.
+    """
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_no_laundering")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segLaunder"
+
+    real_write = backfill.os.write
+
+    def failing_write(fd, data):
+        raise OSError(28, "No space left on device")
+
+    backfill.os.write = failing_write
+    try:
+        first = call_mark(backfill, seg, segments_dir)
+    finally:
+        backfill.os.write = real_write
+
+    assert first.startswith("error: "), first
+
+    # The retry must do real work, not inherit a half-made marker.
+    second = call_mark(backfill, seg, segments_dir)
+    assert second == "created", (
+        f"the retry must genuinely create the sentinel, not report "
+        f"`already_present` off the residue of the failed attempt; got {second!r}"
+    )
+
+    # And the marker it left is the real thing, not the empty file the failed
+    # write would have left -- which is what makes this test able to tell a
+    # true retry from a laundered one.
+    path = backfill.ever_converged_path(seg, segments_dir)
+    assert path.read_bytes() == b"converged\n"
+
+
+def test_a_failed_create_never_destroys_another_writers_sentinel(tmp_path):
+    """The interleaving that made the FIRST cleanup attempt a BLOCKER.
+
+    That version created the public name with O_CREAT|O_EXCL and unlinked it
+    again on failure, reasoning that EXCL proved the call owned the file. EXCL
+    proves only that this call installed the entry at open time -- it does not
+    reserve the pathname. Between the failed write and the unlink, another
+    actor can remove the incomplete inode and install a real, fully-synced
+    sentinel, and the unlink then deletes THAT: a cleanup that destroys
+    protection somebody else established, which is strictly worse than the
+    residue it was cleaning up.
+
+    The failing write here performs exactly that substitution, so the test
+    reproduces the race deterministically rather than hoping to hit it."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_no_destroy")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segRace"
+    path = backfill.ever_converged_path(seg, segments_dir)
+    other_writer_content = b"converged\n"
+
+    real_write = backfill.os.write
+
+    def failing_write_that_lets_another_writer_in(fd, data):
+        # Stand in for the concurrent actor: whatever this call staged, a real
+        # sentinel is now at the public name.
+        if not path.exists():
+            path.write_bytes(other_writer_content)
+        raise OSError(28, "No space left on device")
+
+    backfill.os.write = failing_write_that_lets_another_writer_in
+    try:
+        outcome = call_mark(backfill, seg, segments_dir)
+    finally:
+        backfill.os.write = real_write
+
+    assert outcome.startswith("error: "), outcome
+    assert path.exists(), (
+        "the other writer's sentinel was destroyed by this call's cleanup -- "
+        "a failed create must never remove a marker it did not create"
+    )
+    assert path.read_bytes() == other_writer_content
+
+    # No staging file may be left lying around in segments/ either.
+    strays = [p.name for p in segments_dir.iterdir() if "staging" in p.name]
+    assert strays == [], f"staging files left behind: {strays}"
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["segment_id", "status"],
+    ids=["surrogate-in-segment-id", "surrogate-in-status"],
+)
+def test_a_lone_surrogate_still_produces_a_json_payload_not_a_traceback(tmp_path, where):
+    """A ledger is JSON, and JSON can carry a lone surrogate.
+
+    `json.dumps(..., ensure_ascii=False)` keeps it verbatim and the PRINT then
+    raises UnicodeEncodeError -- from outside every handler in this script, so
+    the process dies with a traceback and emits no JSON at all, exactly where
+    the output contract promises a failure payload. Both carriers matter: a
+    surrogate segment id is caught by validation but is then interpolated into
+    the fatal payload, and a surrogate STATUS travels through `not_evaluated`
+    to the success payload, which validation never touches."""
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    ledger = root / "runs" / "ledger.json"
+    doc = json.loads(ledger.read_text())
+    if where == "segment_id":
+        doc["segments"]["\ud800"] = {"status": "in_progress"}
+    else:
+        doc["segments"]["seg_surrogate_status"] = {"status": "\ud800"}
+    ledger.write_text(json.dumps(doc, ensure_ascii=True))
+
+    proc = run_backfill(root)
+
+    # The message names the SYMPTOM and shows stderr, deliberately without
+    # naming a cause. An earlier version asserted the cause ("the run died
+    # before emitting its payload"), which cost three rounds of repairing
+    # already-correct guards: the script had stopped importing entirely, and
+    # a non-importable module produces this identical empty stdout. Read the
+    # stderr below before believing any theory about why.
+    assert proc.stdout.strip(), (
+        f"no JSON on stdout. Could be the surrogate this test is about, or "
+        f"anything that stops the script reaching its final print at all -- "
+        f"a SyntaxError included. stderr tail: {proc.stderr[-800:]!r}"
+    )
+    payload = json.loads(proc.stdout)
+    assert isinstance(payload, dict) and "success" in payload
+    assert "UnicodeEncodeError" not in proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
+def test_an_unsafe_segment_id_is_refused_even_when_it_is_not_converged(tmp_path):
+    """Segment ids are validated before the status branch, not inside it.
+
+    `not_evaluated` gave non-converged records their first route to stdout.
+    Validation sat on the converged branch only, so an id like `../unsafe`
+    -- rejected outright when it was converged -- travelled straight out
+    through the new list, with `success: true` alongside it."""
+    root = setup_mixed_project(tmp_path)
+    write_fragment(root, "seg_in_progress", in_progress_fragment())
+    prime_materialized_ledger(root)
+
+    ledger = root / "runs" / "ledger.json"
+    doc = json.loads(ledger.read_text())
+    doc["segments"]["../unsafe"] = {"status": "in_progress"}
+    ledger.write_text(json.dumps(doc))
+
+    proc = run_backfill(root)
+
+    assert proc.returncode != 0, (
+        f"an unsafe segment id must be refused wherever it appears, not "
+        f"reported; got rc={proc.returncode} stdout={proc.stdout[:400]!r}"
+    )
+    payload = json.loads(proc.stdout)
+    # Assert the SPECIFIC refusal, not merely that something failed. Without
+    # this, any unrelated fatal -- an unreadable ledger, a merge error --
+    # satisfies rc != 0, and the absence check below passes vacuously because
+    # a fatal payload has no `not_evaluated` key for `../unsafe` to be in.
+    assert payload.get("success") is False
+    assert "unsafe segment id" in payload.get("error", ""), (
+        f"the run must fail BECAUSE of the id, not for some unrelated "
+        f"reason that happens to also be fatal; got {payload!r}"
+    )
+    assert "../unsafe" in payload.get("error", "")
+    assert "../unsafe" not in json.dumps(payload.get("not_evaluated", []))
+
+
+def test_a_staging_fsync_failure_never_publishes_the_public_name(tmp_path):
+    """The durability barrier sits BEFORE publication, so the public name must
+    not exist AT THE MOMENT the fsync runs.
+
+    The assertion is inside the callback deliberately, and the first version of
+    this test is why. It checked only the post-state -- error returned, public
+    name absent, directory empty -- and review showed all three also hold on
+    the OLD public-name-first implementation, whose failure path unlinked what
+    it had published. Both orderings converge on the same wreckage, so a test
+    that inspects the aftermath cannot tell them apart, and this one passed
+    against the very implementation it was written to forbid. Ordering is only
+    observable from inside the window."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_fsync_failure")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segFsyncFail"
+    path = backfill.ever_converged_path(seg, segments_dir)
+
+    real_fsync = backfill.os.fsync
+    observed = {}
+
+    def failing_fsync(fd):
+        # THE assertion of this test: at the durability barrier, the sentinel
+        # name must still be unpublished. Recorded rather than asserted here
+        # so a failure surfaces as this test's own message and not as an
+        # exception escaping through the code under test.
+        observed["public_name_existed_at_fsync"] = os.path.lexists(str(path))
+        raise OSError(5, "Input/output error")  # EIO
+
+    backfill.os.fsync = failing_fsync
+    try:
+        outcome = call_mark(backfill, seg, segments_dir)
+    finally:
+        backfill.os.fsync = real_fsync
+
+    assert observed.get("public_name_existed_at_fsync") is False, (
+        "the sentinel name was ALREADY published when the durability barrier "
+        "ran, so a crash there leaves bytes nothing has synced reachable "
+        "under the name readers consult -- stage, fsync, THEN link"
+    )
+    assert outcome.startswith("error: "), (
+        f"an fsync-time OSError must produce the documented string outcome, "
+        f"not an uncaught exception; got {outcome!r}"
+    )
+    assert "Input/output error" in outcome
+
+    assert not path.exists(), (
+        "bytes that were never fsynced must not be reachable under the "
+        "sentinel name -- that is the entire point of staging before linking"
+    )
+    assert list(segments_dir.iterdir()) == [], (
+        "the staging file must be cleaned up when the fsync fails"
+    )
+
+
+def _apply_run(backfill, root):
+    """Drive run() IN-PROCESS under --apply, so os.fsync can be patched.
+
+    run_backfill() shells out, which is the right harness for output-contract
+    tests but cannot reach a syscall seam inside the child."""
+    # No --plugin-root: that flag names a PLUGIN root (assets/scripts/...),
+    # while the fixture is a DURABLE root. Left unset, ledger_merge.py
+    # resolves module-relative to the real plugin copy, which is what the
+    # subprocess harness effectively uses too.
+    args = backfill.build_arg_parser().parse_args(
+        ["--durable-root", str(root), "--apply"]
+    )
+    return backfill.run(args, backfill.resolve_dirs(str(root), None))
+
+
+def _fsync_failing_only_on_a_directory(real_fsync):
+    """Distinguish the directory seam by WHAT THE FD REFERS TO, never by call
+    order or call count -- an ordering assumption stops testing this seam the
+    moment another fsync is added ahead of it, silently."""
+    def failing(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(5, "Input/output error")  # EIO
+        return real_fsync(fd)
+    return failing
+
+
+def test_a_directory_fsync_failure_keeps_the_sentinels_and_still_fails_the_run(tmp_path):
+    """The one failure that deliberately leaves published names in place.
+
+    Past the link a name may already be another reader's protection, so
+    removing it is the destruction staging exists to prevent. The honest
+    report is "they exist, their durability is unproven" -- which must still
+    FAIL the run, so it cannot claim protection it cannot vouch for. Both
+    halves are asserted because they pull in opposite directions and a
+    plausible fix for either breaks the other."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_dir_fsync")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+    segments_dir = root / "segments"
+
+    real_fsync = backfill.os.fsync
+    backfill.os.fsync = _fsync_failing_only_on_a_directory(real_fsync)
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        backfill.os.fsync = real_fsync
+
+    assert result["created"], "the test must have actually created sentinels"
+    assert result["success"] is False, (
+        "an unsynced segments directory means the entries this run published "
+        "may not survive a crash, so the run cannot report success"
+    )
+    assert "could not be synced" in (result["directory_sync_error"] or "")
+
+    for seg in result["created"]:
+        path = backfill.ever_converged_path(seg, segments_dir)
+        assert path.is_file(), (
+            f"{seg}'s sentinel must NOT be removed: the link already "
+            f"published the name, so another reader may be relying on it"
+        )
+        assert path.read_bytes() == b"converged\n"
+    strays = [q.name for q in segments_dir.iterdir() if "staging" in q.name]
+    assert strays == [], f"staging files left behind: {strays}"
+
+
+def test_a_failed_directory_sync_does_not_launder_into_a_green_retry(tmp_path):
+    """The retry must actually re-sync, not skip the work via
+    `already_sentineled`.
+
+    This is the defect review found in the per-segment version of the fsync.
+    Run 1 published the sentinel and failed its directory fsync, reporting the
+    segment in `failed_to_create`. Run 2's pre-write scan then classified that
+    same published file as SENTINEL_PRESENT, filed it under
+    `already_sentineled`, never called the writer for it, and so never reached
+    the fsync that had failed -- returning `success: true` having established
+    nothing. Red then green, durability proven by neither: the exact
+    laundering shape this release exists to remove, one layer up from the
+    residue version of it.
+
+    The assertion that matters is therefore NOT "run 2 is green" but "run 2
+    actually fsynced the directory". A retry that goes green by skipping the
+    work looks identical from the outside, which is why the first version of
+    this fix shipped with the hole."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_sync_retry")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    real_fsync = backfill.os.fsync
+    backfill.os.fsync = _fsync_failing_only_on_a_directory(real_fsync)
+    try:
+        first = _apply_run(backfill, root)
+    finally:
+        backfill.os.fsync = real_fsync
+
+    assert first["created"] and first["success"] is False, (
+        "run 1 must have published sentinels and failed on the directory sync"
+    )
+
+    dir_syncs = []
+
+    # Identify the directory by INODE, not merely by "is a directory". A
+    # bare S_ISDIR count is satisfied by any directory fsync at all, so an
+    # unrelated one elsewhere in the process would make this test green
+    # without the segments directory ever being synced -- the assertion
+    # would then be about the wrong file.
+    segments_id = (os.stat(root / "segments").st_dev,
+                   os.stat(root / "segments").st_ino)
+
+    def counting_fsync(fd):
+        st = os.fstat(fd)
+        if stat.S_ISDIR(st.st_mode) and (st.st_dev, st.st_ino) == segments_id:
+            dir_syncs.append(fd)
+        return real_fsync(fd)
+
+    backfill.os.fsync = counting_fsync
+    try:
+        second = _apply_run(backfill, root)
+    finally:
+        backfill.os.fsync = real_fsync
+
+    assert second["created"] == [], (
+        "run 2 should find the sentinels already published -- that is the "
+        "very condition under which the old code skipped the sync"
+    )
+    assert dir_syncs, (
+        "run 2 created nothing, so it never called the writer -- and it did "
+        "NOT fsync the segments directory either. Run 1's unsynced entries "
+        "are still unsynced while the run reports success. That is the "
+        "laundering, and it is invisible from the payload alone"
+    )
+    assert second["success"] is True
+    assert second["directory_sync_error"] is None
+
+
+def test_a_segments_dir_replaced_mid_run_fails_instead_of_reporting_created(tmp_path):
+    """Holding one descriptor makes the run self-consistent, NOT correct.
+
+    Every link, unlink and fsync goes to the directory `dir_fd` names. The
+    readers -- select_segments.py, final_audit.py -- resolve
+    `{durable_root}/segments` by PATHNAME, every time. Replace that pathname
+    mid-run and the two stop being the same directory: the sentinels land
+    where the descriptor points, and nobody who looks the path up will ever
+    see them.
+
+    Review found the previous version of this claiming the case "fails closed
+    with ENOENT". It does not -- and since staging became descriptor-relative
+    it cannot: every write in the sequence lands in the directory `dir_fd`
+    names, so no retarget can separate the staging file from the link that
+    publishes it. The link SUCCEEDS in the old directory and the run reports
+    `created` for a name absent from the directory the dispatch gate reads.
+    That is a false success -- the worst shape this script has, because the
+    operator's next action is to dispatch.
+
+    A single process cannot make a pathname stable against a concurrent
+    renamer, so the fix reports rather than repairs. This test pins the
+    reporting: the run must FAIL, and it must not claim the sentinels are
+    where a reader would look."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_retarget")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+    segments_dir = root / "segments"
+
+    real_link = backfill.os.link
+    swapped = []
+
+    def link_then_retarget(src, dst, **kwargs):
+        # Publish into the ORIGINAL directory, exactly as the real sequence
+        # does, and only then move that directory out from under the
+        # pathname -- the interleaving that survives the descriptor binding.
+        result = real_link(src, dst, **kwargs)
+        if not swapped:
+            aside = tmp_path / "segments_aside"
+            os.rename(str(segments_dir), str(aside))
+            os.mkdir(str(segments_dir))
+            swapped.append(aside)
+        return result
+
+    backfill.os.link = link_then_retarget
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        backfill.os.link = real_link
+
+    assert swapped, "the test never performed the retarget it exists to model"
+
+    # THE causal assertion, and deliberately first. `success is False` is NOT
+    # sufficient evidence here and asserting it alone would be near-vacuous:
+    # segments processed AFTER the swap stage into the new directory while
+    # the link resolves through the old descriptor, so they fail ENOENT on
+    # their own and redden the run without the identity check existing at
+    # all. Measured against a mutant with the check removed: `success` was
+    # already False, and only these two assertions went red.
+    assert result["segments_dir_replaced"] is not None, (
+        "the run must detect that the directory it wrote to is no longer the "
+        "one its path names -- per-segment ENOENT on the segments that came "
+        "after the swap is a side effect, not the detection"
+    )
+    # Asserted on the FIELD, not on words in a sentence. Review pointed out
+    # that a free-text string is not a contract a caller can depend on, which
+    # is why displacement got its own key instead of a phrase inside
+    # `directory_sync_error`.
+    assert result["directory_sync_error"] is None, (
+        f"the fsync itself succeeded here, so this must be reported as "
+        f"displacement and nothing else; got "
+        f"{result['directory_sync_error']!r}"
+    )
+    assert result["success"] is False
+
+    # And the substantive claim: the sentinel really is invisible under the
+    # path readers use. If this ever stops holding, the failure above has
+    # become over-strict rather than protective.
+    for seg in result["created"]:
+        assert not backfill.ever_converged_path(seg, segments_dir).exists()
+        assert (swapped[0] / f".ever_converged.{seg}").is_file()
+
+
+def test_a_retarget_during_the_census_is_caught_too_not_only_during_the_writes(tmp_path):
+    """The census is the part that DECIDES; covering only the writes is
+    useless if what got fooled was the decision.
+
+    The earlier version of the identity check opened its descriptor AFTER the
+    sentinel census, so this interleaving sailed through: directory A holds a
+    real sentinel, the census reads A and files that segment under
+    `already_sentineled`, A is renamed aside and an empty B takes the
+    pathname, the descriptor opens B, the segment is not in
+    `missing_sentinels` so B never receives a marker -- and the final
+    comparison finds the descriptor and the pathname agreeing perfectly,
+    because both now name B. `success: true`, and the dispatch gate reads B
+    and sees nothing.
+
+    Note what makes it nastier than the write-window case: this run writes
+    NOTHING, so no per-segment error appears anywhere to redden it. The only
+    thing standing between it and a false green is the descriptor predating
+    the census."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_census_retarget")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+    segments_dir = root / "segments"
+
+    # Give every converged segment a real sentinel first, so the census puts
+    # them all in `already_sentineled` and the run has no writes to do.
+    first = _apply_run(backfill, root)
+    assert first["success"] is True and first["created"], (
+        "setup must actually raise the sentinels the census will later read"
+    )
+    # `missing_sentinels` is the CENSUS result, so it is non-empty on a run
+    # that had work to do -- it names what this run went on to create. The
+    # precondition that matters is the state AFTER: a second census must find
+    # nothing missing, which is what makes the run under test a pure
+    # already_sentineled read with no writes.
+    baseline = _apply_run(backfill, root)
+    assert baseline["missing_sentinels"] == [] and baseline["created"] == [], (
+        f"the project must be fully protected before the census test runs; "
+        f"missing={baseline['missing_sentinels']}"
+    )
+
+    # Derived from ever_converged_segs, NOT from already_sentineled. The
+    # census calls the classifier once per CONVERGED segment; the two counts
+    # coincide only while every converged segment happens to hold a regular
+    # sentinel. An ambiguous entry, or any fixture change, would desync them
+    # and make the swap land mid-census -- turning this into the different,
+    # self-reddening write case and giving a red for the wrong reason.
+    census_size = len(baseline["ever_converged_segs"])
+    assert census_size, "the fixture must have segments for the census to read"
+    assert baseline["ambiguous_sentinels"] == [], (
+        "an ambiguous entry would desync the classifier call count from "
+        "ever_converged_segs and break this test's swap timing"
+    )
+
+    real_classify = backfill.classify_ever_converged_sentinel
+    swapped = []
+    calls = []
+
+    # `**kwargs` rather than a fixed signature: the census passes `dir_fd`
+    # and the writer's EEXIST re-read passes it too, while a mutant that
+    # reverts either call site passes neither. Forwarding whatever arrives
+    # keeps this test valid under both, which is what makes it usable as the
+    # mutation harness it doubles as.
+    def classify_then_retarget(path, **kwargs):
+        state = real_classify(path, **kwargs)
+        calls.append(path)
+        # Swap only once the census has read EVERY segment. Swapping earlier
+        # sends the remaining lookups to the new empty directory, which puts
+        # those segments in `missing_sentinels` and makes the run attempt
+        # writes -- a different (and self-reddening) case. The one being
+        # modelled here is the census completing normally against A and the
+        # pathname moving before anything else happens, so the run has no
+        # work to do and nothing else can go red.
+        if len(calls) == census_size and not swapped:
+            aside = tmp_path / "segments_aside_census"
+            os.rename(str(segments_dir), str(aside))
+            os.mkdir(str(segments_dir))
+            swapped.append(aside)
+        return state
+
+    # setattr, not attribute assignment: the module object is dynamically
+    # loaded, so a static checker cannot see this name on it.
+    setattr(backfill, "classify_ever_converged_sentinel", classify_then_retarget)
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        setattr(backfill, "classify_ever_converged_sentinel", real_classify)
+
+    assert swapped, "the test never performed the retarget it exists to model"
+    assert result["created"] == [] and not result["failed_to_create"], (
+        "this run must write nothing -- that is what makes the case "
+        "dangerous, and what makes every other signal stay green"
+    )
+    assert result["segments_dir_replaced"] is not None, (
+        "a census read from a directory the path no longer names cannot "
+        "support a claim that anything is protected"
+    )
+    assert result["directory_sync_error"] is None
+    assert result["success"] is False
+
+    # The substance: what the census called protected is not visible.
+    for seg in result["already_sentineled"]:
+        assert not backfill.ever_converged_path(seg, segments_dir).exists()
+
+
+def test_a_census_reads_the_descriptor_not_a_pathname_repointed_and_restored(tmp_path):
+    """The swapped-away-AND-BACK interleaving, which the identity check
+    cannot see and never could.
+
+    `check_segments_dir_identity()` samples ONCE, at the end. A `segments/`
+    symlink re-pointed at B for the length of the census and restored to A
+    before that sample makes the sample compare A to A and agree -- so for as
+    long as the census resolved `{segments_dir}/.ever_converged.<seg>` by
+    PATHNAME, it read B's entries and reported them as A's protection.
+    Reproduced on the descriptor-holding code: `success: true`,
+    `already_sentineled` naming segments, `segments_dir_replaced: null`, and A
+    without the sentinels. A run that says "already protected" is the one an
+    operator acts on by dispatching, so this is the false green that costs a
+    finished translation.
+
+    The fix is not another check. A second identity sample is defeated by the
+    same swap, and a locking protocol is not needed either: the run already
+    HOLDS the directory open, so classifying relative to that descriptor
+    leaves the swap no pathname to act on.
+
+    Note what is deliberately asserted NEGATIVE: `segments_dir_replaced` must
+    stay None. This interleaving is invisible to the identity check by
+    construction, so a non-None there would mean the assertions above are
+    being satisfied by the wrong mechanism -- the same reasoning that made
+    `success is False` an inadmissible causal assertion in the two retarget
+    tests above."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_census_symlink")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    # segments -> segments_a, the REAL directory (it already holds the
+    # fixture's one pre-existing sentinel); segments_b is the decoy the
+    # pathname is briefly re-pointed at. A symlinked `segments/` is an
+    # explicitly supported project shape -- that is why the open deliberately
+    # omits O_NOFOLLOW -- so this is a supported project, not a broken one.
+    dir_a = root / "segments_a"
+    dir_b = root / "segments_b"
+    os.rename(str(root / "segments"), str(dir_a))
+    os.mkdir(str(dir_b))
+    os.symlink("segments_a", str(root / "segments"))
+
+    # B holds a real sentinel for EVERY ever-converged segment, including the
+    # two A lacks. Under a pathname census that empties `missing_sentinels`
+    # entirely, so the run writes nothing and no per-segment error exists to
+    # redden it -- the false green in its purest form, exactly as reported.
+    for seg in EVER_CONVERGED:
+        (dir_b / f".ever_converged.{seg}").write_bytes(b"converged\n")
+
+    real_classify = backfill.classify_ever_converged_sentinel
+    census_calls = []
+    repointed = []
+    restored = []
+
+    def classify_then_swap(path, **kwargs):
+        # Re-point BEFORE the first lookup, so the entire census runs while
+        # the pathname names B.
+        if not repointed:
+            os.unlink(str(root / "segments"))
+            os.symlink("segments_b", str(root / "segments"))
+            repointed.append(True)
+        state = real_classify(path, **kwargs)
+        census_calls.append(path)
+        # ...and restore the moment the census ends, before anything else
+        # runs, so the end-of-run identity sample finds A where it started.
+        # That restoration is the whole point: it is what makes the false
+        # green reachable, and what a single identity sample cannot see.
+        if len(census_calls) == len(EVER_CONVERGED) and not restored:
+            os.unlink(str(root / "segments"))
+            os.symlink("segments_a", str(root / "segments"))
+            restored.append(True)
+        return state
+
+    setattr(backfill, "classify_ever_converged_sentinel", classify_then_swap)
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        setattr(backfill, "classify_ever_converged_sentinel", real_classify)
+
+    assert repointed and restored, (
+        "the test never performed the swap-and-restore it exists to model"
+    )
+    assert os.readlink(str(root / "segments")) == "segments_a", (
+        "the pathname must name A again by the end -- that is what makes the "
+        "identity sample agree, and the false green reachable"
+    )
+
+    # THE causal assertion. Neither segment whose only sentinel lives in B
+    # may be reported protected; only the one really present in A may be.
+    assert result["already_sentineled"] == ["seg_conv_presentinel"], (
+        f"only a sentinel that is really in the directory the descriptor "
+        f"names may be counted as protection; got "
+        f"{result['already_sentineled']} -- anything more means the census "
+        f"read the decoy through the re-pointed pathname"
+    )
+    assert result["missing_sentinels"] == MISSING_BEFORE_APPLY, (
+        f"the two segments A lacks must still be missing; got "
+        f"{result['missing_sentinels']}"
+    )
+    assert sorted(result["created"]) == MISSING_BEFORE_APPLY, (
+        f"and they must actually get their sentinels; got {result['created']}"
+    )
+    # NOT caught by the identity check -- see the docstring.
+    assert result["segments_dir_replaced"] is None, (
+        f"the pathname names A at the end, so the identity sample must agree: "
+        f"this case is closed by the census, not by that check; got "
+        f"{result['segments_dir_replaced']!r}"
+    )
+    assert result["directory_sync_error"] is None
+    assert result["ambiguous_sentinels"] == []
+    assert result["success"] is True
+
+    # The substance, in both directions: A really is protected now, and the
+    # decoy directory holds exactly what the test put there and nothing else.
+    for seg in EVER_CONVERGED:
+        assert (dir_a / f".ever_converged.{seg}").is_file(), (
+            f"{seg} must be protected in the directory the descriptor names, "
+            f"which is the one readers reach through the restored pathname"
+        )
+    assert sorted(p.name for p in dir_b.iterdir()) == sorted(
+        f".ever_converged.{seg}" for seg in EVER_CONVERGED
+    ), "nothing this run did may have reached the decoy directory"
+
+
+def test_a_dry_run_also_refuses_when_the_segments_dir_was_replaced(tmp_path):
+    """The dry run is the mode an operator acts on, so it needs the check too.
+
+    SKILL.md's upgrade note tells them a dry run's `missing_sentinels` decides
+    whether backfilling is needed at all. Before this, the descriptor was
+    opened only under `--apply`, so a dry census could read a directory the
+    path no longer names, come back with nothing missing, and talk the
+    operator out of running `--apply` at all -- straight into a W5 dispatch
+    against unprotected work. A false clean here is worse than a false clean
+    under `--apply`, because nothing downstream ever revisits it."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_dry_retarget")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+    segments_dir = root / "segments"
+
+    args = backfill.build_arg_parser().parse_args(["--durable-root", str(root)])
+    dirs = backfill.resolve_dirs(str(root), None)
+
+    real_classify = backfill.classify_ever_converged_sentinel
+    swapped = []
+
+    def classify_then_retarget(path, **kwargs):
+        state = real_classify(path, **kwargs)
+        if not swapped:
+            aside = tmp_path / "segments_aside_dry"
+            os.rename(str(segments_dir), str(aside))
+            os.mkdir(str(segments_dir))
+            swapped.append(aside)
+        return state
+
+    setattr(backfill, "classify_ever_converged_sentinel", classify_then_retarget)
+    try:
+        result = backfill.run(args, dirs)
+    finally:
+        setattr(backfill, "classify_ever_converged_sentinel", real_classify)
+
+    assert swapped, "the test never performed the retarget it exists to model"
+    assert result["applied"] is False, "this must be the DRY path"
+    assert result["segments_dir_replaced"] is not None, (
+        "a dry run whose census read a displaced directory must not report a "
+        "clean result -- its missing_sentinels is what the operator acts on"
+    )
+    assert result["success"] is False
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores the permission bits this test depends on",
+)
+def test_a_census_that_could_not_read_anything_is_not_a_clean_dry_run(tmp_path):
+    """The false CLEAN, and the reason `ambiguous_sentinels` now fails the run.
+
+    `chmod 444 segments` -- readable, not searchable -- needs no attacker: a
+    restore tool, a bad `cp -r`, or a mount option produces it. Every lstat
+    underneath then fails EACCES, so EVERY segment lands in AMBIGUOUS and
+    `missing_sentinels` comes back EMPTY. SKILL.md's upgrade note tells the
+    operator that a dry run with an empty `missing_sentinels` means the
+    project needs no backfilling, and the five-field checklist that would
+    have caught this is explicitly gated on "After --apply" -- which the
+    operator following that instruction never reaches. So a census that
+    established NOTHING was indistinguishable, at `success`/
+    `missing_sentinels`/exit-code level, from a healthy project, and the
+    next step after reading it is a W5 dispatch over unprotected work.
+
+    Fails on the pre-fix code at the returncode assertion: it exited 0."""
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+    segments_dir = root / "segments"
+
+    os.chmod(segments_dir, 0o444)
+    try:
+        proc = run_backfill(root)
+    finally:
+        os.chmod(segments_dir, 0o755)
+
+    payload = parse_stdout(proc)
+    # Precondition: this must be the wholesale-ambiguous shape, not some other
+    # failure. Without it a chmod that stopped working would leave the
+    # returncode assertion below passing for an unrelated reason.
+    assert payload["applied"] is False, "this is the DRY path the note names"
+    assert [e["seg"] for e in payload["ambiguous_sentinels"]] == sorted(
+        payload["ever_converged_segs"]
+    ), payload
+    assert payload["missing_sentinels"] == [] and payload["already_sentineled"] == [], (
+        "the census established nothing -- which is exactly why the empty "
+        "missing_sentinels below must not read as 'nothing to do'"
+    )
+
+    # The ONLY thing that may be reddening this run is the ambiguous census.
+    # Without these, a future change that made some other key fail here would
+    # keep the test green while the guard it exists for had been removed.
+    assert payload["directory_sync_error"] is None, payload
+    assert payload["segments_dir_replaced"] is None, payload
+    assert payload["failed_to_create"] == [], payload
+
+    assert proc.returncode == 1, (
+        f"a run that verified no segment at all must not exit 0; "
+        f"stderr={proc.stderr!r}"
+    )
+    assert payload["success"] is False
+
+
+def test_a_segments_path_that_is_a_regular_file_is_refused_at_the_open(tmp_path):
+    """A bare `O_RDONLY` open succeeds on a REGULAR FILE, `os.fsync` on it
+    succeeds, and `check_segments_dir_identity()` then compares that file
+    against itself and agrees -- so every structural check in the script
+    agreed with every other one while every sentinel lookup underneath them
+    returned ENOTDIR. `O_DIRECTORY` is what makes the open refuse.
+
+    Asserted on the FATAL shape, not merely on `success is False`: without
+    `O_DIRECTORY` the run still fails now (every lookup is ambiguous, and
+    ambiguous fails the run), so `success` alone cannot tell the two apart.
+    A fatal payload carries `error` and has no census buckets at all."""
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+    segments_dir = root / "segments"
+
+    shutil.rmtree(segments_dir)
+    segments_dir.write_text("not a directory\n", encoding="utf-8")
+
+    proc = run_backfill(root)
+
+    assert proc.returncode == 1, f"stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "ambiguous_sentinels" not in payload, (
+        "this must abort at the open, before any census runs -- a run that "
+        "reaches the census has already accepted a file as its directory"
+    )
+    assert "Not a directory" in payload["error"], payload
+
+
+def test_the_staging_file_is_created_relative_to_the_descriptor_not_the_path(tmp_path):
+    """`tempfile.mkstemp(dir=str(segments_dir))` was the one mutating call in
+    the write path still resolving `segments/` by PATHNAME. With the symlink
+    re-pointed A->B after the descriptor is open, staging landed in B while
+    the link and the cleanup both operated on A: the run failed closed, which
+    is correct, and left a file in B that THIS INVOCATION could never remove,
+    since `_cleanup_staging()` unlinks relative to the descriptor -- a
+    file-creation primitive in a directory of the retargeter's choosing.
+
+    The identity check is not a defence against that: it compares directory
+    IDENTITY and never the entries under either directory, so it fires on this
+    interleaving (asserted below) and still cannot see, name, or remove what
+    was left in B.
+
+    The causal assertion is therefore that B is EMPTY. `success is False`
+    holds either way, so it proves nothing here."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_staging_fd")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    # segments -> segments_a, with an empty segments_b standing by.
+    dir_a = root / "segments_a"
+    dir_b = root / "segments_b"
+    os.rename(str(root / "segments"), str(dir_a))
+    os.mkdir(str(dir_b))
+    os.symlink("segments_a", str(root / "segments"))
+
+    real_classify = backfill.classify_ever_converged_sentinel
+    census_calls = []
+    repointed = []
+
+    def classify_then_repoint(path, **kwargs):
+        state = real_classify(path, **kwargs)
+        census_calls.append(path)
+        # Only once the census has finished, so the writes -- and the staging
+        # they need -- are what runs against the re-pointed path. Re-pointing
+        # mid-census would change which segments the run tries to write and
+        # test a different thing.
+        if len(census_calls) == len(EVER_CONVERGED) and not repointed:
+            os.unlink(str(root / "segments"))
+            os.symlink("segments_b", str(root / "segments"))
+            repointed.append(True)
+        return state
+
+    setattr(backfill, "classify_ever_converged_sentinel", classify_then_repoint)
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        setattr(backfill, "classify_ever_converged_sentinel", real_classify)
+
+    assert repointed, "the test never performed the re-point it exists to model"
+    assert list(dir_b.iterdir()) == [], (
+        "nothing this run did may reach the directory the path was re-pointed "
+        "at -- a staging file left there is unreachable by the cleanup, which "
+        "unlinks relative to the descriptor"
+    )
+    # And the work really did happen in the directory the descriptor names.
+    assert result["created"], "the run must have had writes to do"
+    for seg in result["created"]:
+        assert (dir_a / f".ever_converged.{seg}").is_file()
+    assert result["segments_dir_replaced"] is not None
+    assert result["success"] is False
+
+
+def test_the_umask_is_read_once_per_run_not_once_per_segment(tmp_path):
+    """Reading the umask requires SETTING it, and that window is process-wide.
+
+    This module documents in-process callers and every test here is one, so a
+    concurrent thread creating a file inside the window gets it mode-0666. The
+    window cannot be removed (there is no getumask), but opening it once per
+    RUN instead of once per SEGMENT is free. Each read is two os.umask calls
+    (set to 0, restore)."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_umask_count")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    real_umask = os.umask
+    calls = []
+
+    def counting_umask(mask):
+        calls.append(mask)
+        return real_umask(mask)
+
+    backfill.os.umask = counting_umask
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        backfill.os.umask = real_umask
+
+    assert len(result["created"]) >= 2, (
+        f"the fixture must write more than one sentinel, or 'once per run' "
+        f"and 'once per segment' are the same number; created="
+        f"{result['created']}"
+    )
+    assert len(calls) == 2, (
+        f"exactly one umask read for the whole apply pass; got {len(calls)} "
+        f"os.umask calls ({calls})"
+    )
+    assert result["success"] is True
+
+
+def test_an_apply_run_with_nothing_to_create_opens_no_umask_window_at_all(tmp_path):
+    """The regression the hoist introduced, and the run an operator repeats
+    most often: `--apply` over an already fully protected project.
+
+    Before the hoist, zero missing sentinels meant zero calls to the writer
+    and therefore zero umask windows. Hoisting the read to the top of the
+    apply block opened one on every such run -- fewer windows than the
+    per-segment version for a run with work to do, and strictly MORE than
+    before for the run that has none. The test above cannot see it: it
+    requires at least two creations by construction.
+
+    Fails on the unconditional hoist with 2 os.umask calls instead of 0."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_umask_noop")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    first = _apply_run(backfill, root)
+    assert first["created"], "setup must raise the sentinels the no-op run will find"
+
+    real_umask = os.umask
+    calls = []
+
+    def counting_umask(mask):
+        calls.append(mask)
+        return real_umask(mask)
+
+    backfill.os.umask = counting_umask
+    try:
+        second = _apply_run(backfill, root)
+    finally:
+        backfill.os.umask = real_umask
+
+    assert second["missing_sentinels"] == [] and second["created"] == [], (
+        f"the precondition is a run with NOTHING to create; got "
+        f"missing={second['missing_sentinels']} created={second['created']}"
+    )
+    assert calls == [], (
+        f"a run that creates nothing must not widen the process-wide umask "
+        f"even once; got {len(calls)} os.umask calls ({calls})"
+    )
+    assert second["success"] is True
+
+
+def test_an_apply_run_never_labels_a_raced_segment_as_a_dry_run(tmp_path, capsys):
+    """A segment missing at census time and created by SOMETHING ELSE before
+    this run reaches it is reported "already_present" by the writer and lands
+    in no bucket: it stays in `missing_sentinels`, and appears in neither
+    `created` nor `failed_to_create`. The per-segment summary line then fell
+    through to a label hardcoded "(dry run)" -- printed during an --apply run,
+    on the one line an operator reads per segment.
+
+    Fails pre-fix on the label assertion; the payload assertions hold in both
+    versions and are here to prove the race really happened."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_race_label")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    real_classify = backfill.classify_ever_converged_sentinel
+    census_calls = []
+    raced = []
+
+    def classify_then_plant(path, **kwargs):
+        state = real_classify(path, **kwargs)
+        census_calls.append(path)
+        # After the census, plant a real sentinel for a segment it just
+        # classified ABSENT. The writer's link() then gets EEXIST, re-reads
+        # the entry, finds a regular file, and returns "already_present".
+        if len(census_calls) == len(EVER_CONVERGED) and not raced:
+            for candidate in census_calls:
+                if not candidate.exists():
+                    candidate.write_bytes(b"converged\n")
+                    raced.append(candidate.name.split(".ever_converged.")[-1])
+                    break
+        return state
+
+    setattr(backfill, "classify_ever_converged_sentinel", classify_then_plant)
+    try:
+        rc = backfill.main(["--durable-root", str(root), "--apply"])
+    finally:
+        setattr(backfill, "classify_ever_converged_sentinel", real_classify)
+
+    assert raced, "the test never planted the sentinel it exists to model"
+    seg = raced[0]
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.strip().splitlines()[-1])
+
+    assert seg in payload["missing_sentinels"], payload
+    assert seg not in payload["created"], (
+        f"{seg} was created by the plant, not by this run"
+    )
+    assert seg not in {e["seg"] for e in payload["failed_to_create"]}, payload
+
+    line = [ln for ln in captured.err.splitlines() if ln.strip().startswith(f"- {seg}:")]
+    assert len(line) == 1, captured.err
+    # The EXACT label, not merely the absence of the word "dry". Asserting an
+    # absence would stay green for any other wrong label, including a
+    # differently-cased one.
+    assert line[0].strip() == (
+        f"- {seg}: missing at census -- created by something else during this run"
+    ), f"got {line[0]!r}"
+    assert rc == 0, captured.err
+
+
+def test_the_eexist_re_read_asks_the_descriptor_not_the_repointed_pathname(tmp_path):
+    """The same false green one call later, in the write path's last
+    pathname lookup.
+
+    `link()` publishes through `dir_fd`, so an EEXIST it raises is a
+    collision in the directory the DESCRIPTOR names. Re-reading that name by
+    pathname asks a DIFFERENT directory once `segments/` has been re-pointed
+    -- and that answer decides between "already_present", which
+    `mark_ever_converged()` means as "protected, nothing to do", and an
+    error. The file used to disclose this lookup as read-only and therefore
+    harmless; it cannot place, publish or strand a file, but a read that
+    manufactures "protected" out of another directory's file is the exact
+    failure this release exists to remove.
+
+    The interleaving, and it is the narrow one: the census finds the name
+    ABSENT in A; something plants a DANGLING SYMLINK there before the write
+    reaches it -- the entry the predicate exists to refuse, since O_EXCL and
+    link() both take EEXIST from one -- and the pathname is re-pointed at a B
+    holding a real regular file under that same name. Read by pathname, B
+    answers PRESENT and the segment is counted protected while A holds a
+    dangling link that no reader will ever resolve. Read through the
+    descriptor, A answers AMBIGUOUS and the run refuses.
+
+    The pathname is restored before the run ends, for the same reason as in
+    the census test: it keeps `check_segments_dir_identity()` out of the
+    verdict, so what is asserted below is this lookup and nothing else."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_eexist_fd")
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+
+    dir_a = root / "segments_a"
+    dir_b = root / "segments_b"
+    os.rename(str(root / "segments"), str(dir_a))
+    os.mkdir(str(dir_b))
+    os.symlink("segments_a", str(root / "segments"))
+
+    # The victim: a segment the census will find genuinely absent in A.
+    seg = MISSING_BEFORE_APPLY[0]
+    marker = f".ever_converged.{seg}"
+    (dir_b / marker).write_bytes(b"converged\n")
+
+    real_classify = backfill.classify_ever_converged_sentinel
+    census_calls = []
+    planted = []
+
+    def classify_then_plant_and_repoint(path, **kwargs):
+        state = real_classify(path, **kwargs)
+        census_calls.append(path)
+        # After the census, so the segment is already in `missing_sentinels`
+        # and the writer will try to create it.
+        if len(census_calls) == len(EVER_CONVERGED) and not planted:
+            os.symlink("no-such-target", str(dir_a / marker))
+            os.unlink(str(root / "segments"))
+            os.symlink("segments_b", str(root / "segments"))
+            planted.append(True)
+        return state
+
+    real_sync = backfill.sync_segments_dir
+    restored = []
+
+    def restore_then_sync(fd):
+        # The directory fsync is the first thing after the write loop, so
+        # this restores the pathname once every link has been attempted and
+        # before the identity sample runs.
+        if not restored:
+            os.unlink(str(root / "segments"))
+            os.symlink("segments_a", str(root / "segments"))
+            restored.append(True)
+        return real_sync(fd)
+
+    setattr(backfill, "classify_ever_converged_sentinel", classify_then_plant_and_repoint)
+    setattr(backfill, "sync_segments_dir", restore_then_sync)
+    try:
+        result = _apply_run(backfill, root)
+    finally:
+        setattr(backfill, "classify_ever_converged_sentinel", real_classify)
+        setattr(backfill, "sync_segments_dir", real_sync)
+
+    assert planted and restored, (
+        "the test never performed the plant-and-repoint it exists to model"
+    )
+    assert stat.S_ISLNK(os.lstat(str(dir_a / marker)).st_mode), (
+        "the planted entry must still be the dangling link -- the writer must "
+        "never delete or replace an entry it did not create"
+    )
+
+    # THE causal assertion: the segment is REFUSED, not laundered into
+    # "already_present" by a regular file sitting in another directory.
+    failed = {entry["seg"]: entry["error"] for entry in result["failed_to_create"]}
+    assert seg in failed, (
+        f"the entry that raised EEXIST is a dangling symlink in the directory "
+        f"the descriptor names, so this segment's protection is UNPROVEN and "
+        f"the run must say so; got failed_to_create={result['failed_to_create']} "
+        f"created={result['created']}"
+    )
+    assert "refusing to treat this as an existing sentinel" in failed[seg], (
+        f"got {failed[seg]!r}"
+    )
+    assert seg not in result["created"]
+    # Not caught by the identity check, by construction -- see the docstring.
+    assert result["segments_dir_replaced"] is None, (
+        f"the pathname names A again by the end, so the identity sample must "
+        f"agree; got {result['segments_dir_replaced']!r}"
+    )
+    assert result["directory_sync_error"] is None
+    assert result["success"] is False
+
+    # The other missing segment was unaffected and really did get protected.
+    other = MISSING_BEFORE_APPLY[1]
+    assert result["created"] == [other], result["created"]
+    assert (dir_a / f".ever_converged.{other}").is_file()
+    # And nothing this run did reached the decoy directory.
+    assert sorted(p.name for p in dir_b.iterdir()) == [marker], (
+        "no staging file, no link, nothing may have landed in the directory "
+        "the pathname was briefly re-pointed at"
+    )
+
+
+def test_a_dry_run_treats_an_invalid_utf8_ledger_as_missing_not_as_a_crash(tmp_path):
+    """`UnicodeDecodeError` is a `ValueError`, so neither `OSError` nor
+    `json.JSONDecodeError` caught it and it escaped `read_existing_ledger()`
+    -- whose own docstring promises it never raises and treats "missing,
+    unreadable, not valid JSON" identically as "nothing usable yet".
+
+    The operator-visible difference: instead of the refusal that names
+    `--allow-merge` as the next step, they got main()'s defensive catch-all
+    ("unexpected error: 'utf-8' codec can't decode byte ..."), the payload
+    shape reserved for a bug in this script. Fail-closed, wrong message.
+
+    The pre-existing corrupt-ledger test could not catch this: it writes
+    invalid JSON, which is a different exception on a different line."""
+    root = setup_mixed_project(tmp_path)
+    ledger = root / "runs" / "ledger.json"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    # Valid JSON structurally, but the bytes are not UTF-8.
+    ledger.write_bytes(b'{"segments": {"seg\xed\xa0\x80": {}}}')
+
+    proc = run_backfill(root)
+
+    assert proc.returncode == 1, f"stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "unexpected error" not in payload["error"], (
+        f"a malformed input file must not be reported as an internal bug; "
+        f"got {payload['error']!r}"
+    )
+    assert "--allow-merge" in payload["error"], (
+        f"an unusable existing ledger must produce the refusal that names the "
+        f"next step, exactly as a missing or corrupt-JSON one does; got "
+        f"{payload['error']!r}"
+    )
+
+
+def test_read_json_reports_invalid_utf8_as_a_fatal_not_an_unexpected_error(tmp_path):
+    """The other reader. `read_json()` is only ever called on a ledger this
+    script just merged, so a fatal is right -- but it must be THIS script's
+    fatal, with a message naming the file, not the catch-all that says the
+    script itself misbehaved."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_under_test_read_json_utf8")
+    bad = tmp_path / "ledger.json"
+    bad.write_bytes(b'{"segments": {"a\xed\xa0\x80": {}}}')
+
+    with pytest.raises(backfill.FatalError) as excinfo:
+        backfill.read_json(bad, "materialized ledger.json")
+
+    payload = json.loads(str(excinfo.value))
+    assert payload["success"] is False
+    assert "not valid UTF-8" in payload["error"], payload
+    assert str(bad) in payload["error"], payload
 
 
 if __name__ == "__main__":

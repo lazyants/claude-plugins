@@ -57,6 +57,7 @@ select_segments.py's OWN classification logic (the real cache_key.py's
 call paths both ledger_merge.py AND select_segments.py itself make to
 `cache_key.py --seg <id>`.
 """
+import ast
 import hashlib
 import importlib.util
 import json
@@ -425,6 +426,12 @@ def test_full_classification_taxonomy_and_report(tmp_path):
         # always present, so silently dropping it has to fail here.
         "authorizes_dispatch",
         "previously_converged",
+        # 1.19.1 fail-closed sentinel fix: sentinel paths that were neither
+        # absent nor a regular file. Always [] on this path (a non-empty set
+        # refuses above), but part of the contract for the same reason
+        # runs_missing_digest is -- a consumer must be able to tell a scan that
+        # found nothing from a scan that never ran.
+        "ambiguous_sentinels",
         # #409 Step 3 -- the resume-gate evidence, reported on the SUCCESS
         # path too and therefore part of this contract. `runs_missing_digest`
         # in particular must always be present: a consumer (or a test) that
@@ -1607,6 +1614,854 @@ def test_gate_fires_even_though_the_ledger_status_is_no_longer_converged(tmp_pat
         "must fail through THIS gate, not through some other fatal that happens "
         "to mention the same segment"
     )
+
+
+# ---------------------------------------------------------------------------
+# 1.19.1 -- the sentinel predicate is FAIL-CLOSED.
+#
+# The bug these cover: the two halves of the sentinel contract disagreed about
+# the same path. The reader used `Path.exists()`, which FOLLOWS symlinks (a
+# dangling link reads as absent) and, since Python 3.13, swallows every OSError
+# and returns False (EACCES/ESTALE read as absent). The writer used
+# `os.open(O_CREAT|O_EXCL)`, which raises EEXIST for ANY existing entry --
+# dangling symlink and directory included -- and treated that as "already
+# marked". So a segment could be recorded as converged while the dispatch gate
+# saw it as unprotected, and the next cache-key move retranslated it. 1.19.1
+# moves plugin_bundle_hash for every converged segment in every live project,
+# which is precisely when that path gets taken.
+#
+# Fail-closed here points AWAY from tidiness: anything that is not a clean
+# ENOENT is treated as "may have converged" and refuses, because a false
+# "protected" costs one authorization and a false "absent" costs a translation.
+# ---------------------------------------------------------------------------
+
+
+def _sentinel_path(root, seg):
+    return root / "segments" / f".ever_converged.{seg}"
+
+
+def _load_script_module(name):
+    """Load a script by path -- these are standalone entrypoints with no
+    shared import, not an importable package. Same technique as
+    test_sentinel_filename_matches_the_writer_in_ledger_update below, hoisted
+    here because three tests in this section now need it."""
+    path = ASSETS_DIR / "scripts" / name
+    spec = importlib.util.spec_from_file_location(name.replace(".", "_"), str(path))
+    assert spec is not None and spec.loader is not None, f"cannot load {path}"
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_dangling_symlink_sentinel_is_not_read_as_absent(tmp_path):
+    """THE case the finding is about, reader half. `Path.exists()` follows the
+    link and reports False for a dangling one, so the pre-fix gate let the
+    segment through -- while the writer, whose O_CREAT|O_EXCL open gets EEXIST
+    from that same link, had already reported the segment successfully marked.
+
+    Fails on the unfixed code at `assert proc.returncode != 0`: the pre-fix
+    reader classifies the dangling link as absent, no gate fires, and select
+    exits 0 with the segment in `segs`."""
+    root = setup_full_project(tmp_path)
+    baseline = run_select(root)
+    assert baseline.returncode == 0
+    assert EVER_CONVERGED_SEG in parse_stdout(baseline)["segs"], (
+        "precondition: the segment must be dispatch-eligible by default, "
+        "otherwise this test proves nothing"
+    )
+
+    link = _sentinel_path(root, EVER_CONVERGED_SEG)
+    link.symlink_to(root / "segments" / "no-such-target")
+    assert not link.exists(), (
+        "precondition: this must be a DANGLING link -- Path.exists() has to "
+        "report False here, or the test is not exercising the reported bug"
+    )
+    assert link.is_symlink(), "precondition: the entry itself must be present"
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0, (
+        "a dangling symlink at the sentinel path is NOT proof the segment "
+        "never converged; dispatching on it retranslates converged work\n"
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["ambiguous_sentinels"] == [
+        {"seg": EVER_CONVERGED_SEG, "detail": "the entry is a symbolic link, not a regular file"}
+    ], out
+    assert "symbolic link" in out["error"], (
+        "the refusal must say what is actually at the path, or an operator "
+        "cannot act on it"
+    )
+
+
+def test_a_directory_at_the_sentinel_path_refuses_rather_than_counting_as_converged(tmp_path):
+    """Writer half of the same finding, seen from the reader: `exists()` is
+    True for a directory, so the pre-fix reader called it a valid sentinel and
+    reported the segment as previously CONVERGED -- clearable with
+    --allow-retranslate-converged, i.e. exactly one flag away from the same
+    loss, and diagnosed with a message that names the wrong problem.
+
+    Fails on the unfixed code at the `ambiguous_sentinels` assertion: pre-fix
+    the run also exits non-zero, but through the previously-converged gate, so
+    `ambiguous_sentinels` is missing from the payload entirely (KeyError) and
+    `previously_converged` holds the segment instead. Asserting on the exit
+    code alone would be green before the fix -- which is why this test does
+    not."""
+    root = setup_full_project(tmp_path)
+    _sentinel_path(root, EVER_CONVERGED_SEG).mkdir()
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0
+    out = parse_stdout(proc)
+    assert out["ambiguous_sentinels"] == [
+        {"seg": EVER_CONVERGED_SEG, "detail": "the entry is a directory, not a regular file"}
+    ], out
+    assert "--allow-retranslate-converged does NOT clear this" in out["error"], (
+        "a directory is not evidence the segment converged, so the flag that "
+        "authorizes retranslating converged work must be named only to rule "
+        "it OUT -- an operator who reaches for it here would authorize "
+        "discarding work nobody established the state of"
+    )
+    assert out["previously_converged"] == [], (
+        "and it must not be miscounted as a valid sentinel either -- that was "
+        "the pre-fix reading, since Path.exists() is True for a directory"
+    )
+
+
+def test_a_non_enoent_lstat_error_is_ambiguous_not_absent(tmp_path):
+    """The arm that motivated the finding: an EACCES / ESTALE / EIO on the
+    lookup -- a REAL sentinel that this process simply cannot see. Simulated
+    with a mode-000 parent directory, the same shape a stale NFS handle or a
+    permissions accident produces.
+
+    Since Python 3.13 `Path.exists()` swallows every OSError and returns
+    False, so the pre-fix reader called such a segment 'never converged' and
+    dispatched it. That divergence is asserted here directly, on one and the
+    same path, rather than described.
+
+    DELIBERATELY at the predicate level, not end-to-end, and that is not the
+    awkwardness being dodged -- it is the only way this arm can prove
+    anything. The lstat of `segments/.ever_converged.<seg>` can only be made
+    to fail with EACCES by stripping permissions from `segments/` itself, and
+    that same chmod also breaks the draft and segpack reads that
+    classify_segment() performs BEFORE the sentinel loop is ever reached. An
+    end-to-end version would refuse for an unrelated reason and be green
+    whether or not this fix exists. The end-to-end "ambiguous means refuse"
+    link is covered by the dangling-symlink and directory tests above, which
+    can be isolated; this test owns the classification.
+
+    Fails on the unfixed code at the `classify_ever_converged_sentinel`
+    lookup itself (AttributeError -- the fail-closed predicate does not
+    exist), and the `exists()` assertion below documents what the code did
+    instead: reported absent."""
+    import os as _os
+
+    reader = _load_script_module("select_segments.py")
+    locked = tmp_path / "segments"
+    locked.mkdir()
+    sentinel = locked / ".ever_converged.seg01"
+    sentinel.write_text("converged\n", encoding="utf-8")
+
+    _os.chmod(locked, 0o000)
+    try:
+        assert not sentinel.exists(), (
+            "precondition: Path.exists() must report False for this EACCES "
+            "lookup on this interpreter, or the test is not exercising the "
+            "reported bug (on 3.8-3.12 exists() re-raised instead)"
+        )
+        state, detail = reader.classify_ever_converged_sentinel(sentinel)
+    finally:
+        _os.chmod(locked, 0o755)
+
+    assert state == reader.SENTINEL_AMBIGUOUS, (
+        "a lookup that FAILED is not a lookup that found nothing; treating "
+        f"EACCES as absence retranslates a segment whose sentinel is right "
+        f"there and merely unreadable -- got {state!r}"
+    )
+    assert "EACCES" in detail, f"the errno must reach the operator, got {detail!r}"
+    assert sentinel.read_text(encoding="utf-8") == "converged\n", (
+        "and the sentinel really was there the whole time"
+    )
+
+
+def test_an_ordinary_regular_sentinel_still_protects_and_absence_still_dispatches(tmp_path):
+    """FALSE-POSITIVE BOUND for the two arms above. The fix must not turn a
+    fail-closed predicate into a fail-always one: an absent sentinel (clean
+    ENOENT) must still permit dispatch, and an ordinary regular sentinel must
+    still land in `previously_converged` -- not in `ambiguous_sentinels`.
+
+    Green both before and after the fix by design; it exists to catch a fix
+    that over-blocks, which the discriminating tests above cannot see."""
+    root = setup_full_project(tmp_path)
+
+    permitted = run_select(root)
+    assert permitted.returncode == 0, f"stderr={permitted.stderr!r}"
+    out = parse_stdout(permitted)
+    assert EVER_CONVERGED_SEG in out["segs"], "ENOENT must still mean 'dispatch'"
+    assert out["ambiguous_sentinels"] == []
+
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+    refused = run_select(root)
+    assert refused.returncode != 0
+    refused_out = parse_stdout(refused)
+    assert refused_out["ambiguous_sentinels"] == [], (
+        "an ordinary regular sentinel is unambiguous -- it must refuse through "
+        "the previously-converged gate, not through the ambiguity gate"
+    )
+    assert EVER_CONVERGED_SEG in refused_out["error"]
+    assert "--allow-retranslate-converged" in refused_out["error"]
+
+
+def test_the_writer_refuses_to_record_convergence_for_a_dangling_symlink(tmp_path):
+    """Writer half, directly. `os.open(O_CREAT|O_EXCL)` raises FileExistsError
+    for a dangling symlink exactly as it does for a real sentinel, so the
+    pre-fix `except FileExistsError: return True` reported the segment marked
+    while nothing a reader could find had been published.
+
+    Driven through ledger_update.py's own mark_ever_converged() rather than a
+    reimplementation of it -- the point is what the shipped writer does.
+
+    Fails on the unfixed code at `assert ok is False`: pre-fix it returns
+    True. (The directory arm is asserted in the same test because it is the
+    same branch and the same one-line pre-fix behavior.)"""
+    writer = _load_script_module("ledger_update.py")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+
+    link = segments_dir / ".ever_converged.segLINK"
+    link.symlink_to(segments_dir / "no-such-target")
+    ok = writer.mark_ever_converged("segLINK", segments_dir)
+    assert ok is False, (
+        "EEXIST from a dangling symlink is not proof of prior marking; "
+        "returning True records convergence with no sentinel in place"
+    )
+    assert link.is_symlink(), "the writer must not have replaced the entry"
+
+    (segments_dir / ".ever_converged.segDIR").mkdir()
+    assert writer.mark_ever_converged("segDIR", segments_dir) is False, (
+        "a directory is not a sentinel either"
+    )
+
+    real = segments_dir / ".ever_converged.segOK"
+    real.write_text("converged\n", encoding="utf-8")
+    assert writer.mark_ever_converged("segOK", segments_dir) is True, (
+        "FALSE-POSITIVE BOUND: an ordinary regular sentinel must still be "
+        "idempotently accepted, or the fix breaks every re-record"
+    )
+    assert writer.mark_ever_converged("segFRESH", segments_dir) is True, (
+        "FALSE-POSITIVE BOUND: a clean create must still succeed"
+    )
+
+
+def test_an_oserror_with_no_errno_is_ambiguous_not_absent(tmp_path):
+    """`OSError.errno` is typed `int | None` and really can be None -- pyright
+    flagged the original `errno.errorcode.get(exc.errno)` for exactly that.
+    The fix must not resolve the type error by making None mean absence, which
+    is the one direction that destroys work, so this pins the direction rather
+    than merely the absence of a crash.
+
+    Driven with a stub path whose lstat raises a bare `OSError()`: there is no
+    portable filesystem state that produces an errno-less OSError, and the
+    alternative -- trusting the type annotation -- is what let it through the
+    first time.
+
+    Green before the fix only in the sense that the function did not exist;
+    against a fix that reached for `cast()` or a `# type: ignore` it stays
+    green, and against a fix that treated a None errno as ENOENT it FAILS at
+    `assert state == reader.SENTINEL_AMBIGUOUS`."""
+    reader = _load_script_module("select_segments.py")
+
+    class _ErrnolessPath:
+        def lstat(self):
+            raise OSError()  # no errno, no strerror
+
+    state, detail = reader.classify_ever_converged_sentinel(_ErrnolessPath())
+
+    assert state == reader.SENTINEL_AMBIGUOUS, (
+        "an OSError carrying no errno is the LEAST informative failure there "
+        "is -- it cannot be evidence that the segment never converged"
+    )
+    assert "no errno" in detail, detail
+
+
+SENTINEL_SCRIPTS = (
+    "ledger_update.py",           # the only writer
+    "select_segments.py",         # the #409 Step 1 dispatch gate
+    "final_audit.py",             # the completeness carve-out
+    "backfill_ever_converged.py",  # the already_sentineled scan (reader+writer)
+)
+
+def _folded_str_literals(src, skip_docstrings=False):
+    """Every string a module's source CONSTRUCTS from literals alone: plain
+    constants, `+` concatenations of them, and the literal parts of f-strings.
+
+    Exists because a source-TEXT census is defeated by splitting the needle --
+    `".ever_" + "converged." + seg` contains `ever_converged` nowhere in the
+    source, but builds it at runtime. Folding is done here rather than with
+    `ast.literal_eval`, which refuses `+` on strings (it supports binary +/-
+    for NUMBERS only, to admit complex literals) and would therefore return
+    nothing for exactly the shape this needs to catch -- a vacuous guard that
+    looks like a working one.
+
+    `ast.parse()` reads source only: no import, no execution, so it is safe for
+    scripts that are deliberately import-free.
+
+    KNOWN GAPS, measured rather than guessed: `%` interpolation, `.format()`,
+    `"".join()` of constants, and f-string constants formatted separately are
+    NOT folded, and an f-string's `{...}` holes are treated as empty, which can
+    join two literal fragments that runtime would keep apart (a false POSITIVE,
+    the safe direction here). So this narrows evasion to shapes no participant
+    would reach for by accident; it does not make evasion impossible.
+
+    `skip_docstrings` drops module/class/function docstrings, which is what
+    separates a file that DISCUSSES the convention from one that BUILDS it.
+    Without it the two are indistinguishable at file granularity, and a
+    whitelisted file can host a real participant inside its own exemption."""
+    import ast
+
+    def fold(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):  # f-string: keep the literal parts
+            return "".join(p for p in (fold(v) for v in node.values) if p is not None)
+        if isinstance(node, ast.FormattedValue):  # the {...} holes contribute nothing
+            return ""
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = fold(node.left), fold(node.right)
+            if left is not None and right is not None:
+                return left + right
+        return None
+
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:  # not our problem here -- other tests own syntax
+        return []
+
+    skipped = set()
+    if skip_docstrings:
+        for node in ast.walk(tree):
+            body = getattr(node, "body", None)
+            if not isinstance(
+                node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+            ) or not body:
+                continue
+            first = body[0]
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                skipped.add(id(first.value))
+
+    return [
+        s
+        for node in ast.walk(tree)
+        if id(node) not in skipped and (s := fold(node)) is not None
+    ]
+
+
+# The sentinel's public API. Every literal needle above looks at STRINGS; these
+# are IDENTIFIERS, and a file can become a genuine participant without
+# containing the token in any literal at all -- calling the helpers through an
+# injected provider needs no string whatsoever. Measured: a
+# `provider.classify_ever_converged_sentinel(provider.ever_converged_path(seg))`
+# added to a whitelisted file passed every literal-based needle here.
+SENTINEL_API_NAMES = (
+    "ever_converged_path",
+    "classify_ever_converged_sentinel",
+    "mark_ever_converged",
+)
+
+
+def _names_bound_by(target):
+    """Every bare name a binding target introduces, however nested: `a`,
+    `(a, b)`, `[a, *rest]`."""
+    return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+
+
+def _sentinel_api_refs(src):
+    """Every CODE-level use of a SENTINEL_API_NAMES identifier: definitions,
+    bare-name loads, attribute accesses, and imports.
+
+    The literal needles cannot see any of these. Note `mark_ever_converged`
+    especially: the census pins `def ever_converged_path` and `def
+    classify_ever_converged_sentinel` by exact spelling but never looked for the
+    WRITER's definition, so a third copy of it could appear in a whitelisted
+    file and change none of the five literal sets.
+
+    Bare names count only in a LOAD context: `ever_converged_path = None`
+    rebinds the name without using the API, and reporting it as participation
+    would be a false red on code that is doing nothing of the kind.
+
+    ATTRIBUTES count in EVERY context, load or store, and that asymmetry is the
+    whole point. `provider.ever_converged_path = path_builder` is an injected
+    provider being WIRED UP -- participation in the most direct sense -- and an
+    earlier revision narrowed attributes along with bare names, which put that
+    exact shape back through the census untouched in an exempted file. The
+    narrowing was described in its own commit message as applying to bare names
+    and silently applied to attributes too.
+
+    ATTRIBUTE matching is deliberately by NAME ALONE, so any object's
+    `.ever_converged_path` counts. That is the whole point -- reaching the
+    helpers through an injected provider is exactly the participation shape the
+    literal needles miss, and no receiver-type analysis is available here. The
+    accepted cost: an unrelated attribute that happens to share one of these
+    three names reads as participation. They are specific enough that such a
+    collision is itself worth a look, which is the failure direction to prefer.
+
+    Reports WHICH names matched, not merely that something did; the census
+    collapses that to a per-file set because it asks which FILES participate,
+    while the exemption check below prints the names."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return set()
+    hits = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name in SENTINEL_API_NAMES:
+                hits.add(node.name)
+        elif isinstance(node, ast.Name) and node.id in SENTINEL_API_NAMES:
+            if isinstance(node.ctx, ast.Load):
+                hits.add(node.id)
+        elif isinstance(node, ast.Attribute) and node.attr in SENTINEL_API_NAMES:
+            hits.add(node.attr)  # every context -- see the docstring
+        elif isinstance(node, ast.alias):
+            if node.name in SENTINEL_API_NAMES or node.asname in SENTINEL_API_NAMES:
+                hits.add(node.asname or node.name)
+    return hits
+
+
+def _api_names_bound_by(src):
+    """Sentinel API names this file binds by any STATIC binding form other than
+    `def` -- assignment, annotated assignment, walrus, augmented assignment, a
+    `for`/`with`/`except`/`match` target, or a class definition.
+
+    `mark_ever_converged = write_marker` publishes the writer under its public
+    name while matching none of the census needles: not a `def`, not an import
+    alias, not a Load of the name, and carrying no `ever_converged` literal.
+    Used by the exemption role check, which is a promise not to touch the
+    convention -- a stricter bar than the census's "which files use it".
+
+    NOT exhaustive, and the earlier claim that it refused these "by any means"
+    was wrong: a binding built at runtime -- `globals().update(...)`,
+    `setattr()` with a computed name, a dict export consumed elsewhere -- is
+    not visible to any static walk. What is enumerated is every form that
+    appears in this codebase; the rest is disclosed rather than implied."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return set()
+    api = set(SENTINEL_API_NAMES)
+    bound = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                bound |= _names_bound_by(target) & api
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr, ast.AugAssign)):
+            bound |= _names_bound_by(node.target) & api
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            bound |= _names_bound_by(node.target) & api
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            bound |= _names_bound_by(node.optional_vars) & api
+        elif isinstance(node, ast.ExceptHandler) and node.name in api:
+            bound.add(node.name)
+        elif isinstance(node, ast.MatchAs) and node.name in api:
+            bound.add(node.name)
+        elif isinstance(node, ast.ClassDef) and node.name in api:
+            bound.add(node.name)
+    return bound
+
+
+# Scripts that mention `ever_converged` WITHOUT touching the marker: the
+# census's loose needle would otherwise flag them forever. Membership here is
+# not trust -- the census re-checks every listed name for every executable
+# participation signal on every run, so a file that starts participating fails
+# even though it is listed.
+SENTINEL_NON_PARTICIPANTS = (
+    "backfill_resume_gate_ack.py",  # mirrors the shape for `.resume_gate_ack`
+    "resume_setup.py",              # cites mark_ever_converged()'s O_EXCL semantics
+)
+
+
+def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
+    """CENSUS. The drift test below pins the four copies in SENTINEL_SCRIPTS
+    against each other -- and would go on passing, quietly covering three
+    copies, if someone deleted one, or five, if someone added a fifth
+    elsewhere in scripts/. A pairwise-agreement test cannot see its own
+    population change; that is the whole reason this one exists beside it.
+
+    Not a hypothetical shape for this codebase: `draft_content_sha1` is
+    currently implemented in SEVEN scripts under assets/scripts/ (assemble,
+    draft_sha1, final_audit, ledger_merge, ledger_update, select_segments,
+    validate_assembled), each documented as byte-identical to the others.
+    A convention duplicated N ways is one edit away from being duplicated
+    N+1 ways with nothing pointing at the newcomer.
+
+    NEEDLE CHOICE matters and was measured, not assumed. THREE executable
+    needles pin the participants -- the marker f-string as actually written,
+    the predicate's `def` line, and `def ever_converged_path` -- and each
+    yields exactly these four today. The third is not redundant: it is
+    independent of how the marker FILENAME is spelled, so a participant that
+    builds the path as `".ever_converged." + seg` still trips it.
+
+    A FOURTH, deliberately loose needle scans for the bare token
+    `ever_converged` and pins the two files that legitimately mention it
+    without participating (SENTINEL_NON_PARTICIPANTS). Those two are checked
+    BY ROLE, not trusted by name: each is re-asserted every run to carry
+    none of the executable signals. Trusting a name is how a listed file
+    quietly becomes a participant -- the listing that excused its prose
+    mention goes on excusing its code.
+
+    A FIFTH needle is not a text scan at all. `_folded_str_literals()` reads
+    the VALUE each literal expression evaluates to, so `".ever_" +
+    "converged." + seg` is caught even though the source contains the token
+    nowhere. That shape was this census's known bypass for exactly one
+    revision, on the stated grounds that closing it needed import analysis
+    of import-free scripts -- which was wrong, and worth recording as the
+    error it was: `ast.parse()` reads source and imports nothing, so the
+    rationale for leaving the hole open did not survive being checked.
+
+    The non-participant exemptions are checked at OCCURRENCE granularity, not
+    file granularity. Both listed files already appear in every file-level
+    token set, because their docstrings discuss the marker -- so a file-level
+    role check cannot tell "discusses the convention" from "builds it", and a
+    real participant added inline to a listed file passed this whole census.
+    Measured, not hypothetical. The role check therefore re-scans each listed
+    file with docstrings dropped and requires ZERO remaining sites.
+
+    A SIXTH needle reads IDENTIFIERS, not literals, and it exists because
+    every one of the five above shares a blind spot none of them records:
+    they all ask what a file SPELLS, and participation needs no spelling at
+    all. `provider.classify_ever_converged_sentinel(provider.ever_converged_
+    path(seg))` is a genuine participant containing no `ever_converged`
+    literal anywhere -- measured, it passed all five, including the
+    occurrence-level exemption check. `_sentinel_api_refs()` closes it, and
+    incidentally closes a hole nobody had named: the `def` needles pin
+    `ever_converged_path` and `classify_ever_converged_sentinel` but never
+    the WRITER, so a third copy of `mark_ever_converged` could appear in a
+    whitelisted file and move none of the five sets.
+
+    WHAT THIS CENSUS DOES NOT ASK, and deliberately no longer tries to: it
+    pins WHICH files participate, never what they DO with the marker. A
+    participant that quietly reintroduces `ever_converged_path(seg).exists()`
+    -- the raw read this release removed -- passes every needle here.
+
+    A guard for that existed for four rounds and was removed. It tried to
+    recognise a raw read through variable bindings, and across three revisions
+    it was wrong on 12 of 16 constructs, then 7 of 28, then on a `match`
+    capture, a walrus in a default argument, a class-scope comprehension
+    iterable and a 64-deep alias chain. The narrowed syntactic replacement then
+    needed a whole-file veto to avoid firing on a shadowed parameter, and that
+    veto could be tripped by an UNRELATED shadow elsewhere in a participant --
+    silently disabling enforcement for that whole file, which is worse than no
+    guard because it looks like one. Four consecutive review rounds found their
+    only defects inside it and none in the code it was watching. A tripwire
+    whose own defect rate exceeds the drift it catches is not a tripwire, and
+    the honest disclosure is this paragraph rather than a fifth attempt.
+
+    What still pins the contract: the six needles below (WHO participates), the
+    `inspect.getsource` identity check (all four copies byte-identical), and
+    the five-state matrix (what the predicate ANSWERS).
+
+    KNOWN LIMITS, measured rather than asserted: the folder handles `+`,
+    implicit adjacency and f-string literal parts, but NOT `%`, `.format()`,
+    `"".join()` of constants, or separately formatted f-string constants; and
+    it treats f-string holes as empty, which can join fragments runtime keeps
+    apart (a false POSITIVE -- the safe direction). A path built from
+    non-literals at runtime still evades the five LITERAL needles -- but a
+    participant doing that has to reach the marker somehow, and reaching it
+    through the shared API trips the sixth. The residue is a file that
+    reimplements the whole convention from non-literal parts under its own
+    names, which is concealment, not drift. None of this makes the census
+    complete, and an earlier revision of this docstring overclaimed exactly
+    that.
+
+    THE SCAN PATTERN IS ITSELF A DEPENDENCY, and a narrowed one is the
+    failure this guard exists to catch, so it is checked by INDEPENDENT
+    ENUMERATION rather than by a floor on the count. Measured on the tree
+    that shipped 1.20.0: `*.py` scans 44 files, and the plausible typo
+    `*_*.py` scans 42 -- still finds all four participants, and still
+    satisfied every assertion here under the old `scanned > 10` floor. A
+    floor cannot separate "scanned everything" from "scanned almost
+    everything and happened to keep the needles"; walking the tree a second
+    way can. `rglob` + `os.walk` rather than `glob` + `iterdir` so a
+    participant added in a SUBDIRECTORY is seen by both -- the directory is
+    flat today, which is exactly when that blind spot is free to close.
+
+    Every set here is keyed by RELATIVE PATH, never basename. Two
+    enumerations that both discard directory identity agree with each other
+    while being wrong together: a nested copy of an existing participant
+    collapses onto it, both sets stay unchanged, and the census passes. That
+    is not hypothetical -- it was measured on a `nested/ledger_update.py`
+    that this test passed while keying on `py.name`. Agreement between two
+    mechanisms proves nothing about a property NEITHER of them records.
+
+    Fails in BOTH directions: a fifth participant makes the scanned set a
+    superset, deleting one makes it a subset, and the assertion prints the
+    symmetric difference either way."""
+    import os as _os
+
+    scripts_dir = ASSETS_DIR / "scripts"
+    assert scripts_dir.is_dir(), scripts_dir
+
+    path_builders = set()
+    predicate_copies = set()
+    path_helpers = set()
+    mentions_token = set()
+    builds_token = set()
+    api_refs = set()
+    scanned = set()
+    for py in sorted(scripts_dir.rglob("*.py")):
+        src = py.read_text(encoding="utf-8")
+        # RELATIVE PATH, never `py.name`: a basename discards directory
+        # identity, so a nested copy of an existing participant collapses onto
+        # it and every set below stays unchanged. Measured -- copying
+        # ledger_update.py to scripts/nested/ledger_update.py produced a fifth
+        # participant that this census PASSED while keying on basenames.
+        rel = py.relative_to(scripts_dir).as_posix()
+        scanned.add(rel)
+        if 'f".ever_converged.{seg}"' in src:
+            path_builders.add(rel)
+        if "def classify_ever_converged_sentinel" in src:
+            predicate_copies.add(rel)
+        if "def ever_converged_path" in src:
+            path_helpers.add(rel)
+        if "ever_converged" in src:
+            mentions_token.add(rel)
+        if any("ever_converged" in s for s in _folded_str_literals(src)):
+            builds_token.add(rel)
+        # The only needle that reads IDENTIFIERS rather than literals. Every
+        # other one can be evaded with no string at all -- see
+        # _sentinel_api_refs()'s docstring.
+        if _sentinel_api_refs(src):
+            api_refs.add(rel)
+
+    # The scan above is the one input every assertion below inherits, and a
+    # narrowed pattern keeps them all green (see docstring). Enumerate the same
+    # tree by a DIFFERENT mechanism -- os.walk plus a suffix test, no pattern
+    # matching at all -- and require the two to agree exactly.
+    inventory = {
+        (Path(root) / f).relative_to(scripts_dir).as_posix()
+        for root, _dirs, files in _os.walk(scripts_dir)
+        for f in files
+        if f.endswith(".py")
+    }
+    assert scanned == inventory, (
+        f"the scan pattern and an independent walk of {scripts_dir} disagree: "
+        f"{scanned ^ inventory}. The pattern is narrower (or wider) than "
+        f"'every .py under this directory', so every set built from it below is "
+        f"answering a different question than the one this test asks."
+    )
+
+    expected = set(SENTINEL_SCRIPTS)
+    assert path_helpers == expected, (
+        f"the set of scripts defining `ever_converged_path()` has changed: "
+        f"{path_helpers ^ expected}. This needle is independent of how the "
+        f"marker's FILENAME is spelled, so it catches a participant whose path "
+        f"literal the exact needle above misses."
+    )
+    assert mentions_token == expected | set(SENTINEL_NON_PARTICIPANTS), (
+        f"a script mentions `ever_converged` without being either a pinned "
+        f"participant or a pinned non-participant: "
+        f"{mentions_token ^ (expected | set(SENTINEL_NON_PARTICIPANTS))}. If it "
+        f"touches the marker, it is a participant and must join SENTINEL_SCRIPTS "
+        f"with the shared predicate; if it only refers to the convention in "
+        f"prose, add it to SENTINEL_NON_PARTICIPANTS -- which is checked by ROLE "
+        f"below, not merely trusted by name."
+    )
+    # The needle a raw text scan cannot be: this one sees the VALUE a literal
+    # evaluates to, so `".ever_" + "converged." + seg` and an f-string are both
+    # caught while neither contains the token contiguously in the source.
+    assert builds_token == expected | set(SENTINEL_NON_PARTICIPANTS), (
+        f"a script CONSTRUCTS a string containing `ever_converged` without being "
+        f"pinned: {builds_token ^ (expected | set(SENTINEL_NON_PARTICIPANTS))}. "
+        f"Concatenated or f-string spellings are caught here even when the raw "
+        f"text scan above misses them."
+    )
+    # The needle that needs no literal at all. Note the expected set has NO
+    # non-participants in it: a file may DISCUSS the marker in prose (and so sit
+    # in the two sets above), but referencing the API by name is participation,
+    # full stop. This is what separates the two.
+    assert api_refs == expected, (
+        f"the set of scripts REFERENCING the sentinel API by identifier has "
+        f"changed: {api_refs ^ expected}. Every needle above this one reads "
+        f"string literals, so a file that calls the helpers through an injected "
+        f"provider -- or defines its own copy of the writer -- is invisible to "
+        f"all of them. Add it to SENTINEL_SCRIPTS with the shared predicate, or "
+        f"remove the reference."
+    )
+    # A name on the non-participant list is not taken on trust: each one is
+    # re-checked every run for every executable participation signal. The
+    # failure this closes is a listed file QUIETLY BECOMING a participant, where
+    # the listing that excused its prose mention would otherwise excuse its code.
+    #
+    # `builds_token` cannot be used here, and that gap was a MEASURED
+    # false-green, not a theoretical one: both listed files are ALREADY in
+    # `builds_token` because their docstrings discuss the marker, so a real
+    # participant added inline -- `(segments_dir / (".ever_" + "converged." +
+    # seg)).lstat()` -- changed none of the five sets and passed every
+    # assertion. File granularity cannot separate DISCUSSING the convention
+    # from BUILDING it; occurrence granularity can. Hence the docstring-skipping
+    # scan: for these two files the count of non-docstring token sites is 0,
+    # and the mutant above makes it 1.
+    for name in SENTINEL_NON_PARTICIPANTS:
+        assert name not in path_builders | predicate_copies | path_helpers, (
+            f"{name} is on SENTINEL_NON_PARTICIPANTS but now carries an "
+            f"executable participation signal. It is a participant: move it to "
+            f"SENTINEL_SCRIPTS and give it the shared predicate."
+        )
+        executable_sites = [
+            s
+            for s in _folded_str_literals(
+                (scripts_dir / name).read_text(encoding="utf-8"), skip_docstrings=True
+            )
+            if "ever_converged" in s
+        ]
+        assert not executable_sites, (
+            f"{name} is on SENTINEL_NON_PARTICIPANTS but builds a string "
+            f"containing `ever_converged` OUTSIDE a docstring: "
+            f"{executable_sites}. Its exemption covers discussing the "
+            f"convention, not touching the marker -- move it to "
+            f"SENTINEL_SCRIPTS and give it the shared predicate."
+        )
+        # The literal check above still cannot see a file that participates
+        # WITHOUT a string: `provider.ever_converged_path(seg)` names the API
+        # and builds nothing. Measured -- that mutant passed both the file-level
+        # sets and the zero-non-docstring-literal count above.
+        exempt_src = (scripts_dir / name).read_text(encoding="utf-8")
+        api_used = _sentinel_api_refs(exempt_src)
+        assert not api_used, (
+            f"{name} is on SENTINEL_NON_PARTICIPANTS but references the sentinel "
+            f"API by identifier: {sorted(api_used)}. Naming a helper is using it, "
+            f"whether or not any `ever_converged` literal appears -- move it to "
+            f"SENTINEL_SCRIPTS and give it the shared predicate."
+        )
+        # An exempted file may not BIND an API name either. A `def` is caught
+        # above; an assignment is not, and `mark_ever_converged = write_marker`
+        # defines the writer's public name just as effectively -- measured,
+        # that shape passed every other check here. This is deliberately
+        # stricter than the census-wide needle: the census asks which files USE
+        # the API, while an exemption is a promise not to touch the convention
+        # at all.
+        #
+        # It is a NAME check, not a dataflow one, and both directions are
+        # approximate. It misses binding forms `_api_names_bound_by` does not
+        # walk (parameters, comprehension targets, `match` star and mapping-
+        # rest captures, imports -- though imports are caught upstream by
+        # `_sentinel_api_refs`). And it can fire on an unrelated local that
+        # merely COLLIDES with an API name, e.g. `for mark_ever_converged in
+        # items`. A false red here is loud and one rename fixes it; the miss
+        # is the direction that matters, and it is not closed.
+        bound_api_names = sorted(_api_names_bound_by(exempt_src))
+        assert not bound_api_names, (
+            f"{name} is on SENTINEL_NON_PARTICIPANTS but BINDS a sentinel API "
+            f"name: {bound_api_names}. Assigning the name publishes the helper "
+            f"under it. If this is an unrelated local that merely collides "
+            f"with an API name, rename the local; otherwise move the file to "
+            f"SENTINEL_SCRIPTS."
+        )
+    assert path_builders == expected, (
+        f"the set of scripts that BUILD the sentinel path has changed: "
+        f"{path_builders ^ expected}. Add it to SENTINEL_SCRIPTS (and give it "
+        f"the shared predicate), or remove it -- an unlisted participant is "
+        f"invisible to the drift test below."
+    )
+    assert predicate_copies == expected, (
+        f"the set of scripts carrying a copy of the shared predicate has "
+        f"changed: {predicate_copies ^ expected}. A script that builds the "
+        f"sentinel path but does NOT carry the predicate is the exact "
+        f"pre-1.19.1 state: a call site free to disagree with the writer."
+    )
+
+
+def test_sentinel_predicate_is_identical_in_all_four_scripts(tmp_path):
+    """The predicate is spelled in FOUR standalone scripts with no shared
+    import, so pin all four copies against each other across the WHOLE state
+    matrix -- not just the happy path. A drift test, not a second source of
+    truth, same technique as the filename pin below.
+
+    This is the test that keeps the fix from decaying back into the bug: the
+    bug WAS the sentinel's readers and its writer disagreeing about one path,
+    and a divergence reintroduced in any single copy is invisible to every
+    other test here, because that script's own tests would still agree with
+    it. Four copies means six pairs that can drift, so the comparison is
+    against one reference rather than pairwise.
+
+    NOTE the four map AMBIGUOUS to different ACTIONS on purpose (refuse,
+    refuse, count, report) -- that divergence is correct and lives at the call
+    sites. What must never diverge is the CLASSIFICATION, which is what this
+    pins."""
+    import os as _os
+
+    modules = {name: _load_script_module(name) for name in SENTINEL_SCRIPTS}
+    reference_name = SENTINEL_SCRIPTS[0]
+    reference = modules[reference_name]
+
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+
+    absent = segments_dir / "absent"
+    regular = segments_dir / "regular"
+    regular.write_text("converged\n", encoding="utf-8")
+    dangling = segments_dir / "dangling"
+    dangling.symlink_to(segments_dir / "no-such-target")
+    a_dir = segments_dir / "a_dir"
+    a_dir.mkdir()
+    locked_parent = segments_dir / "locked"
+    locked_parent.mkdir()
+    inaccessible = locked_parent / "sentinel"
+    inaccessible.write_text("converged\n", encoding="utf-8")
+
+    cases = [
+        ("absent (ENOENT)", absent, reference.SENTINEL_ABSENT),
+        ("ordinary regular file", regular, reference.SENTINEL_PRESENT),
+        ("dangling symlink", dangling, reference.SENTINEL_AMBIGUOUS),
+        ("directory", a_dir, reference.SENTINEL_AMBIGUOUS),
+    ]
+
+    _os.chmod(locked_parent, 0o000)
+    try:
+        cases.append(("EACCES lstat", inaccessible, reference.SENTINEL_AMBIGUOUS))
+        for label, path, expected_state in cases:
+            expected = reference.classify_ever_converged_sentinel(path)
+            assert expected[0] == expected_state, f"{label}: got {expected!r}"
+            for name, mod in modules.items():
+                got = mod.classify_ever_converged_sentinel(path)
+                assert got == expected, (
+                    f"{label}: {name} disagrees with {reference_name} about "
+                    f"the same path -- {name}={got!r} {reference_name}="
+                    f"{expected!r}. That disagreement IS the 1.19.1 data-loss "
+                    f"bug; it does not matter which of the two is 'right'."
+                )
+    finally:
+        _os.chmod(locked_parent, 0o755)
+
+    import inspect
+
+    for name, mod in modules.items():
+        assert (
+            mod.SENTINEL_ABSENT,
+            mod.SENTINEL_PRESENT,
+            mod.SENTINEL_AMBIGUOUS,
+        ) == (
+            reference.SENTINEL_ABSENT,
+            reference.SENTINEL_PRESENT,
+            reference.SENTINEL_AMBIGUOUS,
+        ), f"{name}: state names must match {reference_name}'s, not just the behavior"
+
+        for fn in ("classify_ever_converged_sentinel", "_sentinel_entry_kind"):
+            assert inspect.getsource(getattr(mod, fn)) == inspect.getsource(
+                getattr(reference, fn)
+            ), (
+                f"{name}.{fn} has drifted from {reference_name}'s copy. The "
+                f"four are meant to be textually identical: the matrix above "
+                f"samples five states, so a drift in the detail strings, in "
+                f"the entry-kind names, or in a branch it does not reach "
+                f"would otherwise pass unseen"
+            )
 
 
 def test_sentinel_filename_matches_the_writer_in_ledger_update(tmp_path):
