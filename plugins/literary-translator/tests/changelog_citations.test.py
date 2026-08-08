@@ -109,8 +109,13 @@ CITATION_ANCHORS = {
     # Anchored on all three: the entry's claim is specifically that the run id
     # is resolved BEFORE selection and forwarded WITH its resume value, so
     # losing any one of the three would falsify the sentence.
-    "segment_dispatch_driver.py:4857-4878": [
-        "resolve_run_id(",
+    "segment_dispatch_driver.py:4963-4984": [
+        # The CALL, not the bare name: "resolve_run_id(" also appears in a
+        # comment a dozen lines above the call (and 13 other places in this
+        # file), and a bare-name anchor resolved to the comment -- starting
+        # the citation in prose ABOUT the code and widening the range by 11
+        # lines, with the test still green.
+        "run_result = resolve_run_id(",
         "run_select_segments(",
         "run_resume=run_resume_literal",
     ],

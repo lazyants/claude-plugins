@@ -247,16 +247,47 @@ def test_parse_claims_field_valid_multi_entry_both_profiles():
 
 def _minimal_claim_dirs(tmp_path):
     """A `dirs`-shaped dict carrying only what claim_refusal_for_translate()
-    itself reads: scripts_dir (must hold a real claim_record.py, loaded via
-    the same verify-then-reopen-by-path discipline the driver uses for
-    every other in-process-executed sibling) and runs_dir (where the
-    per-run claim record lives, #438 D4)."""
+    itself reads: scripts_dir (must hold a real claim_record.py AND
+    draft_sha1.py, both loaded via the same verify-then-reopen-by-path
+    discipline the driver uses for every other in-process-executed
+    sibling), runs_dir (where the per-run claim record lives, #438 D4) and
+    durable_root (whose segments/ holds the draft whose dispatch_token
+    names the CURRENT owner).
+
+    durable_root and draft_sha1.py were added when D8 gained its cross-run
+    half. Before that, this guard only ever looked in its own run's claim
+    namespace, so a fixture with neither was sufficient -- which is
+    precisely why the cross-run hole was invisible from here: the fixture
+    could not represent a draft owned by somebody else, so no test could
+    have expressed the case."""
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir()
     shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
+    shutil.copy2(SCRIPTS_SRC_DIR / "draft_sha1.py", scripts_dir / "draft_sha1.py")
     runs_dir = tmp_path / "runs"
     runs_dir.mkdir()
-    return {"scripts_dir": scripts_dir, "runs_dir": runs_dir}
+    durable_root = tmp_path / "durable"
+    (durable_root / "segments").mkdir(parents=True)
+    return {"scripts_dir": scripts_dir, "runs_dir": runs_dir,
+            "durable_root": durable_root}
+
+
+def _write_draft(ctx, seg, *, token=None, text="ORIGINAL DRAFT TEXT", raw=None):
+    """Puts a draft at the canonical path D8 reads to learn the current
+    owner. `raw` writes bytes verbatim, for the not-JSON / not-an-object
+    cases; otherwise a minimal valid draft, with `dispatch_token` present
+    only when `token` is given (a tokenless draft is what every pre-1.2.0
+    project has)."""
+    path = ctx.dirs["durable_root"] / "segments" / f"{seg}.draft.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if raw is not None:
+        path.write_text(raw, encoding="utf-8")
+        return path
+    doc = {"seg": seg, "text": text}
+    if token is not None:
+        doc["dispatch_token"] = token
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
 
 
 def _minimal_ctx(tmp_path, run_id="testrun"):
@@ -1171,3 +1202,122 @@ def test_claims_field_is_required_and_propagates_through_the_empty_segs_result(t
     assert payload["success"] is True
     assert payload["segs"] == []
     assert payload["claims"] == {}
+
+
+# ---------------------------------------------------------------------------
+# D8's CROSS-RUN half. The guard used to build its lookup path out of
+# ctx.run_id alone, so it could only ever see its OWN namespace: an ordinary
+# later run failed the token gate, found nothing under its own id, read that
+# as "unclaimed", and dispatched translate over a draft another run was
+# actively holding. Every test below distinguishes "this run has not claimed
+# seg" from "seg is unclaimed" -- the conflation that was the defect.
+# ---------------------------------------------------------------------------
+
+RUN_A = "20260101T000000Z"
+RUN_B = "20260202T000000Z"
+
+
+def _ctx_with_foreign_claim(tmp_path, *, hold=True, token=RUN_A + ":seg01", raw=None):
+    ctx = _minimal_ctx(tmp_path, run_id=RUN_B)
+    if hold:
+        path = CLAIM_RECORD.claimed_path(RUN_A, "seg01", ctx.dirs["runs_dir"])
+        ok, detail = CLAIM_RECORD.write_claim_record(
+            path, _fixture_claim_payload(CLAIM_RECORD, "seg01", RUN_A))
+        assert ok, detail
+    _write_draft(ctx, "seg01", token=token, text="HAND EDIT OWNED BY RUN A", raw=raw)
+    return ctx
+
+
+def test_D8_refuses_translate_over_a_draft_a_DIFFERENT_run_holds(tmp_path):
+    """THE REPORTED DEFECT. Run A holds a live claim on seg01 and the draft
+    carries A's token. Run B -- an ordinary invocation that claims nothing --
+    must be refused, because dispatching translate here overwrites the
+    hand-edited draft this whole feature exists to protect.
+
+    Reproduced end-to-end through the real process_segment() before the fix:
+    B failed the token gate, found no record under RUN_B, dispatched translate
+    AND review, replaced the text, and stamped its own token while A's claim
+    record sat there untouched.
+
+    THE MUTATION THAT MAKES THIS FAIL: restore `return None` in place of the
+    _foreign_claim_refusal_for_translate() call on the CLAIM_ABSENT branch of
+    claim_refusal_for_translate(). Measured: this test's `is not None`
+    assertion fails, and the three no-regression tests below stay green --
+    which is the boundary that matters, since a guard that refuses everything
+    would satisfy this test alone."""
+    ctx = _ctx_with_foreign_claim(tmp_path)
+
+    refusal = DRIVER.claim_refusal_for_translate(ctx, "seg01")
+
+    assert refusal is not None, (
+        "run B must not translate over a draft run A holds a live claim on"
+    )
+    assert RUN_A in refusal, f"the refusal must NAME the owning run: {refusal!r}"
+    assert "#438 D8" in refusal, refusal
+    assert "OWNED BY RUN" in refusal, refusal
+
+
+def test_D8_still_allows_the_ordinary_first_translation_with_no_draft(tmp_path):
+    """The single most important no-regression case: with no draft on disk
+    there is nothing to overwrite, and this is what EVERY normal dispatch
+    looks like. A guard that refused "cannot determine the owner" as one
+    undifferentiated case would block the entire pipeline."""
+    ctx = _minimal_ctx(tmp_path, run_id=RUN_B)
+    assert DRIVER.claim_refusal_for_translate(ctx, "seg01") is None
+
+
+def test_D8_still_allows_a_tokenless_draft(tmp_path):
+    """A draft with no dispatch_token asserts no ownership -- and is what
+    every pre-1.2.0 project has on disk. Refusing these would be a silent
+    regression with nothing to do with claims."""
+    ctx = _minimal_ctx(tmp_path, run_id=RUN_B)
+    _write_draft(ctx, "seg01", token=None)
+    assert DRIVER.claim_refusal_for_translate(ctx, "seg01") is None
+
+
+def test_D8_still_allows_a_foreign_token_that_nobody_actually_holds(tmp_path):
+    """The token names run A but A holds NO claim record. Nothing releases a
+    claim, so ownership has to be read off the token plus a LIVE record, never
+    off the token alone -- and draft_ready.py reports this same state as
+    closer to a LOST claim than a live one. Blocking it would strand the
+    recovery.
+
+    This is also why the fix does not enumerate runs/*/.claimed.<seg>: records
+    are immortal, so any once-claimed segment would become permanently
+    un-translatable by anybody."""
+    ctx = _ctx_with_foreign_claim(tmp_path, hold=False)
+    assert DRIVER.claim_refusal_for_translate(ctx, "seg01") is None
+
+
+def test_D8_still_allows_a_draft_stamped_by_THIS_run(tmp_path):
+    """Own token, no foreign owner -- the ordinary resume case."""
+    ctx = _minimal_ctx(tmp_path, run_id=RUN_B)
+    _write_draft(ctx, "seg01", token=f"{RUN_B}:seg01")
+    assert DRIVER.claim_refusal_for_translate(ctx, "seg01") is None
+
+
+@pytest.mark.parametrize("raw,label", [
+    ("{not json", "not valid JSON"),
+    ('["a list"]', "not a JSON object"),
+])
+def test_D8_refuses_a_draft_whose_owner_cannot_be_read(tmp_path, raw, label):
+    """Content exists and this run cannot establish who owns it. Same
+    direction the pre-existing AMBIGUOUS branch takes, and for the same
+    reason: failing to block is the destructive direction, while over-blocking
+    only leaves the segment recoverable for the next invocation."""
+    ctx = _minimal_ctx(tmp_path, run_id=RUN_B)
+    _write_draft(ctx, "seg01", raw=raw)
+    refusal = DRIVER.claim_refusal_for_translate(ctx, "seg01")
+    assert refusal is not None, f"a draft that is {label} must not be overwritten"
+    assert "#438 D8" in refusal, refusal
+
+
+def test_D8_refuses_when_the_token_names_an_unusable_run_id(tmp_path):
+    """A run id claim_record.py will not build a path from. The driver cannot
+    look the owner up at all, which is strictly worse than a record it cannot
+    read -- so it refuses rather than treating "cannot look" as "nobody
+    there"."""
+    ctx = _ctx_with_foreign_claim(tmp_path, hold=False, token="../../etc:seg01")
+    refusal = DRIVER.claim_refusal_for_translate(ctx, "seg01")
+    assert refusal is not None
+    assert "#438 D8" in refusal, refusal
