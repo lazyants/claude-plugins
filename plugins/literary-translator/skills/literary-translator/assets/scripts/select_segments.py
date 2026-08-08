@@ -2175,13 +2175,53 @@ def rewrite_draft_dispatch_token(
     whatever occupies the path at this later moment -- after S1's and S2's
     subprocesses, the segpack scan, a cache_key.py subprocess and the claim
     record's own write -- and hand this run's dispatch_token to a draft that
-    passed nothing. THE ORDER IS WHAT MAKES THE CHECK REAL: the draft is
-    read exactly ONCE, the bytes to be installed are staged into the temp
-    file, and the check hashes THE STAGED FILE. There is no window between
-    "the file I checked" and "the file I install" for anything to slip
-    through, because they are the same bytes -- a check that re-read the
-    live path a second time would be a second sample, and a second sample is
-    a second chance to be handed a different file.
+    passed nothing. THE ORDER IS WHAT MAKES THE STAGED CHECK REAL: the draft
+    is read exactly ONCE, the bytes to be installed are staged into the temp
+    file, and the check hashes THE STAGED FILE. The bytes that were checked
+    and the bytes that get installed are therefore literally the same bytes
+    -- a check that hashed the live path INSTEAD would be gating the install
+    on a second sample of a file that may since have moved, i.e. on
+    something other than what it is about to install.
+
+    TWO CHECKS, TWO DIFFERENT QUESTIONS -- and the staged one answers only
+    the first. "Are the bytes I am about to install the ones admission
+    gated?" is answered by hashing the staged file. "Is the file I am about
+    to DESTROY still the one admission gated?" is NOT: os.replace() below is
+    unconditional, and between the single read at the top of this function
+    and that rename sit the staging write, an fsync and a hash. An edit
+    landing in THAT window never touches the staged bytes, so the staged
+    check passes and the rename silently discards the newer edit -- and
+    protecting hand edits is the entire point of this release, so a generic
+    "last writer wins" is not an acceptable answer here. Hence a SECOND
+    comparison, against the same admitted hash: the canonical draft is
+    re-read immediately before the rename and the rewrite refuses if it
+    moved. The "second sample" objection above does not apply to it, because
+    it never decides WHAT to install -- that is still, only, the staged
+    bytes -- it decides WHETHER to install at all, and a check that can only
+    ever add refusals cannot admit anything the staged check would have
+    refused. The idempotent no-op path returns BEFORE it, deliberately: that
+    path installs nothing and so cannot overwrite anything, and its identity
+    guarantee is the staged check exactly as before.
+
+    THE RESIDUAL, STATED NARROWLY, because an overstated mitigation is worse
+    than a disclosed one -- nobody attacks a hole that reads as already
+    closed. This NARROWS the window; it does not eliminate it. What stays
+    open is the gap between that final hash and the os.replace() a few
+    statements later: an edit landing THERE is still overwritten. That is a
+    few syscalls instead of the whole staging + fsync + hashing span, but it
+    is not zero, and nothing in this file can make it zero. Two further
+    limits belong in the same breath rather than in a footnote: the
+    comparator is draft_content_sha1(), which projects `dispatch_token` OUT
+    (it must -- changing that field is this function's entire job), so a
+    concurrent writer that moved ONLY the token is invisible to BOTH checks;
+    and a refusal is detection, not prevention -- it declines to overwrite,
+    it cannot stop the other writer, and the two edits still have to be
+    reconciled by hand afterwards. Closing the class properly needs
+    something the filesystem does not offer: an atomic compare-and-swap
+    rename, or a lock honoured by EVERY writer -- including a human in a
+    text editor, which is precisely the writer this feature exists to
+    protect and the one least likely to take a lock. Do not upgrade this
+    paragraph's claim without first upgrading the mechanism.
 
     Hashing the staged file also means the comparator is draft_content_sha1()
     itself -- the function that OWNS this hash, seven byte-identical copies
@@ -2321,6 +2361,35 @@ def rewrite_draft_dispatch_token(
         # touched, so a re-claim remains byte-for-byte a no-op.
         _unlink_quietly(tmp_path)
         return True, ""
+
+    # The second half of the identity check -- see "TWO CHECKS, TWO DIFFERENT
+    # QUESTIONS" above. The staged hash proved what goes IN; this proves that
+    # what is about to be OVERWRITTEN is still the draft admission gated,
+    # which is the only question that protects a hand edit landing while this
+    # claim was being staged. Deliberately the LAST statement before the
+    # rename: every statement inserted between these two widens the exact
+    # window this exists to narrow, and the window is all this buys.
+    try:
+        current_sha1 = draft_content_sha1(dp)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        _unlink_quietly(tmp_path)
+        return False, (
+            f"could not re-read {dp} immediately before installing the re-stamped "
+            f"draft: {exc}. It was readable and well-formed at the top of this call, "
+            f"so something changed it underneath this invocation; refusing to replace "
+            f"a file this call can no longer identify. Nothing was installed"
+        )
+    if current_sha1 != expected_content_sha1:
+        _unlink_quietly(tmp_path)
+        return False, (
+            f"the draft on disk changed WHILE this claim was being staged: its content "
+            f"sha1 (dispatch_token projected out) is now {current_sha1}, but the "
+            f"admission gates ran against {expected_content_sha1}. Installing the "
+            f"re-stamped draft would overwrite that newer edit, which is the one thing "
+            f"this claim exists to protect; refusing. Nothing was installed -- "
+            f"reconcile the edit and re-run the claim so the gates evaluate the draft "
+            f"that is actually there"
+        )
 
     try:
         os.replace(tmp_path, dp)

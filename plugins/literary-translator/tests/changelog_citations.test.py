@@ -50,22 +50,22 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # only pins where the range STARTS, and a claim can slide out of the far end.
 CITATION_ANCHORS = {
     # --- claim_record.py: the shared contract module -----------------------
-    "claim_record.py:187-233": ["_RUN_ID_DIR_RE.fullmatch", '".." in run_id'],
+    "claim_record.py:190-236": ["_RUN_ID_DIR_RE.fullmatch", '".." in run_id'],
     # Anchored at BOTH ends: the validate call pins where the range starts,
     # the raise pins that the refusal itself is still inside it. A claimed
     # path that merely VALIDATES and then returns anyway would keep the first
     # anchor and lose the claim.
-    "claim_record.py:238-266": ["def claimed_path", "raise ValueError"],
-    "claim_record.py:270-304": ["lstat()", "S_ISREG"],
-    "claim_record.py:417-426": ["pre_claim_review", "cache_key_at_claim"],
-    "claim_record.py:484-536": ["_O_DIRECTORY", "os.fsync"],
+    "claim_record.py:241-269": ["def claimed_path", "raise ValueError"],
+    "claim_record.py:273-307": ["lstat()", "S_ISREG"],
+    "claim_record.py:467-476": ["pre_claim_review", "cache_key_at_claim"],
+    "claim_record.py:534-586": ["_O_DIRECTORY", "os.fsync"],
     # --- select_segments.py: the only component that may MINT a claim ------
-    "select_segments.py:2852": ["write_claim_record"],
+    "select_segments.py:2921": ["write_claim_record"],
     # The re-stamp, and the hash it is checked against. Both anchored: the
     # ordering claim in the entry is about these two calls in this order.
-    "select_segments.py:2893-2897": ["rewrite_draft_dispatch_token", "expected_content_sha1"],
-    "select_segments.py:2267": ["os.O_EXCL", "_O_NOFOLLOW"],
-    "select_segments.py:2308-2313": ["staged_sha1 != expected_content_sha1", "Something replaced or edited"],
+    "select_segments.py:2962-2966": ["rewrite_draft_dispatch_token", "expected_content_sha1"],
+    "select_segments.py:2307": ["os.O_EXCL", "_O_NOFOLLOW"],
+    "select_segments.py:2348-2353": ["staged_sha1 != expected_content_sha1", "Something replaced or edited"],
     # --- the two components that may only REFUSE ---------------------------
     "codex_job.py:1431-1433": ["_refuse_claimed_translate()", "claimed-segment-refused"],
     # Anchored on all three: the entry's claim is specifically that the run id

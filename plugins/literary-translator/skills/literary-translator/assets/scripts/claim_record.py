@@ -63,10 +63,13 @@ authorized.
 questions and are not interchangeable.** classify_claim_record() is `lstat`
 plus `S_ISREG` and nothing more: it establishes that something occupies the
 path and that the something is a regular file. It never opens the file, so a
-ZERO-LENGTH record, a record holding `null`, and a record torn by a crash
-between the exclusive create and the fsync ALL classify PRESENT. The
-AMBIGUOUS verdict for a torn record comes from read_claim_record()'s JSON
-parse, never from the classifier.
+ZERO-LENGTH record, a record holding `null`, a record whose bytes are not
+valid UTF-8, and a record torn by a crash between the exclusive create and
+the fsync ALL classify PRESENT. The AMBIGUOUS verdict for any of those comes
+from read_claim_record()'s own decode and JSON parse, never from the
+classifier -- and it comes back as a RETURNED verdict in every one of those
+cases, never as a raised exception, which is a property read_claim_record()'s
+own docstring spells out because it was once untrue for the decode.
 
 That split is deliberate, and both directions are load-bearing:
 
@@ -317,12 +320,59 @@ def read_claim_record(path: Path):
     is a record whose pre-claim baseline is gone, and proceeding on one
     would silently discard the only evidence of what the draft looked like
     before the claim.
+
+    THAT PROMISE IS TOTAL -- IT RETURNS A VERDICT, IT DOES NOT RAISE ONE --
+    and the decode is the clause that nearly broke it. `read_text` fails in
+    two unrelated ways that share no base class: an IO failure raises
+    OSError, while a body that is not valid UTF-8 raises UnicodeDecodeError,
+    a subclass of ValueError that `except OSError` does not catch. Left
+    uncaught, a record holding invalid bytes RAISED out of here instead of
+    returning AMBIGUOUS -- falsifying the paragraph above, which every reader
+    maps to its own safe direction on the strength of, and which is the only
+    statement of the contract they have.
+
+    The escape was safe in DIRECTION (nothing downstream grants a claim on a
+    traceback) and expensive in BLAST RADIUS, which is the half that made it
+    worth fixing rather than documenting: neither of select_segments.py's two
+    call sites guards this call -- evaluate_lost_token_recovery()'s read, and
+    the re-read of an already-claimed record inside run()'s claim block -- so
+    ONE segment's malformed record aborted the entire admission batch,
+    contradicting the per-id isolation that same file states for every other
+    unreadable artifact (_run_leaf_gate(): "a per-id failure here becomes THIS
+    id's own claim-admission reason, never a whole-run crash";
+    read_json_nonfatal(): "must fail THAT id's admission alone, never take
+    down the whole batch"). Both of those already spell exactly this
+    three-clause read, down to the separate "not valid UTF-8" wording, and
+    this one now matches them. The wording is not cosmetic either:
+    "unreadable" sends an operator to check permissions on a file whose
+    permissions are fine.
+
+    Deliberately NOT widened to a blanket `except Exception`. The failures a
+    reader can actually produce here are enumerable -- classify_claim_record()
+    has already absorbed every lstat OSError, and what remains is IO, decode
+    and parse -- and a catch-all would launder a programming error into
+    AMBIGUOUS, which reads as a fact about the disk. draft_ready.py's
+    `_claim_note()` does catch broadly, and its own comment says why that is
+    right THERE and not here: it is a never-fatal enrichment probe, so it
+    trades diagnosis for survival. This function is the diagnosis.
     """
     state, detail = classify_claim_record(path)
     if state != CLAIM_PRESENT:
         return (state, None, detail)
     try:
         raw = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        # Listed first to mirror select_segments.py's read_json_nonfatal() /
+        # read_segpack_nonfatal(); the ORDER is cosmetic (the two classes are
+        # unrelated, so neither can shadow the other), the separate clause is
+        # not. This one names `path` and the OSError clause below does not,
+        # because UnicodeDecodeError carries the offending BYTE and no
+        # filename, while an OSError's own str() already carries the filename.
+        return (
+            CLAIM_AMBIGUOUS,
+            None,
+            f"claim record at {path} is not valid UTF-8: {exc}",
+        )
     except OSError as exc:
         return (CLAIM_AMBIGUOUS, None, f"claim record unreadable: {exc}")
     try:

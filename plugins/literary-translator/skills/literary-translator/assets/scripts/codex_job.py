@@ -1636,13 +1636,60 @@ def main(argv=None):
     # DERIVATION -- the next reader will assume the deliberate "RUN_ID is NEVER
     # derived from --expect-token" rule (see _build_parser()'s own --run-id
     # comment) was broken here. It is not: the token's run component is never
-    # ADOPTED as the run id. A token that carries no run component at all (no
-    # colon, or an empty leading component) is left alone for exactly that reason
-    # -- deriving nothing from it is the point, and the gates already refuse a
-    # malformed token on their own. Only an actual DISAGREEMENT between two present
-    # values is fatal, because that can only be a mis-wired caller.
+    # ADOPTED as the run id, and a token that carries none is REFUSED rather than
+    # mined for one. Non-derivation is a rule about where RUN_ID comes FROM (the
+    # caller, always, even when the token would have yielded the same string); it
+    # says nothing about whether a malformed token may be waved through.
+    #
+    # A TOKEN WITH NO RUN COMPONENT IS FATAL, NOT SKIPPED. An earlier revision
+    # skipped this whole check whenever the token had no colon, or an empty leading
+    # component, justifying the skip with "the gates already refuse a malformed
+    # token on their own". That justification is FALSE on the one path that matters
+    # -- the DESTRUCTIVE one. The gates refuse the EXISTING draft, and refusing the
+    # existing draft is precisely what makes run() treat the segment as needing
+    # work and launch a fresh translate; the post-launch os.replace then destroys
+    # the claimed draft (and with it the pre_claim_content_sha1 baseline taken from
+    # it), and the gates re-run against codex's NEW attempt, whose dispatch_token is
+    # whatever the prompt told it to stamp -- so the malformed token never has to
+    # satisfy anything. The gates protect the old bytes from being ADOPTED; they do
+    # not protect them from being OVERWRITTEN, which is the harm D8 exists to stop.
+    # Measured by driving the real main() with a deliberately-missing --companion,
+    # so the NEXT check's own message says whether this block fired at all:
+    # `--expect-token RUN-A:<seg> --run-id RUN-B` and `RUN-A:<seg>:r2 --run-id
+    # RUN-B` were refused by the disagreement branch below, while `BOGUS`,
+    # `:<seg>` and `""` all sailed past into the companion check with --run-id
+    # RUN-B entirely unexamined. From there the rest follows from this
+    # file: a claim minted under RUN-A is invisible to a lookup under RUN-B, and
+    # _refuse_claimed_translate() returns refuse=False on CLAIM_ABSENT (see its
+    # `if state == claim_record.CLAIM_ABSENT: return False, ...` branch), so run()
+    # proceeds to adopt_pending()/launch() over a segment another run holds.
+    #
+    # Refusing costs nothing legitimate: --expect-token is required=True (see
+    # _build_parser()), and EVERY legitimate value is <RUN_ID>:<seg> or
+    # <RUN_ID>:<seg>:r<label> -- mass-translate-wf.template.js builds RUN_ID + ":" +
+    # seg (and + ":r" + roundLabel), segment_dispatch_driver.py's
+    # translate_dispatch_token()/review_dispatch_token() build the same two shapes
+    # from ctx.run_id -- and a validated RUN_ID can never contain a ':' itself
+    # (claim_record.validate_run_id()'s own pattern excludes it), so the run
+    # component is always exactly the text before the FIRST colon. A token with no
+    # colon, or with an empty leading component, is therefore not a case to tolerate
+    # but a mis-wired caller, and the whole point of #438 is that a chokepoint must
+    # answer a mis-wired caller loudly instead of degrading into "cannot compare, so
+    # proceed".
     token_run_id, token_colon, _token_rest = args.expect_token.partition(":")
-    if token_colon and token_run_id and token_run_id != args.run_id:
+    if not token_colon or not token_run_id:
+        print(
+            "Error: --expect-token %r carries no run component -- it must be "
+            "spelled <RUN_ID>:<seg> (translate) or <RUN_ID>:<seg>:r<label> "
+            "(review). Without one there is nothing to check --run-id against, and "
+            "an unchecked --run-id is free to name a foreign claim namespace: the "
+            "lookup at runs/<RUN_ID>/.claimed.<seg> then finds nothing, which reads "
+            "as 'not claimed' and would let a claimed segment be re-translated over."
+            % (args.expect_token,),
+            file=sys.stderr,
+        )
+        return 2
+    if token_run_id != args.run_id:
         print(
             "Error: --expect-token names run %r but --run-id is %r -- the claim "
             "namespace this driver reads (runs/<RUN_ID>/.claimed.<seg>) must be "

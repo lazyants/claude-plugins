@@ -547,6 +547,13 @@ def test_job_out_count_must_be_exactly_one(tmp_path, text):
 # (#438 M3). main() previously checked only that --run-id was non-blank, then
 # handed the raw value to claim_record.claimed_path(); and nothing tied the
 # claim NAMESPACE (--run-id) to the run the token dispatches for.
+#
+# THREE checks live here now, in main()'s own order: the --run-id shape check,
+# then "--expect-token must carry a run component at all", then "that component
+# must equal --run-id". The middle one arrived last and is the reason the tests
+# below deliberately leave ONE later defect in an otherwise-valid argv: all
+# three exit 2, so only the MESSAGE says which of them answered, and a check
+# that stops firing is otherwise invisible behind the next one down.
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("bad_run_id", ["../x", "/tmp/elsewhere", "z..poison",
                                         "a/../..", " RUN", "."])
@@ -585,14 +592,26 @@ def test_usage_expect_token_and_run_id_must_name_the_same_run(tmp_path, capsys, 
     assert "--expect-token" in err and "RUN-A" in err and "RUN-B" in err, err
 
 
-def test_usage_agreeing_token_and_run_id_clear_both_new_checks(tmp_path, capsys):
-    """The control the two tests above need: a matching pair must PASS both new
-    checks rather than being refused by a check that refuses everything. Proven
-    by leaving exactly one LATER defect in the argv (a --companion that does not
-    exist) and asserting the exit 2 comes from THAT check -- main() cannot reach
-    the companion check without having cleared the run-id shape and namespace
-    checks, both of which sit above it."""
-    argv = _argv(tmp_path, run_id="RUN", expect_token="RUN:c001",
+@pytest.mark.parametrize("token", ["RUN:c001", "RUN:c001:r2"])
+def test_usage_agreeing_token_and_run_id_clear_every_new_check(tmp_path, capsys, token):
+    """The control the two tests above and the one below all need: a well-formed
+    token whose run component AGREES with --run-id must PASS all three checks
+    this block added (--run-id shape, token-carries-a-run-component,
+    token-vs---run-id) rather than being cleared by checks that refuse
+    everything. Proven by leaving exactly one LATER defect in the argv (a
+    --companion that does not exist) and asserting the exit 2 comes from THAT
+    check -- main() cannot reach the companion check without having cleared all
+    three, every one of which sits above it.
+
+    BOTH legitimate token shapes are covered. The run component is everything
+    before the FIRST colon, so a review token has one colon more than the check
+    needs and must still clear it: were the check to demand exactly one colon,
+    every review dispatch the shipped template makes
+    (mass-translate-wf.template.js:1028 builds RUN_ID + ":" + seg + ":r" +
+    roundLabel, segment_dispatch_driver.py's review_dispatch_token() the same
+    shape) would be refused at the chokepoint, which no test asserting only the
+    translate form would notice."""
+    argv = _argv(tmp_path, run_id="RUN", expect_token=token,
                  companion=str(tmp_path / "definitely_not_here.mjs"))
     assert codex_job.main(argv) == 2
     err = capsys.readouterr().err
@@ -600,20 +619,49 @@ def test_usage_agreeing_token_and_run_id_clear_both_new_checks(tmp_path, capsys)
     assert "--run-id" not in err and "--expect-token" not in err, err
 
 
-def test_usage_token_with_no_run_component_is_left_alone(tmp_path, capsys):
-    """The deliberate non-derivation rule, pinned. A token carrying NO run
-    component (no colon at all) must NOT be refused: codex_job.py never DERIVES
-    a run id from --expect-token -- deriving one is what would turn a malformed
-    token into "no claim record" -> "not claimed" -> proceed -- so there is
-    nothing to compare and nothing to refuse, and the gates refuse a malformed
-    token on their own account. Drop the `token_colon` guard from the namespace
-    check and this argv is refused with the token message instead."""
-    argv = _argv(tmp_path, run_id="RUN", expect_token="notoken",
+@pytest.mark.parametrize("token", ["notoken", "BOGUS", ":c001", "", ":"])
+def test_usage_token_with_no_run_component_is_refused(tmp_path, capsys, token):
+    """A token carrying NO run component -- no colon at all, or an empty leading
+    component -- is FATAL, not skipped.
+
+    This test replaces one that asserted the OPPOSITE (it was named
+    `..._is_left_alone`). That test pinned a deliberate skip whose stated
+    rationale was "the gates already refuse a malformed token on their own":
+    true of ADOPTING the existing draft, false of DESTROYING it. Refusing the
+    existing draft is exactly what makes run() treat the segment as needing work
+    and launch a fresh translate, whose post-launch os.replace overwrites the
+    claimed draft and the pre_claim_content_sha1 baseline taken from it; the
+    gates then re-run against codex's NEW attempt, whose dispatch_token is
+    whatever the prompt told it to stamp, so the malformed token never has to
+    satisfy anything. Meanwhile --run-id went entirely unexamined and was free
+    to name a foreign claim namespace, where the lookup finds nothing,
+    CLAIM_ABSENT reads as "not claimed", and the D8 chokepoint is walked. The
+    non-derivation rule is untouched by refusing here: it governs where RUN_ID
+    comes FROM (the caller, always), not whether a malformed token is tolerated.
+
+    The argv carries exactly one LATER defect (a --companion that does not
+    exist), and that is what makes this a real assertion in both directions.
+    Restore the lenient predicate and the argv is STILL refused with exit 2 --
+    by the companion check, several checks lower -- so the exit code alone
+    proves nothing here and the MESSAGE is the assertion. The same defect is
+    what proves this refusal is REACHABLE: nothing above it can see a malformed
+    token (argparse only makes --expect-token `required`, it never
+    pattern-checks the value; validate_seg reads --seg, not the token), so if
+    something earlier had rejected these argvs the message would name --kind or
+    --seg, and if nothing had, it would name --companion."""
+    argv = _argv(tmp_path, run_id="RUN", expect_token=token,
                  companion=str(tmp_path / "definitely_not_here.mjs"))
-    assert codex_job.main(argv) == 2          # from the companion check, below both
+    assert codex_job.main(argv) == 2
     err = capsys.readouterr().err
-    assert "--companion" in err, err
-    assert "--expect-token" not in err, err
+    assert "--expect-token" in err and "run component" in err, err
+    assert "--companion" not in err, (
+        "the token check must fire ABOVE the companion check -- a --companion "
+        "message here means a token with no run component was waved through "
+        "again, leaving --run-id free to name a foreign claim namespace: %s" % err
+    )
+    assert "--seg" not in err, (
+        "refused by an EARLIER check than the one under test -- got: %s" % err
+    )
 
 
 # --------------------------------------------------------------------------- #

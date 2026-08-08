@@ -43,6 +43,23 @@ Claim records are written through claim_record.py's OWN `build_claim_record`
 exercise the real write discipline (exclusive create, directory fsync) rather
 than a stand-in for it. See `_write_claim()` for exactly which field-set
 drift that does and does not catch.
+
+THAT FIXTURE CHOICE IS ALSO WHY THIS FILE CARRIES A SECOND, SMALLER SUBJECT
+at the bottom: claim_record.py's own write- and read-FAILURE verdicts. There
+is no dedicated claim_record.test.py; the module's unit tests are distributed
+across the claim_* files by subject, the same way claim_selector.test.py owns
+the torn-record read (its `test_zero_length_claim_record_classifies_ambiguous_
+not_present` / `test_torn_claim_record_with_partial_json_classifies_ambiguous`
+pair) and claim_prompt_contract.test.py owns the healthy already-claimed
+re-write (`test_write_claim_record_is_exclusive_so_a_reclaim_cannot_rewrite_
+the_baseline`). Cross-file references here are by test NAME and never by line
+number, deliberately: those files are edited on the same branch as this one and
+a line citation is stale before the round it was written in ends. What lands HERE is the pair
+`_write_claim()` above silently depends on being true -- that
+write_claim_record() FAILS rather than reporting a durability it never
+established, and that read_claim_record() RETURNS a verdict rather than
+raising one. Those tests construct no CodexJob at all and say so
+individually; they are grouped under their own banner comment below.
 """
 
 import importlib.util
@@ -522,3 +539,222 @@ def test_run_id_present_is_not_fatal(tmp_path):
     argv = _translate_argv(tmp_path, run_id="RUN1")
     args = codex_job._build_parser().parse_args(argv)
     assert args.run_id == "RUN1"
+
+
+# --------------------------------------------------------------------------- #
+# claim_record.py's OWN failure verdicts.
+#
+# No CodexJob is constructed below this line -- see the module docstring for
+# why these live in this file rather than a claim_record.test.py that does not
+# exist. Each one covers a failure path of the writer/reader that `_write_claim()`
+# above depends on and, by asserting on success, can never itself exercise.
+# --------------------------------------------------------------------------- #
+
+# Root bypasses directory permission bits entirely, so the two injections
+# below (mode 0o333 on the record's directory) would simply not fail there and
+# the tests would pass without ever reaching what they are about. Skipping is
+# right and weakening the assertion is not: a green that proves nothing is the
+# exact shape these tests exist to catch in the production code.
+_needs_unprivileged_uid = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses directory permissions, so the fsync cannot be made to fail",
+)
+
+
+def _claim_payload(seg, run_id, profile="from-converged"):
+    """The same every-field-defaulted-to-None payload `_write_claim()` builds,
+    without the writing. These tests call write_claim_record() themselves
+    because its RETURN VALUE is the subject, and `_write_claim()` asserts that
+    value away (`assert ok, detail`) on its way to a claim record."""
+    return claim_record.build_claim_record(**dict(
+        {field: None for field in claim_record.CLAIM_RECORD_FIELDS},
+        seg=seg, profile=profile, run_id=run_id, source_run_id="SOURCE-RUN-0",
+        previous_dispatch_token="SOURCE-RUN-0:%s" % seg,
+        pre_claim_content_sha1="0" * 40,
+        operator_invocation="pytest tests/claim_chokepoint.test.py",
+        claimed_at="2026-08-08T00:00:00Z",
+    ))
+
+
+@_needs_unprivileged_uid
+def test_a_fresh_claim_write_fails_when_its_directory_cannot_be_synced(tmp_path):
+    """write_claim_record()'s FRESH-WRITE path: a record whose directory entry
+    cannot be proven durable is a FAILED write, never a success with a
+    footnote.
+
+    Why that matters more here than in an ordinary writer: the caller reads
+    True as permission to re-stamp the draft's dispatch_token (the claim block
+    in select_segments.py's run(), immediately after `if published:`), and
+    record-first ordering is the entire reason those two happen in that order.
+    fsync on the FILE commits the record's contents; only fsync on the
+    DIRECTORY commits the entry that makes those contents findable after a
+    power loss. Returning True without the second one hands back precisely the
+    state D8's guard cannot refuse -- a re-stamped token with no record, which
+    every reader classifies ABSENT and reads as "unclaimed".
+
+    THE INJECTION IS REAL, NOT A DOUBLE. Mode 0o333 on runs/<run_id>/ keeps
+    write+execute, so `os.open(path, O_CREAT|O_EXCL|O_WRONLY)` still creates
+    the record and its body is still written and fsynced; it takes away read,
+    so `os.open(dir, O_RDONLY)` -- which is all fsync_directory() does -- fails
+    with EACCES. Nothing is monkeypatched, so a fsync_directory() that quietly
+    stopped failing is caught here too, whereas a stubbed one would only prove
+    that write_claim_record() forwards a stub's return value. Same technique as
+    claim_selector.test.py's draft-directory sibling
+    (`test_rewrite_fails_when_the_drafts_directory_entry_cannot_be_made_durable`),
+    which covers the OTHER half of the record-first ordering.
+
+    THE MUTATION THAT MAKES THIS FAIL: delete the `sync_problem =
+    fsync_directory(path.parent)` block at the END of write_claim_record() --
+    the one after the body is written -- leaving `return (True, "")`. The call
+    then reports a fresh success and the first assertion fires. Deleting the
+    OTHER fsync_directory() call (the EEXIST one, inside the
+    `except FileExistsError` handler) leaves this test GREEN, which is why the
+    already-claimed sibling below is a separate test and not a parametrisation.
+    Measured: applied each deletion in turn to a scratch copy of claim_record.py
+    and ran both test bodies against it -- each deletion reddens exactly its own
+    test."""
+    path = claim_record.claimed_path("RUN1", "c001", tmp_path / "durable" / "runs")
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    os.chmod(path.parent, 0o333)
+    try:
+        ok, detail = claim_record.write_claim_record(path, _claim_payload("c001", "RUN1"))
+    finally:
+        os.chmod(path.parent, 0o755)  # restore so tmp_path cleanup can remove it
+
+    assert ok is False, (
+        "a directory entry this code cannot prove durable must FAIL the claim write; "
+        "reporting success would authorize the token re-stamp that record-first "
+        "ordering exists to keep behind a durable record"
+    )
+    assert "directory entry is not durable" in detail, detail
+    assert detail.startswith("the claim record was written but "), detail
+    # The record STAYS on disk -- the deliberate difference from the
+    # partial-write path, which unlinks. Here the contents are complete and
+    # fsynced and only the entry's durability is unproven, and deleting a valid
+    # record is the fail-OPEN direction for every reader of it: both D8 guards
+    # refuse on PRESENT and let a translate through on ABSENT.
+    state, _ = claim_record.classify_claim_record(path)
+    assert state == claim_record.CLAIM_PRESENT, (
+        "the complete record must not be unlinked to settle a durability doubt -- "
+        "removing it deletes the guard, got state=%r" % (state,)
+    )
+    assert json.loads(path.read_text(encoding="utf-8"))["seg"] == "c001"
+
+
+@_needs_unprivileged_uid
+def test_an_already_claimed_write_fails_when_its_directory_cannot_be_synced(tmp_path):
+    """write_claim_record()'s ALREADY-CLAIMED (EEXIST) path, which is a SECOND
+    fsync call site and not a redundant copy of the first.
+
+    The state it exists for is a RETRY after the failure the test above
+    measures: attempt one created the record, failed its directory sync, and
+    deliberately did not unlink it. Attempt two therefore lands on EEXIST.
+    Without a sync of its own that branch would answer the literal "already
+    claimed by this run" -- which select_segments.py compares against exactly,
+    and treats as an idempotent re-application that still permits the token
+    re-stamp -- having never established the durability attempt one failed to.
+    The same crash then produces the same token-without-record state, one retry
+    later and with a clean-looking report.
+
+    So the assertion carrying this test is the one on the LITERAL: the branch
+    must not merely return False, it must return a detail that MISSES the
+    caller's string compare, or the caller reads "already claimed" and proceeds
+    regardless of the False.
+
+    THE MUTATION THAT MAKES THIS FAIL: delete the `sync_problem =
+    fsync_directory(path.parent)` block inside the `except FileExistsError`
+    handler, leaving the branch as `return (False, "already claimed by this
+    run")`. Both the literal assertion and the "not durable" one fire.
+    Deleting the fresh-write fsync instead leaves this test GREEN -- its first
+    write happens before the directory is locked down and is a healthy one.
+    Measured against scratch copies carrying each deletion; each reddens only
+    its own test.
+
+    The HEALTHY shape of this same branch -- exact literal, on-disk record
+    untouched -- is the subject of claim_prompt_contract.test.py's
+    `test_write_claim_record_is_exclusive_so_a_reclaim_cannot_rewrite_the_baseline`,
+    so it is not restated here; this test asserts only that the record
+    survives, which is what makes the retry it describes possible at all."""
+    path = claim_record.claimed_path("RUN1", "c001", tmp_path / "durable" / "runs")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ok, detail = claim_record.write_claim_record(path, _claim_payload("c001", "RUN1"))
+    assert ok is True, detail  # arrange, not assert: a healthy first claim
+    before = path.read_bytes()
+
+    os.chmod(path.parent, 0o333)
+    try:
+        ok2, detail2 = claim_record.write_claim_record(path, _claim_payload("c001", "RUN1"))
+    finally:
+        os.chmod(path.parent, 0o755)
+
+    assert ok2 is False
+    assert detail2 != "already claimed by this run", (
+        "the EEXIST branch reported the idempotent literal its caller compares "
+        "against, so the caller re-stamps the draft's dispatch_token on the strength "
+        "of a record whose directory entry was never made durable -- the retry that "
+        "silently re-creates token-without-record"
+    )
+    assert "directory entry is not durable" in detail2, detail2
+    assert detail2.startswith("this run had already claimed this segment, but "), detail2
+    assert path.read_bytes() == before, (
+        "a failed sync on the EEXIST path must not touch the existing record -- it is "
+        "the only account of the true pre-claim baseline"
+    )
+
+
+def test_a_claim_record_with_invalid_utf8_returns_ambiguous_rather_than_raising(tmp_path):
+    """read_claim_record() must RETURN CLAIM_AMBIGUOUS for a record whose bytes
+    are not valid UTF-8 -- the verdict its own docstring promises for anything
+    that "classifies PRESENT but does not parse".
+
+    UnicodeDecodeError subclasses ValueError, NOT OSError, so the `except
+    OSError` guarding the read let it escape: the call RAISED instead of
+    returning, and the documented invariant was false for exactly the one
+    failure shape a reader cannot see coming. The direction was safe -- nothing
+    downstream grants a claim on a traceback -- and the blast radius was not:
+    select_segments.py reads this unguarded in evaluate_lost_token_recovery()
+    and again when re-reading an already-claimed record, so ONE segment's
+    malformed record took the whole admission batch down with it, contradicting
+    the per-id isolation that file states for every other unreadable artifact.
+
+    No assertion is needed for the raise itself: an escaping exception fails
+    this test by escaping, which is the defect seen from a caller's side. The
+    assertions are about the VERDICT (what callers branch on) and about the
+    detail naming the file -- UnicodeDecodeError's own message carries the
+    offending byte and no filename, so a detail that merely forwarded it would
+    leave an operator with nothing to open.
+
+    THE MUTATION THAT MAKES THIS FAIL: delete the `except UnicodeDecodeError`
+    clause from read_claim_record(). Measured on a scratch copy: the call
+    raises `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in
+    position 28` and the test errors out.
+
+    The classifier assertion comes FIRST because it is the contrast the module
+    docstring's "EXISTENCE IS NOT VALIDITY" split rests on: classify_claim_record()
+    is an lstat, reports PRESENT for these bytes, and never opens the file -- so
+    both D8 guards (which use the classifier alone) still refuse, which is why
+    this defect never reached them, while any consumer about to believe a FIELD
+    must come through the reader and take the AMBIGUOUS verdict."""
+    path = claim_record.claimed_path("RUN1", "c001", tmp_path / "durable" / "runs")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b'{"seg": "c001", "profile": "\xff\xfe not utf-8"}')
+
+    state, _detail = claim_record.classify_claim_record(path)
+    assert state == claim_record.CLAIM_PRESENT, (
+        "the lstat-only classifier must still see a regular file here -- if it did "
+        "not, this fixture would be proving something other than a decode failure"
+    )
+
+    state, payload, detail = claim_record.read_claim_record(path)
+
+    assert state == claim_record.CLAIM_AMBIGUOUS, (
+        "a record whose bytes are not valid UTF-8 must be reported AMBIGUOUS, the "
+        "safe direction every reader maps to 'not claimed', got %r" % (state,)
+    )
+    assert payload is None, payload
+    assert "not valid UTF-8" in detail, detail
+    assert str(path) in detail, (
+        "the detail must name the file: UnicodeDecodeError carries the offending "
+        "byte and no filename, so %r on its own is not actionable" % (detail,)
+    )

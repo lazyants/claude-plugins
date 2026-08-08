@@ -991,9 +991,11 @@ def test_classify_only_rejects_a_combined_claim(tmp_path):
 #
 # These tests pin the function's OWN contract, which is now wider than "swap
 # one field": it refuses a draft that is not the one this invocation
-# admitted (the TOCTOU between admission and stamp), refuses rather than
-# follows a symlink planted at its predictable temp path, and fails the
-# rewrite when the draft's directory entry cannot be made durable.
+# admitted (the TOCTOU between admission and stamp), refuses again when the
+# draft moves LATER -- after the staged bytes were hashed but before the
+# rename installs them -- refuses rather than follows a symlink planted at
+# its predictable temp path, and fails the rewrite when the draft's directory
+# entry cannot be made durable.
 # ---------------------------------------------------------------------------
 
 def _load_select_segments_module(root):
@@ -1119,6 +1121,94 @@ def test_rewrite_refuses_a_draft_that_changed_since_admission(tmp_path):
     )
     assert on_disk == swapped, "the refused draft's own content must be untouched"
     assert _staged_temp_files(root) == []
+
+
+def test_rewrite_refuses_a_draft_edited_after_staging_but_before_install(tmp_path):
+    """The LATER window the test above structurally cannot reach (second code
+    review, #438): it swaps the draft BEFORE the rewrite reads it, so the
+    staged bytes carry the swap and the staged-hash comparison catches it.
+    An edit landing AFTER that read -- while the temp file is being written,
+    fsynced and hashed -- never touches the staged bytes at all. The staged
+    check therefore passes, and an unconditional os.replace() then discards a
+    hand edit newer than the one admission gated. That is the exact loss this
+    whole release exists to prevent, so the rewrite re-reads the canonical
+    draft immediately before the rename and refuses if it moved.
+
+    HOW THE WINDOW IS DRIVEN, and why this is not a flaky race: the window is
+    internal to one function and a few syscalls wide, so waiting for a real
+    concurrent writer to land inside it would be a coin flip. Instead the
+    test lands the edit ON the seam the production code itself uses -- its
+    first draft_content_sha1() call, the staged-file hash -- which is
+    deterministic and pins the ORDER as well: the `hashed` assertion (second
+    call reads the CANONICAL draft, not the temp file a second time) is what
+    separates a real last-moment check from another look at bytes that
+    cannot have changed.
+
+    WHAT THIS TEST DOES NOT PROVE, deliberately: not that the window is
+    closed. The gap between that final hash and os.replace() remains open,
+    and no test in this file can assert otherwise -- see the function's own
+    "THE RESIDUAL, STATED NARROWLY" paragraph."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    admitted = clean_draft(seg)
+    admitted["dispatch_token"] = f"{SOURCE_RUN_ID}:{seg}"
+    write_draft_doc(root, seg, admitted)
+    admitted_sha1 = draft_content_sha1_of(admitted)
+
+    concurrent = dict(admitted)
+    concurrent["blocks"] = dict(admitted["blocks"], p1="A hand edit that landed mid-claim.")
+    concurrent_sha1 = draft_content_sha1_of(concurrent)
+    assert concurrent_sha1 != admitted_sha1, (
+        "precondition: the mid-claim edit must genuinely change the draft's content"
+    )
+
+    mod = _load_select_segments_module(root)
+    real_draft_content_sha1 = mod.draft_content_sha1
+    hashed = []
+
+    def hash_and_land_a_concurrent_edit(path):
+        """Stands in for a writer that wins the staging window: the FIRST
+        call is the staged-file hash, so the canonical draft is edited the
+        moment that hash has been taken."""
+        hashed.append(Path(path).name)
+        result = real_draft_content_sha1(path)
+        if len(hashed) == 1:
+            write_draft_doc(root, seg, concurrent)
+        return result
+
+    mod.draft_content_sha1 = hash_and_land_a_concurrent_edit
+
+    ok, detail = mod.rewrite_draft_dispatch_token(
+        seg, root, f"{RUN_ID}:{seg}", expected_content_sha1=admitted_sha1
+    )
+
+    assert ok is False, (
+        "a draft edited after the staged bytes were hashed must be refused, not "
+        "overwritten by the rename"
+    )
+    assert concurrent_sha1 in detail and admitted_sha1 in detail, (
+        f"the refusal must NAME the drift -- what is on disk now and what admission "
+        f"gated. Got: {detail}"
+    )
+
+    draft_file = root / "segments" / f"{seg}.draft.json"
+    on_disk = json.loads(draft_file.read_text(encoding="utf-8"))
+    assert on_disk == concurrent, (
+        "THE POINT OF THE WHOLE FEATURE: the newer hand edit must survive intact. "
+        "Without the last-moment re-read the rename installs the admitted bytes over "
+        "it and the edit is gone with nothing on disk recording that it existed"
+    )
+    assert on_disk["dispatch_token"] == f"{SOURCE_RUN_ID}:{seg}", (
+        "and nothing may be authorized either -- the draft must still carry the OLD "
+        "token so every existing gate goes on refusing it"
+    )
+    assert _staged_temp_files(root) == [], "the refusal must not leak its staged copy"
+    assert hashed == [f"{seg}.draft.json.tmp.{os.getpid()}", f"{seg}.draft.json"], (
+        f"the two hashes must be of DIFFERENT files, in this order: the staged temp "
+        f"file (what goes in), then the canonical draft (what would be overwritten). "
+        f"A second hash of the temp file would re-answer the question already "
+        f"answered. Got: {hashed}"
+    )
 
 
 def test_rewrite_still_checks_identity_on_the_idempotent_path(tmp_path):
@@ -1277,11 +1367,17 @@ def _write_phantom_evidence_draft(root, run_id, phantom_seg="phantom_seg"):
 def test_step3_refuses_a_fresh_run_id_that_already_has_dispatch_evidence(tmp_path):
     """The refuse arm: resume_setup.py reports this run id as FRESH
     (--run-resume false), but this project already has dispatch evidence
-    bearing that EXACT id (a phantom draft's dispatch_token) -- and no
-    input.digest exists for it (the fresh-mint case never writes a digest
-    ahead of resume_setup.py actually running). A fresh id colliding with
-    pre-existing evidence must be refused, not laundered through by the
-    digest resume_setup.py itself just wrote."""
+    bearing that EXACT id (a phantom draft's dispatch_token). A fresh id
+    colliding with pre-existing evidence must be refused, not laundered
+    through by the digest resume_setup.py itself just wrote.
+
+    This arm deliberately carries NO runs/<RUN_ID>/input.digest, which is one
+    state and NOT the one the production path reaches -- under single-phase
+    ordering resume_setup.py has already written the digest for the id it
+    just minted by the time this script runs. That state is the test
+    immediately below, and it is the one that pins the guard; on its own this
+    arm cannot tell a refusal keyed on the collision apart from one keyed on
+    the missing digest."""
     root = make_durable_root(tmp_path)
     write_manifest(root, ["seg01"])
     _write_phantom_evidence_draft(root, RUN_ID)
@@ -1293,6 +1389,46 @@ def test_step3_refuses_a_fresh_run_id_that_already_has_dispatch_evidence(tmp_pat
     assert RUN_ID in out["error"]
     assert "FRESH" in out["error"], out["error"]
     assert "drafts" in out["error"], out["error"]
+
+
+def test_step3_refuses_a_fresh_run_id_colliding_with_evidence_even_with_a_digest(tmp_path):
+    """THE arm that matches production (second code review, #438). Identical
+    to the one above except that runs/<RUN_ID>/input.digest EXISTS -- which
+    is not an exotic variant but the ONLY state select_segments.py is ever
+    reached in under single-phase ordering: resume_setup.py runs first and
+    writes the digest for the id it just minted, then this script is invoked
+    with that id.
+
+    Why the arm above cannot stand in for it: with no digest present, RUN_ID
+    also lands in `runs_missing_digest`, so a guard narrowed to "fresh id,
+    colliding evidence AND no digest" still refuses there and the test stays
+    green while the production state -- fresh id, colliding evidence, digest
+    present -- sails straight through. The guard must key on the COLLISION,
+    never on the digest's absence, because the digest resume_setup.py just
+    wrote proves only that resume_setup.py ran as part of THIS invocation and
+    nothing whatever about whether the pre-existing evidence was ever gated.
+    That is the entire premise of the fix."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01"])
+    _write_phantom_evidence_draft(root, RUN_ID)
+    # Exactly what resume_setup.py leaves behind for a freshly-minted id.
+    make_run_dir(root, RUN_ID)
+    assert (root / "runs" / RUN_ID / "input.digest").is_file(), (
+        "precondition: the digest resume_setup.py writes for the id it minted"
+    )
+
+    proc = run_select(root, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert RUN_ID in out["error"]
+    assert "FRESH" in out["error"], out["error"]
+    assert "drafts" in out["error"], out["error"]
+    # And it is THIS refusal, not the #409 runs-missing-digest one -- which
+    # cannot fire at all now that the digest is present. Asserting the
+    # distinguishing word keeps a future re-wording of the other refusal from
+    # making this test pass for the wrong reason.
+    assert "launder" in out["error"], out["error"]
 
 
 def test_step3_admits_a_genuinely_resumed_run_id_with_the_same_evidence_shape(tmp_path):
@@ -1398,6 +1534,74 @@ def test_run_resume_true_with_pre_existing_evidence_is_a_known_admitted_residual
     )
     out = parse_stdout(proc)
     assert out["success"] is True, out
+
+
+# ---------------------------------------------------------------------------
+# 13a. --run-id and --run-resume are a PAIR, enforced by THIS script.
+#
+# The dispatch driver enforces the same pairing on its own side and has its
+# own tests for it (tests/claim_driver.test.py) -- which is exactly why these
+# exist rather than being a duplicate of them: every CLI-level test in that
+# file runs against a FAKE select_segments.py, whose own comment states it
+# does not reproduce this refusal. So the driver's tests exercise the
+# DRIVER's guard and nothing else, and deleting the selector's would leave
+# every one of them green while the selector silently accepted a --run-id
+# with no --run-resume from any other caller (a hand-run invocation,
+# SKILL.md's own W5 recipe). A guard nothing can turn red is not a guard.
+#
+# What the selector actually does with an unpaired flag is the reason the
+# pairing matters rather than being tidiness: --run-resume is the ONLY thing
+# that tells a legitimately resumed run id from a freshly-minted one, and
+# both of the checks that read it compare against a string. With the flag
+# absent, `args.run_resume == "false"` and `args.run_resume == "true"` are
+# both False, so BOTH refusals -- the fresh-evidence collision refusal and
+# the resumed-run digest-presence refusal -- silently do not apply, and a
+# --run-id alone buys dispatch authorization with neither check ever having
+# run. That is a bypass, not a defaulting question, which is why it fatals
+# instead of assuming either value.
+#
+# Both use --allow-empty so the guard is the ONLY thing that can fail the
+# run: without it, deleting the guard would still exit non-zero on the empty
+# selection, and the test would go on passing for an unrelated reason.
+# ---------------------------------------------------------------------------
+
+def test_run_id_without_run_resume_is_fatal(tmp_path):
+    """One half of the pair, given alone. No claim flags at all -- the
+    pairing rule is general Step 3 infrastructure and must fire on a plain
+    invocation, not only when --from-converged/--from-cap is involved."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01"])
+
+    proc = run_select(root, "--allow-empty", "--run-id", RUN_ID)
+    assert proc.returncode != 0, (
+        f"--run-id alone must be refused, never treated as 'resume status not "
+        f"applicable'. stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert "--run-id" in out["error"] and "--run-resume" in out["error"], out["error"]
+    assert "TOGETHER" in out["error"], out["error"]
+
+
+def test_run_resume_without_run_id_is_fatal(tmp_path):
+    """The other half, and not a mirror-image formality: this direction is
+    the quieter failure. --run-resume names no run id of its own, so a
+    caller that dropped --run-id would otherwise get a completely
+    unauthorized-run-id invocation that LOOKS attested, with the operator's
+    'true'/'false' silently applying to nothing."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01"])
+
+    for resume_value in ("true", "false"):
+        proc = run_select(root, "--allow-empty", "--run-resume", resume_value)
+        assert proc.returncode != 0, (
+            f"--run-resume {resume_value} alone must be refused. "
+            f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+        )
+        out = parse_stdout(proc)
+        assert out["success"] is False
+        assert "--run-id" in out["error"] and "--run-resume" in out["error"], out["error"]
+        assert "TOGETHER" in out["error"], out["error"]
 
 
 # ---------------------------------------------------------------------------
