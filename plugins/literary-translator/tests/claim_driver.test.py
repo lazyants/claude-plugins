@@ -1266,12 +1266,77 @@ def test_D8_still_allows_the_ordinary_first_translation_with_no_draft(tmp_path):
     assert DRIVER.claim_refusal_for_translate(ctx, "seg01") is None
 
 
-def test_D8_still_allows_a_tokenless_draft(tmp_path):
-    """A draft with no dispatch_token asserts no ownership -- and is what
-    every pre-1.2.0 project has on disk. Refusing these would be a silent
-    regression with nothing to do with claims."""
+def test_D8_still_allows_a_tokenless_draft_when_NOBODY_holds_a_claim(tmp_path):
+    """A draft with no dispatch_token and no claim record anywhere asserts no
+    ownership -- and is what every pre-1.21.0 project has on disk, since claims
+    did not exist before this release. Refusing these would be a silent
+    regression with nothing to do with claims.
+
+    Paired deliberately with the D9 test below: on the draft ALONE these two
+    fixtures are identical, and the claim records are the only thing that
+    tells them apart. An earlier version of this guard asserted only this half
+    and therefore codified "tokenless means unowned", which was a BLOCKER."""
     ctx = _minimal_ctx(tmp_path, run_id=RUN_B)
     _write_draft(ctx, "seg01", token=None)
+    assert DRIVER.claim_refusal_for_translate(ctx, "seg01") is None
+
+
+def test_D8_refuses_a_TOKENLESS_draft_that_another_run_still_holds_a_claim_on(tmp_path):
+    """D9's lost-token state, and the case the first version of this guard got
+    WRONG by allowing.
+
+    Run A claims seg01 and hand-edits the draft; a later fix round drops the
+    dispatch_token from the draft -- a sequence this repository explicitly
+    recognizes and provides a recovery for, because it is what a fix agent that
+    fails to copy the token byte for byte produces. A's claim record is then
+    the ONLY surviving evidence of who owns that hand edit. Ordinary run B
+    fails draft_ready, derives `translate`, and -- before this -- sailed
+    through D8, because the guard returned None the moment it saw no token
+    without ever consulting a foreign namespace.
+
+    This is the one case where the guard DOES enumerate claim records rather
+    than reading ownership off the token, and the asymmetry is deliberate:
+    there is no token to read an owner from, and the denial-of-service argument
+    against enumeration (records are immortal, so a once-claimed segment would
+    become permanently un-translatable) does not apply to a project that has no
+    claim records at all -- which is every project predating this release.
+
+    THE MUTATION THAT MAKES THIS FAIL: return None instead of consulting
+    any_foreign_claim() on the `owner is None` branch of
+    claim_record.foreign_owner_refusal(). The sibling test above stays green
+    under that mutation, which is the whole point of asserting both."""
+    ctx = _minimal_ctx(tmp_path, run_id=RUN_B)
+    path = CLAIM_RECORD.claimed_path(RUN_A, "seg01", ctx.dirs["runs_dir"])
+    ok, detail = CLAIM_RECORD.write_claim_record(
+        path, _fixture_claim_payload(CLAIM_RECORD, "seg01", RUN_A))
+    assert ok, detail
+    _write_draft(ctx, "seg01", token=None, text="HAND EDIT OWNED BY RUN A")
+
+    refusal = DRIVER.claim_refusal_for_translate(ctx, "seg01")
+
+    assert refusal is not None, (
+        "a tokenless draft that run A still holds a claim on is D9's lost-token "
+        "state, not an unowned draft -- translating destroys the hand edit"
+    )
+    assert RUN_A in refusal, f"the refusal must name the holder: {refusal!r}"
+    assert "#438 D8" in refusal, refusal
+
+
+@pytest.mark.parametrize("token", ["RUN-A", "RUN-A:"])
+def test_D8_owner_parse_agrees_with_both_peer_parsers(tmp_path, token):
+    """A token with no colon, or with an empty seg half, names NO run --
+    select_segments.py's draft_run_id() and draft_ready.py's _claim_run_id()
+    both reject exactly these, and a guard that accepted them would hold a
+    different notion of ownership than the two components that decide it
+    everywhere else.
+
+    Asserted through the OBSERVABLE consequence rather than by calling the
+    parser: with no claim record anywhere, a token naming no run falls to the
+    tokenless branch and proceeds. A `split(':')[0]` parser would instead
+    derive owner 'RUN-A' and consult its namespace."""
+    assert CLAIM_RECORD.draft_owner_run_id(token) is None
+    ctx = _minimal_ctx(tmp_path, run_id=RUN_B)
+    _write_draft(ctx, "seg01", token=token)
     assert DRIVER.claim_refusal_for_translate(ctx, "seg01") is None
 
 

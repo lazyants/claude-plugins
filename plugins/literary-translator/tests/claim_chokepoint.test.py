@@ -850,3 +850,96 @@ def test_a_normal_claim_record_is_written_byte_identically_after_the_encode_move
     )
     state, read_back, _ = claim_record.read_claim_record(path)
     assert state == claim_record.CLAIM_PRESENT and read_back == payload
+
+
+# --------------------------------------------------------------------------- #
+# D8's CROSS-RUN half at the DEFAULT chokepoint. codex_job.py is launched
+# directly by mass-translate-wf.template.js, so this guard -- not the optional
+# dispatch driver's -- is the one on the shipped path. It had the identical
+# self-namespace defect: _claim_state() built runs/<self.run_id>/.claimed.<seg>
+# and CLAIM_ABSENT permitted the translate.
+# --------------------------------------------------------------------------- #
+
+
+def _hold_claim(job, run_id, seg=None):
+    """Publishes a real claim record for `run_id`, via the shipped writer."""
+    seg = seg or job.seg
+    path = claim_record.claimed_path(run_id, seg, Path(job.root) / "runs")
+    payload = claim_record.build_claim_record(**dict(
+        {field: None for field in claim_record.CLAIM_RECORD_FIELDS},
+        seg=seg, profile="from-cap", run_id=run_id,
+        claimed_at="2026-08-08T09:00:00Z"))
+    ok, detail = claim_record.write_claim_record(path, payload)
+    assert ok, detail
+    return path
+
+
+def _write_draft_owned_by(job, owner_token):
+    """A schema-shaped draft stamped for somebody else."""
+    doc = {"seg": job.seg, "blocks": {"p1": "HAND EDIT OWNED BY RUN A"}, "footnotes": {},
+           "verses": {}, "names": [], "notes": []}
+    if owner_token is not None:
+        doc["dispatch_token"] = owner_token
+    Path(job.canonical).parent.mkdir(parents=True, exist_ok=True)
+    Path(job.canonical).write_text(json.dumps(doc, indent=2), encoding="utf-8")
+
+
+def test_default_chokepoint_refuses_a_translate_over_a_draft_another_run_owns(tmp_path):
+    """THE DEFAULT-PATH DEFECT. Run A holds a live claim on c001 and the
+    canonical draft is stamped for A. Run B launches codex_job.py directly --
+    which is what the shipped Workflow template does -- with its own
+    --expect-token and --run-id, so the token/run-id consistency check agrees
+    and tells us nothing. safe_adopt() rejects A's draft (foreign token), B's
+    own claim namespace reads ABSENT, and before this the translate reached
+    launch(), promoting a fresh machine translation over A's hand edit.
+
+    THE MUTATION THAT MAKES THIS FAIL: drop the foreign_owner_refusal() call
+    from the CLAIM_ABSENT branch of _refuse_claimed_translate() (restore the
+    bare `return False, None, None, None`). Measured: this test's `refuse`
+    assertion fails while the unclaimed-segment tests above stay green."""
+    job = _mkjob(tmp_path, seg="c001", tok="RUN-B:c001", run_id="RUN-B")
+    _hold_claim(job, "RUN-A")
+    _write_draft_owned_by(job, "RUN-A:c001")
+
+    refuse, state, detail, _path = job._refuse_claimed_translate()
+
+    assert refuse is True, (
+        "run B must not translate over a draft run A holds a live claim on -- "
+        "this is the DEFAULT dispatch path, not the optional driver's"
+    )
+    assert "RUN-A" in (detail or ""), f"the refusal must name the owner: {detail!r}"
+    assert "#438 D8" in (detail or ""), detail
+
+
+def test_default_chokepoint_refuses_a_TOKENLESS_draft_another_run_holds(tmp_path):
+    """D9's lost-token state at the default chokepoint: A claimed c001 and a
+    later fix round dropped the token from the draft, so A's claim record is
+    the only surviving evidence of ownership."""
+    job = _mkjob(tmp_path, seg="c001", tok="RUN-B:c001", run_id="RUN-B")
+    _hold_claim(job, "RUN-A")
+    _write_draft_owned_by(job, None)
+
+    refuse, _state, detail, _path = job._refuse_claimed_translate()
+
+    assert refuse is True, "a tokenless draft A still holds a claim on must not be overwritten"
+    assert "RUN-A" in (detail or ""), detail
+
+
+def test_default_chokepoint_still_allows_an_ordinary_unclaimed_translate(tmp_path):
+    """The no-regression boundary. No claim record anywhere and a draft stamped
+    for this run -- the ordinary case every normal dispatch is in. A guard that
+    refused here would stop the whole pipeline, which is a worse defect than
+    the one above."""
+    job = _mkjob(tmp_path, seg="c001", tok="RUN-B:c001", run_id="RUN-B")
+    _write_draft_owned_by(job, "RUN-B:c001")
+
+    refuse, _state, detail, _path = job._refuse_claimed_translate()
+
+    assert refuse is False, f"an unclaimed segment must still translate: {detail!r}"
+
+
+def test_default_chokepoint_still_allows_a_first_translation_with_no_draft(tmp_path):
+    """No draft on disk at all -- nothing to overwrite."""
+    job = _mkjob(tmp_path, seg="c001", tok="RUN-B:c001", run_id="RUN-B")
+    refuse, _state, detail, _path = job._refuse_claimed_translate()
+    assert refuse is False, f"the first translation must not be blocked: {detail!r}"

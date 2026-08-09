@@ -105,11 +105,11 @@ CITATION_ANCHORS = {
     "select_segments.py:2612": ["os.O_EXCL", "_O_NOFOLLOW"],
     "select_segments.py:2652-2657": ["staged_sha1 != expected_content_sha1", "Something replaced or edited"],
     # --- the two components that may only REFUSE ---------------------------
-    "codex_job.py:1431-1433": ["_refuse_claimed_translate()", "claimed-segment-refused"],
+    "codex_job.py:1453-1455": ["_refuse_claimed_translate()", "claimed-segment-refused"],
     # Anchored on all three: the entry's claim is specifically that the run id
     # is resolved BEFORE selection and forwarded WITH its resume value, so
     # losing any one of the three would falsify the sentence.
-    "segment_dispatch_driver.py:4963-4984": [
+    "segment_dispatch_driver.py:4890-4911": [
         # The CALL, not the bare name: "resolve_run_id(" also appears in a
         # comment a dozen lines above the call (and 13 other places in this
         # file), and a bare-name anchor resolved to the comment -- starting

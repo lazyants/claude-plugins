@@ -1085,6 +1085,28 @@ class CodexJob:
             # driver crash rather than a claim the driver could not rule out.
             return True, claim_record.CLAIM_AMBIGUOUS, str(exc), None
         if state == claim_record.CLAIM_ABSENT:
+            # "This run has not claimed seg" is NOT "seg is unclaimed", and
+            # conflating the two was this guard's defect -- the same one the
+            # optional driver's D8 had, found here second and reachable on the
+            # DEFAULT path, since mass-translate-wf.template.js launches
+            # codex_job.py directly and never passes through that driver. An
+            # ordinary run B supplies --expect-token B:seg and --run-id B, so
+            # the consistency check agrees; safe_adopt() rejects the A-stamped
+            # draft; B's own namespace reads absent; and the translate reached
+            # launch() while A's claim record sat untouched.
+            #
+            # Delegated, not re-implemented. Two independent hand-rolled
+            # answers to "is this claimed?" is exactly what produced three
+            # rounds of one BLOCKER; foreign_owner_refusal() is the single
+            # predicate both chokepoints now share.
+            foreign = claim_record.foreign_owner_refusal(
+                seg=self.seg,
+                this_run_id=self.run_id,
+                draft_path=Path(self.root) / "segments" / f"{self.seg}.draft.json",
+                runs_dir=Path(self.root) / "runs",
+            )
+            if foreign is not None:
+                return True, claim_record.CLAIM_PRESENT, foreign, None
             return False, None, None, None
         return True, state, detail, path
 

@@ -932,99 +932,26 @@ def _load_claim_record_module(scripts_dir: Path = SCRIPTS_DIR):
 
 
 def _foreign_claim_refusal_for_translate(ctx, seg, claim_record_mod) -> "str | None":
-    """D8's cross-run half: refuse a translate dispatch when the DRAFT's own
-    `dispatch_token` names a different run and THAT run still holds a live
-    claim record.
+    """D8's cross-run half, DELEGATED to claim_record.py's shared
+    foreign_owner_refusal() rather than decided here.
 
-    Why the draft's token is the right question, and an enumeration of every
-    `runs/*/.claimed.<seg>` is the WRONG one: nothing releases a claim, so a
-    record lives forever. Refusing whenever any foreign record exists would
-    make a segment claimed once permanently un-translatable by anybody --
-    turning an ownership guard into a project-wide denial of service, and
-    breaking the very re-review capability this release adds. The draft's
-    token is the CURRENT owner and it moves; the records are only evidence
-    about whoever it names. Same reasoning select_segments.py's
-    rewrite_draft_dispatch_token() already applies, deliberately, rather than
-    a second independent notion of ownership.
+    The delegation is the point. This guard and codex_job.py's own D8
+    chokepoint each hand-rolled "is this segment claimed?" against their OWN
+    run id, and both read "I have not claimed this" as "nobody has" -- three
+    consecutive BLOCKERs of one shape. A second local implementation here, even
+    a correct one, would leave the fourth chokepoint free to repeat it. The
+    predicate lives in the module both readers already import, so agreeing with
+    the selector's notion of ownership is structural rather than a convention
+    to be re-honoured at each site.
 
-    The four outcomes, all failing toward refusal where content is at risk:
-
-      - NO DRAFT on disk: allow. This is the ordinary first-translation
-        case, and there is nothing to overwrite. Refusing here would block
-        every normal dispatch, which is why "cannot read the owner" is not
-        treated as one undifferentiated case.
-      - DRAFT PRESENT but unreadable, not JSON, or not an object: REFUSE.
-        Content exists and this run cannot establish who owns it -- the same
-        direction the AMBIGUOUS branch above takes, and for the same reason.
-      - TOKEN missing, empty, not a string, or naming THIS run: allow. No
-        other run is asserting ownership, so the pre-#438 behaviour stands
-        (a tokenless draft is also what every pre-1.2.0 project has, and
-        refusing those would be a silent regression unrelated to claims).
-      - TOKEN names a DIFFERENT run: look that run's record up. PRESENT or
-        AMBIGUOUS both REFUSE -- a foreign owner this run cannot read is
-        strictly worse than one it can. ABSENT allows: the token is foreign
-        but nobody holds the segment, which draft_ready.py reports as closer
-        to a LOST claim than a live one, and blocking it would strand the
-        recovery.
-
-    A run id that claim_record.py will not build a path from raises
-    ValueError, mapped to a REFUSAL for the same reason the caller maps its
-    own: a name this driver cannot look up is a name it cannot clear."""
-    segments_dir = ctx.dirs["durable_root"] / "segments"
-    draft_mod = _load_draft_sha1_module(ctx.dirs["scripts_dir"])
-    draft = draft_mod.draft_path(seg, segments_dir)
-    if not draft.is_file():
-        return None
-    try:
-        doc = json.loads(draft.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        # ValueError covers json.JSONDecodeError AND the UnicodeDecodeError a
-        # non-UTF-8 draft raises -- the latter is a ValueError, not an
-        # OSError, the same trap read_claim_record() was fixed for.
-        return (
-            f"segment {seg!r} has a draft at {draft} that could not be read to "
-            f"determine who owns it ({exc}) -- refusing the translate dispatch "
-            f"rather than overwrite a draft whose owner this run cannot "
-            f"establish (#438 D8)"
-        )
-    if not isinstance(doc, dict):
-        return (
-            f"segment {seg!r}'s draft at {draft} is not a JSON object, so its "
-            f"owner cannot be established -- refusing the translate dispatch "
-            f"rather than overwrite it (#438 D8)"
-        )
-    token = doc.get("dispatch_token")
-    if not isinstance(token, str) or not token:
-        return None
-    owner = token.split(":", 1)[0]
-    if not owner or owner == ctx.run_id:
-        return None
-    try:
-        foreign_path = claim_record_mod.claimed_path(owner, seg, ctx.dirs["runs_dir"])
-    except ValueError as exc:
-        return (
-            f"segment {seg!r}'s draft is stamped {token!r}, naming run {owner!r}, "
-            f"but no claim record path can be built for that run id ({exc}) -- "
-            f"refusing the translate dispatch rather than proceeding against an "
-            f"owner this driver cannot look up (#438 D8)"
-        )
-    foreign_state, foreign_detail = claim_record_mod.classify_claim_record(foreign_path)
-    if foreign_state == claim_record_mod.CLAIM_ABSENT:
-        return None
-    if foreign_state == claim_record_mod.CLAIM_PRESENT:
-        return (
-            f"segment {seg!r} is OWNED BY RUN {owner!r}, not by this run "
-            f"({ctx.run_id!r}): the draft is stamped {token!r} and {owner!r} holds "
-            f"a live claim record at {foreign_path}. Translating would overwrite a "
-            f"draft another run is actively working on -- exactly what a claim "
-            f"exists to prevent. Work under {owner!r}, or resolve ownership by "
-            f"hand first (#438 D8)"
-        )
-    return (
-        f"segment {seg!r}'s draft is stamped {token!r}, naming run {owner!r}, whose "
-        f"claim record at {foreign_path} could not be read unambiguously "
-        f"({foreign_detail}) -- refusing the translate dispatch rather than risk "
-        f"overwriting a draft this run cannot prove is unowned (#438 D8)"
+    See foreign_owner_refusal() for every case and the reasoning behind each
+    direction -- in particular why a tokenless draft consults the claim records
+    (D9's lost-token state) while a TOKENED one never enumerates them."""
+    return claim_record_mod.foreign_owner_refusal(
+        seg=seg,
+        this_run_id=ctx.run_id,
+        draft_path=ctx.dirs["durable_root"] / "segments" / f"{seg}.draft.json",
+        runs_dir=ctx.dirs["runs_dir"],
     )
 
 

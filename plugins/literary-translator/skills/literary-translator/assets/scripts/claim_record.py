@@ -725,3 +725,178 @@ def write_claim_record(path: Path, payload: dict):
         # remove the entry.
         return (False, f"the claim record was written but {sync_problem}")
     return (True, "")
+
+
+# ---------------------------------------------------------------------------
+# THE SHARED OWNERSHIP PREDICATE (#438, added after the third consecutive
+# BLOCKER of the same shape).
+#
+# Three chokepoints independently decided "is this segment claimed?" and two of
+# them got it wrong the SAME way: they built the lookup path out of their OWN
+# run id, so they could only ever see their own namespace, and read "I have not
+# claimed this" as "nobody has". An ordinary run then translated over a draft
+# another run was actively holding -- destroying the hand edit the whole
+# feature exists to protect, with no operator intent involved.
+#
+# Patching each site as it was found is what produced three rounds of the same
+# BLOCKER. The fix that makes the class IMPOSSIBLE rather than DETECTED is one
+# predicate, here, in the module every reader already imports: a fourth
+# chokepoint cannot reintroduce the bug without deliberately declining to call
+# this. That is also why the answer is a FUNCTION rather than a documented
+# convention -- claim_record.py's own docstring already carried the convention,
+# and the convention is exactly what drifted.
+# ---------------------------------------------------------------------------
+
+
+def draft_owner_run_id(dispatch_token):
+    """The run id a draft's `dispatch_token` names, or None when it names none.
+
+    Byte-for-byte the parse select_segments.py's `draft_run_id()` and
+    draft_ready.py's `_claim_run_id()` already use: a colon is REQUIRED and
+    both sides of it must be non-empty. `partition`, never `split(':')[0]` --
+    the latter returns a truthy owner for `"RUN-A"` and `"RUN-A:"`, which both
+    peers reject, so a guard using it would disagree with the two components
+    that decide ownership everywhere else. `partition` and not `rsplit`
+    either: a seg id may itself contain a colon (`FRONTBACK:errata_02`), so
+    only the FIRST separator delimits the run id."""
+    if not isinstance(dispatch_token, str):
+        return None
+    run_id, sep, rest = dispatch_token.partition(":")
+    if not sep or not run_id or not rest:
+        return None
+    return run_id
+
+
+def any_foreign_claim(seg, this_run_id, runs_dir):
+    """`(run_id, state, path)` for some run OTHER than `this_run_id` holding a
+    claim entry for `seg`, or `(None, None, None)`.
+
+    Used ONLY for a draft that names no owner at all. Ownership is normally
+    read off the draft's token, and deliberately so: nothing releases a claim,
+    so records are immortal, and refusing whenever any foreign record existed
+    would make a segment claimed once permanently un-translatable by anybody --
+    an ownership guard turned into a project-wide denial of service.
+
+    A TOKENLESS draft is the one case where that reasoning does not apply,
+    because there is no token to read an owner from and the state is a
+    documented one: D9's lost-token recovery, where a run claimed a segment and
+    a later fix round dropped the token from the draft. The claim record is
+    then the ONLY surviving evidence of who owns the hand edit, so consulting
+    it is the difference between recovering that draft and overwriting it. The
+    denial-of-service objection does not bite here either: a project with no
+    claim records -- every pre-1.21.0 project -- enumerates nothing and is
+    unaffected, and a project that DOES have one plus a tokenless draft is in
+    exactly the state that needs a human, not another translation.
+
+    Unreadable entries count as held. An owner that cannot be established is
+    never assumed absent; that is the direction every other #438 guard takes."""
+    try:
+        entries = sorted(runs_dir.iterdir())
+    except OSError:
+        # The runs/ directory itself cannot be listed. Report nothing rather
+        # than raise -- the caller's own draft-side checks still apply, and a
+        # missing runs/ is the ordinary state of a project that has never
+        # claimed anything.
+        return (None, None, None)
+    for entry in entries:
+        run_id = entry.name
+        if run_id == this_run_id or validate_run_id(run_id) is not None:
+            continue
+        state, _detail = classify_claim_record(entry / f"{CLAIM_PREFIX}{seg}")
+        if state != CLAIM_ABSENT:
+            return (run_id, state, entry / f"{CLAIM_PREFIX}{seg}")
+    return (None, None, None)
+
+
+def foreign_owner_refusal(*, seg, this_run_id, draft_path, runs_dir):
+    """None when a translate dispatch for `seg` may proceed, or a reason string
+    when it must be REFUSED because another run owns the draft.
+
+    Call this from EVERY chokepoint that is about to overwrite a draft, in
+    addition to -- never instead of -- the caller's own "have I claimed this?"
+    check. The two answer different questions and only both together answer
+    "may I destroy this draft?".
+
+    The cases, with the safe direction chosen per case rather than uniformly,
+    because "cannot determine the owner" is several different situations:
+
+      - NO DRAFT on disk -> proceed. The ordinary first translation; there is
+        nothing to overwrite. Refusing here would block every normal dispatch,
+        which is the failure mode a blanket "cannot read the owner -> refuse"
+        would produce.
+      - DRAFT unreadable, not JSON, or not a JSON object -> REFUSE. Content
+        exists whose owner cannot be established.
+      - TOKEN naming THIS run -> proceed. The ordinary retry/resume case.
+      - TOKEN naming ANOTHER run -> that run's record decides. PRESENT or
+        AMBIGUOUS both REFUSE (a foreign owner this run cannot read is strictly
+        worse than one it can); ABSENT proceeds, because a foreign token whose
+        run holds nothing is closer to a LOST claim than a live one, and
+        blocking it would strand the recovery draft_ready.py points operators
+        at.
+      - NO TOKEN AT ALL -> any_foreign_claim() decides; see its docstring. This
+        is the D9 lost-token state, and treating it as unowned was a BLOCKER:
+        a legacy tokenless draft and a hand edit whose token a fix round
+        dropped are indistinguishable from the draft alone."""
+    draft_path = Path(draft_path)
+    if not draft_path.is_file():
+        return None
+    try:
+        raw = draft_path.read_text(encoding="utf-8")
+        doc = json.loads(raw)
+    except (OSError, ValueError) as exc:
+        # ValueError covers json.JSONDecodeError AND the UnicodeDecodeError a
+        # non-UTF-8 draft raises -- the latter is a ValueError, not an OSError,
+        # the same trap read_claim_record() and write_claim_record() were both
+        # fixed for.
+        return (
+            f"segment {seg!r} has a draft at {draft_path} that could not be read to "
+            f"determine who owns it ({exc}) -- refusing rather than overwrite a draft "
+            f"whose owner this run cannot establish (#438 D8)"
+        )
+    if not isinstance(doc, dict):
+        return (
+            f"segment {seg!r}'s draft at {draft_path} is not a JSON object, so its "
+            f"owner cannot be established -- refusing rather than overwrite it (#438 D8)"
+        )
+    owner = draft_owner_run_id(doc.get("dispatch_token"))
+    if owner is None:
+        holder, state, path = any_foreign_claim(seg, this_run_id, Path(runs_dir))
+        if holder is None:
+            return None
+        return (
+            f"segment {seg!r}'s draft at {draft_path} names NO run in its "
+            f"dispatch_token, but run {holder!r} holds a claim record for it at "
+            f"{path} ({state}). A claimed segment whose token was dropped by a later "
+            f"fix round is D9's lost-token state: {holder!r}'s record is the only "
+            f"surviving evidence of who owns this draft, and translating would "
+            f"overwrite it. Recover it under {holder!r}, or resolve ownership by hand "
+            f"(#438 D8)"
+        )
+    if owner == this_run_id:
+        return None
+    try:
+        foreign_path = claimed_path(owner, seg, Path(runs_dir))
+    except ValueError as exc:
+        return (
+            f"segment {seg!r}'s draft is stamped with a token naming run {owner!r}, "
+            f"but no claim record path can be built for that run id ({exc}) -- "
+            f"refusing rather than proceed against an owner that cannot be looked up "
+            f"(#438 D8)"
+        )
+    state, detail = classify_claim_record(foreign_path)
+    if state == CLAIM_ABSENT:
+        return None
+    if state == CLAIM_PRESENT:
+        return (
+            f"segment {seg!r} is OWNED BY RUN {owner!r}, not by this run "
+            f"({this_run_id!r}): the draft at {draft_path} is stamped for {owner!r} "
+            f"and {owner!r} holds a live claim record at {foreign_path}. Translating "
+            f"would overwrite a draft another run is actively working on -- exactly "
+            f"what a claim exists to prevent. Work under {owner!r}, or resolve "
+            f"ownership by hand first (#438 D8)"
+        )
+    return (
+        f"segment {seg!r}'s draft is stamped for run {owner!r}, whose claim record at "
+        f"{foreign_path} could not be read unambiguously ({detail}) -- refusing rather "
+        f"than risk overwriting a draft this run cannot prove is unowned (#438 D8)"
+    )
