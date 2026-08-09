@@ -792,12 +792,24 @@ def any_foreign_claim(seg, this_run_id, runs_dir):
     never assumed absent; that is the direction every other #438 guard takes."""
     try:
         entries = sorted(runs_dir.iterdir())
-    except OSError:
-        # The runs/ directory itself cannot be listed. Report nothing rather
-        # than raise -- the caller's own draft-side checks still apply, and a
-        # missing runs/ is the ordinary state of a project that has never
-        # claimed anything.
+    except (FileNotFoundError, NotADirectoryError):
+        # DEFINITIVELY no foreign claim. A runs/ that does not exist is the
+        # ordinary state of a project that has never claimed anything, and
+        # there is nothing there to have missed.
         return (None, None, None)
+    except OSError as exc:
+        # COULD NOT LOOK -- which is NOT the same answer, and collapsing the
+        # two into one `except OSError` was a fail-open defect. A runs/ that
+        # is searchable but not readable (mode 0o111) refuses `iterdir()`
+        # while every `.claimed.<seg>` inside it stays reachable BY PATH, so
+        # a live foreign claim is fully in force and simply invisible to the
+        # enumeration. Reporting that as "no foreign claim" handed back
+        # permission to overwrite the very draft it protects.
+        #
+        # Returned as AMBIGUOUS with no holder: the caller must refuse, the
+        # same direction every other #438 guard takes when ownership cannot
+        # be established. Absence and failure must never print identically.
+        return (None, CLAIM_AMBIGUOUS, f"runs directory {runs_dir} could not be listed: {exc}")
     for entry in entries:
         run_id = entry.name
         if run_id == this_run_id or validate_run_id(run_id) is not None:
@@ -861,6 +873,17 @@ def foreign_owner_refusal(*, seg, this_run_id, draft_path, runs_dir):
     owner = draft_owner_run_id(doc.get("dispatch_token"))
     if owner is None:
         holder, state, path = any_foreign_claim(seg, this_run_id, Path(runs_dir))
+        if holder is None and state == CLAIM_AMBIGUOUS:
+            # The enumeration itself failed -- see any_foreign_claim(). Not
+            # "nobody holds it": nobody could be LOOKED for, while the records
+            # themselves remain reachable by path and any claim in them is
+            # still in force.
+            return (
+                f"segment {seg!r}'s draft at {draft_path} names NO run in its "
+                f"dispatch_token, and whether another run holds a claim on it could "
+                f"not be established ({path}) -- refusing rather than overwrite a "
+                f"draft whose owner cannot be ruled out (#438 D8)"
+            )
         if holder is None:
             return None
         return (

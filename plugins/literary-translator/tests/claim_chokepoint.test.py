@@ -943,3 +943,75 @@ def test_default_chokepoint_still_allows_a_first_translation_with_no_draft(tmp_p
     job = _mkjob(tmp_path, seg="c001", tok="RUN-B:c001", run_id="RUN-B")
     refuse, _state, detail, _path = job._refuse_claimed_translate()
     assert refuse is False, f"the first translation must not be blocked: {detail!r}"
+
+
+@_needs_unprivileged_uid
+def test_an_unlistable_runs_dir_refuses_rather_than_reporting_no_foreign_claim(tmp_path):
+    """A `runs/` that is SEARCHABLE but not READABLE (mode 0o111) refuses
+    `iterdir()` while every `.claimed.<seg>` inside it stays reachable BY PATH.
+    So a live foreign claim is fully in force and merely invisible to the
+    enumeration -- and the first version of any_foreign_claim() reported that
+    as "no foreign claim", handing back permission to overwrite the very draft
+    the record protects.
+
+    The defect was one `except OSError` covering two different answers:
+    "definitively nothing there" (ENOENT -- a project that never claimed
+    anything) and "could not look" (EACCES). Absence and failure printed
+    identically, which is the shape that makes a fail-open invisible in
+    review: the safe case and the unsafe case return the same value.
+
+    Both halves are asserted here, because fixing this by refusing on ANY
+    OSError would break every project that has no runs/ directory at all --
+    turning a fail-open into a pipeline stoppage.
+
+    THE MUTATION THAT MAKES THIS FAIL: widen the FileNotFoundError/
+    NotADirectoryError clause in any_foreign_claim() back to a bare
+    `except OSError` returning (None, None, None)."""
+    seg = "c001"
+    runs = tmp_path / "durable" / "runs"
+    segments = tmp_path / "durable" / "segments"
+    segments.mkdir(parents=True)
+    path = claim_record.claimed_path("RUN-A", seg, runs)
+    payload = claim_record.build_claim_record(**dict(
+        {field: None for field in claim_record.CLAIM_RECORD_FIELDS},
+        seg=seg, profile="from-cap", run_id="RUN-A", claimed_at="2026-08-08T09:00:00Z"))
+    ok, detail = claim_record.write_claim_record(path, payload)
+    assert ok, detail
+    # Tokenless -- the only branch that enumerates.
+    draft = segments / f"{seg}.draft.json"
+    draft.write_text(json.dumps({"seg": seg, "blocks": {"p1": "HAND EDIT OWNED BY RUN A"}}),
+                     encoding="utf-8")
+
+    os.chmod(runs, 0o111)
+    try:
+        assert claim_record.classify_claim_record(path)[0] == claim_record.CLAIM_PRESENT, (
+            "fixture precondition: A's record must still be reachable BY PATH, or this "
+            "test proves something other than an enumeration failure"
+        )
+        refusal = claim_record.foreign_owner_refusal(
+            seg=seg, this_run_id="RUN-B", draft_path=draft, runs_dir=runs)
+    finally:
+        os.chmod(runs, 0o755)
+
+    assert refusal is not None, (
+        "an unlistable runs/ means ownership could not be established, not that "
+        "nobody owns the segment"
+    )
+    assert "#438 D8" in refusal, refusal
+
+
+def test_a_missing_runs_dir_still_allows_the_translate(tmp_path):
+    """The other half of the pair above: no runs/ at all is DEFINITIVELY no
+    foreign claim -- the ordinary state of every project predating this
+    release -- and must not be refused."""
+    seg = "c001"
+    segments = tmp_path / "durable" / "segments"
+    segments.mkdir(parents=True)
+    draft = segments / f"{seg}.draft.json"
+    draft.write_text(json.dumps({"seg": seg, "blocks": {"p1": "text"}}), encoding="utf-8")
+
+    refusal = claim_record.foreign_owner_refusal(
+        seg=seg, this_run_id="RUN-B", draft_path=draft,
+        runs_dir=tmp_path / "durable" / "runs")
+
+    assert refusal is None, f"a project with no claim records must translate: {refusal!r}"
