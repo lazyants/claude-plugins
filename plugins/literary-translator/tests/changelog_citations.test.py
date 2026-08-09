@@ -49,88 +49,82 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 CITATION_ANCHORS = {
-    # Anchored at BOTH ends on purpose. This citation drifted once already:
-    # the note grew past 448 while both original anchors stayed comfortably
-    # inside the old range, so nothing failed. `not_evaluated` sits near the
-    # new end and pins it.
-    "SKILL.md:419-554": [
-        "#409 upgrade note",
-        "backfill_ever_converged.py",
-        "`not_evaluated`",
-        "`directory_sync_error`",
-        "`segments_dir_replaced`",
-        "`ambiguous_sentinels`",
-        # The citation claims the note covers BOTH modes. Anchored, because
-        # gating this list on `--apply` is precisely the defect that let a
-        # dry run whose census established nothing read as a healthy project.
-        "They govern BOTH modes",
-        "Known limitation",
+    # --- claim_record.py: the shared contract module -----------------------
+    "claim_record.py:190-236": [
+        "def validate_run_id","_RUN_ID_DIR_RE.fullmatch", '".." in run_id'],
+    # Anchored at BOTH ends: the validate call pins where the range starts,
+    # the raise pins that the refusal itself is still inside it. A claimed
+    # path that merely VALIDATES and then returns anyway would keep the first
+    # anchor and lose the claim.
+    "claim_record.py:241-269": ["def claimed_path", "raise ValueError"],
+    "claim_record.py:273-307": [
+        "def classify_claim_record","lstat()", "S_ISREG"],
+    "claim_record.py:467-476": [
+        "CLAIM_RECORD_FIELDS = (","pre_claim_review", "cache_key_at_claim"],
+    "claim_record.py:534-586": [
+        "def fsync_directory","_O_DIRECTORY", "os.fsync"],
+    # --- select_segments.py: the only component that may MINT a claim ------
+    "select_segments.py:3225": [
+        # The CALL, not the bare name: "write_claim_record" also appears in
+        # two docstrings ABOVE this line, and a bare-name anchor resolved to
+        # the first of them -- 968 lines off the code the note describes,
+        # with the citation test still GREEN, because the anchor really was
+        # present in the range it had been moved to.
+        "claim_record.write_claim_record(marker_path, payload)",
     ],
-    "cache_key.py:139": ["ledger_update.py"],
-    "cache_key.py:146": ["segment_dispatch_driver.py"],
-    "cache_key.py:152": ["DERIVATION_BUNDLE_MEMBERS"],
-    "draft_ready.py:323-331": ["expect_token", "stale/straggler draft"],
-    "ledger_update.py:824-827": [
-        "current_draft_sha1 != reviewer_draft_sha1",
-        "draft changed since review",
+    # The fresh-evidence collision refusal the snapshot paragraph cites as the
+    # reason a freshly minted id is NOT guaranteed clean. Anchored on the
+    # arming condition and on the word the refusal itself uses, so a version
+    # that kept the condition but stopped refusing loses an anchor.
+    "select_segments.py:3045-3053": ['args.run_resume == "false"', "launder"],
+    # The cross-run ownership refusal. Anchored at BOTH ends: the predicate's
+    # fourth condition pins where it starts, the refusal message pins that the
+    # refusal itself is still inside the range. A version that evaluated the
+    # predicate and then fell through would keep the first anchor.
+    # The cross-run ownership refusal, now decided by claim AGE. Anchored on
+    # both timestamps AND the strict comparison: a version that read the two
+    # `claimed_at` values and then compared them the wrong way, or with >=,
+    # would keep the first two anchors, so the operator that decides the
+    # verdict is pinned explicitly.
+    "select_segments.py:2540-2549": [
+        "this_claimed_at = _claim_record_claimed_at",
+        "this_claimed_at",
+        "foreign_claimed_at",
+        "this_claimed_at > foreign_claimed_at",
     ],
-    "resume_setup.py:719-722": ["version = {", "plugin_bundle_hash"],
-    "resume_setup.py:723-725": ["orchestration_bundle_hash", "_read_marker"],
-    "resume_setup.py:729-736": ["digest_input = {", "_sha256_hex"],
-    "scaffold_setup.py:63-68": [
-        "ORCHESTRATION_BUNDLE_MEMBERS",
-        "select_segments.py",
+    # The re-stamp, and the hash it is checked against. Both anchored: the
+    # ordering claim in the entry is about these two calls in this order.
+    "select_segments.py:3276-3280": [
+        # The assignment, not the bare name: this function is discussed in a
+        # comment immediately above the call, and a bare-name anchor matched
+        # THAT, silently starting the citation in prose about the code
+        # rather than at the code.
+        "token_ok, token_detail = rewrite_draft_dispatch_token",
+        "expected_content_sha1",
     ],
-    "segment_dispatch_driver.py:742-743": ["def fatal(", "raise DriverError("],
-    "segment_dispatch_driver.py:2602-2603": [
-        "translate_dispatch_token",
-        'f"{run_id}:{seg}"',
+    "select_segments.py:2612": ["os.O_EXCL", "_O_NOFOLLOW"],
+    "select_segments.py:2652-2657": ["staged_sha1 != expected_content_sha1", "Something replaced or edited"],
+    # --- the two components that may only REFUSE ---------------------------
+    "codex_job.py:1453-1455": ["_refuse_claimed_translate()", "claimed-segment-refused"],
+    # Anchored on all three: the entry's claim is specifically that the run id
+    # is resolved BEFORE selection and forwarded WITH its resume value, so
+    # losing any one of the three would falsify the sentence.
+    "segment_dispatch_driver.py:4890-4911": [
+        # The CALL, not the bare name: "resolve_run_id(" also appears in a
+        # comment a dozen lines above the call (and 13 other places in this
+        # file), and a bare-name anchor resolved to the comment -- starting
+        # the citation in prose ABOUT the code and widening the range by 11
+        # lines, with the test still green.
+        "run_result = resolve_run_id(",
+        "run_select_segments(",
+        "run_resume=run_resume_literal",
     ],
-    "segment_dispatch_driver.py:2790-2805": [
-        "_matched_review_round_label",
-        "return None",
-    ],
-    "segment_dispatch_driver.py:2894": ["draft_ok"],
-    "segment_dispatch_driver.py:2972": ['"action": "translate"'],
-    "segment_dispatch_driver.py:3076-3078": [
-        "draft_matches_review",
-        "current_sha1 == reviewed_sha1",
-    ],
-    "segment_dispatch_driver.py:3226-3233": [
-        "current_sha1 is None",
-        "invocation never read",
-    ],
-    "select_segments.py:844": ["HUMAN_ESCALATION_STATUSES"],
-    "select_segments.py:1226-1244": [
-        "ledger_segments.get(seg)",
-        "HUMAN_ESCALATION_STATUSES",
-        '"category": "human_escalation"',
-        '"category": "recoverable"',
-    ],
-    "select_segments.py:1235-1240": [
-        "HUMAN_ESCALATION_STATUSES",
-        'record.get("reason")',
-    ],
-    "select_segments.py:1262": ["DEFAULT_ELIGIBLE_CATEGORIES"],
-    "select_segments.py:1412-1418": [
-        "classify_ever_converged_sentinel",
-        "ambiguous_sentinels.append",
-    ],
-    "select_segments.py:1420-1428": [
-        "not clearable by --allow-retranslate-converged",
-        "if ambiguous_sentinels:",
-        "fatal(",
-    ],
-    "select_segments.py:1462": ["allow_retranslate_converged"],
-    "select_segments.py:1462-1511": [
-        "if previously_converged and not args.allow_retranslate_converged:",
-        "second_loss",
-        # The refusal itself, not just the condition guarding it. Without this
-        # the call could be refactored out of the range while every other
-        # anchor stayed put.
-        "fatal(",
-        "previously_converged=previously_converged",
-    ],
+    # --- the default template path -----------------------------------------
+    "mass-translate-wf.template.js:974": ["--kind translate", "--run-id "],
+    "mass-translate-wf.template.js:1036": ["--kind review", "--run-id "],
+    # --- migration: the two bundle registrations ---------------------------
+    "cache_key.py:157": ['"claim_record.py"'],
+    "scaffold_setup.py:73": ['"claim_record.py"'],
 }
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an

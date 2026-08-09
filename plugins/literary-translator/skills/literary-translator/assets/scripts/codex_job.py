@@ -32,9 +32,17 @@ Design (PLAN-198 §2.1; the 7 steps below map 1:1) -- #409 SANDBOX HARDENING:
      sentinel `.codex_job.<seg>.lock` (kernel auto-releases on crash -- no stale-break race).
      A lease-loser writes ONLY its own fail sentinel + stdout, NEVER the hygiene joblog.
   4. Hygiene (cancel a verified-same-workspace stale prior job) -> safe adoption of an
-     already-valid same-token canonical -> adopt a prior run's DEFERRED completed attempt
-     (#213; re-validated through the same candidate gates before promotion) -> else launch
-     fresh (detached background codex).
+     already-valid same-token canonical -> #438 D8: for a translate, REFUSE if this seg
+     holds a live claim record under --run-id (a healthy claimed draft already adopted
+     above and never reaches this check; reaching it WITH a claim on record means the
+     draft went missing/invalid since the claim) -> adopt a prior run's DEFERRED completed
+     attempt (#213; re-validated through the same candidate gates before promotion) ->
+     else launch fresh (detached background codex). The D8 refusal sits BETWEEN the two
+     adoptions deliberately: launch() is NOT the only route in this file that can
+     overwrite the canonical -- adopt_pending() os.replace()s a deferred attempt straight
+     over it (see _canonical_replaceable(), which guards BOTH write sites by name) -- so a
+     guard placed after adopt_pending() would still let a same-run deferred attempt
+     destroy the exact draft the claim exists to preserve.
   5. Poll to a terminal job status or the poll deadline (cancel-on-deadline).
   6. Best-effort validate the ATTEMPT (kind-specific candidate-file gate), then ONE atomic
      os.replace -- no backup, no post-confirm. Validation-failure => canonical untouched.
@@ -50,7 +58,8 @@ Design (PLAN-198 §2.1; the 7 steps below map 1:1) -- #409 SANDBOX HARDENING:
 CLI (canonical path is DERIVED, never caller-supplied):
     python3 codex_job.py --kind {translate|review} --companion <abs codex-companion.mjs>
       --cwd <durable_root> --seg <seg> --prompt-file <abs prompt with EXACTLY one ⟦JOB_OUT⟧>
-      --expect-token <RUN_ID:seg|RUN_ID:seg:r<label>> --disp <per-dispatch nonce>
+      --expect-token <RUN_ID:seg|RUN_ID:seg:r<label>> --run-id <RUN_ID, #438, REQUIRED>
+      --disp <per-dispatch nonce>
       --deadline-sec <int> [--poll-sec <int default 15>]
       [--write] [--fresh] [--effort high] [--model <model>] [--node <exe default "node">]
       [--plugin-root <plugin install root, #412>]
@@ -74,6 +83,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 from typing import TypeGuard
 
 # ---- Constants (PLAN-198 §2.1 / CONTRACT.md; frozen) ------------------------
@@ -137,6 +147,15 @@ _MAX_REGULAR_READ_BYTES = 64 << 20  # 64 MiB. Real canonical drafts run tens to 
 
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# claim_record.py (#438) is a plugin-path sibling import -- SCRIPTS_DIR must be on
+# sys.path first, same idiom final_audit.py/assemble.py/validate_assembled.py already
+# use for their own sibling imports: a `python3 codex_job.py ...` invocation gets this
+# for free (Python auto-prepends the running script's own directory), but a caller that
+# loads this file via importlib.util.spec_from_file_location (every test in this suite)
+# does not.
+sys.path.insert(0, SCRIPTS_DIR)
+import claim_record  # noqa: E402
 
 
 def validate_seg(seg):
@@ -215,11 +234,23 @@ def _silent_unlinkat(dir_fd, name):
 
 class CodexJob:
     def __init__(self, kind, seg, tok, disp, root, companion, prompt_text, prompt_file,
-                 deadline_sec, poll_sec, effort, node, model=None, plugin_root=None):
+                 deadline_sec, poll_sec, effort, node, model=None, plugin_root=None,
+                 run_id=None):
         self.kind = kind
         self.seg = seg
         self.tok = tok
         self.disp = disp
+        # #438: the CURRENT run's own id -- used ONLY to look up a claim record at
+        # runs/<run_id>/.claimed.<seg> before a translate launch (see run()'s D8
+        # guard below). main() makes --run-id REQUIRED and passes it straight
+        # through (never derived from --expect-token -- see D8's own reasoning for
+        # why deriving it would trade a loud failure for a silent one). None here
+        # only ever happens when a caller constructs CodexJob() directly without
+        # going through main() (every white-box test that predates #438) -- such a
+        # caller never wrote a claim in the first place, so the D8 guard is a
+        # no-op for it by construction, exactly like an omitted --plugin-root
+        # reproduces this file's pre-#412 default.
+        self.run_id = run_id
         self.root = os.path.realpath(root)
         self.companion = companion
         self.prompt_text = prompt_text
@@ -977,6 +1008,108 @@ class CodexJob:
             self._run([self.node, self.companion, "cancel", pj, "--cwd", prior_cwd],
                       self.poll_timeout())
 
+    # ---- #438 D8: a claimed segment may never be dispatched for translation ---
+    def _claim_state(self):
+        """`(state, detail, path)` for this seg's claim record under `self.run_id`,
+        via claim_record's shared three-state predicate -- NEVER `Path.exists()`
+        (see claim_record.py's own module docstring for why: it collapses ENOENT
+        and "unreadable" into the same False, which is exactly the fail-open shape
+        this plan keeps finding). `path` is returned for the refusal message (D8:
+        "naming the segment and the claim").
+
+        RAISES ValueError when `self.run_id` is not a value claim_record's own
+        validate_run_id() accepts -- claimed_path() refuses to build a path from an
+        unsafe run id rather than quietly relocating the lookup. The single caller,
+        _refuse_claimed_translate(), catches it and REFUSES; see its own docstring
+        for why that direction, and never let a future caller of this method let it
+        escape to run()'s generic handler."""
+        path = claim_record.claimed_path(self.run_id, self.seg, Path(self.root) / "runs")
+        state, detail = claim_record.classify_claim_record(path)
+        return state, detail, path
+
+    def _refuse_claimed_translate(self):
+        """True iff a translate launch for this seg must be refused because a claim
+        record exists (D8). Only ever consulted for kind == "translate", and reached
+        immediately after safe_adopt() -- a HEALTHY claimed segment already returned
+        via safe_adopt() above and never gets here at all (D8's own measurement:
+        safe_adopt() passes for a healthy claimed draft because the claim re-stamped
+        its token to exactly what --expect-token checks). Reaching this point WITH a
+        claim on record means the draft has gone missing or invalid since the claim
+        -- the one scenario D8 exists to close.
+
+        WHAT THIS DOCSTRING USED TO CLAIM, AND WHY IT WAS WRONG: it said "launch()
+        is the sole route in this file that can overwrite the canonical", and used
+        that to justify sitting immediately before launch(). It is false, and this
+        same file already contradicted it -- _canonical_replaceable()'s own
+        docstring names TWO write sites it guards: adopt_pending()'s
+        os.replace(self.pending, self.canonical) and run()'s post-launch promote,
+        os.replace(self.attempt, self.canonical). With the guard placed after
+        adopt_pending(), the exact state D8 exists for -- a claimed segment whose
+        draft went missing or invalid, so safe_adopt() fails -- gave adopt_pending()
+        first refusal, and a SAME-RUN deferred attempt (a cross-run one is already
+        blocked by the candidate gates' own --expect-token check) could be promoted
+        over the claimed draft, destroying the pre_claim_content_sha1 baseline the
+        claim exists to preserve. The call therefore moved UP, to sit between
+        safe_adopt() and adopt_pending(); it did NOT move any higher, because the
+        justification above is load-bearing and only holds below safe_adopt().
+
+        PRESENT and AMBIGUOUS both refuse. An unreadable claim record (a non-
+        regular entry, EACCES, ...) is NOT the same as no record -- mapping it to
+        "proceed" would be this plan's third fail-open defect (see the "Standing
+        consequence" / premises section of the #438 plan and claim_record.py's own
+        AMBIGUOUS-maps-to-"do not claim" rule, mirrored here as "cannot rule out a
+        claim -> refuse the launch"). Only CLAIM_ABSENT lets a translate proceed.
+
+        Returns `(refuse, state, detail, path)`. `path` is None ONLY on the
+        unusable-run-id branch below, and run() renders that case with its own
+        wording -- every other refusal carries the real claim path for the
+        operator to go look at."""
+        if self.kind != "translate" or self.run_id is None:
+            return False, None, None, None
+        try:
+            state, detail, path = self._claim_state()
+        except ValueError as exc:
+            # claim_record.claimed_path() REFUSES to build a path out of a run id
+            # that fails its own validate_run_id() -- it raises rather than
+            # returning a sanitized or sentinel path, precisely so a reader cannot
+            # forget to check. main() validates --run-id before ever constructing a
+            # CodexJob, so a real CLI invocation never reaches here; a caller that
+            # constructs CodexJob() directly (every white-box test that predates
+            # #438) can. The direction is the same one every other unreadable claim
+            # state takes: an unusable run id means the claim state cannot be
+            # determined AT ALL, which is strictly worse than an unreadable record,
+            # so it REFUSES. Mapping it to "proceed" would reintroduce the fail-open
+            # shape from the other side -- and letting the ValueError escape to
+            # run()'s generic `except Exception` handler would turn a deliberate
+            # refusal into a "reason: error: ValueError(...)" that reads like a
+            # driver crash rather than a claim the driver could not rule out.
+            return True, claim_record.CLAIM_AMBIGUOUS, str(exc), None
+        if state == claim_record.CLAIM_ABSENT:
+            # "This run has not claimed seg" is NOT "seg is unclaimed", and
+            # conflating the two was this guard's defect -- the same one the
+            # optional driver's D8 had, found here second and reachable on the
+            # DEFAULT path, since mass-translate-wf.template.js launches
+            # codex_job.py directly and never passes through that driver. An
+            # ordinary run B supplies --expect-token B:seg and --run-id B, so
+            # the consistency check agrees; safe_adopt() rejects the A-stamped
+            # draft; B's own namespace reads absent; and the translate reached
+            # launch() while A's claim record sat untouched.
+            #
+            # Delegated, not re-implemented. Two independent hand-rolled
+            # answers to "is this claimed?" is exactly what produced three
+            # rounds of one BLOCKER; foreign_owner_refusal() is the single
+            # predicate both chokepoints now share.
+            foreign = claim_record.foreign_owner_refusal(
+                seg=self.seg,
+                this_run_id=self.run_id,
+                draft_path=Path(self.root) / "segments" / f"{self.seg}.draft.json",
+                runs_dir=Path(self.root) / "runs",
+            )
+            if foreign is not None:
+                return True, claim_record.CLAIM_PRESENT, foreign, None
+            return False, None, None, None
+        return True, state, detail, path
+
     def safe_adopt(self):
         """A pre-existing valid same-token canonical -> adopt without relaunching."""
         if not os.path.exists(self.canonical):
@@ -1302,6 +1435,50 @@ class CodexJob:
                 self.adopted = True
                 self.reason = "adopted"
                 return 0
+            # #438 D8: placed HERE -- after safe_adopt(), before EVERY remaining
+            # route in this file that can overwrite the canonical draft. Not right
+            # after --kind parsing, which would fire before safe_adopt() and break
+            # the flow that already works today (a healthy claimed segment adopts
+            # and returns 0 above, never reaching this line at all); and no longer
+            # after adopt_pending(), which is where it originally sat on the false
+            # premise that launch() was the only destructive route. adopt_pending()
+            # ends in os.replace(self.pending, self.canonical) -- in exactly the
+            # state this guard exists for (a claimed segment whose draft went
+            # missing or invalid, so safe_adopt() failed), a same-run deferred
+            # attempt would have been promoted over the claimed draft, destroying
+            # the pre_claim_content_sha1 baseline the claim exists to preserve.
+            # A refusal here also leaves self.pending untouched, unlike the older
+            # order, where a claimed segment's refusal could be preceded by
+            # adopt_pending() discarding a gate-rejected pending on its way past.
+            refuse, claim_state, claim_detail, claim_path = self._refuse_claimed_translate()
+            if refuse:
+                self.reason = "claimed-segment-refused"
+                if claim_path is None:
+                    # The run id itself could not be turned into a claim path (see
+                    # _refuse_claimed_translate()'s own ValueError branch) -- there
+                    # is no record to name, and asserting a claim would overstate
+                    # what is known. What IS known is the only thing that matters
+                    # here: the claim state is unverifiable, so the translate stops.
+                    self.error_detail = (
+                        "a claim on segment %r cannot be ruled out: this run's own "
+                        "id %r cannot be turned into a claim path (%s) -- a "
+                        "translate may never proceed on a claim state this driver "
+                        "is unable to read (#438 D8)"
+                        % (self.seg, self.run_id, claim_detail)
+                    )
+                else:
+                    self.error_detail = (
+                        "segment %r is claimed under run %r (record %s) -- a claimed "
+                        "segment may never be translated (#438 D8): its draft is "
+                        "missing or failed validation and must be repaired or "
+                        "re-claimed, never overwritten by a fresh translate%s"
+                        % (
+                            self.seg, self.run_id, claim_path,
+                            "" if claim_state == claim_record.CLAIM_PRESENT
+                            else (" [claim record unreadable: %s]" % claim_detail),
+                        )
+                    )
+                return 1
             if self.adopt_pending():                  # NEW: promote a prior run's deferred completed attempt
                 self.adopted = True
                 self.reason = "adopted-pending"
@@ -1383,6 +1560,20 @@ def _build_parser():
     p.add_argument("--seg", required=True)
     p.add_argument("--prompt-file", required=True, dest="prompt_file")
     p.add_argument("--expect-token", required=True, dest="expect_token")
+    # #438: REQUIRED, never derived from --expect-token. Splitting --expect-token
+    # at its first colon would recover a RUN_ID in the common case (the same
+    # derivation select_segments.py's draft_run_id() uses), but a malformed token
+    # yields no run id, which yields "no claim record found", which reads as
+    # "not claimed" and proceeds -- trading a loud failure for a silent one. See
+    # D8's own reasoning in the #438 plan.
+    # NOT argparse `required=True`: kept a plain optional flag (default None) so
+    # ITS OWN absence is checked, and reported, by main() below alongside every
+    # other hand-validated flag (--seg, --disp, --deadline-sec) -- an
+    # argparse-level `required=True` here would raise SystemExit straight out of
+    # parse_args(), before main()'s own usage checks ever run, which is a
+    # DIFFERENT failure shape (uncaught exception vs. a clean `return 2`) than
+    # every other manually-validated flag in this parser.
+    p.add_argument("--run-id", default=None, dest="run_id")
     p.add_argument("--disp", required=True)
     p.add_argument("--deadline-sec", required=True, type=int, dest="deadline_sec")
     p.add_argument("--poll-sec", type=int, default=15, dest="poll_sec")
@@ -1415,6 +1606,120 @@ def main(argv=None):
         return 2
     if not _valid_disp(args.disp):
         print("Error: --disp is not a safe single path component", file=sys.stderr)
+        return 2
+    if args.run_id is None or not args.run_id.strip():
+        # #438 D8: FATAL, not "unclaimed" -- omitting --run-id must not silently
+        # degrade into "cannot look up a claim, so proceed as if unclaimed". An
+        # empty/whitespace-only value is caught the same way as an absent one
+        # (the same silent-degradation trap the --plugin-root check below closes
+        # for a different flag): either would mis-resolve the claim path
+        # (Path("runs") / "" is Path("runs") unchanged) and read every claim
+        # lookup as "not found" -> "not claimed" -> proceed. RUN_ID is
+        # deliberately never derived from --expect-token here either -- see D8's
+        # own reasoning at _build_parser()'s --run-id.
+        print("Error: --run-id is required and must be a non-empty string "
+              "(never derived -- pass the run's own RUN_ID explicitly)",
+              file=sys.stderr)
+        return 2
+    # SHAPE, not just presence. The check above only proves --run-id is not blank;
+    # it says nothing about whether the value is usable as the single path
+    # component this driver splices into runs/<RUN_ID>/.claimed.<seg>. A path-like
+    # value ('../x', '/tmp/elsewhere') used to relocate that lookup silently, and a
+    # relocated lookup reports CLAIM_ABSENT -- which the D8 guard reads as "not
+    # claimed" and proceeds, the fail-open shape #438 exists to refuse. As of
+    # claim_record.claimed_path()'s own validation that same value now RAISES
+    # instead, which closes the silent relocation but would surface, from a CLI
+    # invocation, as a traceback out of run()'s generic handler ("reason: error:
+    # ValueError(...)"). Neither is an acceptable answer to a mistyped flag, so the
+    # value is checked HERE and turned into a clean exit 2 that names the flag.
+    #
+    # claim_record's copy is called rather than a sixth local copy of the same
+    # regex: it is the exact function claimed_path() will apply, so agreement is
+    # structural rather than pinned by a drift test, and adding a module-level
+    # RUN_ID-named pattern to THIS file would enlist it into
+    # tests/run_id_pattern_drift.test.py's roster for no benefit.
+    run_id_problem = claim_record.validate_run_id(args.run_id)
+    if run_id_problem is not None:
+        print("Error: --run-id is not usable as a claim-path component: %s"
+              % run_id_problem, file=sys.stderr)
+        return 2
+    # #438: the claim NAMESPACE must be the run the token dispatches for.
+    # _claim_state() looks the claim up under --run-id while every gate checks the
+    # draft against --expect-token, and nothing tied the two together: a direct
+    # invocation with `--expect-token RUN-A:seg --run-id RUN-B` looked up a claim
+    # that cannot exist under RUN-B, read CLAIM_ABSENT as "not claimed", and could
+    # reach launch() over a draft claimed under RUN-A. Both shipped callers already
+    # pass agreeing values (mass-translate-wf.template.js builds `expectToken` as
+    # RUN_ID + ":" + seg right beside its own `--run-id RUN_ID`;
+    # segment_dispatch_driver.py builds both from the same ctx.run_id), but the
+    # chokepoint must not depend on a contract it never enforces.
+    #
+    # THIS IS A CONSISTENCY CHECK BETWEEN TWO INDEPENDENTLY SUPPLIED VALUES, NOT A
+    # DERIVATION -- the next reader will assume the deliberate "RUN_ID is NEVER
+    # derived from --expect-token" rule (see _build_parser()'s own --run-id
+    # comment) was broken here. It is not: the token's run component is never
+    # ADOPTED as the run id, and a token that carries none is REFUSED rather than
+    # mined for one. Non-derivation is a rule about where RUN_ID comes FROM (the
+    # caller, always, even when the token would have yielded the same string); it
+    # says nothing about whether a malformed token may be waved through.
+    #
+    # A TOKEN WITH NO RUN COMPONENT IS FATAL, NOT SKIPPED. An earlier revision
+    # skipped this whole check whenever the token had no colon, or an empty leading
+    # component, justifying the skip with "the gates already refuse a malformed
+    # token on their own". That justification is FALSE on the one path that matters
+    # -- the DESTRUCTIVE one. The gates refuse the EXISTING draft, and refusing the
+    # existing draft is precisely what makes run() treat the segment as needing
+    # work and launch a fresh translate; the post-launch os.replace then destroys
+    # the claimed draft (and with it the pre_claim_content_sha1 baseline taken from
+    # it), and the gates re-run against codex's NEW attempt, whose dispatch_token is
+    # whatever the prompt told it to stamp -- so the malformed token never has to
+    # satisfy anything. The gates protect the old bytes from being ADOPTED; they do
+    # not protect them from being OVERWRITTEN, which is the harm D8 exists to stop.
+    # Measured by driving the real main() with a deliberately-missing --companion,
+    # so the NEXT check's own message says whether this block fired at all:
+    # `--expect-token RUN-A:<seg> --run-id RUN-B` and `RUN-A:<seg>:r2 --run-id
+    # RUN-B` were refused by the disagreement branch below, while `BOGUS`,
+    # `:<seg>` and `""` all sailed past into the companion check with --run-id
+    # RUN-B entirely unexamined. From there the rest follows from this
+    # file: a claim minted under RUN-A is invisible to a lookup under RUN-B, and
+    # _refuse_claimed_translate() returns refuse=False on CLAIM_ABSENT (see its
+    # `if state == claim_record.CLAIM_ABSENT: return False, ...` branch), so run()
+    # proceeds to adopt_pending()/launch() over a segment another run holds.
+    #
+    # Refusing costs nothing legitimate: --expect-token is required=True (see
+    # _build_parser()), and EVERY legitimate value is <RUN_ID>:<seg> or
+    # <RUN_ID>:<seg>:r<label> -- mass-translate-wf.template.js builds RUN_ID + ":" +
+    # seg (and + ":r" + roundLabel), segment_dispatch_driver.py's
+    # translate_dispatch_token()/review_dispatch_token() build the same two shapes
+    # from ctx.run_id -- and a validated RUN_ID can never contain a ':' itself
+    # (claim_record.validate_run_id()'s own pattern excludes it), so the run
+    # component is always exactly the text before the FIRST colon. A token with no
+    # colon, or with an empty leading component, is therefore not a case to tolerate
+    # but a mis-wired caller, and the whole point of #438 is that a chokepoint must
+    # answer a mis-wired caller loudly instead of degrading into "cannot compare, so
+    # proceed".
+    token_run_id, token_colon, _token_rest = args.expect_token.partition(":")
+    if not token_colon or not token_run_id:
+        print(
+            "Error: --expect-token %r carries no run component -- it must be "
+            "spelled <RUN_ID>:<seg> (translate) or <RUN_ID>:<seg>:r<label> "
+            "(review). Without one there is nothing to check --run-id against, and "
+            "an unchecked --run-id is free to name a foreign claim namespace: the "
+            "lookup at runs/<RUN_ID>/.claimed.<seg> then finds nothing, which reads "
+            "as 'not claimed' and would let a claimed segment be re-translated over."
+            % (args.expect_token,),
+            file=sys.stderr,
+        )
+        return 2
+    if token_run_id != args.run_id:
+        print(
+            "Error: --expect-token names run %r but --run-id is %r -- the claim "
+            "namespace this driver reads (runs/<RUN_ID>/.claimed.<seg>) must be "
+            "the same run the token dispatches for. A mismatch looks up a claim "
+            "that cannot exist, which reads as 'not claimed' and would let a "
+            "claimed segment be translated." % (token_run_id, args.run_id),
+            file=sys.stderr,
+        )
         return 2
     if not os.path.isfile(args.companion):
         print("Error: --companion not found: %s" % args.companion, file=sys.stderr)
@@ -1490,7 +1795,7 @@ def main(argv=None):
         kind=args.kind, seg=args.seg, tok=args.expect_token, disp=args.disp, root=args.cwd,
         companion=args.companion, prompt_text=prompt_text, prompt_file=args.prompt_file,
         deadline_sec=args.deadline_sec, poll_sec=poll_sec, effort=args.effort, node=args.node,
-        model=args.model, plugin_root=resolved_plugin_root,
+        model=args.model, plugin_root=resolved_plugin_root, run_id=args.run_id,
     )
     return job.run()
 

@@ -193,12 +193,15 @@ Output: exactly one JSON object on stdout. Success:
 {"success": true, "durable_root": ..., "segs": [...],
  "requested_only_segs": [...] | null, "classification": {seg: {...}},
  "counts": {...}, "ids_by_category": {category: [seg, ...]},
- "overrides": [...], "excluded_only_segs": [...]}. `counts` and
- `ids_by_category` are keyed by the same six ALL_CATEGORIES, one the
- per-category tally and the other the per-category segment-id list (each
- stale segment's own `stale_reason` lives inline in `classification`) --
- together this is the "classification report" the build spec requires
- (counts + IDs per category + stale_reason).
+ "overrides": [...], "excluded_only_segs": [...], "claims": {seg: {...}}}.
+ `counts` and `ids_by_category` are keyed by the same six ALL_CATEGORIES,
+ one the per-category tally and the other the per-category segment-id list
+ (each stale segment's own `stale_reason` lives inline in `classification`)
+ -- together this is the "classification report" the build spec requires
+ (counts + IDs per category + stale_reason). `claims` (#438) is always
+ present, empty {} unless --from-converged/--from-cap were given -- see the
+ claim admission gate section below for its per-id shape and each
+ profile's closed condition list.
 Failure: {"success": false, "error": ...}. Exit 0 on success, 1 on any
 fatal condition -- callers should read stdout, not rely on the exit code
 alone.
@@ -221,8 +224,22 @@ import stat
 import subprocess
 import sys
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
+
+# #438's claim admission gate needs claim_record.py -- a flat sibling
+# import, the same idiom scaffold_setup.py already uses for `import
+# cache_key`, rather than a duplicated copy, because claim_record.py's own
+# module docstring is explicit that its read discipline (the three-state
+# predicate, AMBIGUOUS mapping to "do not claim") must be SHARED, not
+# reimplemented per reader: "the identical shape that produced the 1.19.1
+# sentinel data-loss bug." Deliberately NOT imported at module level, unlike
+# scaffold_setup.py's `import cache_key`: scaffold_setup.py always runs from
+# a tree where cache_key.py is guaranteed present, while this script is
+# invoked by every caller that merely wants a classification report, most of
+# which never touch a claim at all -- see _import_claim_record() below for
+# where and why it loads.
 
 # ---------------------------------------------------------------------------
 # Self-anchoring
@@ -234,6 +251,12 @@ DURABLE_ROOT = SCRIPTS_DIR.parent
 MANIFEST_PATH = DURABLE_ROOT / "manifest.json"
 LEDGER_MERGE_SCRIPT = SCRIPTS_DIR / "ledger_merge.py"
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
+# #438: the two leaf checkers the claim admission gate shells out to for
+# S1/S2 (PLAN.md D2) -- resolved the SAME way as CACHE_KEY_SCRIPT, since both
+# are leaves with no siblings of their own (see draft_ready.py's and
+# validate_draft.py's own module docstrings: "this script is a LEAF").
+DRAFT_READY_SCRIPT = SCRIPTS_DIR / "draft_ready.py"
+VALIDATE_DRAFT_SCRIPT = SCRIPTS_DIR / "validate_draft.py"
 
 
 def resolve_dirs(durable_root_str, plugin_root_str=None):
@@ -268,16 +291,24 @@ def resolve_dirs(durable_root_str, plugin_root_str=None):
     if plugin_root_str is None:
         ledger_merge_script = LEDGER_MERGE_SCRIPT
         cache_key_script = CACHE_KEY_SCRIPT
+        draft_ready_script = DRAFT_READY_SCRIPT
+        validate_draft_script = VALIDATE_DRAFT_SCRIPT
     else:
         plugin_scripts_dir = Path(plugin_root_str).resolve() / "assets" / "scripts"
         ledger_merge_script = plugin_scripts_dir / "ledger_merge.py"
         cache_key_script = plugin_scripts_dir / "cache_key.py"
+        # #438: same --plugin-root-aware resolution as cache_key_script --
+        # both are leaves, resolved the identical way.
+        draft_ready_script = plugin_scripts_dir / "draft_ready.py"
+        validate_draft_script = plugin_scripts_dir / "validate_draft.py"
 
     return {
         "durable_root": durable_root,
         "manifest_path": manifest_path,
         "ledger_merge_script": ledger_merge_script,
         "cache_key_script": cache_key_script,
+        "draft_ready_script": draft_ready_script,
+        "validate_draft_script": validate_draft_script,
     }
 
 
@@ -1320,6 +1351,1372 @@ def select_only_segs(only_segs: list, classification: dict):
 
 
 # ---------------------------------------------------------------------------
+# #438 -- the claim admission gate. Authorizes RE-REVIEWING an already-
+# dispatched draft under one of two closed, per-profile condition lists
+# (PLAN.md's D1/D2), without ever re-translating it. See PLAN.md (D1-D6, D9,
+# D10) and POPULATIONS.md for the full design. This section implements the
+# SELECTOR half only: it validates admission and WRITES the durable claim
+# record (claim_record.py), then reports the authorization in this script's
+# own JSON output for the driver to consume (D3). It ALSO re-stamps the
+# draft's own dispatch_token (D4, rewrite_draft_dispatch_token() below),
+# strictly AFTER that record is durable -- see that function's docstring.
+# ---------------------------------------------------------------------------
+
+def _import_claim_record():
+    """Lazy sibling import of claim_record.py -- deferred until a claim is
+    actually requested, per the module-level comment above. Self-anchored
+    the same way `import cache_key` resolves for scaffold_setup.py: Python
+    adds a directly-run script's own directory to sys.path[0], so this
+    finds claim_record.py beside THIS script wherever it is currently
+    running from (self-anchored durable-root copy or --plugin-root install
+    tree) -- both are ordinary Step 0a bundle members that always travel
+    together, so the only way this import fails is a genuinely broken
+    install, which is a whole-run FATAL, never a per-id one.
+
+    THE FALLBACK BELOW IS NOT A SECOND GUESS AT WHERE THE SIBLING LIVES --
+    it resolves the SAME location, without consulting sys.path at all.
+    sys.path[0] is this script's own directory only when this script was
+    RUN; when it is LOADED as a module by path instead
+    (importlib.util.spec_from_file_location -- how every test that
+    exercises rewrite_draft_dispatch_token() as a unit gets at it, and the
+    idiom segment_dispatch_driver.py deliberately uses for this very
+    sibling in production), sys.path[0] belongs to whoever did the loading
+    and a bare `import claim_record` resolves against a tree that has
+    nothing to do with this file. SCRIPTS_DIR is
+    `Path(__file__).resolve().parent` -- literally "beside THIS script",
+    the thing the paragraph above already claims -- so the fallback makes
+    that claim TRUE under both invocation modes rather than widening what
+    may be imported. It matters now and did not before: the sibling used to
+    be needed only inside run()'s claim block (always reached by a real
+    subprocess invocation), and is now needed by
+    rewrite_draft_dispatch_token() for its directory fsync, which is called
+    directly as a unit.
+
+    Deliberately NOT registered in sys.modules under `claim_record`: a
+    process that has already bound that name to some other copy must keep
+    it, since the bare import above would have found that copy first
+    anyway, and a fallback that silently rebinds it would make WHICH copy
+    is in force depend on which caller happened to run first.
+
+    A missing or unloadable sibling stays a whole-run FATAL, from whichever
+    attempt ran last -- the fallback never converts a broken install into a
+    per-segment failure."""
+    try:
+        import claim_record
+
+        return claim_record
+    except ImportError:
+        pass
+    # Local import on this one recovery path: the module-level import list
+    # is deliberately minimal (see the note on `os` at the top of this
+    # file), and nothing on the ordinary path needs importlib.
+    import importlib.util
+
+    path = SCRIPTS_DIR / "claim_record.py"
+    spec = importlib.util.spec_from_file_location("claim_record", str(path))
+    if spec is None or spec.loader is None:
+        fatal(f"claim_record.py could not be imported (expected beside this script at {path})")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except (OSError, ImportError, SyntaxError, ValueError) as exc:
+        fatal(
+            f"claim_record.py could not be imported (expected beside this script at "
+            f"{path}): {exc}"
+        )
+    return module
+
+
+# Exactly two profiles -- a third (--from-incomplete, for P3) was proposed in
+# an earlier revision and DELETED after codex round 2 showed no implementable
+# condition separates a stalled unit from ordinary live work (PLAN.md D2's
+# "P3" section). Never reintroduce a third.
+CLAIM_PROFILE_FROM_CONVERGED = "from-converged"
+CLAIM_PROFILE_FROM_CAP = "from-cap"
+CLAIM_PROFILES = (CLAIM_PROFILE_FROM_CONVERGED, CLAIM_PROFILE_FROM_CAP)
+
+# final_audit.py's own SAFE_STALE_CARVEOUT_FIELDS, restated per this
+# project's "no shared lib between self-contained scripts" convention (this
+# file already restates CACHE_KEY_FIELDS/DERIVATION_STATE_FIELDS the same
+# way). A cache-key field in this set can only ever be MACHINERY (plugin
+# bytes, schema shape, derivation-bundle bytes), never prose -- D6 records a
+# moved field here as a REPORTING distinction on a claim, NEVER an admission
+# condition (decision 5: no moved cache-key field, machinery or not, refuses
+# a --from-converged claim).
+MACHINERY_ONLY_CACHE_KEY_FIELDS = frozenset(
+    {"plugin_bundle_hash", "schema_hash", "derivation_bundle_hash"}
+)
+
+
+def _claim_now_iso8601() -> str:
+    """Byte-for-byte the same format as ledger_update.py's own now_iso8601()."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def parse_claim_requests(args) -> "dict[str, str]":
+    """Combines --from-converged/--from-cap into {seg: profile}. FATAL when
+    an id is named under BOTH -- an ambiguous profile is not a decision this
+    script may resolve silently: D2's two profiles are closed condition
+    lists over DIFFERENT populations, and a unit satisfying both is a design
+    error the operator must resolve by naming it under exactly one."""
+    requests: dict = {}
+    collisions = set()
+    for flag_name, profile, raw in (
+        ("--from-converged", CLAIM_PROFILE_FROM_CONVERGED, args.from_converged),
+        ("--from-cap", CLAIM_PROFILE_FROM_CAP, args.from_cap),
+    ):
+        if raw is None:
+            continue
+        for seg in parse_only_segs(raw):
+            problem = validate_seg(seg)
+            if problem is not None:
+                fatal(f"{flag_name}: unsafe segment id: {problem}")
+            if seg in requests and requests[seg] != profile:
+                collisions.add(seg)
+            requests[seg] = profile
+    if collisions:
+        fatal(
+            f"{len(collisions)} segment id(s) were named under BOTH --from-converged "
+            f"and --from-cap: {', '.join(sorted(collisions))}. Each id must be claimed "
+            f"under exactly one profile -- naming it under both is not a decision this "
+            f"script may resolve silently."
+        )
+    return requests
+
+
+def _run_leaf_gate(script_path: Path, seg: str, durable_root: Path, label: str):
+    """Runs a leaf checker script (validate_draft.py / draft_ready.py) as
+    `<script> <seg> --durable-root <durable_root>` -- the same subprocess
+    shape this file already uses for cache_key.py. Returns (True, "") on
+    exit 0, (False, detail) otherwise.
+
+    A per-id failure here becomes THIS id's own claim-admission reason,
+    never a whole-run crash -- matching compute_current_cache_key()'s own
+    "a per-segment failure must never take down the whole run" contract.
+    Script ABSENCE is a whole-run problem (a plugin install defect, not a
+    per-segment fact) and fatals immediately, matching run_ledger_merge()'s
+    own check on ledger_merge_script."""
+    if not script_path.is_file():
+        fatal(f"{label} not found at {script_path}")
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script_path), seg, "--durable-root", str(durable_root)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=str(durable_root),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"could not run {label} {seg}: {exc}"
+    if proc.returncode == 0:
+        return True, ""
+    detail = proc.stdout.strip() or proc.stderr.strip() or f"exit {proc.returncode}"
+    return False, detail
+
+
+def read_json_nonfatal(path: Path, what: str):
+    """Same contract as read_segpack_nonfatal(): the parsed dict on success,
+    or a string error message on failure -- NEVER raises/exits. A claim id's
+    own artifact being unreadable must fail THAT id's admission alone, never
+    take down the whole batch."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return f"{what} not found at {path}"
+    except UnicodeDecodeError as exc:
+        return f"{what} at {path} is not valid UTF-8: {exc}"
+    except OSError as exc:
+        return f"could not read {what} at {path}: {exc}"
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return f"{what} at {path} is not valid JSON: {exc}"
+    if not isinstance(doc, dict):
+        return f"{what} at {path} is not a JSON object"
+    return doc
+
+
+def review_path(seg: str, durable_root: Path) -> Path:
+    """Byte-for-byte the same location as ledger_update.py's own
+    review_path(): {durable_root}/segments/{seg}.review.json."""
+    return durable_root / "segments" / f"{seg}.review.json"
+
+
+# review.schema.json's own required/optional shape (required: clean,
+# coverage_ok, findings, draft_sha1 -- optional: dispatch_token;
+# additionalProperties:false). Restated per this project's "no shared lib"
+# convention, matching how draft_ready.py already restates draft.schema.json's
+# own container shape in its _DRAFT_CONTAINER_SPECS.
+_REVIEW_REQUIRED_TYPES = {
+    "clean": bool,
+    "coverage_ok": bool,
+    "findings": list,
+    "draft_sha1": str,
+}
+_REVIEW_OPTIONAL_TYPES = {"dispatch_token": str}
+_REVIEW_FINDING_REQUIRED_TYPES = {
+    "loc": str,
+    "severity": str,
+    "issue": str,
+    "suggest": str,
+}
+
+
+def check_review_structure(doc) -> list:
+    """S4: 'the stored review is schema-valid on its own terms' --
+    review.schema.json's required fields/types, additionalProperties:false,
+    and findings[]'s own required shape. Returns a list of error strings
+    (empty == valid)."""
+    if not isinstance(doc, dict):
+        return [f"review.schema.json: review root must be an object, got {type(doc).__name__}"]
+    errs = [
+        f"review.schema.json: missing required key {k!r}"
+        for k in _REVIEW_REQUIRED_TYPES if k not in doc
+    ]
+    if errs:
+        return errs
+    for key, expected_type in _REVIEW_REQUIRED_TYPES.items():
+        if not isinstance(doc[key], expected_type):
+            errs.append(f"review.schema.json: {key!r} must be a {expected_type.__name__}")
+    for key, expected_type in _REVIEW_OPTIONAL_TYPES.items():
+        if key in doc and not isinstance(doc[key], expected_type):
+            errs.append(f"review.schema.json: {key!r} must be a {expected_type.__name__}")
+    allowed = set(_REVIEW_REQUIRED_TYPES) | set(_REVIEW_OPTIONAL_TYPES)
+    extra = set(doc) - allowed
+    if extra:
+        errs.append(f"review.schema.json: unexpected field(s) {sorted(extra)}")
+    if isinstance(doc.get("findings"), list):
+        for i, item in enumerate(doc["findings"]):
+            if not isinstance(item, dict):
+                errs.append(f"review.schema.json: findings[{i}] must be an object")
+                continue
+            for key, expected_type in _REVIEW_FINDING_REQUIRED_TYPES.items():
+                if key not in item:
+                    errs.append(f"review.schema.json: findings[{i}] missing {key!r}")
+                elif not isinstance(item[key], expected_type):
+                    errs.append(f"review.schema.json: findings[{i}].{key} must be a string")
+            item_extra = set(item) - set(_REVIEW_FINDING_REQUIRED_TYPES)
+            if item_extra:
+                errs.append(
+                    f"review.schema.json: findings[{i}] has unexpected field(s) {sorted(item_extra)}"
+                )
+    return errs
+
+
+def load_current_canon_entries(durable_root: Path):
+    """Returns (entries_dict, None) or (None, error_string) -- canon.json's
+    own 'entries' map, from the SAME location segpack.py itself reads
+    (DURABLE_ROOT / "canon.json")."""
+    doc = read_json_nonfatal(durable_root / "canon.json", "canon.json")
+    if isinstance(doc, str):
+        return None, doc
+    entries = doc.get("entries")
+    if not isinstance(entries, dict):
+        return None, "canon.json has no 'entries' object"
+    return entries, None
+
+
+def _current_canon_target(entries: dict, name: str):
+    """The target form the CURRENT canon.json would produce for `name`, or
+    None -- byte-for-byte the same rule segpack.py's own canon-injection
+    loop applies (build_pack(): entry = canon_entries.get(name); tf =
+    entry.get('canonical_target_form') if isinstance(entry, dict) else None;
+    recorded only if isinstance(tf, str) and tf)."""
+    entry = entries.get(name)
+    tf = entry.get("canonical_target_form") if isinstance(entry, dict) else None
+    return tf if isinstance(tf, str) and tf else None
+
+
+def evaluate_fresh_segpack_precondition(seg: str, durable_root: Path, canon_entries: dict) -> list:
+    """D6's admission precondition for BOTH profiles: the segpack's frozen
+    canon_map must agree with what the CURRENT canon.json would produce,
+    over the segment's WHOLE 'names' partition -- not just canon_map's
+    existing keys (codex round 2: canon_map is only a SUBSET of
+    canon_names/new_names, so intersecting canon_map's own keys would miss a
+    name that gained a target only in the CURRENT canon, or lost the one it
+    had). Returns a list of mismatch dicts (empty == fresh); a single dict
+    carrying only 'error' means the segpack itself could not be evaluated."""
+    sp = read_segpack_nonfatal(seg, durable_root)
+    if isinstance(sp, str):
+        return [{"error": sp}]
+    names = sp.get("names")
+    if not isinstance(names, list):
+        return [{"error": f"segpack for segment {seg!r} has no 'names' array"}]
+    stored_map = sp.get("canon_map")
+    if not isinstance(stored_map, dict):
+        return [{"error": f"segpack for segment {seg!r} has no 'canon_map' object"}]
+    mismatches = []
+    for name in names:
+        if not isinstance(name, str):
+            continue
+        current_tf = _current_canon_target(canon_entries, name)
+        stored_tf = stored_map.get(name)
+        stored_tf = stored_tf if isinstance(stored_tf, str) and stored_tf else None
+        if current_tf != stored_tf:
+            mismatches.append(
+                {"name": name, "segpack_target": stored_tf, "current_canon_target": current_tf}
+            )
+    return mismatches
+
+
+# The one refusal S3 makes about a MISSING token, stated once so the plain
+# refusal and every lost-token-recovery refusal below open with the same
+# sentence. An operator reading either message is looking at the same
+# observed fact; only the reason the sanctioned recovery did not apply
+# differs, and that difference is what each caller appends.
+_S3_NO_TOKEN = "S3: draft has no dispatch_token (absent or not a string)"
+
+
+def evaluate_lost_token_recovery(seg: str, profile: str, run_id, durable_root: Path):
+    """D9's sanctioned LOST-TOKEN RECOVERY. Returns (record, None) when THIS
+    run's own claim record for `seg` exists, is readable, and agrees with the
+    authorization being requested -- else (None, refusal_reason).
+
+    WHY THIS EXISTS AT ALL. draft_ready.py's own claim note (its
+    _claim_note(), on a dispatch_token-mismatch refusal) tells the operator,
+    in as many words, to "re-claim {seg} under the same profile to restore
+    it" once it finds a claim record for this run with no matching token on
+    the draft -- the case where a fix round rewrote the draft and did not
+    preserve `dispatch_token` byte for byte. Without this function that
+    instruction names a command that cannot run: S3 refuses a token-less
+    draft before the claim block ever consults an existing record, so the
+    advertised recovery was unreachable and D9's residual was not in fact
+    re-establishable. A tool that documents a remedy it then refuses is
+    worse than one that documents none, because the operator spends the
+    round trip discovering it.
+
+    WHY THIS IS NOT A GENERAL HOLE, condition by condition. The recovery
+    turns on evidence THIS RUN ITSELF wrote and nothing else:
+
+      * a claim record must exist at runs/<run_id>/.claimed.<seg>, i.e. this
+        very run already passed every S-gate, the profile's own condition
+        list and D6 for this segment. A token-less draft with NO record is
+        refused exactly as before -- that is an unclaimed draft that never
+        had a token, not a claim whose token was lost, and the two are
+        distinguishable only by the record;
+      * the record must be READABLE (claim_record.read_claim_record(), never
+        the lstat-only classifier -- this consumer is about to believe
+        FIELDS). AMBIGUOUS refuses: an unreadable record is treated as NOT
+        claimed, the safe direction claim_record.py's module docstring
+        requires of every reader;
+      * the record's own `seg`/`run_id` must agree with the path it was read
+        from, so a record that does not describe itself cannot authorize
+        anything;
+      * the record's `profile` must equal the profile being requested now.
+        "Re-claim under the same profile" is the literal instruction, and a
+        DIFFERENT profile is a new authorization over a different condition
+        list -- which needs a draft this gate can still read a token from.
+
+    DELIBERATELY NARROW: this covers a token that is ABSENT (or not a
+    non-empty string), never one that is present but malformed. A dropped
+    field is what a schema-shaped rewrite produces (draft.schema.json makes
+    `dispatch_token` optional, so a re-emitted draft simply loses it); a
+    garbled non-empty token is a different event -- a cross-run collision, a
+    hand edit, a partial write -- and reading it as "lost" would let this
+    recovery answer a question it has no evidence about. It stays refused by
+    S3's malformed-token branch.
+
+    NOT re-checked here, on purpose: `pre_claim_content_sha1`. The record's
+    copy is the draft as it looked at the ORIGINAL claim, and the fix round
+    that dropped the token is exactly the thing that changed the content
+    since. Requiring them to match would refuse every recovery this function
+    exists to allow. What the draft must still satisfy is every gate in this
+    same admission pass, evaluated against the draft as it is NOW."""
+    if not isinstance(run_id, str) or not run_id:
+        return None, (
+            f"{_S3_NO_TOKEN}, and no --run-id is available to look up a claim record for "
+            f"this segment, so the D9 lost-token recovery cannot be evaluated"
+        )
+    claim_record = _import_claim_record()
+    try:
+        path = claim_record.claimed_path(run_id, seg, durable_root / "runs")
+    except ValueError as exc:
+        # claimed_path() raises rather than sanitizing, so a reader cannot
+        # forget the check. Kept a per-id reason here rather than letting it
+        # escape: this function's whole contract is that ONE segment's own
+        # problem never takes down the batch.
+        return None, (
+            f"{_S3_NO_TOKEN}, and the D9 lost-token recovery could not even look for a "
+            f"claim record: {exc}"
+        )
+    state, payload, detail = claim_record.read_claim_record(path)
+    if state == claim_record.CLAIM_ABSENT:
+        return None, (
+            f"{_S3_NO_TOKEN}, and run {run_id!r} holds no claim record for this segment "
+            f"either -- so this is an unclaimed draft with no token at all, not the D9 "
+            f"lost-token recovery (which restores a token dropped AFTER this run already "
+            f"claimed the segment)"
+        )
+    if state != claim_record.CLAIM_PRESENT or not isinstance(payload, dict):
+        return None, (
+            f"{_S3_NO_TOKEN}, and run {run_id!r}'s own claim record for this segment is "
+            f"unreadable ({detail or state}) -- treated as NOT claimed, the safe "
+            f"direction, never assumed claimed. The D9 lost-token recovery needs a "
+            f"readable record; resolve {path} by hand first"
+        )
+    recorded_seg = payload.get("seg")
+    recorded_run_id = payload.get("run_id")
+    if recorded_seg != seg or recorded_run_id != run_id:
+        return None, (
+            f"{_S3_NO_TOKEN}, and the claim record at {path} names "
+            f"seg={recorded_seg!r}/run_id={recorded_run_id!r}, which disagrees with the "
+            f"path it was read from -- refusing to recover a claim from a record that "
+            f"does not describe itself"
+        )
+    recorded_profile = payload.get("profile")
+    if recorded_profile != profile:
+        return None, (
+            f"{_S3_NO_TOKEN}, and run {run_id!r}'s claim record for this segment was "
+            f"written under profile {recorded_profile!r}, not the requested {profile!r} "
+            f"-- the sanctioned recovery is to re-claim under the SAME profile. Naming a "
+            f"different profile is a NEW authorization over a different condition list, "
+            f"and that needs a draft this gate can still read a token from"
+        )
+    return payload, None
+
+
+def evaluate_claim_admission(
+    seg: str,
+    profile: str,
+    record: "dict | None",
+    dirs: dict,
+    canon_entries: dict,
+    args,
+) -> "tuple[bool, list, dict]":
+    """Evaluates ALL of D2's shared safety gates (S1-S5), the requested
+    profile's own closed condition list, and D6's fresh-segpack precondition
+    for ONE claim id -- every check runs independently and every failure is
+    collected, per D2's 'all ids validated in ONE pass with every failure
+    reported' (three sequential fatals cost an operator three round trips).
+
+    Returns (ok, reasons, extras). `extras` is populated only when ok is
+    True and carries everything the caller needs to build and write the
+    claim record (claim_record.build_claim_record())."""
+    durable_root = dirs["durable_root"]
+    reasons = []
+    ledger_record = record if isinstance(record, dict) else {}
+    if record is None:
+        reasons.append(
+            f"{seg!r}: no ledger record exists at all (materialized runs/ledger.json "
+            f"has nothing for it) -- profile {profile!r} requires one"
+        )
+
+    # ---- S1: validate_draft.py -- deterministic coverage/content ---------
+    ok1, detail1 = _run_leaf_gate(dirs["validate_draft_script"], seg, durable_root, "validate_draft.py")
+    if not ok1:
+        reasons.append(f"S1 (validate_draft.py) failed: {detail1}")
+
+    # ---- S2: draft_ready.py structural checks -- NO --expect-token: the --
+    # ---- draft's token is still the OLD one at admission time, this only -
+    # ---- checks required-key-set / seg field / segpack 1:1. ---------------
+    ok2, detail2 = _run_leaf_gate(dirs["draft_ready_script"], seg, durable_root, "draft_ready.py")
+    if not ok2:
+        reasons.append(f"S2 (draft_ready.py structural check) failed: {detail2}")
+
+    # ---- draft read: needed for S3, --from-converged's own ---------------
+    # ---- reviewed_draft_sha1 comparison, and the claim record's own ------
+    # ---- previous_dispatch_token / pre_claim_content_sha1. ----------------
+    dp = draft_path(seg, durable_root)
+    draft_doc = read_json_nonfatal(dp, f"draft for segment {seg!r}")
+    current_draft_sha1 = None
+    previous_token = None
+    source_run_id = None
+    lost_token_recovery = False
+    if isinstance(draft_doc, str):
+        reasons.append(f"S3 (dispatch_token): {draft_doc}")
+    else:
+        try:
+            current_draft_sha1 = draft_content_sha1(dp)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            reasons.append(f"could not compute the draft's own content sha1: {exc}")
+        previous_token = draft_doc.get("dispatch_token")
+        if not isinstance(previous_token, str) or not previous_token:
+            # D9's sanctioned lost-token recovery, the ONLY way a token-less
+            # draft passes S3 -- and only because this same run already
+            # claimed this segment and left the durable record proving it.
+            # See evaluate_lost_token_recovery() for every condition and for
+            # why none of them can be satisfied by an unclaimed draft.
+            previous_token = None
+            recovered, recovery_problem = evaluate_lost_token_recovery(
+                seg, profile, args.run_id, durable_root
+            )
+            if recovered is None:
+                reasons.append(recovery_problem)
+            else:
+                lost_token_recovery = True
+                # Both provenance facts come from the record rather than
+                # from the draft, because the draft no longer carries
+                # either -- the record IS this run's own preserved
+                # observation of what the token was at admission time.
+                previous_token = recovered.get("previous_dispatch_token")
+                recovered_source = recovered.get("source_run_id")
+                if not isinstance(recovered_source, str) or not recovered_source:
+                    reasons.append(
+                        f"S3 (D9 lost-token recovery): run {args.run_id!r}'s claim record "
+                        f"for this segment carries no usable 'source_run_id' "
+                        f"({recovered_source!r}), so the source run this draft came from "
+                        f"cannot be re-established"
+                    )
+                else:
+                    # The SAME two checks the token path makes below, over
+                    # the same fact from the other source. A recovery is not
+                    # a weaker gate -- it reads the source run id off a
+                    # durable record instead of off a field that was lost,
+                    # and everything S3 asks about that id still applies.
+                    problem = validate_run_id(recovered_source)
+                    if problem is not None:
+                        reasons.append(
+                            f"S3 (D9 lost-token recovery): the claim record's "
+                            f"'source_run_id' is not a safe run id: {problem}"
+                        )
+                    elif not (durable_root / "runs" / recovered_source).is_dir():
+                        reasons.append(
+                            f"S3 (D9 lost-token recovery): the claim record names source "
+                            f"run {recovered_source!r}, which does not exist under runs/"
+                        )
+                    else:
+                        source_run_id = recovered_source
+        else:
+            source_run_id = draft_run_id(previous_token)
+            if source_run_id is None:
+                reasons.append(
+                    f"S3: draft's dispatch_token {previous_token!r} is malformed "
+                    f"(cannot extract a run id)"
+                )
+            else:
+                problem = validate_run_id(source_run_id)
+                if problem is not None:
+                    reasons.append(f"S3: draft's dispatch_token names an unsafe run id: {problem}")
+                elif not (durable_root / "runs" / source_run_id).is_dir():
+                    reasons.append(
+                        f"S3: draft's dispatch_token names run {source_run_id!r}, which does "
+                        f"not exist under runs/"
+                    )
+
+    # ---- S4/S5 + profile review conditions: read the stored review -------
+    review_doc = read_json_nonfatal(review_path(seg, durable_root), f"review for segment {seg!r}")
+    if isinstance(review_doc, str):
+        reasons.append(f"S4 (stored review): {review_doc}")
+        review_doc = None
+    else:
+        review_errs = check_review_structure(review_doc)
+        if review_errs:
+            reasons.append(f"S4: stored review is not schema-valid: {'; '.join(review_errs)}")
+            review_doc = None
+
+    if review_doc is not None:
+        if review_doc.get("coverage_ok") is not True:
+            reasons.append(
+                f"S5: stored review's coverage_ok is {review_doc.get('coverage_ok')!r}, "
+                f"required true under BOTH profiles"
+            )
+        if profile == CLAIM_PROFILE_FROM_CAP:
+            if review_doc.get("clean") is not False:
+                reasons.append(
+                    f"{seg!r} requested under --from-cap, but its stored review's clean is "
+                    f"{review_doc.get('clean')!r}, not false -- --from-cap identifies a capped, "
+                    f"hand-fixed segment by its non-clean review with findings; if this segment "
+                    f"actually converged cleanly, use --from-converged instead"
+                )
+            elif not review_doc.get("findings"):
+                reasons.append(
+                    f"{seg!r} requested under --from-cap, but its stored review's findings is "
+                    f"empty -- --from-cap requires a non-clean review WITH findings"
+                )
+        elif profile == CLAIM_PROFILE_FROM_CONVERGED:
+            if review_doc.get("clean") is not True:
+                reasons.append(
+                    f"{seg!r} requested under --from-converged, but its stored review's clean "
+                    f"is {review_doc.get('clean')!r}, not true -- --from-converged requires the "
+                    f"review that converged it, and a converged segment's last review is always "
+                    f"clean:true"
+                )
+
+    # ---- profile-specific ledger-status/sentinel conditions ---------------
+    # Both read from the MATERIALIZED ledger (`ledger_record`, sourced from
+    # runs/ledger.json via classify_segment()'s own caller) -- never a
+    # runs/ledger.d/*.json fragment; the two artifacts disagree by
+    # construction (premise 8) and every status condition in this design
+    # must name which one it reads.
+    sentinel_state, sentinel_detail = classify_ever_converged_sentinel(
+        ever_converged_path(seg, durable_root / "segments")
+    )
+    # AMBIGUOUS cannot reach this point for a seg drawn from `segs` -- the
+    # run()-level ambiguous_sentinels fatal already aborted the whole
+    # invocation before the claim gate runs at all (D5.1's placement).
+    # Handled defensively anyway, and mapped the way claim_record.py's own
+    # module docstring requires for every reader of ambiguous state: AMBIGUOUS
+    # means "do not claim" for BOTH profiles, never "assume present" or
+    # "assume absent".
+    if profile == CLAIM_PROFILE_FROM_CAP:
+        status = ledger_record.get("status")
+        reason = ledger_record.get("reason")
+        if not (status == "non_converged" and reason == "cap"):
+            reasons.append(
+                f"{seg!r} requested under --from-cap, but its materialized ledger status is "
+                f"{status!r}/{reason!r}, not non_converged/reason=cap"
+            )
+        if sentinel_state != SENTINEL_ABSENT:
+            detail = f" ({sentinel_detail})" if sentinel_detail else ""
+            reasons.append(
+                f"{seg!r} requested under --from-cap, but it carries a .ever_converged "
+                f"sentinel ({sentinel_state}{detail}) -- --from-cap's population never "
+                f"converged at all; if this segment converged and was then hand-edited, use "
+                f"--from-converged instead"
+            )
+    elif profile == CLAIM_PROFILE_FROM_CONVERGED:
+        status = ledger_record.get("status")
+        if status not in WAS_CONVERGED_STATUSES:
+            reasons.append(
+                f"{seg!r} requested under --from-converged, but its materialized ledger status "
+                f"is {status!r}, not one of {sorted(WAS_CONVERGED_STATUSES)}"
+            )
+        if sentinel_state != SENTINEL_PRESENT:
+            detail = f" ({sentinel_detail})" if sentinel_detail else ""
+            reasons.append(
+                f"{seg!r} requested under --from-converged, but it carries no .ever_converged "
+                f"sentinel ({sentinel_state}{detail}) -- --from-converged requires a segment "
+                f"that has converged at least once"
+            )
+        reviewed_draft_sha1 = ledger_record.get("reviewed_draft_sha1")
+        if not isinstance(reviewed_draft_sha1, str) or not reviewed_draft_sha1:
+            reasons.append(
+                f"{seg!r} requested under --from-converged, but its ledger record has no "
+                f"'reviewed_draft_sha1' -- the drift baseline this profile requires"
+            )
+        elif current_draft_sha1 is not None and reviewed_draft_sha1 == current_draft_sha1:
+            reasons.append(
+                f"{seg!r} requested under --from-converged, but its current draft content sha1 "
+                f"still matches 'reviewed_draft_sha1' -- nothing has been hand-edited since "
+                f"convergence, so there is no re-review to authorize"
+            )
+
+    # ---- D6: fresh-segpack precondition -- BOTH profiles ------------------
+    segpack_mismatches = evaluate_fresh_segpack_precondition(seg, durable_root, canon_entries)
+    if segpack_mismatches:
+        if len(segpack_mismatches) == 1 and "error" in segpack_mismatches[0]:
+            reasons.append(f"D6 (fresh-segpack precondition): {segpack_mismatches[0]['error']}")
+        else:
+            names_detail = "; ".join(
+                f"{m['name']!r}: segpack has {m['segpack_target']!r}, current canon.json would "
+                f"produce {m['current_canon_target']!r}"
+                for m in segpack_mismatches
+            )
+            reasons.append(
+                f"D6 (fresh-segpack precondition): {len(segpack_mismatches)} name(s) in segment "
+                f"{seg!r}'s segpack disagree with the current canon.json: {names_detail}. Re-run "
+                f"segpack.py for this segment (from the durable copy) before claiming it."
+            )
+
+    # ---- current cache key -- required to RECORD the D4 baseline, never --
+    # ---- to gate --from-converged (decision 5: no moved field refuses). --
+    current_cache_key = compute_current_cache_key(
+        seg, dirs["cache_key_script"], durable_root, args.durable_root, args.plugin_root
+    )
+    if isinstance(current_cache_key, str):
+        reasons.append(f"could not compute the current cache key: {current_cache_key}")
+        current_cache_key = None
+
+    if reasons:
+        return False, reasons, {}
+
+    # ---- cache-key diff -- REPORTING only, never gating (decision 5). ----
+    # --from-cap fragments carry no 'cache_key' field at all (it is written
+    # only on the convergence path) -- D6's own "for --from-cap, this
+    # condition CANNOT EXIST" box -- so there is no historical baseline to
+    # diff against, recorded as a note rather than an empty (and misleading)
+    # moved-fields list.
+    stored_cache_key = ledger_record.get("cache_key")
+    moved_fields = []
+    cache_key_note = None
+    if isinstance(stored_cache_key, dict):
+        # Entry keys are `pre_claim`/`at_claim`, mirroring the two record
+        # fields these entries diff (`pre_claim_cache_key` and
+        # `cache_key_at_claim`) rather than the older `stored`/`current`.
+        # Both endpoints now live in the record beside this list, and a
+        # reader triaging an incident must be able to see at a glance which
+        # endpoint each side of a moved field came from -- "current" reads
+        # as "now, when I am reading this", which is exactly what it is not.
+        moved_fields = [
+            {"field": f, "pre_claim": stored_cache_key.get(f), "at_claim": current_cache_key.get(f)}
+            for f in CACHE_KEY_FIELDS
+            if stored_cache_key.get(f) != current_cache_key.get(f)
+        ]
+    else:
+        cache_key_note = (
+            "no recorded cache_key on this fragment -- expected for --from-cap (cache_key is "
+            "written only on the convergence path); no historical baseline exists to compare "
+            "against"
+        )
+    # TRI-STATE, and produced in ONE place rather than half here and half at
+    # the `extras` key below: None is "no movement to characterise", a
+    # different fact from False -- see claim_record.py's own field commentary.
+    machinery_only = (
+        all(m["field"] in MACHINERY_ONLY_CACHE_KEY_FIELDS for m in moved_fields)
+        if moved_fields
+        else None
+    )
+
+    extras = {
+        "current_draft_sha1": current_draft_sha1,
+        "previous_dispatch_token": previous_token,
+        "source_run_id": source_run_id,
+        # D9: True when this admission came through the lost-token recovery
+        # rather than off a token the draft still carried. Reporting-only --
+        # deliberately NOT a claim-record field, since the record it would
+        # be written into is, on this path, the very record that authorized
+        # the recovery and must not be rewritten. run() surfaces it on
+        # stderr so a recovery is never silent.
+        "lost_token_recovery": lost_token_recovery,
+        "current_cache_key": current_cache_key,
+        # D6's two ENDPOINTS, both recorded: the baseline as the ledger
+        # fragment stored it, and the key this invocation just computed.
+        # `pre_claim_cache_key` is None exactly when no baseline existed
+        # (always so for --from-cap, whose fragments never carry a
+        # cache_key), which is what tells an empty `cache_key_moved_fields`
+        # apart from "nothing moved" -- see claim_record.py's own field
+        # commentary.
+        "pre_claim_cache_key": stored_cache_key if isinstance(stored_cache_key, dict) else None,
+        "cache_key_moved_fields": moved_fields,
+        "cache_key_movement_machinery_only": machinery_only,
+        "cache_key_note": cache_key_note,
+        # D10: captured BEFORE the claim voids the stored review's standing
+        # -- otherwise the only record of what the operator was shown at
+        # admission time is gone.
+        #
+        # None, never a four-key dict of Nones, when no usable review
+        # document existed: "the operator was shown a review whose every
+        # field happened to be null" and "there was no review to be shown"
+        # are different facts, and a record that reports them identically
+        # destroys the one it was extended to preserve. Unreachable today --
+        # `review_doc` is None only when S4 already appended a reason, and
+        # this block is past the `if reasons` return -- but the shape is
+        # written honestly rather than left to depend on that.
+        "pre_claim_review": {
+            "dispatch_token": review_doc.get("dispatch_token"),
+            "clean": review_doc.get("clean"),
+            "coverage_ok": review_doc.get("coverage_ok"),
+            "findings_count": len(review_doc.get("findings", [])),
+        }
+        if review_doc
+        else None,
+    }
+    return True, [], extras
+
+
+def draft_dispatch_token_for(run_id: str, seg: str) -> str:
+    """Byte-for-byte the same format as ledger_update.py's/ledger_merge.py's
+    own expected_draft_token(): '<run_id>:<seg>'."""
+    return f"{run_id}:{seg}"
+
+
+# os.O_NOFOLLOW is POSIX and present on every platform this pipeline runs
+# on; the getattr keeps a hypothetical platform without it importable rather
+# than failing at module load, exactly as claim_record.py's own _O_DIRECTORY
+# does. Falling back to 0 there weakens the temp-file open by one guard and
+# no more -- O_CREAT|O_EXCL already refuses to follow a symlink at the final
+# component (POSIX requires EEXIST when the path names an existing symlink,
+# dangling or not), so O_NOFOLLOW is the explicit statement of an intent
+# O_EXCL enforces anyway, not the only thing enforcing it.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _unlink_quietly(path: Path) -> None:
+    """Remove a staged temp file, ignoring an already-gone or unremovable
+    entry. Used on every refusal path in rewrite_draft_dispatch_token()
+    AFTER the descriptor is closed -- a leftover `.tmp.<pid>` is untidy, but
+    failing the claim a second time over the cleanup would replace a clear
+    refusal with a confusing one, and the refusal is the fact the operator
+    needs."""
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _claim_record_claimed_at(claim_record_mod, state: str, payload) -> "datetime | None":
+    """The trusted `claimed_at` out of a claim-record read, PARSED into a
+    naive UTC `datetime`, or None when it cannot be trusted: `state` is
+    anything but CLAIM_PRESENT (ABSENT -- no record to trust; AMBIGUOUS --
+    unreadable, torn, or not valid JSON, which cannot be trusted either),
+    `payload` did not come back as a dict (read_claim_record()'s own
+    contract says it always does on CLAIM_PRESENT, but this reads the
+    field defensively rather than assuming its own caller upheld that),
+    the `claimed_at` key is missing or not a non-empty string (a
+    hand-edited or otherwise malformed record), or the string does not
+    parse against `_claim_now_iso8601()`'s own format (this file's one
+    writer of the field -- match it exactly rather than accepting anything
+    that merely looks like a timestamp).
+
+    Parsing, not merely trusting-if-string, is the point: the caller
+    compares two of this function's return values with plain `>`, and
+    BEFORE this a non-empty string that fails to parse as a real
+    timestamp (a hand-edited "z", a truncated "9", empty-looking noise)
+    still fell through `isinstance(value, str) and value` and got compared
+    LEXICALLY -- under which `"z" > "2026-01-02T00:00:00Z"` and
+    `"9" > "2026-01-02T00:00:00Z"` are both True, so a malformed record
+    could impersonate the newest possible claimant and win the ownership
+    check the comparison exists to enforce. Returning a parsed `datetime`
+    instead removes the vector entirely: anything that does not parse
+    returns None, exactly like a missing field, and None on either side
+    already refuses via the caller's `is not None` guards -- never via a
+    comparison that could raise.
+
+    Used by rewrite_draft_dispatch_token()'s #438 round 5 ownership-age
+    check on BOTH sides of the comparison, so "cannot establish this
+    side's timestamp" collapses to the same None on either side rather
+    than two differently-named failure modes."""
+    if state != claim_record_mod.CLAIM_PRESENT or not isinstance(payload, dict):
+        return None
+    value = payload.get("claimed_at")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        # The format _claim_now_iso8601() writes: seconds resolution, UTC,
+        # literal trailing "Z" (not %z/%Z -- the writer never emits a
+        # numeric offset or a timezone name, only this exact literal).
+        # strptime anchors the whole string, so anything with extra
+        # precision (".5Z"), a numeric offset ("+00:00"), or garbage
+        # anywhere raises rather than silently truncating. Stated as the
+        # GRAMMAR rather than as a byte-for-byte match, because it is not
+        # one: strptime's numeric fields accept unpadded values, so
+        # "2026-1-2T0:0:0Z" also parses. That is a widening of what is
+        # ACCEPTED, never of what wins -- an accepted value still becomes a
+        # real instant and is compared as one, which is the property the
+        # caller depends on. Nothing in this repo writes the unpadded form.
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+
+
+def rewrite_draft_dispatch_token(
+    seg: str,
+    durable_root: Path,
+    new_token: str,
+    *,
+    expected_content_sha1: str,
+):
+    """D4/#438: the actual "claim the draft into this run" state change --
+    re-stamps segments/{seg}.draft.json's own `dispatch_token` field to
+    `new_token`. Without this, nothing downstream (draft_ready.py
+    --expect-token, derive_next_action(), codex_job.py's safe_adopt()) ever
+    sees the draft as belonging to the claiming run, and the claim record
+    alone authorizes nothing -- the segment stays permanently stuck.
+
+    MUST run strictly AFTER the claim record is durably written for this
+    id, never before: a crash between the two writes must leave the draft
+    holding its OLD token plus a claim record on disk (every existing gate
+    still refuses that token, and a re-claim recovers cleanly) -- never a
+    draft re-stamped for this run with NO record, which for --from-cap's
+    population (no `.ever_converged` sentinel) would leave nothing at all
+    refusing it and the segment would simply be retranslated.
+
+    #438 ROUND 4/5: ALSO REFUSES an OLD run REASSERTING a SUPERSEDED
+    authorization -- the defect three review rounds kept finding under
+    different disguises. Ownership lives in TWO places: the claim record
+    (per-run, so a run can only ever see its OWN claims) and the draft's
+    `dispatch_token` (global and mutable, whoever wrote it last). A run's
+    own claim record, once written, is NEVER released -- there is no
+    release mechanism -- so the SAME run_id claiming the SAME seg a second
+    time always lands on run()'s "already claimed by this run" EEXIST
+    branch, which correctly reads as "the SAME authorization being
+    reapplied" when nothing else has happened since. It reads that way
+    WRONGLY when a DIFFERENT run legitimately claimed the segment in
+    between: the resumed old run's own admission still passes (nothing in
+    S1-S5 asks WHO currently owns the draft, only whether the token names
+    SOME run that exists), so without this check it silently re-stamped the
+    draft back to itself, taking the segment away from its current owner
+    with no record deleted, no warning, nothing but the token moving.
+
+    ROUND 4 refused this on a fourth condition, `already_claimed_by_this_run`,
+    threaded in from write_claim_record()'s own `published` result: True
+    exactly when THIS run's own claim record for `seg` already existed
+    before this call. That is UNSOUND -- it proves this run's record
+    EXISTS, never that this run APPLIED the authorization it recorded. The
+    two are indistinguishable on disk, and the second is a documented,
+    supported recovery: this run publishes its claim record (record-first,
+    by design), then crashes -- or the record's own directory fsync
+    reports failure -- BEFORE this rewrite ever runs. On retry, the record
+    already exists, `already_claimed_by_this_run` came back True, and
+    ROUND 4 refused the retry even though the draft's current owner is
+    exactly the run this one legitimately superseded. That directly
+    contradicted this function's own "a crash between the two writes...
+    and a re-claim recovers cleanly" guarantee above.
+
+    ROUND 5 replaces the proxy with the fact it was standing in for.
+    Every claim record carries `claimed_at` (claim_record.py's own
+    CLAIM_RECORD_FIELDS), so the question ROUND 4 approximated -- "did
+    THIS run's authorization come before or after the current owner's?" --
+    is answered directly: compare the two timestamps. Refuses ONLY when
+    ALL of these hold, evaluated against the draft's CURRENT
+    `dispatch_token` -- i.e. before this call's own write touches it:
+
+      1. that token parses to a run id (draft_run_id() -- None on an
+         absent or malformed token skips this whole check unconditionally,
+         which is what keeps D9's lost-token recovery reachable: a token
+         that is MISSING has nothing to compare against);
+      2. that run id is not THIS run's own id (parsed the same way off
+         `new_token`, which every caller in this codebase mints as
+         draft_dispatch_token_for(run_id, seg) -- an idempotent same-run
+         re-stamp never reaches this branch at all);
+      3. that OTHER run's OWN claim record for this seg is not
+         CLAIM_ABSENT -- read_claim_record() on claimed_path(), never
+         classify_claim_record() alone, because condition 4 below needs to
+         BELIEVE a field out of it, not merely detect its presence
+         (claim_record.py's own module docstring: "Any consumer about to
+         BELIEVE A FIELD must go through read_claim_record()"). AMBIGUOUS
+         (unreadable, torn, not valid JSON) counts as "cannot rule out",
+         which condition 4 folds into "not comparable" below rather than
+         re-deciding the same safe direction a second way;
+      4. this run's OWN claim record's `claimed_at` is NOT PROVABLY more
+         recent than the other run's -- i.e. the comparison refuses unless
+         it can show THIS run is the later claimant. A `claimed_at` this
+         call cannot trust on EITHER side (that side's record ABSENT,
+         AMBIGUOUS, or PRESENT but missing or malformed the field) makes
+         the comparison itself untrustworthy, and that also refuses -- see
+         `_claim_record_claimed_at()` above. `claimed_at` is
+         second-resolution ISO8601 (claim_record.py's own field), so a TIE
+         is possible and is deliberately NOT "allow": strict `>` is what
+         makes a tie refuse, because this run is not PROVABLY the later
+         claimant on a tie either.
+
+    A TIE IS PERMANENT FOR THIS RUN, NOT TRANSIENT -- it is not "refused
+    until the clock ticks over". This run's own claim record is
+    write-once (claim_record.py's write_claim_record() uses
+    O_CREAT|O_EXCL and never overwrites an existing entry), and a same-run
+    retry that finds its own record already published takes the
+    "already claimed by this run" branch above, which re-reads and
+    reports the EXISTING record rather than writing a fresh one -- so this
+    run's `claimed_at` is fixed at its FIRST claim and never advances no
+    matter how many times the caller retries. If that fixed value ties the
+    foreign owner's, no amount of waiting or retrying closes the gap: the
+    only way out is a fresh claim under a run id that has never claimed
+    `seg` before (a new `claimed_at`, published after the tied foreign
+    claim), never a retry of this same run.
+
+    THIS RUN'S OWN `claimed_at` IS READ FRESH OFF DISK, never computed as
+    "now" at this call -- by the time this function runs, the record-first
+    ordering above GUARANTEES this run's own record for `seg` already
+    exists (either just published, moments ago, or already there from an
+    earlier invocation), and reading its ACTUAL value is what makes the
+    crash-retry recovery reachable: a resumed run's own record still
+    carries the ORIGINAL claim's timestamp, not the retry's, which is
+    exactly the value that must lose to a genuinely later foreign claim in
+    the A -> B -> A regression this whole check exists to catch. A
+    freshly-computed "now" would make a resumed run look newer than
+    literally everything, and the refusal this check exists to perform
+    would never fire again.
+
+    Both directions this predicate must get right, worked through:
+      * A -> B -> A (the reported regression): A's own claimed_at is from
+        its FIRST, original claim -- earlier than B's, which came later
+        and legitimately superseded it. A's retry compares older-than-B
+        and refuses. Correct.
+      * A publishes its claim record, crashes before this rewrite ever
+        runs, retries while the draft still names an OLDER, still-live B:
+        A's own claimed_at (from the record it just published) is newer
+        than B's. The retry compares newer-than-B and proceeds. Correct --
+        this is the regression ROUND 4 introduced and ROUND 5 fixes.
+      * A fresh claim by a brand-new run C over a segment some OLD run
+        still holds a live (never-released) record for: C's own
+        claimed_at is from the record C's caller just published, i.e.
+        "now" relative to the old run's claim. Proceeds. Correct, and
+        structurally the SAME case as the crash-retry recovery above --
+        both are "this run's own claim record is more recent than the
+        name on the draft".
+
+    A refusal here is EARLY -- before the staged-file dance below even
+    starts, so there is no temp file to unlink. This refuses the STAMP
+    itself, on a fact read straight off the live draft and the claim
+    records on disk; every other refusal in this function is instead about
+    the IDENTITY of the bytes being installed.
+
+    Atomic (temp file + fsync + os.replace + a directory fsync, the same
+    discipline ledger_update.py's write_fragment_atomically() and
+    codex_job.py's own promote paths already use), so a crash mid-write
+    leaves either the OLD draft intact or the fully-written NEW one, never a
+    torn file.
+
+    THE DIRECTORY FSYNC IS PART OF THE RECORD-FIRST GUARANTEE, not polish.
+    fsync on the temp file commits its CONTENTS; the rename that makes those
+    contents findable as `{seg}.draft.json` is a directory-entry change, and
+    an unsynced directory can lose it. Paired with claim_record.py's own
+    fsync of the runs/<run_id>/ directory (its fsync_directory(), reused
+    here rather than reimplemented), this is what makes "record first, token
+    second" survive a power loss instead of holding only within one
+    process's lifetime. Losing the record while keeping the token is the one
+    asymmetry D8's guard cannot refuse -- it sees no record and reads
+    "unclaimed" -- so a failed sync FAILS the rewrite rather than warning.
+
+    `expected_content_sha1` is REQUIRED, keyword-only, and closes the TOCTOU
+    between admission and this write. Admission gates ONE draft and records
+    its content sha1; without a check here, this function would re-read
+    whatever occupies the path at this later moment -- after S1's and S2's
+    subprocesses, the segpack scan, a cache_key.py subprocess and the claim
+    record's own write -- and hand this run's dispatch_token to a draft that
+    passed nothing. THE ORDER IS WHAT MAKES THE STAGED CHECK REAL: the draft
+    is read exactly ONCE, the bytes to be installed are staged into the temp
+    file, and the check hashes THE STAGED FILE. The bytes that were checked
+    and the bytes that get installed are therefore literally the same bytes
+    -- a check that hashed the live path INSTEAD would be gating the install
+    on a second sample of a file that may since have moved, i.e. on
+    something other than what it is about to install.
+
+    TWO CHECKS, TWO DIFFERENT QUESTIONS -- and the staged one answers only
+    the first. "Are the bytes I am about to install the ones admission
+    gated?" is answered by hashing the staged file. "Is the file I am about
+    to DESTROY still the one admission gated?" is NOT: os.replace() below is
+    unconditional, and between the single read at the top of this function
+    and that rename sit the staging write, an fsync and a hash. An edit
+    landing in THAT window never touches the staged bytes, so the staged
+    check passes and the rename silently discards the newer edit -- and
+    protecting hand edits is the entire point of this release, so a generic
+    "last writer wins" is not an acceptable answer here. Hence a SECOND
+    comparison, against the same admitted hash: the canonical draft is
+    re-read immediately before the rename and the rewrite refuses if it
+    moved. The "second sample" objection above does not apply to it, because
+    it never decides WHAT to install -- that is still, only, the staged
+    bytes -- it decides WHETHER to install at all, and a check that can only
+    ever add refusals cannot admit anything the staged check would have
+    refused. The idempotent no-op path returns BEFORE it, deliberately: that
+    path installs nothing and so cannot overwrite anything, and its identity
+    guarantee is the staged check exactly as before.
+
+    THE RESIDUAL, STATED NARROWLY, because an overstated mitigation is worse
+    than a disclosed one -- nobody attacks a hole that reads as already
+    closed. This NARROWS the window; it does not eliminate it. What stays
+    open is the gap between that final hash and the os.replace() a few
+    statements later: an edit landing THERE is still overwritten. That is a
+    few syscalls instead of the whole staging + fsync + hashing span, but it
+    is not zero, and nothing in this file can make it zero. Two further
+    limits belong in the same breath rather than in a footnote: the
+    comparator is draft_content_sha1(), which projects `dispatch_token` OUT
+    (it must -- changing that field is this function's entire job), so a
+    concurrent writer that moved ONLY the token is invisible to BOTH checks;
+    and a refusal is detection, not prevention -- it declines to overwrite,
+    it cannot stop the other writer, and the two edits still have to be
+    reconciled by hand afterwards. Closing the class properly needs
+    something the filesystem does not offer: an atomic compare-and-swap
+    rename, or a lock honoured by EVERY writer -- including a human in a
+    text editor, which is precisely the writer this feature exists to
+    protect and the one least likely to take a lock. Do not upgrade this
+    paragraph's claim without first upgrading the mechanism.
+
+    Hashing the staged file also means the comparator is draft_content_sha1()
+    itself -- the function that OWNS this hash, seven byte-identical copies
+    of which the project already tracks -- rather than an eighth inline
+    re-implementation of the canonicalization written for this call site.
+
+    ON MISMATCH: REFUSE, name the drift, and install nothing. The staged
+    temp file is removed and the draft on disk is untouched, so the failure
+    is a refusal, never a partial claim. The claim RECORD stays on disk
+    (it was written first, by design), which is precisely the recoverable
+    state -- every existing gate still refuses the old token, and re-running
+    the claim re-evaluates the admission gates against the draft that is
+    actually there now.
+
+    The comparator is THIS invocation's own admitted hash, never the claim
+    record's `pre_claim_content_sha1`. On the D9 lost-token recovery path
+    the record's copy is deliberately older than the draft (a fix round
+    edited it after the original claim), so checking against the record
+    would refuse exactly the recovery this release makes reachable. What
+    must hold is "the draft I gated is the draft I stamp", which is a
+    statement about one invocation.
+
+    The temp file is created with O_CREAT|O_EXCL|O_NOFOLLOW, never a plain
+    open(): its name is predictable (it has to be, for the cleanup below to
+    find it), and a plain open() FOLLOWS a symlink planted at that name and
+    truncates whatever it points at before the file is ever installed as the
+    draft. O_EXCL makes a pre-existing entry of any kind -- symlink,
+    dangling symlink, leftover file -- a refusal instead of a target.
+
+    Idempotent: a draft already carrying `new_token` is a no-op, not an
+    error -- a re-claim in the same run must not be mistaken for a second
+    authorization (D9). The no-op path still stages and checks, so the
+    identity guarantee is the SAME on both paths (a re-claim affirms an
+    authorization too, and affirming it over a draft nobody gated is the
+    same defect); it then removes the staged file and leaves the draft's
+    bytes untouched. Returns (True, "") on success or no-op, (False, detail)
+    on failure -- never raises.
+
+    Preserves every OTHER field's VALUE -- not the raw file's byte-for-byte
+    formatting, which a parse-mutate-reserialize round trip cannot
+    guarantee and does not need to: draft_content_sha1() itself projects
+    `dispatch_token` out before hashing via CANONICAL (sorted-key,
+    compact-separator) re-serialization, so its result is insensitive to
+    this function's own formatting choice. What must be (and is, per a
+    dedicated test) proven is that draft_content_sha1() returns the SAME
+    value before and after -- the property every `reviewed_draft_sha1`
+    comparison downstream depends on. The staged-file check now enforces
+    that property at RUNTIME as well: a re-serialization that moved any
+    other field would move the staged hash and refuse."""
+    dp = draft_path(seg, durable_root)
+    if not isinstance(expected_content_sha1, str) or not expected_content_sha1:
+        # Not a defensive nicety: without a baseline there is nothing to
+        # check the draft against, and proceeding would be the unguarded
+        # rewrite this parameter exists to make impossible.
+        return False, (
+            f"refusing to stamp a claimed dispatch_token without the content sha1 this "
+            f"invocation admitted (got {expected_content_sha1!r}) -- there would be "
+            f"nothing to check the draft against"
+        )
+    try:
+        raw = dp.read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, f"could not read draft to rewrite its dispatch_token: {exc}"
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return False, f"draft is not valid JSON, refusing to rewrite its dispatch_token: {exc}"
+    if not isinstance(doc, dict):
+        return False, "draft is not a JSON object, refusing to rewrite its dispatch_token"
+    current_token = doc.get("dispatch_token")
+    already_stamped = current_token == new_token
+
+    # #438 round 5: refuse a REAPPLICATION of a superseded authorization --
+    # see this function's own docstring for the predicate and why it
+    # compares `claimed_at` instead of trusting whether this run's own
+    # record merely exists (round 4's proxy, now known unsound). Checked
+    # BEFORE any staging IO: a refusal here is about whether to stamp at
+    # all, not about the identity of bytes already being written.
+    current_owner = draft_run_id(current_token)
+    this_run_id = draft_run_id(new_token)
+    if (
+        current_owner is not None
+        and this_run_id is not None
+        and current_owner != this_run_id
+    ):
+        claim_record = _import_claim_record()
+        runs_dir = durable_root / "runs"
+        try:
+            foreign_claim_path = claim_record.claimed_path(current_owner, seg, runs_dir)
+        except ValueError as exc:
+            # current_owner came straight off the draft's own dispatch_token,
+            # a field with no schema pattern (see claimed_path()'s own "WHY
+            # THIS MODULE NEEDS ITS OWN COPY AT ALL"), so it can be unsafe.
+            # An id that cannot even be looked up cannot be shown released --
+            # refuse rather than assume it names nothing.
+            return False, (
+                f"refusing to re-stamp segment {seg!r}'s dispatch_token: this run "
+                f"({this_run_id!r}) already claimed {seg!r} once before, and the "
+                f"draft's CURRENT dispatch_token names run {current_owner!r}, whose "
+                f"claim record cannot even be looked up safely ({exc}) -- treated as "
+                f"still live rather than assumed released. Resolve {seg!r}'s "
+                f"ownership by hand before this run may touch it again"
+            )
+        # read_claim_record(), never classify_claim_record() alone -- the
+        # age check below BELIEVES `claimed_at`, a field, so this must go
+        # through the reader that owns believing fields (claim_record.py's
+        # own module docstring). classify_claim_record() would still
+        # answer "present or not" correctly, but reading a field off its
+        # PRESENT verdict is precisely the mistake that docstring forbids.
+        foreign_state, foreign_payload, foreign_detail = claim_record.read_claim_record(
+            foreign_claim_path
+        )
+        if foreign_state != claim_record.CLAIM_ABSENT:
+            # A foreign claim record for `seg` exists, or cannot be ruled
+            # out as existing (AMBIGUOUS) -- refuse UNLESS this run's OWN
+            # claim over `seg` is PROVABLY the more recent one. This run's
+            # own record is read fresh off disk, never computed as "now":
+            # the record-first ordering above guarantees it already exists
+            # by the time this call runs, and reading its ACTUAL
+            # `claimed_at` (rather than assuming "now") is what lets a
+            # resumed run's retry still compare as OLDER than a genuinely
+            # later foreign claim -- see this function's own docstring for
+            # the three worked cases.
+            try:
+                this_claim_path = claim_record.claimed_path(this_run_id, seg, runs_dir)
+            except ValueError as exc:
+                this_state, this_payload, this_detail = (
+                    claim_record.CLAIM_AMBIGUOUS,
+                    None,
+                    f"this run's own RUN_ID cannot be used to look up its claim record ({exc})",
+                )
+            else:
+                this_state, this_payload, this_detail = claim_record.read_claim_record(
+                    this_claim_path
+                )
+
+            this_claimed_at = _claim_record_claimed_at(claim_record, this_state, this_payload)
+            foreign_claimed_at = _claim_record_claimed_at(claim_record, foreign_state, foreign_payload)
+            # Strict `>`, not `>=`: `claimed_at` is second-resolution, so a
+            # tie is possible, and a tie does not PROVE this run is the
+            # later claimant. Refuse on a tie, the same safe direction as
+            # every other "cannot establish" branch here.
+            this_run_is_newer = (
+                this_claimed_at is not None
+                and foreign_claimed_at is not None
+                and this_claimed_at > foreign_claimed_at
+            )
+            if not this_run_is_newer:
+                detail = f" ({foreign_detail})" if foreign_detail else ""
+                # Named ONLY when it is the reason the comparison could not
+                # be won -- this run's own claimed_at is untrustworthy
+                # (not the ordinary A -> B -> A case, where it is simply
+                # older). An operator staring at a refused retry needs to
+                # know WHICH side broke the comparison; the ordinary case
+                # already says enough via `foreign_state` above.
+                this_claim_note = (
+                    f" This run's OWN claim record for {seg!r} is {this_state}"
+                    f"{f' ({this_detail})' if this_detail else ''}, so its "
+                    f"claimed_at cannot be compared at all."
+                    if this_claimed_at is None
+                    else ""
+                )
+                return False, (
+                    f"refusing to re-stamp segment {seg!r}'s dispatch_token to "
+                    f"{new_token!r}: segment {seg!r} is currently OWNED BY RUN "
+                    f"{current_owner!r} (its own claim record for {seg!r} is still "
+                    f"{foreign_state}{detail}), and this run ({this_run_id!r}) "
+                    f"cannot show its OWN claim over {seg!r} is more recent than "
+                    f"{current_owner!r}'s.{this_claim_note} Taking {seg!r} back from "
+                    f"{current_owner!r} now would risk silently discarding whatever "
+                    f"it did with it. There is no automated release: if "
+                    f"{current_owner!r} genuinely should give up {seg!r}, resolve "
+                    f"that by hand first, then issue a FRESH claim for this run "
+                    f"(never a re-run of the old one) to re-authorize it"
+                )
+
+    doc["dispatch_token"] = new_token
+
+    tmp_path = dp.parent / f"{dp.name}.tmp.{os.getpid()}"
+    # Serialize and ENCODE before creating the temp entry, for the reason
+    # spelled out at claim_record.py's write_claim_record(): `ensure_ascii=
+    # False` can return a str holding a LONE SURROGATE (json.loads() decodes
+    # a "\ud800" escape into one, and the draft this doc came from is
+    # arbitrary caller data), and encoding that raises UnicodeEncodeError --
+    # a ValueError, NOT an OSError. With the encode inside the write block
+    # below, that exception escaped past the `except OSError`, so
+    # _unlink_quietly(tmp_path) never ran and the temp file was STRANDED. The
+    # name is `{draft}.tmp.{pid}`, so the next attempt in this same process
+    # then hit its own leftover on the O_EXCL create and refused for a reason
+    # that had nothing to do with the draft. Encoding first means an
+    # unencodable draft is refused before anything exists on disk.
+    try:
+        blob = (json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=False)
+                + "\n").encode("utf-8")
+    except UnicodeEncodeError as exc:
+        return False, (
+            f"could not encode the re-stamped draft as UTF-8, so nothing was "
+            f"created: {exc}"
+        )
+    try:
+        # 0o644, matching claim_record.py's own CLAIM_MODE and, under the
+        # usual umask, exactly what the `open(tmp_path, "w")` this replaced
+        # produced. os.open() takes the mode explicitly where open() did not,
+        # so leaving it unstated would silently RE-PERMISSION the draft on
+        # every claim -- the file that lands here is installed as the draft
+        # by the os.replace() below, and a rewrite must change the token, not
+        # who can read the draft.
+        fd = os.open(
+            str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o644
+        )
+    except OSError as exc:
+        return False, (
+            f"could not create the temp file for the re-stamped draft at {tmp_path}: "
+            f"{exc}. It is created exclusively and without following a symlink, so an "
+            f"entry already sitting at that name is refused rather than written through"
+        )
+    write_problem = None
+    try:
+        # os.write on the raw descriptor rather than os.fdopen(): the
+        # descriptor is closed exactly once, in the finally below, on every
+        # path -- including a failure inside the wrapper construction
+        # itself, which an `os.fdopen(fd, ...)` inside a `with` would leak.
+        # The byte stream is identical to what json.dump(f) + f.write("\n")
+        # produced before. The loop is not decoration either: os.write() is
+        # allowed to write fewer bytes than it was given, and a silent short
+        # write here would produce a truncated draft that the staged-hash
+        # check below would then correctly refuse -- turning a recoverable
+        # write into an unexplained mismatch.
+        view = memoryview(blob)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    except OSError as exc:
+        write_problem = f"could not write the re-stamped draft: {exc}"
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    if write_problem is not None:
+        _unlink_quietly(tmp_path)
+        return False, write_problem
+
+    try:
+        staged_sha1 = draft_content_sha1(tmp_path)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        _unlink_quietly(tmp_path)
+        return False, f"could not hash the staged re-stamped draft: {exc}"
+    if staged_sha1 != expected_content_sha1:
+        _unlink_quietly(tmp_path)
+        return False, (
+            f"the draft on disk is not the one this invocation admitted: its content "
+            f"sha1 (dispatch_token projected out) is {staged_sha1}, but the admission "
+            f"gates ran against {expected_content_sha1}. Something replaced or edited "
+            f"{dp} between admission and this stamp; refusing to hand it this run's "
+            f"dispatch_token. Nothing was installed -- re-run the claim so the gates "
+            f"evaluate the draft that is actually there"
+        )
+    if already_stamped:
+        # Idempotent no-op -- see docstring. The staged file proved the
+        # identity and is discarded; the draft's own bytes are never
+        # touched, so a re-claim remains byte-for-byte a no-op.
+        _unlink_quietly(tmp_path)
+        return True, ""
+
+    # The second half of the identity check -- see "TWO CHECKS, TWO DIFFERENT
+    # QUESTIONS" above. The staged hash proved what goes IN; this proves that
+    # what is about to be OVERWRITTEN is still the draft admission gated,
+    # which is the only question that protects a hand edit landing while this
+    # claim was being staged. Deliberately the LAST statement before the
+    # rename: every statement inserted between these two widens the exact
+    # window this exists to narrow, and the window is all this buys.
+    try:
+        current_sha1 = draft_content_sha1(dp)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        _unlink_quietly(tmp_path)
+        return False, (
+            f"could not re-read {dp} immediately before installing the re-stamped "
+            f"draft: {exc}. It was readable and well-formed at the top of this call, "
+            f"so something changed it underneath this invocation; refusing to replace "
+            f"a file this call can no longer identify. Nothing was installed"
+        )
+    if current_sha1 != expected_content_sha1:
+        _unlink_quietly(tmp_path)
+        return False, (
+            f"the draft on disk changed WHILE this claim was being staged: its content "
+            f"sha1 (dispatch_token projected out) is now {current_sha1}, but the "
+            f"admission gates ran against {expected_content_sha1}. Installing the "
+            f"re-stamped draft would overwrite that newer edit, which is the one thing "
+            f"this claim exists to protect; refusing. Nothing was installed -- "
+            f"reconcile the edit and re-run the claim so the gates evaluate the draft "
+            f"that is actually there"
+        )
+
+    try:
+        os.replace(tmp_path, dp)
+    except OSError as exc:
+        _unlink_quietly(tmp_path)
+        return False, f"could not install the re-stamped draft: {exc}"
+
+    claim_record = _import_claim_record()
+    sync_problem = claim_record.fsync_directory(dp.parent)
+    if sync_problem is not None:
+        # The draft IS re-stamped and its contents are fsynced; only the
+        # durability of the new directory entry is unproven. Reported as a
+        # failure of the whole rewrite because the caller's next move --
+        # dispatching this segment as claimed -- rests on a token that a
+        # crash could still take back while the claim record survives. Not
+        # reverted: rolling back here would mean writing the OLD token
+        # through the same unsynced directory, which establishes nothing and
+        # destroys the token provenance the record has already preserved.
+        return False, f"the draft was re-stamped but {sync_problem}"
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -1341,6 +2738,31 @@ def run(args, dirs: dict) -> dict:
                 f"--only-segs names {len(unknown)} id(s) not present in "
                 f"manifest.json's segments[]: {', '.join(unknown)}"
             )
+
+    # #438: parsed early (cheap, no I/O beyond arg strings) so the
+    # --classify-only incompatibility fatals fast, before ledger_merge.py
+    # even runs.
+    claim_requests = parse_claim_requests(args)
+    if claim_requests and args.classify_only:
+        fatal(
+            "--classify-only produces a read-only report and may not be combined with a "
+            "claim (--from-converged/--from-cap write a durable claim record on disk) -- "
+            "run the claim in its own invocation."
+        )
+
+    # #438/#409 Step 3: --run-id and --run-resume are a PAIR, validated
+    # together regardless of whether a claim is involved (this is a general
+    # Step 3 fix, not claim-specific logic -- see the fresh-evidence refusal
+    # further down). Giving one without the other is refused rather than
+    # silently treating the missing one as "not applicable".
+    if (args.run_id is None) != (args.run_resume is None):
+        fatal(
+            "--run-id and --run-resume must be given TOGETHER or not at all -- "
+            f"got --run-id={args.run_id!r} --run-resume={args.run_resume!r}. "
+            "--run-resume carries resume_setup.py's own 'resume' field, which is what "
+            "lets the fresh-evidence check below tell a legitimately resumed run id from "
+            "a freshly-minted one; a run id without it cannot be evaluated safely."
+        )
 
     merge_result = run_ledger_merge(dirs, args.durable_root, args.plugin_root)
     ledger_segments = load_ledger_segments(merge_result, dirs["durable_root"])
@@ -1459,6 +2881,452 @@ def run(args, dirs: dict) -> dict:
             previously_converged=previously_converged,
         )
 
+    # ---- #409 Step 3: evidence scan -----------------------------------------
+    # SKILL.md's W5 tells the orchestrating session to run resume_setup.py
+    # before the Workflow launches; the driver's own resolve_run_id() does it
+    # unconditionally. Neither fact was ever CHECKED, and a real project ran
+    # six consecutive batches with the step skipped entirely -- hand-labelled
+    # run ids, not one `input.digest` on disk, and nothing noticed. The defect
+    # this closes is that INVISIBILITY, not the skip.
+    #
+    # The discriminator is a set difference over evidence that already exists:
+    # the RUN_IDs that actually dispatched work (each draft's own
+    # `dispatch_token`) MINUS the RUN_IDs the gate demonstrably ran for (each
+    # `runs/<RUN_ID>/input.digest`). Three states fall out of it without a
+    # special case for any of them:
+    #
+    #   gate ran       -- drafts exist, every one of their run ids has a digest
+    #   gate skipped   -- a run id dispatched drafts and has no digest
+    #   first run ever -- no tokened draft exists, so the left-hand set is
+    #                     empty and the difference is empty. A brand-new
+    #                     project is not a skipped gate, and does not need to
+    #                     be special-cased into not being one.
+    #
+    # Scanned over ALL drafts, never over `segs`. Scoping the scan to the
+    # current selection would make a HISTORY question depend on which segments
+    # happen to be eligible right now -- the exact selection-dependence bug
+    # class that made resume_setup.py's own digest domain unstable (#392).
+    #
+    # #438 fix, and the reason this scan sits HERE -- strictly before the claim
+    # block below, never after it: a claim writes (the claim record, and the
+    # draft's own dispatch_token). Scanning AFTER those writes would let a
+    # claim's own write feed this same invocation's evidence set -- proven by
+    # hand while wiring rewrite_draft_dispatch_token() in: with the scan
+    # positioned after the claim block, a brand-new run's own first claim
+    # rewrites a draft's dispatch_token to `run_id:seg`, the scan then reads
+    # that back off disk as "dispatch evidence for run_id", and the
+    # fresh-evidence check below refuses the run for evidence it just
+    # manufactured itself. Evidence bearing this run's id that PRE-EXISTS this
+    # invocation must refuse (the skipped-gate laundering case Step 3 exists
+    # to close); evidence this SAME invocation is about to create as part of
+    # an admitted claim is expected and must not. Ordering is what separates
+    # the two -- there is no content-based test that would -- so the scan
+    # (and the fresh-evidence check that reads it, immediately below) must
+    # complete before the claim block's first write, not merely before its
+    # own two refusal fatals.
+    #
+    # THE NORMATIVE RULE (state this, not just "scan early"): Step 3's
+    # evidence is a property of the tree AS THIS INVOCATION FOUND IT --
+    # `evidence`/`dispatch_scan`/`workflow_run_ids`/`unsafe_run_ids`/
+    # `safe_evidence`/`runs_acknowledged_pre_gate`/`runs_missing_digest` are
+    # computed EXACTLY ONCE, right here, and every consumer -- the
+    # fresh-evidence check immediately below AND the two refusal fatals
+    # further down in this function -- reads this SAME snapshot. This is not
+    # merely "the scan runs before the claim block"; ordering is a
+    # coincidental property of where the claim block currently lives in
+    # run(), and a future edit that reorders things again could silently
+    # reintroduce the hazard while still "running before" some write. A
+    # SNAPSHOT makes the bug class structurally inexpressible instead: "an
+    # invocation refuses against its own writes" cannot be expressed at all
+    # once evidence is a value fixed at scan time rather than a live query.
+    # This is the THIRD time this exact defect surfaced under a new name
+    # (r13's digest-laundering finding, then the runs_missing_digest
+    # self-trip during the first wiring attempt, then this fresh-evidence
+    # self-trip) -- each fix that only reordered things moved the defect
+    # rather than closing it. Do not call scan_dispatching_run_ids() or
+    # scan_workflow_run_ids() anywhere else in this function; re-scanning
+    # live state downstream of this point IS the bug, not a refinement of it.
+    #
+    # The scan runs unconditionally and its result is always reported, but only
+    # an AUTHORIZING invocation refuses: --classify-only must stay a pure read
+    # (final_audit.py's completeness gate calls it and must never start
+    # refusing). Scanning only when authorizing would make `runs_missing_digest`
+    # an empty list under --classify-only -- indistinguishable from a clean
+    # project, which is the "absence and failure print identically" failure
+    # this whole check exists to stop reproducing.
+    runs_dir = dirs["durable_root"] / "runs"
+    dispatch_scan = scan_dispatching_run_ids(dirs["durable_root"] / "segments")
+    workflow_run_ids = scan_workflow_run_ids(runs_dir)
+    # The UNION of both evidence halves -- neither subsumes the other; see
+    # scan_workflow_run_ids()'s own docstring for the three cases and for why
+    # a draft-only scan structurally cannot see a run whose drafts were later
+    # overwritten.
+    evidence: dict = {}
+    for run_id in dispatch_scan["by_run_id"]:
+        evidence.setdefault(run_id, []).append("drafts")
+    for run_id in workflow_run_ids:
+        evidence.setdefault(run_id, []).append("workflow_dir")
+
+    # Security fix: validate EVERY run id in the union before either path
+    # function below is ever called with it. The workflow-derived half is
+    # already shape-filtered by scan_workflow_run_ids() itself (a
+    # runs/workflows/ entry that doesn't match _RUN_ID_DIR_RE is silently
+    # skipped, never added to `workflow_run_ids` at all), but the
+    # draft-derived half is not: draft_run_id() only ever splits on the first
+    # colon, by design -- see its own docstring -- and never validates what
+    # it returns. This is the ONE choke point both halves pass through
+    # before `input_digest_path()`/`resume_gate_ack_path()` ever splice a
+    # run id into a filesystem path, so neither scanner's own shape can
+    # drift out from under it.
+    unsafe_run_ids = {}
+    safe_evidence = {}
+    for run_id, sources in evidence.items():
+        problem = validate_run_id(run_id)
+        if problem is not None:
+            unsafe_run_ids[run_id] = problem
+        else:
+            safe_evidence[run_id] = sources
+
+    runs_acknowledged_pre_gate = sorted(
+        run_id
+        for run_id in safe_evidence
+        if not input_digest_path(run_id, runs_dir).is_file()
+        and resume_gate_ack_path(run_id, runs_dir).exists()
+    )
+    runs_missing_digest = sorted(
+        run_id
+        for run_id in safe_evidence
+        if not input_digest_path(run_id, runs_dir).is_file()
+        and not resume_gate_ack_path(run_id, runs_dir).exists()
+    )
+
+    # #438 fix to #409 Step 3 itself (general infrastructure, not
+    # claim-specific -- found while wiring the claim's own --run-id/
+    # single-phase ordering, but the defect predates #438). The gate above
+    # trusts "a digest exists for this id" as proof the resume-integrity
+    # gate ran for it. That is true for a RESUMED id (the digest genuinely
+    # predates this invocation) but false for a FRESH one under the new
+    # single-phase ordering: resume_setup.py runs BEFORE this script and
+    # writes runs/<RUN_ID>/input.digest for the id it just minted, so a
+    # digest existing for THIS invocation's own --run-id proves only that
+    # resume_setup.py ran just now -- it proves NOTHING about whether any
+    # PRE-EXISTING dispatch evidence bearing that exact id was ever gated.
+    # resume_setup.py mints a fresh id merely when runs/<candidate> is
+    # absent (never consulting workflow dirs or draft tokens), so a fresh
+    # id colliding with pre-existing evidence would otherwise sail through
+    # runs_missing_digest untouched -- laundering exactly the skipped-gate
+    # dispatch this whole gate exists to refuse. Gated on `authorizes_dispatch`
+    # for the same reason every other Step 3 refusal is: --classify-only
+    # must stay a pure read.
+    # KNOWN RESIDUAL, disclosed rather than closed (team-lead, #438 review):
+    # this check is ONE-SIDED. It fires only when `--run-resume` is the
+    # literal string "false" -- there is no cross-check on the "true" branch,
+    # so a caller that relays "--run-resume true" for a genuinely FRESH id
+    # carrying pre-existing evidence bypasses the refusal entirely. `--run-
+    # resume` is a RELAY of resume_setup.py's own `resume` field, not
+    # something this script re-derives: `resume_setup.py` reports `resume:
+    # true` only when a candidate's prior digest matches the freshly computed
+    # `input_digest`, but a FRESH run's digest is written with that exact
+    # same value, so digest CONTENT cannot discriminate after the fact. The
+    # genuine discriminator -- "the digest existed BEFORE this pipeline ran"
+    # -- is not observable from inside this invocation. Attestation is
+    # unavoidable here; do not try to close this with more machinery without
+    # a new source of truth, and do not read this guard as self-verifying --
+    # a false "true" defeats it completely.
+    if authorizes_dispatch and args.run_id is not None:
+        current_run_problem = validate_run_id(args.run_id)
+        if current_run_problem is not None:
+            fatal(
+                f"--run-id {args.run_id!r} is not a safe run id: {current_run_problem}",
+                classification=classification,
+                counts=counts,
+                ids_by_category=ids_by_category,
+            )
+        if args.run_resume == "false" and args.run_id in evidence:
+            fatal(
+                f"--run-id {args.run_id!r} was reported FRESH by resume_setup.py "
+                f"(--run-resume false), but this project already has dispatch evidence "
+                f"bearing that exact id: evidence={'+'.join(evidence[args.run_id])}. A "
+                f"digest resume_setup.py just wrote for it proves only that "
+                f"resume_setup.py ran as part of THIS invocation -- it proves nothing "
+                f"about whether the pre-existing evidence was ever checked against the "
+                f"resume-integrity gate, and admitting it here would launder exactly the "
+                f"skipped-gate dispatch #409 Step 3 exists to refuse. If this id is "
+                f"genuinely a resumed run, resume_setup.py should have reported "
+                f"--run-resume true; if this is a wall-clock collision or a forged/"
+                f"duplicate id, a different run id is required.",
+                classification=classification,
+                counts=counts,
+                ids_by_category=ids_by_category,
+            )
+        # The one cheap check that IS derivable on the "true" branch: a
+        # genuinely RESUMED run must already have an input.digest -- that is
+        # the literal precondition resume_setup.py's own resume match
+        # requires. It does not close the attestation hole above (a caller
+        # could still relay "true" for an id that has BOTH pre-existing
+        # evidence AND a digest from some unrelated prior run), but it does
+        # catch the more likely accident: a malformed or garbled relay of
+        # resume_setup.py's own field, as opposed to a deliberate lie.
+        if args.run_resume == "true" and not input_digest_path(args.run_id, runs_dir).is_file():
+            fatal(
+                f"--run-id {args.run_id!r} was reported RESUMED by resume_setup.py "
+                f"(--run-resume true), but no runs/{args.run_id}/input.digest exists for "
+                f"it. A genuine resume match requires resume_setup.py to have already "
+                f"written that digest -- its absence means --run-resume does not agree "
+                f"with what is actually on disk, most likely a malformed or stale relay "
+                f"of resume_setup.py's own 'resume' field rather than resume_setup.py's "
+                f"real, current output.",
+                classification=classification,
+                counts=counts,
+                ids_by_category=ids_by_category,
+            )
+
+    # ---- #438: the claim admission gate -----------------------------------
+    # D5.1: placed strictly AFTER ambiguous_sentinels (never before -- an
+    # ambiguous sentinel means convergence history is UNKNOWN, and letting a
+    # claim run first would let a new authorization clear a refusal
+    # deliberately built to be unclearable) and BEFORE previously_converged
+    # (a successful --from-converged claim clears THAT gate for exactly its
+    # own successfully-admitted ids -- D5.2).
+    claims_payload: dict = {}
+    if claim_requests:
+        claim_record = _import_claim_record()
+        run_id = args.run_id
+        if run_id is None:
+            fatal(
+                "a claim (--from-converged/--from-cap) was requested but --run-id was not "
+                "given. --run-id must be passed explicitly and is never derived from a token "
+                "-- deriving it would make a malformed token read as 'not claimed' and "
+                "silently proceed (PLAN.md D8).",
+                classification=classification,
+                counts=counts,
+                ids_by_category=ids_by_category,
+            )
+        run_id_problem = validate_run_id(run_id)
+        if run_id_problem is not None:
+            fatal(
+                f"--run-id {run_id!r} is not a safe run id: {run_id_problem}",
+                classification=classification,
+                counts=counts,
+                ids_by_category=ids_by_category,
+            )
+
+        # D3: the authorization must be a SUBSET of the emitted segs -- a
+        # human_escalation id (tome1's --from-cap population) needs
+        # --only-segs naming it too, exactly as any other retry does.
+        segs_set = set(segs)
+        not_in_segs = sorted(seg for seg in claim_requests if seg not in segs_set)
+        if not_in_segs:
+            fatal(
+                f"{len(not_in_segs)} claimed id(s) are not in this invocation's own emitted "
+                f"segs, so the authorization would not be a subset of what is dispatched: "
+                f"{', '.join(not_in_segs)}. A human_escalation id needs --only-segs naming "
+                f"it too, exactly as any other retry does.",
+                classification=classification,
+                counts=counts,
+                ids_by_category=ids_by_category,
+            )
+
+        # D5.3: overlap between a claim and --allow-retranslate-converged is
+        # REJECTED OUTRIGHT, not resolved by precedence -- checked over the
+        # REQUESTED --from-converged ids, before any admission work runs.
+        # --from-cap is deliberately absent here: its population carries no
+        # sentinel, so it never reaches previously_converged at all.
+        from_converged_requested = {
+            seg for seg, profile in claim_requests.items() if profile == CLAIM_PROFILE_FROM_CONVERGED
+        }
+        if args.allow_retranslate_converged:
+            overlap = sorted(from_converged_requested & set(previously_converged))
+            if overlap:
+                fatal(
+                    f"{len(overlap)} segment(s) are named under --from-converged AND covered "
+                    f"by --allow-retranslate-converged: {', '.join(overlap)}. Rejected "
+                    f"outright -- --allow-retranslate-converged authorizes RE-TRANSLATION, a "
+                    f"claim authorizes RE-REVIEW only, and 'claim wins' would be one flag "
+                    f"silently changing the other's meaning. Split this into two invocations.",
+                    classification=classification,
+                    counts=counts,
+                    ids_by_category=ids_by_category,
+                    previously_converged=previously_converged,
+                )
+
+        canon_entries, canon_err = load_current_canon_entries(dirs["durable_root"])
+        if canon_entries is None:
+            fatal(
+                f"could not evaluate the fresh-segpack precondition (D6) for any requested "
+                f"claim: {canon_err}",
+                classification=classification,
+                counts=counts,
+                ids_by_category=ids_by_category,
+            )
+
+        # D2: all ids validated in ONE PASS, every failure reported together
+        # -- three sequential fatals would cost an operator three round
+        # trips to learn three problems.
+        admitted: dict = {}
+        failures: dict = {}
+        for seg, profile in sorted(claim_requests.items()):
+            ok, reasons, extras = evaluate_claim_admission(
+                seg, profile, ledger_segments.get(seg), dirs, canon_entries, args
+            )
+            if ok:
+                admitted[seg] = (profile, extras)
+            else:
+                failures[seg] = reasons
+
+        if failures:
+            detail = "; ".join(
+                f"{seg} [{claim_requests[seg]}]: {' | '.join(reasons)}"
+                for seg, reasons in sorted(failures.items())
+            )
+            fatal(
+                f"{len(failures)} of {len(claim_requests)} requested claim(s) refused "
+                f"admission (every failure reported together, per D2): {detail}",
+                classification=classification,
+                counts=counts,
+                ids_by_category=ids_by_category,
+                claim_failures=failures,
+            )
+
+        # Every requested id passed -- write the durable claim record for
+        # each (claim_record.py's own three-state predicate; NEVER
+        # Path.exists()). AMBIGUOUS reads (an unreadable existing record)
+        # map to a write failure below, never to "assume claimed".
+        runs_dir = dirs["durable_root"] / "runs"
+        operator_invocation = " ".join(sys.argv)
+        write_failures = []
+        for seg, (profile, extras) in sorted(admitted.items()):
+            # Every one of CLAIM_RECORD_FIELDS' fourteen fields, by keyword
+            # -- build_claim_record() is keyword-only with no defaults, so a
+            # field added there and forgotten here is a TypeError at this
+            # line rather than a record silently missing the evidence it was
+            # extended to carry. D6's cache-key endpoints and D10's
+            # pre-claim review are passed INTO the record here; they used to
+            # be spliced onto the stdout payload only, which meant the one
+            # durable account of a state change that voids a review did not
+            # contain the evidence that justified it.
+            payload = claim_record.build_claim_record(
+                seg=seg,
+                profile=profile,
+                run_id=run_id,
+                source_run_id=extras["source_run_id"],
+                previous_dispatch_token=extras["previous_dispatch_token"],
+                pre_claim_content_sha1=extras["current_draft_sha1"],
+                pre_claim_review=extras["pre_claim_review"],
+                pre_claim_cache_key=extras["pre_claim_cache_key"],
+                cache_key_at_claim=extras["current_cache_key"],
+                cache_key_moved_fields=extras["cache_key_moved_fields"],
+                cache_key_movement_machinery_only=extras["cache_key_movement_machinery_only"],
+                cache_key_note=extras["cache_key_note"],
+                operator_invocation=operator_invocation,
+                claimed_at=_claim_now_iso8601(),
+            )
+            marker_path = claim_record.claimed_path(run_id, seg, runs_dir)
+            published, write_detail = claim_record.write_claim_record(marker_path, payload)
+            if published:
+                record_for_output = payload
+            elif write_detail == "already claimed by this run":
+                # Idempotent: the SAME authorization being reapplied, not a
+                # new one (D9) -- report what is ACTUALLY on disk, never a
+                # freshly recomputed payload, since the durable record is
+                # the one thing a re-run must not silently overwrite.
+                state, existing, read_detail = claim_record.read_claim_record(marker_path)
+                if state != claim_record.CLAIM_PRESENT or existing is None:
+                    write_failures.append(
+                        f"{seg}: already claimed by this run, but the existing record could "
+                        f"not be re-read ({read_detail}) -- state={state}"
+                    )
+                    continue
+                record_for_output = existing
+            else:
+                write_failures.append(f"{seg}: {write_detail}")
+                continue
+
+            # D4/D9: rewrite the draft's OWN dispatch_token to this run's
+            # value, strictly AFTER the record write above (never before --
+            # token-first would destroy the previous token's provenance
+            # before anything durable recorded it; if the draft then became
+            # ABSENT or INVALID with no record ever written, D8's guard would
+            # not protect it and a translate could launch). Safe to do here,
+            # inside the same single-phase invocation, because the #409 Step
+            # 3 evidence scan above (and the fresh-evidence check that reads
+            # it) already completed BEFORE this claim block's first write --
+            # see that scan's own comment for the self-refusal this ordering
+            # exists to prevent.
+            #
+            # `expected_content_sha1` is THIS invocation's own admitted hash
+            # (extras), never `record_for_output["pre_claim_content_sha1"]`.
+            # On the idempotent/D9-recovery path the record's copy is
+            # deliberately older than the draft -- a fix round edited it
+            # after the original claim -- so checking against the record
+            # would refuse exactly the recovery this release makes
+            # reachable. The property being enforced is "the draft these
+            # gates just evaluated is the draft that gets stamped", which is
+            # a statement about one invocation.
+            #
+            # #438 round 4 threaded `already_claimed_by_this_run=not
+            # published` through here -- round 5 removes that parameter
+            # entirely. It is no longer needed: rewrite_draft_dispatch_token()
+            # now reads THIS run's own claim record's `claimed_at` straight
+            # off disk (the record-first write above guarantees it already
+            # exists by the time this call runs) instead of asking the
+            # caller whether that record predates this invocation. See that
+            # function's own docstring for the age-based predicate this was
+            # replaced with.
+            token_ok, token_detail = rewrite_draft_dispatch_token(
+                seg,
+                dirs["durable_root"],
+                draft_dispatch_token_for(run_id, seg),
+                expected_content_sha1=extras["current_draft_sha1"],
+            )
+            if not token_ok:
+                write_failures.append(f"{seg}: dispatch_token rewrite failed: {token_detail}")
+                continue
+
+            if extras.get("lost_token_recovery"):
+                # D9: an admission that came through the lost-token recovery
+                # must never be silent. It is not reported in the JSON --
+                # `claims` is the record verbatim, and this is a fact about
+                # HOW this invocation reached it, not about the claim -- but
+                # an operator who lost a token by accident needs to see that
+                # the tool noticed and restored it rather than quietly
+                # re-authorizing something.
+                print(
+                    f"select_segments.py: {seg} admitted via the D9 lost-token recovery "
+                    f"-- its draft carried no dispatch_token and run {run_id!r}'s own "
+                    f"claim record for it authorized re-stamping",
+                    file=sys.stderr,
+                )
+
+            # The record VERBATIM -- no freshly recomputed fields spliced on
+            # top. It used to carry a four-field spread of `extras` here,
+            # which on the already-claimed path silently overwrote the
+            # DURABLE record's values with values recomputed in this
+            # invocation, contradicting the comment above about reporting
+            # what is actually on disk. The record now carries all four
+            # itself, so the spread is not merely wrong, it is redundant.
+            claims_payload[seg] = record_for_output
+
+        if write_failures:
+            fatal(
+                f"{len(write_failures)} claim record write failure(s): "
+                f"{'; '.join(write_failures)}",
+                classification=classification,
+                counts=counts,
+                ids_by_category=ids_by_category,
+            )
+
+        # D5.2: a --from-converged claim clears previously_converged for
+        # EXACTLY its own SUCCESSFULLY-ADMITTED-AND-RECORDED ids -- never
+        # the merely requested ones. A claim that failed any gate above
+        # already fataled the whole invocation, so by construction every
+        # key in claims_payload here passed every S-gate, its profile
+        # condition, and D6.
+        cleared = {
+            seg for seg in claims_payload if claim_requests.get(seg) == CLAIM_PROFILE_FROM_CONVERGED
+        }
+        previously_converged = [seg for seg in previously_converged if seg not in cleared]
+
     if previously_converged and not args.allow_retranslate_converged:
         detail = []
         for seg in previously_converged:
@@ -1520,86 +3388,28 @@ def run(args, dirs: dict) -> dict:
             ambiguous_sentinels=ambiguous_sentinels,
         )
 
-    # ---- #409 Step 3: refuse when a prior run dispatched WITHOUT the -------
-    # ---- resume-integrity gate ---------------------------------------------
-    # SKILL.md's W5 tells the orchestrating session to run resume_setup.py
-    # before the Workflow launches; the driver's own resolve_run_id() does it
-    # unconditionally. Neither fact was ever CHECKED, and a real project ran
-    # six consecutive batches with the step skipped entirely -- hand-labelled
-    # run ids, not one `input.digest` on disk, and nothing noticed. The defect
-    # this closes is that INVISIBILITY, not the skip.
+    # ---- #409 Step 3 refusal fatals -----------------------------------------
+    # `evidence`/`dispatch_scan`/`workflow_run_ids`/`unsafe_run_ids`/
+    # `safe_evidence`/`runs_acknowledged_pre_gate`/`runs_missing_digest` are
+    # all computed EARLIER now (see "#409 Step 3: evidence scan" above,
+    # snapshotted strictly before the #438 claim block) -- #438 fix, see that
+    # comment for why. Only the two refusal fatals stay at this original
+    # position; they are ambivalent to WHEN their inputs were computed
+    # (nothing here writes anything the scan would see), so keeping them here
+    # preserves this gate's existing relative precedence against
+    # previously_converged/ambiguous_sentinels exactly as before #438.
     #
-    # The discriminator is a set difference over evidence that already exists:
-    # the RUN_IDs that actually dispatched work (each draft's own
-    # `dispatch_token`) MINUS the RUN_IDs the gate demonstrably ran for (each
-    # `runs/<RUN_ID>/input.digest`). Three states fall out of it without a
-    # special case for any of them:
+    # DO NOT re-scan here, or anywhere else downstream of the snapshot above.
+    # `evidence` is a fixed value from the tree as this invocation FOUND it,
+    # not a live query -- that is what makes "refuses against its own
+    # writes" structurally inexpressible. A "helpful" refresh of `evidence`
+    # /`dispatch_scan`/`runs_missing_digest` here would silently reintroduce
+    # the exact self-refusal this snapshot exists to close -- pinned by
+    # tests/claim_selector.test.py's own
+    # test_step3_admits_a_fresh_claim_that_rewrites_its_own_evidence
+    # (section 13): a real claim, rewrite wired in, under --run-resume
+    # false, that MUST succeed.
     #
-    #   gate ran       -- drafts exist, every one of their run ids has a digest
-    #   gate skipped   -- a run id dispatched drafts and has no digest
-    #   first run ever -- no tokened draft exists, so the left-hand set is
-    #                     empty and the difference is empty. A brand-new
-    #                     project is not a skipped gate, and does not need to
-    #                     be special-cased into not being one.
-    #
-    # Scanned over ALL drafts, never over `segs`. Scoping the scan to the
-    # current selection would make a HISTORY question depend on which segments
-    # happen to be eligible right now -- the exact selection-dependence bug
-    # class that made resume_setup.py's own digest domain unstable (#392).
-    #
-    # The scan runs unconditionally and its result is always reported, but only
-    # an AUTHORIZING invocation refuses: --classify-only must stay a pure read
-    # (final_audit.py's completeness gate calls it and must never start
-    # refusing). Scanning only when authorizing would make `runs_missing_digest`
-    # an empty list under --classify-only -- indistinguishable from a clean
-    # project, which is the "absence and failure print identically" failure
-    # this whole check exists to stop reproducing.
-    runs_dir = dirs["durable_root"] / "runs"
-    dispatch_scan = scan_dispatching_run_ids(dirs["durable_root"] / "segments")
-    workflow_run_ids = scan_workflow_run_ids(runs_dir)
-    # The UNION of both evidence halves -- neither subsumes the other; see
-    # scan_workflow_run_ids()'s own docstring for the three cases and for why
-    # a draft-only scan structurally cannot see a run whose drafts were later
-    # overwritten.
-    evidence: dict = {}
-    for run_id in dispatch_scan["by_run_id"]:
-        evidence.setdefault(run_id, []).append("drafts")
-    for run_id in workflow_run_ids:
-        evidence.setdefault(run_id, []).append("workflow_dir")
-
-    # Security fix: validate EVERY run id in the union before either path
-    # function below is ever called with it. The workflow-derived half is
-    # already shape-filtered by scan_workflow_run_ids() itself (a
-    # runs/workflows/ entry that doesn't match _RUN_ID_DIR_RE is silently
-    # skipped, never added to `workflow_run_ids` at all), but the
-    # draft-derived half is not: draft_run_id() only ever splits on the first
-    # colon, by design -- see its own docstring -- and never validates what
-    # it returns. This is the ONE choke point both halves pass through
-    # before `input_digest_path()`/`resume_gate_ack_path()` ever splice a
-    # run id into a filesystem path, so neither scanner's own shape can
-    # drift out from under it.
-    unsafe_run_ids = {}
-    safe_evidence = {}
-    for run_id, sources in evidence.items():
-        problem = validate_run_id(run_id)
-        if problem is not None:
-            unsafe_run_ids[run_id] = problem
-        else:
-            safe_evidence[run_id] = sources
-
-    runs_acknowledged_pre_gate = sorted(
-        run_id
-        for run_id in safe_evidence
-        if not input_digest_path(run_id, runs_dir).is_file()
-        and resume_gate_ack_path(run_id, runs_dir).exists()
-    )
-    runs_missing_digest = sorted(
-        run_id
-        for run_id in safe_evidence
-        if not input_digest_path(run_id, runs_dir).is_file()
-        and not resume_gate_ack_path(run_id, runs_dir).exists()
-    )
-
     # An unsafe run id must neither silently vanish (that would reintroduce
     # exactly the "gate passes when it should refuse" failure #409 Step 3
     # exists to close -- a traversing id that happens to resolve onto some
@@ -1713,6 +3523,23 @@ def run(args, dirs: dict) -> dict:
         "ids_by_category": ids_by_category,
         "overrides": overrides,
         "excluded_only_segs": excluded_only_segs,
+        # #438 D3: the claim authorization, keyed by segment id -- a subset
+        # of `segs` by construction (validated above). Empty {} when no
+        # claim was requested. Each entry is EXACTLY the claim_record.py
+        # payload durably written to runs/<run_id>/.claimed.<seg>, field for
+        # field and in CLAIM_RECORD_FIELDS order -- nothing is added here.
+        #
+        # It used to be that payload PLUS a spread of four D6/D10 fields
+        # (cache_key_moved_fields, cache_key_movement_machinery_only,
+        # cache_key_note, pre_claim_review) that the marker file did not
+        # carry. Those four are now record fields, written to the marker
+        # like every other one, which is where the evidence for a claim
+        # belongs: a consumer reading this JSON and an operator reading the
+        # marker file after the fact must not be able to see different
+        # things. On the already-claimed path this is the record as re-read
+        # FROM DISK, so a re-claim reports the original authorization rather
+        # than a freshly recomputed lookalike.
+        "claims": claims_payload,
         # #409: a consumer must be able to tell an authorizing result from a
         # merely descriptive one without re-deriving which flags were passed.
         "authorizes_dispatch": authorizes_dispatch,
@@ -1803,6 +3630,53 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "previously-converged refusal does not apply, because nothing "
             "downstream of this call can dispatch; the emitted 'segs' is "
             "reported as usual and 'authorizes_dispatch' is false."
+        ),
+    )
+    parser.add_argument(
+        "--from-converged",
+        default=None,
+        metavar="SEG1,SEG2,...",
+        help=(
+            "#438: claim these ids for RE-REVIEW under the --from-converged profile "
+            "(PLAN.md D2) -- a segment that converged cleanly at least once and was then "
+            "hand-edited. Never re-translates. Requires --run-id. A successfully-admitted id "
+            "clears the previously_converged refusal for itself only (D5.2)."
+        ),
+    )
+    parser.add_argument(
+        "--from-cap",
+        default=None,
+        metavar="SEG1,SEG2,...",
+        help=(
+            "#438: claim these ids for RE-REVIEW under the --from-cap profile (PLAN.md D2) "
+            "-- a segment that hit the review cap (non_converged, reason=cap) and was then "
+            "hand-edited. Never re-translates. Requires --run-id and, being human_escalation, "
+            "--only-segs naming the same ids."
+        ),
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        metavar="RUN_ID",
+        help=(
+            "#438: the current run id a claim re-stamps a draft's authorization to. Required "
+            "whenever --from-converged/--from-cap is given; never derived from an existing "
+            "token (PLAN.md D8: deriving it would make a malformed token read as 'not "
+            "claimed' and silently proceed). Must be paired with --run-resume."
+        ),
+    )
+    parser.add_argument(
+        "--run-resume",
+        default=None,
+        choices=("true", "false"),
+        help=(
+            "#409 Step 3 fix: resume_setup.py's own 'resume' field for --run-id, forwarded "
+            "verbatim ('true' when --run-id matched a prior run's digest and is being "
+            "resumed, 'false' when a fresh id was minted). Required whenever --run-id is "
+            "given -- a digest resume_setup.py just wrote for a FRESH id proves only that "
+            "resume_setup.py ran as part of this invocation, never that any pre-existing "
+            "dispatch evidence bearing the same id was ever gated; this flag is what lets "
+            "that be told apart from a legitimate resume."
         ),
     )
     parser.add_argument(

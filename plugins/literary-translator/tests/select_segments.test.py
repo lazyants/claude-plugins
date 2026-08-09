@@ -454,6 +454,10 @@ def test_full_classification_taxonomy_and_report(tmp_path):
         "run_id_evidence",
         "drafts_scanned",
         "drafts_untokened",
+        # #438 D3: the claim authorization the driver consumes. Part of the
+        # exact-key contract for the same reason the keys above are -- a
+        # consumer must be able to trust the key is always present.
+        "claims",
     }
     assert payload["success"] is True
     assert payload["durable_root"] == str(root)
@@ -2083,6 +2087,13 @@ def _api_names_bound_by(src):
 SENTINEL_NON_PARTICIPANTS = (
     "backfill_resume_gate_ack.py",  # mirrors the shape for `.resume_gate_ack`
     "resume_setup.py",              # cites mark_ever_converged()'s O_EXCL semantics
+    # #438's claim record. It owns a SEPARATE marker (`.claimed.<seg>`) with
+    # its own three-state predicate, and names `.ever_converged` only in prose
+    # -- to explain why the ledger fragment was rejected as a home, and that
+    # its predicate is shared by import rather than being a fifth duplicate.
+    # It touches neither the marker nor any sentinel helper, which is what the
+    # ROLE check below re-verifies.
+    "claim_record.py",
 )
 
 

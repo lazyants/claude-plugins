@@ -971,7 +971,7 @@ function translateDrivePrompt(seg) {
     "cat > \"$TASKFILE\" <<'LT_CODEX_TASK_EOF'\n" +
     codexTask + "\n" +
     "LT_CODEX_TASK_EOF\n" +
-    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind translate --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + PLUGIN_ROOT_ARG + " </dev/null >/dev/null 2>&1 &\n" +
+    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind translate --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --run-id " + RUN_ID + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + PLUGIN_ROOT_ARG + " </dev/null >/dev/null 2>&1 &\n" +
     "echo \"DISPATCHED " + seg + " $DISP\"";
   const lines = [];
   lines.push("Effort: low. You are DISPATCHING a background codex translation job for segment " + seg + " -- you do NOT translate anything yourself, and you do NOT wait for the job to finish.");
@@ -1033,7 +1033,7 @@ function reviewDrivePrompt(seg, roundLabel) {
     "cat > \"$TASKFILE\" <<'LT_CODEX_TASK_EOF'\n" +
     codexTask + "\n" +
     "LT_CODEX_TASK_EOF\n" +
-    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind review --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + PLUGIN_ROOT_ARG + " </dev/null >/dev/null 2>&1 &\n" +
+    "nohup " + PY + " " + ROOT + "/scripts/codex_job.py --kind review --companion '" + COMPANION + "' --cwd " + ROOT + " --seg " + seg + " --prompt-file \"$TASKFILE\" --expect-token " + expectToken + " --run-id " + RUN_ID + " --disp \"$DISP\" --deadline-sec " + CODEX_DEADLINE_SEC + " --effort " + EFFORT + MODEL_ARG + PLUGIN_ROOT_ARG + " </dev/null >/dev/null 2>&1 &\n" +
     "echo \"DISPATCHED " + seg + " $DISP\"";
   const lines = [];
   lines.push("Effort: low. You are DISPATCHING a background codex review job for segment " + seg + " (round " + roundLabel + ") -- you do NOT review anything yourself, and you do NOT wait for the job to finish.");
