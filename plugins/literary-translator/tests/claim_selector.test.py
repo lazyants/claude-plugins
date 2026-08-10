@@ -40,6 +40,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -2674,3 +2675,1353 @@ def test_fresh_claim_by_a_new_run_succeeds_even_though_the_named_run_still_holds
     )
     draft = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
     assert draft["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}"
+
+
+# ---------------------------------------------------------------------------
+# 19. #460 -- evaluate_open_review_loop(): a DIRTY --from-converged review is
+# admitted only when the draft's OWNER run (named by its own dispatch_token)
+# holds a live, self-consistent, from-converged claim record for this exact
+# segment. `clean: true` was the ENTRY condition into the previously-converged
+# population, not a standing one -- round 1 of a re-review overwrites the
+# stored review with a DIRTY one, and before this fix that closed the door
+# behind the operator: the driver's own prescribed fix turn could run, and
+# then nothing could dispatch round 2 (the plain path refuses via
+# previously_converged, --from-converged refused on the now-dirty review).
+# This admits round 2 through the ORDINARY claim path -- authorized by the
+# owner's own prior claim record, never by exempting the segment somewhere
+# downstream -- so the fresh authorization lands on THIS run, not the owner.
+# ---------------------------------------------------------------------------
+
+def write_owner_claim_record(
+    root,
+    seg,
+    *,
+    owner_run_id=SOURCE_RUN_ID,
+    profile="from-converged",
+    seg_field=None,
+    run_id_field=None,
+):
+    """Publish a claim record for `owner_run_id` over `seg`, through the REAL
+    claim_record.py writer (build_claim_record() + write_claim_record()) --
+    never hand-written JSON, so a passing test proves the record SHAPE
+    evaluate_open_review_loop() actually reads rather than a shape this
+    suite merely imagines it reads.
+
+    `seg_field`/`run_id_field` default to the record's own true location
+    (`seg`/`owner_run_id`) and exist so exactly one test at a time can plant
+    a record whose OWN `seg` or `run_id` field disagrees with the path it
+    was found at -- evaluate_open_review_loop()'s self-agreement check on
+    top of mere presence, the same scoping D5.2 already applies elsewhere in
+    this file. `owner_run_id` also picks WHERE the record is written
+    (claimed_path()'s own directory), so a test flipping `run_id_field`
+    alone plants a self-disagreeing record at the OWNER's true path, while a
+    test flipping `owner_run_id` itself would (correctly) publish a
+    perfectly self-consistent record the gate cannot find at all -- these
+    tests use the former."""
+    mod = _load_claim_record_module()
+    payload = mod.build_claim_record(
+        seg=seg_field if seg_field is not None else seg,
+        profile=profile,
+        run_id=run_id_field if run_id_field is not None else owner_run_id,
+        source_run_id=owner_run_id,
+        previous_dispatch_token=None,
+        pre_claim_content_sha1=None,
+        pre_claim_review=None,
+        pre_claim_cache_key=None,
+        cache_key_at_claim=None,
+        cache_key_moved_fields=[],
+        cache_key_movement_machinery_only=None,
+        cache_key_note=None,
+        operator_invocation=None,
+        claimed_at="2026-01-01T00:00:00Z",
+    )
+    record_path = mod.claimed_path(owner_run_id, seg, root / "runs")
+    ok, detail = mod.write_claim_record(record_path, payload)
+    assert ok, f"test setup: could not publish the owner's own claim record: {detail}"
+    return record_path
+
+
+def test_dirty_review_is_admitted_when_owner_holds_a_live_from_converged_claim(tmp_path):
+    """PERMIT -- the core case #460 exists for. Round 1 of a re-review left
+    the stored review dirty, but the draft's owner run (SOURCE_RUN_ID, named
+    by its own dispatch_token) already holds a from-converged claim record
+    for this exact segment: this run's own --from-converged re-claim must be
+    admitted, and the fresh authorization must be granted to THIS run, not
+    silently left with the owner's."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys, review_overrides={"clean": False})
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+    write_owner_claim_record(root, seg)
+
+    proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert seg in out["segs"]
+    assert seg not in out["previously_converged"], (
+        "an admitted --from-converged claim must clear the gate for itself, same as the "
+        "clean-review happy path"
+    )
+    assert seg in out["claims"]
+    claim = out["claims"][seg]
+    assert claim["run_id"] == RUN_ID, "the fresh claim is granted to THIS run, not the owner"
+    assert claim["source_run_id"] == SOURCE_RUN_ID
+
+
+def test_dirty_review_refused_when_owner_holds_no_claim_record(tmp_path):
+    """REFUSE -- the default gate. Nobody ever claimed this segment, so a
+    dirty review is just a dirty review: exactly as true of a segment nobody
+    claimed as it is of one mid re-review, and this project never opened a
+    loop for it. No claim record is published at all."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys, review_overrides={"clean": False})
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert seg in out["error"]
+    assert "holds no readable claim record" in out["error"], out["error"]
+    assert "state=absent" in out["error"], (
+        f"must name the ABSENT state specifically -- distinguishes this refusal from the "
+        f"torn-record (AMBIGUOUS) refusal below. Got: {out['error']!r}"
+    )
+
+
+def test_dirty_review_refused_when_owners_claim_was_granted_under_from_cap(tmp_path):
+    """REFUSE. The owner's record exists and is perfectly readable, but it
+    authorizes a DIFFERENT population for a different reason (D5.2) --
+    --from-cap's own re-review loop is not --from-converged's. Must refuse
+    on the PROFILE clause specifically, not be swallowed by the "no record"
+    reason the previous test exercises."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys, review_overrides={"clean": False})
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+    write_owner_claim_record(root, seg, profile="from-cap")
+
+    proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    # The refusal reports BOTH probes -- the draft's owner and, for D9's sake,
+    # this run -- so attribution is asserted against the OWNER's clause alone.
+    # Asserting over the whole string would pass on the second probe's "no
+    # record" reason, which is exactly the swallowing this test exists to stop.
+    owner_clause = out["error"].split("; for this run")[0]
+    assert "was granted under profile 'from-cap'" in owner_clause, out["error"]
+    assert "holds no readable claim record" not in owner_clause, (
+        "must refuse on the PROFILE clause, not the presence clause the no-record test covers"
+    )
+
+
+def test_dirty_review_refused_when_the_owner_record_is_only_partially_written(tmp_path):
+    """A record carrying the three fields the gate names -- seg, run_id,
+    profile -- and none of the other eleven must NOT authorize. Those three are
+    the ones a forger or a half-finished write would get right by reading the
+    error messages; the full fourteen are what only this project's own claim
+    path produces. Hand-written on purpose: the production writer cannot
+    produce this shape, which is the point."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys, review_overrides={"clean": False})
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    record_dir = root / "runs" / SOURCE_RUN_ID
+    record_dir.mkdir(parents=True, exist_ok=True)
+    (record_dir / f".claimed.{seg}").write_text(
+        json.dumps({"seg": seg, "run_id": SOURCE_RUN_ID, "profile": "from-converged"}),
+        encoding="utf-8",
+    )
+
+    proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    owner_clause = out["error"].split("; for this run")[0]
+    assert "is missing" in owner_clause and "fields this project's claim path writes" in owner_clause, (
+        out["error"]
+    )
+
+
+def test_a_stale_claim_of_this_run_does_not_authorize_another_owners_dirty_review(tmp_path):
+    """The widening a codex review caught, pinned as a refusal.
+
+    This run holding a claim record proves only that it once opened a loop on
+    this segment -- never that it opened THIS one. So when the draft carries a
+    token naming a DIFFERENT owner, this run's own record must not stand in for
+    the owner's: the draft has legitimately moved on, and a record from the
+    earlier loop would otherwise authorize the new owner's dirty review with no
+    forged file anywhere.
+
+    The second probe exists only for D9's lost-token path (the test below), and
+    `lost_token_recovery` is what confines it there."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys, review_overrides={"clean": False})
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+    make_run_dir(root, RUN_ID)
+    # This run holds a full, valid record -- and the draft still names
+    # SOURCE_RUN_ID, which holds none.
+    write_owner_claim_record(root, seg, owner_run_id=RUN_ID)
+
+    proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert "holds no readable claim record" in out["error"], out["error"]
+    assert "for this run" not in out["error"], (
+        "the second probe must not even run for a draft that still carries a token"
+    )
+
+
+def test_d9_lost_token_recovery_still_works_when_the_review_came_back_dirty(tmp_path):
+    """D9's recovery, in the state #460 introduces: round 1 came back dirty AND
+    a fix round dropped the token. `source_run_id` is then recovered from this
+    run's own record and names the original TRANSLATION run, which never holds a
+    from-converged claim -- so without the second probe this recovery would be
+    stranded exactly where the loop is supposed to continue.
+
+    Driven the way the existing D9 tests are: a real first claim, then the token
+    dropped, then a real re-claim -- never a hand-assembled record."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    first = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert first.returncode == 0, f"stdout={first.stdout!r} stderr={first.stderr!r}"
+
+    # Round 1 came back dirty, and the fix round dropped the token.
+    write_review(root, seg, {"clean": False, "coverage_ok": True, "findings": [
+        {"loc": "PARA:p1", "severity": "medium", "issue": "x", "suggest": "y"}
+    ], "draft_sha1": "0" * 40})
+    _drop_dispatch_token(root, seg)
+    make_run_dir(root, RUN_ID)
+
+    second = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "true")
+    assert second.returncode == 0, f"stdout={second.stdout!r} stderr={second.stderr!r}"
+    out = parse_stdout(second)
+    assert seg in out["segs"]
+    assert seg not in out["previously_converged"]
+    assert seg in out["claims"]
+
+
+def test_dirty_review_refused_when_records_own_seg_names_a_different_segment(tmp_path):
+    """REFUSE. classify_claim_record()/read_claim_record() establish only "a
+    regular file holding a JSON object at the right PATH" -- the record must
+    also AGREE with that path. A record whose own `seg` field names
+    something else is refused rather than trusted as evidence for THIS
+    segment."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys, review_overrides={"clean": False})
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+    write_owner_claim_record(root, seg, seg_field="some_other_seg")
+
+    proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert "disagrees with its own location" in out["error"], out["error"]
+    assert "seg='some_other_seg'" in out["error"], (
+        f"must name the WRONG seg the record actually carries. Got: {out['error']!r}"
+    )
+
+
+def test_dirty_review_refused_when_records_own_run_id_names_a_different_run(tmp_path):
+    """REFUSE -- the mirror of the seg check above. A record sitting at
+    SOURCE_RUN_ID's own path but whose own `run_id` field names a different
+    run is the other half of the self-agreement condition, and must be
+    told apart from the seg-mismatch refusal by the value the message
+    actually names."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys, review_overrides={"clean": False})
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+    write_owner_claim_record(root, seg, run_id_field=OTHER_RUN_ID)
+
+    proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert "disagrees with its own location" in out["error"], out["error"]
+    assert f"run_id={OTHER_RUN_ID!r}" in out["error"], (
+        f"must name the WRONG run_id the record actually carries. Got: {out['error']!r}"
+    )
+    assert "seg='some_other_seg'" not in out["error"], (
+        "must not be the seg-mismatch refusal's own reason"
+    )
+
+
+def test_dirty_review_refused_when_owners_claim_record_is_torn(tmp_path):
+    """REFUSE. A record that classifies PRESENT but does not parse as a JSON
+    object is AMBIGUOUS, not PRESENT-with-empty-contents -- the same
+    discipline every other reader of claim_record.py applies (see section 14
+    above). Hand-written and truncated MID-OBJECT deliberately, rather than
+    a bare `{}`: `{}` parses clean as a JSON object with every key simply
+    absent, which classify_claim_record() reports PRESENT and
+    read_claim_record() reports PRESENT/{} -- so it would fail this test's
+    OWN seg/run_id/profile checks for an unrelated reason (all three keys
+    missing) and never actually exercise the AMBIGUOUS branch this test
+    targets."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys, review_overrides={"clean": False})
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    mod = _load_claim_record_module()
+    record_path = mod.claimed_path(SOURCE_RUN_ID, seg, root / "runs")
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text('{"seg": "seg22", "profile": "from-conve', encoding="utf-8")
+
+    proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert "holds no readable claim record" in out["error"], out["error"]
+    assert "state=ambiguous" in out["error"], (
+        f"must name the AMBIGUOUS state specifically -- distinguishes this refusal from the "
+        f"no-record (ABSENT) refusal above. Got: {out['error']!r}"
+    )
+
+
+def test_clean_review_still_admitted_without_any_owner_claim_record(tmp_path):
+    """UNCHANGED -- guards against the relaxation swallowing the ORIGINAL
+    path. A clean:true stored review is admitted exactly as before #460,
+    and without evaluate_open_review_loop() ever being consulted: no owner
+    claim record is published anywhere in this test, so if the loop check
+    were (wrongly) called unconditionally, this admission would refuse for
+    lack of one, and this test would catch it."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)  # review clean: True, the default
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert seg in out["segs"]
+    assert seg not in out["previously_converged"]
+    assert seg in out["claims"]
+    assert out["claims"][seg]["profile"] == "from-converged"
+
+
+# ---------------------------------------------------------------------------
+# 19b. evaluate_open_review_loop() called DIRECTLY, in isolation from the rest
+# of evaluate_claim_admission().
+#
+# The end-to-end tests above prove the whole INVOCATION refuses or admits,
+# but a refusal can come from any of D2's several independent chokepoints --
+# under a mutation that disables the owner-claim check specifically, the
+# end-to-end REFUSE tests still went red, but via the *unrelated* #438
+# ownership-rewrite guard (a foreign run's own claim record makes
+# rewrite_draft_dispatch_token() refuse the re-stamp), not via
+# evaluate_open_review_loop() itself. That is a test passing for the wrong
+# reason -- a second chokepoint firing is exactly how it happens -- so it
+# does not actually pin the predicate's OWN behavior. These tests close that
+# by calling the function directly and asserting on its RETURNED pair, with
+# no other gate in the path to produce a right-shaped refusal for a
+# different reason.
+#
+# `dirs` is built with resolve_dirs() -- the SAME function run()'s own call
+# site uses (`dirs = resolve_dirs(args.durable_root, args.plugin_root)`) --
+# rather than a hand-rolled dict shaped to only what this one function
+# happens to read today.
+# ---------------------------------------------------------------------------
+
+def test_evaluate_open_review_loop_permits_a_valid_owner_claim(tmp_path):
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    write_owner_claim_record(root, seg)
+
+    mod = _load_select_segments_module(root)
+    dirs = mod.resolve_dirs(str(root))
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
+    assert ok is True
+    assert reason == ""
+
+
+def test_evaluate_open_review_loop_refuses_when_owner_holds_no_claim_record(tmp_path):
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    # deliberately: no write_owner_claim_record() call.
+
+    mod = _load_select_segments_module(root)
+    dirs = mod.resolve_dirs(str(root))
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
+    assert ok is False
+    assert "holds no readable claim record" in reason, reason
+    assert "state=absent" in reason, reason
+
+
+def test_evaluate_open_review_loop_refuses_a_from_cap_owner_claim(tmp_path):
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    write_owner_claim_record(root, seg, profile="from-cap")
+
+    mod = _load_select_segments_module(root)
+    dirs = mod.resolve_dirs(str(root))
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
+    assert ok is False
+    assert "was granted under profile 'from-cap'" in reason, reason
+    assert "holds no readable claim record" not in reason, (
+        f"must refuse on the PROFILE clause, not the presence clause. Got: {reason!r}"
+    )
+
+
+def test_evaluate_open_review_loop_refuses_a_seg_mismatched_record(tmp_path):
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    write_owner_claim_record(root, seg, seg_field="some_other_seg")
+
+    mod = _load_select_segments_module(root)
+    dirs = mod.resolve_dirs(str(root))
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
+    assert ok is False
+    assert "disagrees with its own location" in reason, reason
+    assert "seg='some_other_seg'" in reason, reason
+
+
+def test_evaluate_open_review_loop_refuses_a_run_id_mismatched_record(tmp_path):
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    write_owner_claim_record(root, seg, run_id_field=OTHER_RUN_ID)
+
+    mod = _load_select_segments_module(root)
+    dirs = mod.resolve_dirs(str(root))
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
+    assert ok is False
+    assert "disagrees with its own location" in reason, reason
+    assert f"run_id={OTHER_RUN_ID!r}" in reason, reason
+    assert "seg='some_other_seg'" not in reason, (
+        "must not be the seg-mismatch refusal's own reason"
+    )
+
+
+def test_evaluate_open_review_loop_refuses_a_torn_owner_record(tmp_path):
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    crmod = _load_claim_record_module()
+    record_path = crmod.claimed_path(SOURCE_RUN_ID, seg, root / "runs")
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text('{"seg": "seg22", "profile": "from-conve', encoding="utf-8")
+
+    mod = _load_select_segments_module(root)
+    dirs = mod.resolve_dirs(str(root))
+    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
+    assert ok is False
+    assert "holds no readable claim record" in reason, reason
+    assert "state=ambiguous" in reason, reason
+
+
+def test_evaluate_open_review_loop_refuses_a_none_or_empty_owner_run_id(tmp_path):
+    """The caller-side precondition: `owner_run_id` is whatever S3 parsed out
+    of the draft's own dispatch_token (or None, when parsing itself already
+    failed upstream) -- never this run's own identity. Neither shape names
+    an owner whose claim record could even be looked up."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+
+    mod = _load_select_segments_module(root)
+    dirs = mod.resolve_dirs(str(root))
+    for bad_owner in (None, ""):
+        ok, reason = mod.evaluate_open_review_loop(seg, bad_owner, dirs)
+        assert ok is False
+        assert "no owner whose claim could be read" in reason, reason
+
+
+# ---------------------------------------------------------------------------
+# 20. The two-owner takeover of sections 17/18, in the ONE state those guards
+# cannot see: a draft carrying NO dispatch_token.
+#
+# #438's `claimed_at` tiebreak reads the incumbent owner OFF the draft's token,
+# so it is structurally unreachable once the token is gone -- and a fix round
+# that re-emits the draft drops it routinely (draft.schema.json makes the field
+# optional). That leaves D9's lost-token recovery as the only gate in the path,
+# and it asked exclusively about THIS run: does a readable, self-consistent,
+# same-profile claim record exist at runs/<this run>/? Nothing releases a
+# claim, so that record is immortal -- "I claimed this once" is a fact that
+# never expires, while "I still own it" is a different fact entirely, and the
+# recovery treated the first as proof of the second.
+#
+# The rule that answers it is evaluate_takeover_since_this_claim(), and the
+# question it asks is "does anybody own this NOW", not "has anybody ever
+# claimed it". The difference is the whole section: records are IMMORTAL, so
+# two records for one segment is the DESIGNED residue of every sanctioned
+# takeover, and the first version of this guard -- refusing on any foreign
+# holder -- refused the rightful CURRENT owner its own recovery. Both
+# directions are pinned below, because a rule that only ever refuses is
+# indistinguishable from a correct one until something has to be admitted.
+#
+# Its two refusal clauses are OR-ed and are pinned SEPARATELY: the successor
+# test (a foreign record whose `previous_dispatch_token` names this run) and
+# the `claimed_at` comparison. They are reachable together in the ordinary
+# A->B sequence, so a test that only staged that one would leave a mutant
+# deleting either clause green.
+#
+# Every end-to-end test here drives the REAL select_segments.py and builds
+# EVERY claim by actually running the selector, because the defect is in what
+# one gate knows about another run's evidence; a test that hand-assembles the
+# records asserts the arrangement it invented rather than the one the claim
+# path produces. The one unit-level test at the end is marked as such and
+# exists to reach a state the real selector cannot produce.
+#
+# NO FIXTURE HERE CAN TIE. `_cross_a_claimed_at_second_boundary()` runs between
+# every pair of claims, and -- the part worth stating, because it is what makes
+# the guarantee load-bearing rather than hopeful -- each staged claim asserts
+# `returncode == 0`. A tie is REFUSED by rewrite_draft_dispatch_token()'s own
+# tiebreak, so a same-second pair fails LOUDLY at the staging assertion instead
+# of quietly rerouting the test to a different clause than the one it names.
+# ---------------------------------------------------------------------------
+
+# A third claimant, for staging a takeover CHAIN. Its id sorts BETWEEN RUN_ID
+# and OTHER_RUN_ID while it claims LAST, which is deliberate: run ids are
+# `[A-Za-z0-9][A-Za-z0-9._-]*` (no timestamp shape is enforced), the guard
+# enumerates runs/ in sorted order, and sort order therefore has nothing to do
+# with recency. Staging a chain whose alphabetical order disagrees with its
+# claim order is what lets one test reach the `claimed_at` clause without the
+# successor clause firing first on an earlier-sorting entry.
+THIRD_RUN_ID = "20260810T120000Z"
+
+def test_lost_token_recovery_refuses_when_a_newer_run_has_since_claimed(tmp_path):
+    """The takeover #438 closed, surviving in D9's lost-token state. RUN_ID
+    claims seg22; OTHER_RUN_ID legitimately re-claims it (both through every
+    real gate); OTHER_RUN_ID's review comes back dirty and its fix round
+    re-emits the draft WITHOUT the token; RUN_ID then resumes and asks for the
+    sanctioned recovery. Its own record from step 1 still exists and still
+    passes every condition the recovery used to check -- readable,
+    self-describing, same profile -- so before this fix the recovery stamped
+    the draft back to RUN_ID and handed it OTHER_RUN_ID's live review loop,
+    silently, with the hand edit that loop is protecting still on disk.
+
+    Why the draft must come out UNSTAMPED rather than merely "not claimed":
+    the refusal is what tells the operator the ownership needs resolving by
+    hand, and a token quietly restored to the wrong run would make the next
+    dispatch look authorized to every downstream chokepoint."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    # Same #409 Step 3 precondition sections 17/18 document: a real invocation
+    # always has a digest behind it, and without one a LATER run id trips over
+    # RUN_ID's dispatch evidence on that unrelated gate before reaching this
+    # test's own subject.
+    make_run_dir(root, RUN_ID)
+    first = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert first.returncode == 0, f"stdout={first.stdout!r} stderr={first.stderr!r}"
+    run_marker = root / "runs" / RUN_ID / f".claimed.{seg}"
+    run_record_before = run_marker.read_bytes()
+
+    # OTHER_RUN_ID's claimed_at must be STRICTLY newer than RUN_ID's for this
+    # legitimate re-claim to be admitted -- see _cross_a_claimed_at_second_boundary().
+    _cross_a_claimed_at_second_boundary()
+    make_run_dir(root, OTHER_RUN_ID)
+    second = run_select(root, "--from-converged", seg, "--run-id", OTHER_RUN_ID, "--run-resume", "false")
+    assert second.returncode == 0, (
+        f"OTHER_RUN_ID's own re-claim over seg22 (a genuine re-review) must succeed\n"
+        f"stdout={second.stdout!r} stderr={second.stderr!r}"
+    )
+    other_marker = root / "runs" / OTHER_RUN_ID / f".claimed.{seg}"
+    other_record_before = other_marker.read_bytes()
+
+    # OTHER_RUN_ID's fix round rewrites the draft and does not preserve the
+    # token -- the event draft_ready.py's own claim note describes, and the
+    # only way to reach the recovery at all.
+    _drop_dispatch_token(root, seg)
+
+    make_run_dir(root, RUN_ID)
+    third = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "true")
+    assert third.returncode != 0, (
+        f"RUN_ID recovering a token-less draft {OTHER_RUN_ID!r} has since claimed must be "
+        f"refused\nstdout={third.stdout!r} stderr={third.stderr!r}"
+    )
+    out = parse_stdout(third)
+    assert out["success"] is False
+    # Asserted on the SUCCESSOR clause specifically. D2 reports every failure
+    # for the pass together, so a bare "it refused" would not distinguish this
+    # from any other condition the fixture might also fail -- and this sequence
+    # must be caught by the fact B RECORDED (it replaced this run's token),
+    # never by the timestamp comparison, which is second-resolution and could
+    # not decide a takeover that happened inside one second.
+    assert f"run {OTHER_RUN_ID!r} took {seg!r} over FROM this run" in out["error"], out["error"]
+    assert "records this run's token as the one it replaced" in out["error"], out["error"]
+
+    draft_after = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert "dispatch_token" not in draft_after, (
+        "a refused recovery must leave the draft exactly as the fix round left it -- "
+        "never stamped back to the run that lost the segment"
+    )
+    assert other_marker.read_bytes() == other_record_before, (
+        "OTHER_RUN_ID's durable claim record must be untouched by the refused attempt"
+    )
+    assert run_marker.read_bytes() == run_record_before, (
+        "and RUN_ID's own record must not be rewritten either -- a refusal changes "
+        "nothing, so a later hand resolution reads the original evidence"
+    )
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses directory permissions, so runs/ cannot be made unlistable",
+)
+def test_lost_token_recovery_refuses_when_the_runs_directory_cannot_be_listed(tmp_path):
+    """COULD-NOT-LOOK is not NOBODY-HOLDS-IT. A runs/ that is not READABLE
+    refuses `iterdir()` while every `.claimed.<seg>` inside it stays reachable
+    BY PATH -- so any foreign claim is fully in force
+    and merely invisible to the enumeration. Reporting that as "no foreign
+    claim" would hand back exactly the permission the enumeration exists to
+    withhold, and it is the fail-open that hides in review because absence and
+    failure print identically.
+
+    Staged with RUN_ID's own record as the only claim on disk, so no run has
+    in fact taken the segment over and the only foreign-claim answer available
+    is the AMBIGUOUS one -- which is what makes the assertion specific to the
+    could-not-look branch rather than to any holder the enumeration found."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    make_run_dir(root, RUN_ID)
+    first = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert first.returncode == 0, f"stdout={first.stdout!r} stderr={first.stderr!r}"
+    _drop_dispatch_token(root, seg)
+    make_run_dir(root, RUN_ID)
+
+    # 0o333, not 0o111: this pass still materializes runs/ledger.json on its
+    # way to the claim block, so the directory has to stay WRITABLE or the
+    # refusal comes from ledger_merge.py long before the recovery is reached.
+    # Write+search without read is exactly the shape that breaks iterdir()
+    # while leaving every .claimed.<seg> inside reachable by path.
+    runs = root / "runs"
+    os.chmod(runs, 0o333)
+    try:
+        assert (runs / RUN_ID / f".claimed.{seg}").is_file(), (
+            "fixture precondition: this run's own record must still be reachable BY PATH, "
+            "or this test proves something other than an enumeration failure"
+        )
+        proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "true")
+    finally:
+        os.chmod(runs, 0o755)  # restore so tmp_path cleanup can remove it
+
+    assert proc.returncode != 0, (
+        f"an unlistable runs/ means ownership could not be established, not that nobody "
+        f"owns the segment\nstdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert f"the runs directory {runs} could not be listed" in out["error"], out["error"]
+    assert "could-not-look is not nobody-did" in out["error"], out["error"]
+
+    draft_after = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert "dispatch_token" not in draft_after, (
+        "a refused recovery must not stamp the draft anyway"
+    )
+
+
+def test_lost_token_recovery_refuses_when_a_runs_entry_cannot_be_stat_d(tmp_path):
+    """THE OTHER HALF OF THE PAIR ABOVE, and NOT a duplicate of it: that test
+    breaks the LISTING, this one breaks the PER-ENTRY STAT. `runs/` here is an
+    ordinary readable directory and `iterdir()` returns every run; what fails
+    is establishing what ONE listed entry actually is. The two land on
+    different branches with different reasons, and each asserts its own, so
+    neither can silently answer for the other.
+
+    The branch exists because `Path.is_dir()` SWALLOWS the stat error and
+    answers False -- so an `except OSError` wrapped around it never fires, and
+    "I could not look" is delivered in the same word as "it is not a run". The
+    enumeration then skips the entry and can report the segment CLEAR while a
+    foreign holder sits behind an entry nobody could read. Absence and failure
+    printing identically, one directory level down from the case above.
+
+    STAGED WITH A SELF-REFERENTIAL SYMLINK rather than the permission shape
+    (`runs/` at 0o444, readable but not searchable) that the review reported.
+    Both produce exactly the defect -- `is_dir()` False, `os.stat()` raising --
+    but 0o444 is NOT reachable through the real selector: the same pass
+    materializes runs/ledger.json, so a `runs/` without write+search fails in
+    ledger_merge.py long before the claim block, which is measured, not
+    assumed. A symlink loop leaves `runs/` fully intact and breaks exactly one
+    entry, so the refusal can only come from the branch under test. It also
+    needs no root guard: ELOOP is not a permission and root gets it too."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    make_run_dir(root, RUN_ID)
+    first = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert first.returncode == 0, f"stdout={first.stdout!r} stderr={first.stderr!r}"
+    _drop_dispatch_token(root, seg)
+    make_run_dir(root, RUN_ID)
+
+    # A well-formed run id (so it is not skipped by name) that sorts AFTER
+    # RUN_ID, pointing at itself.
+    unstattable = root / "runs" / "20260812T000000Z"
+    unstattable.symlink_to(unstattable)
+
+    assert unstattable.name in [p.name for p in (root / "runs").iterdir()], (
+        "fixture precondition: the listing must SUCCEED and include this entry -- a "
+        "listing that failed would put this test on the branch above instead"
+    )
+    assert unstattable.is_dir() is False, (
+        "fixture precondition: is_dir() must answer False on the very entry it cannot "
+        "stat -- that indistinguishability IS the defect, and without it this test is "
+        "staging something else"
+    )
+
+    proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "true")
+    assert proc.returncode != 0, (
+        f"an entry that cannot be stat'd means ownership could not be established, not "
+        f"that the entry is harmless\nstdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert f"entry {unstattable} under {root / 'runs'} could not be stat'd" in out["error"], (
+        out["error"]
+    )
+    assert "could not be listed" not in out["error"], (
+        f"this test is void if the LISTING branch answered instead -- the two cases are "
+        f"only distinguishable by their reasons: {out['error']}"
+    )
+
+    draft_after = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert "dispatch_token" not in draft_after, (
+        "a refused recovery must not stamp the draft anyway"
+    )
+
+
+def test_an_unstattable_runs_entry_refuses_only_the_segment_that_consults_it(tmp_path):
+    """PER-ID ISOLATION, which the admission batch states as a property and
+    this guard is in a position to break. `runs/` is process-wide, not
+    per-segment, so one broken entry there is the obvious candidate for a
+    fault that escapes the id it belongs to and takes the pass down with it.
+
+    Two segments in ONE invocation. Only seg22 loses its token, so only seg22
+    reaches evaluate_takeover_since_this_claim() and meets the unstattable
+    entry; seg14 keeps its token and never enumerates runs/ at all. The batch
+    refuses -- an admission pass grants all or nothing, per D2/D5 -- but the
+    REASON must be attributed to seg22 alone, and seg14 must be absent from
+    claim_failures rather than carried down with it.
+
+    That seg14 is evaluated and reported at all is the second half of the
+    assertion: a fault that escaped as an exception would abort the pass and
+    there would be no per-id report to read."""
+    root = make_durable_root(tmp_path)
+    lost, intact = "seg22", "seg14"
+    fixture_keys = {}
+    build_from_converged_segment(root, lost, fixture_keys)
+    build_from_cap_segment(root, intact, fixture_keys)
+    write_manifest(root, [lost, intact])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    make_run_dir(root, RUN_ID)
+    first = run_select(
+        root, "--only-segs", f"{lost},{intact}",
+        "--from-converged", lost, "--from-cap", intact,
+        "--run-id", RUN_ID, "--run-resume", "false",
+    )
+    assert first.returncode == 0, f"stdout={first.stdout!r} stderr={first.stderr!r}"
+    intact_marker = root / "runs" / RUN_ID / f".claimed.{intact}"
+    intact_record_before = intact_marker.read_bytes()
+
+    _drop_dispatch_token(root, lost)
+    make_run_dir(root, RUN_ID)
+    unstattable = root / "runs" / "20260812T000000Z"
+    unstattable.symlink_to(unstattable)
+
+    proc = run_select(
+        root, "--only-segs", f"{lost},{intact}",
+        "--from-converged", lost, "--from-cap", intact,
+        "--run-id", RUN_ID, "--run-resume", "true",
+    )
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert "1 of 2 requested claim(s) refused admission" in out["error"], (
+        f"ONE of the two failed -- a count that said 2 would mean the broken entry "
+        f"escaped the segment that consulted it: {out['error']}"
+    )
+    assert list(out["claim_failures"]) == [lost], (
+        f"the refusal must be attributed to the segment that enumerated runs/, and to "
+        f"no other: {out['claim_failures']}"
+    )
+    assert "could not be stat'd" in out["claim_failures"][lost][0], out["claim_failures"]
+    assert intact_marker.read_bytes() == intact_record_before, (
+        "the untouched segment's own durable record must survive the refused batch "
+        "byte for byte"
+    )
+
+
+def test_lost_token_recovery_by_the_current_owner_after_an_earlier_run_also_claimed(tmp_path):
+    """The MIRROR of the takeover test, and the case that decides whether the
+    ownership rule is drawn in the right place. Same first three steps -- A
+    claims, B legitimately re-claims, B's fix round drops the token -- but the
+    run that resumes is B, the RIGHTFUL CURRENT OWNER recovering its own loop.
+
+    A's record is still on disk, because nothing releases a claim: a second
+    record for one segment is the DESIGNED steady state after any legitimate
+    re-review, and sections 17/18 stage it deliberately. So "any other run
+    holds a record" is a condition that is permanently true for every segment
+    that has ever changed hands -- which would make this recovery, the one the
+    release exists to enable, unreachable for exactly the segments most likely
+    to need it.
+
+    THE REGRESSION GUARD FOR THE ANY-HOLDER RULE, which shipped briefly and
+    would have broken this release's own headline recovery: B's admission here
+    is the only assertion in the section that a refuse-everything guard cannot
+    satisfy. Restore that rule and this test is the one that goes red."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    make_run_dir(root, RUN_ID)
+    first = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert first.returncode == 0, f"stdout={first.stdout!r} stderr={first.stderr!r}"
+
+    _cross_a_claimed_at_second_boundary()
+    make_run_dir(root, OTHER_RUN_ID)
+    second = run_select(root, "--from-converged", seg, "--run-id", OTHER_RUN_ID, "--run-resume", "false")
+    assert second.returncode == 0, (
+        f"OTHER_RUN_ID's own re-claim over seg22 (a genuine re-review) must succeed\n"
+        f"stdout={second.stdout!r} stderr={second.stderr!r}"
+    )
+    other_marker = root / "runs" / OTHER_RUN_ID / f".claimed.{seg}"
+    other_record_before = other_marker.read_bytes()
+
+    # OTHER_RUN_ID's OWN fix round drops the token from its OWN draft.
+    _drop_dispatch_token(root, seg)
+
+    make_run_dir(root, OTHER_RUN_ID)
+    third = run_select(root, "--from-converged", seg, "--run-id", OTHER_RUN_ID, "--run-resume", "true")
+    assert third.returncode == 0, (
+        f"the CURRENT owner must be able to recover its own token-less draft -- an earlier "
+        f"run's never-released record is not a competing claim\n"
+        f"stdout={third.stdout!r} stderr={third.stderr!r}"
+    )
+    out = parse_stdout(third)
+    assert seg in out["claims"], out
+
+    restamped = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert restamped["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}", (
+        "the recovery's whole point is that the draft ends up stamped again, to its "
+        "current owner"
+    )
+    assert other_marker.read_bytes() == other_record_before, (
+        "a recovery re-establishes a token; it must not rewrite the durable record"
+    )
+
+
+def test_lost_token_recovery_refuses_on_claimed_at_alone_without_a_successor_record(tmp_path):
+    """The `claimed_at` clause with the successor clause held OFF -- otherwise
+    the two are only ever reachable together and deleting either one leaves
+    every other test in this section green.
+
+    Staged as a CHAIN: RUN_ID claims, OTHER_RUN_ID takes it over, THIRD_RUN_ID
+    takes it over from OTHER_RUN_ID. RUN_ID then resumes a token-less draft.
+    THIRD_RUN_ID's record cannot convict it by the successor test -- that
+    record names OTHER_RUN_ID's token as the one it replaced, not RUN_ID's --
+    so the only thing left that can see the takeover is that THIRD_RUN_ID
+    claimed later. Which is also the honest shape of the danger: a run two
+    steps down a chain is exactly the owner whose claim no single record names.
+
+    THIRD_RUN_ID's id sorts BEFORE OTHER_RUN_ID's while it claims LAST, so the
+    guard reaches it first in the sorted enumeration and this test cannot pass
+    by accidentally hitting OTHER_RUN_ID's successor record instead. That
+    inversion also pins the guard's own reason for examining every holder
+    rather than returning on the first."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    make_run_dir(root, RUN_ID)
+    first = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert first.returncode == 0, f"stdout={first.stdout!r} stderr={first.stderr!r}"
+
+    _cross_a_claimed_at_second_boundary()
+    make_run_dir(root, OTHER_RUN_ID)
+    second = run_select(root, "--from-converged", seg, "--run-id", OTHER_RUN_ID, "--run-resume", "false")
+    assert second.returncode == 0, f"stdout={second.stdout!r} stderr={second.stderr!r}"
+
+    _cross_a_claimed_at_second_boundary()
+    make_run_dir(root, THIRD_RUN_ID)
+    third = run_select(root, "--from-converged", seg, "--run-id", THIRD_RUN_ID, "--run-resume", "false")
+    assert third.returncode == 0, (
+        f"the third link in the chain must be admitted like any other legitimate "
+        f"takeover\nstdout={third.stdout!r} stderr={third.stderr!r}"
+    )
+
+    third_record = json.loads(
+        (root / "runs" / THIRD_RUN_ID / f".claimed.{seg}").read_text(encoding="utf-8")
+    )
+    assert third_record["previous_dispatch_token"] == f"{OTHER_RUN_ID}:{seg}", (
+        "fixture precondition: the LAST claimant must record OTHER_RUN_ID's token, not "
+        "RUN_ID's -- otherwise the successor clause convicts and this test would prove "
+        "nothing about the timestamp comparison"
+    )
+
+    _drop_dispatch_token(root, seg)
+    make_run_dir(root, RUN_ID)
+    resumed = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "true")
+    assert resumed.returncode != 0, (
+        f"RUN_ID sits two steps back in the chain and must not recover the draft\n"
+        f"stdout={resumed.stdout!r} stderr={resumed.stderr!r}"
+    )
+    out = parse_stdout(resumed)
+    assert out["success"] is False
+    assert f"run {THIRD_RUN_ID!r} claimed {seg!r} at " in out["error"], out["error"]
+    assert "the later claim owns the segment" in out["error"], out["error"]
+    assert "took 'seg22' over FROM this run" not in out["error"], (
+        f"this test is void if the successor clause fired instead: {out['error']}"
+    )
+
+    draft_after = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert "dispatch_token" not in draft_after, (
+        "a refused recovery must not stamp the draft anyway"
+    )
+
+
+def test_a_same_second_foreign_claim_refuses_rather_than_admitting_an_unprovable_claim(tmp_path):
+    """THE TIE, both with and without a successor link. `claimed_at` is
+    second-resolution, so two equal stamps prove nothing in either direction --
+    and the guard refuses, mirroring rewrite_draft_dispatch_token()'s own
+    tiebreak instead of inverting it.
+
+    This is the one arrangement where the comparison's DIRECTION is load
+    bearing rather than cosmetic: written as `foreign > this` with no separate
+    tie branch, a tie falls through and ADMITS, which is the only path in this
+    guard that lets an unprovable claim win. A test that only ever stages
+    strictly-ordered stamps cannot tell the two spellings apart.
+
+    UNIT-LEVEL on purpose, because the real selector cannot produce a tie: every
+    holder acquired its record while the draft still carried a token, so each
+    had to win that same strict tiebreak against the incumbent, and a
+    same-second claim is refused there (sections 17/18). A tied pair therefore
+    implies a record this project's claim path did not write -- a restored
+    backup, a hand edit, a copy from a machine with a different clock -- which
+    is exactly the provenance that should not be given the benefit of the
+    doubt."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    mod = _load_select_segments_module(root)
+    crmod = _load_claim_record_module()
+
+    same_second = "2026-08-09T12:00:00Z"
+    this_payload = crmod.build_claim_record(**dict(
+        {field: None for field in crmod.CLAIM_RECORD_FIELDS},
+        seg=seg, profile="from-converged", run_id=RUN_ID,
+        previous_dispatch_token=f"{SOURCE_RUN_ID}:{seg}", claimed_at=same_second))
+    # A foreign holder at the SAME second whose own takeover was FROM a third
+    # run -- so the successor clause has nothing to bite on.
+    foreign_payload = crmod.build_claim_record(**dict(
+        {field: None for field in crmod.CLAIM_RECORD_FIELDS},
+        seg=seg, profile="from-converged", run_id=OTHER_RUN_ID,
+        previous_dispatch_token=f"{THIRD_RUN_ID}:{seg}", claimed_at=same_second))
+    tied_path = crmod.claimed_path(OTHER_RUN_ID, seg, root / "runs")
+    ok, detail = crmod.write_claim_record(tied_path, foreign_payload)
+    assert ok, f"test setup: could not publish the foreign record: {detail}"
+
+    still_ours, reason = mod.evaluate_takeover_since_this_claim(
+        seg, RUN_ID, this_payload, root / "runs", crmod)
+    assert still_ours is False, (
+        f"a tie is not evidence of ownership in either direction, and every other "
+        f"cannot-establish branch in this guard refuses. reason={reason!r}"
+    )
+    assert "the same second as this run's own claim" in reason, reason
+    assert "neither claim can be shown to precede the other" in reason, reason
+    # A tie never resolves itself -- the two stamps will be equal forever -- so
+    # this refusal is one of the states only a human clears, and it has to say
+    # which file to look at.
+    assert str(tied_path) in reason, (
+        f"the tie clause must name the record it could not order against: {reason!r}"
+    )
+    assert "does not clear on its own" in reason, reason
+
+    # The other half: a SECOND tied holder that DOES name this run's token as
+    # the one it replaced is convicted BY NAME, with no timestamp involved --
+    # the successor test is checked first precisely because no clock resolution
+    # can blur it. Published under THIRD_RUN_ID rather than by rewriting the
+    # record above, because write_claim_record() is O_EXCL and refuses to
+    # overwrite a live claim; THIRD_RUN_ID also sorts FIRST, so the guard
+    # reaches the successor record before the tied one and the clause under
+    # test is the one that answers.
+    successor_payload = crmod.build_claim_record(**dict(
+        {field: None for field in crmod.CLAIM_RECORD_FIELDS},
+        seg=seg, profile="from-converged", run_id=THIRD_RUN_ID,
+        previous_dispatch_token=f"{RUN_ID}:{seg}", claimed_at=same_second))
+    ok, detail = crmod.write_claim_record(
+        crmod.claimed_path(THIRD_RUN_ID, seg, root / "runs"), successor_payload)
+    assert ok, f"test setup: could not publish the successor record: {detail}"
+    still_ours, reason = mod.evaluate_takeover_since_this_claim(
+        seg, RUN_ID, this_payload, root / "runs", crmod)
+    assert still_ours is False, reason
+    assert f"run {THIRD_RUN_ID!r} took {seg!r} over FROM this run" in reason, reason
+    assert "the same second" not in reason, (
+        f"the successor clause must answer first -- it reads a fact the writer stored, "
+        f"while the tie clause only reports that nothing could be established: {reason!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 21. CHARACTERIZATION of the two residuals evaluate_takeover_since_this_claim()
+# ships DISCLOSED. Its docstring names both; these pin them.
+#
+# EVERY ASSERTION BELOW DESCRIBES BEHAVIOUR THAT IS WRONG. Neither test is a
+# specification -- they exist because a residual that lives only in prose is
+# one refactor away from silently becoming a different residual, with nothing
+# going red. If a change here makes one of these fail, that is the signal to
+# read the docstring and decide deliberately, NOT to "fix" the test to match
+# the new output. Closing either state needs a primitive this feature does not
+# have (a lock around claim acquisition, or a claim-release), which is why they
+# are disclosed rather than closed.
+#
+# Both are staged as END STATES. Neither races anything: the arrangement a race
+# would leave behind is constructed directly, with every record written through
+# the REAL claim_record.py writer so what is pinned is the shape the claim path
+# actually produces.
+# ---------------------------------------------------------------------------
+
+def _claimed_at_plus(iso8601: str, seconds: int) -> str:
+    """`claimed_at` shifted by `seconds`, in _claim_now_iso8601()'s own format.
+    Parsed and re-emitted rather than string-spliced, so a fixture cannot
+    accidentally produce a stamp the reader would reject as unparseable and
+    refuse on a branch this section is not about."""
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    return (datetime.strptime(iso8601, fmt) + timedelta(seconds=seconds)).strftime(fmt)
+
+
+def _record_payload(root, run_id, seg):
+    crmod = _load_claim_record_module()
+    state, payload, detail = crmod.read_claim_record(
+        crmod.claimed_path(run_id, seg, root / "runs"))
+    assert state == crmod.CLAIM_PRESENT, f"expected a readable record for {run_id}: {detail}"
+    return payload
+
+
+def test_concurrent_acquisition_can_invert_ownership_disclosed_residual(tmp_path):
+    """RESIDUAL 1, the ADMIT direction, and it is WRONG ON PURPOSE.
+
+    The claim record is written BEFORE the draft is re-stamped, and two direct
+    `select_segments.py --from-converged --run-id` invocations share no lock.
+    So two runs can both read the incumbent's token, both pass the incumbent
+    check, and both publish records -- while the one whose record is EARLIER
+    installs its token LAST and ends up the actual owner. `claimed_at` order
+    and ownership order then disagree, and this guard believes `claimed_at`.
+
+    Staged as that end state: OTHER_RUN_ID owns the draft (its token is on
+    disk, written by the real selector) while THIRD_RUN_ID holds a strictly
+    LATER record that never re-stamped anything. THIRD_RUN_ID's record names
+    RUN_ID's token as what it replaced -- not OTHER_RUN_ID's -- because in the
+    race both contenders read the SAME incumbent token, which is exactly why
+    the successor clause cannot see this and the timestamp decides.
+
+    Both halves are asserted, because a one-sided assertion would not notice
+    the inversion being closed in only one direction: the rightful owner is
+    REFUSED, and the run that never owned the segment is ADMITTED and walks
+    off with the draft.
+
+    WHY THIS SHIPS: the cost is a stolen review loop, not a lost draft. The
+    sentinel and both translate chokepoints still stand between this and a
+    retranslation. Reachable only from two concurrent invocations; the
+    single-operator sequence this feature documents cannot produce it."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+    crmod = _load_claim_record_module()
+
+    make_run_dir(root, RUN_ID)
+    first = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert first.returncode == 0, f"stdout={first.stdout!r} stderr={first.stderr!r}"
+
+    # OTHER_RUN_ID takes over from RUN_ID for real: its record and the draft's
+    # token are both written by the shipped claim path.
+    _cross_a_claimed_at_second_boundary()
+    make_run_dir(root, OTHER_RUN_ID)
+    second = run_select(root, "--from-converged", seg, "--run-id", OTHER_RUN_ID, "--run-resume", "false")
+    assert second.returncode == 0, f"stdout={second.stdout!r} stderr={second.stderr!r}"
+    owner_claimed_at = _record_payload(root, OTHER_RUN_ID, seg)["claimed_at"]
+
+    # The contender: a record LATER than the owner's, naming the SAME incumbent
+    # the owner replaced, and no re-stamp behind it.
+    contender = crmod.build_claim_record(**dict(
+        {field: None for field in crmod.CLAIM_RECORD_FIELDS},
+        seg=seg, profile="from-converged", run_id=THIRD_RUN_ID,
+        previous_dispatch_token=f"{RUN_ID}:{seg}", source_run_id=RUN_ID,
+        claimed_at=_claimed_at_plus(owner_claimed_at, 1)))
+    ok, detail = crmod.write_claim_record(
+        crmod.claimed_path(THIRD_RUN_ID, seg, root / "runs"), contender)
+    assert ok, f"test setup: could not publish the contender's record: {detail}"
+
+    draft = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert draft["dispatch_token"] == f"{OTHER_RUN_ID}:{seg}", (
+        "fixture precondition: the OWNER is whoever the draft's token names, and this "
+        "residual is only interesting while that disagrees with the claimed_at order"
+    )
+
+    _drop_dispatch_token(root, seg)
+
+    # (a) The RIGHTFUL owner is refused.
+    make_run_dir(root, OTHER_RUN_ID)
+    owner_try = run_select(
+        root, "--from-converged", seg, "--run-id", OTHER_RUN_ID, "--run-resume", "true")
+    assert owner_try.returncode != 0, (
+        f"DOCUMENTED-WRONG: the owner is refused here. If this now succeeds the residual "
+        f"was closed -- read the docstring before touching this test\n"
+        f"stdout={owner_try.stdout!r}"
+    )
+    out = parse_stdout(owner_try)
+    assert f"run {THIRD_RUN_ID!r} claimed {seg!r} at " in out["error"], out["error"]
+    assert "the later claim owns the segment" in out["error"], out["error"]
+
+    # (b) The run that never owned it IS admitted, and takes the draft.
+    make_run_dir(root, THIRD_RUN_ID)
+    contender_try = run_select(
+        root, "--from-converged", seg, "--run-id", THIRD_RUN_ID, "--run-resume", "true")
+    assert contender_try.returncode == 0, (
+        f"DOCUMENTED-WRONG: the contender is admitted here, which is the half that makes "
+        f"this an inversion rather than merely a strict refusal\n"
+        f"stdout={contender_try.stdout!r} stderr={contender_try.stderr!r}"
+    )
+    stolen = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert stolen["dispatch_token"] == f"{THIRD_RUN_ID}:{seg}", (
+        "the loop is handed to the run that never owned the segment -- the concrete cost "
+        "of this residual, and what makes it worth disclosing"
+    )
+
+
+def test_a_record_that_never_became_ownership_strands_the_owner_disclosed_residual(tmp_path):
+    """RESIDUAL 2, the REFUSE direction, also WRONG ON PURPOSE.
+
+    A claim record can outlive an attempt that never became ownership:
+    write_claim_record() leaves a complete record behind when the directory
+    fsync fails (run() appends to `write_failures` and continues -- there is no
+    unlink), and the re-stamp that would have followed can fail on its own from
+    content drift between admission and staging. The record is well-formed and
+    indistinguishable from a successful claimant's, so once the rightful owner
+    loses its token this guard refuses it -- permanently, since nothing
+    releases a record. The segment is stranded until a human deletes one file,
+    and the owner cannot simply re-claim: a token-less draft has no other way
+    back in.
+
+    BOTH SHAPES of the abandoned record are pinned, because they are answered
+    by DIFFERENT clauses and a mutant deleting either would otherwise leave the
+    other's test green:
+
+      * naming the incumbent it meant to replace -> the SUCCESSOR clause;
+      * not naming it (the concurrent shape) -> the TIMESTAMP clause.
+
+    WHAT IS ASSERTED ABOUT THE MESSAGE, and why it is not decoration. The
+    refusal is the operator's only handle on this state: the draft has no token
+    to re-claim with, so unless the message says WHICH FILE to delete, the
+    segment is stranded and the refusal reads exactly like a legitimate
+    takeover. Both shapes are asserted to name the record path.
+
+    BOTH clauses now say the refusal is permanent, and they DIVERGE on the
+    remedy -- deliberately, which is why each shape asserts its own:
+
+      * TIMESTAMP -> names the file AND says to remove it by hand. Safe,
+        because a strictly-later record that never re-stamped is the residue
+        case and nothing legitimate is destroyed by clearing it.
+      * SUCCESSOR -> names the file, says the refusal is permanent, and
+        points at recovery UNDER THE HOLDER instead of removal. This clause
+        fires on every legitimate takeover too, so "delete the newer record"
+        would be the exact move an older run makes to steal a segment back.
+
+    An earlier revision of the timestamp clause said neither, and this test
+    pinned that deficiency deliberately so a repair could not land unremarked.
+    The repair landed mid-review; these assertions are the re-pin."""
+    crmod = _load_claim_record_module()
+
+    # --- shape 1: the abandoned record names the incumbent ------------------
+    root = make_durable_root(tmp_path / "names_incumbent")
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    make_run_dir(root, RUN_ID)
+    owned = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert owned.returncode == 0, f"stdout={owned.stdout!r} stderr={owned.stderr!r}"
+    owner_claimed_at = _record_payload(root, RUN_ID, seg)["claimed_at"]
+
+    abandoned_path = crmod.claimed_path(OTHER_RUN_ID, seg, root / "runs")
+    abandoned = crmod.build_claim_record(**dict(
+        {field: None for field in crmod.CLAIM_RECORD_FIELDS},
+        seg=seg, profile="from-converged", run_id=OTHER_RUN_ID,
+        previous_dispatch_token=f"{RUN_ID}:{seg}", source_run_id=RUN_ID,
+        claimed_at=_claimed_at_plus(owner_claimed_at, 1)))
+    ok, detail = crmod.write_claim_record(abandoned_path, abandoned)
+    assert ok, f"test setup: could not publish the abandoned record: {detail}"
+    assert json.loads(
+        (root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8")
+    )["dispatch_token"] == f"{RUN_ID}:{seg}", (
+        "fixture precondition: the abandoned claimant never re-stamped, so the RIGHTFUL "
+        "owner's token must still be the one on disk"
+    )
+
+    _drop_dispatch_token(root, seg)
+    make_run_dir(root, RUN_ID)
+    stranded = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "true")
+    assert stranded.returncode != 0, (
+        f"DOCUMENTED-WRONG: the rightful owner is refused by a record that never became "
+        f"ownership\nstdout={stranded.stdout!r}"
+    )
+    out = parse_stdout(stranded)
+    assert f"run {OTHER_RUN_ID!r} took {seg!r} over FROM this run" in out["error"], out["error"]
+    assert str(abandoned_path) in out["error"], (
+        f"the refusal must name the record it turned on, so an operator can see WHICH "
+        f"claim is holding the segment: {out['error']}"
+    )
+    assert "refusal is permanent for this run" in out["error"], (
+        f"and it must say the refusal never lifts, because nothing releases a record: "
+        f"{out['error']}"
+    )
+    # NOT removal advice, and that is deliberate rather than an omission: this
+    # same clause fires on every LEGITIMATE takeover, where deleting the newer
+    # record is exactly how an older run would steal the segment back. So it
+    # points at recovery under the holder instead. Asserted in its POSITIVE
+    # form -- pinning "no delete advice" as an absence would go red the day
+    # someone words it differently while keeping the same decision.
+    assert f"recovered under {OTHER_RUN_ID!r}" in out["error"], (
+        f"the successor clause must route the operator to recovery under the holder, not "
+        f"to deleting a record that is usually a legitimate claim: {out['error']}"
+    )
+
+    # --- shape 2: it does not name the incumbent (the concurrent shape) -----
+    root2 = make_durable_root(tmp_path / "anonymous")
+    fixture_keys2 = {}
+    build_from_converged_segment(root2, seg, fixture_keys2)
+    write_manifest(root2, [seg])
+    write_fixture_cache_keys(root2, fixture_keys2)
+
+    make_run_dir(root2, RUN_ID)
+    owned2 = run_select(root2, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert owned2.returncode == 0, f"stdout={owned2.stdout!r} stderr={owned2.stderr!r}"
+    owner2_claimed_at = _record_payload(root2, RUN_ID, seg)["claimed_at"]
+
+    anonymous_path = crmod.claimed_path(OTHER_RUN_ID, seg, root2 / "runs")
+    anonymous = crmod.build_claim_record(**dict(
+        {field: None for field in crmod.CLAIM_RECORD_FIELDS},
+        seg=seg, profile="from-converged", run_id=OTHER_RUN_ID,
+        previous_dispatch_token=f"{SOURCE_RUN_ID}:{seg}", source_run_id=SOURCE_RUN_ID,
+        claimed_at=_claimed_at_plus(owner2_claimed_at, 1)))
+    ok, detail = crmod.write_claim_record(anonymous_path, anonymous)
+    assert ok, f"test setup: could not publish the abandoned record: {detail}"
+
+    _drop_dispatch_token(root2, seg)
+    make_run_dir(root2, RUN_ID)
+    stranded2 = run_select(root2, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "true")
+    assert stranded2.returncode != 0, (
+        f"DOCUMENTED-WRONG: same stranding, reached by the timestamp instead\n"
+        f"stdout={stranded2.stdout!r}"
+    )
+    out2 = parse_stdout(stranded2)
+    assert f"run {OTHER_RUN_ID!r} claimed {seg!r} at " in out2["error"], out2["error"]
+    assert "the later claim owns the segment" in out2["error"], out2["error"]
+
+    # The operator's only handle on a stranded segment, asserted on the clause
+    # that used to carry neither half.
+    assert str(anonymous_path) in out2["error"], (
+        f"the timestamp clause must name the record to delete -- without it this "
+        f"refusal is indistinguishable from a legitimate takeover and the operator has "
+        f"nothing to act on: {out2['error']}"
+    )
+    assert "does not clear on its own" in out2["error"], (
+        f"and it must say the state is permanent, because a token-less draft cannot be "
+        f"re-claimed to get past it: {out2['error']}"
+    )
+
+
+def test_an_unorderable_own_claimed_at_refuses_and_names_THIS_runs_record(tmp_path):
+    """The one refusal in this guard whose remedy is a DIFFERENT FILE from
+    every other one's: the problem is in the resuming run's OWN record, not in
+    a foreign holder's, so an operator following any other clause's advice
+    would delete the wrong file -- and deleting a foreign record here fixes
+    nothing while destroying the only evidence of a legitimate takeover.
+
+    Reached whenever this run's own `claimed_at` cannot be parsed into an
+    instant: hand-edited, truncated by a partial write, or written by a build
+    whose format differed. The guard cannot order ANY holder against a stamp it
+    cannot read, so it refuses rather than assume nobody took over -- the same
+    direction every other cannot-establish branch takes.
+
+    Staged by corrupting only that one field of a record the REAL claim path
+    wrote, so everything else about the record stays exactly as shipped and the
+    refusal can only come from the ordering."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    make_run_dir(root, RUN_ID)
+    first = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert first.returncode == 0, f"stdout={first.stdout!r} stderr={first.stderr!r}"
+
+    own_record = root / "runs" / RUN_ID / f".claimed.{seg}"
+    payload = json.loads(own_record.read_text(encoding="utf-8"))
+    assert payload["claimed_at"], "fixture precondition: the real writer set a claimed_at"
+    payload["claimed_at"] = "yesterday afternoon"
+    own_record.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    _drop_dispatch_token(root, seg)
+    make_run_dir(root, RUN_ID)
+    proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "true")
+    assert proc.returncode != 0, (
+        f"an unreadable own claimed_at means no holder can be ordered, which is not the "
+        f"same as no holder existing\nstdout={proc.stdout!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert "carries no usable 'claimed_at'" in out["error"], out["error"]
+    assert str(own_record) in out["error"], (
+        f"THIS RUN's own record is the file to repair, and naming a foreign one here "
+        f"would send the operator to delete the wrong evidence: {out['error']}"
+    )
+    assert "this run's own claim record" in out["error"], (
+        f"and it must be identified AS this run's own -- the path alone reads like any "
+        f"other clause's: {out['error']}"
+    )
+
+    draft_after = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert "dispatch_token" not in draft_after, (
+        "a refused recovery must not stamp the draft anyway"
+    )

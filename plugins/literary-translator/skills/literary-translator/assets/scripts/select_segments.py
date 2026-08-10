@@ -647,9 +647,58 @@ def scan_dispatching_run_ids(segments_dir: Path) -> dict:
     by_run_id: dict = {}
     scanned = 0
     untokened = 0
-    if not segments_dir.is_dir():
+    try:
+        entries = sorted(segments_dir.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        # DEFINITIVELY no segments/ directory for this project (never
+        # scaffolded, or a durable_root that moved) -- the ordinary state of
+        # a first-ever run. Nothing was missed.
         return {"by_run_id": by_run_id, "drafts_scanned": 0, "drafts_untokened": 0}
-    for path in sorted(segments_dir.glob("*.draft.json")):
+    # Any OTHER OSError (EACCES, ELOOP, EIO, ...) is deliberately left
+    # uncaught, mirroring scan_workflow_run_ids()'s own identical
+    # workflows_dir.iterdir() call above -- see that comment for the full
+    # reasoning; restated here only where it differs. The code this
+    # replaces had TWO swallow sites, not one: `Path.is_dir()` (the removed
+    # guard) and `Path.glob()` (the removed enumeration call) BOTH catch any
+    # OSError internally and answer "not a directory" / "no matches" for it
+    # -- measured on this project's Python (3.14.6) for both EACCES and
+    # ELOOP -- so fixing only the `is_dir()` guard would have left `.glob()`
+    # swallowing the identical error on the identical `segments_dir` right
+    # below it. `iterdir()` replaces both in one call: unlike either
+    # swallow-prone call, it genuinely raises for EACCES/ELOOP/EIO instead
+    # of answering False/[] for them, so a hand-filtered loop over its
+    # result is used below in place of the glob pattern.
+    #
+    # This function's return channel (a dict carrying `drafts_scanned`)
+    # could in principle fold a "could not look" signal in, the way
+    # `by_run_id` folds in per-entry evidence below the RUN_ID loop in
+    # scan_workflow_run_ids() -- but only at PER-ENTRY granularity, where an
+    # entry's own name is a real thing to fold in. Here the ambiguity is
+    # about `segments_dir` ITSELF, before any entry has even been
+    # discovered -- there is nothing to fold in without fabricating a run id
+    # out of nothing, which is exactly what that sibling function's own
+    # comment rejected for the same reason. And `drafts_scanned` is a COUNT
+    # this script's JSON payload reports to every caller: silently
+    # returning `drafts_scanned: 0` here would be indistinguishable
+    # downstream from a genuinely empty segments/ directory -- the exact
+    # ambiguity this fix exists to remove. Propagating instead means the
+    # "could not look" case never produces a zero count dressed up as a
+    # real one: the OSError rises out of run() to main()'s existing
+    # defensive `except Exception`, which already turns it into
+    # `{"success": False, "error": ...}` -- an honest refusal through a
+    # channel that already exists, not one built for this.
+    #
+    # DIVERGES from segment_dispatch_driver.py's `_definitive_stat()`
+    # (a dedicated `fatal()` call with its own exit code) on purpose: that
+    # driver has no equivalent existing catch-all to defer to, so it had to
+    # build one. This script already has main()'s catch-all AND a sibling
+    # function in this same file that already made this exact choice for
+    # its own top-level directory access -- mirroring the sibling here is
+    # the more locally consistent move than importing a different script's
+    # pattern.
+    for path in entries:
+        if not path.name.endswith(".draft.json"):
+            continue
         scanned += 1
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
@@ -732,13 +781,94 @@ def scan_workflow_run_ids(runs_dir: Path) -> list:
     fully-compliant live project: all six of its workflow directories have
     digests, so this half contributes zero false positives there."""
     workflows_dir = runs_dir / "workflows"
-    if not workflows_dir.is_dir():
+    try:
+        entries = sorted(workflows_dir.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        # DEFINITIVELY no workflow directory exists for this project -- the
+        # ordinary state of a driver-only run (see "drafts only" above),
+        # which never creates runs/workflows/ at all. Nothing was missed.
         return []
-    return sorted(
-        p.name
-        for p in workflows_dir.iterdir()
-        if p.is_dir() and _RUN_ID_DIR_RE.fullmatch(p.name)
-    )
+    # Any OTHER OSError here (EACCES on runs/workflows/ itself, ELOOP if it
+    # is a symlink loop, EIO, ...) is deliberately left uncaught rather than
+    # folded into `return []`. That fold is the exact defect this fix
+    # closes at the entry level below -- "could not look" worded the same
+    # as "nobody did" -- and this function has no return-value channel to
+    # say "could not look" instead: unlike evaluate_takeover_since_this_
+    # claim()'s (False, reason) or claim_record.any_foreign_claim()'s
+    # (None, CLAIM_AMBIGUOUS, detail), it returns a bare `list`, and
+    # fabricating a run id to carry that signal into the evidence union
+    # would be worse than saying nothing -- it would make the Step 3
+    # refusal below NAME a run nobody ever saw. Left to propagate, the
+    # OSError rises out of run() to main()'s own existing defensive
+    # catch-all (`except Exception`), which already turns any unexpected
+    # exception into `{"success": False, "error": ...}` -- the honest
+    # "could not establish the facts" answer, through a channel that
+    # already exists and that run_select_segments() (segment_dispatch_
+    # driver.py) already checks via `result.get("success")` on every
+    # invocation, rather than a new one built for this.
+
+    run_ids = []
+    for entry in entries:
+        if not _RUN_ID_DIR_RE.fullmatch(entry.name):
+            continue
+        # os.stat() and NOT Path.is_dir(): is_dir() swallows the stat error
+        # and answers False, so an entry that cannot be stat'd (a
+        # self-referential symlink -> ELOOP; runs/workflows/ readable but
+        # not searchable -> EACCES on the child) reads as "not a directory"
+        # rather than "could not look", and this scan silently drops
+        # evidence instead of refusing on it. Same trap, same fix, as
+        # evaluate_takeover_since_this_claim()'s own enumeration above --
+        # see it for the measured repro.
+        #
+        # claim_record.any_foreign_claim() does NOT carry this split, and
+        # deliberately keeps it that way in this release. Its loop treats
+        # every run-id-shaped entry under runs/ as a candidate holder with
+        # no stat at all, so runs/ledger.json -- skipped here, because
+        # os.stat() plus S_ISDIR() can see it is not a directory -- is
+        # taken there as a run whose claim path lstat's ENOTDIR, which
+        # classifies AMBIGUOUS and is reported as a foreign holder.
+        # Measured, not reasoned: any_foreign_claim() on a runs/ holding
+        # only ledger.json returns ('ledger.json', 'ambiguous', ...). The
+        # divergence is INTENTIONAL and retained: AMBIGUOUS there is what
+        # keeps a legacy token-less draft refused at the translate
+        # chokepoint (foreign_owner_refusal()'s no-token branch), which is
+        # the direction that guard must fail. Porting this split into that
+        # enumeration would turn the refusal into a proceed.
+        try:
+            entry_stat = os.stat(entry)
+        except (FileNotFoundError, NotADirectoryError):
+            # DEFINITIVELY not a run: gone between the listing and the
+            # stat, or a dangling symlink.
+            continue
+        except OSError:
+            # COULD NOT LOOK -- counted AS evidence, not skipped. This
+            # function has no refusal channel of its own (see above), so
+            # "fail closed" here means feeding Step 3's EXISTING machinery
+            # rather than inventing a new one: the name already matched
+            # _RUN_ID_DIR_RE, so it passes validate_run_id() at run()'s
+            # choke point unchanged and joins `evidence` as a
+            # "workflow_dir" entry exactly like a verified one. An entry
+            # nothing could stat almost never has a matching
+            # runs/<id>/input.digest either, so it lands in
+            # `runs_missing_digest` and run() refuses, naming this exact
+            # id. That refusal is conservative, not wrong: this function's
+            # own docstring above already states a workflow directory
+            # proves only INSTANTIATION, never dispatch, and treating an
+            # unverifiable one the same way is the more cautious reading of
+            # that same claim, not a stronger one. The rejected
+            # alternative -- giving this function its own error channel so
+            # Step 3 could refuse with a dedicated "could not verify"
+            # message -- was not taken because segment_dispatch_driver.py
+            # also depends on this evidence path and nothing downstream of
+            # it needs more than "count it and let the existing missing-
+            # digest refusal fire"; a dedicated channel would touch run()'s
+            # refusal shapes for no behavioral gain over what already
+            # happens here.
+            run_ids.append(entry.name)
+            continue
+        if stat.S_ISDIR(entry_stat.st_mode):
+            run_ids.append(entry.name)
+    return sorted(run_ids)
 
 
 def validate_run_id(run_id):
@@ -1667,6 +1797,240 @@ def evaluate_fresh_segpack_precondition(seg: str, durable_root: Path, canon_entr
 _S3_NO_TOKEN = "S3: draft has no dispatch_token (absent or not a string)"
 
 
+def evaluate_takeover_since_this_claim(seg, this_run_id, this_payload, runs_dir, claim_record):
+    """(True, "") when no OTHER run has taken `seg` over since this run
+    claimed it, else (False, reason).
+
+    ADMISSION-ONLY, and deliberately NOT claim_record.any_foreign_claim().
+    That predicate answers "does anybody else hold a claim entry", which is
+    the right question at a translate chokepoint: there the caller holds no
+    record of its own (it is reached from claim_refusal_for_translate()'s
+    CLAIM_ABSENT branch), so it has no `claimed_at` to compare against and
+    ANY holder must stop a destructive act. It is also lstat-only by design,
+    and giving a chokepoint a reason to parse JSON is a new failure surface
+    where the cost of failing is highest.
+
+    D9's lost-token recovery needs the OTHER question -- "does anybody own it
+    NOW" -- because records are IMMORTAL. Two records for one segment is not
+    an anomaly, it is what a sanctioned takeover leaves behind, and asking
+    any-holder there refused the rightful current owner its own recovery: run
+    A claims, run B legitimately takes over, B's fix round drops the token,
+    and B is then told A holds a claim. That refusal is permanent -- nothing
+    releases a record -- so it disabled exactly the recovery this release
+    exists to enable. Measured and fixed here rather than reasoned about; the
+    first version of this guard shipped the any-holder rule.
+
+    WHY A TIMESTAMP COMPARISON WORKS HERE, and EXACTLY HOW FAR THAT GOES.
+    For claims acquired one after another, holders of one segment are ordered
+    by `claimed_at` and that order IS the takeover chain: a token-less draft's
+    only admission path is the recovery below, which requires this run's own
+    record to exist already, so no run can acquire a FIRST record for a
+    token-less draft -- every holder got its record while the draft still
+    carried a token, and claiming a draft whose token names another run must
+    already have won rewrite_draft_dispatch_token()'s strict `claimed_at`
+    tiebreak. `claimed_at` never moves afterwards (a re-claim by the same run
+    re-reads its record rather than rewriting it).
+
+    That is NOT a total order over every reachable state, and an earlier
+    version of this docstring asserted it was. Two states break it, both
+    disclosed rather than closed, because closing either needs a primitive
+    this feature does not have -- a lock around acquisition, or a release:
+
+      * CONCURRENT acquisition. The record is written BEFORE the re-stamp and
+        two direct `select_segments.py --from-converged --run-id` invocations
+        share no lock, so B and C can both read A's token, both pass the
+        incumbent check, and both publish records with B's `claimed_at`
+        earlier than C's -- while C installs its token first and B installs
+        last. B is then the current owner holding the LOWER timestamp, and
+        this function admits C over B. No content hash can see it: they all
+        project `dispatch_token` out, which is what makes the re-stamp
+        possible at all. A foreign run directory appearing after the
+        enumeration below is the same unsnapshotted race.
+      * A RECORD THAT NEVER BECAME OWNERSHIP. write_claim_record() leaves a
+        complete record behind when the directory fsync fails, and the
+        re-stamp that would have followed it can fail on its own (content
+        drift between admission and staging). The run never became owner, its
+        record outlives the attempt, and its later `claimed_at` -- or its
+        `previous_dispatch_token` naming the incumbent -- then refuses the
+        RIGHTFUL owner here, permanently, once that owner loses its token.
+
+    Both directions were chosen with their costs in front of us. The first
+    admits a run into a review loop it does not own, which costs a stolen
+    loop and not a draft: the sentinel and both translate chokepoints still
+    stand between that and a retranslation. The second refuses an owner that
+    should have been admitted, which strands the segment until a human
+    removes one file.
+
+    Their REACHABILITY is not the same, and an earlier version of this
+    paragraph said it was -- that "neither is reachable from the
+    single-operator sequence this feature documents". That is true of the
+    first and false of the second, in the direction that makes a residual
+    sound rarer than it is. The admitting break does need two claim
+    invocations overlapping on one segment. The refusing break needs only a
+    write that does not fully succeed: write_claim_record() leaves a complete
+    record behind when the directory fsync fails and reports the write as
+    FAILED, and run() then records that failure and moves to the next
+    segment -- so the re-stamp is never attempted at all. One operator, one
+    invocation, no concurrency, nothing retried.
+
+    TWO clauses, OR-ed, because the timestamp alone is second-resolution.
+    `previous_dispatch_token` records who each claimant TOOK OVER FROM, so a
+    foreign record naming this run is a direct successor test that no clock
+    resolution can blur -- it reads a fact the writer stored rather than
+    inferring one. The comparison stays as well, for a successor whose own
+    record is the residue of a chain rather than an immediate takeover.
+
+    Every failure to establish a fact refuses, including a foreign record
+    that cannot be read or cannot be ordered. Two properties hold across all
+    eight refusals and are stated here because both were established by
+    ENUMERATING every `return False` in this function, never by reading it:
+
+      * every refusal names the file it refused on; and
+      * every refusal describing a state only a HUMAN can clear says so, in
+        as many words. The two that do not -- `runs/` could not be listed,
+        an entry could not be stat'd -- are the two that clear when the
+        environment is repaired, so the sentence would be false there.
+
+    Both are easy to lose and were lost. Three clauses named no path at all,
+    and three more described a permanent state without saying so; an earlier
+    version of this very sentence asserted the first property while it was
+    false of three clauses. A refusal an operator cannot act on is worse
+    than a loud one, and the tie and strictly-later clauses are where it
+    costs most: they are what a never-became-ownership record refuses on,
+    and their text otherwise reads exactly like a legitimate takeover.
+    Correspondingly, the SUCCESSOR clause states permanence WITHOUT advising
+    removal -- it fires mostly on genuine takeovers, where deleting the newer
+    run's record is how an older run steals the segment back."""
+    this_claimed_at = _claim_record_claimed_at(
+        claim_record, claim_record.CLAIM_PRESENT, this_payload
+    )
+    if this_claimed_at is None:
+        return False, (
+            f"this run's own claim record for {seg!r} at "
+            f"{runs_dir / this_run_id / f'{claim_record.CLAIM_PREFIX}{seg}'} carries no "
+            f"usable 'claimed_at', so whether another run has taken the segment over since "
+            f"cannot be established at all -- refusing rather than assume it has not. "
+            f"Nothing releases a claim record, so this refusal does not clear on its own; "
+            f"unlike every other clause here the file named is THIS run's own, which is "
+            f"what has to be repaired"
+        )
+    try:
+        entries = sorted(runs_dir.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        # DEFINITIVELY nobody: a runs/ that is not there holds no records,
+        # including the one this run was just read from -- unreachable in
+        # practice, kept because "not there" and "could not look" must not
+        # collapse into one branch.
+        return True, ""
+    except OSError as exc:
+        return False, (
+            f"the runs directory {runs_dir} could not be listed ({exc}), so whether another "
+            f"run has taken {seg!r} over is unknown -- could-not-look is not nobody-did"
+        )
+    for entry in entries:
+        run_id = entry.name
+        if run_id == this_run_id or claim_record.validate_run_id(run_id) is not None:
+            continue
+        # os.stat() and NOT Path.is_dir(): is_dir() swallows the stat error and
+        # answers False, so an `except OSError` around it never fires and "I
+        # could not look" arrives worded as "it is not a run". Measured on the
+        # Python this ships against: runs/ readable but not searchable (mode
+        # 0o444) lists every run while each child's is_dir() returns False, so
+        # every foreign holder would be skipped and this function would report
+        # the segment clear.
+        #
+        # claim_record.py's own enumeration (any_foreign_claim()) does NOT
+        # take this fix, and does not have this trap to take it for --
+        # deliberately, and it stays that way in this release. It stats
+        # nothing at all, so there is no swallowed stat error there to
+        # split; a non-directory entry reaches it undetected and is caught
+        # one level down instead, by the child lstat. So a non-directory
+        # entry such as runs/ledger.json, which the S_ISDIR() check below
+        # skips here, is taken there as a holder whose claim path lstat's
+        # ENOTDIR -> AMBIGUOUS. That is the direction that predicate must
+        # fail in: AMBIGUOUS is what keeps a legacy token-less draft refused
+        # at the translate chokepoint (foreign_owner_refusal()'s no-token
+        # branch). Skipping here is right because THIS function refuses on
+        # an unstattable entry rather than on a non-directory one; the two
+        # enumerations answer different questions and their treatment of a
+        # non-directory diverges on purpose.
+        try:
+            entry_stat = os.stat(entry)
+        except (FileNotFoundError, NotADirectoryError):
+            # DEFINITIVELY not a run holding anything: gone between the listing
+            # and the stat, or a dangling symlink.
+            continue
+        except OSError as exc:
+            return False, (
+                f"entry {entry} under {runs_dir} could not be stat'd ({exc}), so whether it "
+                f"is a run that has taken {seg!r} over is unknown"
+            )
+        if not stat.S_ISDIR(entry_stat.st_mode):
+            continue
+        record_path = entry / f"{claim_record.CLAIM_PREFIX}{seg}"
+        state, payload, detail = claim_record.read_claim_record(record_path)
+        if state == claim_record.CLAIM_ABSENT:
+            continue
+        if state != claim_record.CLAIM_PRESENT or not isinstance(payload, dict):
+            return False, (
+                f"run {run_id!r} holds a claim record for {seg!r} at {record_path} that "
+                f"cannot be read ({detail or state}), so whether it took the segment over "
+                f"cannot be established. Resolve that file by hand -- nothing releases a "
+                f"claim record, so this refusal does not clear on its own"
+            )
+        # EVERY holder is examined before concluding nobody took over. An
+        # early return on the first holder found would compare against an
+        # arbitrary run -- sort order is alphabetical by run id and has
+        # nothing to do with recency -- and could report "clear" while a
+        # strictly later claimant sat further down the listing.
+        if claim_record.draft_owner_run_id(payload.get("previous_dispatch_token")) == this_run_id:
+            return False, (
+                f"run {run_id!r} took {seg!r} over FROM this run -- its claim record at "
+                f"{record_path} records this run's token as the one it replaced, so this "
+                f"run is no longer the owner and must not recover the draft. Nothing "
+                f"releases a claim record, so this refusal is permanent for this run; "
+                f"when the takeover was legitimate that is the intended outcome, and the "
+                f"segment is recovered under {run_id!r} rather than by removing anything"
+            )
+        foreign_claimed_at = _claim_record_claimed_at(claim_record, state, payload)
+        if foreign_claimed_at is None:
+            return False, (
+                f"run {run_id!r}'s claim record for {seg!r} at {record_path} carries no "
+                f"usable 'claimed_at', so it cannot be ordered against this run's own "
+                f"claim. Nothing releases a claim record, so this refusal does not clear "
+                f"on its own -- that file has to be repaired or removed by hand, exactly "
+                f"as for a record that cannot be read at all"
+            )
+        # A tie refuses, mirroring rewrite_draft_dispatch_token()'s tiebreak
+        # rather than inverting it: `claimed_at` is second-resolution, so two
+        # equal stamps prove nothing in either direction, and every other
+        # "cannot establish" branch here refuses. Stated as its own branch
+        # instead of folded into the comparison below, because the comparison
+        # written the other way round (`foreign > this`) silently ADMITS a tie
+        # -- the one arrangement that lets an unprovable claim through.
+        if this_claimed_at == foreign_claimed_at:
+            return False, (
+                f"run {run_id!r} claimed {seg!r} at {payload.get('claimed_at')!r}, the same "
+                f"second as this run's own claim at {this_payload.get('claimed_at')!r} -- "
+                f"claimed_at is second-resolution, so neither claim can be shown to precede "
+                f"the other and neither can be shown to own the segment. That record is at "
+                f"{record_path}; nothing releases a claim, so this refusal does not clear on "
+                f"its own and a token-less draft cannot be re-claimed to get past it"
+            )
+        if foreign_claimed_at > this_claimed_at:
+            return False, (
+                f"run {run_id!r} claimed {seg!r} at {payload.get('claimed_at')!r}, after this "
+                f"run's own claim at {this_payload.get('claimed_at')!r} -- the later claim "
+                f"owns the segment, so this run must not recover the draft. That record is at "
+                f"{record_path}; nothing releases a claim, so this refusal does not clear on "
+                f"its own and a token-less draft cannot be re-claimed to get past it. If run "
+                f"{run_id!r} never actually took the segment over -- a claim whose re-stamp "
+                f"failed leaves a complete record behind -- that file is what has to be "
+                f"removed by hand"
+            )
+    return True, ""
+
+
 def evaluate_lost_token_recovery(seg: str, profile: str, run_id, durable_root: Path):
     """D9's sanctioned LOST-TOKEN RECOVERY. Returns (record, None) when THIS
     run's own claim record for `seg` exists, is readable, and agrees with the
@@ -1685,8 +2049,8 @@ def evaluate_lost_token_recovery(seg: str, profile: str, run_id, durable_root: P
     worse than one that documents none, because the operator spends the
     round trip discovering it.
 
-    WHY THIS IS NOT A GENERAL HOLE, condition by condition. The recovery
-    turns on evidence THIS RUN ITSELF wrote and nothing else:
+    WHY THIS IS NOT A GENERAL HOLE, condition by condition. The FOUR below turn
+    on evidence THIS RUN ITSELF wrote; a FIFTH sits at the tail of the body:
 
       * a claim record must exist at runs/<run_id>/.claimed.<seg>, i.e. this
         very run already passed every S-gate, the profile's own condition
@@ -1772,7 +2136,95 @@ def evaluate_lost_token_recovery(seg: str, profile: str, run_id, durable_root: P
             f"different profile is a NEW authorization over a different condition list, "
             f"and that needs a draft this gate can still read a token from"
         )
+    # LAST, and the condition none of the ones above can stand in for: a record
+    # proves this run claimed the segment ONCE, never that the claim is still
+    # this run's to resume. Nothing releases a claim, so the record survives a
+    # later run legitimately taking the segment over -- and a draft whose token
+    # was dropped no longer carries the fact that it did. #438 closed exactly
+    # this takeover for a draft that still HAS a token, with the `claimed_at`
+    # tiebreak on re-stamp; that guard reads the incumbent owner off the token
+    # and is unreachable here, which is why the same defect survived in the one
+    # state where the evidence is thinnest.
+    #
+    # The question is "does anybody own it NOW", not "has anybody ever claimed
+    # it" -- see evaluate_takeover_since_this_claim() for why those differ here
+    # and nowhere else, and why claim_record.any_foreign_claim() (which answers
+    # the second) is right at a translate chokepoint and wrong at this one.
+    still_ours, takeover = evaluate_takeover_since_this_claim(
+        seg, run_id, payload, durable_root / "runs", claim_record
+    )
+    if not still_ours:
+        return None, (
+            f"{_S3_NO_TOKEN}, and this run's own record is evidence that it claimed the "
+            f"segment, not that it still owns it: {takeover}"
+        )
     return payload, None
+
+
+def evaluate_open_review_loop(seg: str, owner_run_id, dirs: dict):
+    """(True, "") when `seg`'s draft belongs to a re-review loop this project
+    already opened, else (False, reason). #460.
+
+    The evidence is a claim record held by `owner_run_id` -- WHICH RUN TO ASK
+    ABOUT IS THE CALLER'S DECISION, and it passes the DRAFT's own owner first.
+    That ordering is the #438 lesson: "I have not claimed this" and "nobody
+    has" are different facts, so the draft's own token decides who is asked
+    before this run's identity is ever considered.
+
+    Every condition is checked against the record's CONTENTS, not merely its
+    presence: `read_claim_record()` establishes "a regular file holding a JSON
+    object" and nothing more, so a three-key file at the right path would
+    otherwise be a complete authorization. The record must therefore AGREE
+    with the path it was found at (its own `seg` and `run_id`), carry the
+    from-converged profile -- the same scoping D5.2 applies to the
+    in-invocation clearing, since a --from-cap claim authorizes a different
+    population for different reasons -- and carry EVERY field
+    `build_claim_record()` writes. The full-shape check is not ceremony: the
+    fourteen fields are what makes a record something only this project's own
+    claim path produces, and a partial object is exactly what a forgery or a
+    half-finished write looks like. It is still not proof of authenticity --
+    nothing in a plain file can be, and an attacker with durable-root write
+    access can overwrite the draft directly -- but it removes the case where
+    three hand-typed keys are a complete authorization.
+
+    Every failure to establish a fact returns False. The cost is asymmetric:
+    refusing wrongly costs a fresh claim, admitting wrongly puts a
+    hand-corrected draft back in front of a translate dispatch."""
+    if not isinstance(owner_run_id, str) or not owner_run_id:
+        return False, (
+            "the draft names no run in its dispatch_token, so there is no owner whose "
+            "claim could be read"
+        )
+    claim_record = _import_claim_record()
+    try:
+        record_path = claim_record.claimed_path(owner_run_id, seg, dirs["durable_root"] / "runs")
+    except ValueError as exc:
+        return False, f"the draft's owner {owner_run_id!r} is not a usable run id ({exc})"
+    state, payload, detail = claim_record.read_claim_record(record_path)
+    if state != claim_record.CLAIM_PRESENT or not isinstance(payload, dict):
+        return False, (
+            f"the draft's owner {owner_run_id!r} holds no readable claim record for it at "
+            f"{record_path} (state={state}{f': {detail}' if detail else ''})"
+        )
+    if payload.get("seg") != seg or payload.get("run_id") != owner_run_id:
+        return False, (
+            f"the claim record at {record_path} disagrees with its own location "
+            f"(records seg={payload.get('seg')!r} run_id={payload.get('run_id')!r})"
+        )
+    if payload.get("profile") != CLAIM_PROFILE_FROM_CONVERGED:
+        return False, (
+            f"the claim record at {record_path} was granted under profile "
+            f"{payload.get('profile')!r}, not {CLAIM_PROFILE_FROM_CONVERGED!r}"
+        )
+    missing = [field for field in claim_record.CLAIM_RECORD_FIELDS if field not in payload]
+    if missing:
+        return False, (
+            f"the claim record at {record_path} is missing {len(missing)} of the "
+            f"{len(claim_record.CLAIM_RECORD_FIELDS)} fields this project's claim path "
+            f"writes ({', '.join(missing)}) -- a partial object is what a half-finished "
+            f"write or a hand-made file looks like, not what select_segments.py produces"
+        )
+    return True, ""
 
 
 def evaluate_claim_admission(
@@ -1924,13 +2376,90 @@ def evaluate_claim_admission(
                     f"empty -- --from-cap requires a non-clean review WITH findings"
                 )
         elif profile == CLAIM_PROFILE_FROM_CONVERGED:
+            # #460: `clean: true` is the ENTRY condition, not a standing one.
+            # It admits the segment whose review converged it -- but round 1 of
+            # that re-review overwrites the stored review with a DIRTY one, and
+            # a dirty round is the normal case a fix loop exists for. Requiring
+            # `clean: true` on every invocation therefore closed the door
+            # behind the operator: the fix turn the driver's contract
+            # prescribes could be performed, and then nothing could dispatch
+            # round 2 (the plain path refuses via previously_converged, and
+            # this profile refused here).
+            #
+            # A dirty review is admitted only as the CONTINUATION of a loop
+            # this machinery already opened -- established from the draft's own
+            # owner holding a live claim, never from "the review is dirty",
+            # which is just as true of a segment nobody ever claimed.
+            #
+            # Deliberately admitted through the ORDINARY claim path rather than
+            # by exempting the segment somewhere downstream: this way the claim
+            # is granted to THIS run, the draft's token is re-stamped to it,
+            # and the id lands in `claims_payload` -- so the authorization
+            # travels to the driver through the channel it already reads, and
+            # a segment does not become undispatchable the moment
+            # resume_setup.py resolves a different run id.
             if review_doc.get("clean") is not True:
-                reasons.append(
-                    f"{seg!r} requested under --from-converged, but its stored review's clean "
-                    f"is {review_doc.get('clean')!r}, not true -- --from-converged requires the "
-                    f"review that converged it, and a converged segment's last review is always "
-                    f"clean:true"
-                )
+                open_loop, why_not = evaluate_open_review_loop(seg, source_run_id, dirs)
+                if (
+                    not open_loop
+                    and lost_token_recovery
+                    and args.run_id
+                    and args.run_id != source_run_id
+                ):
+                    # ONLY on D9's lost-token path, and the `lost_token_recovery`
+                    # condition is what keeps it there. That path reaches here
+                    # with `source_run_id` recovered from THIS run's own claim
+                    # record -- it names the run the draft originally came FROM,
+                    # which never held a from-converged claim and never should,
+                    # so asking only about it would strand exactly the recovery
+                    # this branch exists to enable.
+                    #
+                    # Gating on the RECOVERY, not merely on "the ids differ",
+                    # because this run's record proves only that this run once
+                    # opened a loop on this segment -- not that it opened THIS
+                    # one. Without the gate, a run holding an older record from
+                    # a loop over a draft that has since legitimately moved to a
+                    # different owner could present that stale record as
+                    # authorization for the new owner's dirty review, and no
+                    # forged file would be needed.
+                    #
+                    # An earlier version of this comment said the D9 path makes
+                    # that staleness impossible BY CONSTRUCTION, because the
+                    # recovery had already authenticated the record. That was
+                    # wrong, and it is recorded here rather than deleted because
+                    # it was the stated reason this probe is safe.
+                    # evaluate_lost_token_recovery() authenticated the record --
+                    # its location, its own seg/run_id, its profile -- and never
+                    # its relationship to the draft in front of it. Records are
+                    # never released, so an older run's record outlives a newer
+                    # run legitimately claiming the same segment, and a draft
+                    # whose token was dropped no longer carries who that was.
+                    # What actually excludes it is the explicit foreign-claim
+                    # check at the tail of that function, added for exactly this
+                    # -- not the shape of the code.
+                    #
+                    # The draft's own token still decides who is asked first
+                    # whenever there IS one; this branch is reachable only when
+                    # there is not.
+                    open_loop, why_not_self = evaluate_open_review_loop(seg, args.run_id, dirs)
+                    if not open_loop:
+                        # BOTH probes are reported, each labelled with the run
+                        # it asked about. A single merged sentence would make
+                        # the refusal unattributable -- an operator could not
+                        # tell "the owner's record has the wrong profile" from
+                        # "this run has no record", and those call for
+                        # different actions.
+                        why_not = (
+                            f"for the draft's owner {source_run_id!r}: {why_not}"
+                            f"; for this run {args.run_id!r}: {why_not_self}"
+                        )
+                if not open_loop:
+                    reasons.append(
+                        f"{seg!r} requested under --from-converged, but its stored review's "
+                        f"clean is {review_doc.get('clean')!r}, not true. A dirty review is "
+                        f"admitted only when it belongs to a re-review loop this project "
+                        f"already opened, and that could not be established here: {why_not}"
+                    )
 
     # ---- profile-specific ledger-status/sentinel conditions ---------------
     # Both read from the MATERIALIZED ledger (`ledger_record`, sourced from
@@ -2162,10 +2691,10 @@ def _claim_record_claimed_at(claim_record_mod, state: str, payload) -> "datetime
     already refuses via the caller's `is not None` guards -- never via a
     comparison that could raise.
 
-    Used by rewrite_draft_dispatch_token()'s #438 round 5 ownership-age
-    check on BOTH sides of the comparison, so "cannot establish this
-    side's timestamp" collapses to the same None on either side rather
-    than two differently-named failure modes."""
+    Used on BOTH sides of the comparison by rewrite_draft_dispatch_token()'s #438
+    round 5 ownership-age check and by #460's evaluate_takeover_since_this_claim(),
+    so "cannot establish this side's timestamp" collapses to the same None on
+    either side rather than two differently-named failure modes."""
     if state != claim_record_mod.CLAIM_PRESENT or not isinstance(payload, dict):
         return None
     value = payload.get("claimed_at")

@@ -940,3 +940,161 @@ def test_the_reader_and_writer_agree_on_a_real_marker(tmp_path):
     assert BACKFILL_ACK.write_ack("RUN1", runs, ["seg01"]) == "already_present", (
         "the writer must be idempotent and never overwrite an existing marker"
     )
+
+
+# ===========================================================================
+# #460 fix -- "could not stat" must never read as "genuinely absent" in
+# EITHER evidence scan. `Path.is_dir()` and `Path.glob()` both swallow ANY
+# OSError (not just ENOENT) and answer False/[] for it -- so an unstattable
+# segments/ or runs/workflows/<run_id>/ used to look identical to a project
+# that simply never dispatched anything, silently dropping Step 3 evidence
+# instead of refusing on it. Staged with a self-referential symlink loop
+# (ELOOP) throughout, never permission bits: a chmod fixture is silently
+# skipped when the suite runs as root -- exactly when this assurance matters
+# most -- while a symlink loop breaks only the one entry it names and needs
+# no such guard. Each test asserts its own fixture precondition (the listing
+# succeeds and `is_dir()` really does swallow the error into False) so a
+# future Python that stops suppressing the error fails loudly here rather
+# than quietly staging something else.
+# ===========================================================================
+
+
+def test_dispatching_scan_refuses_when_segments_dir_itself_is_unstattable(tmp_path):
+    """PROOF for scan_dispatching_run_ids()'s top-level fix. `segments/`
+    itself (not an entry inside it) is the symlink loop here, so `root`
+    stays intact and readable -- the top-level analogue of the per-entry
+    case the workflow scan covers below.
+
+    Drives with --classify-only specifically to dodge an EARLIER, UNRELATED
+    gate: run()'s own ever-converged-sentinel check (before Step 3) also
+    reads through `segments_dir` when `authorizes_dispatch` is true, and
+    would turn this same ELOOP into an "ambiguous sentinel" refusal before
+    Step 3's scan is ever reached -- a real refusal, but not the one this
+    test exists to pin. --classify-only skips that block (it is gated on
+    `authorizes_dispatch`) while Step 3's scan still runs unconditionally
+    (see run()'s own comment: "The scan runs unconditionally ... but only
+    an AUTHORIZING invocation refuses"), isolating exactly the code path
+    fixed above."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01"])
+    (root / "segments").rmdir()
+    loop = root / "segments"
+    loop.symlink_to(loop)
+    assert loop.is_symlink(), "fixture precondition: segments/ must be a symlink"
+    assert not loop.is_dir(), (
+        "fixture precondition: is_dir() must swallow the ELOOP and answer "
+        "False -- indistinguishable from 'genuinely absent' to the code "
+        "this fix replaces"
+    )
+
+    proc = run_select(root, "--classify-only")
+
+    assert proc.returncode != 0, (
+        f"an unstattable segments/ must refuse, not silently report zero "
+        f"drafts. stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    payload = parse_stdout(proc)
+    assert payload["success"] is False, payload
+    assert "Too many levels of symbolic links" in payload["error"], payload
+    assert "segments" in payload["error"], payload
+
+
+def test_dispatching_scan_still_reports_real_counts_on_an_ordinary_tree(tmp_path):
+    """BOUND, paired with the PROOF above: the SAME construction minus the
+    loop swap must still scan correctly through the new iterdir()-based
+    code path -- this is not a truthiness check, `drafts_scanned` and
+    `by_run_id` must match exactly what a working scan reads off disk."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01", "seg02"])
+    write_in_progress_fragment(root, "seg01")
+    write_in_progress_fragment(root, "seg02")
+    write_draft(root, "seg01", dispatch_token="RUNA20260801:seg01")
+    write_draft(root, "seg02", dispatch_token="RUNA20260801:seg02")
+    write_digest(root, "RUNA20260801")
+
+    proc = run_select(root)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["drafts_scanned"] == 2, payload
+    assert payload["dispatching_run_ids"] == ["RUNA20260801"], payload
+    assert payload["runs_missing_digest"] == [], payload
+
+
+def test_workflow_scan_refuses_when_workflows_dir_itself_is_unstattable(tmp_path):
+    """PROOF, symmetric to the segments/ case above but for the OTHER
+    evidence half and its TOP-LEVEL guard specifically:
+    scan_workflow_run_ids()'s own `workflows_dir.iterdir()` call already
+    lets any OSError beyond FileNotFoundError/NotADirectoryError propagate
+    uncaught (see that function's own comment for why) -- fixed earlier
+    than the dispatching scan above, but with no direct test until now.
+    `runs/workflows/` itself is the loop; `runs/` (its parent) stays
+    intact."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01"])
+    loop = root / "runs" / "workflows"
+    loop.symlink_to(loop)
+    assert loop.is_symlink(), "fixture precondition: runs/workflows/ must be a symlink"
+    assert not loop.is_dir(), (
+        "fixture precondition: is_dir() must swallow the ELOOP and answer "
+        "False -- the same ambiguity the top-level fix removes"
+    )
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False, payload
+    assert "Too many levels of symbolic links" in payload["error"], payload
+    assert "workflows" in payload["error"], payload
+
+
+def test_workflow_scan_folds_an_unstattable_entry_into_evidence(tmp_path):
+    """PROOF for the PER-ENTRY half of scan_workflow_run_ids()'s fix, a
+    DIFFERENT direction than the top-level case above on purpose: an entry
+    inside runs/workflows/ that cannot be stat'd is folded INTO the
+    evidence union as though it were a verified workflow directory, rather
+    than propagated as a hard refusal or silently dropped -- see that
+    function's own comment for why "could not look" is counted rather than
+    given a dedicated channel. The loop is one ENTRY of workflows/, which
+    -- unlike the top-level case above -- leaves workflows/ itself
+    perfectly listable, exercising the loop's `except OSError` arm rather
+    than the top-level `iterdir()` call.
+
+    Mutation coverage: collapsing scan_workflow_run_ids()'s two `except`
+    arms (`except (FileNotFoundError, NotADirectoryError): continue` /
+    `except OSError: run_ids.append(entry.name); continue`) into a single
+    `except OSError: continue` must make this test go RED -- the identical
+    fail-open through a different door."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01"])
+    write_in_progress_fragment(root, "seg01")
+    write_draft(root, "seg01", dispatch_token="COMPLIANTRUN20260801:seg01")
+    write_digest(root, "COMPLIANTRUN20260801")
+    (root / "runs" / "workflows").mkdir(parents=True)
+    loop = root / "runs" / "workflows" / "UNSTATTABLE_RUN"
+    loop.symlink_to(loop)
+    assert loop.is_symlink(), "fixture precondition: the entry must be a symlink"
+    assert not loop.is_dir(), (
+        "fixture precondition: is_dir() must swallow the ELOOP for this one "
+        "entry -- the ambiguity the per-entry fix removes"
+    )
+    assert [p.name for p in (root / "runs" / "workflows").iterdir()] == [
+        "UNSTATTABLE_RUN"
+    ], "fixture precondition: the listing itself must succeed and include it"
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False, payload
+    assert payload["runs_missing_digest"] == ["UNSTATTABLE_RUN"], (
+        "an unstattable entry must be treated as a real (unverified) run id "
+        f"and refused for lacking a digest, not silently dropped. {payload}"
+    )
+    assert payload["run_id_evidence"]["UNSTATTABLE_RUN"] == ["workflow_dir"], payload
+    assert "COMPLIANTRUN20260801" not in payload["runs_missing_digest"], (
+        "the compliant run must still pass cleanly -- this test isolates "
+        f"the unstattable entry's effect. {payload}"
+    )
+    assert "UNSTATTABLE_RUN (0 draft(s), evidence: workflow_dir)" in payload["error"], payload["error"]
