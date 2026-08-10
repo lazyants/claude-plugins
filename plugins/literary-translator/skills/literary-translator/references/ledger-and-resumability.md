@@ -519,7 +519,7 @@ Exact byte-scope per field:
   catches a footnote-apparatus re-extraction change for this segment
   specifically.
 - **`plugin_bundle_hash`** (global) — sha1 of sorted,
-  filename-concatenated bytes of the fourteen generic scripts that directly
+  filename-concatenated bytes of the fifteen generic scripts that directly
   shape translate/review content (`ledger_update.py` included — its
   `reviewed_draft_sha1` binding-check logic directly determines
   correctness) plus the two workflow templates
@@ -573,7 +573,7 @@ membership.
 
 - **`plugin_bundle_hash`** (global, read from
   `${durable_root}/runs/.plugin_bundle_hash` — a marker file Step 0a writes
-  once per run, not recomputed per segment) — covers exactly **fourteen
+  once per run, not recomputed per segment) — covers exactly **fifteen
   scripts** (six pre-1.2.0, plus `review_ready.py` and `resume_setup.py`,
   new in 1.2.0, `glossary_batch_plan.py`, new in 1.3.5, `codex_job.py`,
   new in 1.4.7, `canon_senses.py`, added for RFC #215's homonym-split
@@ -592,7 +592,8 @@ membership.
   `cache_key.py`, `draft_sha1.py`, `review_artifact_check.py`,
   `ledger_update.py`, `review_ready.py`, `resume_setup.py`,
   `glossary_batch_plan.py`, `codex_job.py`, `canon_senses.py`,
-  `fetch_citation.py`, `segment_dispatch_driver.py`, `claim_record.py`, plus
+  `fetch_citation.py`, `segment_dispatch_driver.py`, `claim_record.py`,
+  `reject_review.py`, plus
   `mass-translate-wf.template.js`/`glossary-pass-wf.template.js`. These are
   scripts that directly shape extraction/translation/review/validation
   content, or determine whether a convergence verdict was correctly

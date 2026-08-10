@@ -2094,6 +2094,14 @@ SENTINEL_NON_PARTICIPANTS = (
     # It touches neither the marker nor any sentinel helper, which is what the
     # ROLE check below re-verifies.
     "claim_record.py",
+    # #461's review-rejection tool. It owns its OWN durable record
+    # (`<seg>.review_rejected.json`, a sibling of the review artifact rather
+    # than a dot-prefixed marker) and names `.ever_converged` exactly once, in prose,
+    # to say which gap the sentinel closes and why a rejection is a different
+    # fact from a convergence. It reads no sentinel, writes no sentinel, and
+    # carries no copy of the predicate -- re-verified by the ROLE check below
+    # rather than taken on the strength of this comment.
+    "reject_review.py",
 )
 
 

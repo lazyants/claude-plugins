@@ -61,244 +61,77 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.22.0 (#460, #450), and rewritten AGAIN within that same
-# version: an earlier shape of this release also touched `claim_record.py`
-# and `codex_job.py` (a fifth sentinel-participant role, an `any_foreign_claim()`
-# fix, and a translate-chokepoint sentinel check). An eighth review round found
-# that last piece still let a never-converged hand-edited draft be destroyed,
-# and the owner cut it back out rather than ship it. This map covers only what
-# actually ships: `select_segments.py` and `segment_dispatch_driver.py`.
-# `claim_record.py` and `codex_job.py` are cited below only for CONTEXT they
-# already carried before this release (they are not in the diff), never for a
-# change 1.22.0 makes to them. The previous map (1.21.0's, #438) is gone in
-# full -- it described the entry that is now the SECOND section in
-# CHANGELOG.md, and this test covers the newest one only.
+# Rewritten for 1.23.0 (#461, the rejection record), and rewritten AGAIN
+# within that same version: a security pass and a codex round moved three of
+# these ranges after the first draft of this map, by editing the cited files
+# ABOVE the cited sites. That is the drift this test exists to catch, and it
+# caught it -- so re-resolve every range by CONTENT after any edit to a cited
+# file, never by assuming a uniform offset. The previous map (1.22.0's, #460
+# and #450) is gone in full: it described the entry that is now the SECOND
+# section in CHANGELOG.md, and this test covers the newest one only.
 CITATION_ANCHORS = {
-    # --- the admission relaxation: a dirty review admitted only as the -----
-    # --- CONTINUATION of a loop this project already opened ----------------
-    # Anchored at both ends: the def pins where the range starts, and the
-    # docstring line stating the ordering rule pins that the rule is still
-    # inside it by the time the range ends.
-    "select_segments.py:2164-2169": [
-        "def evaluate_open_review_loop(seg: str, owner_run_id, dirs: dict):",
-        "it passes the DRAFT's own owner first.",
+    # --- #461: the rejection record ----------------------------------------
+    # The consumer. Anchored on the def, on the two contract rules the entry
+    # actually claims it enforces (exact key set, seg self-agreement), on the
+    # O_NOFOLLOW|O_NONBLOCK open the entry singles out as the provenance
+    # check, on the S_ISREG test that open exists to make meaningful, and on
+    # the freshness comparison the "final is absorbing" section turns on --
+    # IN THE ORDER THE CODE EVALUATES THEM, so a version that kept the rules
+    # but reordered provenance after parsing loses an anchor.
+    "segment_dispatch_driver.py:4274-4478": [
+        "def _rejection_matches(seg: str, segments_dir: Path, review_obj: dict) -> bool:",
+        "fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)",
+        "if not stat.S_ISREG(st.st_mode):",
+        "if set(record) != REJECTION_RECORD_KEYS:",
+        'if record["seg"] != seg:',
+        "return record_mtime_ns > review_mtime_ns",
     ],
-    # The two-probe call site: the draft's OWNER is asked first
-    # (source_run_id), and only on refusal -- and only on D9's lost-token
-    # recovery -- is THIS run asked second (args.run_id). Anchored on both
-    # calls IN ORDER plus the gate between them, so a version that swapped the
-    # probes, dropped the second, or dropped the gate that confines it to D9
-    # loses an anchor. The gate is the load-bearing one: without it the second
-    # probe widens admission to any run holding an unrelated older record.
-    "select_segments.py:2402-2444": [
-        "open_loop, why_not = evaluate_open_review_loop(seg, source_run_id, dirs)",
-        "and lost_token_recovery",
-        "open_loop, why_not_self = evaluate_open_review_loop(seg, args.run_id, dirs)",
+    # The seven-key shape itself, cited for the entry's claim that it is
+    # pinned on BOTH sides. All seven anchored: the entry says "exactly seven
+    # keys", so dropping one must fail here rather than silently narrow the
+    # contract the prose describes.
+    "segment_dispatch_driver.py:4263-4271": [
+        "REJECTION_RECORD_KEYS = frozenset({",
+        '"seg",',
+        '"dispatch_token",',
+        '"verdict_digest",',
+        '"round_label",',
+        '"reason",',
+        '"rejected_at",',
+        '"operator_invocation",',
     ],
-    # The full-fourteen-field record check. Anchored on the field-membership
-    # test itself and on the refusal message's closing clause, so a version
-    # that kept the loop but stopped refusing on a partial record loses the
-    # second anchor.
-    "select_segments.py:2219-2225": [
-        "missing = [field for field in claim_record.CLAIM_RECORD_FIELDS if field not in payload]",
-        "not what select_segments.py produces",
+    # The read-only mode that makes the required digest obtainable. Anchored
+    # on the def and on the emitted pair, because the entry's claim is
+    # specifically that BOTH values come from one read -- a version that
+    # printed only the digest would keep the def and lose the payload anchor.
+    "reject_review.py:858-913": [
+        "def _print_verdict_digest(seg: str, dirs: dict) -> NoReturn:",
+        '"round_label": label,',
+        '"round_label_problem": label_err,',
     ],
-    # --- the D9 ownership rule: "does anybody own it NOW" ------------------
-    # evaluate_takeover_since_this_claim(), the admission-only helper that
-    # REPLACED an any-holder rule that was written, rejected in review, and
-    # never released. Anchored on the def, on the sentence separating it from
-    # any_foreign_claim(), on the soundness argument the entry states, and
-    # then on all four refusal clauses IN THE ORDER THE CODE EVALUATES THEM:
-    # unreadable-record, the previous_dispatch_token successor test, the tie,
-    # and strictly-later.
-    #
-    # The order is not decoration here. The tie branch exists precisely
-    # because the comparison written the other way round (`foreign > this`
-    # with no separate equality test) silently ADMITS a tie, which is the one
-    # arrangement that lets an unprovable claim through -- so a version that
-    # folded the tie into the comparison would keep `foreign_claimed_at >
-    # this_claimed_at` and lose the anchor before it.
-    "select_segments.py:1800-2024": [
-        "def evaluate_takeover_since_this_claim(",
-        "ADMISSION-ONLY, and deliberately NOT claim_record.any_foreign_claim().",
-        "WHY A TIMESTAMP COMPARISON WORKS HERE, and EXACTLY HOW FAR THAT GOES.",
-        'if claim_record.draft_owner_run_id(payload.get("previous_dispatch_token")) == this_run_id:',
-        "if this_claimed_at == foreign_claimed_at:",
-        "if foreign_claimed_at > this_claimed_at:",
-        # The strictly-later branch's REFUSAL, not just its condition. Without
-        # this the range stopped on the `if` and a change to what that branch
-        # returns would leave every anchor in place.
-        "owns the segment, so this run must not recover the draft.",
+    # The trust-boundary fix. Anchored on the def AND on the by-path load,
+    # because the entry's whole claim is that `scripts_dir` is now the ONLY
+    # thing deciding which file executes -- a reinstated `import claim_record`
+    # would keep the def and the spec call while making the prose false, so
+    # the ABSENCE of the bare import is what the middle anchor pins: it sits
+    # where that import used to be, and nothing between the def and the spec
+    # can be a sys.path lookup while this line is the first statement.
+    "reject_review.py:541-584": [
+        "def _import_claim_record(scripts_dir: Path):",
+        "    import importlib.util",
+        'path = scripts_dir / "claim_record.py"',
     ],
-    # The same function's OWN enumeration is the first of the four is_dir()
-    # sites below -- cited separately from the range above because the entry
-    # makes a claim specifically about THIS loop's stat handling, not about
-    # the function's ownership logic. Anchored on the iterdir(), the stat
-    # call, and the S_ISDIR decision.
-    "select_segments.py:1918-1968": [
-        "entries = sorted(runs_dir.iterdir())",
-        "entry_stat = os.stat(entry)",
-        "if not stat.S_ISDIR(entry_stat.st_mode):",
+    # The record's temp file. Anchored on all three properties the entry
+    # names -- the random suffix, O_EXCL, and the rename -- because dropping
+    # any one of them restores the symlink write on its own.
+    "reject_review.py:724-757": [
+        'tmp_path = path.parent / f".{path.name}.tmp.{os.getpid()}.{os.urandom(6).hex()}"',
+        "fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)",
+        "os.replace(tmp_path, path)",
     ],
-    # Its call site: the LAST thing evaluate_lost_token_recovery() does, and
-    # the refusal that carries the helper's reason outward. Anchored on both,
-    # so a version that computed the verdict and then failed to refuse on it
-    # -- the shape that would restore the original defect while keeping the
-    # helper intact -- loses the second anchor.
-    "select_segments.py:2153-2159": [
-        "still_ours, takeover = evaluate_takeover_since_this_claim(",
-        "segment, not that it still owns it: {takeover}",
-    ],
-    # write_claim_record()'s directory-fsync branch, which leaves a COMPLETE
-    # record on disk on purpose rather than unlinking it -- pre-existing
-    # 1.21.0 code, cited here only because #460's own new docstring above
-    # names it as the ordinary-operator route to one of its two disclosed
-    # residuals. Anchored on the deliberate-non-removal comment and the
-    # failure return.
-    "claim_record.py:720-726": [
-        "sync_problem = fsync_directory(path.parent)",
-        "Left on disk on purpose",
-        "the claim record was written but {sync_problem}",
-    ],
-    "select_segments.py:3805-3812": [
-        "token_ok, token_detail = rewrite_draft_dispatch_token(",
-        "if not token_ok:",
-        'write_failures.append(f"{seg}: dispatch_token rewrite failed',
-    ],
-    # any_foreign_claim() -- pre-existing, untouched by this release, cited
-    # for the entry's claim that it keeps the any-holder rule where that rule
-    # is still right (a translate chokepoint with no record of its own to
-    # compare), and that it never had the is_dir() trap the four sites below
-    # fix, because it never calls Path.is_dir() on an entry at all. Anchored
-    # on the def, on the unreadable-counts-as-held docstring line, and on the
-    # per-entry read that goes straight to classify_claim_record() with no
-    # is_dir() guard in front of it.
-    "claim_record.py:770-819": [
-        "def any_foreign_claim(seg, this_run_id, runs_dir):",
-        "Unreadable entries count as held.",
-        "state, _detail = classify_claim_record(entry / f\"{CLAIM_PREFIX}{seg}\")",
-        # The conversion of a non-ABSENT state into a REPORTED HOLDER is the
-        # whole claim the entry makes about this function -- AMBIGUOUS counts
-        # as held. Anchored so the range cannot stop just before it.
-        "if state != CLAIM_ABSENT:",
-        "return (run_id, state, entry / f\"{CLAIM_PREFIX}{seg}\")",
-    ],
-    # any_foreign_claim()'s ONLY caller anywhere in the shipped scripts, cited
-    # for the entry's correction that the deliberately-unfixed ledger.json
-    # defect does NOT reach D9's lost-token recovery. The claim is a
-    # REACHABILITY one, so the anchors pin the two halves that carry it: that
-    # this predicate is entered on the NO-TOKEN branch, and that the call to
-    # any_foreign_claim() lives here rather than on any admission path.
-    "claim_record.py:823-875": [
-        "def foreign_owner_refusal(*, seg, this_run_id, draft_path, runs_dir):",
-        "- NO TOKEN AT ALL -> any_foreign_claim() decides",
-        "holder, state, path = any_foreign_claim(seg, this_run_id, Path(runs_dir))",
-    ],
-    # The other half of the same correction: the recovery's whole body, cited
-    # for the claim that it reaches only claimed_path(), read_claim_record()
-    # and evaluate_takeover_since_this_claim() -- never any_foreign_claim().
-    # Anchored on the def and on both claim_record calls it does make, so a
-    # future edit that adds an any_foreign_claim() call here does not silently
-    # keep this citation valid while the sentence above it goes false.
-    "select_segments.py:2034-2153": [
-        "def evaluate_lost_token_recovery(seg: str, profile: str, run_id, durable_root: Path):",
-        'path = claim_record.claimed_path(run_id, seg, durable_root / "runs")',
-        "state, payload, detail = claim_record.read_claim_record(path)",
-        # The third and last claim_record-reaching call the entry names. The
-        # sentence citing this range asserts the recovery reaches exactly
-        # these three and never any_foreign_claim(), so the range has to run
-        # far enough to contain the last of them.
-        "still_ours, takeover = evaluate_takeover_since_this_claim(",
-    ],
-    # classify_claim_record()'s lstat, cited for the mechanism the "what this
-    # release does not fix" section describes: an ENOTDIR under a plain file
-    # (runs/ledger.json) lands on the AMBIGUOUS branch via a non-None errno,
-    # never on the FileNotFoundError/ABSENT branch. Anchored on the lstat
-    # call, the OSError branch, and the final AMBIGUOUS return it reaches.
-    "claim_record.py:291-306": [
-        "st = path.lstat()",
-        "except OSError as exc:",
-        'return (CLAIM_AMBIGUOUS, f"lstat failed with {code}: {exc.strerror or exc}")',
-    ],
-    # The shipped path's only cross-run gate -- pre-existing, untouched by
-    # this release, cited for the entry's claim that a token-less converged
-    # draft with no sentinel protection reaches this SAME predicate on the
-    # codex_job.py path, which is why the deliberately-unfixed defect above
-    # affects both chokepoints identically.
-    "codex_job.py:1100-1108": [
-        "foreign_owner_refusal() is the single",
-        "foreign = claim_record.foreign_owner_refusal(",
-        "if foreign is not None:",
-    ],
-    # --- the is_dir()/glob() census: four sites, not five ------------------
-    # scan_workflow_run_ids(), issue #462, pulled into this release. Anchored
-    # on the def, the guarded iterdir(), and the per-entry stat split that
-    # replaced a bare `p.is_dir()` filter inside a generator expression.
-    "select_segments.py:785-871": [
-        "entries = sorted(workflows_dir.iterdir())",
-        "run_ids = []",
-        "return sorted(run_ids)",
-    ],
-    # scan_dispatching_run_ids() -- the site with TWO swallowing constructs,
-    # not one. Anchored on the def, the iterdir() that replaced `.is_dir()`,
-    # and the loop that replaced `.glob("*.draft.json")` with a hand filter,
-    # so a version that fixed only the guard and left the glob call in place
-    # loses the last anchor.
-    "select_segments.py:651-700": [
-        "entries = sorted(segments_dir.iterdir())",
-        "except (FileNotFoundError, NotADirectoryError):",
-        "for path in entries:",
-        'if not path.name.endswith(".draft.json"):',
-    ],
-    # _definitive_stat(), the named helper _resumable_run_id_candidates()
-    # below converges on rather than hand-rolling a fourth copy of the split.
-    # Anchored on the def and both arms of the split.
-    "segment_dispatch_driver.py:2203-2241": [
-        "def _definitive_stat(path: Path, *, refusal: str):",
-        "except (FileNotFoundError, NotADirectoryError):",
-        'fatal(f"{refusal} ({path} could not be inspected: {exc})", exit_code=2)',
-    ],
-    # _resumable_run_id_candidates()'s own fix, built on the helper above.
-    # Anchored on the top-level stat, the guarded iterdir(), and the final
-    # sort, so a version that restored the bare `p.is_dir()` list
-    # comprehension loses every code-bearing anchor at once.
-    "segment_dispatch_driver.py:2339-2385": [
-        "runs_stat = _definitive_stat(",
-        "entries = sorted(runs_dir.iterdir())",
-        "candidates = []",
-        "return sorted(candidates, reverse=True)",
-    ],
-    # --- the driver's new refusal: ctx.claims enforced, not merely read ----
-    # Anchored on the def, the two lines of its actual logic, and the tail of
-    # its refusal message -- four anchors across a docstring-heavy function,
-    # so a version that kept the prose but changed the check (or its refuse
-    # direction) loses one of the code-bearing anchors.
-    "segment_dispatch_driver.py:1045-1102": [
-        "def claim_capability_refusal_for_translate",
-        "profile = ctx.claims.get(seg)",
-        "if profile is None:",
-        "reaches it (#450)",
-    ],
-    # The call site inside process_segment(), and what it sits before: the
-    # PRE-EXISTING chokepoint (claim_refusal_for_translate) immediately
-    # after it, and the ledger write after THAT. Anchored on all three calls
-    # in order, so a version that reordered them, or dropped the pre-existing
-    # check, loses an anchor rather than passing on prose alone.
-    "segment_dispatch_driver.py:4728-4743": [
-        "capability_refusal = claim_capability_refusal_for_translate(ctx, seg)",
-        "claim_refusal = claim_refusal_for_translate(ctx, seg)",
-        "rec = write_ledger(",
-    ],
-    # --- migration: which single script moves which single hash -----------
-    # cache_key.py:156 pins segment_dispatch_driver.py as the sole changed
-    # PLUGIN_BUNDLE_MEMBERS entry this release touches -- claim_record.py
-    # sits on the neighboring line but is not part of this citation, because
-    # the entry's claim is specifically that claim_record.py's membership
-    # does NOT contribute this time.
-    "cache_key.py:156": ['"segment_dispatch_driver.py",'],
-    # scaffold_setup.py:77 pins select_segments.py as the sole changed
-    # ORCHESTRATION_BUNDLE_MEMBERS entry, for the same reason.
-    "scaffold_setup.py:77": ['"select_segments.py",'],
+    # Bundle membership, cited for the claim that the rejection producer is a
+    # decision authority inside plugin_bundle_hash rather than outside it.
+    "cache_key.py:168": ['"reject_review.py",'],
 }
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
