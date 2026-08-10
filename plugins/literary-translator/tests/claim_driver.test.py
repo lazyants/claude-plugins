@@ -20,6 +20,16 @@ chokepoint (the second D8 layer) -- both are owned by other files this
 plugin's own "no shared lib between self-contained scripts" convention
 keeps this file from reaching into.
 
+Section E (below the D8-cross-run block) is the one exception: it covers
+`_definitive_stat()` and `_resumable_run_id_candidates()`, the round-5
+(post-1.21.0 codex review) hardening against Path.is_dir()/is_file()'s own
+error-swallowing inside run-id resumability scanning. That function's
+PRE-EXISTING coverage (ordering, the glossary-sibling exclusion, the
+round-4 uncapped-candidates fix, the double-dot exclusion) stays in
+tests/segment_dispatch_driver.test.py, which owns the rest of that
+function's behavior; Section E adds only the unstattable-entry refusal
+this round shipped without any test for.
+
 ## Fixture strategy
 
 Deliberately NEVER stages the REAL select_segments.py -- nor the REAL
@@ -1386,3 +1396,148 @@ def test_D8_refuses_when_the_token_names_an_unusable_run_id(tmp_path):
     refusal = DRIVER.claim_refusal_for_translate(ctx, "seg01")
     assert refusal is not None
     assert "#438 D8" in refusal, refusal
+
+
+# ---------------------------------------------------------------------------
+# E -- _definitive_stat() / _resumable_run_id_candidates(), round-5
+# (post-1.21.0 codex review) hardening. See the Scope section of this file's
+# own module docstring for why this lives here rather than in
+# tests/segment_dispatch_driver.test.py, which owns the rest of
+# _resumable_run_id_candidates()'s coverage.
+#
+# Path.is_dir()/Path.is_file() both swallow the underlying stat error and
+# answer False on ANY OSError (measured on the Python this ships against,
+# 3.14.6, for both EACCES and ELOOP) -- so an `except OSError` wrapped
+# around either call never fires, and "I could not look" (EACCES/EIO/ELOOP)
+# reads identically to "it is not there" (ENOENT). _definitive_stat() closes
+# that: os.stat() directly, None ONLY for FileNotFoundError/
+# NotADirectoryError, DriverError (exit_code=2, naming the path and what
+# could not be established) for every other OSError. Every test below is
+# staged with a SYMLINK LOOP, not a chmod fixture: ELOOP is not a permission
+# bit, so it needs no root guard (chmod 0o000 is silently a no-op under root
+# -- see claim_chokepoint.test.py's own `_needs_unprivileged_uid`), and it
+# breaks exactly the one entry it is applied to, leaving everything else in
+# the fixture intact.
+# ---------------------------------------------------------------------------
+
+
+def test_resumable_run_id_candidates_refuses_on_an_unstattable_entry(tmp_path):
+    """An entry under runs_dir/ that _definitive_stat() cannot classify must
+    refuse via DriverError naming the entry, not silently vanish from the
+    candidate list the way the pre-round-5 Path.is_dir() call did (see
+    _resumable_run_id_candidates()'s own docstring, "codex round-5"
+    paragraph, for the exact #438 hole a silently-dropped candidate opens:
+    a fresh run id minted in its place, orphaning an in-progress hand-edit
+    that still names the old run and reads as unowned to every ownership
+    guard downstream)."""
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    durable_root = tmp_path / "durable"
+    durable_root.mkdir()
+
+    good = runs_dir / "20260101T000000Z"
+    good.mkdir()
+    (good / "input.digest").write_text("digest-a", encoding="utf-8")
+
+    loop = runs_dir / "20260202T000000Z"
+    loop.symlink_to(loop)
+
+    # Fixture preconditions, proven with the real syscalls this test is
+    # actually about rather than taken on faith: the listing succeeds and
+    # still includes the loop entry, os.stat() on it raises, and is_dir()
+    # answers False on that same entry -- so a future Python that stops
+    # suppressing the error fails this assertion loudly instead of the test
+    # quietly staging something else.
+    assert loop.name in {p.name for p in runs_dir.iterdir()}
+    with pytest.raises(OSError):
+        os.stat(loop)
+    assert loop.is_dir() is False
+
+    with pytest.raises(DRIVER.DriverError) as excinfo:
+        DRIVER._resumable_run_id_candidates(runs_dir, durable_root)
+    assert loop.name in str(excinfo.value), excinfo.value
+    assert excinfo.value.exit_code == 2
+
+
+def test_resumable_run_id_candidates_refuses_when_runs_dir_itself_is_unstattable(tmp_path):
+    """Same rule one level up: `runs_dir` itself definitively-not-existing is
+    an ordinary "no resumable prior run" ([] returned, no run yet exists) --
+    but `runs_dir` being UNREADABLE is a different answer this driver cannot
+    tell apart from ENOENT without _definitive_stat()."""
+    durable_root = tmp_path / "durable"
+    durable_root.mkdir()
+    runs_dir = tmp_path / "runs"
+    runs_dir.symlink_to(runs_dir)
+
+    # Same swallow, one level up: is_dir() (and exists()) both answer False
+    # on this ELOOP, indistinguishable from a runs_dir that was never
+    # created -- the exact ambiguity _definitive_stat() exists to resolve.
+    assert runs_dir.is_dir() is False
+    with pytest.raises(OSError):
+        os.stat(runs_dir)
+
+    with pytest.raises(DRIVER.DriverError) as excinfo:
+        DRIVER._resumable_run_id_candidates(runs_dir, durable_root)
+    assert str(runs_dir) in str(excinfo.value), excinfo.value
+    assert excinfo.value.exit_code == 2
+
+
+def test_resumable_run_id_candidates_still_resolves_real_candidates_in_order(tmp_path):
+    """ALLOW-DIRECTION CONTROL for the two refusal tests above: an ordinary,
+    fully readable runs_dir must still return every real candidate, in
+    _resumable_run_id_candidates()'s documented most-recent-first order.
+    Without this, the two refusal tests above would be indistinguishable
+    from a version that refuses UNCONDITIONALLY -- a change that merely
+    looks like a targeted fix."""
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    durable_root = tmp_path / "durable"
+    durable_root.mkdir()
+
+    for run_id in ("20260101T000000Z", "20260202T000000Z", "20260303T000000Z"):
+        d = runs_dir / run_id
+        d.mkdir()
+        (d / "input.digest").write_text("digest", encoding="utf-8")
+    # A non-run-id entry runs_dir also legitimately holds (this function's
+    # own docstring: ledger.json, workflows/, ...) -- excluded by the
+    # name-shape check before any stat, must not perturb the real
+    # candidates' order.
+    (runs_dir / "ledger.json").write_text("{}", encoding="utf-8")
+
+    candidates = DRIVER._resumable_run_id_candidates(runs_dir, durable_root)
+    assert candidates == [
+        "20260303T000000Z", "20260202T000000Z", "20260101T000000Z",
+    ]
+
+
+def test_resumable_run_id_candidates_skips_a_definitively_absent_entry(tmp_path):
+    """The other side of the split _definitive_stat() draws: an entry whose
+    name matches the run-id shape but resolves to nothing at all (a dangling
+    symlink -> ENOENT) is DEFINITIVELY not a run directory, and must be
+    quietly skipped -- exactly like an entry validate_run_id() itself
+    disqualifies -- not turned into a DriverError. Refusing here would make
+    every ordinary broken symlink under runs_dir fatal, which is not what
+    round-5 asked for; the boundary is "could not tell" vs. "definitely not
+    there", not "anything not a clean directory"."""
+    runs_dir = tmp_path / "runs"
+    runs_dir.mkdir()
+    durable_root = tmp_path / "durable"
+    durable_root.mkdir()
+
+    good = runs_dir / "20260101T000000Z"
+    good.mkdir()
+    (good / "input.digest").write_text("digest", encoding="utf-8")
+
+    dangling = runs_dir / "20260202T000000Z"
+    dangling.symlink_to(runs_dir / "no-such-target")
+
+    # Fixture preconditions via the real syscalls: listed, os.stat() raises
+    # the DEFINITIVE (not swallowed-generic) FileNotFoundError, is_dir()
+    # answers False.
+    assert dangling.name in {p.name for p in runs_dir.iterdir()}
+    with pytest.raises(FileNotFoundError):
+        os.stat(dangling)
+    assert dangling.is_dir() is False
+
+    candidates = DRIVER._resumable_run_id_candidates(runs_dir, durable_root)
+    assert candidates == ["20260101T000000Z"]

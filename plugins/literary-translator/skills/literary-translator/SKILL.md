@@ -1904,8 +1904,11 @@ silently reclassified into the other one:
   `stale`; a `.ever_converged.<seg>` sentinel present; a recorded
   `reviewed_draft_sha1` that DIFFERS from the draft's current content sha1
   (nothing to re-review if it still matches); and the stored review's
-  `clean` is `true`. A successfully-admitted `--from-converged` claim clears
-  the `previously_converged` refusal for exactly that id, and nothing else.
+  `clean` is `true` — OR, when it is `false`, the review is admitted as the
+  CONTINUATION of a re-review loop this project already opened (#460; see
+  the paragraph below for what establishes that). A successfully-admitted
+  `--from-converged` claim clears the `previously_converged` refusal for
+  exactly that id, and nothing else.
 - **`--from-cap SEG1[,SEG2,...]`** — for a segment that hit the review cap
   (materialized status `non_converged`, `reason: "cap"`) and was then
   hand-edited. Requires: NO `.ever_converged` sentinel; the stored review's
@@ -1913,6 +1916,32 @@ silently reclassified into the other one:
   `human_escalation`, `--only-segs` naming the same id(s) is ALSO required
   — the same explicit-retry mechanism any other `human_escalation` retry
   already needs, now doubled as a second, independent authorization.
+
+**A dirty review is admitted under `--from-converged` only as the
+CONTINUATION of a re-review loop this project already opened — never
+merely because the review happens to be dirty, which is just as true of a
+segment nobody ever claimed (#460).** The claim mechanism shipped in 1.21.0
+worked for exactly one round: when the mandatory fix turn after a
+not-clean round 1 produced a dirty round 2, the segment had nowhere to
+go — `--from-converged` itself required `clean: true`, and the plain path
+refuses via `previously_converged` regardless. Continuation is established
+from a claim record at `runs/<run_id>/.claimed.<seg>`, asked for in a
+fixed order: the draft's own CURRENT owner first, read off its
+`dispatch_token` — "I have not claimed this" and "nobody has" are
+different facts — and, ONLY on D9's lost-token recovery path (the draft
+carries no token at all, and this run's own prior claim record is what
+re-establishes one), this run itself. Every condition is checked against
+the record's CONTENTS, never merely its presence: it must agree with the
+path it was found at (its own `seg` and `run_id`), carry the
+`from-converged` profile, and carry every field `build_claim_record()`
+writes — a partial object is what a forgery or a half-finished write looks
+like, and it is refused exactly like an absent record. On the lost-token
+path specifically, admission is ALSO refused if any OTHER run has taken
+the segment over since this run's own claim — records are never released,
+so two claim records for one segment is not an anomaly, it is what a
+sanctioned takeover leaves behind. That refusal is operator-visible and
+has an operator-visible consequence: a token-less draft superseded by a
+later claim cannot simply be re-claimed by the run that held it first.
 
 **Shared safety gates, both profiles, every requested id validated
 together in ONE pass (every failure reported at once — three sequential

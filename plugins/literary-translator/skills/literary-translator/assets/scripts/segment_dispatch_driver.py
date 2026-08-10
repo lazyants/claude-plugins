@@ -1042,6 +1042,67 @@ def claim_refusal_for_translate(ctx: "DispatchContext", seg: str) -> "str | None
     )
 
 
+def claim_capability_refusal_for_translate(ctx: "DispatchContext", seg: str) -> "str | None":
+    """#450: 'a segment THIS INVOCATION admitted a claim for must never be
+    translated -- full stop, independently of whatever the ON-DISK claim
+    record happens to say by the time dispatch actually reaches it.'
+    Returns None when `seg` carries no claim in ctx.claims, else a
+    refusal naming the claim and the profile it was granted under.
+
+    A THIRD layer alongside claim_refusal_for_translate() (this driver's
+    own on-disk check, directly above) and codex_job.py's own chokepoint --
+    in ADDITION to both, never a replacement for either. Those two exist
+    precisely because ctx.claims is private process memory: nothing
+    OUTSIDE this run() invocation (a fix-turn LLM, a resumed later run,
+    codex_job.py's own subprocess) can read it, so every cross-process or
+    cross-invocation guard has to be keyed off the durable record instead
+    -- that split is correct and deliberate, not a gap this function
+    papers over.
+
+    The gap #450 actually found is narrower, and specific to a fact THIS
+    process already holds that both on-disk checks re-derive from
+    scratch every time: select_segments.py granted this segment's claim
+    and validated it exactly once (parse_claims_field(), #438 D3), folding
+    it into ctx.claims BEFORE this invocation ever touched a segment. The
+    filesystem those two on-disk checks trust can move AFTER that moment,
+    from something neither of them owns -- a partial restore, a runs/
+    prune, any concurrent writer. Both existing chokepoints read "the
+    record I can find right now says nothing" as "nothing was ever
+    granted": claim_refusal_for_translate()'s own CLAIM_ABSENT branch
+    falls through to foreign_owner_refusal(), which returns None (proceed)
+    for a draft still stamped with THIS run's own token -- the ordinary-
+    retry shape, indistinguishable on disk from "this run's claim record
+    was just deleted out from under it." Re-deriving from disk a second
+    and third time cannot close that hole; the disk is exactly what is
+    untrustworthy here. What closes it is the one fact that cannot have
+    moved: this process's own memory of what it was granted, minted once
+    at the top of run() and never touched again after.
+
+    So this check is UNCONDITIONAL, not a reconciliation against the
+    on-disk state: `seg in ctx.claims` refuses on its own. An on-disk
+    record that still agrees only makes the refusal doubly justified
+    (both this check and claim_refusal_for_translate() below independently
+    refuse); one that disagrees is precisely the drift #450 exists to
+    catch, so disagreement is never grounds to defer to the disk instead.
+
+    Placed in process_segment() BEFORE both write_ledger()'s in_progress
+    write AND the existing claim_refusal_for_translate() call, on the same
+    reasoning that check's own docstring already gives for its own
+    placement: a refusal here must lose neither the draft bytes nor the
+    ledger fragment."""
+    profile = ctx.claims.get(seg)
+    if profile is None:
+        return None
+    return (
+        f"segment {seg!r} was admitted under this invocation's own claim "
+        f"(granted under profile {profile!r}) -- a segment this run's own "
+        f"select_segments.py call claimed for re-review may never be "
+        f"dispatched for translation by this invocation, regardless of "
+        f"what the on-disk claim record shows by the time dispatch "
+        f"reaches it (#450)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Property 3 -- one project-wide fcntl.flock, held by descriptor, never a
 # pid file.
@@ -1479,12 +1540,25 @@ def parse_claims_field(select_result: dict, segs: list) -> dict:
     NOT re-validate the rest of the record's fields (previous_dispatch_
     token, cache_key, ...) -- claim_refusal_for_translate() reads the
     record's own on-disk copy directly via claim_record.py's shared
-    three-state predicate, which is this driver's actual source of truth
-    for D8. This field exists so a stripped/malformed/mismatched 'claims'
-    field is caught here, fail-closed, rather than silently proceeding to
-    consume `segs` regardless (#438 D3 -- "the selector emits the
-    authorization, the driver ignores or loses the field but still
-    consumes segs").
+    three-state predicate, which is the source of truth for the D8
+    on-disk check.
+
+    What this function returns is NOT audit-only, and is not merely a
+    fail-closed transport either: #450 gave it direct enforcement power.
+    claim_capability_refusal_for_translate() refuses a TRANSLATE straight
+    off `ctx.claims` -- unconditionally, before write_ledger() and before
+    the on-disk check -- so an id admitted here can never be translated by
+    this invocation no matter what the record on disk says by then. The
+    two layers are additive and answer different questions: the on-disk
+    record is the only evidence that survives across processes and
+    invocations, while this in-memory grant is the only fact a concurrent
+    writer, a partial restore or a runs/ prune cannot move.
+
+    The transport requirement stands as well: a stripped/malformed/
+    mismatched 'claims' field is caught here, fail-closed, rather than
+    silently proceeding to consume `segs` regardless (#438 D3 -- "the
+    selector emits the authorization, the driver ignores or loses the
+    field but still consumes segs").
 
     FATAL (never a silent default) on any of: the field missing
     entirely; not a JSON object; a key that is not a safe segment id
@@ -2126,6 +2200,47 @@ def validate_run_id(name: str) -> "str | None":
     return None
 
 
+def _definitive_stat(path: Path, *, refusal: str):
+    """os.stat(path) -> its stat_result, or None when `path` (or a
+    directory component leading to it) definitively does not exist
+    (FileNotFoundError/NotADirectoryError). Any OTHER OSError -- EACCES,
+    EIO, ELOOP, ... -- means the filesystem could not answer at all, and
+    this refuses immediately via DriverError (`refusal`, exit_code=2)
+    naming `path`, rather than letting a caller mistake "could not look"
+    for "not there".
+
+    Exists because Path.is_dir()/Path.is_file() BOTH swallow the
+    underlying stat error and answer False on ANY OSError -- so an
+    `except OSError` wrapped around either one never fires, and "I could
+    not look" is delivered in the same word as "it does not exist" / "it
+    is not that kind". Measured on the Python this ships against (3.14.6)
+    for both EACCES and ELOOP. Same trap, same fix, as
+    select_segments.py's evaluate_takeover_since_this_claim() -- see its
+    own comment for what silently collapsing the two answers cost there.
+
+    claim_record.py's any_foreign_claim() does NOT take this fix, and does
+    not have this trap to take it for; that divergence is deliberate and
+    retained in this release. It stats nothing at all, so there is no
+    swallowed stat error there to split -- a non-directory entry reaches
+    it undetected and is caught one level down, by the child lstat.
+    So a non-directory entry under runs/ (ledger.json, the
+    materialized ledger every project has) is taken as a candidate holder
+    whose claim path lstat's ENOTDIR -> CLAIM_AMBIGUOUS -> reported as a
+    foreign holder. Fixing it there would flip a refusal into a proceed:
+    that AMBIGUOUS is what keeps a legacy token-less draft refused at the
+    translate chokepoint, via foreign_owner_refusal()'s no-token branch.
+    Do not mirror this helper into that enumeration. `refusal` is
+    the caller's own description of what could not be established, so the
+    DriverError message says WHAT was being checked, not just which path
+    failed."""
+    try:
+        return os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        fatal(f"{refusal} ({path} could not be inspected: {exc})", exit_code=2)
+
+
 def _resumable_run_id_candidates(runs_dir: Path, durable_root: Path) -> list:
     """Candidate `resume_from_run_ids` entries for resolve_run_id() below
     (all offered together, in the order returned here), most recent first:
@@ -2185,15 +2300,88 @@ def _resumable_run_id_candidates(runs_dir: Path, durable_root: Path) -> list:
     such directory -- resolve_run_id() then omits `resume_from_run_ids`
     entirely, exactly like a genuinely first-ever run (resume_setup.py's
     own module docstring: "Omitting both fields is a genuinely-first-ever-
-    run signal")."""
-    if not runs_dir.is_dir():
+    run signal").
+
+    codex round-5 (post-1.21.0 review): an entry that becomes unstattable
+    here -- EACCES, EIO, ELOOP, transient or not -- used to vanish from
+    the returned list SILENTLY, via Path.is_dir()/Path.is_file()'s own
+    error-swallowing (see _definitive_stat()'s own docstring for the
+    mechanism). That is a real hole, not a theoretical one: on the
+    ORDINARY (non-claim) dispatch path, run_select_segments() has already
+    finished (run()'s own `select_result = run_select_segments(...)` call)
+    BEFORE this function's caller runs -- resolve_run_id() is invoked
+    afterward, only once `run_result is None` -- so the selector's own
+    fresh-RUN_ID collision refusal has nothing to do with a candidate this
+    scan drops: on that path the selector was never even given a run id to
+    check evidence against. A run entry that flickers unreadable in
+    exactly this window would be dropped here, a FRESH run id minted in
+    its place, and an in-progress, hand-claimed draft still naming the
+    old (now orphaned) run would read as unowned to every ownership guard
+    downstream -- silently permitting exactly the retranslation-over-a-
+    hand-edit #438 exists to stop.
+
+    DIRECTION CHOSEN: refuse outright (DriverError via _definitive_stat(),
+    exit_code=2, naming the unreadable path) rather than silently treating
+    an unstattable entry as either answer. The alternative considered --
+    folding an unstattable entry INTO the candidate list, on the theory
+    that "it might be a real run, so do not silently forget it" -- was
+    rejected: this function's return value is forwarded verbatim into
+    resume_setup.py's own `resume_from_run_ids`, and that authority's
+    resolve_run() (resume_setup.py:781) decides a MATCH by reading
+    `runs/<id>/input.digest` with its OWN `Path.is_file()` call
+    (resume_setup.py:803) -- the identical swallow-pattern, one layer
+    down, in a file this fix does not own. Passing an unreadable candidate
+    through would not close the hole; it would only relocate it to a site
+    this change cannot reach, while looking closed here. Refusing at the
+    point where the ambiguity is actually discovered is the only
+    direction that is both honest about what could not be established and
+    fully within this function's own power to guarantee."""
+    runs_stat = _definitive_stat(
+        runs_dir,
+        refusal=f"could not establish whether {runs_dir} holds any resumable prior run",
+    )
+    if runs_stat is None or not stat.S_ISDIR(runs_stat.st_mode):
         return []
     glossary_runs_dir = durable_root / "glossary" / "runs"
-    candidates = [
-        p.name for p in runs_dir.iterdir()
-        if p.is_dir() and validate_run_id(p.name) is None and (p / "input.digest").is_file()
-        and not (glossary_runs_dir / p.name).is_dir()
-    ]
+    try:
+        entries = sorted(runs_dir.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        # DEFINITIVELY nothing: gone between the stat above and this listing.
+        return []
+    except OSError as exc:
+        fatal(
+            f"runs directory {runs_dir} could not be listed ({exc}), so whether a "
+            f"resumable prior run exists there is unknown",
+            exit_code=2,
+        )
+    candidates = []
+    for entry in entries:
+        # Name-shape check FIRST, before any stat: runs_dir also holds
+        # ledger.json, workflows/, and any other non-run-id entry (see
+        # this function's own docstring above) -- a name that already
+        # disqualifies an entry excludes it on that basis alone, with
+        # nothing to establish about its filesystem state and no risk of
+        # refusing over a path that was never a candidate to begin with.
+        if validate_run_id(entry.name) is not None:
+            continue
+        entry_stat = _definitive_stat(
+            entry, refusal=f"could not establish whether {entry.name} is a run directory",
+        )
+        if entry_stat is None or not stat.S_ISDIR(entry_stat.st_mode):
+            continue
+        digest_stat = _definitive_stat(
+            entry / "input.digest",
+            refusal=f"could not establish whether {entry.name} carries an input.digest marker",
+        )
+        if digest_stat is None or not stat.S_ISREG(digest_stat.st_mode):
+            continue
+        glossary_stat = _definitive_stat(
+            glossary_runs_dir / entry.name,
+            refusal=f"could not establish whether {entry.name} is a glossary run",
+        )
+        if glossary_stat is not None and stat.S_ISDIR(glossary_stat.st_mode):
+            continue
+        candidates.append(entry.name)
     return sorted(candidates, reverse=True)
 
 
@@ -3205,11 +3393,17 @@ class DispatchContext:
         self.session_id = session_id
         # #438 D3: {seg: profile} for every id parse_claims_field() admitted
         # from select_segments.py's own 'claims' field THIS invocation --
-        # never consulted directly by claim_refusal_for_translate() (which
-        # reads the on-disk record, the durable source of truth), but
         # folded in here per D3's own requirement and reported alongside
-        # run()'s own journal/result for audit. {} when this run requested
-        # no claim.
+        # run()'s own journal/result. {} when this run requested no claim.
+        #
+        # ENFORCING, not audit-only: #450's claim_capability_refusal_for_
+        # translate() refuses a translate dispatch directly off this dict,
+        # unconditionally and before any ledger write. It is read INSTEAD
+        # of the on-disk record there, never reconciled against it -- that
+        # is the whole point of the layer. claim_refusal_for_translate()
+        # still does not consult it, and deliberately so: that check is
+        # keyed off the durable record because it must answer for runs and
+        # processes this dict cannot reach. Both run, in that order.
         self.claims = claims if claims is not None else {}
 
 
@@ -4281,6 +4475,31 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               "invalid-post-fix-draft"
                                               above.
       outcome="failed", reason=
+        "invocation-claim-
+        translate-refused"                -- #450: derive_next_action()
+                                              returned {"action":
+                                              "translate"} for a segment
+                                              THIS INVOCATION admitted a
+                                              claim for (present in
+                                              ctx.claims) -- see
+                                              claim_capability_refusal_
+                                              for_translate()'s own
+                                              docstring for why this check
+                                              is unconditional rather than
+                                              a reconciliation with the
+                                              on-disk claim record the row
+                                              above reads. Checked and
+                                              returned BEFORE the row
+                                              above AND before this
+                                              iteration's write_ledger()
+                                              call, so neither the draft
+                                              bytes nor the ledger
+                                              fragment are touched --
+                                              recoverable next invocation,
+                                              same story as every other
+                                              refusal-before-write row
+                                              here.
+      outcome="failed", reason=
         "loop-exhausted-without-
         terminal-state"                   -- the defensive iteration cap
                                               bound below. NOT purely
@@ -4495,6 +4714,22 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 }
 
             if action["action"] == "translate":
+                # #450: this invocation's OWN claim admission is checked
+                # FIRST and UNCONDITIONALLY -- before write_ledger() AND
+                # before the on-disk-only check right below, never after.
+                # See claim_capability_refusal_for_translate()'s own
+                # docstring for why this is a THIRD, additive layer rather
+                # than a replacement for either #438 D8 chokepoint (this
+                # driver's own check below, and codex_job.py's, owned
+                # separately): it closes the one case neither of those can
+                # see -- ctx.claims still names this segment even though
+                # the on-disk record the row below reads has since moved
+                # out from under this run.
+                capability_refusal = claim_capability_refusal_for_translate(ctx, seg)
+                if capability_refusal is not None:
+                    return {"seg": seg, "converged": False, "outcome": "failed",
+                            "reason": "invocation-claim-translate-refused",
+                            "detail": capability_refusal}
                 # #438 D8: refuse BEFORE the ledger write below, never
                 # after -- see claim_refusal_for_translate()'s own
                 # docstring for why placement here (rather than after
