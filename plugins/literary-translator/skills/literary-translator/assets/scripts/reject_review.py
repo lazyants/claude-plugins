@@ -204,6 +204,7 @@ Exit 2 = usage error (bad seg id, or argparse's own complaint about a
 genuinely missing/malformed flag).
 """
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -211,6 +212,7 @@ import re
 import shlex
 import stat
 import sys
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -582,6 +584,81 @@ def _import_claim_record(scripts_dir: Path):
     except (OSError, ImportError, SyntaxError, ValueError):
         return None
     return module
+
+
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+REJECTION_LOCK_TIMEOUT_S = 10.0
+
+# Open lock descriptors, held for the life of the process. See main()'s own
+# comment: an flock lives on its fd, so this list is what keeps it alive.
+_HELD_LOCK_FDS: "list[int]" = []
+
+
+def rejection_lock_path(seg: str, segments_dir: Path) -> Path:
+    """`.reject_review.{seg}.lock`, beside the record it serialises -- the same
+    naming and placement codex_job.py uses for its own per-segment lease
+    (`.codex_job.{seg}.lock`)."""
+    return segments_dir / f".reject_review.{seg}.lock"
+
+
+def acquire_rejection_lock(seg: str, segments_dir: Path,
+                           timeout_s: float = REJECTION_LOCK_TIMEOUT_S):
+    """`(fd, None)` holding an exclusive kernel flock, or `(None, problem)`.
+
+    WHY A LOCK AT ALL, when this is a command a human types. Gate 6 READS the
+    record on disk, decides from it, and only later publishes with an
+    unconditional os.replace(). Nothing spans those two steps, so two
+    operators rejecting the same verdict with DIFFERENT reasons can both
+    observe an absent-or-stale record, both pass the conflict gate, and the
+    later replace silently erases the first one's record -- exactly what the
+    conflict gate's own refusal message promises cannot happen ("nothing here
+    can tell a deliberate correction from a second operator replacing a
+    colleague's record"). A documented guarantee that a race can break is
+    worse than no guarantee. The cleanup paths carry the same hazard in
+    reverse: an unconditional unlink can remove a record another process
+    published in between.
+
+    So the WHOLE sequence -- read, conflict check, write, directory sync,
+    post-write freshness check, and any cleanup -- runs inside one critical
+    section, and this is what opens it.
+
+    A KERNEL FLOCK, not a lockfile whose presence means "locked", for the
+    reason codex_job.py's own lease states: the kernel releases it when the
+    holder dies, so a crashed operator cannot wedge the segment and there is
+    no stale-break race to get wrong. The lock FILE is left behind on purpose;
+    it carries no state and creating it is not acquiring anything.
+
+    LOCK_NB in a bounded retry loop rather than a blocking LOCK_EX: a human
+    waiting on a terminal deserves a refusal that names the problem, not an
+    indefinite hang with no output."""
+    lock_path = rejection_lock_path(seg, segments_dir)
+    try:
+        segments_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | _O_CLOEXEC, 0o600)
+    except OSError as exc:
+        return None, (
+            f"could not open the rejection lock at {lock_path}: {exc}. "
+            f"Refusing rather than publish a record without serialising "
+            f"against a concurrent operator."
+        )
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd, None
+        except OSError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return None, (
+                    f"another rejection for segment {seg!r} is in progress and "
+                    f"still holds {lock_path} after {timeout_s:g}s. Nothing was "
+                    f"read, written or removed. Wait for it to finish and "
+                    f"re-run this command -- if no other operator is running "
+                    f"one, a process holding that lock is stuck and must be "
+                    f"ended before this can proceed."
+                )
+            time.sleep(0.1)
 
 
 def _rejection_outlives_review(rej_path: Path, rev_path: Path) -> bool:
@@ -1109,6 +1186,26 @@ def main():
 
     rej_path = rejection_path(seg, dirs["segments_dir"])
     renewed = False
+
+    # THE CRITICAL SECTION OPENS HERE and closes when this process exits --
+    # every _refuse()/_accept() below is a sys.exit(), and the kernel drops the
+    # flock with the fd. It deliberately spans gate 6's READ, the write, the
+    # directory sync, the post-write freshness check and every cleanup, because
+    # the hazard is precisely the gap between reading the record and replacing
+    # it. See acquire_rejection_lock() for what that gap allows.
+    #
+    # Taken AFTER every gate that needs nothing but the review on disk: a
+    # malformed invocation must refuse without ever contending for a lock, and
+    # --print-verdict-digest (which exits far above this) must stay a pure read
+    # that creates nothing at all.
+    lock_fd, lock_problem = acquire_rejection_lock(seg, dirs["segments_dir"])
+    if lock_problem is not None:
+        _refuse(lock_problem)
+    # THE FD IS THE LOCK. Parked in module state rather than left as a local
+    # nobody reads, so that "this value is unused" can never become a reason to
+    # drop it: closing it -- or letting anything close it -- releases the flock
+    # and silently reopens the race this section exists to close.
+    _HELD_LOCK_FDS.append(lock_fd)
 
     # Gate 6, BEFORE the sibling import and before any write: an idempotent
     # re-run is a pure READ and must not depend on the write path's helper

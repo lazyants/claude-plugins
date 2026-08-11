@@ -56,6 +56,7 @@ name claims:
     the UNMUTATED artifact authorizes -- so a False can only come from
     the one field that changed.
 """
+import fcntl
 import importlib.util
 import json
 import os
@@ -524,9 +525,18 @@ def test_reject_review_leaves_no_record_behind_when_the_directory_fsync_fails(tm
         "UNLINKED again, not left behind as a live authorization this command "
         "reported as failed"
     )
+    # The lock FILE is the one permitted leftover, and it is enumerated rather
+    # than filtered out by a pattern: it carries no state, its presence
+    # authorizes nothing, and the flock that does mean something lives on a
+    # descriptor the kernel dropped when this process exited. Anything ELSE
+    # here -- a temp file, a partial record -- is a real leak, which is why
+    # this compares an exact list instead of asserting "no record".
     leftovers = sorted(p.name for p in (root / "segments").iterdir()
                        if p.name != f"{seg}.review.json")
-    assert leftovers == [], f"a failed rejection must leave the segments dir clean, found {leftovers}"
+    assert leftovers == [f".reject_review.{seg}.lock"], (
+        f"a failed rejection may leave the (stateless) lock file and nothing "
+        f"else behind, found {leftovers}"
+    )
 
     # The control: the SAME invocation, with the durability step succeeding.
     # Without it, "no record on disk" is equally consistent with a producer
@@ -1019,6 +1029,91 @@ def test_the_records_temp_file_refuses_any_entry_planted_at_its_exact_pinned_nam
         "run would have renamed it away entirely"
     )
     assert not rejection_path.exists()
+
+
+def test_a_concurrent_rejection_cannot_overwrite_a_colleagues_record(tmp_path):
+    """THE CONFLICT GATE'S PROMISE IS ONLY TRUE IF IT IS SERIALISED.
+
+    Gate 6 READS the record on disk, decides from it, and publishes later with
+    an unconditional os.replace(). Without a lock spanning those steps, two
+    operators rejecting the same verdict with DIFFERENT reasons both see an
+    absent record, both pass the gate, and the second one's replace silently
+    erases the first one's -- while the gate's own refusal message promises
+    the opposite: that nothing here can tell a deliberate correction from one
+    operator replacing a colleague's audit trail, so it refuses rather than
+    overwrite.
+
+    DRIVEN BY HOLDING THE REAL LOCK FROM THIS TEST, not by racing two
+    subprocesses and hoping the interleaving lands. A race that reproduces
+    "usually" is a test that fails "sometimes"; taking the exact lock the
+    production code takes makes the contended path deterministic. What this
+    pins is that the critical section is entered at all and that contention
+    refuses cleanly -- an implementation with no lock sails straight through
+    and publishes.
+
+    THE CONTROL is the same command with the lock released: it must succeed.
+    Otherwise the refusal is consistent with a gate that refuses in any state.
+
+    WHAT IT DOES NOT PIN: that the section's BOUNDARIES are exactly right --
+    only that a second writer cannot enter while one holds it. A genuine
+    two-process interleaving is not reproducible here by construction."""
+    root = make_reject_review_root(tmp_path)
+    seg = "seg01"
+    token = "RUN1:seg01:r1"
+    review = write_review_lite(root / "segments", seg, clean=False, coverage_ok=True,
+                                dispatch_token=token,
+                                findings=[{"loc": "p1:1", "severity": "major",
+                                           "issue": "x", "suggest": "y"}])
+    digest = REJECT_MOD._review_verdict_digest(review)
+    rejection_path = root / "segments" / f"{seg}.review_rejected.json"
+    lock_path = root / "segments" / f".reject_review.{seg}.lock"
+
+    # OPERATOR A publishes first, normally.
+    first = run_reject_review(root, seg, reason="A: verified unfounded against the source",
+                              round_label="1", expect_token=token, expect_digest=digest)
+    assert first.returncode == 0, first.stdout + first.stderr
+    original = rejection_path.read_bytes()
+
+    # OPERATOR A's process is still inside the critical section: this test now
+    # holds the very lock reject_review.py takes.
+    held_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(held_fd, fcntl.LOCK_EX)
+    try:
+        second = run_reject_review(root, seg, reason="B: a different reason entirely",
+                                   round_label="1", expect_token=token, expect_digest=digest,
+                                   extra_args=())
+        assert second.returncode == 1, (
+            f"a rejection that cannot take the lock must refuse -- without the "
+            f"critical section it would read, pass the conflict gate and "
+            f"replace operator A's record. got rc={second.returncode}\n"
+            f"stdout:\n{second.stdout}"
+        )
+        payload = json.loads(second.stdout.strip())
+        assert payload["success"] is False
+        assert str(lock_path) in payload["error"], (
+            f"the refusal must name the lock, or an operator cannot tell this "
+            f"from any other failure: {payload['error']!r}"
+        )
+        assert rejection_path.read_bytes() == original, (
+            "and operator A's record must be byte-identical -- erasing it is "
+            "the exact outcome the conflict gate promises cannot happen"
+        )
+    finally:
+        fcntl.flock(held_fd, fcntl.LOCK_UN)
+        os.close(held_fd)
+
+    # CONTROL -- lock released, the SAME command now reaches the conflict gate
+    # and refuses there instead, on the different reason.
+    third = run_reject_review(root, seg, reason="B: a different reason entirely",
+                              round_label="1", expect_token=token, expect_digest=digest)
+    assert third.returncode == 1
+    third_payload = json.loads(third.stdout.strip())
+    assert "DIFFERENT reason" in third_payload["error"], (
+        f"once the lock is free the CONFLICT gate must be what answers, not the "
+        f"lock -- otherwise the refusal above was not about contention: "
+        f"{third_payload['error']!r}"
+    )
+    assert rejection_path.read_bytes() == original
 
 
 def test_removing_a_record_that_cannot_authorize_is_itself_synced(tmp_path):
