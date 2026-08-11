@@ -64,12 +64,28 @@ import pytest
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
 
-# All 10 scripts carrying a copy of the seg-id safety contract.
+# Every script carrying a copy of the seg-id safety contract.
+#
+# THIS LIST IS NO LONGER MAINTAINED BY HAND ALONE. It was, and it silently
+# under-covered: when `reject_review.py` (#461) was added the roster held ten
+# entries while FOURTEEN scripts carried the copy -- so three omissions
+# (`backfill_ever_converged.py`, `resume_setup.py`,
+# `segment_dispatch_driver.py`) had been unchecked for several releases, and
+# a fourth was about to join them. That is the exact failure this file's own
+# docstring already records happening once before, which is what makes a
+# hand roster the wrong instrument: it fails SILENTLY and its green is
+# indistinguishable from coverage.
+#
+# `test_roster_is_exactly_the_scripts_that_carry_the_copy` below now derives
+# the true population from the scripts directory and asserts this list equals
+# it, in BOTH directions. Adding a copy to a new script without listing it
+# here fails; listing a script that does not carry it fails too.
 ALL_SCRIPTS = [
     "cache_key.py",
     "draft_ready.py",
     "draft_sha1.py",
     "ledger_update.py",
+    "reject_review.py",
     "validate_draft.py",
     "select_segments.py",
     "segpack.py",
@@ -77,6 +93,65 @@ ALL_SCRIPTS = [
     "review_ready.py",
     "codex_job.py",
 ]
+
+# Scripts that DO carry the copy and are deliberately NOT enrolled above yet.
+#
+# Measured when #461 added `reject_review.py`: fourteen scripts carry
+# `_SEG_ID_RE` + `def validate_seg`, while the roster held ten. Enrolling
+# these three fails the body comparison TODAY -- their `validate_seg` has no
+# docstring at all, so they have genuinely drifted from the canonical copy
+# and have been unchecked for several releases.
+#
+# They are NAMED here rather than enrolled because repairing three unrelated
+# scripts would widen a release whose subject is the rejection record, and a
+# silent omission is exactly what this file exists to prevent. The census
+# below treats this list as the only permitted excuse: a carrier in NEITHER
+# list fails, so the next omission cannot be silent even while these stay
+# open. Enrolling them is follow-up work, not an oversight.
+KNOWN_UNENROLLED = [
+    "backfill_ever_converged.py",
+    "resume_setup.py",
+    "segment_dispatch_driver.py",
+]
+
+
+def test_roster_is_exactly_the_scripts_that_carry_the_copy():
+    """CENSUS, in BOTH directions, because a hand roster fails silently.
+
+    Derives the true carrier population from the scripts directory rather
+    than trusting either list above: a script carries the contract when it
+    defines `validate_seg` AND references `_SEG_ID_RE`. Asserts that set
+    equals ALL_SCRIPTS + KNOWN_UNENROLLED exactly.
+
+    Adding a copy to a new script without listing it fails here. Listing a
+    script that no longer carries one fails here too -- a roster entry for a
+    file that dropped the copy is a check that silently stopped checking,
+    which is the same defect wearing the other face."""
+    import ast as _ast
+
+    carriers = set()
+    for path in sorted(SCRIPTS_DIR.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "_SEG_ID_RE" not in source:
+            continue
+        tree = _ast.parse(source)
+        if any(
+            isinstance(node, _ast.FunctionDef) and node.name == "validate_seg"
+            for node in tree.body
+        ):
+            carriers.add(path.name)
+
+    listed = set(ALL_SCRIPTS) | set(KNOWN_UNENROLLED)
+    assert carriers == listed, (
+        f"the seg-id contract census disagrees with the rosters.\n"
+        f"  carries the copy but is listed nowhere: {sorted(carriers - listed)}\n"
+        f"  listed but does not carry the copy:     {sorted(listed - carriers)}\n"
+        f"A script carrying this contract must be enrolled in ALL_SCRIPTS, or "
+        f"named in KNOWN_UNENROLLED with the reason it cannot be yet."
+    )
+    assert not (set(ALL_SCRIPTS) & set(KNOWN_UNENROLLED)), (
+        "a script cannot be both enrolled and excused"
+    )
 
 # The canonical copy the function-body check compares everything else
 # against. Arbitrary choice among the byte-identical group of six.
@@ -106,25 +181,49 @@ def _seg_id_re_assign_source(script_name: str) -> str:
     assignment statement in `script_name`, located by target name (not line
     number)."""
     source, tree = _parse(script_name)
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id == "_SEG_ID_RE"
-        ):
-            segment = ast.get_source_segment(source, node)
-            assert segment is not None, f"could not slice _SEG_ID_RE source from {script_name}"
-            return segment
-    raise AssertionError(f"no `_SEG_ID_RE = ...` assignment found in {script_name}")
+    found = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "_SEG_ID_RE"
+    ]
+    if not found:
+        raise AssertionError(f"no `_SEG_ID_RE = ...` assignment found in {script_name}")
+    # EXACTLY ONE, not "the first one walk() happens to reach". Returning the
+    # first would compare a canonical assignment while Python executes a
+    # LATER, permissive rebinding of the same name -- a green census over a
+    # pattern that is not the one in force at runtime.
+    assert len(found) == 1, (
+        f"{script_name} binds _SEG_ID_RE {len(found)} times; this census "
+        f"compares one assignment while Python executes the last, so a "
+        f"permissive rebinding would pass. Keep exactly one."
+    )
+    segment = ast.get_source_segment(source, found[0])
+    assert segment is not None, f"could not slice _SEG_ID_RE source from {script_name}"
+    return segment
 
 
 def _validate_seg_function_node(script_name: str) -> ast.FunctionDef:
     _, tree = _parse(script_name)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "validate_seg":
-            return node
-    raise AssertionError(f"no `def validate_seg(...)` found in {script_name}")
+    found = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "validate_seg"
+    ]
+    if not found:
+        raise AssertionError(f"no `def validate_seg(...)` found in {script_name}")
+    # Same rule as _seg_id_re_assign_source(): exactly one definition. A
+    # second `def validate_seg` later in the file SHADOWS the first at
+    # runtime, so pinning the first would let a carrier ship a canonical
+    # copy for this census to read and a permissive one for Python to call.
+    assert len(found) == 1, (
+        f"{script_name} defines validate_seg() {len(found)} times; the LAST "
+        f"definition is the one Python calls, so pinning the first would "
+        f"compare a copy that never runs. Keep exactly one."
+    )
+    return found[0]
 
 
 def _normalized_docstring(func_node: ast.FunctionDef) -> str:

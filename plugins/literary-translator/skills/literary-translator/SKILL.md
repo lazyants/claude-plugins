@@ -1816,6 +1816,67 @@ plugin currently reads `needs_fix`, the driver's stdout, or its own journal
 Do not launch this driver unattended expecting it to complete a batch
 end-to-end — a `needs_fix` segment sits stalled until someone checks.
 
+**When the finding is WRONG (#461) — rejecting a verdict instead of
+applying it.** The fix turn above assumes the finding is actionable. A
+review can be schema-valid, carry an authentic `loc`, pass the
+`fabricated_loc` gate, and still be FALSE about the source — verified on a
+live segment whose sole finding claimed a Hebrew string that occurs zero
+times in the block (the apparent word was a fragment of a longer one, split
+by RTL mangling). There is nothing to apply, so the draft does not change,
+and `derive_next_action()` cannot tell "unchanged because the draft was
+already right" from "unchanged because nobody tried": it returns
+`needs_fix` again, on every subsequent invocation, forever.
+
+**Do NOT resolve that by applying the finding anyway.** It is the path of
+least resistance and it is the worst available outcome: it inserts content
+the source does not contain, and every gate downstream of the fix turn —
+schema, dispatch token, placeholder parity, `draft_sha1` — reads the DRAFT,
+never the source, so not one of them can catch it. The reviewer is an LLM
+and its findings are not evidence.
+
+The route out is `reject_review.py`, the only component allowed to record
+that a stored verdict does not bind. Verify the claim against the source
+yourself FIRST — this tool records a human judgement, it does not make one.
+Then, two invocations, the read before the write:
+
+```
+# 1. The read mode -- a PURE READ (writes nothing) that prints the stored
+#    review's own dispatch_token, verdict_digest and round label, all from
+#    ONE read, so the three always describe a single verdict.
+python3 {durable_root}/scripts/reject_review.py SEG \
+    --print-verdict-digest --durable-root {durable_root}
+# -> {"success": true, "dispatch_token": ..., "verdict_digest": ...,
+#     "round_label": ..., "round_label_problem": null}
+
+# 2. The rejection itself -- every --expect-* value copied VERBATIM from
+#    step 1's own output. Nothing auto-fills them: passing them back IS the
+#    attestation that a human read that exact verdict.
+python3 {durable_root}/scripts/reject_review.py SEG \
+    --reason "verified against the source: ..." --round-label LABEL \
+    --expect-token TOK --expect-verdict-digest HEX64 \
+    --durable-root {durable_root} --plugin-root {plugin_root}
+```
+
+`--plugin-root` is not optional in practice: it is what decides where the
+trusted `claim_record.py` sibling is loaded from, and `{durable_root}/scripts/`
+is a Step-0a copy other passes in this pipeline hold write access over.
+
+The record lands at `segments/<seg>.review_rejected.json`, and the next
+driver invocation dispatches a FRESH review round for that segment instead
+of `needs_fix`. **It never yields a re-translation and never writes the
+draft** — a rejection buys another look, never permission to overwrite. It
+also does not survive the review it names: the record is bound to that
+verdict's token AND its digest, so a genuinely different verdict on the
+next round is judged on its own merits.
+
+`--reason` is required, non-empty, and durable — it is the entire audit
+trail, and the one thing a later reviewer has to go on. Re-running the
+identical command is safe: an unspent record is left exactly as it is
+(`already_recorded: true`), and one the driver has already consumed is
+renewed (`renewed: true`), which is how a repeat of the same false verdict
+at the absorbing `final` round is rejected a second time. A DIFFERENT
+`--reason` for the same verdict refuses rather than overwriting the first.
+
 **Claiming a segment for re-review (#438) — re-reviewing a hand-edited
 draft WITHOUT re-translating it.** A converged or capped segment's draft is
 sometimes hand-edited outside the plugin (a name-form fix, a phrasing

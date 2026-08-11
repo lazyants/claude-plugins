@@ -155,6 +155,17 @@ PLUGIN_BUNDLE_MEMBERS = (
     "fetch_citation.py",
     "segment_dispatch_driver.py",
     "claim_record.py",
+    # #461. The rejection tool is a DECISION AUTHORITY, not a diagnostic: the
+    # record it writes is the only artifact that can make an unchanged draft
+    # advance past a needs_fix loop. Leaving it outside the bundle would let a
+    # future safety correction to the producer be invisible to
+    # plugin_bundle_hash and to resume identity, so durable state authorized
+    # under the OLD rules would silently coexist with a consumer enforcing the
+    # new ones -- the same "record outlives the fact it attests" shape the
+    # rest of this machinery is built to refuse. Added in the release that
+    # already moves this hash through segment_dispatch_driver.py, so it costs
+    # no reclassification beyond what that release pays anyway.
+    "reject_review.py",
     "mass-translate-wf.template.js",
     "glossary-pass-wf.template.js",
 )
