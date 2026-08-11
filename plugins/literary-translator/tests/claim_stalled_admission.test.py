@@ -1789,27 +1789,112 @@ def test_a_held_codex_job_lock_refuses_that_id_and_leaves_the_others_evaluated(t
     assert sorted(parse_stdout(control)["claims"]) == sorted([LIVE_CLEAN_SEG, LIVE_DIRTY_SEG])
 
 
-# A stand-in for the stdlib `fcntl` extension, staged into the durable root's
-# own scripts/ directory -- which is sys.path[0] for a directly-run script, and
-# `fcntl` is a shared extension rather than a built-in module, so this shadows
-# it. `flock` becomes a NO-OP that never refuses, which is precisely how a mount
-# that does not implement flock behaves (NFS/SMB): every acquire "succeeds",
-# including two that should have contended.
+# Simulates a filesystem that does not enforce flock, by INJECTING a stub into
+# `sys.modules` before select_segments.py is executed and then running the real
+# script in that process via runpy under `__main__`.
 #
-# Chosen over editing select_segments.py's own lock code because the thing under
-# test is the script's behaviour on such a filesystem, and a source edit would
-# be testing a different program. select_segments.py uses `fcntl` for these two
-# leases and nothing else.
-UNENFORCED_FCNTL_PY = '''"""Test stand-in: a filesystem that does not enforce flock."""
-LOCK_SH = 1
-LOCK_EX = 2
-LOCK_NB = 4
-LOCK_UN = 8
+# WHY NOT THE OBVIOUS THING. The first version staged a `fcntl.py` in the
+# durable root's own scripts/ directory and relied on it shadowing the stdlib
+# module via sys.path[0]. That works only because `fcntl` happens to be a SHARED
+# EXTENSION on the interpreter it was written against -- which is a property of
+# how CPython was BUILT, not of fcntl. On a build where `fcntl` is statically
+# compiled in, `sys.builtin_module_names` contains it and BuiltinImporter
+# resolves it BEFORE sys.path is ever consulted: the stub is silently never
+# imported, flock is real, the acquire succeeds, and the claim is ADMITTED --
+# so the test fails, or worse, a differently-shaped version of it passes while
+# testing nothing. Measured on this very machine, where `errno` IS a builtin and
+# `fcntl` is not: a sys.path[0] `errno.py` does NOT shadow, a sys.path[0]
+# `fcntl.py` DOES.
+#
+# `sys.modules` injection is immune to that, and the immunity is structural
+# rather than lucky: the import system checks `sys.modules` FIRST, before
+# BuiltinImporter and before any path finder, so a name already bound there is
+# returned whatever the interpreter build did with it. Verified by the same
+# experiment run the other way -- injecting a stub `errno` (a genuine builtin
+# here) into sys.modules DOES override it.
+#
+# runpy rather than execv, for the reason tests/review_rejection.test.py's own
+# O_EXCL runner states: execv would replace the interpreter and take the patched
+# sys.modules with it. Staying in-process is what keeps the injection alive, and
+# `run_name="__main__"` is what still makes the script's own
+# `if __name__ == "__main__"` block run -- so the CLI, its argv, its
+# self-anchoring off __file__ and its exit code are all the real ones.
+#
+# EVERY CALL IS LOGGED, and that log is the test's evidence that the stub was
+# really used. A stub that silently is not used produces a refusal for some
+# OTHER reason, and an assertion that only checks "the run refused" cannot tell
+# the two apart -- which is exactly how the sys.path[0] version came to look
+# correct on one interpreter and be vacuous on another.
+UNENFORCED_FLOCK_RUNNER_PY = '''#!/usr/bin/env python3
+import runpy
+import sys
+import types
+
+log_path, script = sys.argv[1:3]
+
+stub = types.ModuleType("fcntl")
+stub.LOCK_SH = 1
+stub.LOCK_EX = 2
+stub.LOCK_NB = 4
+stub.LOCK_UN = 8
 
 
-def flock(fd, operation):
+def _flock(fd, operation):
+    # A no-op that NEVER refuses -- precisely how a mount without flock behaves
+    # (NFS/SMB): every acquire "succeeds", including two that should contend.
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write("%d\\n" % (operation,))
     return None
+
+
+stub.flock = _flock
+sys.modules["fcntl"] = stub
+
+sys.argv = [script] + sys.argv[3:]
+runpy.run_path(script, run_name="__main__")
 '''
+
+# fcntl.LOCK_EX | fcntl.LOCK_NB, the operation select_segments.py's own lease
+# code passes. Spelled from the REAL module rather than hard-coded, so the
+# assertion cannot drift from what the script actually asks for.
+_LOCK_EX_NB = fcntl.LOCK_EX | fcntl.LOCK_NB
+
+
+def claim_stalled_unenforced(root, *segs, run_id=RUN_ID, extra=()):
+    """Run the REAL select_segments.py with flock stubbed out. Returns
+    `(CompletedProcess, [operation, ...])` -- the second element is every
+    `flock()` operation the stub actually received, which is what proves the
+    injection took effect rather than being assumed."""
+    runner = root / "scripts" / "unenforced_flock_runner.py"
+    runner.write_text(UNENFORCED_FLOCK_RUNNER_PY, encoding="utf-8")
+    log = root / "test_fixture_flock_calls.txt"
+    if log.exists():
+        log.unlink()
+    argv = [
+        sys.executable, str(runner), str(log), str(root / "scripts" / "select_segments.py"),
+        "--from-stalled", ",".join(segs), "--run-id", run_id, "--run-resume", "false", *extra,
+    ]
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=60, cwd=str(root))
+    calls = [int(line) for line in log.read_text(encoding="utf-8").split()] if log.exists() else []
+    return proc, calls
+
+
+def assert_stub_really_ran(calls, label):
+    """The guard the sys.path[0] version was missing. A stub that is not used
+    leaves NO calls, and the run then refuses (or admits) for a reason unrelated
+    to flock enforcement -- indistinguishable from the outside. Asserting the
+    exact operation the lease code passes is what makes this positive evidence
+    that select_segments.py's own lock path went through the injected module."""
+    assert calls, (
+        f"[{label}] the flock stub recorded NO calls -- it was never used, so this "
+        f"run says nothing about unenforced flock. That is the exact failure the "
+        f"sys.modules injection replaced sys.path[0] shadowing to prevent"
+    )
+    assert _LOCK_EX_NB in calls, (
+        f"[{label}] the stub was called, but never with LOCK_EX|LOCK_NB "
+        f"({_LOCK_EX_NB}) -- select_segments.py's own lease code did not go "
+        f"through it. got {calls!r}"
+    )
 
 
 def test_unenforced_flock_refuses_every_from_stalled_id_on_both_paths(tmp_path):
@@ -1833,6 +1918,14 @@ def test_unenforced_flock_refuses_every_from_stalled_id_on_both_paths(tmp_path):
     that changes between the admitting run and the refusing one is whether the
     filesystem enforces the lock.
 
+    AND EACH REFUSING HALF ASSERTS THE STUB WAS REALLY USED, via the operations
+    it recorded (see assert_stub_really_ran). Without that, an injection that
+    silently did not take effect produces a run that refuses -- or admits -- for
+    an unrelated reason, and no assertion here could tell the difference. That
+    is not hypothetical: the first version of this test simulated the unenforced
+    mount by shadowing `fcntl` on sys.path, which is silently inert on an
+    interpreter that compiles fcntl in as a builtin.
+
     EACH RUN GETS ITS OWN ROOT, deliberately. Re-running a claim over an
     already-claimed segment is answered by #438's superseded-authority guard in
     rewrite_draft_dispatch_token(), so a shared root would let THAT refusal
@@ -1853,8 +1946,8 @@ def test_unenforced_flock_refuses_every_from_stalled_id_on_both_paths(tmp_path):
     )
 
     standalone_root = fresh("standalone_unenforced")
-    (standalone_root / "scripts" / "fcntl.py").write_text(UNENFORCED_FCNTL_PY, encoding="utf-8")
-    standalone = claim_stalled(standalone_root, seg)
+    standalone, standalone_calls = claim_stalled_unenforced(standalone_root, seg)
+    assert_stub_really_ran(standalone_calls, "standalone")
     assert standalone.returncode != 0, (
         f"on an unenforced mount the standalone path must REFUSE, not warn -- the "
         f"lease it just 'took' is worthless\nstdout={standalone.stdout}\n"
@@ -1893,10 +1986,12 @@ def test_unenforced_flock_refuses_every_from_stalled_id_on_both_paths(tmp_path):
         os.close(fd)
 
     driver_root = fresh("driver_unenforced")
-    (driver_root / "scripts" / "fcntl.py").write_text(UNENFORCED_FCNTL_PY, encoding="utf-8")
     fd = hold(driver_lock(driver_root))
     try:
-        driver_path = claim_stalled(driver_root, seg, extra=("--driver-lease-held",))
+        driver_path, driver_calls = claim_stalled_unenforced(
+            driver_root, seg, extra=("--driver-lease-held",)
+        )
+        assert_stub_really_ran(driver_calls, "driver-invoked")
         assert driver_path.returncode != 0, (
             f"on an unenforced mount the --driver-lease-held path must refuse too -- "
             f"its probe succeeds, and a succeeding probe cannot tell 'nobody holds "
