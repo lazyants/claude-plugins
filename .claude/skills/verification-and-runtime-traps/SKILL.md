@@ -158,3 +158,41 @@ Same false-green family as the fixture traps above, but the diverging path is th
 **The knee is RUNNER-specific and must be re-measured, never copied.** The figures above belong to one machine and one worker count; a different core count, worker count or a busier box moves them. The in-code comments at `plugins/literary-translator/tests/canon_approve_to.test.py` (lines 293-298 and 375-377 on `main`) record the CONCLUSION at the one site that uses it, but not the method and not the numbers — so a reader porting the pattern elsewhere inherits a verdict with no n, no margin, and no instruction to re-measure. Carry the sweep, not the constant.
 
 **In any teardown that kills child processes, `kill()` only SIGNALS.** Without a following `wait()` the killed children sit in state `Z` until the whole runner exits — verified by watching a killed child sit in state Z until reaped. A timeout path that kills and moves on therefore leaks a zombie per worker for the rest of the session, and the suite's own output reports nothing: the test that timed out has already printed its failure, and every later test still passes.
+
+## 9. Faking a stdlib module by `sys.path` shadowing is a property of how CPython was BUILT
+
+To simulate a hostile environment (a filesystem where `flock` is unenforced), a test staged a fake
+`fcntl.py` in the directory that becomes `sys.path[0]` for a directly-run script, and relied on it
+shadowing the real module. It worked, and the reasoning offered for it was "`fcntl` is a shared
+extension, not a builtin" — which is true **of this interpreter**, not of `fcntl`.
+
+**If the module is compiled INTO the interpreter, `BuiltinImporter` resolves it before `sys.path` is
+consulted at all.** The stub is then never imported, the real primitive runs, and the test either
+fails confusingly on someone else's machine or — the worse shape — passes while exercising nothing.
+Caught by an external reviewer, not by the suite.
+
+**Demonstrable locally without a differently-built Python**, which is what makes this checkable
+rather than a thing you take on faith: some stdlib modules ARE statically compiled in on any given
+build. Here `errno` is and `fcntl` is not, so with `errno.py` and `fcntl.py` both on `sys.path[0]`,
+`errno` is NOT shadowed and `fcntl` is. Same rule, same interpreter — read `sys.builtin_module_names`
+and `mod.__spec__.origin == "built-in"` to pick a stand-in.
+
+**Inject through `sys.modules` instead.** `sys.modules` is consulted before `BuiltinImporter` and
+before any path finder, so a name already bound there wins whatever the build did:
+
+```python
+sys.modules["fcntl"] = stub
+runpy.run_path(script, run_name="__main__")   # NOT execv
+```
+
+`runpy` rather than `execv` because `execv` replaces the interpreter and discards the patched
+`sys.modules`; `run_name="__main__"` keeps argv, `__file__` self-anchoring and the exit code real.
+
+**Then prove the stub was actually used, positively.** The failure being fixed is a stub that
+silently is not there, and an assertion on the OUTCOME ("the run refused") cannot tell a working
+stub from a refusal arriving for some other reason. Have the stub record the calls it receives and
+assert on that record — spelling the expected operation from the REAL module (`fcntl.LOCK_EX |
+fcntl.LOCK_NB`) so it cannot drift from what the code under test passes. Verified load-bearing by
+deleting the injection — exactly what a builtin does — and watching it fail with "the stub recorded
+NO calls" rather than a generic mismatch. Related: §3, same `sys.modules` mechanism, opposite
+direction (there it is pollution to defend against, here it is the injection point to use).
