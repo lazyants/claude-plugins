@@ -419,7 +419,14 @@ def read_claim_record(path: Path):
 #       is the `cache_key` recorded on the segment's own ledger fragment as
 #       read at admission -- what the key WAS when the work being re-reviewed
 #       was produced; None when the fragment carries none, which is always so
-#       for --from-cap (a cache_key is written only on the convergence path).
+#       for --from-cap (a cache_key is written only on the convergence path) and,
+#       since #455, for --from-stalled as well -- a stalled unit's materialized
+#       ledger status is `in_progress`, the identical never-reached-convergence
+#       shape, even though the SEGMENT converged at some earlier point in its
+#       history. That history is what the `.ever_converged` sentinel records;
+#       it is not carried onto the fragment's own `cache_key` field, so a
+#       stalled fragment is a full replacement with no baseline exactly like a
+#       capped one, for a different underlying reason.
 #       `cache_key_at_claim` is the key freshly computed by this invocation --
 #       what it IS now.
 #
@@ -461,7 +468,10 @@ def read_claim_record(path: Path):
 #       A human-readable explanation when there is no baseline to compare
 #       against, else None. This is what keeps `pre_claim_cache_key: null`
 #       from being read as "the key was missing unexpectedly" when it is in
-#       fact the documented, expected shape for --from-cap.
+#       fact the documented, expected shape for --from-cap and, since #455,
+#       for --from-stalled -- see `pre_claim_cache_key`'s own entry above for
+#       why the same absence shows up under each profile for a different
+#       reason.
 # ---------------------------------------------------------------------------
 
 CLAIM_RECORD_FIELDS = (

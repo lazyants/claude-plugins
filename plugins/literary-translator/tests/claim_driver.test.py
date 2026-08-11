@@ -236,15 +236,20 @@ def test_parse_claims_field_empty_claims_is_valid():
     assert DRIVER.parse_claims_field({"claims": {}}, ["seg01", "seg02"]) == {}
 
 
-def test_parse_claims_field_valid_multi_entry_both_profiles():
+def test_parse_claims_field_valid_multi_entry_all_profiles():
     result = DRIVER.parse_claims_field(
         {"claims": {
             "seg01": _claim_entry("seg01", profile="from-cap"),
             "seg02": _claim_entry("seg02", profile="from-converged"),
+            "seg03": _claim_entry("seg03", profile="from-stalled"),
         }},
-        ["seg01", "seg02", "seg03"],
+        ["seg01", "seg02", "seg03", "seg04"],
     )
-    assert result == {"seg01": "from-cap", "seg02": "from-converged"}
+    assert result == {
+        "seg01": "from-cap",
+        "seg02": "from-converged",
+        "seg03": "from-stalled",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -907,6 +912,8 @@ def main():
     p.add_argument("--allow-empty", action="store_true")
     p.add_argument("--from-cap", default=None)
     p.add_argument("--from-converged", default=None)
+    p.add_argument("--from-stalled", default=None)
+    p.add_argument("--driver-lease-held", action="store_true")
     p.add_argument("--run-id", default=None)
     p.add_argument("--run-resume", default=None, choices=("true", "false"))
     p.add_argument("--durable-root", default=None)
@@ -916,11 +923,17 @@ def main():
     # Records the raw argv values this process actually received, for the
     # test to inspect afterward -- mirrors segment_dispatch_driver.test.py's
     # own FAKE_CODEX_JOB_PHASE2_PY argv_log_path convention. Deliberately
-    # NEVER folds from_cap/from_converged into 'segs' below -- this fake
-    # exists to prove argv FORWARDING only, and always reporting an empty
-    # segs/claims keeps every CLI-level test in this section on the cheap
-    # --allow-empty early-return path, with no need for the driver's full
-    # dispatch machinery.
+    # NEVER folds from_cap/from_converged/from_stalled into 'segs' below --
+    # this fake exists to prove argv FORWARDING only, and always reporting an
+    # empty segs/claims keeps every CLI-level test in this section on the
+    # cheap --allow-empty early-return path, with no need for the driver's
+    # full dispatch machinery.
+    #
+    # --from-stalled/--driver-lease-held (#455) are accepted here purely so
+    # this fake does not choke with argparse's own "unrecognized arguments"
+    # the moment the real driver forwards either -- this fake is not a
+    # from-stalled admission gate any more than it is a from-cap/
+    # from-converged one.
     #
     # --run-resume carries the real script's own `choices` so a driver that
     # relayed a Python bool ("True"/"False") or an unset value is refused
@@ -931,6 +944,7 @@ def main():
     Path("test_fixture_select_segments_received.json").write_text(
         json.dumps({
             "from_cap": args.from_cap, "from_converged": args.from_converged,
+            "from_stalled": args.from_stalled, "driver_lease_held": args.driver_lease_held,
             "run_id": args.run_id, "run_resume": args.run_resume, "argv": sys.argv[1:],
         }),
         encoding="utf-8",
@@ -993,9 +1007,10 @@ def make_cli_root(tmp_path, name="durable_root"):
     file's own module docstring for why).
 
     resume_setup.py has to be faked here as of #438: run() now resolves the
-    RUN_ID BEFORE the Step 1 gate call whenever --from-cap/--from-converged
-    is given, because admission is single-phase and select_segments.py
-    refuses a claim with no --run-id. The real resume_setup.py would need a
+    RUN_ID BEFORE the Step 1 gate call whenever
+    --from-cap/--from-converged/--from-stalled is given, because admission
+    is single-phase and select_segments.py refuses a claim with no
+    --run-id. The real resume_setup.py would need a
     manifest, bundle-hash markers and per-segment cache keys this section
     deliberately does not build; the fake answers with one fixed, recognizable
     id so a test can assert THAT EXACT VALUE arrived at select_segments.py --
@@ -1054,6 +1069,20 @@ def test_from_converged_bad_id_refused_locally_before_select_segments_ever_runs(
     assert not (root / "test_fixture_select_segments_received.json").exists()
 
 
+def test_from_stalled_bad_id_refused_locally_before_select_segments_ever_runs(tmp_path):
+    # #455: the third profile gets the SAME local fail-fast validation as
+    # --from-cap/--from-converged (:5505-5514) -- proven the same way, by
+    # the fake selector's own receipt file never appearing.
+    root = make_cli_root(tmp_path)
+    proc = run_driver(root, "--from-stalled", "../etc/passwd")
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert "--from-stalled" in payload["error"]
+    assert not (root / "test_fixture_select_segments_received.json").exists(), (
+        "select_segments.py must never have been invoked"
+    )
+
+
 def test_from_cap_and_from_converged_forwarded_with_the_resolved_run_id_pair(tmp_path):
     """#438: the claim is SINGLE-PHASE, so the ONE Step 1 gate call must
     carry the RUN_ID the claim will re-stamp drafts to -- select_segments.py
@@ -1082,6 +1111,10 @@ def test_from_cap_and_from_converged_forwarded_with_the_resolved_run_id_pair(tmp
     assert "--run-id" in argv, argv
     idx = argv.index("--run-id")
     assert argv[idx:idx + 4] == ["--run-id", FAKE_RESOLVED_RUN_ID, "--run-resume", "false"], argv
+    # #455 acceptance criterion 4: --driver-lease-held is a --from-stalled-
+    # only carrier (:1499-1537) -- neither profile requested here, so it
+    # must never appear.
+    assert "--driver-lease-held" not in argv, argv
 
     payload = parse_stdout(proc)
     assert payload["claims"] == {}
@@ -1094,6 +1127,38 @@ def test_from_cap_and_from_converged_forwarded_with_the_resolved_run_id_pair(tmp
         "the run id must be resolved EXACTLY once per invocation -- a second "
         "resolution could hand the dispatch loop a different id than the claim "
         "stamped onto the drafts"
+    )
+
+
+def test_from_stalled_forwarded_with_the_resolved_run_id_and_driver_lease_held(tmp_path):
+    """#455: --from-stalled alone (no --from-cap/--from-converged) must
+    still count as `claim_requested` (:5568-5572, so the run id is resolved
+    BEFORE selection exactly as for the other two profiles) and must carry
+    --driver-lease-held -- run()'s own call reaches run_select_segments()
+    only after acquire_driver_lock() has already returned successfully
+    (:1507-1509), so this driver-invoked path forwards the flag every time,
+    unconditionally on from_stalled being set."""
+    root = make_cli_root(tmp_path)
+    proc = run_driver(root, "--from-stalled", "seg21", "--allow-empty")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+    received = read_select_segments_received(root)
+    assert received["from_stalled"] == "seg21"
+    assert received["driver_lease_held"] is True, received
+    assert received["run_id"] == FAKE_RESOLVED_RUN_ID, received
+    assert received["run_resume"] == "false", received
+    argv = received["argv"]
+    assert "--from-stalled" in argv, argv
+    assert "--driver-lease-held" in argv, argv
+    # --driver-lease-held must be forwarded, not merely present anywhere:
+    # select_segments.py only ever checks its presence, but pinning it right
+    # after the profile's own id list matches how run_select_segments()
+    # actually builds cmd (:1499-1537).
+    idx = argv.index("--from-stalled")
+    assert argv[idx:idx + 3] == ["--from-stalled", "seg21", "--driver-lease-held"], argv
+    assert resume_setup_call_count(root) == 1, (
+        "a --from-stalled-only invocation must resolve the run id exactly "
+        "once before selection, same as --from-cap/--from-converged"
     )
 
 
@@ -1201,10 +1266,11 @@ def test_accepted_run_id_refuses_an_unsafe_effective_run_id():
 
 
 def test_claims_field_is_required_and_propagates_through_the_empty_segs_result(tmp_path):
-    """No --from-cap/--from-converged passed -- select_segments.py's own
-    'claims' field is still validated (required on every invocation, #438
-    D3) and, being empty here, folds into an empty {} that is reported
-    in the final result exactly like every other gate decision."""
+    """No --from-cap/--from-converged/--from-stalled passed --
+    select_segments.py's own 'claims' field is still validated (required on
+    every invocation, #438 D3) and, being empty here, folds into an empty
+    {} that is reported in the final result exactly like every other gate
+    decision."""
     root = make_cli_root(tmp_path)
     proc = run_driver(root, "--allow-empty")
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"

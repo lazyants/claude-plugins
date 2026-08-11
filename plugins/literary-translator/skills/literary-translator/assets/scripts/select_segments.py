@@ -199,9 +199,9 @@ Output: exactly one JSON object on stdout. Success:
  (each stale segment's own `stale_reason` lives inline in `classification`)
  -- together this is the "classification report" the build spec requires
  (counts + IDs per category + stale_reason). `claims` (#438) is always
- present, empty {} unless --from-converged/--from-cap were given -- see the
- claim admission gate section below for its per-id shape and each
- profile's closed condition list.
+ present, empty {} unless --from-converged/--from-cap/--from-stalled were
+ given -- see the claim admission gate section below for its per-id shape
+ and each profile's closed condition list.
 Failure: {"success": false, "error": ...}. Exit 0 on success, 1 on any
 fatal condition -- callers should read stdout, not rely on the exit code
 alone.
@@ -209,6 +209,15 @@ alone.
 
 import argparse
 import errno
+# #455: the two kernel leases --from-stalled admission holds (runs/.driver.lock
+# and segments/.codex_job.<seg>.lock). Module level, matching reject_review.py's
+# own `import fcntl`, rather than the local-import treatment `os`/importlib get
+# above: those notes are about a SIBLING SCRIPT that may be absent from an
+# install, while fcntl is stdlib and present on every platform this pipeline
+# runs on. Nothing outside the --from-stalled path calls into it -- see
+# acquire_from_stalled_leases() for the acceptance criterion (an invocation
+# requesting no --from-stalled id acquires NO lock at all).
+import fcntl
 import hashlib
 import json
 # `os` is used by exactly one thing here: the shared sentinel predicate's
@@ -1557,13 +1566,61 @@ def _import_claim_record():
     return module
 
 
-# Exactly two profiles -- a third (--from-incomplete, for P3) was proposed in
-# an earlier revision and DELETED after codex round 2 showed no implementable
-# condition separates a stalled unit from ordinary live work (PLAN.md D2's
-# "P3" section). Never reintroduce a third.
+# Three profiles. `--from-incomplete` -- an ARTIFACT-ONLY attempt at this same
+# third population -- was proposed and deleted, because no condition over
+# artifacts separates a stalled unit from ordinary live work (PLAN.md D2's
+# "P3" section). `--from-stalled` (#455) reaches that population WITHOUT
+# repeating that mistake: it does not claim to tell stalled from live by
+# artifacts at all. It proves the two liveness facts this project CAN prove --
+# no competing driver holds runs/.driver.lock, and no codex job holds this
+# segment's own .codex_job.<seg>.lock -- and leaves the remainder (a Workflow
+# fix turn, another claim invocation) as an EXPLICIT OPERATOR ASSERTION that
+# the refusal text, the --help and SKILL.md all name as an assertion rather
+# than dress up as a proof. Reintroducing an artifact-only third profile is
+# still forbidden; this one is not that.
 CLAIM_PROFILE_FROM_CONVERGED = "from-converged"
 CLAIM_PROFILE_FROM_CAP = "from-cap"
-CLAIM_PROFILES = (CLAIM_PROFILE_FROM_CONVERGED, CLAIM_PROFILE_FROM_CAP)
+CLAIM_PROFILE_FROM_STALLED = "from-stalled"
+CLAIM_PROFILES = (
+    CLAIM_PROFILE_FROM_CONVERGED,
+    CLAIM_PROFILE_FROM_CAP,
+    CLAIM_PROFILE_FROM_STALLED,
+)
+
+# #455: the profile's own honesty clause, ONE string so that no surface inside
+# this script can drift into a differently-strong promise. Every in-script
+# surface INTERPOLATES this constant rather than restating it:
+#
+#   * the refusals where an operator could reasonably conclude the plugin
+#     checked more than it did -- the two lease refusals above all, since "it
+#     refused because something is running" invites "so it must SEE everything
+#     that runs" -- plus the continuation refusal;
+#   * build_arg_parser()'s --from-stalled and --driver-lease-held help text.
+#
+# The help strings USED to restate it in their own words. They agreed, and
+# nothing made them agree -- which is the drift this constant exists to close,
+# left half-closed. Each surface keeps its own framing AROUND the constant;
+# none of them may paraphrase what is inside it.
+#
+# HONEST LIMIT: SKILL.md and the changelog are prose in other files and cannot
+# import this. They are the two surfaces where the wording can still drift, and
+# a reviewer comparing surfaces has to diff those two by hand.
+#
+# The cost sentence is deliberately specific rather than "work may be lost":
+# mass-translate-wf.template.js's fix turn writes the canonical draft DIRECTLY
+# and copies whatever dispatch_token it read, so the two orderings have
+# genuinely different outcomes and an operator triaging afterwards needs to
+# know which one they are looking at.
+FROM_STALLED_DISCLOSURE = (
+    "--from-stalled PROVES exactly two facts, both kernel-held: no competing driver holds "
+    "runs/.driver.lock, and no codex job holds this segment's own "
+    "segments/.codex_job.<seg>.lock. Everything else is YOUR ASSERTION, made by naming the "
+    "id -- that no Workflow fix turn and no OTHER select_segments.py claim invocation is "
+    "touching it right now. This plugin cannot check that. If the assertion is wrong, a "
+    "concurrent fix turn writes the canonical draft directly and copies whatever "
+    "dispatch_token it read, so depending on timing it either loses its own work or leaves "
+    "this claim's re-stamped draft carrying content that nobody has re-reviewed."
+)
 
 # final_audit.py's own SAFE_STALE_CARVEOUT_FIELDS, restated per this
 # project's "no shared lib between self-contained scripts" convention (this
@@ -1584,16 +1641,26 @@ def _claim_now_iso8601() -> str:
 
 
 def parse_claim_requests(args) -> "dict[str, str]":
-    """Combines --from-converged/--from-cap into {seg: profile}. FATAL when
-    an id is named under BOTH -- an ambiguous profile is not a decision this
-    script may resolve silently: D2's two profiles are closed condition
-    lists over DIFFERENT populations, and a unit satisfying both is a design
-    error the operator must resolve by naming it under exactly one."""
+    """Combines --from-converged/--from-cap/--from-stalled into
+    {seg: profile}. FATAL when an id is named under MORE THAN ONE -- an
+    ambiguous profile is not a decision this script may resolve silently:
+    the profiles are closed condition lists over DIFFERENT populations, and
+    a unit satisfying two is a design error the operator must resolve by
+    naming it under exactly one. The three populations are disjoint on
+    materialized ledger status alone (non_converged/reason=cap;
+    converged|stale; in_progress), so any collision is an operator error
+    rather than a genuinely dual-natured unit."""
     requests: dict = {}
-    collisions = set()
+    # seg -> the flag names that claimed it, in the order given below. Kept
+    # per-id rather than as a bare set of colliding ids so the refusal can
+    # name the TWO flags actually in conflict: with three profiles there are
+    # three possible pairs, and "named under both" without saying which two
+    # sends an operator to re-read every flag on the command line.
+    flags_by_seg: dict = {}
     for flag_name, profile, raw in (
         ("--from-converged", CLAIM_PROFILE_FROM_CONVERGED, args.from_converged),
         ("--from-cap", CLAIM_PROFILE_FROM_CAP, args.from_cap),
+        ("--from-stalled", CLAIM_PROFILE_FROM_STALLED, args.from_stalled),
     ):
         if raw is None:
             continue
@@ -1601,15 +1668,22 @@ def parse_claim_requests(args) -> "dict[str, str]":
             problem = validate_seg(seg)
             if problem is not None:
                 fatal(f"{flag_name}: unsafe segment id: {problem}")
-            if seg in requests and requests[seg] != profile:
-                collisions.add(seg)
+            # De-duplicated per flag: `--from-cap a,a` names one id twice under
+            # ONE flag, which is not a collision -- only two DIFFERENT flags
+            # naming the same id are.
+            claiming_flags = flags_by_seg.setdefault(seg, [])
+            if flag_name not in claiming_flags:
+                claiming_flags.append(flag_name)
             requests[seg] = profile
+    collisions = {seg: names for seg, names in flags_by_seg.items() if len(names) > 1}
     if collisions:
+        detail = "; ".join(
+            f"{seg} ({' and '.join(names)})" for seg, names in sorted(collisions.items())
+        )
         fatal(
-            f"{len(collisions)} segment id(s) were named under BOTH --from-converged "
-            f"and --from-cap: {', '.join(sorted(collisions))}. Each id must be claimed "
-            f"under exactly one profile -- naming it under both is not a decision this "
-            f"script may resolve silently."
+            f"{len(collisions)} segment id(s) were named under more than one claim "
+            f"profile: {detail}. Each id must be claimed under exactly one profile -- "
+            f"naming it under two is not a decision this script may resolve silently."
         )
     return requests
 
@@ -1758,7 +1832,7 @@ def _current_canon_target(entries: dict, name: str):
 
 
 def evaluate_fresh_segpack_precondition(seg: str, durable_root: Path, canon_entries: dict) -> list:
-    """D6's admission precondition for BOTH profiles: the segpack's frozen
+    """D6's admission precondition for EVERY profile: the segpack's frozen
     canon_map must agree with what the CURRENT canon.json would produce,
     over the segment's WHOLE 'names' partition -- not just canon_map's
     existing keys (codex round 2: canon_map is only a SUBSET of
@@ -2161,9 +2235,9 @@ def evaluate_lost_token_recovery(seg: str, profile: str, run_id, durable_root: P
     return payload, None
 
 
-def evaluate_open_review_loop(seg: str, owner_run_id, dirs: dict):
+def evaluate_open_review_loop(seg: str, owner_run_id, dirs: dict, *, expected_profile: str):
     """(True, "") when `seg`'s draft belongs to a re-review loop this project
-    already opened, else (False, reason). #460.
+    already opened UNDER `expected_profile`, else (False, reason). #460, #455.
 
     The evidence is a claim record held by `owner_run_id` -- WHICH RUN TO ASK
     ABOUT IS THE CALLER'S DECISION, and it passes the DRAFT's own owner first.
@@ -2175,17 +2249,32 @@ def evaluate_open_review_loop(seg: str, owner_run_id, dirs: dict):
     presence: `read_claim_record()` establishes "a regular file holding a JSON
     object" and nothing more, so a three-key file at the right path would
     otherwise be a complete authorization. The record must therefore AGREE
-    with the path it was found at (its own `seg` and `run_id`), carry the
-    from-converged profile -- the same scoping D5.2 applies to the
-    in-invocation clearing, since a --from-cap claim authorizes a different
-    population for different reasons -- and carry EVERY field
-    `build_claim_record()` writes. The full-shape check is not ceremony: the
-    fourteen fields are what makes a record something only this project's own
-    claim path produces, and a partial object is exactly what a forgery or a
-    half-finished write looks like. It is still not proof of authenticity --
-    nothing in a plain file can be, and an attacker with durable-root write
-    access can overwrite the draft directly -- but it removes the case where
-    three hand-typed keys are a complete authorization.
+    with the path it was found at (its own `seg` and `run_id`), carry
+    `expected_profile` -- the same scoping D5.2 applies to the in-invocation
+    clearing, since a --from-cap claim authorizes a different population for
+    different reasons -- and carry EVERY field `build_claim_record()` writes.
+    The full-shape check is not ceremony: the fourteen fields are what makes a
+    record something only this project's own claim path produces, and a
+    partial object is exactly what a forgery or a half-finished write looks
+    like. It is still not proof of authenticity -- nothing in a plain file can
+    be, and an attacker with durable-root write access can overwrite the draft
+    directly -- but it removes the case where three hand-typed keys are a
+    complete authorization.
+
+    #455: `expected_profile` is KEYWORD-ONLY AND HAS NO DEFAULT, on purpose.
+    #460 hard-coded CLAIM_PROFILE_FROM_CONVERGED here, and --from-stalled
+    needs the identical predicate over its OWN profile (see its continuation
+    branch in evaluate_claim_admission()); a default would let a fourth
+    profile's call site inherit the from-converged condition list SILENTLY --
+    and silently is the operative word, because the wrong profile makes this
+    function refuse rather than crash, so the defect would surface only as a
+    continuation that mysteriously never continues. Required-and-explicit
+    turns that into a TypeError at the call site, the same reason
+    build_claim_record() is keyword-only with no defaults. The MUTATION that
+    must turn a test red: hard-code CLAIM_PROFILE_FROM_CONVERGED in the check
+    below again and the --from-stalled continuation tests must fail, naming
+    the profile mismatch -- if they still pass, they are not exercising this
+    parameter at all.
 
     Every failure to establish a fact returns False. The cost is asymmetric:
     refusing wrongly costs a fresh claim, admitting wrongly puts a
@@ -2211,10 +2300,10 @@ def evaluate_open_review_loop(seg: str, owner_run_id, dirs: dict):
             f"the claim record at {record_path} disagrees with its own location "
             f"(records seg={payload.get('seg')!r} run_id={payload.get('run_id')!r})"
         )
-    if payload.get("profile") != CLAIM_PROFILE_FROM_CONVERGED:
+    if payload.get("profile") != expected_profile:
         return False, (
             f"the claim record at {record_path} was granted under profile "
-            f"{payload.get('profile')!r}, not {CLAIM_PROFILE_FROM_CONVERGED!r}"
+            f"{payload.get('profile')!r}, not {expected_profile!r}"
         )
     missing = [field for field in claim_record.CLAIM_RECORD_FIELDS if field not in payload]
     if missing:
@@ -2225,6 +2314,95 @@ def evaluate_open_review_loop(seg: str, owner_run_id, dirs: dict):
             f"write or a hand-made file looks like, not what select_segments.py produces"
         )
     return True, ""
+
+
+def evaluate_open_review_loop_with_recovery(
+    seg: str,
+    dirs: dict,
+    args,
+    *,
+    source_run_id,
+    lost_token_recovery: bool,
+    expected_profile: str,
+) -> "tuple[bool, str]":
+    """evaluate_open_review_loop() plus D9's lost-token second probe --
+    `(True, "")` when `seg`'s draft belongs to a re-review loop this project
+    already opened under `expected_profile`, else `(False, why_not)`.
+
+    ONE construction, used by BOTH profiles that admit on a continuation:
+    --from-converged's dirty-review branch (#460) and --from-stalled's
+    current-review branch (#455). They were written twice, identically, and
+    the second copy's own comment said to read the first one's -- which is
+    the drift this function exists to close. The only things that legitimately
+    vary are `expected_profile` and the refusal sentence, and the refusal
+    sentence stays at the CALL SITE: what a failed continuation means is a
+    property of the profile, not of this probe.
+
+    The FIRST probe asks about `source_run_id` -- the DRAFT'S OWN OWNER --
+    and NEVER about args.run_id. They coincide whenever the same run re-enters
+    its own loop, which is the easy case and exactly why substituting
+    args.run_id here is invisible: the substitution only diverges when the
+    draft belongs to a DIFFERENT run, and then it asks "have I ever claimed
+    this?" instead of "does the draft's owner hold an open loop?" -- the #438
+    lesson about which of those two facts authorizes anything. MUTATION that
+    must turn a test red: pass args.run_id as the first probe's owner; a
+    fixture whose draft owner differs from the invoking run must then admit
+    where it should refuse.
+
+    All parameters after `args` are keyword-only and have no defaults, for
+    the reason evaluate_open_review_loop()'s own `expected_profile` does: a
+    wrong value here makes this function REFUSE rather than crash, so the
+    defect surfaces only as a continuation that mysteriously never continues.
+    """
+    open_loop, why_not = evaluate_open_review_loop(
+        seg, source_run_id, dirs, expected_profile=expected_profile
+    )
+    if not open_loop and lost_token_recovery and args.run_id and args.run_id != source_run_id:
+        # ONLY on D9's lost-token path, and the `lost_token_recovery`
+        # condition is what keeps it there. That path reaches here with
+        # `source_run_id` recovered from THIS run's own claim record -- it
+        # names the run the draft originally came FROM, which never held a
+        # claim under `expected_profile` and never should, so asking only
+        # about it would strand exactly the recovery this branch exists to
+        # enable.
+        #
+        # Gating on the RECOVERY, not merely on "the ids differ", because
+        # this run's record proves only that this run once opened a loop on
+        # this segment -- not that it opened THIS one. Without the gate, a run
+        # holding an older record from a loop over a draft that has since
+        # legitimately moved to a different owner could present that stale
+        # record as authorization for the new owner's dirty review, and no
+        # forged file would be needed.
+        #
+        # An earlier version of this comment said the D9 path makes that
+        # staleness impossible BY CONSTRUCTION, because the recovery had
+        # already authenticated the record. That was wrong, and it is recorded
+        # here rather than deleted because it was the stated reason this probe
+        # is safe. evaluate_lost_token_recovery() authenticated the record --
+        # its location, its own seg/run_id, its profile -- and never its
+        # relationship to the draft in front of it. Records are never released,
+        # so an older run's record outlives a newer run legitimately claiming
+        # the same segment, and a draft whose token was dropped no longer
+        # carries who that was. What actually excludes it is the explicit
+        # foreign-claim check at the tail of that function, added for exactly
+        # this -- not the shape of the code.
+        #
+        # The draft's own token still decides who is asked first whenever
+        # there IS one; this branch is reachable only when there is not.
+        open_loop, why_not_self = evaluate_open_review_loop(
+            seg, args.run_id, dirs, expected_profile=expected_profile
+        )
+        if not open_loop:
+            # BOTH probes are reported, each labelled with the run it asked
+            # about. A single merged sentence would make the refusal
+            # unattributable -- an operator could not tell "the owner's record
+            # has the wrong profile" from "this run has no record", and those
+            # call for different actions.
+            why_not = (
+                f"for the draft's owner {source_run_id!r}: {why_not}"
+                f"; for this run {args.run_id!r}: {why_not_self}"
+            )
+    return open_loop, why_not
 
 
 def evaluate_claim_admission(
@@ -2360,8 +2538,16 @@ def evaluate_claim_admission(
         if review_doc.get("coverage_ok") is not True:
             reasons.append(
                 f"S5: stored review's coverage_ok is {review_doc.get('coverage_ok')!r}, "
-                f"required true under BOTH profiles"
+                f"required true under EVERY claim profile"
             )
+        # #455: --from-stalled has NO arm in this chain, deliberately. Its
+        # review conditions include "a usable stored review exists at all",
+        # and this block is unreachable when `review_doc` is None -- so
+        # stating them here would make the one case that matters (no review,
+        # or a review S4 could not validate) silently unreported for this
+        # profile. They live in the profile-specific block below, which runs
+        # unconditionally, as ONE closed list rather than split across two
+        # places an operator would have to find both halves of.
         if profile == CLAIM_PROFILE_FROM_CAP:
             if review_doc.get("clean") is not False:
                 reasons.append(
@@ -2399,60 +2585,14 @@ def evaluate_claim_admission(
             # a segment does not become undispatchable the moment
             # resume_setup.py resolves a different run id.
             if review_doc.get("clean") is not True:
-                open_loop, why_not = evaluate_open_review_loop(seg, source_run_id, dirs)
-                if (
-                    not open_loop
-                    and lost_token_recovery
-                    and args.run_id
-                    and args.run_id != source_run_id
-                ):
-                    # ONLY on D9's lost-token path, and the `lost_token_recovery`
-                    # condition is what keeps it there. That path reaches here
-                    # with `source_run_id` recovered from THIS run's own claim
-                    # record -- it names the run the draft originally came FROM,
-                    # which never held a from-converged claim and never should,
-                    # so asking only about it would strand exactly the recovery
-                    # this branch exists to enable.
-                    #
-                    # Gating on the RECOVERY, not merely on "the ids differ",
-                    # because this run's record proves only that this run once
-                    # opened a loop on this segment -- not that it opened THIS
-                    # one. Without the gate, a run holding an older record from
-                    # a loop over a draft that has since legitimately moved to a
-                    # different owner could present that stale record as
-                    # authorization for the new owner's dirty review, and no
-                    # forged file would be needed.
-                    #
-                    # An earlier version of this comment said the D9 path makes
-                    # that staleness impossible BY CONSTRUCTION, because the
-                    # recovery had already authenticated the record. That was
-                    # wrong, and it is recorded here rather than deleted because
-                    # it was the stated reason this probe is safe.
-                    # evaluate_lost_token_recovery() authenticated the record --
-                    # its location, its own seg/run_id, its profile -- and never
-                    # its relationship to the draft in front of it. Records are
-                    # never released, so an older run's record outlives a newer
-                    # run legitimately claiming the same segment, and a draft
-                    # whose token was dropped no longer carries who that was.
-                    # What actually excludes it is the explicit foreign-claim
-                    # check at the tail of that function, added for exactly this
-                    # -- not the shape of the code.
-                    #
-                    # The draft's own token still decides who is asked first
-                    # whenever there IS one; this branch is reachable only when
-                    # there is not.
-                    open_loop, why_not_self = evaluate_open_review_loop(seg, args.run_id, dirs)
-                    if not open_loop:
-                        # BOTH probes are reported, each labelled with the run
-                        # it asked about. A single merged sentence would make
-                        # the refusal unattributable -- an operator could not
-                        # tell "the owner's record has the wrong profile" from
-                        # "this run has no record", and those call for
-                        # different actions.
-                        why_not = (
-                            f"for the draft's owner {source_run_id!r}: {why_not}"
-                            f"; for this run {args.run_id!r}: {why_not_self}"
-                        )
+                open_loop, why_not = evaluate_open_review_loop_with_recovery(
+                    seg,
+                    dirs,
+                    args,
+                    source_run_id=source_run_id,
+                    lost_token_recovery=lost_token_recovery,
+                    expected_profile=CLAIM_PROFILE_FROM_CONVERGED,
+                )
                 if not open_loop:
                     reasons.append(
                         f"{seg!r} requested under --from-converged, but its stored review's "
@@ -2475,8 +2615,8 @@ def evaluate_claim_admission(
     # invocation before the claim gate runs at all (D5.1's placement).
     # Handled defensively anyway, and mapped the way claim_record.py's own
     # module docstring requires for every reader of ambiguous state: AMBIGUOUS
-    # means "do not claim" for BOTH profiles, never "assume present" or
-    # "assume absent".
+    # means "do not claim" for EVERY profile that reads it, never "assume
+    # present" or "assume absent".
     if profile == CLAIM_PROFILE_FROM_CAP:
         status = ledger_record.get("status")
         reason = ledger_record.get("reason")
@@ -2519,8 +2659,144 @@ def evaluate_claim_admission(
                 f"still matches 'reviewed_draft_sha1' -- nothing has been hand-edited since "
                 f"convergence, so there is no re-review to authorize"
             )
+    elif profile == CLAIM_PROFILE_FROM_STALLED:
+        # #455. The THIRD state, and the whole reason this profile exists:
+        # materialized status in_progress, sentinel PRESENT, no
+        # reviewed_draft_sha1, a draft on disk, and a stored review that
+        # describes a draft that no longer exists. --from-cap refuses it (the
+        # status is wrong and the sentinel is present) and --from-converged
+        # refuses it (the status is wrong and there is no drift baseline), so
+        # before this profile the only route was a hand-driven
+        # ledger_update.py convergence write.
+        #
+        # EVERY condition below is reported INDEPENDENTLY -- no short-circuit,
+        # no elif chain across different facts -- because this function's
+        # contract (see its docstring) is that one pass reports every failure.
+        # An operator who fixes one condition and re-runs to discover the next
+        # pays a round trip per condition, and this population is exactly the
+        # one where several conditions fail at once.
+        status = ledger_record.get("status")
+        if status != "in_progress":
+            reasons.append(
+                f"{seg!r} requested under --from-stalled, but its materialized ledger status "
+                f"is {status!r}, not 'in_progress' -- --from-stalled's population is a unit "
+                f"whose convergence bookkeeping never completed, which is what leaves the "
+                f"status at in_progress. A converged or stale unit belongs to "
+                f"--from-converged; a non_converged/reason=cap unit belongs to --from-cap"
+            )
+        # AMBIGUOUS is "do not claim", never "assume present" -- the same
+        # mapping claim_record.py's module docstring requires of every reader
+        # of a three-state predicate, and the same one --from-converged
+        # applies immediately above. Written as `!= SENTINEL_PRESENT` rather
+        # than `== SENTINEL_ABSENT` so a future fourth state cannot default
+        # into admission.
+        if sentinel_state != SENTINEL_PRESENT:
+            detail = f" ({sentinel_detail})" if sentinel_detail else ""
+            reasons.append(
+                f"{seg!r} requested under --from-stalled, but it carries no .ever_converged "
+                f"sentinel ({sentinel_state}{detail}) -- --from-stalled's population HAS "
+                f"converged at least once; an in_progress unit with no sentinel is ordinary "
+                f"first-pass work, and re-reviewing it is not what this profile authorizes"
+            )
+        # The EXACT field whose absence makes --from-converged refuse
+        # ("the drift baseline this profile requires", in the branch above).
+        # Its absence is not an incidental property here, it is the defining
+        # one: a unit that HAS it has a baseline, so its remedy is
+        # --from-converged's drift comparison rather than this profile.
+        reviewed_draft_sha1 = ledger_record.get("reviewed_draft_sha1")
+        if isinstance(reviewed_draft_sha1, str) and reviewed_draft_sha1:
+            reasons.append(
+                f"{seg!r} requested under --from-stalled, but its ledger record already "
+                f"carries 'reviewed_draft_sha1' ({reviewed_draft_sha1!r}) -- --from-stalled "
+                f"is for a unit whose convergence write never landed, so the drift baseline "
+                f"is exactly what it does NOT have. A unit that has one is --from-converged's "
+                f"population, which compares against it"
+            )
+        # `clean` IS DELIBERATELY NOT CONSTRAINED HERE, and this is the one
+        # place --from-stalled is WIDER than --from-cap (which requires
+        # clean: false WITH findings) and than --from-converged's entry
+        # condition (clean: true). The reason is measured, not stylistic: the
+        # two live units this profile was built for disagree on that field --
+        # one carries a clean stored review, the other a dirty one -- and both
+        # are the same stalled state by every other condition. Constraining
+        # `clean` either way would therefore admit exactly one of them and
+        # send the other back to the hand procedure this profile exists to
+        # retire. What makes the stored verdict irrelevant here is STALENESS:
+        # it describes a draft that no longer exists, so whether it was clean
+        # about those older bytes says nothing about the bytes on disk now.
+        if review_doc is None:
+            # "Absent" and "present but unusable" are both reported by S4
+            # above with the detail; this reason states the CONDITION that
+            # failed for THIS profile rather than restating S4's finding,
+            # because a from-stalled unit without a readable review is not
+            # merely missing a gate input -- it is not in this population at
+            # all (the population is defined by having been reviewed).
+            reasons.append(
+                f"{seg!r} requested under --from-stalled, but no usable stored review was "
+                f"read for it (see the S4 reason above for what was wrong with it) -- "
+                f"--from-stalled's population has been reviewed at least once, and the "
+                f"stored review is what this profile compares against the current draft"
+            )
+        elif current_draft_sha1 is None:
+            # Reported as its own condition rather than folded into the
+            # staleness comparison: `None == "<sha1>"` is False, which would
+            # have made an UNHASHABLE draft look STALE and admit. The failure
+            # to hash is already reported above; this says what it cost.
+            reasons.append(
+                f"{seg!r} requested under --from-stalled, but its current draft's content "
+                f"sha1 could not be computed (see the reason above), so the stored review "
+                f"cannot be shown to be stale against it -- refusing rather than treat an "
+                f"unhashable draft as one whose review no longer applies"
+            )
+        else:
+            # review.draft_sha1 vs the CURRENT draft's content sha1 -- the
+            # identical comparison ledger_update.py's own review-artifact
+            # binding check makes (its `current_draft_sha1 != reviewer_draft_sha1`),
+            # over the identical hash: draft_content_sha1() above is
+            # byte-for-byte draft_sha1.py's, and review.schema.json requires
+            # `draft_sha1`, so S4 has already established it is a string.
+            #
+            # ENTRY CONDITION, NOT A STANDING ONE -- and this is the half that
+            # keeps the profile from stranding the loop it opens. Once
+            # --from-stalled dispatches a fresh review and that review is
+            # promoted, the review is CURRENT. If the driver then dies before
+            # the convergence write, or the fresh verdict is rejected via
+            # reject_review.py without editing the draft, the unit is back to
+            # in_progress + sentinel + no reviewed_draft_sha1 -- with a
+            # CURRENT review. A standing staleness gate would refuse re-entry
+            # and leave the operator exactly where this profile found them.
+            #
+            # The continuation is AUTHENTICATED rather than assumed, the same
+            # shape #460 gave --from-converged's dirty-review branch: a
+            # current review continues only when the DRAFT'S OWN OWNER holds a
+            # COMPLETE claim record for this segment under THIS profile.
+            # "The review is current" is just as true of a segment nobody ever
+            # claimed, so it authorizes nothing by itself.
+            # A MISMATCH is the entry condition itself and needs no branch:
+            # the stored verdict describes a draft that no longer exists, which
+            # is the population. Only the MATCH -- a current review -- has to
+            # justify itself, below.
+            if review_doc.get("draft_sha1") == current_draft_sha1:
+                open_loop, why_not = evaluate_open_review_loop_with_recovery(
+                    seg,
+                    dirs,
+                    args,
+                    source_run_id=source_run_id,
+                    lost_token_recovery=lost_token_recovery,
+                    expected_profile=CLAIM_PROFILE_FROM_STALLED,
+                )
+                if not open_loop:
+                    reasons.append(
+                        f"{seg!r} requested under --from-stalled, but its stored review's "
+                        f"'draft_sha1' still matches the current draft ({current_draft_sha1!r}) "
+                        f"-- the stored verdict describes the draft that is there NOW, so this "
+                        f"is not the stalled population. A CURRENT review is admitted only as "
+                        f"the continuation of a re-review loop this profile already opened, "
+                        f"and that could not be established here: {why_not}. "
+                        f"{FROM_STALLED_DISCLOSURE}"
+                    )
 
-    # ---- D6: fresh-segpack precondition -- BOTH profiles ------------------
+    # ---- D6: fresh-segpack precondition -- EVERY profile ------------------
     segpack_mismatches = evaluate_fresh_segpack_precondition(seg, durable_root, canon_entries)
     if segpack_mismatches:
         if len(segpack_mismatches) == 1 and "error" in segpack_mismatches[0]:
@@ -2550,11 +2826,31 @@ def evaluate_claim_admission(
         return False, reasons, {}
 
     # ---- cache-key diff -- REPORTING only, never gating (decision 5). ----
-    # --from-cap fragments carry no 'cache_key' field at all (it is written
-    # only on the convergence path) -- D6's own "for --from-cap, this
-    # condition CANNOT EXIST" box -- so there is no historical baseline to
-    # diff against, recorded as a note rather than an empty (and misleading)
-    # moved-fields list.
+    # `cache_key` is written only on the convergence path, so a fragment that
+    # has never converged carries no such field at all and there is no
+    # historical baseline to diff against. Recorded as a note rather than an
+    # empty (and misleading) moved-fields list.
+    #
+    # ANY profile can reach this branch, which is why the note interpolates the
+    # profile it was produced under rather than hard-coding one. Two reach it
+    # routinely: --from-cap (D6's own "for --from-cap, this condition CANNOT
+    # EXIST" box) and, since #455, --from-stalled, whose `in_progress`
+    # population is equally pre-convergence in its bookkeeping.
+    #
+    # --from-converged reaches it too, and only an ANOMALOUS record gets it
+    # there -- which is exactly why the note must not assert a profile. A
+    # converged fragment that is missing `cache_key` is downgraded to `stale`
+    # by ledger_merge.py rather than trusted, `ledger.schema.json` permits a
+    # stale entry to carry no key (only `converged` requires one), and
+    # --from-converged accepts `stale` via WAS_CONVERGED_STATUSES. So the note
+    # can legitimately read "expected for --from-converged" on a record where
+    # it is not expected at all. An earlier revision of this comment claimed
+    # exactly two profiles reach here; that was wrong and is recorded rather
+    # than quietly corrected, because the wrong version reads as more precise.
+    #
+    # The note is persisted verbatim as the durable record's `cache_key_note`,
+    # so the profile named here is not a cosmetic comment -- it is the audit
+    # trail a reader who was not present will use to understand the claim.
     stored_cache_key = ledger_record.get("cache_key")
     moved_fields = []
     cache_key_note = None
@@ -2573,9 +2869,9 @@ def evaluate_claim_admission(
         ]
     else:
         cache_key_note = (
-            "no recorded cache_key on this fragment -- expected for --from-cap (cache_key is "
-            "written only on the convergence path); no historical baseline exists to compare "
-            "against"
+            f"no recorded cache_key on this fragment -- expected for --{profile} (cache_key is "
+            f"written only on the convergence path); no historical baseline exists to compare "
+            f"against"
         )
     # TRI-STATE, and produced in ONE place rather than half here and half at
     # the `extras` key below: None is "no movement to characterise", a
@@ -3246,6 +3542,374 @@ def rewrite_draft_dispatch_token(
 
 
 # ---------------------------------------------------------------------------
+# #455: the two kernel leases --from-stalled admission holds
+#
+# NOTHING IN THIS SECTION RUNS UNLESS AT LEAST ONE --from-stalled ID WAS
+# REQUESTED. That is acceptance criterion 4 -- an ordinary invocation must be
+# unchanged, INCLUDING acquiring no lock and creating no lock file -- and it is
+# structural rather than intended: acquire_from_stalled_leases() below is the
+# ONLY caller of everything here, and run() calls it inside a single
+# `if stalled_segs:` guard nested in the existing `if claim_requests:` block.
+#
+# WHY HOLD RATHER THAN PROBE. A probe that acquires and releases answers "was
+# anything running a moment ago", which is not the question. The claim writes
+# TWICE -- the durable claim record, then the draft's own dispatch_token (a
+# full-file os.replace of the canonical draft) -- and the fact that has to hold
+# is "nothing else is writing this draft WHILE those two writes happen". So
+# every lease is taken before the admission gates read anything and is held,
+# by descriptor, until the process exits. The fds are parked in a module-level
+# list for the reason reject_review.py parks its own: an flock lives on its
+# open file description and dies with it, so ANY edit that closes the
+# descriptor -- a reader deciding a write-only "unused" variable can be
+# dropped along with the acquire that produced it, or a refactor from
+# os.open() to a file object, which a raw int fd is NOT and which the garbage
+# collector WOULD close -- silently releases the lease and leaves code that
+# looks locked and is not.
+# ---------------------------------------------------------------------------
+
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+# segment_dispatch_driver.py's own DRIVER_LOCK_NAME, restated here per this
+# project's "no shared lib between self-contained scripts" convention -- the
+# same way this file already restates CACHE_KEY_FIELDS and the sentinel
+# predicate. The two names MUST stay equal: they are the same lock, and a
+# divergence would make this script take a lease no driver ever contends for,
+# which reads exactly like a lease that works.
+DRIVER_LOCK_NAME = ".driver.lock"
+
+# Every lease this process holds, kept open for its whole lifetime. See the
+# section comment: this list is the only thing keeping the flocks alive.
+_HELD_LOCK_FDS: "list[int]" = []
+
+# _independent_lock_attempt()'s three outcomes. Three, not a bool, because
+# BOTH consumers below must map "could not even try" to a refusal rather than
+# to either answer: an errored probe reported as "refused" would be read as
+# "somebody holds it", which is the unsafe direction on the --driver-lease-held
+# path (it would confirm an assertion nothing checked).
+_PROBE_ACQUIRED = "acquired"
+_PROBE_REFUSED = "refused"
+_PROBE_ERROR = "error"
+
+
+def driver_lock_path(durable_root: Path) -> Path:
+    """runs/.driver.lock -- the same path segment_dispatch_driver.py's own
+    driver_lock_path() builds."""
+    return durable_root / "runs" / DRIVER_LOCK_NAME
+
+
+def codex_job_lock_path(seg: str, segments_dir: Path) -> Path:
+    """segments/.codex_job.<seg>.lock -- the same path codex_job.py builds for
+    its per-segment lease (its `self.lock`), and the same naming
+    reject_review.py's `.reject_review.<seg>.lock` follows.
+
+    `seg` reaches here only after validate_seg() (parse_claim_requests() runs
+    it on every id under every flag), so no id that could escape this
+    directory can be spliced into this name."""
+    return segments_dir / f".codex_job.{seg}.lock"
+
+
+def _open_lock_file(lock_path: Path) -> "tuple[int, str]":
+    """`(fd, "")` for an opened, verified-REGULAR lock file, or `(-1, problem)`.
+
+    O_NOFOLLOW|O_NONBLOCK and an fstat ON THE DESCRIPTOR, mirroring
+    reject_review.py's acquire_rejection_lock(), because this path has the same
+    provenance problem: it is predictable and it lives inside a durable root
+    the threat model says other processes write. Without O_NOFOLLOW a planted
+    `.codex_job.<seg>.lock -> /somewhere/outside` is FOLLOWED and O_CREAT then
+    creates that external target with the operator's privileges; a symlink
+    pointing at some OTHER lock inode is the second half, under which
+    serialisation advertised as per-path silently becomes per-whatever-the-
+    link-names. The fstat is on the fd rather than the path so the check cannot
+    be raced after the open. O_NONBLOCK for the reason reject_review.py
+    measured: a FIFO at this path would otherwise hang the command.
+
+    NOTE the deliberate asymmetry with segment_dispatch_driver.py, which opens
+    runs/.driver.lock with a plain O_CREAT|O_RDWR. If something has planted a
+    symlink or a device there, the driver follows it and this script refuses --
+    the two disagree, and REFUSING is the direction to disagree in: the cost is
+    that one --from-stalled claim stops with a message naming the path, versus
+    taking a lease on an inode nobody else contends for."""
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(
+            str(lock_path),
+            os.O_CREAT | os.O_RDWR | _O_CLOEXEC | _O_NOFOLLOW | _O_NONBLOCK,
+            0o600,
+        )
+    except OSError as exc:
+        return -1, (
+            f"could not open {lock_path}: {exc}. A symlink or special file at that path is "
+            f"REFUSED rather than followed -- if one is there, something else put it there"
+        )
+    try:
+        lock_st = os.fstat(fd)
+    except OSError as exc:
+        os.close(fd)
+        return -1, (
+            f"could not stat {lock_path} after opening it: {exc}. Refusing rather than "
+            f"serialise on something whose kind could not be established"
+        )
+    if not stat.S_ISREG(lock_st.st_mode):
+        os.close(fd)
+        return -1, (
+            f"{lock_path} is not a regular file. Refusing rather than take a lease on a "
+            f"device, socket or directory -- remove whatever is at that path and re-run"
+        )
+    return fd, ""
+
+
+def _independent_lock_attempt(lock_path: Path) -> "tuple[str, str]":
+    """Can a genuinely INDEPENDENT open of `lock_path` take LOCK_EX|LOCK_NB
+    right now? Returns (_PROBE_ACQUIRED | _PROBE_REFUSED | _PROBE_ERROR,
+    detail) and NEVER leaves a lock held: an acquired probe is unlocked and
+    closed before returning.
+
+    `flock` is scoped per OPEN FILE DESCRIPTION, not per process and not per fd
+    table, so a second open() of the same path contends for real against a
+    lease this same process already holds -- it cannot self-deadlock, and it
+    behaves exactly as a second process would (segment_dispatch_driver.py's own
+    lock self-test rests on this, measured: BlockingIOError, errno 35).
+
+    ONE primitive, read two different ways by its two callers:
+
+      * as an ENFORCEMENT self-test, run right after we take a lease: _ACQUIRED
+        means this filesystem does not enforce flock at all, so the lease we
+        just "took" is worthless;
+      * as the --driver-lease-held KERNEL RE-CONFIRMATION: _ACQUIRED means
+        nobody holds the driver lease, so the flag's assertion is false.
+
+    Both callers refuse on _ACQUIRED and on _ERROR, and proceed only on
+    _REFUSED."""
+    fd, problem = _open_lock_file(lock_path)
+    if fd < 0:
+        return _PROBE_ERROR, problem
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            # ONLY the documented contention errnos mean "somebody else holds
+            # it". Everything else is a FAILED PROBE, and the difference is the
+            # whole safety property: both callers proceed on _REFUSED and
+            # refuse on _ERROR, so mapping an arbitrary OSError to _REFUSED
+            # manufactures the evidence they are asking for. Measured: an
+            # injected ENOLCK returned ('refused', 'was refused ([Errno 77] No
+            # locks available)') from an earlier version of this function --
+            # i.e. a filesystem that cannot lock at all read as proof that a
+            # lease is held, which is exactly backwards and defeats the
+            # fail-closed claim this whole probe exists to make.
+            #
+            # EAGAIN and EWOULDBLOCK are the POSIX answers; they are the same
+            # value on Linux and macOS but are spelled separately because the
+            # standard does not require that. EACCES is included because some
+            # platforms report a contended LOCK_NB that way.
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+                return _PROBE_REFUSED, f"was refused ({exc})"
+            return _PROBE_ERROR, (
+                f"could not be attempted -- flock failed with a non-contention error "
+                f"({exc}). This is NOT evidence that another process holds the lock: "
+                f"the probe itself did not run"
+            )
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return _PROBE_ACQUIRED, "SUCCEEDED"
+    finally:
+        # Closed on EVERY path. A probe that leaked its descriptor would make
+        # the NEXT probe on the same path report "refused" against nothing but
+        # itself -- manufacturing the very evidence it exists to gather.
+        #
+        # Closing THIS descriptor cannot release a lease this process holds on
+        # the same file through a different one: flock() is scoped per OPEN
+        # FILE DESCRIPTION. (POSIX record locks, fcntl.lockf(), are the ones
+        # where closing ANY descriptor on the file drops the lock -- this is
+        # precisely why the whole scheme, here and in every sibling script,
+        # uses flock and not lockf.)
+        os.close(fd)
+
+
+def acquire_and_hold_lease(lock_path: Path, what: str) -> "tuple[bool, str]":
+    """Takes LOCK_EX|LOCK_NB on `lock_path` and HOLDS it for the life of this
+    process. `(True, "")` on success, `(False, problem)` otherwise.
+
+    Non-blocking, never a bounded retry loop (reject_review.py retries because
+    it serialises two humans typing the same command; here a held lease means
+    real work is in flight on this segment, and waiting for it would only make
+    the admission decision rest on state that changed while we waited).
+
+    The self-test after a successful acquire is
+    segment_dispatch_driver.py:1195-1250's, with ONE deliberate difference: it
+    warns and proceeds, THIS REFUSES. The asymmetry is the point. On an
+    unenforced mount the driver's own acquire is merely not exclusive, whereas
+    this script's standalone path would FALSELY ACQUIRE runs/.driver.lock while
+    a real driver holds it and then admit a live unit -- the unsafe direction,
+    and the one an operator would read as "the plugin checked". Refusing costs
+    one profile on an exotic filesystem; the alternative costs a draft."""
+    fd, problem = _open_lock_file(lock_path)
+    if fd < 0:
+        return False, problem
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        return False, (
+            f"{what} at {lock_path} is HELD by another process ({exc}). It is a kernel "
+            f"flock, released automatically when its holder exits or crashes, so it cannot "
+            f"be stale while a process holds it -- wait for that process to finish and "
+            f"re-run"
+        )
+    # Parked BEFORE the self-test, never after: between acquiring and parking,
+    # any early return would drop the only reference keeping the flock alive.
+    _HELD_LOCK_FDS.append(fd)
+    state, detail = _independent_lock_attempt(lock_path)
+    # Both non-REFUSED outcomes fail the acquire, but they are DIFFERENT facts
+    # and are reported as such: one says the filesystem does not enforce flock,
+    # the other says the self-test could not run at all. Collapsing them into
+    # one sentence would send an operator to investigate a mount that is fine.
+    #
+    # The lease is left HELD on both failure paths rather than released. The
+    # refusal is about to end this invocation, and dropping it first would open
+    # the exact window it exists to close for the ids still being evaluated.
+    # MUTATION that must turn a test red: downgrade this to a stderr warning
+    # and proceed (segment_dispatch_driver.py's own choice, right for a driver
+    # and wrong here) -- the unenforced-flock fixture must then admit.
+    if state == _PROBE_ACQUIRED:
+        return False, (
+            f"flock is NOT enforced for {lock_path} on this filesystem: a second, "
+            f"independent LOCK_EX|LOCK_NB attempt against the SAME path {detail} instead of "
+            f"being refused, while this process already holds it. The lease is therefore "
+            f"worthless here -- it would let this claim proceed alongside a driver or a "
+            f"codex job that genuinely holds it, with nothing ever printed. Known on some "
+            f"network filesystems (NFS/SMB) that do not implement flock. --from-stalled "
+            f"REFUSES rather than warn-and-continue, because the direction this fails in is "
+            f"a false ACQUIRE, not a false refusal"
+        )
+    if state == _PROBE_ERROR:
+        return False, (
+            f"the flock-enforcement self-test for {lock_path} could not be run: {detail}. "
+            f"This lease was acquired, but whether this filesystem enforces it is now "
+            f"unknown -- refused rather than assumed enforced, the same direction every "
+            f"'cannot establish' branch in this file takes"
+        )
+    return True, ""
+
+
+def acquire_from_stalled_leases(stalled_segs: list, dirs: dict, args) -> "dict[str, list]":
+    """Establishes -- and holds -- both #455 leases for every requested
+    --from-stalled id. Returns {seg: [reason, ...]} for the ids that must be
+    refused; an empty dict means every lease is held.
+
+    Called ONLY when `stalled_segs` is non-empty (acceptance criterion 4), and
+    strictly BEFORE the admission gates read any artifact, so the whole
+    decision -- read, admit, write the claim record, re-stamp the draft --
+    happens under both leases rather than after a probe that proved something
+    about a moment already past.
+
+    WHAT EACH LEASE IS FOR, and what it is not.
+
+    runs/.driver.lock excludes a competing DRIVER on this machine. It does not
+    exclude a Workflow-driven run (SKILL.md is explicit that the lease "only
+    serializes two driver launches against each other"), and it does not
+    exclude a second machine reaching the same durable root through a
+    sync-replicated folder -- see segment_dispatch_driver.py's own docstring
+    for why no flock-based scheme can. FROM_STALLED_DISCLOSURE states what is
+    left as the operator's assertion; do not let this comment, the --help text
+    and that constant drift into three different promises.
+
+    segments/.codex_job.<seg>.lock is the leg that actually protects the draft.
+    codex_job.py opens and flocks exactly this path immediately before launch()
+    (codex_job.py:1426-1427) and releases it in the finally after finalize()
+    (:1540-1549), and its canonical promotion -- os.replace(self.attempt,
+    self.canonical), :1524 -- sits INSIDE that window re-checking neither the
+    draft's dispatch_token nor any claim record. Holding it across our claim
+    write and token re-stamp is what stops an already-launched job from
+    overwriting a freshly claimed draft and restoring its old token; a job that
+    starts AFTERWARDS instead meets _refuse_claimed_translate() (D8,
+    codex_job.py:1030) with the claim already on disk.
+
+    ONE MORE THING THIS DOES NOT COVER, stated because the gap is invisible:
+    the materialized ledger these gates read was loaded by run() before any
+    lease was taken. The leases protect the DRAFT -- the artifact this
+    invocation destroys and rewrites -- not that snapshot."""
+    durable_root = dirs["durable_root"]
+    lock_path = driver_lock_path(durable_root)
+
+    # ---- lease 1: the project-wide driver lease ---------------------------
+    if args.driver_lease_held:
+        # The flag is a POINTER, never a grant. The driver spawns this script
+        # with subprocess.run() and no pass_fds, so close_fds=True strips its
+        # lease fd and a fresh open() here would be refused by our own parent
+        # on every dispatch -- which is why we must NOT try to acquire. What we
+        # CAN do is confirm the assertion against the kernel: an independent
+        # attempt must FAIL. Kernel contention proves only that SOME
+        # independent open file description holds this lease, never that it is
+        # our parent's; the parent's identity rests on the driver's own control
+        # flow (the flag is set only after acquire_driver_lock() returned) and
+        # on the trusted-operator boundary. Say that rather than claim more: an
+        # operator running this script directly with a forged
+        # --driver-lease-held while a real driver runs would pass this check,
+        # and that actor is already inside the trust boundary.
+        #
+        # This same probe is ALSO the unenforced-flock check for this path: on
+        # a filesystem that does not enforce flock the attempt SUCCEEDS, and
+        # success refuses here for either reading. MUTATION that must turn a
+        # test red: trust the flag without the probe.
+        state, detail = _independent_lock_attempt(lock_path)
+        if state != _PROBE_REFUSED:
+            problem = (
+                f"--driver-lease-held was passed, but that assertion could not be confirmed "
+                f"against the kernel: an independent LOCK_EX|LOCK_NB attempt on {lock_path} "
+                f"{detail}. The flag says segment_dispatch_driver.py already holds that "
+                f"lease, in which case the attempt MUST be refused. Acquiring it instead "
+                f"means either that nobody holds the lease (so the flag is false) or that "
+                f"this filesystem does not enforce flock at all (so no lease here means "
+                f"anything); an errored attempt means the fact could not be established. "
+                f"All three refuse. Every --from-stalled id in this invocation is refused"
+            )
+            return {seg: [f"{seg!r}: {problem}. {FROM_STALLED_DISCLOSURE}"] for seg in stalled_segs}
+    else:
+        ok, problem = acquire_and_hold_lease(lock_path, "the project-wide driver lease")
+        if not ok:
+            return {
+                seg: [
+                    f"{seg!r} requested under --from-stalled, but this invocation could not "
+                    f"take the project-wide driver lease: {problem}. A driver holding that "
+                    f"lease is dispatching work against this same durable root, and its "
+                    f"dispatches rewrite the very drafts a claim re-stamps. Every "
+                    f"--from-stalled id in this invocation is refused. "
+                    f"{FROM_STALLED_DISCLOSURE}"
+                ]
+                for seg in stalled_segs
+            }
+
+    # ---- lease 2: the per-segment codex-job lease --------------------------
+    # Per id, and a failure refuses THAT id only -- the driver lease above is
+    # project-wide and refuses all of them, this one is not. The id is refused
+    # WITHOUT running its admission gates: with a codex job holding the segment,
+    # every artifact those gates read is one the job may be about to replace, so
+    # reporting "and also its review is stale" would be reporting on state we
+    # have just established we do not own.
+    failures: dict = {}
+    segments_dir = durable_root / "segments"
+    for seg in stalled_segs:
+        seg_lock = codex_job_lock_path(seg, segments_dir)
+        ok, problem = acquire_and_hold_lease(seg_lock, f"segment {seg!r}'s codex-job lease")
+        if not ok:
+            failures[seg] = [
+                f"{seg!r} requested under --from-stalled, but this invocation could not take "
+                f"that segment's own codex-job lease at {seg_lock}: {problem}. codex_job.py "
+                f"holds exactly this lock across its canonical promotion "
+                f"(os.replace(attempt, canonical), codex_job.py:1524), which re-checks "
+                f"neither the draft's dispatch_token nor any claim record -- so claiming "
+                f"while it is held would let an already-launched job overwrite the draft "
+                f"this claim just re-stamped and put its old token back. "
+                f"{FROM_STALLED_DISCLOSURE}"
+            ]
+    return failures
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -3275,8 +3939,31 @@ def run(args, dirs: dict) -> dict:
     if claim_requests and args.classify_only:
         fatal(
             "--classify-only produces a read-only report and may not be combined with a "
-            "claim (--from-converged/--from-cap write a durable claim record on disk) -- "
-            "run the claim in its own invocation."
+            "claim (--from-converged/--from-cap/--from-stalled write a durable claim record "
+            "on disk) -- run the claim in its own invocation."
+        )
+
+    # #455: --driver-lease-held is meaningful ONLY as the carrier of a
+    # --from-stalled admission, so it is refused outright without one rather
+    # than accepted and ignored. Two reasons it is a refusal and not a no-op:
+    # a flag that silently does nothing teaches an operator (and a future
+    # caller) that it is harmless to pass, and this one is an ASSERTION about
+    # the kernel -- the one kind of argument that must never be accepted where
+    # nothing will check it. Placed here, beside the --classify-only
+    # incompatibility, so it costs no I/O: acceptance criterion 4 is that an
+    # invocation requesting no --from-stalled id acquires NO lock, and this
+    # refusal fires long before anything could.
+    stalled_requested = sorted(
+        seg for seg, prof in claim_requests.items() if prof == CLAIM_PROFILE_FROM_STALLED
+    )
+    if args.driver_lease_held and not stalled_requested:
+        fatal(
+            "--driver-lease-held was passed without any --from-stalled id. That flag exists "
+            "only to tell this script that segment_dispatch_driver.py already holds "
+            f"runs/{DRIVER_LOCK_NAME} for a --from-stalled admission, and nothing else in "
+            "this script reads it. Refused rather than ignored: it asserts a fact about the "
+            "kernel, and accepting an assertion nothing will check is how a pointer becomes "
+            "a grant."
         )
 
     # #438/#409 Step 3: --run-id and --run-resume are a PAIR, validated
@@ -3623,8 +4310,9 @@ def run(args, dirs: dict) -> dict:
         run_id = args.run_id
         if run_id is None:
             fatal(
-                "a claim (--from-converged/--from-cap) was requested but --run-id was not "
-                "given. --run-id must be passed explicitly and is never derived from a token "
+                "a claim (--from-converged/--from-cap/--from-stalled) was requested but "
+                "--run-id was not given. --run-id must be passed explicitly and is never "
+                "derived from a token "
                 "-- deriving it would make a malformed token read as 'not claimed' and "
                 "silently proceed (PLAN.md D8).",
                 classification=classification,
@@ -3656,20 +4344,81 @@ def run(args, dirs: dict) -> dict:
                 ids_by_category=ids_by_category,
             )
 
+        # D3b (#455): when a --from-stalled id is requested, the emitted segs
+        # must ALSO be a subset of the claimed ids. D3 above enforces only the
+        # other direction, and for --from-cap that is enough: its population is
+        # human_escalation, which is outside DEFAULT_ELIGIBLE_CATEGORIES, so
+        # none of its ids reaches `segs` at all unless --only-segs names them.
+        # A stalled unit is `in_progress`, which classify_segment() reports as
+        # `recoverable` (:1414) and DEFAULT_ELIGIBLE_CATEGORIES contains
+        # (:1432) -- so the subset direction is satisfied for free and the
+        # --only-segs requirement this profile's help text states was enforced
+        # by nothing. Measured: --from-stalled over one id emitted a second,
+        # unclaimed id for dispatch and reported success.
+        #
+        # What that costs is not a tidiness argument. The run would spend paid
+        # turns on units the operator never named, and FROM_STALLED_DISCLOSURE
+        # -- the assertion this profile collects, that no fix turn and no other
+        # claim invocation is touching these ids -- is scoped to the ids NAMED
+        # on the flag. Dispatching beyond them acts outside the only assurance
+        # the operator gave.
+        #
+        # Placed ABOVE the previously_converged fatal (:4601) deliberately, and
+        # this ordering is load-bearing rather than incidental. A sentinel-
+        # bearing unclaimed sibling IS refused down there -- so a check placed
+        # after it passes every test that only asks "did the run refuse" --
+        # but by the wrong gate, naming --allow-retranslate-converged as the
+        # remedy. On this population that flag is the one that re-translates
+        # hand-corrected drafts, so the misleading message coaches the operator
+        # toward the single most destructive action available. It also stops
+        # refusing the moment anyone passes that flag. Refusing here names
+        # --only-segs, which is what the operator actually needs.
+        #
+        # SUBSET, not equality: a mixed invocation also carrying --from-cap or
+        # --from-converged ids stays legal, because every emitted seg is still
+        # claimed under SOME profile. An equality check against the stalled ids
+        # alone would break that case for no gain.
+        if stalled_requested:
+            unclaimed_emitted = sorted(seg for seg in segs if seg not in claim_requests)
+            if unclaimed_emitted:
+                fatal(
+                    f"--from-stalled was requested for {', '.join(stalled_requested)}, but "
+                    f"{len(unclaimed_emitted)} emitted seg(s) are not claimed by this "
+                    f"invocation: {', '.join(unclaimed_emitted)}. A --from-stalled run must "
+                    f"dispatch ONLY what it claims -- pass --only-segs naming exactly the "
+                    f"claimed ids. This profile's population is `in_progress`, which is "
+                    f"dispatch-eligible by default, so without --only-segs this run would "
+                    f"also work on units you never named -- outside the assertion "
+                    f"--from-stalled collects from you, which covers only the ids on the flag.",
+                    classification=classification,
+                    counts=counts,
+                    ids_by_category=ids_by_category,
+                )
+
         # D5.3: overlap between a claim and --allow-retranslate-converged is
         # REJECTED OUTRIGHT, not resolved by precedence -- checked over the
-        # REQUESTED --from-converged ids, before any admission work runs.
+        # REQUESTED sentinel-bearing ids, before any admission work runs.
         # --from-cap is deliberately absent here: its population carries no
         # sentinel, so it never reaches previously_converged at all.
-        from_converged_requested = {
-            seg for seg, profile in claim_requests.items() if profile == CLAIM_PROFILE_FROM_CONVERGED
+        #
+        # #455: --from-stalled joins --from-converged for exactly the reason
+        # --from-cap stays out -- it REQUIRES the sentinel, so its ids do reach
+        # previously_converged and the same collision is reachable. Read over
+        # the REQUESTED set (not the admitted one) deliberately: this fires
+        # before any admission work, so a contradictory pair of flags costs the
+        # operator a refusal rather than a half-performed claim.
+        sentinel_bearing_requested = {
+            seg
+            for seg, profile in claim_requests.items()
+            if profile in (CLAIM_PROFILE_FROM_CONVERGED, CLAIM_PROFILE_FROM_STALLED)
         }
         if args.allow_retranslate_converged:
-            overlap = sorted(from_converged_requested & set(previously_converged))
+            overlap = sorted(sentinel_bearing_requested & set(previously_converged))
             if overlap:
+                named = ", ".join(f"{seg} (--{claim_requests[seg]})" for seg in overlap)
                 fatal(
-                    f"{len(overlap)} segment(s) are named under --from-converged AND covered "
-                    f"by --allow-retranslate-converged: {', '.join(overlap)}. Rejected "
+                    f"{len(overlap)} segment(s) are named under a sentinel-bearing claim "
+                    f"profile AND covered by --allow-retranslate-converged: {named}. Rejected "
                     f"outright -- --allow-retranslate-converged authorizes RE-TRANSLATION, a "
                     f"claim authorizes RE-REVIEW only, and 'claim wins' would be one flag "
                     f"silently changing the other's meaning. Split this into two invocations.",
@@ -3678,6 +4427,23 @@ def run(args, dirs: dict) -> dict:
                     ids_by_category=ids_by_category,
                     previously_converged=previously_converged,
                 )
+
+        # #455: BOTH kernel leases, taken here and HELD until this process
+        # exits. Placed after every cheap, purely-argument-shaped refusal above
+        # (a contradictory command should not touch a lock) and strictly before
+        # the admission gates below read a single artifact, so the whole
+        # decision -- read, admit, write the claim record, re-stamp the draft --
+        # runs inside the critical section rather than after a probe that
+        # proved something about a moment already past.
+        #
+        # ACCEPTANCE CRITERION 4 LIVES ON THIS `if`. Everything lock-related in
+        # this script is reachable only through this one call, and this call is
+        # reachable only when at least one --from-stalled id was requested. An
+        # ordinary invocation -- including a --from-cap or --from-converged
+        # claim -- takes no lease, runs no probe, and creates no lock file.
+        lock_failures: dict = {}
+        if stalled_requested:
+            lock_failures = acquire_from_stalled_leases(stalled_requested, dirs, args)
 
         canon_entries, canon_err = load_current_canon_entries(dirs["durable_root"])
         if canon_entries is None:
@@ -3695,6 +4461,17 @@ def run(args, dirs: dict) -> dict:
         admitted: dict = {}
         failures: dict = {}
         for seg, profile in sorted(claim_requests.items()):
+            # #455: an id whose lease could not be taken is refused WITHOUT
+            # running its gates. Not an optimisation -- with a driver or a
+            # codex job holding the segment, every artifact those gates read is
+            # one the holder may be mid-way through replacing, so appending
+            # "and its review is stale too" would be reporting on state we have
+            # just established we do not own. The other profiles' ids are still
+            # evaluated in this same pass, so D2's one-round-trip contract
+            # holds for everything this refusal does not cover.
+            if seg in lock_failures:
+                failures[seg] = lock_failures[seg]
+                continue
             ok, reasons, extras = evaluate_claim_admission(
                 seg, profile, ledger_segments.get(seg), dirs, canon_entries, args
             )
@@ -3845,14 +4622,33 @@ def run(args, dirs: dict) -> dict:
                 ids_by_category=ids_by_category,
             )
 
-        # D5.2: a --from-converged claim clears previously_converged for
+        # D5.2: a SENTINEL-BEARING claim clears previously_converged for
         # EXACTLY its own SUCCESSFULLY-ADMITTED-AND-RECORDED ids -- never
         # the merely requested ones. A claim that failed any gate above
         # already fataled the whole invocation, so by construction every
         # key in claims_payload here passed every S-gate, its profile
         # condition, and D6.
+        #
+        # #455: BOTH sentinel-bearing profiles clear, not just
+        # --from-converged. previously_converged is built from sentinel state
+        # ALONE for every requested seg (see its own loop above), and
+        # --from-stalled REQUIRES the sentinel to be PRESENT, so every id it
+        # admits lands in that list. Left uncleared, the unconditional fatal
+        # immediately below would fire on this invocation's own successful
+        # admission -- and D5.3 above rejects the --allow-retranslate-converged
+        # escape outright, so a from-stalled claim would have had no route at
+        # all. The rationale is the one already written here for
+        # --from-converged and it transfers unchanged: a claim authorizes
+        # RE-REVIEW, never re-translation, so the refusal this clearing lifts
+        # ("these would be TRANSLATED again") was never about these ids.
+        # --from-cap is absent for the reason it is absent everywhere in this
+        # neighbourhood: its population has no sentinel, so it never reaches
+        # previously_converged to begin with.
         cleared = {
-            seg for seg in claims_payload if claim_requests.get(seg) == CLAIM_PROFILE_FROM_CONVERGED
+            seg
+            for seg in claims_payload
+            if claim_requests.get(seg)
+            in (CLAIM_PROFILE_FROM_CONVERGED, CLAIM_PROFILE_FROM_STALLED)
         }
         previously_converged = [seg for seg in previously_converged if seg not in cleared]
 
@@ -4184,12 +4980,73 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--from-stalled",
+        default=None,
+        metavar="SEG1,SEG2,...",
+        # The disclosure sentences are INTERPOLATED from FROM_STALLED_DISCLOSURE,
+        # never restated here: this help text and every refusal that carries the
+        # same clause must be the same bytes, and prose that merely happens to
+        # agree is what drifts. Only the profile's own framing -- what it admits,
+        # what it requires -- and the two CITATIONS the constant deliberately
+        # leaves out are written locally, after it.
+        help=(
+            "#455: claim these ids for RE-REVIEW under the --from-stalled profile -- a "
+            "previously-converged segment left with incomplete bookkeeping: materialized "
+            "status in_progress, the .ever_converged sentinel PRESENT, no "
+            "reviewed_draft_sha1, and a stored review that is STALE against the current "
+            "draft. Never re-translates. Requires --run-id, and --only-segs naming every "
+            "claimed id -- enforced by D3b, this profile's OWN check, for a different "
+            "reason than --from-cap's. A capped id is human_escalation and so never "
+            "reaches the dispatch set unless --only-segs names it; a stalled id is "
+            "in_progress, which classifies as `recoverable` and IS dispatch-eligible by "
+            "default, so without D3b this run would also work on units you never named -- "
+            "outside the assertion below, which covers only the ids on this flag. "
+            "A successfully-admitted id clears the "
+            "previously_converged refusal for itself only (D5.2). "
+            "WHAT THIS PROFILE PROVES, AND WHAT IT ONLY ASSERTS -- read before using it. "
+            + FROM_STALLED_DISCLOSURE
+            + " Where those two facts live in the code: the per-segment lock is the one "
+            "whose critical section contains codex_job.py's canonical draft promotion "
+            "(codex_job.py:1524), and the fix turn's byte-for-byte dispatch_token copy is "
+            "mass-translate-wf.template.js:1284."
+        ),
+    )
+    parser.add_argument(
+        "--driver-lease-held",
+        action="store_true",
+        # Same rule as --from-stalled above: the disclosure comes from the
+        # constant. This flag has no meaning outside a --from-stalled admission
+        # (it is refused without one), so the profile's limits ARE this flag's
+        # limits -- and the residual the flag adds on top of them is the only
+        # thing written locally.
+        help=(
+            "#455: set by segment_dispatch_driver.py ONLY, and only on a code path reached "
+            "after its own acquire_driver_lock() has returned. It tells this script that "
+            "the caller already holds runs/.driver.lock, which this process therefore "
+            "CANNOT acquire itself: flock is scoped per OPEN FILE DESCRIPTION, the driver "
+            "spawns this script with no pass_fds (so close_fds=True strips the lease fd), "
+            "and a fresh open() here would be refused by our own parent on every dispatch. "
+            "The flag is a POINTER, never a grant: it is re-confirmed against the kernel "
+            "(an independent LOCK_EX|LOCK_NB that MUST fail), and it is refused outright "
+            "unless at least one --from-stalled id was requested. THE RESIDUAL THIS FLAG "
+            "ADDS: kernel contention proves that SOME independent open file description "
+            "holds the lease, never that it is this script's parent -- so running this "
+            "script by hand with a forged --driver-lease-held while a real driver runs "
+            "would pass the re-confirmation. That actor is already inside this project's "
+            "trust boundary (they can rewrite a draft or the ledger directly), which is why "
+            "the check is worth making and is not claimed to be more. The profile this flag "
+            "carries discloses the rest, and this flag changes none of it: "
+            + FROM_STALLED_DISCLOSURE
+        ),
+    )
+    parser.add_argument(
         "--run-id",
         default=None,
         metavar="RUN_ID",
         help=(
             "#438: the current run id a claim re-stamps a draft's authorization to. Required "
-            "whenever --from-converged/--from-cap is given; never derived from an existing "
+            "whenever --from-converged/--from-cap/--from-stalled is given; never derived "
+            "from an existing "
             "token (PLAN.md D8: deriving it would make a malformed token read as 'not "
             "claimed' and silently proceed). Must be paired with --run-resume."
         ),
