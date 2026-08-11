@@ -834,7 +834,11 @@ def test_lost_token_recovery_runs_the_command_draft_ready_advertises(tmp_path):
     # the selector flag of the same name. Looked up rather than hardcoded so
     # a record carrying an unknown profile fails HERE, naming it, instead of
     # silently exercising --from-cap regardless of what was advertised.
-    profile_flag = {"from-cap": "--from-cap", "from-converged": "--from-converged"}
+    profile_flag = {
+        "from-cap": "--from-cap",
+        "from-converged": "--from-converged",
+        "from-stalled": "--from-stalled",
+    }
     flag = profile_flag.get(advertised_profile.group(1))
     assert flag is not None, (
         f"draft_ready.py advertised profile {advertised_profile.group(1)!r}, which is not "

@@ -479,6 +479,44 @@ def test_a_claimed_segment_whose_action_is_translate_is_refused_even_with_no_on_
     )
 
 
+def test_a_from_stalled_claimed_segment_whose_action_is_translate_is_refused_even_with_no_on_disk_claim_record(tmp_path):
+    """#455's profile, same #450 gap as the test immediately above: the
+    capability check reads `seg in ctx.claims` unconditionally, never which
+    profile string the claim carries -- so a mutant that special-cases
+    'from-stalled' out of the refusal (return None only for that one
+    profile, leaving --from-cap/--from-converged intact) would pass every
+    test above this one, since none of them ever construct a context whose
+    claims dict names 'from-stalled'. This is the ONLY thing that changes
+    from the --from-converged version above; the fixture, the missing-draft
+    setup, and all three assertions are identical on purpose."""
+    root = make_durable_root(tmp_path)
+    write_fixture_cache_keys(root, {"seg01": make_cache_key("seg01")})
+    write_fixture_segpack(root, "seg01")
+    driver_mod, ctx = _fixture_ctx(root, run_id="RUN-A", claims={"seg01": "from-stalled"})
+
+    # Setup check: the OLDER, on-disk-only chokepoint genuinely sees nothing
+    # here -- proving the scenario actually needs the #450 fix, rather than
+    # accidentally being caught by the pre-existing #438 D8 layer instead.
+    assert driver_mod.claim_refusal_for_translate(ctx, "seg01") is None, (
+        "setup check: this scenario must be invisible to the on-disk-only "
+        "chokepoint, or it is not exercising #450's own gap"
+    )
+
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result["outcome"] == "failed", result
+    assert result["reason"] == "invocation-claim-translate-refused", result
+    assert "seg01" in result["detail"]
+    assert "from-stalled" in result["detail"]
+    assert _argv_log(root) == [], "codex_job.py must never have been invoked"
+    assert not (root / "runs" / "ledger.d" / "seg01.json").exists(), (
+        "no ledger fragment may be written on refusal"
+    )
+    assert not (root / "segments" / "seg01.draft.json").exists(), (
+        "no draft may be written on refusal"
+    )
+
+
 def test_the_same_segment_with_no_claim_in_this_invocation_dispatches_normally(tmp_path):
     """The ALLOW side, without which a version of the #450 fix that simply
     refuses every translate unconditionally would pass the refuse-side
@@ -758,6 +796,64 @@ def wiring_build_from_cap_segment(root, seg, fixture_keys):
     wiring_write_fragment(root, seg, frag)
 
 
+def wiring_build_from_stalled_segment(root, seg, fixture_keys):
+    """P3 (--from-stalled, #455) population, duplicated from
+    tests/claim_stalled_admission.test.py's own build_from_stalled_segment():
+    materialized status in_progress, a `.ever_converged.<seg>` sentinel
+    PRESENT, no `reviewed_draft_sha1`, a stored review that is STALE against
+    the current draft -- the shape the REAL select_segments.py actually
+    admits under --from-stalled. Mirrors wiring_build_from_cap_segment()
+    immediately above; see this file's own module docstring for why this
+    file builds its own copy rather than importing that one.
+
+    The stale review's own `draft_sha1` is computed by the REAL, already-
+    staged draft_sha1.py against the PRE-EDIT draft actually written to
+    disk (never a hand-rolled oracle) -- staleness is an ENTRY condition
+    this profile's own admission gate checks, so a wrong value here would
+    make the fixture refuse for the wrong reason rather than admit."""
+    segpack = wiring_clean_segpack(seg)
+    wiring_write_segpack(root, seg, segpack)
+    wiring_write_canon(root, {})
+
+    draft_sha1_mod = _load_module(root / "scripts" / "draft_sha1.py", "draft_sha1_for_wiring_stalled")
+    draft_path = root / "segments" / f"{seg}.draft.json"
+
+    pre_edit_draft = wiring_clean_draft(seg)
+    wiring_write_draft_doc(root, seg, pre_edit_draft)
+    reviewed_sha1 = draft_sha1_mod.draft_content_sha1(draft_path)
+
+    # The hand-corrected bytes the stored review no longer describes --
+    # what makes the stored verdict stale, matching the live seg21/errata_02
+    # units this profile was designed for (SKILL.md's own P3 section).
+    draft = dict(pre_edit_draft)
+    draft["blocks"] = dict(draft["blocks"])
+    draft["blocks"]["p1"] = draft["blocks"]["p1"] + " Hand-corrected after the driver died."
+    draft["dispatch_token"] = f"{WIRING_SOURCE_RUN_ID}:{seg}"
+    wiring_write_draft_doc(root, seg, draft)
+
+    wiring_make_run_dir(root, WIRING_SOURCE_RUN_ID)
+
+    fixture_keys[seg] = make_cache_key(seg)
+
+    review = {
+        "clean": True,
+        "coverage_ok": True,
+        "findings": [],
+        "draft_sha1": reviewed_sha1,
+        "dispatch_token": f"{WIRING_SOURCE_RUN_ID}:{seg}:r1",
+    }
+    wiring_write_review(root, seg, review)
+
+    (root / "segments" / f".ever_converged.{seg}").write_text("converged\n", encoding="utf-8")
+
+    # No `reason` key: an in_progress fragment carries none (the live units'
+    # own measured shape), and writing a literal null would fail
+    # ledger-record-base.schema.json's own string typing before any claim
+    # gate is even reached.
+    frag = {"timestamp": "2026-01-01T00:00:00Z", "status": "in_progress", "rounds": 1}
+    wiring_write_fragment(root, seg, frag)
+
+
 def wiring_make_driver_root(tmp_path, seg):
     """Everything segment_dispatch_driver.py's own run() needs to drive a
     REAL --from-cap claim through a REAL select_segments.py subprocess and
@@ -810,6 +906,66 @@ def wiring_make_driver_root(tmp_path, seg):
 
     fixture_keys = {}
     wiring_build_from_cap_segment(root, seg, fixture_keys)
+    (root / "manifest.json").write_text(
+        json.dumps({"segments": [{"seg": seg}]}, ensure_ascii=False), encoding="utf-8"
+    )
+    (root / "test_fixture_cache_keys.json").write_text(
+        json.dumps(fixture_keys, ensure_ascii=False), encoding="utf-8"
+    )
+    return root
+
+
+def wiring_make_driver_root_from_stalled(tmp_path, seg):
+    """The #455 sibling of wiring_make_driver_root() immediately above --
+    same staging (real scripts/schemas/templates/bundle-hash markers/
+    profile.yml), the P3 (--from-stalled) population instead of P2. Kept as
+    its own full copy rather than a `profile=` parameter on the existing
+    function: this file's own convention is duplication over cross-
+    reference (see the module docstring), and --from-stalled additionally
+    needs the driver's own runs/.driver.lock to be genuinely free/
+    acquirable, which nothing about the --from-cap fixture has ever had to
+    consider -- a shared builder risks the two populations quietly
+    entangling."""
+    root = tmp_path / "wiring_root_stalled"
+    scripts_dir = root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    for name, src in (
+        ("select_segments.py", WIRING_SELECT_SCRIPT_SRC),
+        ("ledger_merge.py", WIRING_LEDGER_MERGE_SRC),
+        ("ledger_update.py", LEDGER_UPDATE_SRC),
+        ("draft_ready.py", WIRING_DRAFT_READY_SRC),
+        ("validate_draft.py", WIRING_VALIDATE_DRAFT_SRC),
+        ("review_ready.py", WIRING_REVIEW_READY_SRC),
+        ("draft_sha1.py", DRAFT_SHA1_SRC),
+        ("claim_record.py", CLAIM_RECORD_SRC),
+        ("segment_dispatch_driver.py", DRIVER_SRC),
+        ("resume_setup.py", RESUME_SETUP_SRC),
+    ):
+        shutil.copy2(src, scripts_dir / name)
+    (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
+    (scripts_dir / "resolve_codex_companion.py").write_text(FAKE_RESOLVE_CODEX_COMPANION_PY, encoding="utf-8")
+    (scripts_dir / "codex_job.py").write_text(FAKE_CODEX_JOB_PHASE2_PY, encoding="utf-8")
+
+    shutil.copytree(ASSETS_DIR / "schemas", root / "schemas")
+
+    templates_dir = root / "templates"
+    templates_dir.mkdir()
+    shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, templates_dir / "mass-translate-wf.template.js")
+
+    (root / "runs" / "ledger.d").mkdir(parents=True)
+    (root / "segments").mkdir()
+    (root / "runs" / ".plugin_bundle_hash").write_text("fixture-plugin-bundle-hash\n", encoding="utf-8")
+    (root / "runs" / ".orchestration_bundle_hash").write_text(
+        "fixture-orchestration-bundle-hash\n", encoding="utf-8")
+
+    profile_path = root / "profile.yml"
+    profile_path.write_text(WIRING_PROFILE_YAML, encoding="utf-8")
+    (root / ".literary-translator-root.json").write_text(
+        json.dumps({"owner_profile_path": str(profile_path)}), encoding="utf-8"
+    )
+
+    fixture_keys = {}
+    wiring_build_from_stalled_segment(root, seg, fixture_keys)
     (root / "manifest.json").write_text(
         json.dumps({"segments": [{"seg": seg}]}, ensure_ascii=False), encoding="utf-8"
     )
@@ -929,4 +1085,85 @@ def test_a_real_selector_claim_reaches_process_segment_through_the_real_run_wiri
     assert fragment["status"] == "non_converged", (
         f"the pre-existing ledger fragment must be untouched by a refused translate "
         f"-- no in_progress write may happen on this path. Got: {fragment}"
+    )
+
+
+def test_a_real_selector_from_stalled_claim_reaches_process_segment_through_the_real_run_wiring(tmp_path):
+    """#455's sibling of the --from-cap wiring test immediately above --
+    same reasoning, same corruption wrapper, same three-assertion shape.
+    Exists because that test alone leaves the from-stalled capability
+    proven only by Section A/B's own hand-built DispatchContext tests,
+    which -- exactly as the docstring above explains for --from-cap --
+    would stay green even if `claims=claims` were deleted from run()'s
+    real DispatchContext construction, or if
+    claim_capability_refusal_for_translate() special-cased 'from-stalled'
+    out of the refusal specifically. Only a REAL select_segments.py
+    admission, reached through this driver's own run(), proves the wiring
+    itself for this profile too.
+
+    --from-stalled additionally drives run()'s own runs/.driver.lock
+    acquisition and its --driver-lease-held forwarding to the child
+    selector (segment_dispatch_driver.py:1499-1537) -- both real here, not
+    stubbed, since this test calls run() directly rather than through a
+    subprocess and nothing about that machinery is mocked."""
+    seg = "seg21"
+    root = wiring_make_driver_root_from_stalled(tmp_path, seg)
+    driver_mod = _load_module(
+        root / "scripts" / "segment_dispatch_driver.py", "segment_dispatch_driver_wiring_e2e_stalled"
+    )
+
+    real_run_select_segments = driver_mod.run_select_segments
+
+    def corrupting_run_select_segments(dirs, **kwargs):
+        result = real_run_select_segments(dirs, **kwargs)
+        claims = result.get("claims")
+        if result.get("success") and isinstance(claims, dict) and seg in claims:
+            run_id = kwargs.get("run_id")
+            durable_root = dirs["durable_root"]
+            draft_path = durable_root / "segments" / f"{seg}.draft.json"
+            assert draft_path.is_file(), (
+                "setup check: the REAL select_segments.py admission must have left "
+                "a re-stamped draft on disk before this wrapper deletes it, or the "
+                "corruption below proves nothing about a genuine admission"
+            )
+            draft_path.unlink()
+            claim_mod = _load_module(root / "scripts" / "claim_record.py", "claim_record_for_wiring_e2e_stalled")
+            record_path = claim_mod.claimed_path(run_id, seg, dirs["runs_dir"])
+            assert record_path.is_file(), (
+                "setup check: the REAL select_segments.py admission must have "
+                "written a durable claim record before this wrapper deletes it"
+            )
+            record_path.unlink()
+        return result
+
+    driver_mod.run_select_segments = corrupting_run_select_segments
+
+    args = driver_mod.build_arg_parser().parse_args(["--only-segs", seg, "--from-stalled", seg])
+    dirs = driver_mod.resolve_dirs(None)
+
+    result = driver_mod.run(args, dirs)
+
+    assert result["success"] is True, result
+    assert result["claims"] == {seg: "from-stalled"}, (
+        f"setup check: the REAL selector must have actually admitted the claim "
+        f"for this to be a meaningful test of the wiring -- got: {result}"
+    )
+
+    seg_results = [r for r in result["results"] if r.get("seg") == seg]
+    assert len(seg_results) == 1, result["results"]
+    seg_result = seg_results[0]
+
+    assert seg_result["outcome"] == "failed", seg_result
+    assert seg_result["reason"] == "invocation-claim-translate-refused", seg_result
+    assert seg in seg_result.get("detail", ""), seg_result
+    assert "from-stalled" in seg_result.get("detail", ""), seg_result
+
+    assert _argv_log(root) == [], "codex_job.py must never have been invoked"
+    assert not (root / "segments" / f"{seg}.draft.json").exists(), (
+        "no draft may be (re-)written on refusal"
+    )
+    fragment = json.loads((root / "runs" / "ledger.d" / f"{seg}.json").read_text(encoding="utf-8"))
+    assert fragment["status"] == "in_progress", (
+        f"the pre-existing ledger fragment must be untouched by a refused translate "
+        f"-- no new write may happen on this path. Got: {fragment}"
     )

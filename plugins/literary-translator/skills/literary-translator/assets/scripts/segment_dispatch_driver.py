@@ -306,28 +306,36 @@ re-invalidate converged work against.
         [--durable-root PATH] [--plugin-root PATH]
         [--only-segs SEG1,SEG2,...] [--allow-retranslate-converged]
         [--allow-empty] [--from-cap SEG1,SEG2,...] [--from-converged SEG1,SEG2,...]
+        [--from-stalled SEG1,SEG2,...]
         [--max-concurrent-codex-jobs N] [--node BIN]
 
 Forwards `--only-segs`/`--allow-retranslate-converged`/`--allow-empty`/
-`--from-cap`/`--from-converged` verbatim to `select_segments.py` -- see
-that script's own module docstring for their exact semantics; this
-script adds no independent meaning to any of them. `--from-cap`/
-`--from-converged` (#438) request claim admission for the named ids from
-the Step 1 gate call, and that admission is SINGLE-PHASE: the one
-`select_segments.py` invocation this driver makes both validates the ids
-and, for every id that passes, writes the durable claim record and
-re-stamps the draft's own `dispatch_token`. There is no separate commit
-call, here or anywhere else -- an earlier revision of the design split
-admission into validate/commit and was abandoned; nothing in this file
-drives a second phase, and no future caller should be built expecting
-one. Because the write is part of THAT call, the claim needs a RUN_ID
-before it, so `run()` resolves the run id BEFORE selection whenever a
-claim flag is present and forwards it as `--run-id`/`--run-resume` (see
+`--from-cap`/`--from-converged`/`--from-stalled` verbatim to
+`select_segments.py` -- see that script's own module docstring for their
+exact semantics; this script adds no independent meaning to any of them.
+`--from-cap`/`--from-converged`/`--from-stalled` (#438, #455) request
+claim admission for the named ids from the Step 1 gate call, and that
+admission is SINGLE-PHASE: the one `select_segments.py` invocation this
+driver makes both validates the ids and, for every id that passes,
+writes the durable claim record and re-stamps the draft's own
+`dispatch_token`. There is no separate commit call, here or anywhere
+else -- an earlier revision of the design split admission into
+validate/commit and was abandoned; nothing in this file drives a second
+phase, and no future caller should be built expecting one. Because the
+write is part of THAT call, the claim needs a RUN_ID before it, so
+`run()` resolves the run id BEFORE selection whenever a claim flag is
+present and forwards it as `--run-id`/`--run-resume` (see
 `run_select_segments()` and `run()`'s own call site for the #409 Step 3
 ordering property that makes resolving early safe). Whatever
 `select_segments.py` reports back in its own `claims` field is read back,
 validated (see `parse_claims_field()`), and folded into the dispatch
 context -- fatal on anything missing, malformed, or mismatched (#438 D3).
+`--from-stalled` additionally carries `--driver-lease-held` forward to
+`select_segments.py` whenever at least one id is requested under it, but
+only ever on this code path -- run after `acquire_driver_lock()` has
+already returned -- see `run_select_segments()`'s own docstring and its
+call site in `run()` for exactly what that flag asserts and why an
+ordinary dispatch (no `--from-stalled` id) never sends it.
 `--max-concurrent-codex-jobs` (default 40) and `--node` are this driver's
 own -- see `build_arg_parser()`'s own help text for the concurrency
 default's justification.
@@ -1382,6 +1390,7 @@ def run_select_segments(
     allow_empty=False,
     from_cap=None,
     from_converged=None,
+    from_stalled=None,
     run_id=None,
     run_resume=None,
     durable_root_str=None,
@@ -1396,15 +1405,21 @@ def run_select_segments(
     select_segments.py-side refusal, only for a genuine invocation failure
     (missing script, bad subprocess, unparseable output).
 
-    `from_cap`/`from_converged` (#438 D1/D2): forwarded verbatim to
-    select_segments.py's own like-named flags, requesting claim ADMISSION
-    for the named ids under the `--from-cap`/`--from-converged` profile
-    respectively. Admission is SINGLE-PHASE -- this one call validates
-    the ids AND writes each admitted id's durable claim record plus its
-    draft's re-stamped dispatch_token, all before it returns. See run()'s
-    own call site and parse_claims_field() below for how the resulting
-    authorization is read back out of select_segments.py's JSON payload
-    -- never assumed from these arguments alone.
+    `from_cap`/`from_converged`/`from_stalled` (#438 D1/D2, #455): forwarded
+    verbatim to select_segments.py's own like-named flags, requesting claim
+    ADMISSION for the named ids under the `--from-cap`/`--from-converged`/
+    `--from-stalled` profile respectively. Admission is SINGLE-PHASE -- this
+    one call validates the ids AND writes each admitted id's durable claim
+    record plus its draft's re-stamped dispatch_token, all before it
+    returns. See run()'s own call site and parse_claims_field() below for
+    how the resulting authorization is read back out of select_segments.py's
+    JSON payload -- never assumed from these arguments alone.
+
+    `from_stalled` additionally causes `--driver-lease-held` to be forwarded
+    (see the cmd-building block below for exactly when and why) -- an
+    ordinary call with `from_stalled=None` never sends that flag, matching
+    acceptance criterion 4 (no behaviour change, no new lock acquisition,
+    off this path).
 
     `run_id`/`run_resume`: forwarded as select_segments.py's own
     `--run-id`/`--run-resume`, which that script requires as a PAIR (it
@@ -1481,6 +1496,45 @@ def run_select_segments(
         cmd += ["--from-cap", from_cap]
     if from_converged is not None:
         cmd += ["--from-converged", from_converged]
+    if from_stalled is not None:
+        cmd += ["--from-stalled", from_stalled]
+        # #455: --driver-lease-held is forwarded HERE, and ONLY here -- never
+        # for an ordinary dispatch, never for --from-cap/--from-converged.
+        # This is safe to do unconditionally at this call site (no separate
+        # "did we actually acquire the lease" check needed) because
+        # run_select_segments() has exactly ONE caller in this file: run()'s
+        # own `select_result = run_select_segments(...)` below, which is
+        # reached only after `acquire_driver_lock()` has already returned
+        # successfully (a failed acquire calls fatal() and this function is
+        # never reached at all) -- see run()'s own body for that ordering.
+        # If a second call site is ever added that can reach here WITHOUT
+        # first holding the lease, this flag must not be forwarded
+        # unconditionally on `from_stalled is not None` alone; it would then
+        # need its own "was the lease actually acquired" parameter.
+        #
+        # WHY the flag has to be forwarded at all, rather than the child
+        # just noticing its parent already holds the lease: `flock` is
+        # scoped per OPEN FILE DESCRIPTION, not per path or per process, so
+        # select_segments.py opening runs/.driver.lock fresh (its own
+        # independent open()) gets an independent file description with no
+        # visibility into this driver's lease no matter how the two
+        # processes are related. And even if that were not true,
+        # subprocess.run() below passes no `pass_fds`, so Python's own
+        # default `close_fds=True` applies and this driver's lease fd would
+        # not survive into the child's fd table regardless. Without
+        # --driver-lease-held the child would attempt its own independent
+        # `LOCK_EX|LOCK_NB` against a lease its own parent already holds,
+        # and be refused by that parent -- an ordinary driver-invoked
+        # --from-stalled claim would be unconditionally impossible.
+        #
+        # The flag is a POINTER ("a driver in my own process tree already
+        # holds this lease"), never a GRANT: select_segments.py re-confirms
+        # it independently against the kernel (its own LOCK_EX|LOCK_NB
+        # attempt, which must FAIL) rather than trusting the flag's mere
+        # presence -- see that script's own admission logic for the
+        # self-test this mirrors. A forged flag from outside a real driver
+        # is still refused whenever the lease genuinely is free.
+        cmd += ["--driver-lease-held"]
     if run_id is not None:
         cmd += ["--run-id", run_id, "--run-resume", run_resume]
     cmd += _root_forward_args(dirs, durable_root_str, plugin_root_str)
@@ -1522,11 +1576,12 @@ def run_select_segments(
 # already is.
 # ---------------------------------------------------------------------------
 
-# The two #438 D2 admission profiles, spelled identically to the CLI flag
-# names that request them (`--from-cap`/`--from-converged`) so a
+# The three admission profiles -- the original #438 D2 pair plus #455's
+# `--from-stalled` -- spelled identically to the CLI flag names that
+# request them (`--from-cap`/`--from-converged`/`--from-stalled`) so a
 # mismatched literal is visible by inspection rather than needing a
 # lookup table.
-KNOWN_CLAIM_PROFILES = ("from-cap", "from-converged")
+KNOWN_CLAIM_PROFILES = ("from-cap", "from-converged", "from-stalled")
 
 
 def parse_claims_field(select_result: dict, segs: list) -> dict:
@@ -5343,6 +5398,50 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "named here."
         ),
     )
+    # The population sentence below names the convergence sentinel WITHOUT
+    # spelling its marker filename, and that is deliberate rather than sloppy.
+    # This driver is not a participant in the sentinel contract, and
+    # select_segments.test.py's census refuses a non-participant that carries
+    # that token ANYWHERE outside a docstring -- an argparse help= string is
+    # not one, so spelling it here would trade a clean census for an exemption
+    # this file has no business holding. The exact filename lives in
+    # select_segments.py's own --from-stalled help, which is a participant and
+    # spells it there.
+    parser.add_argument(
+        "--from-stalled",
+        default=None,
+        metavar="SEG1,SEG2,...",
+        help=(
+            "#455: forwarded verbatim to select_segments.py's own "
+            "--from-stalled -- claims the named ids for RE-REVIEW under the "
+            "'--from-stalled' admission profile (a stalled, previously-"
+            "converged unit stuck outside every other route: materialized "
+            "status in_progress, the convergence sentinel present, no "
+            "reviewed_draft_sha1, and a stored review that is stale against "
+            "the current draft; select_segments.py --help names the marker "
+            "file). An admitted id can NEVER be translated by "
+            "this invocation -- claim_capability_refusal_for_translate() "
+            "refuses it unconditionally, same as --from-cap/--from-converged. "
+            "Admission is single-phase and it WRITES: every id that passes "
+            "gets a durable claim record plus a re-stamped draft "
+            "dispatch_token, inside the one gate call -- see --from-cap's "
+            "own help text for the RUN_ID consequence that follows from "
+            "that. UNLIKE --from-cap/--from-converged, this profile also "
+            "rests on an assertion this plugin cannot check: naming an id "
+            "here ASSERTS, on the operator's word alone, that no Workflow "
+            "fix turn and no OTHER select_segments.py claim invocation is "
+            "touching that id right now. This plugin proves only that no "
+            "driver and no codex job currently hold this segment (runs/"
+            ".driver.lock, segments/.codex_job.<seg>.lock) -- it cannot "
+            "prove the rest, and does not pretend to. If the assertion is "
+            "wrong, a concurrent fix turn writes the canonical draft "
+            "directly and copies whatever dispatch_token it read "
+            "(mass-translate-wf.template.js:1284): depending on timing it "
+            "either loses its own work, or leaves the claim's re-stamped "
+            "draft carrying content that nobody has re-reviewed. Never a "
+            "blanket authorization: only the ids named here."
+        ),
+    )
     parser.add_argument(
         "--durable-root",
         default=None,
@@ -5410,10 +5509,14 @@ def run(args, dirs: dict) -> dict:
             problem = validate_seg(seg)
             if problem is not None:
                 fatal(f"--only-segs: unsafe segment id: {problem}", exit_code=2)
-    # #438: same fail-fast local validation --only-segs already gets above,
-    # before either flag value is ever spliced into the select_segments.py
-    # subprocess argv.
-    for flag_name, flag_value in (("--from-cap", args.from_cap), ("--from-converged", args.from_converged)):
+    # #438/#455: same fail-fast local validation --only-segs already gets
+    # above, before any of the three flag values is ever spliced into the
+    # select_segments.py subprocess argv.
+    for flag_name, flag_value in (
+        ("--from-cap", args.from_cap),
+        ("--from-converged", args.from_converged),
+        ("--from-stalled", args.from_stalled),
+    ):
         if flag_value is not None:
             for seg in (s.strip() for s in flag_value.split(",") if s.strip()):
                 problem = validate_seg(seg)
@@ -5472,7 +5575,11 @@ def run(args, dirs: dict) -> dict:
         # property, unchanged from before #438 -- and the id is journalled
         # the moment it is minted so an operator triaging a refusal can see
         # which directory this invocation created.
-        claim_requested = args.from_cap is not None or args.from_converged is not None
+        claim_requested = (
+            args.from_cap is not None
+            or args.from_converged is not None
+            or args.from_stalled is not None
+        )
         translate_cfg = None
         run_result = None
         run_id = None
@@ -5498,6 +5605,7 @@ def run(args, dirs: dict) -> dict:
             allow_empty=args.allow_empty,
             from_cap=args.from_cap,
             from_converged=args.from_converged,
+            from_stalled=args.from_stalled,
             run_id=run_id,
             run_resume=run_resume_literal(run_result) if run_result is not None else None,
             durable_root_str=args.durable_root,

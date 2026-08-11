@@ -877,7 +877,23 @@ def test_colon_bearing_segment_id_end_to_end(tmp_path):
 # 9. Malformed / duplicate / non-subset authorization.
 # ---------------------------------------------------------------------------
 
-def test_id_named_under_both_profiles_is_fatal(tmp_path):
+@pytest.mark.parametrize(
+    "flag_a,flag_b",
+    [
+        ("--from-converged", "--from-cap"),
+        ("--from-cap", "--from-stalled"),
+        ("--from-converged", "--from-stalled"),
+    ],
+    ids=["cap-converged", "cap-stalled", "converged-stalled"],
+)
+def test_id_named_under_both_profiles_is_fatal(tmp_path, flag_a, flag_b):
+    # The collision check in parse_claim_requests() is purely syntactic --
+    # which FLAGS named this id, never which population it actually
+    # belongs to (see the cap/converged case above, which already names a
+    # from-converged-shaped fixture under --from-cap too). So one fixture
+    # shape suffices for all three pairs; what is under test is that the
+    # refusal names the SPECIFIC two conflicting flags for THIS pair, not
+    # a generic "named twice".
     root = make_durable_root(tmp_path)
     seg = "seg22"
     fixture_keys = {}
@@ -886,12 +902,17 @@ def test_id_named_under_both_profiles_is_fatal(tmp_path):
     write_fixture_cache_keys(root, fixture_keys)
 
     proc = run_select(
-        root, "--from-converged", seg, "--from-cap", seg, "--run-id", RUN_ID, "--run-resume", "false"
+        root, flag_a, seg, flag_b, seg, "--run-id", RUN_ID, "--run-resume", "false"
     )
     assert proc.returncode != 0
     out = parse_stdout(proc)
     assert seg in out["error"]
-    assert "--from-converged" in out["error"] and "--from-cap" in out["error"]
+    assert flag_a in out["error"] and flag_b in out["error"], out["error"]
+    # The OTHER profile's flag must not appear -- a refusal naming all
+    # three would satisfy this assert with a generic "more than one"
+    # message that never actually distinguishes the pair.
+    other = ({"--from-converged", "--from-cap", "--from-stalled"} - {flag_a, flag_b}).pop()
+    assert other not in out["error"], out["error"]
 
 
 def test_claim_id_not_in_emitted_segs_is_fatal(tmp_path):
@@ -1808,8 +1829,8 @@ def test_missing_token_with_no_claim_record_is_still_refused(tmp_path):
 
 def test_lost_token_recovery_refuses_under_a_different_profile(tmp_path):
     """"Re-claim under the SAME profile" is the literal instruction, and the
-    profile is not a formality: the two profiles are closed condition lists
-    over different populations. Naming the other one is a NEW authorization,
+    profile is not a formality: each profile is a closed condition list
+    over a different population. Naming another one is a NEW authorization,
     and a new authorization needs a draft this gate can still read a token
     from."""
     root = make_durable_root(tmp_path)
@@ -3057,7 +3078,9 @@ def test_evaluate_open_review_loop_permits_a_valid_owner_claim(tmp_path):
 
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
+    ok, reason = mod.evaluate_open_review_loop(
+        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
+    )
     assert ok is True
     assert reason == ""
 
@@ -3069,7 +3092,9 @@ def test_evaluate_open_review_loop_refuses_when_owner_holds_no_claim_record(tmp_
 
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
+    ok, reason = mod.evaluate_open_review_loop(
+        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
+    )
     assert ok is False
     assert "holds no readable claim record" in reason, reason
     assert "state=absent" in reason, reason
@@ -3082,7 +3107,9 @@ def test_evaluate_open_review_loop_refuses_a_from_cap_owner_claim(tmp_path):
 
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
+    ok, reason = mod.evaluate_open_review_loop(
+        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
+    )
     assert ok is False
     assert "was granted under profile 'from-cap'" in reason, reason
     assert "holds no readable claim record" not in reason, (
@@ -3097,7 +3124,9 @@ def test_evaluate_open_review_loop_refuses_a_seg_mismatched_record(tmp_path):
 
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
+    ok, reason = mod.evaluate_open_review_loop(
+        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
+    )
     assert ok is False
     assert "disagrees with its own location" in reason, reason
     assert "seg='some_other_seg'" in reason, reason
@@ -3110,7 +3139,9 @@ def test_evaluate_open_review_loop_refuses_a_run_id_mismatched_record(tmp_path):
 
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
+    ok, reason = mod.evaluate_open_review_loop(
+        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
+    )
     assert ok is False
     assert "disagrees with its own location" in reason, reason
     assert f"run_id={OTHER_RUN_ID!r}" in reason, reason
@@ -3129,7 +3160,9 @@ def test_evaluate_open_review_loop_refuses_a_torn_owner_record(tmp_path):
 
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
-    ok, reason = mod.evaluate_open_review_loop(seg, SOURCE_RUN_ID, dirs)
+    ok, reason = mod.evaluate_open_review_loop(
+        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
+    )
     assert ok is False
     assert "holds no readable claim record" in reason, reason
     assert "state=ambiguous" in reason, reason
@@ -3146,9 +3179,56 @@ def test_evaluate_open_review_loop_refuses_a_none_or_empty_owner_run_id(tmp_path
     mod = _load_select_segments_module(root)
     dirs = mod.resolve_dirs(str(root))
     for bad_owner in (None, ""):
-        ok, reason = mod.evaluate_open_review_loop(seg, bad_owner, dirs)
+        ok, reason = mod.evaluate_open_review_loop(
+            seg, bad_owner, dirs, expected_profile="from-converged"
+        )
         assert ok is False
         assert "no owner whose claim could be read" in reason, reason
+
+
+def test_evaluate_open_review_loop_refuses_a_from_stalled_owner_claim_when_expecting_converged(tmp_path):
+    """The #455 half of the generalization: a valid, complete, self-agreeing
+    claim record is not enough on its own -- it must have been granted under
+    THE CALLER'S OWN profile. A record granted under --from-stalled must not
+    let --from-converged's own continuation predicate treat it as its own
+    re-review loop, even though every other field agrees. Mutation this test
+    exists to catch: hard-coding CLAIM_PROFILE_FROM_CONVERGED back into
+    evaluate_open_review_loop() would make this pass for the wrong reason
+    only by coincidence -- it would actually make the from-cap sibling above
+    (also refused) indistinguishable in cause from this one; the assertion
+    on the mismatched profile value is what pins the parameter is genuinely
+    read, not merely present in the signature."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    write_owner_claim_record(root, seg, profile="from-stalled")
+
+    mod = _load_select_segments_module(root)
+    dirs = mod.resolve_dirs(str(root))
+    ok, reason = mod.evaluate_open_review_loop(
+        seg, SOURCE_RUN_ID, dirs, expected_profile="from-converged"
+    )
+    assert ok is False
+    assert "was granted under profile 'from-stalled'" in reason, reason
+    assert "not 'from-converged'" in reason, reason
+
+
+def test_evaluate_open_review_loop_permits_a_valid_owner_claim_under_from_stalled(tmp_path):
+    """The mirror of the happy-path test above, with expected_profile
+    generalized to --from-stalled's own value -- pins that the predicate is
+    genuinely parameterized rather than only ever exercised with
+    'from-converged' (every other test in this section passes that one
+    value, which would leave a hard-coded default undetected)."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    write_owner_claim_record(root, seg, profile="from-stalled")
+
+    mod = _load_select_segments_module(root)
+    dirs = mod.resolve_dirs(str(root))
+    ok, reason = mod.evaluate_open_review_loop(
+        seg, SOURCE_RUN_ID, dirs, expected_profile="from-stalled"
+    )
+    assert ok is True
+    assert reason == ""
 
 
 # ---------------------------------------------------------------------------

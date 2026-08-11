@@ -1914,6 +1914,11 @@ python3 {durable_root}/scripts/select_segments.py \
 python3 {durable_root}/scripts/select_segments.py \
     --from-converged SEG1[,SEG2,...] \
     --run-id RUN_ID --run-resume true|false
+# or (1.24.0, #455 -- P3, below; --only-segs IS required here, enforced by
+# its own D3b check -- a different mechanism from D3's --from-cap gate):
+python3 {durable_root}/scripts/select_segments.py \
+    --from-stalled SEG1[,SEG2,...] --only-segs SEG1[,SEG2,...] \
+    --run-id RUN_ID --run-resume true|false
 ```
 
 This is not a stylistic reordering — it is what makes the claim mechanism
@@ -1950,14 +1955,21 @@ typed for what is actually a `false` case sails straight through the one
 check meant to catch it. There is no way to make this self-verifying; the
 operator relaying the value correctly IS the safeguard.
 
-**The two admission profiles — exactly two, never more.** A third
-(`--from-incomplete`, for stalled/interrupted work) was designed and then
-deliberately DELETED from this feature: no implementable condition
-separates "bookkeeping incomplete" from "ordinary live work mid-flight" (the
-default path full-replaces the ledger to a two-key `in_progress` row before
-it ever dispatches, which is indistinguishable from a stall by any artifact
-on disk). Naming a segment under the wrong profile is refused BY NAME, not
-silently reclassified into the other one:
+**The three admission profiles — never a fourth.** An earlier, ARTIFACT-ONLY
+attempt at a third profile (`--from-incomplete`, for stalled/interrupted
+work) was designed and then deliberately DELETED from this feature: no
+implementable condition over artifacts separates "bookkeeping incomplete"
+from "ordinary live work mid-flight" (the default path full-replaces the
+ledger to a two-key `in_progress` row before it ever dispatches, which is
+indistinguishable from a stall by any artifact on disk). `--from-stalled`
+(1.24.0, #455, below) reaches that same population WITHOUT repeating that
+mistake — it never claims to tell stalled from live by artifacts alone. It
+proves the two liveness facts this project's own kernel state CAN prove and
+leaves the remainder an explicit, disclosed operator assertion rather than
+dressing an artifact test up as proof. Reintroducing an artifact-only fourth
+profile is still forbidden; `--from-stalled` is not that. Naming a segment
+under the wrong profile is refused BY NAME, not silently reclassified into
+another one:
 
 - **`--from-converged SEG1[,SEG2,...]`** — for a segment that converged
   CLEANLY at least once and was then hand-edited. Requires, in addition to
@@ -1977,6 +1989,12 @@ silently reclassified into the other one:
   `human_escalation`, `--only-segs` naming the same id(s) is ALSO required
   — the same explicit-retry mechanism any other `human_escalation` retry
   already needs, now doubled as a second, independent authorization.
+- **`--from-stalled SEG1[,SEG2,...]`** — for a segment stalled with
+  genuinely incomplete bookkeeping: previously converged, then left
+  `in_progress` with no `reviewed_draft_sha1` and a review that no longer
+  describes the current draft. Full condition list, what the profile
+  proves versus what it asks the operator to assert, and the hand-driven
+  fallback for a unit that fails it: see **P3**, below.
 
 **A dirty review is admitted under `--from-converged` only as the
 CONTINUATION of a re-review loop this project already opened — never
@@ -2004,7 +2022,7 @@ sanctioned takeover leaves behind. That refusal is operator-visible and
 has an operator-visible consequence: a token-less draft superseded by a
 later claim cannot simply be re-claimed by the run that held it first.
 
-**Shared safety gates, both profiles, every requested id validated
+**Shared safety gates, across all three profiles, every requested id validated
 together in ONE pass (every failure reported at once — three sequential
 refusals would cost three round trips to learn three problems):**
 `validate_draft.py` passes; `draft_ready.py`'s structural checks pass; the
@@ -2021,17 +2039,107 @@ exclusive for the same id and rejected OUTRIGHT if both are given for it:
 one authorizes re-TRANSLATION, the other re-REVIEW, and "claim wins" would
 let one flag silently change what the other one means.
 
-**P3 — two units the plugin does NOT claim at all, handled entirely
-OUTSIDE it by a hand-driven procedure.** A third state exists that neither
-profile above covers: a segment stuck with genuinely incomplete
-bookkeeping — its stored review is stale, describing a draft that no longer
-exists in that form, and its token predates the run that should have
-converged it — rather than cleanly converged-and-edited or
-capped-and-edited. No implementable condition distinguishes this from
-ordinary live work mid-flight, so **there is no `select_segments.py` flag
-for it at all; do not look for one.** The currently known instances
-(`seg21`, `FRONTBACK:errata_02`) are handled entirely by hand, OUTSIDE any
-plugin script, in this exact order:
+**P3 — a stalled, previously-converged, incompletely-bookkept unit.**
+`--from-stalled SEG1[,SEG2,...]` (1.24.0, #455) admits a segment stuck with
+genuinely incomplete bookkeeping — materialized ledger `status:
+in_progress`, a `.ever_converged.<seg>` sentinel PRESENT, no
+`reviewed_draft_sha1`, a draft on disk, and a stored review that is stale
+against that draft — rather than cleanly converged-and-edited
+(`--from-converged`) or capped-and-edited (`--from-cap`). Neither of those
+two profiles reaches it: `--from-cap` refuses because the sentinel is
+present (that population never converged); `--from-converged` refuses
+because there is no `reviewed_draft_sha1`, the drift baseline that profile
+requires.
+
+Requires, beyond the shared safety gates above: materialized status
+`in_progress`; the `.ever_converged.<seg>` sentinel present; no
+`reviewed_draft_sha1`; a review artifact on disk; that review stale against
+the CURRENT draft, checked **only on entry** (below); no competing driver
+holding `runs/.driver.lock`; no codex job holding this segment's own
+`segments/.codex_job.<seg>.lock`; and (D3b) `--only-segs` naming exactly the
+claimed id(s). **`--only-segs` IS required here, but not for the reason it is
+for `--from-cap` — conflating the two mechanisms is itself a trap.**
+`--from-cap`'s population is `human_escalation`, which
+`DEFAULT_ELIGIBLE_CATEGORIES` excludes, so an unclaimed capped id can never
+reach `segs` at all unless `--only-segs` names it — D3 (claimed ids ⊆
+`segs`) is sufficient there on its own. A stalled unit is NOT
+`human_escalation`: `classify_segment()` never reads the sentinel, and
+`in_progress` classifies `recoverable`, which IS inside
+`DEFAULT_ELIGIBLE_CATEGORIES` — so without `--only-segs`, `select_default()`
+would sweep every OTHER `not_started`/`recoverable`/`stale` candidate into
+`segs` alongside the claim, and D3 alone would not catch it (D3 checks only
+that claimed ids are a subset of `segs`, never the reverse). **D3b is this
+profile's own check for exactly that gap: when a `--from-stalled` id is
+requested, every emitted seg must ALSO be a subset of the claimed ids**
+(`segs` ⊆ claimed) — the direction D3 does not cover. Omitting
+`--only-segs` does not merely dispatch un-scoped work; it trips D3b's fatal
+outright, because `select_default()`'s sweep is exactly what makes `segs` a
+strict superset of the claim. Review
+`clean` is **not** constrained — a stalled
+unit's stale review may be `clean: true` or `clean: false` and both are
+admitted; unlike `--from-cap`'s `clean: false`-with-findings requirement,
+the field describes a verdict over a draft that no longer exists, so it
+says nothing about the CURRENT draft in either direction. A unit whose
+review is current and clean but never converged is deliberately excluded —
+its remedy is a convergence write, not a re-review.
+
+**What this profile proves, and what it asks the operator to assert
+instead of proving.** Two liveness facts are provable from this durable
+root's own kernel state, and admission proves both before it claims
+anything:
+
+- **No competing driver holds `runs/.driver.lock`** — a project-wide
+  `flock`, acquired and held across the whole admission decision, standalone
+  or driver-invoked. Cannot acquire (and, on the driver-invoked path, cannot
+  confirm a genuine holder by an independent probe) ⇒ refuse every
+  `--from-stalled` id, naming the lease.
+- **No codex job is in its promoting phase on this segment** — this
+  segment's own `segments/.codex_job.<seg>.lock`, acquired and held across
+  the claim write and the token re-stamp for every requested id. Cannot
+  acquire ⇒ refuse that id, naming the segment and the job lock.
+
+**What is NOT provable is the operator's own disclosed assertion, recorded
+verbatim in `claim_record.py`'s `operator_invocation`: that no Workflow fix
+turn, and no OTHER `select_segments.py` claim invocation, is touching these
+same ids.** The plugin has no way to check either — a Workflow-dispatched
+fix turn holds neither lock above, and a second claim invocation racing
+this one is a gap this profile discloses rather than closes. **Naming an id
+under `--from-stalled` IS that assertion, stated plainly wherever the
+profile appears — its `--help`, its refusal text, and here.** Getting it
+wrong has a specific, real cost, and it is understated by saying "work may
+be lost": a concurrent fix turn writes the canonical draft directly and
+copies whatever token it read, so depending on timing it either loses its
+own work or leaves the claimed draft carrying content nobody re-reviewed.
+The two locks above cover a driver and a codex job — never a fix turn, and
+never a second selector invocation.
+
+A further residual, disclosed rather than closed: an operator running the
+selector directly with a forged `--driver-lease-held` while a real driver
+runs would pass. That actor is inside this project's trust boundary — the
+durable root's owner, who can already rewrite a draft or the ledger
+directly — so the gate exists against operator mistake and against a
+fabricated model finding, never against that operator.
+
+**Staleness gates ENTRY only, and continuation of the SAME loop does not
+re-trigger it.** Once `--from-stalled` dispatches a fresh review and that
+review is promoted, the review is current. If the driver then dies before
+the convergence write, or the fresh verdict is rejected via
+`reject_review.py` without touching the draft, the unit returns to
+`in_progress` + sentinel + no `reviewed_draft_sha1` with a now-current
+review — and a standing staleness gate would wrongly refuse re-entry into
+the loop this profile just opened. Continuation is authenticated the same
+way `--from-converged`'s dirty-review continuation is, above: against a
+COMPLETE claim record held by the draft's current owner, or, on the
+lost-token path, this run — never merely because the review happens to be
+current.
+
+**When a unit fails one of the conditions above, the hand-driven procedure
+below is the FALLBACK — no longer the only route.** The currently known
+instances (`seg21`, `FRONTBACK:errata_02`) are both admissible under
+`--from-stalled` on their real on-disk state as of this writing; drive them
+through it rather than by hand. For a unit that genuinely fails the
+profile, the same procedure that used to be the only option remains
+available, entirely OUTSIDE any plugin script, in this exact order:
 
 1. **A fresh review of the current bytes, at the NEXT round label** (e.g.
    `:r2` if the stale review was `:r1`) — dispatched however W5's ordinary

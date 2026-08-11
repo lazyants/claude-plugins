@@ -790,8 +790,8 @@ def test_from_cap_claim_admitted_end_to_end_through_the_real_selector(tmp_path):
     Before the fix this could not pass at all, and that was measured, not
     assumed: reverting run()'s call site to `run_id=None` (the abandoned
     two-phase contract) makes this exact invocation exit 1 with
-    "a claim (--from-converged/--from-cap) was requested but --run-id was
-    not given", dispatching nothing.
+    "a claim (--from-converged/--from-cap/--from-stalled) was requested but
+    --run-id was not given", dispatching nothing.
 
     `kinds == ["review"]` is the assertion that protects the operator's
     bytes. If the run id the claim stamped onto the draft ever diverged
