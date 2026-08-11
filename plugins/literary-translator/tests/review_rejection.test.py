@@ -1116,6 +1116,79 @@ def test_a_concurrent_rejection_cannot_overwrite_a_colleagues_record(tmp_path):
     assert rejection_path.read_bytes() == original
 
 
+def test_the_lock_path_refuses_a_planted_symlink_and_a_planted_fifo(tmp_path):
+    """THE LOCK PATH HAS THE RECORD'S PROVENANCE PROBLEM, and needs the record's
+    defence.
+
+    `.reject_review.<seg>.lock` is predictable and lives in `segments/` -- the
+    directory this whole artifact's threat model says other processes can
+    write. Opened with plain `O_CREAT|O_RDWR`, a planted
+    `.reject_review.<seg>.lock -> /outside/target` is FOLLOWED, and O_CREAT
+    then creates that external file with the operator's privileges: this
+    command reaching outside the durable root, which is exactly the boundary
+    the temp-record write already defends. The second half is subtler -- a
+    symlink to a DIFFERENT lock inode turns serialisation advertised as
+    per-path into serialisation on whatever the link names.
+
+    TWO ENTRY KINDS, because they fail through different mechanisms and one
+    does not imply the other: O_NOFOLLOW is what refuses the symlink (ELOOP at
+    open), while a FIFO opens fine and is refused by the S_ISREG test on the
+    DESCRIPTOR -- with O_NONBLOCK the only reason the command refuses in
+    milliseconds instead of blocking forever on a reader that never comes.
+
+    THE CONTROL is the same command with nothing planted: it must succeed, so
+    neither refusal can be a gate that refuses in any state."""
+    root = make_reject_review_root(tmp_path)
+    seg = "seg01"
+    token = "RUN1:seg01:r1"
+    review = write_review_lite(root / "segments", seg, clean=False, coverage_ok=True,
+                                dispatch_token=token,
+                                findings=[{"loc": "p1:1", "severity": "major",
+                                           "issue": "x", "suggest": "y"}])
+    invocation = dict(reason="verified unfounded", round_label="1", expect_token=token,
+                      expect_digest=REJECT_MOD._review_verdict_digest(review))
+    lock_path = root / "segments" / f".reject_review.{seg}.lock"
+    rejection_path = root / "segments" / f"{seg}.review_rejected.json"
+
+    # 1. SYMLINK pointing OUTSIDE the durable root, at a path that does not
+    #    exist yet -- so "was it created?" answers whether the open followed.
+    outside = tmp_path / "outside_the_durable_root.txt"
+    assert not outside.exists()
+    os.symlink(str(outside), str(lock_path))
+    linked = run_reject_review(root, seg, **invocation)
+    assert linked.returncode == 1, (
+        f"a symlink at the lock path must REFUSE, got rc={linked.returncode}\n"
+        f"stdout:\n{linked.stdout}"
+    )
+    assert json.loads(linked.stdout.strip())["success"] is False
+    assert not outside.exists(), (
+        "and O_CREAT must not have followed the link: creating that file is "
+        "this command writing outside the durable root, with the operator's "
+        "privileges, at a path someone else chose"
+    )
+    assert not rejection_path.exists()
+    lock_path.unlink()
+
+    # 2. FIFO. Opens without ELOOP, so only the S_ISREG test on the descriptor
+    #    can refuse it -- and only O_NONBLOCK keeps the open from blocking.
+    os.mkfifo(str(lock_path))
+    fifo = run_reject_review(root, seg, **invocation)
+    assert fifo.returncode == 1, (
+        f"a FIFO at the lock path must REFUSE (and must not hang), got "
+        f"rc={fifo.returncode}\nstdout:\n{fifo.stdout}"
+    )
+    assert "not a regular file" in json.loads(fifo.stdout.strip())["error"]
+    assert not rejection_path.exists()
+    lock_path.unlink()
+
+    # CONTROL -- nothing planted, the same command succeeds and the lock file
+    # it creates is an ordinary regular file.
+    ok = run_reject_review(root, seg, **invocation)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert rejection_path.is_file()
+    assert lock_path.is_file() and not lock_path.is_symlink()
+
+
 def test_removing_a_record_that_cannot_authorize_is_itself_synced(tmp_path):
     """AN UNLINK IS A DIRECTORY-ENTRY CHANGE, and an unsynced one can be undone
     by a crash -- which would bring back a record this command has just told

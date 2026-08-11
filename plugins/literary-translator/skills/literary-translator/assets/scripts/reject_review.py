@@ -587,6 +587,8 @@ def _import_claim_record(scripts_dir: Path):
 
 
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 REJECTION_LOCK_TIMEOUT_S = 10.0
 
@@ -635,12 +637,49 @@ def acquire_rejection_lock(seg: str, segments_dir: Path,
     lock_path = rejection_lock_path(seg, segments_dir)
     try:
         segments_dir.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR | _O_CLOEXEC, 0o600)
+        # O_NOFOLLOW|O_NONBLOCK AND AN fstat, exactly as the consumer applies
+        # to the record itself, because this path has the same provenance
+        # problem: it is predictable and it lives in a directory the threat
+        # model says other processes can write. Without O_NOFOLLOW a planted
+        # `.reject_review.<seg>.lock -> /somewhere/outside` is FOLLOWED, and
+        # O_CREAT then creates that external target with the operator's
+        # privileges -- this command reaching outside the durable root, which
+        # is the boundary the temp-record write already defends. A symlink
+        # pointing at another lock inode is the second half: serialisation
+        # advertised as per-path would silently become per-whatever-the-link-
+        # names. O_NONBLOCK for the same measured reason as the record's own
+        # open: a FIFO at this path would otherwise hang the command instead
+        # of refusing it.
+        fd = os.open(
+            str(lock_path),
+            os.O_CREAT | os.O_RDWR | _O_CLOEXEC | _O_NOFOLLOW | _O_NONBLOCK,
+            0o600,
+        )
     except OSError as exc:
         return None, (
-            f"could not open the rejection lock at {lock_path}: {exc}. "
-            f"Refusing rather than publish a record without serialising "
-            f"against a concurrent operator."
+            f"could not open the rejection lock at {lock_path}: {exc}. A "
+            f"symlink or special file at that path is REFUSED rather than "
+            f"followed -- if one is there, something else put it there. "
+            f"Nothing was read, written or removed."
+        )
+    # The descriptor, never the path: what was opened is the only thing that
+    # can be judged without reintroducing the TOCTOU the open just closed.
+    try:
+        lock_st = os.fstat(fd)
+    except OSError as exc:
+        os.close(fd)
+        return None, (
+            f"could not stat the rejection lock at {lock_path} after opening "
+            f"it: {exc}. Refusing rather than serialise on something whose "
+            f"kind could not be established."
+        )
+    if not stat.S_ISREG(lock_st.st_mode):
+        os.close(fd)
+        return None, (
+            f"the rejection lock path {lock_path} is not a regular file. "
+            f"Refusing rather than take a lease on a device, socket or "
+            f"directory -- remove whatever is at that path and re-run. "
+            f"Nothing was read, written or removed."
         )
     deadline = time.monotonic() + timeout_s
     while True:

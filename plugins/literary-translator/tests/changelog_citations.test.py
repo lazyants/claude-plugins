@@ -104,7 +104,7 @@ CITATION_ANCHORS = {
     # on the def and on the emitted pair, because the entry's claim is
     # specifically that BOTH values come from one read -- a version that
     # printed only the digest would keep the def and lose the payload anchor.
-    "reject_review.py:935-990": [
+    "reject_review.py:974-1029": [
         "def _print_verdict_digest(seg: str, dirs: dict) -> NoReturn:",
         '"round_label": label,',
         '"round_label_problem": label_err,',
@@ -124,7 +124,7 @@ CITATION_ANCHORS = {
     # The record's temp file. Anchored on all three properties the entry
     # names -- the random suffix, O_EXCL, and the rename -- because dropping
     # any one of them restores the symlink write on its own.
-    "reject_review.py:812-834": [
+    "reject_review.py:851-873": [
         'tmp_path = path.parent / f".{path.name}.tmp.{os.getpid()}.{os.urandom(6).hex()}"',
         "fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)",
         "os.replace(tmp_path, path)",
