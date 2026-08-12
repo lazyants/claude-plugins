@@ -667,7 +667,7 @@ step that needs them; both sit inert under the default
 `output.v1_scope: segment_drafts_and_audit`, and reading them up front pays
 for machinery a plain project will never use.
 
-## Hard rules R1–R7
+## Hard rules R1–R9
 
 Full content lives in the dedicated reference docs — do not duplicate it
 here, follow the linked doc:
@@ -736,6 +736,44 @@ here, follow the linked doc:
     `oneOf`/`allOf`/`anyOf`/`array`).
 
   `references/workflow-schema-validation.md`
+- **R8 — The fix turn is applied in-session, or by at most TWO long-lived
+  executors that are never closed between rounds.** R7 governs who calls
+  translate/review; nothing governed who EDITS the draft afterwards, and that
+  is where an operator's cost silently explodes. Codex cannot do it —
+  `--kind review` writes only `<seg>.review.json` and never touches the draft,
+  and re-translating converged or hand-corrected text is prohibited — so a
+  Claude turn must apply it. Never one spawn per round, per segment, or per
+  defect class. **The billable unit is the COLD START, not the round and not
+  the concurrency**: twenty sequential spawns cost the same as twenty parallel
+  ones, so capping concurrency saves almost nothing, while a warm executor
+  re-reads the contract incrementally and a cold one rebuilds it. Measured on
+  two books driven through this plugin on the same day: the one that spawned a
+  fresh executor per round burned 39.3M cache-creation tokens across 19 spawns
+  against its own session's 3.2M, and cost 3.1× the book that applied every fix
+  in-session.
+  Two corollaries, and they are ONE rule with the above — unsafe apart. **Do
+  not respond by enlarging the batches:** small parcels (3–7 loci) are what
+  keeps attention on each finding, and executor attention is the only detector
+  for a finding whose execution violates another contract rule. Small parcels
+  are cheap only BECAUSE the executor stays warm; small parcels with a close
+  between them is exactly the configuration that produced the figure above.
+  **Do not collapse to a single actor either:** two independent readers exist
+  to disagree with the lead's FRAME, not to add hands. Authorization may be
+  granted per defect class; the record stays per item, always.
+- **R9 — A style-contract edit applies FORWARD; a converged segment stays
+  converged.** Appending a finding to `style_bible.md` mid-run does not
+  invalidate work already reviewed under the previous contract, and must never
+  trigger a re-review pass or a back-sweep of earlier segments over the new
+  rule. Resetting converged status is an OPERATOR decision, taken only when the
+  rules changed radically — never an automatic consequence of one more line.
+  The mechanical `converged → stale` flip that follows the edit is a
+  bookkeeping consequence of `style_contract_hash` being a cache-key field
+  (`references/ledger-and-resumability.md`), not evidence that any prose needs
+  rechecking. The one real constraint is TIMING, not content: segments that
+  converge AFTER the edit carry the new hash and are unaffected, so make
+  contract edits while the loop is still running — an edit landing after the
+  last segment converges re-stales the corpus and blocks W9 assembly, buying
+  nothing but a re-run for the stamp.
 
 ## Workflow W1–W9
 
@@ -1815,6 +1853,9 @@ plugin currently reads `needs_fix`, the driver's stdout, or its own journal
 (`runs/<internal-session-id>/driver_journal.jsonl`) on the driver's behalf.
 Do not launch this driver unattended expecting it to complete a batch
 end-to-end — a `needs_fix` segment sits stalled until someone checks.
+**R8 governs WHO performs that turn** — this session, or at most two
+long-lived executors kept open across rounds; never a fresh spawn per round,
+per segment, or per defect class.
 
 **When the finding is WRONG (#461) — rejecting a verdict instead of
 applying it.** The fix turn above assumes the finding is actionable. A
@@ -2216,7 +2257,11 @@ and three of them are unenforced traps with no code-side safety net:**
 **W6 Consistency pass** — cross-segment sweep using `consistency_issues.md`
 as a lightweight, hand-maintained tracker after every batch, before the next
 starts. Never the output of an automated script, never read back in or
-acted on programmatically.
+acted on programmatically. A decision recorded here is invisible to the
+reviewer, which reads `style_bible.md` and the segpack's `canon_map` only —
+so promoting a decision into the contract is what makes it enforceable, and
+**R9 governs what that promotion does and does not oblige**: it binds the
+segments still to come, never a re-review of the ones already converged.
 
 **W7 Final audit** — `scripts/final_audit.py`, generalized directly from the
 proven `final_audit.py` in the in-house historiettes-t3 provenance project

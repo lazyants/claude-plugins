@@ -13,7 +13,7 @@ Plugin hardening layered around that core is called out inline where relevant;
 do not infer byte-identity for schema fields or control-flow branches explicitly
 marked as plugin additions.
 
-## Hard rules index (R1–R7)
+## Hard rules index (R1–R9)
 
 Full content lives in the reference doc named next to each rule. This file carries
 the full content of **R1** and **R6**; the others are cross-referenced, not repeated,
@@ -29,6 +29,12 @@ so there is exactly one place each rule can go stale.
   dimension of the engine loop, not a separate subsystem).
 - **R7** Workflow-script schema requirement (two explicit categories) —
   `references/workflow-schema-validation.md`.
+- **R8** The fix turn runs in-session or on at most two long-lived executors,
+  never a spawn per round/segment/defect class — `SKILL.md`. R1 fixes WHO
+  translates and reviews; R8 fixes who EDITS the draft afterwards, the step
+  codex structurally cannot perform.
+- **R9** A style-contract edit applies forward; a converged segment stays
+  converged, and no back-sweep is owed to a newly written rule — `SKILL.md`.
 
 ## R1 — Role separation is a hard rule, never profile-configurable
 

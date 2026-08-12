@@ -73,89 +73,13 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # contain its anchor text is exactly what a re-numbering produces without
 # anyone re-reading it.
 CITATION_ANCHORS = {
-    # --- #490: the two completeness gates, and the allowlist they share ----
-    # The whole defect was that these two frozensets were the same list in two
-    # files and the gates around them were NOT the same predicate. Anchoring
-    # both on the identical definition line is deliberate: if one is renamed or
-    # narrowed, exactly one of these two anchors goes missing, which is the
-    # cheapest possible signal that the copies have parted.
-    "final_audit.py:1156": ["SAFE_STALE_CARVEOUT_FIELDS = frozenset("],
-    "assemble.py:374": ["SAFE_STALE_CARVEOUT_FIELDS = frozenset("],
-
-    # --- the merge records the reason it had already computed --------------
-    "ledger_merge.py:329": ["def _compute_stale_segments("],
-    # Anchored on all three lines, not just the assignment, because the claim
-    # is "materialized entry ONLY, and only when non-empty". The `if fields:`
-    # is the non-empty half; dropping it would leave the other two anchors
-    # intact while writing an empty list onto every entry.
-    "ledger_merge.py:660-662": [
-        "stale_mismatched_fields.get(seg)",
-        "if fields:",
-        'entry["stale_mismatched_fields"] = fields',
-    ],
-    # The unconditional strip that makes the materialized value provably the
-    # merge's OWN diff. Anchored on the pop rather than on its comment: a
-    # fragment supplies this field through `dict(record)` above, and without
-    # this line a hand-written fragment authorizes its own carve-out. The
-    # entry claims the value is never inherited -- this is the only line that
-    # makes that true.
-    "ledger_merge.py:648": ['entry.pop("stale_mismatched_fields", None)'],
-
-    # --- assembly's carve-out, and the fatal it must never weaken ----------
-    "assemble.py:567": ["def _stale_carveout_refusal_reason("],
-    # The sha1 fatal. Anchored on the message rather than the comparison, so a
-    # refactor that keeps the check but downgrades it to a skip still trips
-    # this: the entry's claim is that a hand-edit is REFUSED, not merely noticed.
-    "assemble.py:896": ["draft has changed since review"],
-    # The member-type guard. Anchored on the comprehension rather than on the
-    # refusal text, because the claim is that the members are checked BEFORE
-    # the allowlist subtraction below them -- move it after and the crash it
-    # exists to prevent comes back while the message it returns still exists.
-    "assemble.py:618": ["non_str = [f for f in mismatched"],
-
-    # --- #491: the premise, and where it is combined ------------------------
-    # Three anchors for one mechanism, because the entry's claim is about
-    # WHERE, not just whether. The flag is declared before the profile chain,
-    # set inside it, and consumed at the pre-existing cache-key computation
-    # site -- and it is that third location that carries the promise the
-    # subprocess call neither moved nor gained a sibling.
-    "select_segments.py:2625": ["draft_unchanged_since_convergence = False"],
-    "select_segments.py:2673": ["draft_unchanged_since_convergence = True"],
-    "select_segments.py:2839": ["if draft_unchanged_since_convergence:"],
-    "select_segments.py:1633": ["MACHINERY_ONLY_CACHE_KEY_FIELDS = frozenset("],
-
-    # --- the gate ahead of delivery ----------------------------------------
-    # Two anchors because the claim is both WHAT the predicate restates and
-    # WHERE it is applied. The predicate alone could exist unused; the loop
-    # line alone could call something that restated the sentinel condition
-    # too, which is the asymmetry the entry explicitly promises.
-    "validate_assembled.py:755": ["def _stale_qualifies_for_carveout("],
-    # Three anchors on one line, in order, because the line carries three
-    # separate claims: it fires only for `stale`, only for records the
-    # field-list predicate accepts, and only for segments the CURRENT manifest
-    # still contains. Dropping the last conjunct is the round-2 MAJOR
-    # (a retained out-of-manifest entry reaching a gate it was never subject
-    # to) and would leave the first two anchors intact.
-    "validate_assembled.py:927": [
-        'status == "stale"',
-        "_stale_qualifies_for_carveout(record)",
-        "seg in manifest_seg_ids",
-    ],
-
-    # --- why there is no fourth profile, and which hashes actually move ----
-    # Anchored on the driver's membership specifically: that one line is the
-    # entire reason a fourth profile was rejected, and if it ever leaves this
-    # roster the rejection's stated rationale silently stops being true.
-    "cache_key.py:143-171": [
-        "PLUGIN_BUNDLE_MEMBERS = (",
-        "segment_dispatch_driver.py",
-    ],
-    # The OTHER roster -- the one this release's own files ARE on, which is
-    # why the entry states plainly that the resume digest moves even though no
-    # cache key does. Anchored here rather than on resume_setup.py because
-    # membership is what makes the claim true; the digest that consumes it
-    # would still exist if the tuple were emptied.
-    "scaffold_setup.py:63": ["ORCHESTRATION_BUNDLE_MEMBERS = ("],
+    # This map tracks the NEWEST changelog entry only, and is rewritten every
+    # release. 1.26.0 is documentation-only: it states two operator rules (R8,
+    # R9) and cites exactly one source range, the line that decides which
+    # artifact a codex job may publish -- the whole basis for R8's claim that
+    # codex cannot perform the fix turn. If that expression moves or is
+    # renamed, R8's stated reason has silently lost its evidence.
+    "codex_job.py:772": ['ext = "draft" if self.kind == "translate" else "review"'],
 }
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an

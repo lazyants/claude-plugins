@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.26.0 — 2026-08-12
+
+Two operator rules the plugin relied on but never stated. Documentation only — no script, schema, template or workflow byte changes, so no cache key moves and no corpus re-stales.
+
+### R8 — who applies the fix
+
+R7 fixes who calls translate and review. Nothing fixed who EDITS the draft afterwards, and codex structurally cannot: the artifact a job may publish is chosen from its `--kind` alone (`codex_job.py:772`), so a review job writes `<seg>.review.json` and can never touch the draft, while re-translating converged or hand-corrected text is prohibited. So a Claude turn must apply every finding, and the plugin said nothing about which one — the single place an operator's cost silently explodes.
+
+The rule is now stated: the driving session applies fixes itself, or hands them to at most **two long-lived executors that are never closed between rounds**. Never one spawn per round, per segment, or per defect class. The billable unit is the **cold start**, not the round and not the concurrency — twenty sequential spawns cost the same as twenty parallel ones, so capping concurrency saves almost nothing, while a warm executor re-reads the contract incrementally and a cold one rebuilds it. Measured on two books driven through this plugin on the same day: the one that spawned a fresh executor per round burned 39.3M cache-creation tokens across 19 spawns against its own session's 3.2M, and cost 3.1× the book that applied every fix in-session.
+
+Both corollaries ship with it, because the rule is unsafe in halves. **Batches do not grow in response**: small parcels (3–7 loci) are what keeps attention on each finding, and executor attention is the only detector for a finding whose execution violates another contract rule — parcels are cheap only BECAUSE the executor stays warm, and small parcels with a close between them is exactly the configuration that produced the figure above. **The work does not collapse to one actor either**: two independent readers exist to disagree with the lead's frame, not to add hands.
+
+### R9 — what a style-contract edit obliges
+
+Appending a finding to `style_bible.md` mid-run does not invalidate work already reviewed under the previous contract, and never owes a re-review pass or a back-sweep of earlier segments over the newly written rule. Resetting converged status is an operator decision taken when the rules changed radically — not an automatic consequence of one more line. The mechanical `converged → stale` flip that follows the edit is bookkeeping, because `style_contract_hash` is a cache-key field; it is not evidence that any prose needs rechecking.
+
+The one real constraint is timing rather than content. Segments that converge AFTER the edit carry the new hash and are unaffected, so contract edits belong inside the running loop; an edit landing after the last segment converges re-stales the corpus and blocks W9 assembly, buying nothing but a re-run for the stamp.
+
+W6 now also states plainly that a decision recorded in `consistency_issues.md` is invisible to the reviewer — which reads `style_bible.md` and the segpack's `canon_map` only — so promoting a decision into the contract is what makes it enforceable, and R9 governs what that promotion does and does not oblige.
+
 ## 1.25.0 — 2026-08-12
 
 A translated book could reach a state where it could neither be assembled nor re-reviewed. Closes #491 and #490.
