@@ -76,11 +76,16 @@ Two scope-specific ways to compute `C_output` (never mixed):
     AFTER `final_audit.py` and BEFORE delivery, a hand edit landing in that
     exact window would otherwise be evaluated (and delivered) without proof
     the reviewer ever saw those bytes. The rebind covers **every converged
-    segment in `runs/ledger.json`**, not merely the heading-bearing subset
-    the coverage invariant above happens to iterate -- an all-prose
-    segment hand-edited after review must fail this gate too, even though
-    it declares no heading at all and the coverage invariant alone would
-    never look at it. For every converged segment, it recomputes that
+    segment in `runs/ledger.json`, plus every #491 machinery-only carved-out
+    `stale` segment** (a `stale` record whose entire `stale_mismatched_fields`
+    set is drawn from `SAFE_STALE_CARVEOUT_FIELDS` -- see
+    `_stale_qualifies_for_carveout()`'s own docstring for exactly which of
+    `assemble.py`'s carve-out conditions this restates), not merely the
+    heading-bearing subset the coverage invariant above happens to iterate --
+    an all-prose segment hand-edited after review must fail this gate too,
+    even though it declares no heading at all and the coverage invariant
+    alone would never look at it. For every converged-or-carved-out segment,
+    it recomputes that
     draft's current canonical sha1 from a SINGLE on-disk read (dispatch_token
     excluded, identical algorithm to `final_audit.py`/`assemble.py`'s own
     `draft_content_sha1()` -- hashed and parsed from the same read, never two
@@ -212,6 +217,29 @@ BROAD_HEADING_LIKE_RE = re.compile(
 # script reads the merged ledger.json, not raw fragments.
 LEDGER_STATUS_ENUM = frozenset(
     {"pending", "in_progress", "converged", "non_converged", "blocked", "stale"}
+)
+
+# #491: the machinery-only stale carve-out's field allowlist. A cache-key
+# field move that lands ONLY here can never have touched translated prose
+# (source text, style bible, prompts, canon terms, engine config all live
+# in the OTHER CACHE_KEY_FIELD_ORDER fields, see scripts/cache_key.py) --
+# so a "stale" ledger record whose entire stale_mismatched_fields set is
+# drawn from here is, structurally, still the same reviewed translation,
+# just re-cache-keyed by a tooling upgrade. See
+# _stale_qualifies_for_carveout() below for how this gate uses it.
+#
+# Restated here, not imported -- house convention for this plugin's
+# self-contained scripts (see e.g. ledger_merge.py's own CACHE_KEY_FIELDS,
+# assemble.py:374's own comment). The existing three-way census
+# (tests/stale_carveout.test.py's own
+# test_three_copy_drift_guard_for_machinery_only_fields) lives in a file a
+# concurrent #491 change owns, so this copy is pinned by a SEPARATE
+# four-way drift assertion in tests/validate_assembled_carveout.test.py
+# instead, against final_audit.SAFE_STALE_CARVEOUT_FIELDS,
+# select_segments.MACHINERY_ONLY_CACHE_KEY_FIELDS and assemble.py's own
+# copy.
+SAFE_STALE_CARVEOUT_FIELDS = frozenset(
+    {"plugin_bundle_hash", "schema_hash", "derivation_bundle_hash"}
 )
 
 
@@ -563,6 +591,22 @@ def collect_source_markers(manifest_segments, manifest_blocks, heading_types):
     return counter
 
 
+def collect_manifest_seg_ids(manifest_segments):
+    """Set of every `seg` value declared across `manifest_segments` -- the
+    manifest's own "which segments does the CURRENT book require" population,
+    derived the SAME way collect_source_markers() above walks
+    `manifest_segments` (`seg_entry["seg"]` for every entry) so the two can
+    never disagree about what "in the manifest" means. Trusts
+    `_validate_manifest_shape()` already ran, exactly like
+    collect_source_markers() itself (every seg_entry is a dict with a str
+    `seg`).
+
+    Exists for collect_reviewed_draft_rebind()'s own `manifest_seg_ids`
+    parameter below (#491 R2, MAJOR) -- see that function's docstring for
+    why a ledger-only view of "in scope" is not enough."""
+    return {seg_entry["seg"] for seg_entry in manifest_segments}
+
+
 # ---------------------------------------------------------------------------
 # assembled_book scope: C_output from the assembled NodeStream.
 # ---------------------------------------------------------------------------
@@ -708,20 +752,127 @@ def _rebind_or_flag_stale(seg, record, stale_segs):
     return draft
 
 
-def collect_reviewed_draft_rebind(ledger_segments):
-    """Rebind-checks EVERY converged segment in `ledger_segments` against
-    its own recorded reviewed_draft_sha1 -- mirrors assemble.py's own
-    load_converged_segments() guard, and deliberately covers the WHOLE
-    converged population, not merely the heading-bearing subset the
-    coverage invariant happens to need. The rebind is a general
-    draft-trust guard ("did the reviewer actually see these bytes"), not a
-    heading-scoped one: an all-prose converged segment hand-edited (or its
-    draft replaced) strictly after review must RED too, even though it
-    declares no heading at all and the coverage invariant would otherwise
-    never look at it (BLOCKER 1). Returns (trusted_drafts: {seg: draft
-    dict}, stale_segs: set) -- `trusted_drafts` holds only segments that
-    passed the rebind; any other converged-or-not segment is simply absent
-    from it.
+def _stale_qualifies_for_carveout(record: dict) -> bool:
+    """True iff `record` (a runs/ledger.json segments{} entry already known
+    to have status=="stale") qualifies for the #491 machinery-only carve-out
+    -- i.e. is to be treated exactly like status=="converged" by
+    collect_reviewed_draft_rebind() below. NEVER RAISES: an unqualifying
+    shape returns False (excluded from the widened rebind population, the
+    same fate status=="stale" already had before #491 -- simply absent from
+    `trusted_drafts`, per collect_reviewed_draft_rebind()'s own docstring),
+    never a fatal _MalformedArtifact. See the DELIBERATE ASYMMETRY paragraph
+    below for why this gate can afford to be permissive in a way
+    assemble.py's own equivalent cannot.
+
+    Restates only the FIELD-LIST half of assemble.py's own #491
+    four-condition carve-out predicate
+    (_stale_carveout_refusal_reason, assemble.py:567-635) -- conditions 1-3
+    of 4:
+      1. `stale_mismatched_fields` is present and a non-empty list.
+      2. Every member of that list is a `str` (assemble.py's own codex
+         hardening: an unhashable member ([{}]/[[]]) would otherwise raise
+         TypeError at condition 3's frozenset membership test, and a
+         hashable-but-non-string member ([1]/[None]) is not evidence of a
+         machinery-only move either -- both shapes are excluded here for
+         the same reason assemble.py refuses them, even though this
+         function has no refusal message to build).
+      3. Every one of its members is in SAFE_STALE_CARVEOUT_FIELDS.
+
+    DELIBERATE ASYMMETRY -- deliberately OMITS assemble.py's own condition
+    4 (whether the `.ever_converged.<seg>` sentinel is present,
+    assemble.py:613-634). #491 R2 (round-2 review) found the ORIGINAL
+    version of this paragraph factually wrong: it justified the omission by
+    claiming assemble.py always re-checks the sentinel downstream, so this
+    gate could never ship anything assembly would refuse. That does not
+    hold in the scope this function actually runs in -- the default
+    `segment_drafts_and_audit` scope (main(), below) runs this gate AFTER
+    final_audit.py and BEFORE W8 Deliver, while assemble.py only runs at
+    all in the SEPARATE `assembled_book` scope (W9); a project driven
+    through the default scope alone may never reach an assembly decision
+    for this gate to defer to. The asymmetry itself is still correct, for
+    two different, independently sufficient reasons:
+
+      1. This gate has never checked the sentinel for ANY record, carved
+         out or not. At the #491 R2 branch base (commit 64a18b3) this file
+         contains ZERO occurrences of `ever_converged` -- a plain
+         `status=="converged"` record has ALWAYS been rebind-checked on
+         nothing but its own self-asserted `reviewed_draft_sha1`, with no
+         sentinel involved. Admitting a carved-out `stale` record on the
+         SAME terms grants no capability a plain `converged` record did
+         not already grant here -- and reaching a carved-out `stale`
+         record requires strictly MORE than planting a `converged` one (a
+         prior genuine convergence, then a drift confined to
+         SAFE_STALE_CARVEOUT_FIELDS).
+
+      2. `final_audit.py` enforces the sentinel on exactly this
+         population, ahead of this gate. Its own
+         `count_stale_previously_converged()` (final_audit.py) keeps a
+         stale segment OUT of its own carve-out count -- which blocks
+         `project_complete` -- whenever the `.ever_converged` sentinel is
+         absent (see that function's own fail-safe-direction docstring).
+         This gate's default scope runs only after `final_audit.py` has
+         already SUCCEEDED, so a sentinel-less segment cannot reach this
+         function via the normal W1-W9 wiring in the first place; this
+         function's own permissiveness is not what stands between such a
+         segment and a false-clean rebind.
+
+    Restating the sentinel classifier (classify_ever_converged_sentinel(),
+    assemble.py:417-552) here would still buy nothing beyond what reason 2
+    above already gives, at the cost of a SIXTH byte-identical copy of a
+    predicate the #409 program already restates five times and enforces
+    byte-for-byte (tests/select_segments.test.py's
+    test_exactly_these_five_scripts_participate_in_the_sentinel_contract)."""
+    mismatched = record.get("stale_mismatched_fields")
+    if not isinstance(mismatched, list) or not mismatched:
+        return False
+    if not all(isinstance(f, str) for f in mismatched):
+        return False
+    return all(f in SAFE_STALE_CARVEOUT_FIELDS for f in mismatched)
+
+
+def collect_reviewed_draft_rebind(ledger_segments, manifest_seg_ids):
+    """Rebind-checks EVERY converged segment in `ledger_segments`, PLUS
+    every #491 machinery-only carved-out stale segment (see
+    _stale_qualifies_for_carveout() above) that the CURRENT manifest still
+    requires, against its own recorded reviewed_draft_sha1 -- mirrors
+    assemble.py's own load_converged_segments() guard, and deliberately
+    covers the WHOLE converged-or-carved-out population, not merely the
+    heading-bearing subset the coverage invariant happens to need. The
+    rebind is a general draft-trust guard ("did the reviewer actually see
+    these bytes"), not a heading-scoped one: an all-prose converged segment
+    hand-edited (or its draft replaced) strictly after review must RED too,
+    even though it declares no heading at all and the coverage invariant
+    would otherwise never look at it (BLOCKER 1) -- and #491 must not
+    narrow that guarantee back down for a carved-out stale segment. Returns
+    (trusted_drafts: {seg: draft dict}, stale_segs: set) -- `trusted_drafts`
+    holds only segments that passed the rebind; any other segment (never
+    converged, "stale" but not carve-out-eligible, or a carved-out stale
+    segment the current manifest no longer requires -- see
+    `manifest_seg_ids` below) is simply absent from it.
+
+    `manifest_seg_ids` -- #491 R2 (MAJOR, round-2 review): this function
+    walks EVERY `runs/ledger.json` `segments{}` entry, not only the ones
+    the CURRENT manifest names. `ledger_merge.py` deliberately RETAINS a
+    historical entry for a segment the current manifest no longer contains
+    (see that script's own module docstring: "ledger.json legitimately
+    accumulates fragments across every batch ever run"). Before #491 R2,
+    such a retained entry was harmless here: `collect_default_output_
+    markers()` only ever CREDITS keys `source_counter` names, so an
+    out-of-manifest trusted draft simply contributed to no key at all --
+    but #491's own widening (below) means a retained entry whose status is
+    "stale" and whose `stale_mismatched_fields` is machinery-only now
+    reaches `_rebind_or_flag_stale()`, which can FAIL on it: flagging
+    `stale_segs` (a HARD `stale_review_since_audit` defect, exit 1) on a
+    missing sha1/draft/mismatch, or raising `_MalformedArtifact` (exit 2)
+    on a draft that cannot be read/parsed or has a malformed `blocks`
+    field. Both are fatal-or-hard outcomes an otherwise-deliverable CURRENT
+    book must never suffer for a retained entry it does not even need --
+    the exact failure class #491 exists to remove. So the NEW stale branch
+    below (only that branch -- the pre-existing "converged" branch is left
+    completely alone, per BLOCKER 1's own guarantee above) is scoped to
+    `seg in manifest_seg_ids`. Callers derive this set via
+    collect_manifest_seg_ids() (above) so it can never disagree with
+    collect_source_markers()'s own notion of "in the manifest".
 
     Three element-shape/security guards, all fatal (raise _MalformedArtifact,
     never silently skipped -- see that exception's own docstring for why a
@@ -736,7 +887,11 @@ def collect_reviewed_draft_rebind(ledger_segments):
     test below -- reincarnating BLOCKER-1 for exactly the segment it fixed
     (a genuinely-converged, all-prose segment whose draft was hand-edited
     after review, now invisible to BOTH the rebind AND the heading-coverage
-    invariant, since it declares no heading at all)."""
+    invariant, since it declares no heading at all). All three run for
+    EVERY record before either branch below is evaluated -- the #491 R2
+    `seg in manifest_seg_ids` test added to the stale branch runs strictly
+    AFTER them, so a traversal-shaped seg key (e.g. "../../etc/x") is still
+    fatal here, never silently scoped away."""
     trusted_drafts = {}
     stale_segs = set()
     for seg, record in ledger_segments.items():
@@ -769,7 +924,25 @@ def collect_reviewed_draft_rebind(ledger_segments):
                 f"not one of {sorted(LEDGER_STATUS_ENUM)} (ledger.schema.json) "
                 f"-- cannot classify its convergence state"
             )
-        if status != "converged":
+        if status == "stale" and _stale_qualifies_for_carveout(record) and seg in manifest_seg_ids:
+            # #491 -- falls through to the SAME rebind treatment as
+            # status=="converged". See _stale_qualifies_for_carveout's own
+            # docstring for exactly which of assemble.py's four carve-out
+            # conditions this restates, and the DELIBERATE ASYMMETRY
+            # (assemble.py's own sentinel condition is intentionally NOT
+            # restated here); see this function's own `manifest_seg_ids`
+            # paragraph for why the #491 R2 membership test scopes this
+            # branch and only this branch.
+            pass
+        elif status != "converged":
+            # A stale entry that doesn't qualify for the carve-out, and a
+            # carved-out stale entry the manifest no longer requires, land
+            # here and are skipped -- BYTE-IDENTICAL to the pre-#491
+            # behaviour for both shapes. An out-of-manifest CONVERGED entry
+            # does NOT reach here: #491 R2 leaves the converged branch
+            # unscoped, so it still falls through to the rebind below (see
+            # BLOCKER 1 in this function's own docstring; fenced by
+            # tests/validate_assembled_carveout.test.py case 8.9).
             continue
         draft = _rebind_or_flag_stale(seg, record, stale_segs)
         if draft is not None:
@@ -781,10 +954,11 @@ def collect_default_output_markers(source_counter, trusted_drafts):
     """Counter of surfaced (seg, block_id) keys, restricted to exactly the
     keys `source_counter` names (never widens the population). Reads draft
     content ONLY from `trusted_drafts` (see collect_reviewed_draft_rebind)
-    -- a segment that failed the reviewed-SHA rebind, or was never
-    converged at all, is simply absent from `trusted_drafts` and
-    contributes 0 to every one of its own keys, naturally RED (no vacuous
-    pass -- #208 remains the general completeness gate).
+    -- a segment that failed the reviewed-SHA rebind, was never converged
+    at all, or is "stale" without qualifying for the #491 machinery-only
+    carve-out, is simply absent from `trusted_drafts` and contributes 0 to
+    every one of its own keys, naturally RED (no vacuous pass -- #208
+    remains the general completeness gate).
 
     ped-ant PR#230 [P1]: `draft.blocks{}` is KEYED by block_id -- exactly
     ONE string per id, never one-per-occurrence. When a segment's own
@@ -1114,7 +1288,15 @@ def main():
             # source_counter happens to name -- an all-prose segment
             # hand-edited after review must RED too (see
             # collect_reviewed_draft_rebind's own docstring).
-            trusted_drafts, stale_segs = collect_reviewed_draft_rebind(ledger_segments)
+            #
+            # #491 R2: `collect_manifest_seg_ids(manifest_segments)` scopes
+            # collect_reviewed_draft_rebind()'s NEW stale-carve-out branch
+            # to segments the CURRENT manifest still requires -- see that
+            # function's own `manifest_seg_ids` docstring paragraph for why
+            # a retained, out-of-manifest ledger entry must not reach it.
+            trusted_drafts, stale_segs = collect_reviewed_draft_rebind(
+                ledger_segments, collect_manifest_seg_ids(manifest_segments)
+            )
             output_counter = collect_default_output_markers(source_counter, trusted_drafts)
         else:
             _fatal(

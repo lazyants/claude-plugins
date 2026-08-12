@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ledger.schema.json",
   "title": "Ledger",
-  "description": "The SEPARATE materialized multi-record shape written by ledger_merge.py to ledger.json -- a per-segment status/reason/rounds map assembled from every runs/ledger.d/*.json fragment. Each value under `segments` composes against the SAME status-free base as ledger-fragment.schema.json (never against ledger-fragment.schema.json itself), so the wider status enum here -- which includes `stale` -- never conflicts with the fragment schema's narrower enum. `stale` is a status ledger_merge.py COMPUTES when building this map (a cache-key mismatch against a converged fragment); it is never found in any actual on-disk fragment.",
+  "description": "The SEPARATE materialized multi-record shape written by ledger_merge.py to ledger.json -- a per-segment status/reason/rounds map assembled from every runs/ledger.d/*.json fragment. Each value under `segments` composes against the SAME status-free base as ledger-fragment.schema.json (never against ledger-fragment.schema.json itself), so the wider status enum here -- which includes `stale` -- never conflicts with the fragment schema's narrower enum. `stale` is a status ledger_merge.py COMPUTES when building this map (a cache-key mismatch against a converged fragment); it is never found in any actual on-disk fragment. `stale_mismatched_fields` (1.25.0, #491) is likewise computed here, never found in a fragment -- declared on THIS schema, not on ledger-record-base.schema.json, which fragments also compose.",
   "type": "object",
   "properties": {
     "segments": {
@@ -16,6 +16,12 @@
           "status": {
             "type": "string",
             "enum": ["pending", "in_progress", "converged", "non_converged", "blocked", "stale"]
+          },
+          "stale_mismatched_fields": {
+            "type": "array",
+            "description": "The sorted, non-empty list of CACHE_KEY_FIELDS names whose value differs between a 'stale' segment's stored cache_key and its current one, as computed by ledger_merge.py's own _compute_stale_segments() at merge time. Present only when that field-by-field diff was actually computed (never for the OTHER path that also flips a segment stale -- a stored cache_key that isn't a dict at all, which has no diff to report) and never present on a fragment or a non-'stale' entry. assemble.py's own machinery-only carve-out (#491) reads this to decide whether a stale segment can rejoin the book without re-review; a missing, empty, or non-list value is fail-safe by construction there -- 'not machinery-only'.",
+            "items": { "type": "string" },
+            "minItems": 1
           }
         },
         "required": ["status"],

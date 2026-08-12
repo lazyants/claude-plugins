@@ -1102,7 +1102,18 @@ def run_output_coverage():
         if not isinstance(ledger_segments, dict):
             raise ConservationError("runs/ledger.json is missing its 'segments' object")
         try:
-            trusted_drafts, _stale_segs = va.collect_reviewed_draft_rebind(ledger_segments)
+            # #491 R2 (MAJOR): the rebind population is scoped to the CURRENT
+            # manifest, because runs/ledger.json deliberately retains entries
+            # for segments this book no longer contains, and the #491 stale
+            # carve-out would otherwise pull one of those into a gate it was
+            # never subject to. Derived through validate_assembled.py's own
+            # helper, from the same `manifest_segments` already shape-validated
+            # at _validate_manifest_shape() above -- never a second, local
+            # notion of "in the manifest", which is exactly how two gates come
+            # to disagree about the same book.
+            trusted_drafts, _stale_segs = va.collect_reviewed_draft_rebind(
+                ledger_segments, va.collect_manifest_seg_ids(manifest_segments)
+            )
         except va._MalformedArtifact as exc:
             raise ConservationError(str(exc))
         output_words = collect_default_output_word_counts(trusted_drafts)
