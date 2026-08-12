@@ -1967,21 +1967,49 @@ mistake — it never claims to tell stalled from live by artifacts alone. It
 proves the two liveness facts this project's own kernel state CAN prove and
 leaves the remainder an explicit, disclosed operator assertion rather than
 dressing an artifact test up as proof. Reintroducing an artifact-only fourth
-profile is still forbidden; `--from-stalled` is not that. Naming a segment
-under the wrong profile is refused BY NAME, not silently reclassified into
-another one:
+profile is still forbidden; `--from-stalled` is not that, and neither is
+1.25.0's widening of `--from-converged` (#491): admitting a converged unit
+whose draft never changed but whose content-affecting cache key did is a
+second way to satisfy that profile's own drift condition, not a new
+profile — same claim mechanism, same name, same refusal shape. Naming a
+segment under the wrong profile is refused BY NAME, not silently
+reclassified into another one:
 
 - **`--from-converged SEG1[,SEG2,...]`** — for a segment that converged
-  CLEANLY at least once and was then hand-edited. Requires, in addition to
-  the shared gates below: a materialized ledger status of `converged` or
-  `stale`; a `.ever_converged.<seg>` sentinel present; a recorded
-  `reviewed_draft_sha1` that DIFFERS from the draft's current content sha1
-  (nothing to re-review if it still matches); and the stored review's
-  `clean` is `true` — OR, when it is `false`, the review is admitted as the
-  CONTINUATION of a re-review loop this project already opened (#460; see
-  the paragraph below for what establishes that). A successfully-admitted
-  `--from-converged` claim clears the `previously_converged` refusal for
-  exactly that id, and nothing else.
+  CLEANLY at least once and was then either hand-edited or left untouched
+  while a content-affecting cache-key field moved (1.25.0, #491; previously
+  only the hand-edited case was admitted). Requires, in addition to the
+  shared gates below: a materialized ledger status of `converged` or
+  `stale`; a `.ever_converged.<seg>` sentinel present; and the stored
+  review's `clean` is `true` — OR, when it is `false`, the review is
+  admitted as the CONTINUATION of a re-review loop this project already
+  opened (#460; see the paragraph below for what establishes that). The
+  drift baseline is one of two shapes:
+  - **Draft changed** — current draft content sha1 DIFFERS from
+    `reviewed_draft_sha1`. Admits exactly as before 1.25.0; no stored
+    `cache_key` is required (`--only-segs`'s force-include can reach a
+    hand-edited segment with none).
+  - **Draft unchanged** — current sha1 still matches `reviewed_draft_sha1`.
+    Requires a usable stored `cache_key` dict, a computable current key, and
+    at least one moved field OUTSIDE `MACHINERY_ONLY_CACHE_KEY_FIELDS`.
+    Anything missing refuses, fail-closed, naming which part was missing. A
+    unit whose ONLY moved fields are machinery-only (`plugin_bundle_hash`,
+    `schema_hash`, `derivation_bundle_hash`) is refused here too, saying
+    assembly no longer requires action for it — `assemble.py`'s
+    completeness gate now carves that population out directly, without any
+    claim (1.25.0, #491), and `validate_assembled.py`'s reviewed-SHA rebind
+    population is widened to match, so a carved-out `stale` segment is
+    rebind-checked exactly like a `converged` one instead of failing the
+    structural-completeness gate that runs before Deliver. That gate
+    restates only the field-list half of the carve-out predicate, never the
+    `.ever_converged` sentinel condition — not because assembly will catch
+    it (in the default scope assembly may never run), but because this gate
+    has never checked the sentinel for any record, so carved-out `stale`
+    records are admitted on exactly the terms `converged` ones always were,
+    and because `final_audit.py`'s own carve-out count already blocks
+    `project_complete` when the sentinel is absent, one gate earlier.
+  A successfully-admitted `--from-converged` claim clears the
+  `previously_converged` refusal for exactly that id, and nothing else.
 - **`--from-cap SEG1[,SEG2,...]`** — for a segment that hit the review cap
   (materialized status `non_converged`, `reason: "cap"`) and was then
   hand-edited. Requires: NO `.ever_converged` sentinel; the stored review's

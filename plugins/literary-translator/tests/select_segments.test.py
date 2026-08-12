@@ -1895,6 +1895,16 @@ SENTINEL_SCRIPTS = (
     "select_segments.py",         # the #409 Step 1 dispatch gate
     "final_audit.py",             # the completeness carve-out
     "backfill_ever_converged.py",  # the already_sentineled scan (reader+writer)
+    # #491/#490's assembly-side carve-out. W9 now accepts a `stale` record whose
+    # staleness is machinery-only, and the sentinel is one of that decision's
+    # conditions -- so assembly reads it, which makes it a participant by the
+    # ROLE check below rather than by anyone's intention. It carries the shared
+    # predicate rather than importing one, which is what this census's own
+    # remedy prescribes and what the other four do. It must agree with
+    # final_audit.py in particular, including on AMBIGUOUS: both carve out on
+    # anything that is not a clean ENOENT, and a divergence there would put the
+    # two completeness gates back into the disagreement #490 exists to end.
+    "assemble.py",
 )
 
 def _folded_str_literals(src, skip_docstrings=False):
@@ -2102,15 +2112,32 @@ SENTINEL_NON_PARTICIPANTS = (
     # carries no copy of the predicate -- re-verified by the ROLE check below
     # rather than taken on the strength of this comment.
     "reject_review.py",
+    # #491's structural-completeness gate. It restates the FIELD-LIST half of
+    # assemble.py's machinery-only carve-out and names `.ever_converged` only
+    # to record that it deliberately does NOT restate the sentinel half --
+    # assemble.py still enforces that condition, so this gate cannot pass a
+    # segment assembly would refuse, and duplicating the predicate here would
+    # have made a sixth byte-identical copy for no safety gain. A prose
+    # citation of the very condition a file declines to implement is exactly
+    # the case this roster exists for; the ROLE check below re-verifies that
+    # it reads no marker, builds no sentinel path, and binds no sentinel API.
+    "validate_assembled.py",
 )
 
 
-def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
-    """CENSUS. The drift test below pins the four copies in SENTINEL_SCRIPTS
-    against each other -- and would go on passing, quietly covering three
-    copies, if someone deleted one, or five, if someone added a fifth
+def test_exactly_these_five_scripts_participate_in_the_sentinel_contract():
+    """CENSUS. The drift test below pins the copies in SENTINEL_SCRIPTS
+    against each other -- and would go on passing, quietly covering one fewer
+    if someone deleted a participant, or one more if someone added another
     elsewhere in scripts/. A pairwise-agreement test cannot see its own
     population change; that is the whole reason this one exists beside it.
+
+    It has now caught that exactly once for real: #491/#490 made assemble.py
+    read the sentinel for its machinery-only carve-out, and this census went
+    red on the same run that introduced it, naming assemble.py, before the
+    change reached review. The population is deliberately stated as a count in
+    this test's NAME so that growing it is a rename -- an edit nobody makes by
+    accident -- rather than a silent append.
 
     Not a hypothetical shape for this codebase: `draft_content_sha1` is
     currently implemented in SEVEN scripts under assets/scripts/ (assemble,
@@ -2122,7 +2149,7 @@ def test_exactly_these_four_scripts_participate_in_the_sentinel_contract():
     NEEDLE CHOICE matters and was measured, not assumed. THREE executable
     needles pin the participants -- the marker f-string as actually written,
     the predicate's `def` line, and `def ever_converged_path` -- and each
-    yields exactly these four today. The third is not redundant: it is
+    yields exactly these five today. The third is not redundant: it is
     independent of how the marker FILENAME is spelled, so a participant that
     builds the path as `".ever_converged." + seg` still trips it.
 

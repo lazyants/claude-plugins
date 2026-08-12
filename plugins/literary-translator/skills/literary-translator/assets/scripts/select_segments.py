@@ -2617,6 +2617,12 @@ def evaluate_claim_admission(
     # module docstring requires for every reader of ambiguous state: AMBIGUOUS
     # means "do not claim" for EVERY profile that reads it, never "assume
     # present" or "assume absent".
+    # #491: the draft-changed/unchanged PREMISE for --from-converged's own
+    # branch below, set there and read again much further down (D6's
+    # existing cache-key computation site) -- never here. False for every
+    # other profile, by construction: only --from-converged's branch ever
+    # sets it.
+    draft_unchanged_since_convergence = False
     if profile == CLAIM_PROFILE_FROM_CAP:
         status = ledger_record.get("status")
         reason = ledger_record.get("reason")
@@ -2654,11 +2660,17 @@ def evaluate_claim_admission(
                 f"'reviewed_draft_sha1' -- the drift baseline this profile requires"
             )
         elif current_draft_sha1 is not None and reviewed_draft_sha1 == current_draft_sha1:
-            reasons.append(
-                f"{seg!r} requested under --from-converged, but its current draft content sha1 "
-                f"still matches 'reviewed_draft_sha1' -- nothing has been hand-edited since "
-                f"convergence, so there is no re-review to authorize"
-            )
+            # #491: "still matches" is no longer an unconditional refusal --
+            # it used to BE the whole gate (a hand-edit was the only way to
+            # authorize re-review). Now it only records the PREMISE: an
+            # untouched draft can still be admitted if a CONTENT-affecting
+            # cache-key field moved since convergence (the Hebrew shape -- a
+            # style-bible edit, no hand-edit at all). The key-dependent half
+            # of this check is evaluated at D6's existing cache-key
+            # computation site further down, deliberately -- see that
+            # site's own comment for why the computation itself must not
+            # move up here.
+            draft_unchanged_since_convergence = True
     elif profile == CLAIM_PROFILE_FROM_STALLED:
         # #455. The THIRD state, and the whole reason this profile exists:
         # materialized status in_progress, sentinel PRESENT, no
@@ -2813,14 +2825,56 @@ def evaluate_claim_admission(
                 f"segpack.py for this segment (from the durable copy) before claiming it."
             )
 
-    # ---- current cache key -- required to RECORD the D4 baseline, never --
-    # ---- to gate --from-converged (decision 5: no moved field refuses). --
+    # ---- current cache key -- required to RECORD the D4 baseline, and, --
+    # ---- since #491, to gate --from-converged's DRAFT-UNCHANGED branch --
+    # ---- (decision 5 still holds unmodified for a HAND-EDITED claim: no --
+    # ---- moved field refuses one). ----------------------------------------
     current_cache_key = compute_current_cache_key(
         seg, dirs["cache_key_script"], durable_root, args.durable_root, args.plugin_root
     )
     if isinstance(current_cache_key, str):
         reasons.append(f"could not compute the current cache key: {current_cache_key}")
         current_cache_key = None
+
+    if draft_unchanged_since_convergence:
+        # #491: the deferred half of the premise recorded above. Reached
+        # only for --from-converged, and only when the draft's current
+        # content sha1 still matches 'reviewed_draft_sha1'. Fail-closed on
+        # every part of the comparison -- a missing/malformed stored
+        # baseline or an uncomputable current key refuses rather than
+        # assumes "nothing moved", which would silently admit every
+        # unchanged draft the moment its baseline went missing. Reuses
+        # `current_cache_key`, computed once directly above: a second
+        # cache_key.py subprocess call here would be exactly the kind of
+        # second, later-timestamped invocation D4's own "the key as of
+        # publication" contract must not tolerate (claim_record.py:430-431).
+        stored_cache_key_for_drift = ledger_record.get("cache_key")
+        if not isinstance(stored_cache_key_for_drift, dict):
+            reasons.append(
+                f"{seg!r} requested under --from-converged with an unchanged draft, but its "
+                f"ledger record's 'cache_key' is not a usable stored dict "
+                f"({stored_cache_key_for_drift!r}) -- there is no baseline to compare the "
+                f"current cache key against, so whether a content-affecting field moved since "
+                f"convergence cannot be established"
+            )
+        elif current_cache_key is not None:
+            # current_cache_key is None here only when the block directly
+            # above already appended "could not compute the current cache
+            # key" -- that reason already explains the refusal, so this
+            # branch is skipped rather than adding a second, redundant one.
+            content_field_moved = any(
+                stored_cache_key_for_drift.get(f) != current_cache_key.get(f)
+                for f in CACHE_KEY_FIELDS
+                if f not in MACHINERY_ONLY_CACHE_KEY_FIELDS
+            )
+            if not content_field_moved:
+                reasons.append(
+                    f"{seg!r} requested under --from-converged, but its draft is unchanged "
+                    f"since convergence and every cache-key field that has moved since then is "
+                    f"machinery-only (plugin bytes, schema shape, or derivation-bundle bytes) "
+                    f"-- assembly no longer requires action for this segment, so there is no "
+                    f"re-review to authorize"
+                )
 
     if reasons:
         return False, reasons, {}

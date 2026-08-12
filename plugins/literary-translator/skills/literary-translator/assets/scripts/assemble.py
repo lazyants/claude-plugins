@@ -134,11 +134,13 @@ distinct from `dependency_precondition` because a custom renderer is an
 open extension point and its halt reason isn't necessarily a missing
 dependency)).
 """
+import errno
 import hashlib
 import importlib.util
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 from collections import defaultdict
@@ -351,37 +353,534 @@ def _profile_get(profile: dict, dotted_path: str):
 
 
 # ---------------------------------------------------------------------------
+# #491: the machinery-only "stale" carve-out. A converged segment whose ONLY
+# cache-key drift is tooling/schema/derivation-bundle (never the source
+# text, style bible, prompts, canon terms, or engine config) never needed
+# re-review in the first place -- ledger_merge.py now records WHICH fields
+# moved (`stale_mismatched_fields`) on the materialized entry only, and
+# load_converged_segments() below accepts such a record exactly like
+# status=="converged", so a plugin upgrade can no longer strand a finished
+# book. See final_audit.py's own `count_stale_previously_converged()`
+# (`final_audit.py:1156-1243`), the sibling carve-out this one is designed
+# to always agree with over the SAME materialized runs/ledger.json snapshot.
+# ---------------------------------------------------------------------------
+
+# Deliberately restated, not imported -- house convention for this plugin's
+# self-contained scripts (see e.g. ledger_merge.py's own CACHE_KEY_FIELDS).
+# A drift test (tests/stale_carveout.test.py) pins this against
+# final_audit.SAFE_STALE_CARVEOUT_FIELDS and
+# select_segments.MACHINERY_ONLY_CACHE_KEY_FIELDS so the three copies can
+# never silently disagree.
+SAFE_STALE_CARVEOUT_FIELDS = frozenset(
+    {"plugin_bundle_hash", "schema_hash", "derivation_bundle_hash"}
+)
+
+
+# ---------------------------------------------------------------------------
+# The shared #409 ever-converged sentinel predicate. This block is an EXACT
+# duplicate of the copy in the other four sentinel scripts (search
+# `SENTINEL_ABSENT` in ledger_update.py, select_segments.py, final_audit.py
+# and backfill_ever_converged.py) -- see classify_ever_converged_sentinel()'s
+# own docstring for why it is duplicated rather than imported, and which
+# test (tests/select_segments.test.py) pins the copies together. #491 makes
+# this script a fifth participant: the machinery-only carve-out above needs
+# the SAME three-state read final_audit.py's own carve-out uses, for the
+# same reason -- an AMBIGUOUS read (a dangling symlink, an EACCES) must
+# never read as absent and refuse a finished book over an unreadable
+# dotfile.
+# ---------------------------------------------------------------------------
+
+SENTINEL_ABSENT = "absent"
+SENTINEL_PRESENT = "present"
+SENTINEL_AMBIGUOUS = "ambiguous"
+
+
+def _sentinel_entry_kind(mode: int) -> str:
+    """A human name for the st_mode of whatever occupies a sentinel path --
+    it goes straight into an operator-facing message, which has to say what
+    is actually sitting there before it can ask anyone to fix it."""
+    if stat.S_ISLNK(mode):
+        return "a symbolic link"
+    if stat.S_ISDIR(mode):
+        return "a directory"
+    if stat.S_ISFIFO(mode):
+        return "a FIFO"
+    if stat.S_ISSOCK(mode):
+        return "a socket"
+    if stat.S_ISBLK(mode):
+        return "a block device"
+    if stat.S_ISCHR(mode):
+        return "a character device"
+    return f"a non-regular entry (st_mode {stat.S_IFMT(mode):#o})"
+
+
+def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
+    """Three-state classification of the `.ever_converged.<seg>` entry at
+    `path`: `(SENTINEL_ABSENT|SENTINEL_PRESENT|SENTINEL_AMBIGUOUS, detail)`.
+
+    THE SHARED PREDICATE. Every script that asks whether a segment has ever
+    converged calls this, and all four must agree on it:
+    ledger_update.py's `mark_ever_converged()` (the only writer),
+    select_segments.py's #409 Step 1 dispatch gate,
+    final_audit.py's `count_stale_previously_converged()` carve-out, and
+    backfill_ever_converged.py's `already_sentineled` scan.
+
+    DUPLICATED RATHER THAN IMPORTED because importing it would be a live
+    hazard -- NOT because of the "no shared lib between self-contained
+    scripts" convention, which is already false here (canon_validate.py and
+    glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports
+    cache_key.py). The real reason: ledger_update.py is a
+    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:100-107 records that that
+    tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS
+    INVISIBLE -- which is why canon_senses.py had to be registered
+    explicitly once two members imported it. A shared module would put this
+    predicate's bytes outside the hash meant to cover them, so WEAKENING
+    this guard would no longer move plugin_bundle_hash, and every durable
+    root scaffolded beforehand would go on trusting it: the exact
+    false-green cache_key.py:114-118 names. Consolidation stays possible --
+    it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the
+    same commit.
+
+    What keeps the four copies honest is ENFORCEMENT, not discipline. A
+    remembered convention rots -- this docstring's own first version cited
+    the false one -- while a test that fails loudly does not.
+    tests/select_segments.test.py's
+    test_sentinel_predicate_is_identical_in_all_four_scripts pins the copies
+    byte for byte and across the state matrix; its
+    test_exactly_these_four_scripts_participate_in_the_sentinel_contract
+    fails when a fifth copy appears or one of the four goes away.
+
+    Why three states, and why not `Path.exists()`. `exists()` answers the
+    wrong question three ways, and NOT all of them in the same direction --
+    an earlier draft of this docstring said "twice over, and BOTH point at
+    absent", which is the claim the CHANGELOG had to correct. Two of the
+    three do point at "absent", and that is the direction that authorizes
+    destroying converged work:
+
+      1. It FOLLOWS symlinks, so a DANGLING symlink named as the sentinel
+         reads as absent -- while the writer's `os.open(O_CREAT|O_EXCL)` gets
+         EEXIST from that same symlink and reports the segment successfully
+         marked. That split is the whole finding: a segment recorded as
+         converged that the gate then sees as unprotected and retranslates.
+         Verified on this project's Python (3.14.6): `exists()` -> False,
+         `os.open` -> FileExistsError, for one and the same dangling link.
+      2. Since Python 3.13 `exists()` swallows EVERY OSError and returns
+         False, so an EACCES/ESTALE/EIO on the lookup is reported as "this
+         segment never converged". Verified on 3.14.6: with an unreadable
+         parent directory `exists()` returns False while `lstat()` raises
+         EACCES. (On 3.8-3.12 the same call re-raised for EACCES but still
+         swallowed ELOOP/ENOTDIR/EBADF -- so no supported version answers
+         this correctly, and the version-dependence is itself a reason not
+         to route a data-loss guard through `exists()`.)
+      3. In the OTHER direction: a DIRECTORY at the marker's path is
+         `exists() == True`, so `exists()` reports converged a segment the
+         writer never marked. That one cannot destroy finished work, which is
+         why it went unnoticed -- but it is the reason "exists() at least
+         fails safe in one direction" is false, and the reason the fix is a
+         third state rather than a flipped default.
+
+    So: only ENOENT means absent, and it is determined by catching
+    FileNotFoundError rather than by comparing `exc.errno`, so the verdict
+    never depends on an errno that may be None. `lstat`, deliberately not
+    `stat` -- a symlink is not something `mark_ever_converged()` can have
+    (its O_CREAT|O_EXCL open refuses to write through one), so following a
+    link would only ask the question about some unrelated file. Either way
+    only the final `.ever_converged.<seg>` component is left unresolved:
+    WITHOUT `dir_fd` the PARENT components still resolve normally, so a
+    project whose whole `segments/` directory is a symlink is unaffected;
+    WITH `dir_fd` there are no parent components left to resolve, because
+    the caller already resolved them once, when it opened the descriptor.
+
+    `dir_fd` -- OPTIONAL, and today exactly one caller passes it:
+    backfill_ever_converged.py's census. Omitted (every other caller), the
+    lookup resolves the whole pathname afresh, which is the right thing for
+    a reader that holds nothing open. Passed, the BASENAME is looked up
+    relative to that descriptor instead, and `segments/` is not resolved by
+    pathname at all. The difference matters only for a caller that already
+    HOLDS the directory open and acts on its census afterwards, which is
+    exactly that one: it opens `segments/` once, does every write relative
+    to the descriptor, and samples directory identity at the end. A census
+    resolving the pathname afresh could therefore classify entries in a
+    DIFFERENT directory than the one being written to -- re-point
+    `segments/` at B for the length of the census and back to A before the
+    run ends, and B's sentinel is reported as A's protection while the
+    final identity sample compares A to A and agrees. Reproduced by review,
+    not theorised. Binding the census to the descriptor removes that
+    interleaving with no locking protocol at all, because the descriptor is
+    already held; a caller that holds none gains nothing here and passes
+    None.
+
+    Anything that is neither ENOENT nor a regular file is AMBIGUOUS: it MAY
+    be a converged segment whose sentinel this process cannot see. Each
+    caller then maps AMBIGUOUS to ITS OWN work-preserving side, and that is
+    deliberately NOT the same action in all four: the writer and the
+    dispatch gate REFUSE (never destroy or mis-record converged work), while
+    final_audit.py's carve-out COUNTS it (never declare a converged book
+    incomplete and therefore undeliverable) and backfill's scan reports it
+    unprotected (never claim protection it did not verify). One predicate,
+    four deliberate mappings -- see each call site's own comment. The
+    asymmetry is the reason a false "absent" is the unacceptable answer
+    everywhere: it costs a finished translation, or a finished book.
+    """
+    try:
+        # `path.name` is the basename and the descriptor is its parent, so
+        # the `dir_fd` branch resolves no part of `segments/` by pathname.
+        # `os.lstat` keeps `follow_symlinks` off exactly as `Path.lstat`
+        # does, so the FINAL component stays unresolved either way and both
+        # branches raise the same exceptions into the same handlers below.
+        st = path.lstat() if dir_fd is None else os.lstat(path.name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return (SENTINEL_ABSENT, "")
+    except OSError as exc:
+        # `OSError.errno` is typed `int | None` and genuinely can be None. A
+        # missing errno is the LEAST informative failure there is, so it
+        # lands on the ambiguous side like every other non-ENOENT outcome --
+        # never silently treated as "some other errno", and above all never
+        # as absence. The ENOENT verdict above does not consult `errno` at
+        # all (FileNotFoundError IS ENOENT by construction), so a None errno
+        # can never reach it, which is why this branch can be a plain guard
+        # rather than a three-way comparison.
+        if exc.errno is None:
+            return (SENTINEL_AMBIGUOUS, f"lstat failed with no errno: {exc}")
+        code = errno.errorcode.get(exc.errno, f"errno {exc.errno}")
+        return (SENTINEL_AMBIGUOUS, f"lstat failed with {code}: {exc.strerror or exc}")
+    if stat.S_ISREG(st.st_mode):
+        return (SENTINEL_PRESENT, "")
+    return (
+        SENTINEL_AMBIGUOUS,
+        f"the entry is {_sentinel_entry_kind(st.st_mode)}, not a regular file",
+    )
+
+
+def ever_converged_path(seg):
+    """The durable 'this segment has converged at least once' sentinel.
+    WRITTEN by ledger_update.py:mark_ever_converged (the single place
+    convergence is recorded). Restated here -- assemble.py's own #491
+    carve-out reader -- rather than imported; see
+    classify_ever_converged_sentinel()'s own docstring for why the whole
+    predicate is duplicated rather than shared. Never called for anything
+    but the read-only carve-out check below: this script writes no
+    sentinel."""
+    return SEGMENTS_DIR / f".ever_converged.{seg}"
+
+
+def _stale_carveout_refusal_reason(seg: str, record: dict) -> "str | None":
+    """Returns None when `record` (a runs/ledger.json entry already known to
+    have status=="stale") qualifies for the #491 machinery-only carve-out --
+    i.e. is to be treated exactly like status=="converged" by every check
+    load_converged_segments() runs after this one returns -- or a specific,
+    human-readable refusal reason naming the first condition that failed.
+
+    Four conditions, ALL of which must hold, checked in this order so the
+    reason names the FIRST one that fails (1/3/4 are acceptance criteria
+    1/2/3 of the #491 plan; 2 is a hardening added on review of the
+    original #491 patch -- see below):
+      1. `stale_mismatched_fields` is present and a non-empty list.
+      2. Every member of that list is a `str`.
+      3. Every one of its members is in SAFE_STALE_CARVEOUT_FIELDS.
+      4. The `.ever_converged.<seg>` sentinel is not SENTINEL_ABSENT.
+
+    Condition 2 exists because a hand-edited or corrupted runs/ledger.json
+    (this script never schema-validates the ledger it reads) can carry a
+    `stale_mismatched_fields` list whose MEMBERS are malformed --
+    `[{}]`/`[[]]` are unhashable and raise TypeError at condition 3's `f not
+    in SAFE_STALE_CARVEOUT_FIELDS` frozenset test; `[1]`/`[None]` are
+    hashable but then raise TypeError at `sorted()`/`', '.join()` over a
+    mixed or non-string `unsafe`. Without this check the outer handler
+    turns either crash into a generic "unexpected error" instead of this
+    function's own per-segment `project_incomplete` refusal -- still
+    fail-closed (assembly still aborts), but the wrong diagnostic for what
+    is, structurally, just another "unusable stale_mismatched_fields" shape.
+
+    FAIL-SAFE DIRECTION throughout, deliberately: missing, empty, or
+    non-list `stale_mismatched_fields` refuses -- so a runs/ledger.json
+    written before this change (which never wrote the field at all) blocks
+    assembly rather than shipping. An unrecognised or future field name is
+    absent from the allowlist by construction and refuses too, never
+    silently becomes deliverable. And ONLY a clean ENOENT sentinel read
+    blocks -- AMBIGUOUS (a dangling symlink, an EACCES) carves out exactly
+    like PRESENT, mirroring final_audit.py's own
+    count_stale_previously_converged() (`final_audit.py:1213-1242`) so the
+    two whole-project completeness signals never disagree about the same
+    materialized snapshot. Reading an unreadable dotfile as "absent" would
+    declare a finished book undeliverable, and unrecoverably so: the
+    operator's only route to a fresh sentinel is a retranslate, which
+    select_segments.py's own #409 Step 1 gate refuses for a segment that
+    already converged."""
+    mismatched = record.get("stale_mismatched_fields")
+    if not isinstance(mismatched, list) or not mismatched:
+        return (
+            f"segment {seg!r} is stale but its ledger record carries no "
+            f"usable stale_mismatched_fields (missing, empty, or not a "
+            f"list) -- cannot confirm the staleness is machinery-only; "
+            f"re-review required"
+        )
+    non_str = [f for f in mismatched if not isinstance(f, str)]
+    if non_str:
+        return (
+            f"segment {seg!r} is stale but its ledger record's "
+            f"stale_mismatched_fields carries a non-string member "
+            f"({non_str!r}) -- cannot confirm the staleness is "
+            f"machinery-only; re-review required"
+        )
+    unsafe = sorted(f for f in mismatched if f not in SAFE_STALE_CARVEOUT_FIELDS)
+    if unsafe:
+        return (
+            f"segment {seg!r} is stale because of a content-affecting "
+            f"cache-key field ({', '.join(unsafe)}) -- the machinery-only "
+            f"carve-out requires every moved field to be one of "
+            f"{{{', '.join(sorted(SAFE_STALE_CARVEOUT_FIELDS))}}}; "
+            f"re-review required before assembling"
+        )
+    state, _detail = classify_ever_converged_sentinel(ever_converged_path(seg))
+    if state == SENTINEL_ABSENT:
+        return (
+            f"segment {seg!r} is stale, and every moved field is "
+            f"machinery-only ({', '.join(sorted(mismatched))}), but its "
+            f".ever_converged sentinel is absent -- cannot confirm it ever "
+            f"converged; re-review required"
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# #491 round-2 hardening (codex review of the original #491 patch): the
+# manifest segment-id population, factored out here into ONE authoritative
+# extraction so assert_project_complete() and load_converged_segments()
+# (via main()'s own call site, below) can never derive a different notion
+# of "in the manifest". assert_project_complete() calls the raising form
+# directly -- it is, and remains, the sole place a malformed manifest is
+# authoritatively reported. main()'s own call site instead goes through
+# the NON-raising sibling right below it -- see that function's own
+# docstring for why (round-2-on-round-2: codex found that raising straight
+# out of main() had silently reordered two pre-existing, differently-coded
+# outcomes -- see its docstring for the exact regression).
+# ---------------------------------------------------------------------------
+
+
+def _manifest_segment_ids(manifest: dict) -> "set[str]":
+    """The exact manifest.segments[] population assert_project_complete()
+    has always required completeness against -- moved here verbatim from
+    that function's former inline copy so load_converged_segments() can
+    reuse the IDENTICAL extraction (via _manifest_segment_ids_or_empty()
+    right below, see its own docstring) to scope its own #491 stale-
+    carveout fall-through: one implementation walked by both callers,
+    never two copies that could silently drift apart.
+
+    Raises the same AssembleError(reason="malformed_manifest") assembly has
+    always raised when manifest.json's `segments` array is absent, empty,
+    or holds an entry with no string `seg` id -- unchanged condition,
+    unchanged message, and still surfaced ONLY from assert_project_complete
+    (its only caller), exactly as before the #491 round-2 refactor that
+    introduced this function. main()'s own call site feeding
+    load_converged_segments() never calls this raising form directly --
+    see _manifest_segment_ids_or_empty()'s own docstring for why raising
+    from there would be a new failure mode, not merely an earlier
+    surfacing of an old one."""
+    segments = manifest.get("segments")
+    if not isinstance(segments, list) or not segments:
+        raise AssembleError(
+            "manifest.json 'segments' must be a non-empty array -- refusing "
+            "to assemble a book from a manifest with no segment inventory "
+            "(a converged ledger alongside an empty/absent manifest segment "
+            "list is a corrupt or inconsistent project state)",
+            reason="malformed_manifest",
+        )
+    ids = set()
+    for seg_entry in segments:
+        seg = seg_entry.get("seg") if isinstance(seg_entry, dict) else None
+        if not isinstance(seg, str):
+            raise AssembleError(
+                f"manifest.json 'segments' contains a malformed entry -- each "
+                f"must be an object with a string 'seg' id: {seg_entry!r}",
+                reason="malformed_manifest",
+            )
+        ids.add(seg)
+    return ids
+
+
+def _manifest_segment_ids_or_empty(manifest: dict) -> "set[str]":
+    """Non-raising sibling of _manifest_segment_ids(), for the ONE caller
+    that must never raise on a malformed manifest: main()'s own call site
+    feeding load_converged_segments(). Returns _manifest_segment_ids(manifest),
+    or an empty set on EITHER of two independent axes that would otherwise
+    raise or crash:
+
+      (1) `manifest` itself is not a dict -- a top-level JSON array, null,
+          string, or number. manifest.json parses to whatever read_json()
+          handed back, and nothing upstream of this function checks its
+          type, so `manifest.get("segments")` inside _manifest_segment_ids()
+          would otherwise raise an UNTYPED AttributeError that this
+          function's own `except AssembleError` cannot catch (round-3
+          finding, measured: a top-level `[]` produced exit 1 with
+          `{"success": false, "error": "unexpected error: 'list' object
+          has no attribute 'get'"}` -- no `reason` field at all -- for a
+          project where nothing had converged or been refused, instead of
+          the required exit 2 no_converged_segments).
+      (2) `manifest` IS a dict but its `segments` value is absent, empty,
+          non-list, or holds a malformed entry -- the shapes
+          _manifest_segment_ids() itself raises AssembleError(reason=
+          "malformed_manifest") for (round-2's original finding).
+
+    Axis (1) is an explicit `isinstance(manifest, dict)` guard, deliberately
+    NOT a widened `except (AssembleError, AttributeError)`: a broad except
+    would also swallow a genuine AttributeError raised by some FUTURE edit
+    inside _manifest_segment_ids()'s own extraction, silently turning a
+    real bug into an empty population instead of a loud crash. The
+    isinstance guard only ever fires for the one shape it names.
+
+    WHY non-raising at all -- codex review of the FIRST round-2 patch (this
+    function's own reason for existing): that patch called the raising
+    _manifest_segment_ids() straight from main(), ahead of the ledger read,
+    which made a malformed manifest surface as AssembleError(reason=
+    "malformed_manifest", exit 1) even for a project where NOTHING has
+    converged or been refused yet -- a case that, before #491 round 2 ever
+    touched this code, hit main()'s own `if not converged and not refusals:
+    raise AssemblePrecondition("no_converged_segments", ...)` first (exit
+    2, a defined, non-fatal bootstrap state per AssemblePrecondition's own
+    docstring). Silently upgrading that to a hard exit 1 is a real
+    behavioral change a caller could depend on (e.g. "exit 2 means not
+    ready yet, retry me"), not "the same error surfacing earlier" -- unlike
+    a malformed manifest ALONGSIDE at least one converged/refused segment,
+    where assert_project_complete() was always going to hit the SAME
+    outcome (a typed malformed_manifest raise for axis (2), or the SAME
+    untyped AttributeError crash base always had for axis (1) -- this
+    function restores parity with base on axis (1), it does NOT newly type
+    that crash; giving it a typed malformed_manifest reason is a separate
+    change with its own blast radius, deliberately out of scope here) a
+    few lines later regardless of what the loader does first.
+
+    An empty set is safe for load_converged_segments() on EITHER axis: it
+    just means every #491-carved-out stale record reads as out-of-manifest
+    and gets silently skipped (see that function's own docstring), and the
+    run is headed for one of the SAME pre-round-2 outcomes regardless of
+    what the loader returns -- no_converged_segments via main()'s own
+    early check if nothing converged or got refused, or whatever
+    assert_project_complete() already did with that same malformed
+    manifest otherwise. Either way, restores the exact pre-round-2
+    ordering of those outcomes.
+
+    DO NOT "tidy" this into a bare call to _manifest_segment_ids(), and do
+    NOT replace the isinstance guard with a widened `except` -- either one
+    silently re-opens a regression this function exists to prevent: the
+    bare-call form re-flips main()'s exit code for the malformed-manifest-
+    plus-nothing-converged-or-refused combination from 2 back to 1 (round
+    2's finding); the widened-except form re-opens axis (1) above (round
+    3's finding) AND risks masking an unrelated future AttributeError. See
+    tests/stale_carveout.test.py's own dedicated exit-code-ordering
+    section for the tests that pin both axes."""
+    if not isinstance(manifest, dict):
+        return set()
+    try:
+        return _manifest_segment_ids(manifest)
+    except AssembleError:
+        return set()
+
+
+# ---------------------------------------------------------------------------
 # Ledger convergence + sha1 gate.
 # ---------------------------------------------------------------------------
 
 
-def load_converged_segments(ledger: dict) -> dict:
-    """Returns {seg: record} for every runs/ledger.json segments{} entry
-    whose status=="converged" AND whose on-disk draft sha1 currently
-    matches the record's own reviewed_draft_sha1 -- the same
-    stale-review-detection guard this plugin's own W7 audit gate uses. A
-    mismatch is a FATAL guard refusal (exit 1, via AssembleError), never a
-    silent skip -- "a hand-edit the reviewer never saw must not silently
-    ship" is the whole point of this gate."""
+def load_converged_segments(ledger: dict, manifest_seg_ids: "set[str]") -> "tuple[dict, dict]":
+    """Returns `(converged, refusals)`.
+
+    `converged` is {seg: record} for every runs/ledger.json segments{} entry
+    that is EITHER status=="converged" OR status=="stale", carved out by the
+    #491 machinery-only carve-out above (_stale_carveout_refusal_reason
+    returns None), AND (round-2 hardening below) inside `manifest_seg_ids`
+    -- in every case also requiring the on-disk draft sha1 to currently
+    match the record's own reviewed_draft_sha1, the same stale-review-
+    detection guard this plugin's own W7 audit gate uses. A mismatch is a
+    FATAL guard refusal (exit 1, via AssembleError), never a silent skip,
+    for either population alike -- "a hand-edit the reviewer never saw must
+    not silently ship" is the whole point of this gate, and the carve-out
+    only widens WHICH records reach it, never what it does once they
+    arrive.
+
+    `manifest_seg_ids` (round-2 hardening; main()'s call site derives it via
+    _manifest_segment_ids_or_empty() above -- normally the SAME set
+    assert_project_complete() checks completeness against, or an empty set
+    on a malformed manifest, which is safe here: see that function's own
+    docstring for why the loader must never be the place a malformed
+    manifest is first reported) scopes ONLY the new stale-carveout
+    fall-through, never the status=="converged" branch. runs/ledger.json's
+    segments{} map deliberately RETAINS historical entries for segments
+    the CURRENT manifest no longer contains (see ledger_merge.py's own module
+    docstring, and the mass-translate workflow template, on why merge never
+    prunes). Before #491, ANY such retained "stale" entry was
+    unconditionally skipped by the plain `elif status != "converged":
+    continue` branch below, so a retained-but-no-longer-required fragment
+    could never affect assembly. #491's carve-out widened what a "stale"
+    record can become -- accepted exactly like "converged", including the
+    FATAL sha1/draft-presence guards below -- which, left unscoped, would
+    let a retained out-of-manifest entry that happens to qualify for the
+    carve-out abort an otherwise-complete book over a segment it was never
+    going to require. Scoping the fall-through to `seg in manifest_seg_ids`
+    restores the pre-#491 "an out-of-manifest entry cannot newly block an
+    otherwise assemblable book" invariant for this new branch, while
+    leaving status=="converged" completely unscoped and unchanged -- an
+    out-of-manifest CONVERGED entry hitting these same fatals is
+    pre-existing behaviour, not something #491 is responsible for fixing.
+
+    `refusals` is {seg: reason} for every "stale" entry the carve-out itself
+    refused (never for pending/in_progress/non_converged/blocked/malformed
+    records, and never for an out-of-manifest entry the carve-out accepted
+    but this function then silently skipped -- a refusal there would name a
+    segment this book does not even contain), so main() can still name a
+    reason for an all-refused project instead of folding it into the
+    generic "nothing has converged yet" precondition (see
+    assert_project_complete)."""
     segments = ledger.get("segments") if isinstance(ledger, dict) else None
     if not isinstance(segments, dict):
         raise AssembleError("runs/ledger.json is missing its 'segments' object")
 
     converged = {}
+    refusals = {}
     for seg, record in segments.items():
-        if not isinstance(record, dict) or record.get("status") != "converged":
+        if not isinstance(record, dict):
+            continue
+        status = record.get("status")
+        if status == "stale":
+            if seg not in manifest_seg_ids:
+                # Round-2 hardening, moved ahead of the carve-out check
+                # itself in round 3 (codex/security-review finding: this
+                # membership test used to run AFTER
+                # _stale_carveout_refusal_reason(), so an out-of-manifest
+                # entry that FAILED the carve-out still cost a refusal --
+                # and, via that function's own condition 4, a sentinel
+                # lstat -- for a segment this book does not even contain).
+                # A retained entry for a segment the CURRENT manifest no
+                # longer requires is skipped silently, exactly as the
+                # pre-#491 `elif status != "converged": continue` branch
+                # always did for every stale entry regardless of its
+                # shape -- never fall through to the fatal checks below
+                # (which abort the WHOLE run), never call
+                # _stale_carveout_refusal_reason() at all, and never
+                # record a refusal (which would surface a segment this
+                # book does not contain in assert_project_complete()'s own
+                # diagnostics).
+                continue
+            reason = _stale_carveout_refusal_reason(seg, record)
+            if reason is not None:
+                refusals[seg] = reason
+                continue
+            # Carved out AND required by the current manifest -- falls
+            # through to the shared checks below, exactly like
+            # status=="converged".
+        elif status != "converged":
             continue
         expected_sha1 = record.get("reviewed_draft_sha1")
         if not expected_sha1:
             raise AssembleError(
-                f"runs/ledger.json segment {seg!r} has status=converged but "
+                f"runs/ledger.json segment {seg!r} has status={status!r} but "
                 f"no reviewed_draft_sha1 recorded -- cannot confirm the "
                 f"reviewer actually saw the current draft"
             )
         dp = draft_path(seg)
         if not dp.is_file():
             raise AssembleError(
-                f"runs/ledger.json segment {seg!r} has status=converged but "
+                f"runs/ledger.json segment {seg!r} has status={status!r} but "
                 f"its draft is missing on disk at {dp}"
             )
         try:
@@ -400,10 +899,10 @@ def load_converged_segments(ledger: dict) -> dict:
                 f"re-review (or restore the reviewed draft) before assembling"
             )
         converged[seg] = record
-    return converged
+    return converged, refusals
 
 
-def assert_project_complete(manifest: dict, converged: dict) -> None:
+def assert_project_complete(manifest: dict, converged: dict, refusals: dict) -> None:
     """W9's whole-project completeness gate (SKILL.md "W9 Assemble";
     references/assembly-and-output.md Path 2). Refuse to assemble unless
     EVERY manifest.segments[] unit is converged. manifest.segments[] is the
@@ -411,42 +910,41 @@ def assert_project_complete(manifest: dict, converged: dict) -> None:
     FRONTBACK:{id} units (each such entry's `seg` IS "FRONTBACK:{id}"), which
     share the one seg-id namespace with body segments and are ledgered
     identically, so a plain membership test over manifest.segments[] covers
-    front/back matter too. `converged` is exactly the units whose materialized
-    ledger status is "converged" with an on-disk draft sha1 still matching
-    reviewed_draft_sha1 (see load_converged_segments); ledger_merge.py has
-    already collapsed any cache-key mismatch to status "stale", so "converged
-    in the materialized ledger" is equivalent to final_audit.py's `reusable`
-    classification. This re-derives the SAME predicate as final_audit.py's
-    `final-audit-summary.project_complete: true` directly from manifest +
-    ledger -- final_audit.py only prints that summary and never persists it,
-    and W9 deliberately does NOT shell out to it (advisory-only, gated
-    nothing, up to 300s -- a proportionality guardrail). Assembling a book
-    from a not-fully-converged project is refused here (exit 2), never
-    silently attempted over a partial set. A manifest whose `segments`
-    inventory is absent, empty, or holds a non-object / non-string-`seg`
-    entry is itself rejected here as `malformed_manifest` (exit 1) rather
-    than coerced into an empty required set (which would otherwise fail
-    open into an empty "successful" book)."""
-    segments = manifest.get("segments")
-    if not isinstance(segments, list) or not segments:
-        raise AssembleError(
-            "manifest.json 'segments' must be a non-empty array -- refusing "
-            "to assemble a book from a manifest with no segment inventory "
-            "(a converged ledger alongside an empty/absent manifest segment "
-            "list is a corrupt or inconsistent project state)",
-            reason="malformed_manifest",
-        )
+    front/back matter too. `converged` is exactly the units accepted by
+    load_converged_segments() -- status=="converged", or (#491)
+    status=="stale" with a materialized `stale_mismatched_fields` that is
+    non-empty, entirely inside SAFE_STALE_CARVEOUT_FIELDS, and a
+    `.ever_converged` sentinel that is not ABSENT -- in every case with an
+    on-disk draft sha1 still matching reviewed_draft_sha1. This reads the
+    SAME materialized runs/ledger.json snapshot final_audit.py's own
+    `count_stale_previously_converged()` carve-out reads (never an
+    independent re-derivation of it: final_audit.py classifies via
+    select_segments.py's own scan of manifest+segpacks, while this gate
+    reads ledger.json directly) -- the two are designed, and tested
+    (tests/stale_carveout.test.py's snapshot-parity fixture), to always
+    agree about the same snapshot rather than to share one predicate.
+    final_audit.py only prints its own summary and never persists it, and W9
+    deliberately does NOT shell out to it (advisory-only, gated nothing, up
+    to 300s -- a proportionality guardrail). Assembling a book from a
+    not-fully-converged project is refused here (exit 2), never silently
+    attempted over a partial set. A manifest whose `segments` inventory is
+    absent, empty, or holds a non-object / non-string-`seg` entry is
+    rejected as `malformed_manifest` (exit 1) rather than coerced into an
+    empty required set (which would otherwise fail open into an empty
+    "successful" book) -- via the shared _manifest_segment_ids() extraction
+    (round-2 hardening; see its own docstring for why it moved out of this
+    function and became shared with load_converged_segments()).
+
+    `refusals` (#491) is load_converged_segments()'s own {seg: reason} map
+    for every "stale" record the carve-out refused -- folded into the
+    refusal message below so an all-refused project still names WHY, rather
+    than just listing bare segment ids."""
+    manifest_ids = _manifest_segment_ids(manifest)
     missing = []
-    for seg_entry in segments:
-        seg = seg_entry.get("seg") if isinstance(seg_entry, dict) else None
-        if not isinstance(seg, str):
-            raise AssembleError(
-                f"manifest.json 'segments' contains a malformed entry -- each "
-                f"must be an object with a string 'seg' id: {seg_entry!r}",
-                reason="malformed_manifest",
-            )
+    for seg in manifest_ids:
         if seg not in converged:
-            missing.append(seg)
+            reason = refusals.get(seg)
+            missing.append(f"{seg} ({reason})" if reason else seg)
     if missing:
         raise AssemblePrecondition(
             "project_incomplete",
@@ -1563,15 +2061,22 @@ def main() -> int:
             )
         ledger = read_json(LEDGER_PATH, "runs/ledger.json")
 
-        converged = load_converged_segments(ledger)
-        if not converged:
+        # Non-raising -- see _manifest_segment_ids_or_empty()'s own
+        # docstring. This must never be the place a malformed manifest is
+        # first reported: assert_project_complete() below (and, when
+        # nothing has converged or been refused at all, the
+        # no_converged_segments precondition right after this) have to
+        # keep winning first, exactly as they did before #491 round 2.
+        manifest_seg_ids = _manifest_segment_ids_or_empty(manifest)
+        converged, refusals = load_converged_segments(ledger, manifest_seg_ids)
+        if not converged and not refusals:
             raise AssemblePrecondition(
                 "no_converged_segments",
                 "runs/ledger.json has zero segments with status=converged -- "
                 "nothing to assemble yet",
             )
 
-        assert_project_complete(manifest, converged)
+        assert_project_complete(manifest, converged, refusals)
 
         canon = {"entries": {}, "review_queue": []}
         if CANON_PATH.is_file():

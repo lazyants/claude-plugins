@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.25.0 — 2026-08-12
+
+A translated book could reach a state where it could neither be assembled nor re-reviewed. Closes #491 and #490.
+
+A converged segment goes `stale` whenever any cache-key field moves. If its draft was also hand-edited, `--from-converged` admits it for re-review and convergence re-keys it. If the draft was **untouched** — because it was correct and nobody needed to change it — nothing admitted it and nothing re-keyed it, while `assemble.py` requires every manifest segment to be converged. The gate therefore handed out the right to be re-reviewed in exchange for having edited the draft, and stranded exactly the units that had nothing to edit. Measured on two live books on the same day: 13 stranded units on one after a correct style-bible edit moved `style_contract_hash`, and 76 stale segments on the other after a plugin upgrade moved `plugin_bundle_hash`, of which 73 were stale on that field alone.
+
+The two books arrive at the same dead end from opposite directions, and the fix follows that split rather than treating it as one bug.
+
+### Machinery-only staleness stops blocking delivery
+
+`plugin_bundle_hash`, `schema_hash` and `derivation_bundle_hash` cannot change what a segment's prose should say — that is why `final_audit.py:1156` already carves them out and reports such a project complete. `assemble.py` did not, and refused the same records as `project_incomplete` while its own refusal text cited `final-audit-summary.project_complete: true` as the criterion. Two gates, one predicate in name only, disagreeing after every single plugin release.
+
+`ledger_merge.py` already diffed the stored key against the current one field by field and then discarded the result. It now returns it (`ledger_merge.py:329`) and writes it as `stale_mismatched_fields` onto the **materialized** entry only (`ledger_merge.py:660-662`); fragments under `runs/ledger.d/` are never touched, which is why the property is declared on `ledger.schema.json` rather than on the base schema that fragments also compose.
+
+The materialized value is always the merge's own freshly computed diff, never anything a fragment supplied (`ledger_merge.py:648`). Fragments are read without schema validation and the merge copies their keys verbatim, so an inherited value would have let a hand-written fragment declare its own staleness machinery-only and ship a segment nothing ever compared. Declaring the property on `ledger.schema.json` is precisely what removed the closed-schema barrier that had been rejecting such a fragment, so this release had to close it in the same change that opened it. Caught in review of this release, not in production.
+
+`assemble.py` reads it (`assemble.py:567`) and accepts a `stale` record when every moved field is machinery-only (`assemble.py:374`), the `.ever_converged` sentinel is not ABSENT, and the record passes every check a `converged` one passes. The sentinel policy mirrors `final_audit.py` exactly, AMBIGUOUS included: only a clean ENOENT blocks, because reading a dangling symlink as "absent" would declare a finished book undeliverable over an unreadable dotfile.
+
+Fail-safe in both directions. A `runs/ledger.json` written before this release carries no `stale_mismatched_fields`, so it blocks rather than ships — re-run the merge after upgrading, before assembling. An unrecognised or future cache-key field is absent from the allowlist by construction and blocks.
+
+### The draft-sha1 fatal is unchanged, and now guards the new path too
+
+`assemble.py:896` still refuses, fatally, any record whose on-disk draft no longer matches `reviewed_draft_sha1`. Carved-out records traverse it exactly as converged ones do: a hand-edit the reviewer never saw must not be assembled, and widening *which* records are eligible must never widen *what* is accepted without review.
+
+Both carve-outs apply only to segments the CURRENT manifest requires. `runs/ledger.json` deliberately retains entries for segments a book no longer contains, and those entries used to be skipped outright — falling them through to the shared checks turned a retained historical record into a way to abort an otherwise assemblable book, which is the failure class this release exists to remove. Each gate derives that population through one helper of its own — `assemble.py`'s serves both its loader and its completeness gate, and `validate_assembled.py`'s serves both its own rebind and `validate_conservation.py`'s reuse of it — so no script grows a second, local notion of "in the manifest". The two helpers are separate by the same house convention that keeps every script self-contained, and they perform the identical extraction. The `converged` path is deliberately left unscoped: an out-of-manifest converged entry still hits those fatals, exactly as before. One operator-visible difference in those fatals: because the same messages now serve both statuses, they interpolate the record's actual status rather than hardcoding `converged` — a log line that read `status=converged` now reads `status='converged'`, and a carved-out record correctly reports `status='stale'` instead of a false one.
+
+A `stale_mismatched_fields` whose members are not strings is refused by name (`assemble.py:618`) instead of crashing the run. Assembly does not schema-validate the ledger it reads, so that list can be any shape a hand-edit produces; aborting with `unexpected error` was fail-closed but told the operator neither which segment nor which condition.
+
+### The gate ahead of delivery was widened to match
+
+`validate_assembled.py` is a hard structural-completeness gate that runs after the audit and before Deliver, and it selected its population by `status == "converged"` alone. Carving out machinery-only staleness in assembly alone would have moved the wall one gate earlier rather than removing it: every carved-out segment owning a declared heading would have gone red there, and one owning no heading at all would have quietly lost its reviewed-SHA rebind. Its rebind population now includes carved-out records (`validate_assembled.py:927`).
+
+`validate_conservation.py`'s output-coverage lane reuses that same rebind population, so its coverage widens with it; that lane is WARN-only and never exits 1, so nothing there gates on the change.
+
+`validate_assembled.py` restates only the field-list half of the predicate (`validate_assembled.py:755`), deliberately not the `.ever_converged` sentinel condition. Two reasons, neither of which is "assembly will catch it" — in the default scope this gate runs after the audit and before Deliver, and assembly runs only for the `assembled_book` scope, so there may be no later assembly decision at all. First, this gate has never checked the sentinel for any record: a `converged` entry has always been rebind-checked on its own recorded `reviewed_draft_sha1` with no sentinel involved, so admitting carved-out `stale` records on identical terms grants nothing a plain `converged` record did not already grant, and reaching a carved-out record requires strictly more. Second, `final_audit.py:1156`'s own carve-out count keeps a segment out — and so blocks `project_complete` — when the sentinel is absent, and this gate runs only after that audit succeeds. Duplicating the sentinel predicate here would have made a sixth byte-identical copy to re-state a condition already enforced one gate earlier.
+
+### `--from-converged` recognises a moved standard, not only a moved draft
+
+The profile already means *the stored verdict no longer applies*. It recognised one cause — the text changed. It now recognises the other — the standard changed. A premise recorded during the profile chain (`select_segments.py:2625`, set at `select_segments.py:2673`) is combined with the moved-field set at the **existing** cache-key computation site (`select_segments.py:2839`), so the subprocess call neither moved nor gained a sibling; hoisting it would have widened the window in which the recorded `cache_key_at_claim` stops meaning the key as of publication.
+
+An untouched draft is admitted only when a field outside `MACHINERY_ONLY_CACHE_KEY_FIELDS` (`select_segments.py:1633`) moved. Machinery-only movement is still refused, and the refusal now says that assembly no longer requires action for that segment, so an operator does not go looking for a flag that should not exist. A mixed movement — one machinery field and one content field together — is admitted: the test is whether any content-affecting field moved, not whether all moved fields are machinery.
+
+Admission is permissive-only: no claim admitted before this release is refused after it. In particular the draft-changed branch requires no stored cache-key baseline, because a hand-edited segment with no stored key is admitted today and refusing it would have recreated the dead end this release removes.
+
+### No admission profile was added, and no cache key moves
+
+There are still three profiles. A fourth was designed and rejected on measurement: it would have required `KNOWN_CLAIM_PROFILES` in `segment_dispatch_driver.py`, which is a `PLUGIN_BUNDLE_MEMBERS` entry (`cache_key.py:143-171`), so shipping it would have moved `plugin_bundle_hash` and marked every corpus stale — reproducing the defect it was meant to close. Every file this release changes is absent from that roster, and `schema_hash` covers only the draft, review and segpack schemas, so no segment's 15-field `cache_key` moves: nothing is re-staled and nothing is re-translated by this upgrade.
+
+The resume digest is a different bundle, and it does move. `ledger_merge.py` and `select_segments.py` are `ORCHESTRATION_BUNDLE_MEMBERS` (`scaffold_setup.py:63`), and `resume_setup.py` folds both bundle markers and a hash of the durable root's own `schemas/` — which `ledger.schema.json` lives in — into one `input_digest`. So once a durable root's scripts and schemas are refreshed, the next run gets a fresh `RUN_ID` with `resume: false`, exactly as after any release touching those files. Already-converged segments are untouched by that: the batch-final token re-assertion applies only to the segments of the batch being run.
+
+### Known limitations
+
+Assembly decides from the materialized ledger, so a content-affecting input edited **after** the last `ledger_merge.py` run is invisible to it — for `converged` records before this release and for carved-out `stale` records after it, identically. The normal pipeline runs the audit before assembly and the audit is fresh; nothing enforces that ordering. Tracked as #492, with the three designs that failed to fix it recorded there so they are not re-attempted.
+
+`assemble.py` applies no `validate_seg()` path-safety allowlist to `runs/ledger.json`'s segment keys, while `validate_assembled.py` does — two consumers of the same untrusted map disagreeing about whether its keys need validating. Pre-existing, and not fixed here on purpose: adding the guard could newly refuse segment ids that work today, which belongs in its own change with its own survey of the live roots rather than in a release whose whole point is to stop refusing books. Tracked as #493.
+
 ## 1.24.0 — 2026-08-11
 
 A third claim admission profile for a segment stalled with genuinely incomplete bookkeeping. Closes #455.

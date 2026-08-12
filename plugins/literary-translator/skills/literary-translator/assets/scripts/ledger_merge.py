@@ -26,7 +26,16 @@ What it does, in order:
      ledger.json only* -- the on-disk fragment itself is never rewritten.
      `stale` is a status this script computes; `ledger_update.py` never
      writes it to a fragment (see `ledger-fragment.schema.json`'s narrower
-     enum vs. `ledger.schema.json`'s wider one).
+     enum vs. `ledger.schema.json`'s wider one). 1.25.0 addition (#491) --
+     the sorted, non-empty list of exactly which fields moved is ALSO
+     written, as `stale_mismatched_fields`, onto that same materialized
+     entry only, so a downstream reader (assemble.py's own machinery-only
+     carve-out) can tell WHY a segment went stale without recomputing
+     anything itself. Never written to the fragment, and never written at
+     all for the OTHER path that flips a segment stale below (a stored
+     `cache_key` that isn't even a dict) -- there is no diff to report
+     there, and assemble.py's carve-out treats a missing value as
+     "not machinery-only" by design (see its own fail-safe docstring).
   4. Validates the materialized `{"segments": {...}}` document against
      `ledger.schema.json` (which composes the SAME status-free
      `ledger-record-base.schema.json` fragments do, just with a wider
@@ -324,11 +333,19 @@ def _compute_stale_segments(
     durable_root: Path = DURABLE_ROOT,
     durable_root_str=None,
     plugin_root_str=None,
-) -> set:
+) -> "tuple[set, dict]":
     """For every fragment whose on-disk status is 'converged', recomputes
     the current cache key via `cache_key.py --seg <id>` and compares it
     field-by-field against the fragment's own stored `cache_key`. Returns
-    the set of segment ids to mark 'stale' in the MATERIALIZED output only.
+    `(stale, mismatched_fields)`: `stale` is the set of segment ids to mark
+    'stale' in the MATERIALIZED output only; `mismatched_fields` is
+    {seg: sorted [field, ...]} for exactly the segments where that
+    field-by-field diff was actually computed (i.e. NOT the "stored
+    cache_key isn't even a dict" branch below, which marks a segment stale
+    for a different reason and has no diff to report) -- #491's
+    `stale_mismatched_fields`, written onto the materialized entry only by
+    merge() below so assemble.py's machinery-only carve-out can read WHY a
+    segment went stale without recomputing anything itself.
 
     A per-segment failure to recompute (cache_key.py missing, non-zero
     exit, unparseable stdout) is treated as non-fatal for the overall
@@ -371,8 +388,9 @@ def _compute_stale_segments(
     contract -- it already accepts an absolute --durable-root.
     """
     stale = set()
+    mismatched_fields: dict = {}
     if skip_stale_check:
-        return stale
+        return stale, mismatched_fields
 
     for seg, record in sorted(fragments.items()):
         if record.get("status") != "converged":
@@ -382,7 +400,15 @@ def _compute_stale_segments(
         if not isinstance(stored_key, dict):
             # A schema-valid converged fragment always has this; if it's
             # missing anyway, surface it as stale rather than silently
-            # trusting an anomalous record.
+            # trusting an anomalous record. LOAD-BEARING for #491's own
+            # `stale_mismatched_fields` too (see tests/stale_carveout.
+            # test.py's absent/non-dict-cache_key tests): this `continue`
+            # is what keeps this branch from ever reaching the
+            # `mismatched_fields[seg] = moved` write below -- a naive
+            # stored-vs-current diff against an ABSENT stored key would
+            # read as "all 15 CACHE_KEY_FIELDS differ", fabricating a
+            # content-affecting-looking list for a record that was never
+            # actually compared at all.
             stale.add(seg)
             continue
 
@@ -435,13 +461,16 @@ def _compute_stale_segments(
             )
             continue
 
-        if any(
-            stored_key.get(field) != current_key.get(field)
+        moved = sorted(
+            field
             for field in CACHE_KEY_FIELDS
-        ):
+            if stored_key.get(field) != current_key.get(field)
+        )
+        if moved:
             stale.add(seg)
+            mismatched_fields[seg] = moved
 
-    return stale
+    return stale, mismatched_fields
 
 
 def expected_draft_token(run_token: str, seg: str) -> str:
@@ -585,7 +614,7 @@ def merge(args, registry: "Registry", dirs: dict) -> dict:
                 missing_segments=missing_segments,
             )
 
-    stale_segments = _compute_stale_segments(
+    stale_segments, stale_mismatched_fields = _compute_stale_segments(
         fragments,
         args.skip_stale_check,
         dirs["cache_key_script"],
@@ -597,8 +626,40 @@ def merge(args, registry: "Registry", dirs: dict) -> dict:
     materialized_segments = {}
     for seg, record in fragments.items():
         entry = dict(record)
+        # #491 rescue (post-review correction): the materialized
+        # `stale_mismatched_fields` must ALWAYS be this merge's own freshly
+        # computed diff, never anything a fragment supplied. `_read_fragments()`
+        # applies NO fragment-schema validation at all, so a hand-written (or
+        # attacker/operator-planted) fragment can carry this key with an
+        # arbitrary value -- and because ledger.schema.json now DECLARES the
+        # property (ledger-fragment.schema.json and ledger-record-base.
+        # schema.json deliberately do not), `unevaluatedProperties: false` no
+        # longer rejects it on the materialized entry the way it would reject
+        # it on the fragment itself. Inheriting it here would let a planted
+        # `stale_mismatched_fields` fabricate carve-out eligibility for a
+        # segment assemble.py's machinery-only carve-out never actually
+        # compared (see its own _stale_carveout_refusal_reason()). Drop any
+        # inherited value unconditionally, for EVERY entry -- not just the
+        # ones this merge itself flips stale below, and not just entries
+        # whose fragment status was already "stale" (ledger_update.py never
+        # writes that status, but nothing stops a hand-edited fragment from
+        # claiming it) -- before the stale branch below gets a chance to set
+        # the real one.
+        entry.pop("stale_mismatched_fields", None)
         if seg in stale_segments:
             entry["status"] = "stale"
+            # #491: record WHY, on the materialized entry only -- the
+            # fragment in runs/ledger.d/ is never touched (see _read_fragments
+            # / _atomic_write_json below: only ledger.json is (re)written).
+            # Only set when the diff was actually computed (see
+            # _compute_stale_segments' own docstring) and therefore
+            # non-empty; assemble.py's carve-out treats a missing/empty
+            # value as "not machinery-only" by design (fail-safe direction),
+            # so omitting it here for the other stale branches is correct,
+            # not an oversight.
+            fields = stale_mismatched_fields.get(seg)
+            if fields:
+                entry["stale_mismatched_fields"] = fields
         materialized_segments[seg] = entry
 
     # 1.2.0 addition: for EACH expected segment whose materialized status is
