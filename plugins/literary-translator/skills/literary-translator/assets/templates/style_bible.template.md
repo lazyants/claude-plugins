@@ -169,12 +169,16 @@ than leaving this unfilled.
   attribute to gossip, or dismantle is the author's device, not the translator's omission. If the
   reader genuinely needs the stronger reading, it belongs in the apparatus, never in the narrator's
   voice.
-- **One source word, one target word inside a passage** -- when the source repeats a word about the same
-  referent, the repetition is what carries the link, and the target has to repeat too. Two different
-  renderings of one word in one paragraph is a defect even when each is defensible alone. Worth naming
-  separately because of how it presents: it surfaces as a word-sense finding against ONE of the two
-  sites, and fixing that site in isolation resolves an ambiguity the source kept open instead of
-  restoring the link.
+- **A repetition the author uses as a link** -- when the source repeats a word about one referent AND the
+  passage leans on that repetition (the later occurrence answers, echoes or reinterprets the earlier one),
+  the link is content: keep ONE target lexeme across the pair wherever the target language permits it.
+  Not every repeated source word is such a link, and this rule does not make a differing rendering a
+  defect by itself -- sense, collocation, register and grammar routinely require different target words,
+  and target inflection can rule out literal repetition outright. Establish that the passage uses the
+  repetition before treating a difference as a defect; where it does and the target cannot repeat, carry
+  the link by other means rather than silently dropping it. Worth naming because of how the real case
+  presents: it surfaces as a word-sense finding against ONE of the two sites, and repairing that site
+  alone strengthens one occurrence, drops the link, and can resolve an ambiguity the source kept open.
 
 #### E-traps. Known traps discovered during this project (living, append-only -- starts empty)
 
