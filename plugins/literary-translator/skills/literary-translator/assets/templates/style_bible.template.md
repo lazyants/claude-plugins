@@ -156,6 +156,29 @@ than leaving this unfilled.
 - **Word-sense / realia accuracy** -- a notable word or reference may have meant something different in
   the source's own era/domain than its first present-day sense. This is a first-class, explicitly named
   review dimension (see `references/engine-loop.md`'s R6), not folded into generic accuracy.
+- **Deliberate ambiguity is content, and reproducing it is the job** -- this is a literary TRANSLATION,
+  not a commentary on the source. Where the author leaves something open on purpose -- hearsay framing
+  (`they say that ...`), a period euphemism the passage then undercuts, a word the narrator declines to
+  make explicit -- the target text reproduces the opening. **A rendering that is unambiguous where the
+  source is not has changed what the author asserted**, and that is a defect no matter how well the
+  stronger reading is attested.
+  The discriminator matters, because the rule above pulls the other way and a reviewer cannot tell the
+  two apart by feel: a genuinely missed idiom leaves the target thinner at that WORD; a deliberate
+  ambiguity is thin at the word and load-bearing in the PASSAGE. So before calling a rendering weak,
+  read what the surrounding sentences do with it -- an ambiguity the narrator goes on to exploit,
+  attribute to gossip, or dismantle is the author's device, not the translator's omission. If the
+  reader genuinely needs the stronger reading, it belongs in the apparatus, never in the narrator's
+  voice.
+- **A repetition the author uses as a link** -- when the source repeats a word about one referent AND the
+  passage leans on that repetition (the later occurrence answers, echoes or reinterprets the earlier one),
+  the link is content: keep ONE target lexeme across the pair wherever the target language permits it.
+  Not every repeated source word is such a link, and this rule does not make a differing rendering a
+  defect by itself -- sense, collocation, register and grammar routinely require different target words,
+  and target inflection can rule out literal repetition outright. Establish that the passage uses the
+  repetition before treating a difference as a defect; where it does and the target cannot repeat, carry
+  the link by other means rather than silently dropping it. Worth naming because of how the real case
+  presents: it surfaces as a word-sense finding against ONE of the two sites, and repairing that site
+  alone strengthens one occurrence, drops the link, and can resolve an ambiguity the source kept open.
 
 #### E-traps. Known traps discovered during this project (living, append-only -- starts empty)
 
