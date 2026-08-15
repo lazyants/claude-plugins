@@ -13,7 +13,7 @@ Plugin hardening layered around that core is called out inline where relevant;
 do not infer byte-identity for schema fields or control-flow branches explicitly
 marked as plugin additions.
 
-## Hard rules index (R1–R9)
+## Hard rules index (R1–R10)
 
 Full content lives in the reference doc named next to each rule. This file carries
 the full content of **R1** and **R6**; the others are cross-referenced, not repeated,
@@ -35,6 +35,11 @@ so there is exactly one place each rule can go stale.
   codex structurally cannot perform.
 - **R9** A style-contract edit applies forward; a converged segment stays
   converged, and no back-sweep is owed to a newly written rule — `SKILL.md`.
+- **R10** A previous volume is not an input: mechanics come from the plugin,
+  the general contract from the shipped template, and whatever outlives a book
+  from the series directory — `SKILL.md`. Scaffold into an EMPTY root;
+  `select_segments.py --classify-only` reporting anything but `not_started`
+  means state arrived from somewhere.
 
 ## R1 — Role separation is a hard rule, never profile-configurable
 

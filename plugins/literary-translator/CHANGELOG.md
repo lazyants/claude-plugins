@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.28.0 — 2026-08-15
+
+R10: a previous volume is not an input. Documentation only — no script, schema, template or workflow byte changes, so no cache key moves and no corpus re-stales.
+
+### The rule
+
+When a series gets its next volume, a completed durable root is usually sitting in the same tree: working `scripts/`, a filled-in `style_bible.md`, a real `profile.yml`, a canon that took weeks. Copying it is the obvious way to start, and it is how a book inherits every defect the previous one already worked through. The inheritance is silent — nothing downstream re-reads a decision that was correct for the last book and wrong for this one.
+
+R10 states the three legitimate inputs and refuses the rest:
+
+- **mechanics** — `scripts/`, `schemas/`, workflow and seed templates — from the PLUGIN, via Step 0a's copy pass out of the plugin install path. A copy taken from a sibling root is frozen at whatever version that book ran and will not announce it.
+- **the general contract** — from the shipped `style_bible.template.md`, then filled in by interview. This is what upstreaming a learned rule into the template is *for*: a new book gets the rule without copying a book.
+- **whatever outlives a book** — pending contract corrections, a cross-volume name or person registry — from the series' own directory.
+
+Never copied, each with what it breaks: the previous `style_bible.md` (rulings whose reasons are gone, enforced against a different text); `canon.json` (book-shaped — duplicate spellings that resolved to one target *in that book*, a `review_queue` left unfrozen for *that book's* cast); `runs/`, the ledger, `segments/`, `.ever_converged.*`, `.codex_job.*` (run state — a stray sentinel asserts a unit converged once, a claim about a book that does not exist yet); `profile.yml` verbatim (`v1_scope`, effort and language config of a different source).
+
+### Why it is a hard rule rather than advice
+
+The pull toward "look at how the last one did it" is constant when the last one is one directory away, and it is usually right about mechanics and usually wrong about content. Advice does not survive that; a numbered rule with a mechanical check does.
+
+The check: after Step 0a and before the first dispatch, `select_segments.py --classify-only` must report every unit `not_started` — anything else means run state arrived from somewhere.
+
+The scaffold is checked only at the coarse end, which is why R10 asks for a NEW empty root rather than a verified one. A wholesale `cp -r` brings `.literary-translator-root.json` along, and Step 0a reads that root marker first, so it halts fatally on the different owner; a hand-picked copy into a fresh directory brings no marker and stops one notch softer, at the adoption prompt, which `project.durable_root_adopt_existing: true` waves through without anyone inspecting what was copied. Past those halts, nothing looks at the scaffold's contents. `.plugin_bundle_hash` is computed over `cache_key.py`'s fixed `PLUGIN_BUNDLE_MEMBERS` allowlist, so an extra module inherited from a copied `scripts/` is invisible to every digest while staying importable; `schemas/` is hashed by glob (`_schemas_dir_hash()` in `resume_setup.py`), so a stray schema there does move the resume hash — but it surfaces as a resume mismatch rather than as "you copied a neighbour". Letting Step 0a populate a fresh root costs a minute and removes both failure modes.
+
+Indexed in `references/engine-loop.md` alongside R1–R9; the range headings in `SKILL.md`, `references/engine-loop.md` and `references/workflow-schema-validation.md` now read R1–R10.
+
+Two non-prose changes ride along, neither of them shipped code: `tests/changelog_citations.test.py`'s `CITATION_ANCHORS` map is emptied, which is its documented per-release state when an entry cites no `file.ext:NNN` source line (the test still fails on a citation appearing with no anchor); and the repository's `README.md` and `.claude-plugin/marketplace.json` are re-synced to the plugin version, which 1.27.0 left at 1.26.0.
+
 ## 1.27.0 — 2026-08-15
 
 `--from-cap` admits a capped unit that had converged once. Closes #537.

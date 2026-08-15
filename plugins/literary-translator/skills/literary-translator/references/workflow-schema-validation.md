@@ -1,7 +1,7 @@
 # Workflow schema validation
 
 This is the full content of **R7 — Workflow-script schema requirement**
-(see `SKILL.md`'s R1–R9 index). It covers three things that are all facets
+(see `SKILL.md`'s R1–R10 index). It covers three things that are all facets
 of the same underlying constraint: every `codex:codex-rescue` call that
 needs a guaranteed structured verdict must be dispatched as a **Workflow-tool
 `agent()` call carrying a `schema` param**, never as a bare `Agent()` call and

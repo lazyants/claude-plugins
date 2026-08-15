@@ -667,7 +667,7 @@ step that needs them; both sit inert under the default
 `output.v1_scope: segment_drafts_and_audit`, and reading them up front pays
 for machinery a plain project will never use.
 
-## Hard rules R1–R9
+## Hard rules R1–R10
 
 Full content lives in the dedicated reference docs — do not duplicate it
 here, follow the linked doc:
@@ -774,6 +774,54 @@ here, follow the linked doc:
   contract edits while the loop is still running — an edit landing after the
   last segment converges re-stales the corpus and blocks W9 assembly, buying
   nothing but a re-run for the stamp.
+- **R10 — A previous volume is not an input. A new volume takes from exactly
+  three places, and the finished book beside it is none of them.** When a series
+  gets its next volume, a completed durable root is usually sitting in the same
+  tree with working `scripts/`, a filled-in `style_bible.md`, a real
+  `profile.yml` and a canon that took weeks. Copying it is the obvious way to
+  start and it is the way a book inherits every defect the previous one already
+  worked through — silently, because nothing downstream re-reads a decision that
+  was right for the last book and wrong for this one.
+  **The three legitimate inputs:** (1) **mechanics** — `scripts/`, `schemas/`,
+  workflow and seed templates — come from the PLUGIN: point `durable_root` at a
+  NEW empty directory (never one emptied by hand beside a live book) and let
+  Step 0a's copy pass fill it from the plugin install path, never a sibling
+  root, which is frozen at whatever version that book ran and will not say so;
+  (2) **the general contract** comes
+  from the shipped `style_bible.template.md` and is then filled in by interview
+  — which is what upstreaming a learned rule into the template is FOR; (3)
+  **whatever outlives a book** — pending contract corrections, a cross-volume
+  name or person registry — comes from the series' own directory, the only place
+  whose contents are about the SERIES rather than about one book.
+  **Never copied, and what each one breaks:** the previous `style_bible.md`
+  (template plus that book's accretions — rulings whose reasons are gone,
+  enforced against a different text); `canon.json` (book-shaped: duplicate
+  spellings that resolved to one target *in that book*, a `review_queue` left
+  unfrozen for *that book's* cast); `runs/`, the ledger, `segments/`,
+  `.ever_converged.*` sentinels, `.codex_job.*` (run state — a stray sentinel
+  asserts that a unit converged once, a claim about a book that does not exist
+  yet); `profile.yml` verbatim (it carries `v1_scope`, effort and the language
+  config of a different source).
+  **The check, because a rule nobody can verify is a wish:** after Step 0a and
+  before the first dispatch, `select_segments.py --classify-only` must report
+  every unit `not_started`. Anything else means state arrived from somewhere.
+  That check covers run state. The scaffold is covered only at the coarse end:
+  a wholesale `cp -r` of a finished root brings `.literary-translator-root.json`
+  along with it, and Step 0a reads that root marker first, so it halts fatally
+  on the different owner (case 4 above). A hand-picked copy into a fresh
+  directory brings no marker at all and stops one notch softer, at case 3's
+  adoption prompt — which `project.durable_root_adopt_existing: true` waves
+  through without anyone inspecting what was copied. That is why the empty root
+  above is not a nicety. Past those halts the two directories fail differently,
+  and
+  neither failure names its cause: `.plugin_bundle_hash` is computed over
+  `cache_key.py`'s fixed `PLUGIN_BUNDLE_MEMBERS` allowlist, so a module the
+  plugin deleted upstream can sit in a copied `scripts/` forever — still
+  importable, invisible to every digest — while `resume_setup.py`'s
+  `_schemas_dir_hash()` globs `schemas/*.schema.json`, so a stray schema there
+  does move the resume hash and surfaces as a resume mismatch rather than as
+  "you copied a neighbour". Neither is worth the minute Step 0a would have
+  taken.
 
 ## Workflow W1–W9
 
