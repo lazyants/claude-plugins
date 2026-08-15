@@ -2623,6 +2623,10 @@ def evaluate_claim_admission(
     # other profile, by construction: only --from-converged's branch ever
     # sets it.
     draft_unchanged_since_convergence = False
+    # #537: set by --from-cap's own branch below when it admits a unit that
+    # HAD converged once. False for every other profile by construction, the
+    # same way draft_unchanged_since_convergence is.
+    from_cap_over_sentinel = False
     if profile == CLAIM_PROFILE_FROM_CAP:
         status = ledger_record.get("status")
         reason = ledger_record.get("reason")
@@ -2631,14 +2635,50 @@ def evaluate_claim_admission(
                 f"{seg!r} requested under --from-cap, but its materialized ledger status is "
                 f"{status!r}/{reason!r}, not non_converged/reason=cap"
             )
-        if sentinel_state != SENTINEL_ABSENT:
+        # #537: a PRESENT sentinel is ADMITTED here, and the premise this
+        # branch used to refuse on -- "--from-cap's population never converged
+        # at all" -- was simply false. A unit can converge (earning the
+        # sentinel), go stale when style_contract_hash or prompt_hash moves,
+        # re-enter the loop, exhaust max_fix_rounds there, and settle at
+        # non_converged/reason=cap WITH the sentinel intact. That intersection
+        # was admissible by NO profile: this one refused on the sentinel;
+        # --from-converged refuses on the status AND on the reviewed_draft_sha1
+        # the cap write erased (every cap write REPLACES the record, and
+        # ledger_update.py derives that baseline only for status == converged);
+        # --from-stalled requires in_progress. Since assemble.py refuses a book
+        # while any unit is not converged, such a unit blocked the whole title.
+        # Measured before this change: 12 of 12 capped units on one live book
+        # carried the sentinel, 11 of 81 on another.
+        #
+        # Widening the sentinel condition is the narrow fix precisely because
+        # every OTHER --from-cap condition is untouched and still enforced: the
+        # materialized ledger must say non_converged/reason=cap (immediately
+        # above), the stored review must be clean:false WITH findings (S-gate
+        # block), and D6 still runs below. Admitting this population through
+        # --from-converged instead would mean relaxing BOTH of that profile's
+        # defining gates, which is a wider hole for the same result.
+        #
+        # AMBIGUOUS still refuses -- the widening narrows "every non-ABSENT
+        # state" to the ONE state whose meaning is established, and the
+        # function preamble above already says why ambiguous means "do not
+        # claim" for every profile that reads it. Written as an explicit
+        # membership test rather than `== SENTINEL_AMBIGUOUS` so a future
+        # fourth state cannot default into being admitted.
+        if sentinel_state not in (SENTINEL_ABSENT, SENTINEL_PRESENT):
             detail = f" ({sentinel_detail})" if sentinel_detail else ""
             reasons.append(
-                f"{seg!r} requested under --from-cap, but it carries a .ever_converged "
-                f"sentinel ({sentinel_state}{detail}) -- --from-cap's population never "
-                f"converged at all; if this segment converged and was then hand-edited, use "
-                f"--from-converged instead"
+                f"{seg!r} requested under --from-cap, but its .ever_converged sentinel state "
+                f"is {sentinel_state}{detail} -- an unreadable sentinel is not evidence that "
+                f"this segment did or did not converge, and is never admitted"
             )
+        elif sentinel_state == SENTINEL_PRESENT:
+            # Reporting only, and deliberately NOT printed here: this function
+            # can still accumulate refusal reasons below (D6), and a sibling id
+            # in the same invocation can fail before any claim record is
+            # written -- so announcing the admission at this point would
+            # announce one that never happened. run() prints it after the
+            # record and the token are published, beside D9's own disclosure.
+            from_cap_over_sentinel = True
     elif profile == CLAIM_PROFILE_FROM_CONVERGED:
         status = ledger_record.get("status")
         if status not in WAS_CONVERGED_STATUSES:
@@ -2675,8 +2715,11 @@ def evaluate_claim_admission(
         # #455. The THIRD state, and the whole reason this profile exists:
         # materialized status in_progress, sentinel PRESENT, no
         # reviewed_draft_sha1, a draft on disk, and a stored review that
-        # describes a draft that no longer exists. --from-cap refuses it (the
-        # status is wrong and the sentinel is present) and --from-converged
+        # describes a draft that no longer exists. --from-cap refuses it on
+        # the STATUS alone -- in_progress is not non_converged/reason=cap --
+        # and since #537 that is the only thing refusing it there, the
+        # sentinel no longer being disqualifying under that profile; and
+        # --from-converged
         # refuses it (the status is wrong and there is no drift baseline), so
         # before this profile the only route was a hand-driven
         # ledger_update.py convergence write.
@@ -2947,6 +2990,14 @@ def evaluate_claim_admission(
         # the recovery and must not be rewritten. run() surfaces it on
         # stderr so a recovery is never silent.
         "lost_token_recovery": lost_token_recovery,
+        # #537: True when --from-cap admitted a unit whose .ever_converged
+        # sentinel is PRESENT -- the converged-then-staled-then-capped
+        # population. Reporting-only, exactly like lost_token_recovery above
+        # and for the same reason: it is a fact about HOW this invocation
+        # reached the admission, not a property of the claim, and run()
+        # surfaces it on stderr AFTER the record is published so the
+        # disclosure can never describe an admission that did not happen.
+        "from_cap_over_sentinel": from_cap_over_sentinel,
         "current_cache_key": current_cache_key,
         # D6's two ENDPOINTS, both recorded: the baseline as the ledger
         # fragment stored it, and the key this invocation just computed.
@@ -3086,9 +3137,12 @@ def rewrite_draft_dispatch_token(
     id, never before: a crash between the two writes must leave the draft
     holding its OLD token plus a claim record on disk (every existing gate
     still refuses that token, and a re-claim recovers cleanly) -- never a
-    draft re-stamped for this run with NO record, which for --from-cap's
-    population (no `.ever_converged` sentinel) would leave nothing at all
-    refusing it and the segment would simply be retranslated.
+    draft re-stamped for this run with NO record, which for the
+    sentinel-ABSENT part of --from-cap's population would leave nothing at
+    all refusing it and the segment would simply be retranslated. (Since
+    #537 that population also contains sentinel-BEARING units, and those
+    would still be refused by previously_converged -- the ordering rule
+    below is stated for the half that has no such backstop.)
 
     #438 ROUND 4/5: ALSO REFUSES an OLD run REASSERTING a SUPERSEDED
     authorization -- the defect three review rounds kept finding under
@@ -4452,19 +4506,35 @@ def run(args, dirs: dict) -> dict:
         # D5.3: overlap between a claim and --allow-retranslate-converged is
         # REJECTED OUTRIGHT, not resolved by precedence -- checked over the
         # REQUESTED sentinel-bearing ids, before any admission work runs.
-        # --from-cap is deliberately absent here: its population carries no
-        # sentinel, so it never reaches previously_converged at all.
         #
-        # #455: --from-stalled joins --from-converged for exactly the reason
-        # --from-cap stays out -- it REQUIRES the sentinel, so its ids do reach
-        # previously_converged and the same collision is reachable. Read over
-        # the REQUESTED set (not the admitted one) deliberately: this fires
-        # before any admission work, so a contradictory pair of flags costs the
-        # operator a refusal rather than a half-performed claim.
+        # #455: --from-stalled joins --from-converged because it REQUIRES the
+        # sentinel, so its ids do reach previously_converged and the same
+        # collision is reachable. Read over the REQUESTED set (not the admitted
+        # one) deliberately: this fires before any admission work, so a
+        # contradictory pair of flags costs the operator a refusal rather than
+        # a half-performed claim.
+        #
+        # #537: --from-cap joins them too, and it USED to be excluded here on
+        # the premise that its population carries no sentinel. That premise was
+        # false -- see the sentinel branch in evaluate_claim_admission() -- and
+        # once PRESENT became admissible, leaving --from-cap out would have
+        # meant this pair of flags stopped being rejected for exactly the
+        # population the same change admits: the driver forwards both flags
+        # verbatim, so the contradictory invocation is reachable, and it would
+        # have written the claim record and re-stamped the draft instead of
+        # receiving the pre-write refusal SKILL.md promises. The claimed id
+        # still could not be translated -- claim_capability_refusal_for_translate()
+        # is profile-independent -- but silently accepting a barred flag is not
+        # the guarantee this gate exists to give.
         sentinel_bearing_requested = {
             seg
             for seg, profile in claim_requests.items()
-            if profile in (CLAIM_PROFILE_FROM_CONVERGED, CLAIM_PROFILE_FROM_STALLED)
+            if profile
+            in (
+                CLAIM_PROFILE_FROM_CONVERGED,
+                CLAIM_PROFILE_FROM_STALLED,
+                CLAIM_PROFILE_FROM_CAP,
+            )
         }
         if args.allow_retranslate_converged:
             overlap = sorted(sentinel_bearing_requested & set(previously_converged))
@@ -4658,6 +4728,20 @@ def run(args, dirs: dict) -> dict:
                     file=sys.stderr,
                 )
 
+            if extras.get("from_cap_over_sentinel"):
+                # #537: --from-cap admitting a unit that HAD converged once is
+                # correct but unusual, and an operator must not have to diff
+                # the sentinel directory to discover it. Printed here, after
+                # the record and the dispatch token are both published, for
+                # the reason D9's disclosure directly above is: at the point
+                # the branch decided, the admission could still have failed.
+                print(
+                    f"select_segments.py: {seg} admitted under --from-cap although its "
+                    f".ever_converged sentinel is present -- converged, then staled, then "
+                    f"capped is a real population, and this claim authorizes RE-REVIEW only",
+                    file=sys.stderr,
+                )
+
             # The record VERBATIM -- no freshly recomputed fields spliced on
             # top. It used to carry a four-field spread of `extras` here,
             # which on the already-claimed path silently overwrote the
@@ -4695,14 +4779,26 @@ def run(args, dirs: dict) -> dict:
         # --from-converged and it transfers unchanged: a claim authorizes
         # RE-REVIEW, never re-translation, so the refusal this clearing lifts
         # ("these would be TRANSLATED again") was never about these ids.
-        # --from-cap is absent for the reason it is absent everywhere in this
-        # neighbourhood: its population has no sentinel, so it never reaches
-        # previously_converged to begin with.
+        # #537: --from-cap clears too, and it used to be excluded here on the
+        # same false premise D5.3 above carried -- that its population has no
+        # sentinel and so never reaches previously_converged. A
+        # converged-then-staled-then-capped unit reaches it every time, because
+        # previously_converged is built from sentinel state ALONE. Left
+        # uncleared, the unconditional fatal immediately below would fire on
+        # this invocation's OWN successful admission -- the #455 failure, one
+        # profile later. The rationale already written here for the other two
+        # transfers unchanged: a claim authorizes RE-REVIEW, never
+        # re-translation, so the refusal this clearing lifts ("these would be
+        # TRANSLATED again") was never about these ids either.
         cleared = {
             seg
             for seg in claims_payload
             if claim_requests.get(seg)
-            in (CLAIM_PROFILE_FROM_CONVERGED, CLAIM_PROFILE_FROM_STALLED)
+            in (
+                CLAIM_PROFILE_FROM_CONVERGED,
+                CLAIM_PROFILE_FROM_STALLED,
+                CLAIM_PROFILE_FROM_CAP,
+            )
         }
         previously_converged = [seg for seg in previously_converged if seg not in cleared]
 

@@ -32,6 +32,7 @@ another run, then the first run resumes and reclaims -- and the
 fresh-claim-over-a-live-foreign-record case a naive predicate would have
 broken instead).
 """
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -431,9 +432,15 @@ def build_from_cap_segment(
     canon_entries=None,
     source_run_dir=True,
 ):
-    """P2 shape (POPULATIONS.md): non_converged/reason=cap, NO sentinel, no
-    cache_key on the fragment at all, stored review clean:false with
-    findings. human_escalation -> reachable only via --only-segs."""
+    """P2 shape (POPULATIONS.md): non_converged/reason=cap, no cache_key on the
+    fragment at all, stored review clean:false with findings.
+    human_escalation -> reachable only via --only-segs.
+
+    The sentinel is ABSENT by default and PRESENT via `sentinel_present=True`.
+    Both are real members of this population since #537: a unit that converged,
+    went stale when the contract moved and then exhausted its rounds is capped
+    AND sentinel-bearing. This docstring used to say the population has NO
+    sentinel, which is the premise 1.27.0 refutes."""
     names = names if names is not None else []
     canon_map = canon_map if canon_map is not None else {}
 
@@ -567,6 +574,183 @@ def test_from_cap_happy_path_requires_only_segs_and_claims(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 1b. #537 -- the converged-then-staled-then-capped unit. A capped segment MAY
+#     carry a .ever_converged sentinel, and before this the intersection was
+#     admissible by no profile at all: --from-cap refused on the sentinel,
+#     --from-converged on the status and on the reviewed_draft_sha1 the cap
+#     write erases, --from-stalled on requiring in_progress. Since assemble.py
+#     refuses a book while any unit is not converged, one such unit blocked a
+#     whole title.
+# ---------------------------------------------------------------------------
+
+def test_from_cap_admits_a_capped_unit_that_had_converged_and_discloses_it(tmp_path):
+    """THE #537 population, end to end.
+
+    Two independent things must both hold, and the pre-fix code fails the
+    first one, which is what makes this red rather than merely new:
+
+      (i) admission -- the sentinel branch refused every non-ABSENT state, so
+          the claim gate rejected the id outright;
+      (ii) clearing -- the id lands in `previously_converged` (that list is
+          built from sentinel state ALONE), so without D5.2 covering
+          --from-cap the unconditional fatal below it fires on this
+          invocation's OWN successful admission. A fix that did only (i)
+          would still exit non-zero, which is exactly what happened when
+          the admission half was patched by itself in the field.
+
+    The disclosure is asserted too, and deliberately as a stderr line rather
+    than a JSON field: an operator must not have to diff the sentinel
+    directory to discover that a claim admitted a unit which had converged
+    once."""
+    root = make_durable_root(tmp_path)
+    seg = "seg14"
+    fixture_keys = {}
+    build_from_cap_segment(root, seg, fixture_keys, sentinel_present=True)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    assert (root / "segments" / f".ever_converged.{seg}").is_file(), (
+        "precondition: this test is about a CAPPED unit that carries a sentinel"
+    )
+
+    proc = run_select(
+        root, "--only-segs", seg, "--from-cap", seg, "--run-id", RUN_ID, "--run-resume", "false"
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert seg in out["claims"], "the sentinel-bearing capped unit must be ADMITTED"
+    assert out["claims"][seg]["profile"] == "from-cap"
+    assert seg not in (out["previously_converged"] or []), (
+        "D5.2 must clear a --from-cap id too, or the fatal below it fires on this "
+        "invocation's own admission"
+    )
+    assert ".ever_converged sentinel is present" in proc.stderr, (
+        f"the admission must be disclosed on stderr; stderr={proc.stderr!r}"
+    )
+    assert "RE-REVIEW only" in proc.stderr, (
+        "the disclosure must say what the claim does and does not authorize"
+    )
+
+
+def test_from_cap_sentinel_disclosure_is_not_printed_when_the_claim_fails(tmp_path):
+    """The disclosure names a PUBLISHED admission, so it must not be printed
+    from inside the profile branch that merely decided one.
+
+    Reachable shape: two ids requested, the second one refusable. Every claim
+    in an invocation is written only after all of them pass, so a refusal on
+    the sibling means the first id's record was never published -- and a
+    disclosure printed at decision time would announce an admission that did
+    not happen.
+
+    Mutation that must turn this red: print inside the sentinel branch of
+    evaluate_claim_admission() (where the local field patch printed it)
+    instead of beside D9's post-publication disclosure."""
+    root = make_durable_root(tmp_path)
+    good, bad = "seg14", "seg22"
+    fixture_keys = {}
+    build_from_cap_segment(root, good, fixture_keys, sentinel_present=True)
+    # A second --from-cap id whose ledger status is wrong for the profile:
+    # refused by name, and its refusal fatals the whole invocation.
+    build_from_cap_segment(root, bad, fixture_keys, ledger_status="converged", ledger_reason=None)
+    write_manifest(root, [good, bad])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    proc = run_select(
+        root, "--only-segs", f"{good},{bad}", "--from-cap", f"{good},{bad}",
+        "--run-id", RUN_ID, "--run-resume", "false",
+    )
+    assert proc.returncode != 0, "precondition: the sibling must make the invocation refuse"
+    assert not (root / "runs" / RUN_ID / f".claimed.{good}").exists(), (
+        "precondition: no claim record may be published when the invocation refuses"
+    )
+    assert ".ever_converged sentinel is present" not in proc.stderr, (
+        f"an admission that never happened must not be announced; stderr={proc.stderr!r}"
+    )
+
+
+def test_from_cap_overlap_with_allow_retranslate_converged_is_rejected_outright(tmp_path):
+    """D5.3 for --from-cap (#537). The overlap guard defines its population by
+    PROFILE, and --from-cap used to be excluded from it on the same false
+    premise -- "its ids never reach previously_converged". Once a
+    sentinel-bearing capped unit is admissible, they do, and leaving the guard
+    alone would mean this contradictory pair of flags -- which the driver
+    forwards verbatim -- stopped being rejected for exactly the population the
+    same change admits.
+
+    The claimed id still could not be TRANSLATED (that refusal is
+    profile-independent), so what this pins is narrower and worth naming:
+    the pre-write refusal itself.
+
+    WHAT MAKES IT RED, precisely -- the obvious statement is wrong and was
+    corrected in review. A FULL revert also exits non-zero, but on the
+    ADMISSION gate (the sentinel refusal that #537 removes), not on D5.3; the
+    assertions that distinguish the two are `rejected outright` in the error
+    and the absent claim record. So this test's real target is the
+    ADMISSION-ONLY partial fix -- widening the sentinel condition while
+    leaving D5.3's profile set alone -- which is exactly the shape the field
+    patch had, and which exits 0 here, writes the record and re-stamps the
+    draft."""
+    root = make_durable_root(tmp_path)
+    seg = "seg14"
+    fixture_keys = {}
+    build_from_cap_segment(root, seg, fixture_keys, sentinel_present=True)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    proc = run_select(
+        root, "--only-segs", seg, "--from-cap", seg, "--run-id", RUN_ID,
+        "--run-resume", "false", "--allow-retranslate-converged",
+    )
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert seg in out["error"]
+    assert "rejected outright" in out["error"].lower()
+    assert not (root / "runs" / RUN_ID / f".claimed.{seg}").exists(), (
+        "an overlap must write NOTHING -- the guard's whole value here is that it "
+        "refuses BEFORE the record and the token are published"
+    )
+
+
+def test_an_unreadable_sentinel_is_still_refused_under_from_cap(tmp_path):
+    """#537 widened --from-cap to PRESENT, not to 'anything that is not
+    absent'. AMBIGUOUS means the sentinel could not be READ, which is evidence
+    of nothing and must not become admissible because its neighbour did.
+
+    A DIRECT evaluate_claim_admission() call, not run_select(): a dangling
+    symlink at the sentinel path aborts the whole invocation at the run-level
+    ambiguous-sentinel fatal long before any claim gate runs (that path is
+    already owned by tests/select_segments.test.py), so an end-to-end test
+    here would be green on the unfixed code and would never execute this
+    branch at all."""
+    root = make_durable_root(tmp_path)
+    seg = "seg14"
+    fixture_keys = {}
+    build_from_cap_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    sentinel = root / "segments" / f".ever_converged.{seg}"
+    sentinel.symlink_to(root / "segments" / "no-such-target")
+    assert not sentinel.exists() and sentinel.is_symlink(), (
+        "precondition: a DANGLING link -- exists() follows it and reports False"
+    )
+
+    mod = _load_select_segments_module(root)
+    dirs = mod.resolve_dirs(str(root))
+    args = argparse.Namespace(run_id=RUN_ID, durable_root=str(root), plugin_root=None)
+    record = {"status": "non_converged", "reason": "cap"}
+
+    ok, reasons, _extras = mod.evaluate_claim_admission(
+        seg, mod.CLAIM_PROFILE_FROM_CAP, record, dirs, {}, args
+    )
+    assert ok is False, "an unreadable sentinel must never be admitted"
+    joined = " | ".join(reasons)
+    assert "unreadable sentinel is not evidence" in joined, joined
+    assert "ambiguous" in joined.lower(), joined
+
+
+# ---------------------------------------------------------------------------
 # 2. Wrong profile, refused BY NAME, in both directions.
 # ---------------------------------------------------------------------------
 
@@ -583,7 +767,13 @@ def test_p1_shaped_segment_refused_by_name_under_from_cap(tmp_path):
     out = parse_stdout(proc)
     assert out["success"] is False
     assert seg in out["error"] and "--from-cap" in out["error"]
-    assert "non_converged" in out["error"] or "sentinel" in out["error"]
+    # Was `"non_converged" in error or "sentinel" in error` until #537. This
+    # fixture is P1-shaped, so it carries a sentinel, and the second arm used
+    # to be satisfied by --from-cap's own sentinel refusal. That refusal is
+    # gone for a PRESENT sentinel, leaving a one-armed OR that would survive
+    # the STATUS gate being removed if any unrelated text containing
+    # "sentinel" ever reached the error. Named directly instead.
+    assert "non_converged" in out["error"]
 
 
 def test_p2_shaped_segment_refused_by_name_under_from_converged(tmp_path):

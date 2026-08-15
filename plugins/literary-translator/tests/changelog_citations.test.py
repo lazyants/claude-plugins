@@ -74,12 +74,25 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # anyone re-reading it.
 CITATION_ANCHORS = {
     # This map tracks the NEWEST changelog entry only, and is rewritten every
-    # release. 1.26.0 is documentation-only: it states two operator rules (R8,
-    # R9) and cites exactly one source range, the line that decides which
-    # artifact a codex job may publish -- the whole basis for R8's claim that
-    # codex cannot perform the fix turn. If that expression moves or is
-    # renamed, R8's stated reason has silently lost its evidence.
-    "codex_job.py:772": ['ext = "draft" if self.kind == "translate" else "review"'],
+    # release. 1.27.0 cites the four sites #537 moved. Each anchor is the
+    # decision itself rather than its comment, so a rewritten rationale does
+    # not fail this test while a moved or reverted decision does.
+    #
+    # The membership test, not `== SENTINEL_AMBIGUOUS`: what the release
+    # claims is that ABSENT and PRESENT are BOTH admitted and everything else
+    # is not, which is exactly what this spelling says and an equality check
+    # would not.
+    "select_segments.py:2667": ["if sentinel_state not in (SENTINEL_ABSENT, SENTINEL_PRESENT):"],
+    # The disclosure's PLACEMENT is the claim -- it is read off `extras` in
+    # run(), after publication, rather than printed inside the branch that
+    # decided. An anchor on the printed text alone would still pass if the
+    # print moved back into evaluate_claim_admission().
+    "select_segments.py:4731": ['if extras.get("from_cap_over_sentinel"):'],
+    # Both profile sets gained CLAIM_PROFILE_FROM_CAP. The anchor names the
+    # set being built as well, so the citation cannot drift onto the other
+    # one -- they are otherwise near-identical three-element tuples.
+    "select_segments.py:4529-4538": ["sentinel_bearing_requested = {", "CLAIM_PROFILE_FROM_CAP,"],
+    "select_segments.py:4793-4802": ["cleared = {", "CLAIM_PROFILE_FROM_CAP,"],
 }
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an

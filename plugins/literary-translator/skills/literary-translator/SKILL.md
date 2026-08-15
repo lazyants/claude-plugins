@@ -2049,12 +2049,25 @@ reclassified into another one:
     records are admitted on exactly the terms `converged` ones always were,
     and because `final_audit.py`'s own carve-out count already blocks
     `project_complete` when the sentinel is absent, one gate earlier.
-  A successfully-admitted `--from-converged` claim clears the
-  `previously_converged` refusal for exactly that id, and nothing else.
+  A successfully-admitted claim clears the `previously_converged` refusal
+  for exactly that id, and nothing else — under any of the three profiles,
+  since each of them can admit a sentinel-bearing unit (`--from-cap` since
+  1.27.0, #537).
 - **`--from-cap SEG1[,SEG2,...]`** — for a segment that hit the review cap
   (materialized status `non_converged`, `reason: "cap"`) and was then
-  hand-edited. Requires: NO `.ever_converged` sentinel; the stored review's
-  `clean` is `false` WITH non-empty `findings`. Because a capped segment is
+  hand-edited. Requires: the stored review's `clean` is `false` WITH
+  non-empty `findings`. **The `.ever_converged` sentinel may be absent OR
+  present** (1.27.0, #537) — a unit that converged, went stale when the
+  contract moved, re-entered the loop and exhausted its rounds there is
+  capped *and* sentinel-bearing, and that intersection was previously
+  admissible by no profile at all. When the sentinel is present the
+  admission is disclosed on `select_segments.py`'s **stderr** — so you see
+  it on the hand-run recipe above, but **not** through
+  `segment_dispatch_driver.py`, which captures the selector's stderr and
+  discards it on success (the same fate as the D9 lost-token disclosure);
+  the fact is not written into the claim record either. An *unreadable*
+  sentinel is still refused: it is evidence of nothing. Because a capped
+  segment is
   `human_escalation`, `--only-segs` naming the same id(s) is ALSO required
   — the same explicit-retry mechanism any other `human_escalation` retry
   already needs, now doubled as a second, independent authorization.
@@ -2115,8 +2128,10 @@ in_progress`, a `.ever_converged.<seg>` sentinel PRESENT, no
 `reviewed_draft_sha1`, a draft on disk, and a stored review that is stale
 against that draft — rather than cleanly converged-and-edited
 (`--from-converged`) or capped-and-edited (`--from-cap`). Neither of those
-two profiles reaches it: `--from-cap` refuses because the sentinel is
-present (that population never converged); `--from-converged` refuses
+two profiles reaches it: `--from-cap` refuses because the materialized
+status is `in_progress`, not `non_converged`/`reason: "cap"` (since 1.27.0
+it is the STATUS that refuses here, never the sentinel — a present sentinel
+is admissible under `--from-cap`, see #537); `--from-converged` refuses
 because there is no `reviewed_draft_sha1`, the drift baseline that profile
 requires.
 
