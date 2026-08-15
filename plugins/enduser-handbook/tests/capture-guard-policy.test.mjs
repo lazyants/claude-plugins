@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 
 import {
   decideRoute,
+  auditRedirectHop,
   tokenize,
   hasDangerousVerb,
   matchesDeny,
@@ -255,6 +256,114 @@ test('hasDangerousVerb decode-cap fix does not regress the benign encoded/malfor
   assert.equal(hasDangerousVerb('https://app.test/deletedAt/report'), false);
   assert.equal(hasDangerousVerb('https://app.test/items/%zz/%25'), false);
   assert.equal(hasDangerousVerb('https://app.test/items/list'), false);
+});
+
+// ── Redirect-hop audit (#471) ───────────────────────────────────────────────────────────────────
+// A redirect hop never reaches the route handler. Measured against the real engine on playwright-core
+// 1.61.1 AND 1.62.1 (302 chain + a 307): context.route() saw only 'GET /reports/monthly' and
+// 'POST /search', while context.on('request') saw both hops with redirectedFrom set, the server
+// executed GET /orders/42/finalize and POST /orders/42/finalize, and the dangerous ledger stayed
+// EMPTY. auditRedirectHop is the DETECTION channel: it re-asks the SAME ordered policy about the hop
+// using the HOP's own method and URL. It returns a verdict, not an allow/block action — by the time a
+// hop is observable the browser has already sent it, so there is nothing left to block.
+
+// Build a redirect-hop GuardRequest (a fresh request has redirectedFrom: null).
+function hopReq(over = {}) {
+  return req({ redirectedFrom: 'https://app.test/reports/monthly', ...over });
+}
+
+test('a redirect hop into a dangerous-verb path is flagged dangerous (the #471 silent pass)', () => {
+  const audit = auditRedirectHop(
+    hopReq({ method: 'GET', url: 'https://app.test/orders/42/finalize', resourceType: 'document' }),
+  );
+  assert.equal(audit.verdict, 'dangerous');
+  assert.equal(audit.reason, 'redirect-hop:deny-dangerous-verb');
+});
+
+test('auditRedirectHop reports a verdict only — detection, not prevention (no allow/block action)', () => {
+  // The hop has already been sent when it becomes observable, so returning an 'action' would claim an
+  // effect the audit channel cannot have. Pin the shape so a later refactor cannot reintroduce one.
+  const audit = auditRedirectHop(hopReq({ method: 'GET', url: 'https://app.test/orders/42/finalize' }));
+  assert.deepEqual(Object.keys(audit).sort(), ['reason', 'verdict']);
+});
+
+test('a hop is classified with its OWN method, not the origin request\'s', () => {
+  // 307/308 preserve the method; 301/302/303 may downgrade a POST to a GET (RFC 9110 §15.4). The same
+  // destination is therefore a fail-closed write on one hop and an ordinary read on the other.
+  const preserved = auditRedirectHop(
+    hopReq({ method: 'POST', url: 'https://app.test/api/items', redirectedFrom: 'https://app.test/search' }),
+  );
+  assert.equal(preserved.verdict, 'dangerous');
+  assert.equal(preserved.reason, 'redirect-hop:fail-closed');
+  const downgraded = auditRedirectHop(
+    hopReq({ method: 'GET', url: 'https://app.test/api/items', redirectedFrom: 'https://app.test/search' }),
+  );
+  assert.equal(downgraded.verdict, 'clean');
+  assert.equal(downgraded.reason, 'redirect-hop:get-head');
+});
+
+test('admitting the ORIGIN as a read does not implicitly admit its hop target', () => {
+  // The escape-hatch leak in #471: classifyRequest admits POST /search as a read, and without an audit
+  // channel the 307 target inherits that admission by never being classified at all.
+  const classifyRequest = (r) => (new URL(r.url).pathname === '/search' ? 'read' : undefined);
+  assert.equal(
+    decideRoute(req({ method: 'POST', url: 'https://app.test/search' }), { classifyRequest }).action,
+    'allow',
+  );
+  const audit = auditRedirectHop(
+    hopReq({ method: 'POST', url: 'https://app.test/orders/42/finalize', redirectedFrom: 'https://app.test/search' }),
+    { classifyRequest },
+  );
+  assert.equal(audit.verdict, 'dangerous');
+  assert.equal(audit.reason, 'redirect-hop:deny-dangerous-verb');
+});
+
+test('classifyRequest receives redirectedFrom, so a hop can be admitted deliberately', () => {
+  const seen = [];
+  const classifyRequest = (r) => {
+    seen.push(r.redirectedFrom);
+    return r.redirectedFrom === 'https://app.test/reports' ? 'read' : undefined;
+  };
+  const audit = auditRedirectHop(
+    hopReq({ method: 'POST', url: 'https://app.test/api/report-data', redirectedFrom: 'https://app.test/reports' }),
+    { classifyRequest },
+  );
+  assert.equal(audit.verdict, 'clean');
+  assert.equal(audit.reason, 'redirect-hop:classify-read');
+  assert.deepEqual(seen, ['https://app.test/reports']);
+});
+
+test('a hop classified benign is reported but never counted dangerous', () => {
+  const audit = auditRedirectHop(
+    hopReq({ method: 'POST', url: 'https://an.test/_boost/logs', redirectedFrom: 'https://an.test/_boost' }),
+    { classifyRequest: () => 'benign' },
+  );
+  assert.equal(audit.verdict, 'benign');
+  assert.equal(audit.reason, 'redirect-hop:classify-benign');
+});
+
+test('deny patterns win on a hop exactly as on a fresh request', () => {
+  const audit = auditRedirectHop(hopReq({ method: 'GET', url: 'https://app.test/x/y' }), { denyPatterns: ['/x/'] });
+  assert.equal(audit.verdict, 'dangerous');
+  assert.equal(audit.reason, 'redirect-hop:deny-pattern');
+});
+
+test('a body-shaped denyPattern is not hop-blind (307 preserves the body)', () => {
+  // Measured against the real engine: a 307 hop arrives carrying the origin's full postData, so the
+  // documented body-shaped backstop — a denyPattern like /\bmutation\b/ for a write the URL alone
+  // cannot identify — must reach a hop too. It does only because the audit passes the body through;
+  // dropping it downgrades this to a generic fail-closed and loses the reason that names the cause.
+  const audit = auditRedirectHop(
+    hopReq({
+      method: 'POST',
+      url: 'https://app.test/graphql',
+      postData: '{"query":"mutation { deleteUser(id: 1) { id } }"}',
+      redirectedFrom: 'https://app.test/search-start',
+    }),
+    { denyPatterns: [/\bmutation\b/] },
+  );
+  assert.equal(audit.verdict, 'dangerous');
+  assert.equal(audit.reason, 'redirect-hop:deny-pattern');
 });
 
 test('hasDangerousVerb decode-sequence scan completes quickly on a huge percent-run (no exponential blowup)', () => {

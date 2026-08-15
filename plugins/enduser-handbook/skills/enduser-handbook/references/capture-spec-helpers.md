@@ -15,31 +15,63 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
 ## What each helper must guarantee
 
 - **Capture guard** — installed at the browser-context level *before any page is created*, with the
-  context configured so service-worker traffic cannot bypass it. It intercepts every request and
-  classifies it in a strict order: deny-patterns always block; long-lived reads (server-sent
-  events) and analytics beacons block unless explicitly admitted; a single read predicate
-  (`classifyRequest`) may admit an otherwise-blocked read (a GraphQL **query**, not a mutation);
-  plain GET/HEAD reads pass; **everything else fails closed (blocked + recorded)**. It exposes one
-  assertion that throws if any dangerous/blocked request fired during capture. This is
-  **defense-in-depth, not permission to click ambiguous controls** — the human capture-safety
-  classification still governs every click. There is exactly **one** read escape hatch
-  (`classifyRequest`); no broad write/stream/origin allowlists. A **built-in dangerous-verb path
-  block** (delete/destroy/remove/disable/… in any URL segment) blocks even a GET, so a destructive
-  GET the author forgot to deny-list still fails closed. WebSockets are blocked *without connecting*;
-  an engine that cannot block a socket (only observe it) must fail at install time, not silently
-  open. The ordered decision is a **pure function** (`../assets/lib/capture-guard-policy.mjs`,
-  `decideRoute`) so its branch order is unit-tested, not just grep-asserted. The end-of-run
-  assertion **drains a short quiet period** before checking, so a delayed beacon/fetch fired after
-  the last interaction is still caught.
+  context configured so service-worker traffic cannot bypass it. It classifies **every request the
+  engine surfaces to its interception handler** in a strict order: deny-patterns always block;
+  long-lived reads (server-sent events) and analytics beacons block unless explicitly admitted; a
+  single read predicate (`classifyRequest`) may admit an otherwise-blocked read (a GraphQL **query**,
+  not a mutation); plain GET/HEAD reads pass; **every non-GET/HEAD request left unadmitted fails
+  closed (blocked + recorded)**. It exposes one assertion that throws if any dangerous/blocked
+  request fired during capture. This is **defense-in-depth, not permission to click ambiguous
+  controls** — the human capture-safety classification still governs every click. There is exactly
+  **one** read escape hatch (`classifyRequest`); no broad write/stream/origin allowlists. WebSockets
+  are blocked *without connecting*; an engine that cannot block a socket (only observe it) must fail
+  at install time, not silently open. The ordered decision is a **pure function**
+  (`../assets/lib/capture-guard-policy.mjs`, `decideRoute`) so its branch order is unit-tested, not
+  just grep-asserted. The end-of-run assertion **drains a short quiet period** before checking, so a
+  delayed beacon/fetch fired after the last interaction is still caught.
+
+  **What the GET/HEAD allow does NOT check — the guard is not fail-closed on reads.** Once a request
+  reaches the general GET/HEAD allow — past the deny, benign, SSE and beacon blocks above it — a GET
+  or HEAD is admitted **unconditionally**: the **origin is never
+  examined** (`decideRoute` takes no base URL or app origin), so a GET to a third-party host passes
+  exactly like a same-origin one. The only built-in brake on a *writing* GET is a **fixed 16-verb
+  token list** matched against the URL path and query (`DANGEROUS_VERB_SET` — 13 English, 3 German).
+  That list is not, and cannot be, an enumeration of destructive route vocabulary: a GET to
+  `/orders/42/confirm`, `/reports/publish` or `/users/7/impersonate` is **admitted**. So it is *not*
+  true that a destructive GET the author forgot to deny-list still fails closed — that holds only
+  when the forgotten verb happens to be one of the 16. Every other writing GET must be listed in
+  `denyPatterns` or refused by `classifyRequest`. (Tracked as issue #470.)
+
+  **Redirect hops are DETECTED, not intercepted.** A request the browser issues itself to follow a
+  3xx `Location` never reaches the interception handler — measured against the real engine on
+  playwright-core 1.61.1 and 1.62.1, a `GET /reports/monthly` → 302 → `/orders/42/finalize` chain
+  reached the server in full while the handler saw only the first request. The guard therefore runs a
+  **second, audit-only channel** over the engine's request-observation event: every hop is
+  re-classified by the same ordered policy using the **hop's own method, URL and body** (307/308
+  preserve both the method and the body — so a body-shaped `denyPattern` reaches a hop exactly as it
+  reaches a fresh request; 301/302/303 may downgrade a POST to a GET), the whole chain is logged for
+  inspection, and any hop the policy would have blocked — **except** one the project's own
+  `classifyRequest` returns `'benign'` for, which is reported in the chain only — is pushed into the
+  dangerous ledger so the end-of-run assertion **fails loudly**. Note that a `'benign'` hop is a
+  weaker claim than a `'benign'` blocked request: the blocked one never fired, the hop already did.
+  This is detection, not prevention — the browser has already sent the hop, so a failure naming a
+  `redirect-hop:` reason means a live request **fired**, not that one was
+  stopped. Admitting a request through `classifyRequest` never admits its hop target: the hop is
+  classified on its own, and the predicate is told which request it came from. (Issue #471.)
 
   **`classifyRequest` is one predicate with two non-`undefined` verdicts — `'read'` and `'benign'`
   do opposite things.** `'read'` **ADMITS** (allows) the read escape: the otherwise-blocked GraphQL
   query is let through. `'benign'` **BLOCKS** the request — it never fires — but EXCLUDES it from
   the dangerous-hits assertion, so known-harmless dev telemetry (a laravel-boost `/_boost/` log
   POST, a Sentry beacon) does not false-trip `assertNoDangerousHits()` on any page that
-  console-logs. Everything else (any other return, including a stray truthy) **fails closed**
-  (blocked + recorded as dangerous). Note the asymmetry: `'read'` allows, `'benign'` blocks — they
-  are not "both block". `classifyRequest` must be **total**: return `undefined` for anything it does
+  console-logs. Everything else (any other return, including a stray truthy) is **not a verdict at
+  all** — the request simply falls through to the ordered default, which is **fail-closed (blocked +
+  recorded as dangerous) only for a request that is not a plain GET/HEAD**; a GET/HEAD that reaches
+  the general allow is still admitted unconditionally, as above. **An SSE GET never reaches it** —
+  `[guard:eventsource]` blocks a stream the predicate did not admit, so returning `undefined` for an
+  event-source endpoint blocks it rather than passing it. Note the asymmetry: `'read'` allows,
+  `'benign'` blocks — they are not "both block". `classifyRequest` must be **total**: return
+  `undefined` for anything it does
   not recognize and never throw (the guard now consults it for beacon/SSE requests too). There is
   still **NO write allowlist** — `'benign'` silences a block, it does not permit a write.
 
@@ -100,14 +132,24 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   scan string by **joining per-node values with a newline** (not one concatenated `textContent`,
   which fuses neighbouring cells into false tokens), then fail if any leak pattern matches **or** if
   the matched-mask count differs from the expected count (fail-closed coverage for unmatchable PII).
-  Both passes recurse into **open** shadow roots. Four things the automated scan does **not** cover
-  — like closed shadow roots, they fall to the human eyeball-the-frame step as the backstop: **closed**
+  Both passes recurse into **open** shadow roots. **Five** things the automated scan does **not**
+  cover — they all fall to the human eyeball-the-frame step as the backstop: **closed**
   shadow roots (inaccessible to script — mask inside the component or open the root for capture); **CSS
   pseudo-element content** (`::before`/`::after` `content:`, painted into the shot but not a DOM text
   node); **a broken or failed `<img>`'s `alt` text** (the browser paints it into the frame as
   replacement-rendering, but it is **not** a DOM text node — so the text/value/placeholder corpus
-  misses it exactly as it misses pseudo-content; a successfully loaded image paints no `alt`); and
-  **genuinely non-rendered attributes** (`title`/`aria-label`, never painted into a static screenshot).
+  misses it exactly as it misses pseudo-content; a successfully loaded image paints no `alt`);
+  **genuinely non-rendered attributes** (`title`/`aria-label`, never painted into a static
+  screenshot); and **the content of a same-origin `<iframe>`**, which is a different class from the
+  four above because it *is* ordinary DOM text — just in another document. Neither the mask nor the
+  scan crosses a document boundary (a tree walk rooted in the parent stops at the `<iframe>` element,
+  which has no text children), while the screenshot composites the child document's pixels. Framed
+  iframe content is therefore photographed but never masked and never scanned. Listing a selector
+  that only matches inside the frame at least fails loudly — it matches nothing, so the
+  mask-**coverage** assert throws. The case the scan exists for is the silent one: PII the author did
+  *not* list has nothing to mask, no text node to collect and no pattern to match, so the run is
+  green and the value is in the PNG. Mask or remove the frame's content before the shot, scan it
+  yourself per frame, or keep the frame out of the captured region. (Issue #472.)
 
 ## The spec skeleton
 

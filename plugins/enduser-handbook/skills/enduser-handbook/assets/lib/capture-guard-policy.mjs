@@ -11,14 +11,23 @@
 // order, so reordering the actual decisions is what the order test catches.
 //
 // This is DEFENSE-IN-DEPTH, not permission to click ambiguous controls — the human capture-safety
-// classification still governs every click. The guard fails closed on anything it cannot prove is
-// a read.
+// classification still governs every click. It fails closed on any NON-GET/HEAD request it cannot
+// prove is a read. A GET/HEAD that reaches the get-head step — past the deny, benign, eventsource
+// and beacon branches above it — is ADMITTED unconditionally, and the origin is never examined, so
+// that allow is only as strong as the caller's denyPatterns plus the fixed
+// DANGEROUS_VERB_SET below (issue #470). And a redirect HOP never reaches the route handler at all:
+// it is audited after the fact by auditRedirectHop, which detects but cannot prevent (issue #471).
 
 // Built-in dangerous-verb path matcher (finding 4). Even a GET can be destructive
 // (/items/5/disable, /users/7/delete-now), and an author may forget to list it in denyPatterns.
 // This is additive to the caller's denyPatterns and runs as part of the deny step, BEFORE any
 // method-based allow. Matched against tokenized URL path segments so it is not fooled by casing or
 // camel/snake/kebab joins.
+//
+// SCOPE (issue #470): this is a FIXED set of 16 verbs — 13 EN + 3 DE — NOT an enumeration of
+// destructive route vocabulary. A writing GET named with any other verb ('confirm', 'publish',
+// 'archive', 'issue', 'impersonate', …) is NOT caught here and must be listed in denyPatterns or
+// refused by classifyRequest. Do not read this set as "a destructive GET always fails closed".
 const DANGEROUS_VERB_SET = new Set([
   // EN
   'delete',
@@ -198,8 +207,9 @@ export function matchesDeny(req, patterns) {
 }
 
 /**
- * @typedef {{ method: string, url: string, postData: string|null, resourceType: string }} GuardRequest
+ * @typedef {{ method: string, url: string, postData: string|null, resourceType: string, redirectedFrom?: string|null }} GuardRequest
  * @typedef {{ action: 'allow'|'block', reason: string }} GuardDecision
+ * @typedef {{ verdict: 'clean'|'dangerous'|'benign', reason: string }} RedirectHopAudit
  * @typedef {{ denyPatterns?: Array<string|RegExp>, classifyRequest?: (req: GuardRequest) => ('read'|'benign'|undefined), allowBeacons?: boolean }} GuardPolicyOptions
  *
  * `classifyRequest` totality contract: the predicate is consulted ONCE per request (hoisted below
@@ -209,6 +219,11 @@ export function matchesDeny(req, patterns) {
  * recognize and MUST NOT throw; a throw escapes decideRoute (no fail-closed wrapper). 'read' ADMITS
  * (allow), 'benign' BLOCKS but is not counted dangerous, anything else (incl. a stray truthy) falls
  * through to the fail-closed default.
+ *
+ * `redirectedFrom` carries the URL of the previous hop when this request is a REDIRECT HOP, and is
+ * absent/null for a browser-originated request. No branch below reads it — it is passed through so a
+ * project's `classifyRequest` can tell a hop from a fresh request and admit one deliberately.
+ * Admitting the ORIGIN never admits its hop: the hop is classified on its OWN method and URL.
  */
 
 /**
@@ -218,7 +233,8 @@ export function matchesDeny(req, patterns) {
  * order and counts. `classifyRequest` is hoisted to a single call after the deny step (see the
  * typedef's totality contract): deny + the built-in dangerous-verb block always win over it; then a
  * 'benign' verdict silences eventsource/beacon/fail-closed without flagging; a 'read' verdict admits
- * an SSE or a generic POST; everything else fails closed.
+ * an SSE or a generic POST; a plain GET/HEAD is then admitted unconditionally, and everything that
+ * reaches the end fails closed.
  *
  * @param {GuardRequest} req
  * @param {GuardPolicyOptions} [opts]
@@ -280,4 +296,41 @@ export function decideRoute(req, opts = {}) {
   // [guard:fail-closed]
   // Everything else (unclassified POST/PUT/PATCH/DELETE, etc.) is blocked + recorded.
   return { action: 'block', reason: 'fail-closed' };
+}
+
+/**
+ * Audit a REDIRECT HOP — a request the browser issued itself to follow a 3xx Location.
+ *
+ * WHY THIS EXISTS (issue #471): a hop never reaches the route handler. Chromium continues a paused
+ * request whose redirect origin is set without constructing a Route, so the interception handler is
+ * never consulted; only the context-level `request` event observes it. Measured against the real
+ * engine on playwright-core 1.61.1 and 1.62.1: a `GET /reports/monthly` → 302 → `/orders/42/finalize`
+ * chain reached the server in full while the route handler saw only the first request and the
+ * dangerous ledger stayed empty — even though decideRoute, asked directly, blocks that destination.
+ *
+ * DETECTION, NOT PREVENTION. By the time a hop is observable the browser has already sent it. So this
+ * returns a VERDICT, never an allow/block action — there is no request left to block. Preventing a
+ * dangerous hop would require classifying each Location BEFORE the next hop is issued (following
+ * redirects manually via route.fetch()), which is a different and much larger change.
+ *
+ * The hop is classified by the SAME ordered policy, on its OWN method and URL — 307/308 preserve the
+ * method while 301/302/303 may downgrade a POST to a GET (RFC 9110 §15.4), so inheriting the origin's
+ * method would both miss a preserved POST and misclassify a downgraded one.
+ *
+ *   'dangerous' — decideRoute would have blocked it; the caller MUST record it so the end-of-run
+ *                 assertion fails loudly. The reason is the underlying one, prefixed 'redirect-hop:'.
+ *   'benign'    — the caller's classifyRequest called it known-harmless telemetry; report it, but do
+ *                 NOT count it dangerous (the same asymmetry the route handler applies).
+ *   'clean'     — the policy would have admitted it (a plain read, an admitted hop).
+ *
+ * @param {GuardRequest} req the hop, with `redirectedFrom` set to the previous hop's URL
+ * @param {GuardPolicyOptions} [opts]
+ * @returns {RedirectHopAudit}
+ */
+export function auditRedirectHop(req, opts = {}) {
+  const decision = decideRoute(req, opts);
+  const reason = `redirect-hop:${decision.reason}`;
+  if (decision.action === 'allow') return { verdict: 'clean', reason };
+  if (decision.reason === 'classify-benign') return { verdict: 'benign', reason };
+  return { verdict: 'dangerous', reason };
 }

@@ -107,9 +107,18 @@ project's capture specs, not here.
   mask, so a missed target throws instead of leaking. Use both together: pattern-matchable PII
   is caught by the leak-assert, unmatchable PII by the coverage assert.
 
-Automated asserts cover the DOM subtree; your eye covers the frame. **Always eyeball masked
-and confirmation-dialog shots before publishing** — that is how the bleed-through case above
-gets caught when the subtree-scoped assert passes but the frame still leaks.
+Automated asserts cover the DOM subtree of **one document**; your eye covers the frame. A
+same-origin `<iframe>` inside the shot is a document of its own: a mask and a leak-scan
+rooted in the parent stop at the `<iframe>` element, which has no text children, while the
+screenshot composites the child document's pixels. So a rich-text editor body, an embedded
+preview or a framed legacy page is **photographed but not scanned** — and unlisted PII there
+fails silently (there is nothing to mask, so even the coverage assert stays green). Mask or
+clear the frame's content before the shot, run the same mask+scan inside each accessible
+frame, or keep the frame out of the captured region.
+
+**Always eyeball masked and confirmation-dialog shots before publishing** — that is how the
+bleed-through and framed-document cases above get caught when the subtree-scoped assert
+passes but the frame still leaks.
 
 ## Disclosure in prose
 
