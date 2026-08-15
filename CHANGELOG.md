@@ -40,8 +40,10 @@ index without saying so. Closes #337, #350, #351.
   entries are now `file + section + sectionNth + quoted text + direction + ordinal`, so prose moving
   around a citation no longer reddens the suite, and a documented regenerate-and-paste command plus a
   test asserting the shipped block equals what that command emits replace hand-transcription. This
-  release exercises it: the doc edits above removed three citations, and the regenerated allowlist
-  differs by exactly those three and nothing else.
+  release exercises it: the doc edits above removed five citations (`EXPECTED_TOTAL_CITATIONS` 94 →
+  89), three of them unresolved — and the regenerated allowlist differs by exactly those three and
+  nothing else. The other two were resolved cross-references carried by the "tracked separately as
+  #337" clause this release retired, so they never sat in the allowlist to begin with.
 - The **verified class** for present-line placement verification widened, and its sentence — quoted
   verbatim in both publish adapters and `revalidation.md` — now reads: files for which the
   fixed-probe writer call returns `kind === 'inserted'`, `kind === 'present'`, or `kind ===
