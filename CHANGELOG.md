@@ -4,8 +4,11 @@ All notable changes to `lazyants/claude-plugins` are documented here. Format fol
 
 ## [enduser-handbook 1.13.0] — 2026-08-15
 
-Three defects in the index-wiring path, all of which could put a wrong row into a real handbook
-index without saying so. Closes #337, #350, #351.
+Two independent tracks, both about a run that completes while telling the operator something untrue.
+Three defects in the index-wiring path, each able to put a wrong row into a real handbook index
+without saying so (#337, #350, #351); and the capture guard, which silently never saw a redirect hop
+and whose contract document promised guarantees the policy does not enforce (#471). Closes #337,
+#350, #351, #471.
 
 ### Fixed
 - **The locator and the writer now apply ONE frontmatter rule** (`indexView`, via a helper shared
@@ -25,6 +28,20 @@ index without saying so. Closes #337, #350, #351.
   the container line it would emit is unsafe, which says nothing about where the existing row sits.
   That outcome now falls through to the container comparison, and can conclude only `misplaced` —
   never a false `ok`, since the refusal is reachable solely on the create branch.
+- **The capture guard now audits redirect hops** — #471. `context.route` is never called for a
+  request the browser issues itself to follow a 3xx `Location`, measured against real chromium on
+  playwright-core 1.61.1 and 1.62.1: a `GET /reports/monthly` → 302 → `/orders/42/finalize` chain
+  reached the server in full while the interception handler saw only the first request, so the hop
+  was never classified, never blocked, never recorded, and `assertNoDangerousHits()` stayed green. A
+  second, audit-only channel on `context.on('request')` now re-classifies every hop through the same
+  `decideRoute` on the *hop's own* method, URL and body (307/308 preserve both, so a body-shaped
+  `denyPattern` reaches a hop exactly as it reaches a fresh request; 301/302/303 may downgrade a POST
+  to a GET), exposes the whole chain via `redirectHops()`, and pushes a would-be-blocked hop into the
+  dangerous ledger — except one the project's own `classifyRequest` calls `'benign'`, which is
+  reported in the chain only. **This is DETECTION, not prevention**: the browser has already sent the
+  hop, so a failure naming a `redirect-hop:` reason means a live request fired, not that one was
+  stopped. Preventing it would need `route.fetch()` with manual redirect following, which this
+  release does not do.
 
 ### Added
 - **An invisible character in a label is refused rather than normalized** (#351) — no normalization
@@ -50,6 +67,17 @@ index without saying so. Closes #337, #350, #351.
   'unwritable'` with `field === 'group_title'`, and which hold exactly one selected-target match (a
   row inside a closed leading frontmatter block is not a match at all). The 1.11.0 entry below
   deliberately keeps the narrower sentence that was true then; the suite pins each separately.
+- **The capture-spec contract stops promising what the guard cannot do** — #470, #471, #472.
+  `references/capture-spec-helpers.md` is a mandatory pre-read, so each overstatement misled every
+  capture author downstream. Corrected against the implementation: "intercepts every request" →
+  classifies every request *the engine surfaces to its interception handler*; "everything else fails
+  closed" → fail-closed covers *non-GET/HEAD only*, and the GET/HEAD allow never examines the origin;
+  "a destructive GET still fails closed" → true only when the verb is one of a fixed 16 in
+  `DANGEROUS_VERB_SET` (13 English, 3 German — a GET to `/orders/42/confirm`, `/reports/publish` or
+  `/users/7/impersonate` is admitted, each verified against the real `decideRoute`); and the general
+  GET/HEAD allow is reached only past the deny, benign, SSE and beacon blocks, so an event-source GET
+  the predicate did not admit is blocked rather than passed. The scan carve-out now names the
+  same-origin `<iframe>` as a fifth uncovered item.
 
 ### Migration
 - An index that already accumulated BOTH spellings of one container label now halts as `multiple`
@@ -67,6 +95,15 @@ index without saying so. Closes #337, #350, #351.
   pre-existing, both are now stated in the two adapters rather than left to be rediscovered.
 - ZWNJ/ZWJ stay legal: they are required inside ordinary words in Persian, Hindi and other scripts,
   so refusing them would lock a correctly-spelled title out of automation.
+- **#470 and #472 remain open.** This release documents both gaps precisely; it fixes neither. The
+  GET/HEAD allow is still origin-blind and braked only by the fixed 16-verb list, and the automated
+  scan still does not reach the content of a same-origin `<iframe>`.
+- **Redirect-hop coverage is after-the-fact.** A dangerous hop fails the run but has already reached
+  the server.
+- **Dedicated-Worker hop coverage is unestablished.** No evidence of a gap; establishing it needs a
+  runtime fixture rather than static reading.
+- The contract doc **re-derives the guard's branch order in several paragraphs**, which is why three
+  review rounds each found a different paraphrase overstating it. Structural fix filed as #557.
 
 ## [ai-cli-optout 1.1.2] — 2026-08-03
 
