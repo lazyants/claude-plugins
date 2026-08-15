@@ -182,7 +182,7 @@ export interface ValidateGroupsOptions {
 /** See chapter-paths.mjs: all D1 manifest-review gates; [1.6.0, #221] a group-free manifest now halts unconditionally on a duplicate flat slug instead of always returning []; [1.9.0, #310] options.perGroupSlugs (default false) scopes slug uniqueness per group. */
 export function validateGroups(entries: ChapterEntry[], options?: ValidateGroupsOptions): string[];
 
-/** See chapter-paths.mjs: [1.11.0] #330 the sanitized view locateChapterLine scans, extracted so every caller reaches it through this export rather than re-deriving the expression inline. */
+/** See chapter-paths.mjs: [1.11.0] #330 the sanitized view locateChapterLine scans, extracted so every caller reaches it through this export rather than re-deriving the expression inline; #337 it now blanks a CLOSED leading frontmatter block first, the same rule the writer's own preparation applies, so a row inside frontmatter is invisible to both and a backtick in a YAML scalar cannot swallow the body. */
 export function indexView(indexLines: string[]): string[];
 
 /** See chapter-paths.mjs: the D6 step-0 index-line idempotency check; options.wikilink (default false) folds ONE terminal '.md' off both sides before comparison. */
@@ -244,7 +244,7 @@ export function wireNestedListChapter(
 /** See chapter-paths.mjs: #223 [1.10.0] escape-aware whole-content link/wikilink label unwrap (else the trimmed content verbatim) — the display text matched against a group_title. */
 export function extractLabel(content: string): string;
 
-/** See chapter-paths.mjs: #223 [1.10.0] the §5.1 positive plain-label allowlist (`s` already trimmed) — true iff the label's rendered form equals its literal form. */
+/** See chapter-paths.mjs: #223 [1.10.0] the §5.1 positive plain-label allowlist (`s` already trimmed) — true iff the label's rendered form equals its literal form; #351 a label carrying an invisible character (zero-width space, soft hyphen, bidi control, BOM) is refused, while ZWNJ/ZWJ and U+2028/U+2029 are deliberately still accepted. */
 export function isPlainLabel(s: string): boolean;
 
 /** See chapter-paths.mjs: the D6 manual-migration boundary trigger. */
@@ -272,7 +272,7 @@ export function specReferencesDir(specText: string, dir: string): boolean;
 /** See chapter-paths.mjs: the forbidden-target wikilink classification predicate. */
 export function chapterHasWikilinkTo(chapterText: string, slug: string, oldChapterRelPath: string): boolean;
 
-/** See chapter-paths.mjs: the trim-safe step-0 "line present under the correct container" comparator. */
+/** See chapter-paths.mjs: the trim-safe step-0 "line present under the correct container" comparator; #351 both sides are NFC-normalized, so a decomposed heading and a precomposed group_title are the same container. */
 export function containerTitleMatches(containerTitle: string | null, entry: ChapterEntry): boolean;
 
 /**

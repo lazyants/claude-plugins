@@ -304,7 +304,14 @@ function trimmedTitle(entry) {
 // chapterHasWikilinkTo: a narrow production predicate the adapter-authored wiring code calls)
 // so the comparison is trim-safe wherever it is made, not just inside this module.
 export function containerTitleMatches(containerTitle, entry) {
-  return containerTitle !== null && containerTitle === trimmedTitle(entry);
+  // #351: the headings branch's own half of the one normalization. Without it a `## Übersicht`
+  // written with a combining accent fails to match a precomposed `group_title`, and the caller
+  // raises a wrong-container halt naming two strings that render identically — the complaint the
+  // issue was filed for, one branch over from the nested-list case.
+  return (
+    containerTitle !== null &&
+    normalizeLabelForCompare(containerTitle) === normalizeLabelForCompare(trimmedTitle(entry))
+  );
 }
 
 /**
@@ -434,7 +441,9 @@ export function validateGroups(entries, { perGroupSlugs = false } = {}) {
     }
   }
 
-  // 5. group_title — required on every grouped entry, identical across the group. F5: "required"
+  // 5. group_title — required on every grouped entry, identical across the group, and (#351) free
+  // of invisible characters, which the container comparison can never match and the operator can
+  // never see. F5: "required"
   // means USABLE (isUsableTitle) — a number, boolean, or whitespace-only string can never anchor
   // a real heading match, so it gets the same missing-title halt as an absent field, never a new
   // halt string. Distinct-title comparison runs on the TRIMMED form so padding alone ('Admin' vs
@@ -451,29 +460,77 @@ export function validateGroups(entries, { perGroupSlugs = false } = {}) {
         halts.push(
           `Entry '${entry.slug}' in group '${group}' lacks group_title — every grouped entry carries the localized group title (never derived from the English group slug).`,
         );
+        continue;
+      }
+      // #351: refuse an invisible-character-bearing title HERE, where the operator can still fix it
+      // cheaply, rather than letting it fail at publish time. Measured consequence of not doing so:
+      // isPlainLabel now declines the whole index for such a title, so the ABSENT path halts (good)
+      // but the PRESENT path degrades from a `misplaced` halt to `unverifiable`, which both adapters
+      // proceed on — a genuine misplacement would go silent, on every run, unfixably. One manifest
+      // halt at authoring time replaces that.
+      // Tested on containerLabelKey's OWN form, not the raw value, so this gate refuses EXACTLY what
+      // the writer's isPlainLabel(wanted) would refuse — one normalization, one decision. Testing
+      // the raw value instead made the gate strictly stricter than its own consumer in one case
+      // (U+FEFF is ECMAScript whitespace, so a leading/trailing BOM is trimmed downstream and would
+      // have published fine): fail-closed, but a halt the operator could not have reproduced from
+      // the behaviour it warns about. An INTERIOR invisible character is unaffected by the trim.
+      const invisible = INVISIBLE_LABEL_CHAR_RE.exec(containerLabelKey(entry.group_title));
+      if (invisible !== null) {
+        // The halt NAMES the code point and its offset in the raw manifest value, because "delete
+        // the invisible character" is the one instruction an operator cannot execute for a
+        // character they cannot see, and every sibling halt's habit — quote the offending value —
+        // is useless here: a quoted invisible renders identically to the correct string.
+        //
+        // The search starts AFTER the leading run that trim() removes. "Trim only removes from the
+        // ends, so the character is present in both forms" is true and does NOT carry the offset:
+        // U+FEFF is ECMAScript whitespace and is also a member of this set, so a title carrying one
+        // leading AND one interior BOM triggers on the INTERIOR occurrence while a plain indexOf
+        // reports the leading one — a legal, deliberately tolerated character, at the wrong column.
+        // Measured before this line existed; the operator would delete offset 0 and get the same
+        // halt back. Skipping the trimmed prefix makes the reported offset the one that fired.
+        const raw = String(entry.group_title);
+        const point = `U+${invisible[0].codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
+        const at = raw.indexOf(invisible[0], raw.length - raw.trimStart().length);
+        const where = at === -1 ? '' : ` at code-unit offset ${at}`;
+        halts.push(
+          `Entry '${entry.slug}' in group '${group}' has a group_title carrying an invisible character (${point}${where}) — delete that character: two labels differing only by an invisible one are indistinguishable on screen and can never be matched to a container.`,
+        );
       }
     }
-    const distinctTitles = [...new Set(groupEntries.filter((e) => isUsableTitle(e.group_title)).map(trimmedTitle))];
-    if (distinctTitles.length > 1) {
+    // #351: keyed through containerLabelKey, the same normalization the container comparison uses,
+    // so two spellings of ONE label are not reported as a conflict between two identical-looking
+    // strings. The halt still DISPLAYS the raw trimmed spellings — a real conflict must be quoted as
+    // the manifest wrote it — and keeps first-appearance order.
+    const distinctTitles = new Map();
+    for (const e of groupEntries) {
+      if (!isUsableTitle(e.group_title)) continue;
+      const key = containerLabelKey(e.group_title);
+      if (!distinctTitles.has(key)) distinctTitles.set(key, trimmedTitle(e));
+    }
+    if (distinctTitles.size > 1) {
       halts.push(
-        `Group '${group}' carries conflicting group_title values (${distinctTitles.map((t) => `'${t}'`).join(', ')}) — align all entries of the group.`,
+        `Group '${group}' carries conflicting group_title values (${[...distinctTitles.values()].map((t) => `'${t}'`).join(', ')}) — align all entries of the group.`,
       );
     }
   }
 
   // 6. group_title — unique ACROSS groups (containers are located by title), trimmed comparison.
+  // #351: the comparison KEY is containerLabelKey's, because "located by title" is now literally a
+  // normalized lookup — without this, two groups whose titles differ only by normalization pass this
+  // gate and then wire into ONE container, which is the collision the gate exists to prevent.
   const groupByTitle = new Map();
   for (const [group, groupEntries] of entriesByGroup) {
     const usableEntry = groupEntries.find((e) => isUsableTitle(e.group_title));
     if (usableEntry === undefined) continue;
     const title = trimmedTitle(usableEntry);
-    const otherGroup = groupByTitle.get(title);
+    const titleKey = containerLabelKey(usableEntry.group_title);
+    const otherGroup = groupByTitle.get(titleKey);
     if (otherGroup !== undefined && otherGroup !== group) {
       halts.push(
         `Groups '${otherGroup}' and '${group}' share group_title '${title}' — nav containers are located by title; give each group a distinct localized title.`,
       );
     } else {
-      groupByTitle.set(title, group);
+      groupByTitle.set(titleKey, group);
     }
   }
 
@@ -970,13 +1027,46 @@ function foldTargetForMatch(target, wikilink) {
  * @param {string[]} indexLines
  * @returns {string[]}
  */
+// #337: the ONE leading-frontmatter rule, shared by the writer's preparation (prepareIndexLines,
+// §5.1 step 5) and the locator's view (indexView) — the two used to carry independent answers, and
+// the disagreement was the defect. Returns the blanked lines (line-count-preserving, so every caller
+// keeps its index alignment), the span that was blanked, and whether a block that OPENED was also
+// closed; the delimiter test stays EXACT and untrimmed (an indented '  ---' inside a block scalar is
+// scalar content, not the closer), with only a single trailing '\r' tolerated so a CRLF index —
+// whose lines still carry it when the caller split on '\n' — is recognized identically.
+function blankLeadingFrontmatter(lines) {
+  const withoutCR = (line) => (line.endsWith('\r') ? line.slice(0, -1) : line);
+  if (lines.length === 0 || withoutCR(lines[0]) !== '---') return { lines, span: null, closed: true };
+  let j = 1;
+  while (j < lines.length && withoutCR(lines[j]) !== '---' && withoutCR(lines[j]) !== '...') j += 1;
+  if (j >= lines.length) return { lines, span: null, closed: false };
+  const blanked = lines.slice();
+  for (let x = 0; x <= j; x += 1) blanked[x] = '';
+  return { lines: blanked, span: { start: 0, endExclusive: j + 1 }, closed: true };
+}
+
 export function indexView(indexLines) {
+  // #337: blank a CLOSED leading frontmatter block FIRST, exactly as the writer's own preparation
+  // does (prepareIndexLines §5.1 step 5) and for exactly the same reason — stripInertContexts has no
+  // frontmatter awareness, so a backtick inside a YAML scalar opens an inline-code span that
+  // swallows the rest of the document. Before this, the writer blanked and the locator did not, and
+  // that single asymmetry made a headings-form index read as absent AND non-heading: the caller then
+  // routed it into the nested-list writer, which appended a bogus bullet container plus a duplicate
+  // row on every publish. Blanking is line-count-preserving, so `matches[].index` stays aligned with
+  // the caller's own array.
+  //
+  // Scope: a CLOSED block only, mirroring hasYamlMappingStructure's R4-F3 rule — a lone leading
+  // '---' with no closer is a plain YAML document-start marker, not frontmatter, and exempts
+  // nothing. A row that lives INSIDE frontmatter is now invisible to the locator, which is the
+  // writer's view of it too: it is YAML content, never a wired index row, and reporting it as
+  // present was the false completion this function exists to prevent.
+  const blanked = blankLeadingFrontmatter(indexLines);
   // R4-F2: sanitize the WHOLE index text (not line-by-line — an inert region can itself span
   // multiple lines) through the shared stripper BEFORE any per-line processing, so a row sitting
   // inside an HTML comment or a fenced code block can never report present:true (a false
   // completion — the wiring is declared done when it never actually happened). join/split on '\n'
   // round-trips exactly because stripInertContexts preserves every newline unmodified.
-  return stripInertContexts(indexLines.join('\n')).split('\n');
+  return stripInertContexts(blanked.lines.join('\n')).split('\n');
 }
 
 /**
@@ -1114,7 +1204,11 @@ export function findContainer(indexLines, groupTitle) {
   if (classifyIndexForm(sanitizedLines) === 'non-heading') return { kind: 'non-heading' };
   const headings = collectContainerHeadings(sanitizedLines);
 
-  const matches = headings.filter((h) => h.title === wanted);
+  // #351: normalized on both sides — `wanted` through containerLabelKey, the file's own heading
+  // text here — so a decomposed `## Übersicht` heading is the SAME container as a precomposed
+  // group_title instead of provoking a second heading beside it. The heading's RAW title is what
+  // travels on in `location`/`matches`, so every halt still quotes the file.
+  const matches = headings.filter((h) => normalizeLabelForCompare(h.title) === wanted);
   if (matches.length > 1) return { kind: 'multiple', matches };
   if (matches.length === 1) return { kind: 'single', location: matches[0] };
   return { kind: 'zero', headingDepth: headings[0].depth };
@@ -1261,7 +1355,53 @@ export function extractLabel(content) {
  * @param {string} s  an already-trimmed candidate label / group_title
  * @returns {boolean}
  */
+// #351: the invisible-character set a plain label may not contain. Every entry is an explicit code
+// point, enumerated rather than expressed as a range, and the pattern is assembled from '\\uXXXX'
+// escapes so no invisible character is ever pasted into this module's source: a pasted invisible
+// character is invisible to review too, and a range whose endpoints are pasted glyphs is silently
+// wider than it reads.
+// Soft hyphen; zero-width space; the COMPLETE bidi-control family — the LRM/RLM/ALM marks, the
+// embedding/override controls and the isolates; the word joiner and the invisible-operator block;
+// the byte-order mark. "Complete" is the point: a review caught U+061C ARABIC LETTER MARK missing
+// while its own LRM/RLM counterparts were present, which is what an enumeration drifts into when
+// each member is added on its own rather than the family being closed.
+//
+// THREE deliberate ABSENCES, each of which a wider set would have broken silently:
+// - U+2028/U+2029: the writer's re-read postcondition already refuses them with a strictly better
+//   diagnosis — {kind:'unwritable', field:'group_title'} names which manifest field to repair, where
+//   a not-a-list refusal from here would only say the file is unreadable. The committed fixture that
+//   pins `isPlainLabel` ACCEPTING them is what catches a regression on this.
+// - U+200C/U+200D (ZWNJ/ZWJ): invisible, but linguistically REQUIRED inside ordinary words in
+//   Persian, Hindi and other scripts, so refusing them would lock a whole handbook out of automation
+//   over a correctly-spelled group title. The residual is disclosed rather than closed: two labels
+//   differing only by a ZWNJ/ZWJ are still two containers, and NFC does not merge them.
+// - the format characters that occur INSIDE real content the same way ZWNJ does, and are therefore
+//   the same decision rather than a second oversight: the Arabic number signs (U+0600-U+0605,
+//   U+06DD), the Syriac abbreviation mark (U+070F), U+08E2, and the Mongolian vowel separator
+//   (U+180E). They are refused nowhere; a title carrying one is automatable and can still collide.
+//
+// SCOPE, stated so it is a boundary rather than an omission: this set is BMP-only. Astral-plane
+// format characters — notably the U+E0020-U+E007F TAG block, the usual invisible-text vector — are
+// NOT refused (measured: U+E0001 and U+E0041 both pass). Covering them needs a surrogate-aware
+// pattern under the `u` flag, which is a wider change than this fix, and nothing in this product
+// authors a group_title from an untrusted source. The BMP sweep fixture pins the boundary.
+const INVISIBLE_LABEL_CODE_POINTS = [
+  0x00ad, 0x061c, 0x200b, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d,
+  0x202e, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0x2066, 0x2067, 0x2068, 0x2069, 0xfeff,
+];
+const INVISIBLE_LABEL_CHAR_RE = new RegExp(
+  `[${INVISIBLE_LABEL_CODE_POINTS.map((cp) => `\\u${cp.toString(16).padStart(4, '0')}`).join('')}]`,
+);
+
 export function isPlainLabel(s) {
+  // #351: an invisible character defeats the premise of this allowlist — "the rendered form equals
+  // the literal form" is technically true of a zero-width space and useless in practice, because two
+  // labels differing only by one are pixel-identical to the operator while being different strings
+  // to every comparison. NFC (containerLabelKey) cannot reconcile them, and picking one would be a
+  // guess about which container the operator meant, so the only honest outcome is refusal: the
+  // writer declines the file and the operator gets the manual halt, instead of a second container
+  // nobody can tell apart from the first.
+  if (INVISIBLE_LABEL_CHAR_RE.test(s)) return false;
   if (/[\\*_<>&~[\]!`]/.test(s)) return false;
   if (/^#{1,6}(\s|$)/.test(s)) return false;
   if (/^([-+]|\d+[.)])(\s|$)/.test(s)) return false;
@@ -1322,16 +1462,12 @@ function prepareIndexLines(indexLines) {
   // closer, so the module's own `.trim()==='---'` test at :843 is deliberately NOT reused). Blanking
   // here, BEFORE the sanitizer, also stops a backtick inside YAML scalar content from being misread
   // by stripInertContexts (which has no frontmatter awareness, :675-731).
-  let fm = logical;
-  let span = null;
-  if (logical[0] === '---') {
-    let j = 1;
-    while (j < logical.length && logical[j] !== '---' && logical[j] !== '...') j += 1;
-    if (j >= logical.length) return { kind: 'not-a-list' }; // unclosed frontmatter
-    fm = logical.slice();
-    for (let x = 0; x <= j; x += 1) fm[x] = '';
-    span = { start: 0, endExclusive: j + 1 };
-  }
+  // #337: the rule itself now lives in blankLeadingFrontmatter, shared with indexView — the locator
+  // used to answer this question differently, which is exactly the drift a shared helper prevents.
+  const fmView = blankLeadingFrontmatter(logical);
+  if (!fmView.closed) return { kind: 'not-a-list' }; // unclosed frontmatter
+  const fm = fmView.lines;
+  const span = fmView.span;
 
   // §5.1 step 6 — the load-bearing R3 fix: refuse any file carrying an HTML comment / fenced block /
   // inline-code span. stripInertContexts is newline-preserving and 1:1 (:610), so SAN[i] === fm[i]
@@ -1435,7 +1571,11 @@ function containerOwnerScan(body, wanted) {
       ownerOf[i] = -1;
       if (firstTopMarker === null) firstTopMarker = marker;
       lastBulletIndex = i;
-      if (info.label === wanted) containers.push({ index: i, label: info.label, marker });
+      // #351: both sides go through the one NFC step — `wanted` already did, via containerLabelKey.
+      // The file's own label is NOT trimmed here (the mdlink branch's untrimmed value is
+      // load-bearing, see containerLabelKey's note) and is recorded RAW, so a halt still quotes the
+      // file byte-for-byte; only the COMPARISON is normalized.
+      if (normalizeLabelForCompare(info.label) === wanted) containers.push({ index: i, label: info.label, marker });
     } else {
       if (currentContainer === null) return { kind: 'not-a-list' }; // orphan child
       if (childIndentSeen === null) {
@@ -1487,8 +1627,18 @@ function containerOwnerScan(body, wanted) {
 // That asymmetry is deliberate and load-bearing (round-18 HIGH): the writer reads the same label, so
 // trimming it here would accept a container the writer itself treats as absent. It is pinned by the
 // rule-5 UNTRIMMED test in chapter-paths.test.mjs — check that test before "simplifying" this.
+// #351: the normalization this seam was predicted to gain. NFC folds the two spellings of one label
+// — 'U' + COMBINING DIAERESIS versus the precomposed letter, which different platforms hand out for
+// the same keystroke — into one key, so an NFD group_title stops appending a SECOND, pixel-identical
+// container beside the precomposed one already in the file. It deliberately does NOT touch invisible
+// characters: a zero-width space makes two labels genuinely different strings that no normalization
+// can reconcile, so isPlainLabel refuses those outright rather than guessing.
+function normalizeLabelForCompare(label) {
+  return String(label).normalize('NFC');
+}
+
 function containerLabelKey(groupTitle) {
-  return String(groupTitle).trim();
+  return normalizeLabelForCompare(String(groupTitle).trim());
 }
 
 /**
@@ -1692,7 +1842,22 @@ function classifyEntryDelta(oldEntry, newEntry) {
   const groupChanged = oldEntry.group !== newEntry.group;
   // F5: compared TRIMMED — a padding-only difference ('Admin' vs '  Admin  ') is not a real
   // title change (trimmedTitle is the single normalization every touchpoint reads through).
-  const titleChanged = trimmedTitle(oldEntry) !== trimmedTitle(newEntry);
+  // #351: and NFC-folded, for exactly the same reason one step further out. Re-encoding a title
+  // between its decomposed and precomposed spellings is not a title change either — the container
+  // comparison now treats the two as one label, so leaving this site raw would raise a manual
+  // migration halt for a move that, by every other measure in this module, did not happen. This is
+  // the SEVENTH comparison site; a reviewer found it after the other six were converted, which is
+  // what an enumeration looks like when it is closed one member at a time.
+  // The normalization is applied ONLY to a string. trimmedTitle passes an unusable title through
+  // untouched (it may be a number, a boolean, undefined), and String()-coercing those would make
+  // two DIFFERENT unusable values compare equal — 5 and '5' both become '5' — quietly changing a
+  // verdict on a path validateGroups already halts on. Non-strings keep their pre-#351 identity
+  // comparison exactly.
+  const titleKey = (entry) => {
+    const title = trimmedTitle(entry);
+    return typeof title === 'string' ? normalizeLabelForCompare(title) : title;
+  };
+  const titleChanged = titleKey(oldEntry) !== titleKey(newEntry);
   const destinationGrouped = newEntry.group !== undefined;
   const sourceGrouped = oldEntry.group !== undefined;
 
@@ -2225,7 +2390,8 @@ const NON_HEADING_PLACEMENT_PROBE_LINK = '[probe](__verify-non-heading-placement
  * reached only for a file holding exactly one selected-target match):
  *   1. zero selected-target matches                          -> inconsistent (fail-closed)
  *   2. more than one selected-target match                   -> inconsistent
- *   3. the single match lies inside the leading-frontmatter span -> unverifiable
+ *   3. the single match lies inside the leading-frontmatter span -> unverifiable (unreachable since
+ *      #337 — see the rule's own comment)
  *   4. the writer's own predicate declines the shape (not-a-list/multiple) -> unverifiable
  *   5. otherwise, compare the container the writer itself resolved -> ok / misplaced
  *
@@ -2273,9 +2439,12 @@ export function verifyNonHeadingPlacement(indexLines, selectedTarget, groupTitle
   const prep = prepareIndexLines(indexLines);
   if (prep.kind === 'not-a-list') return { kind: 'unverifiable' };
 
-  // Rule 3: a match inside a leading frontmatter block is never verified — the writer's own BODY
-  // blanks frontmatter while `indexView` does not (the shipped 1.10.0 disagreement, filed as #337),
-  // so a present match there cannot be soundly judged either way.
+  // Rule 3: a match inside a leading frontmatter block is never verified. It existed because the
+  // writer's own BODY blanked frontmatter while `indexView` did not (the shipped 1.10.0
+  // disagreement, filed as #337), so a present match there could not be soundly judged either way.
+  // #337 closed that gap — `indexView` now blanks the SAME span, so a row in frontmatter is not a
+  // match at all and rule 1 answers first. This branch is therefore UNREACHABLE, and stays only as a
+  // structural guard, the same house style as the `not-a-list` branch under rule 5 below.
   if (prep.span !== null && matchIndex >= prep.span.start && matchIndex < prep.span.endExclusive) {
     return { kind: 'unverifiable' };
   }
@@ -2286,7 +2455,21 @@ export function verifyNonHeadingPlacement(indexLines, selectedTarget, groupTitle
   // Written as a positive accept-list, not as a negative decline-list. The negative form silently
   // acquired a third accepted outcome when 1.11.0 added `present`, and nothing went red; a future
   // outcome must fail this gate until someone decides it belongs here.
-  if (shapeVerdict.kind !== 'inserted' && shapeVerdict.kind !== 'present') return { kind: 'unverifiable' };
+  //
+  // #350: `unwritable` on the group_title is the one refusal that does NOT block a comparison, and
+  // folding it in here discarded a verdict this function can fully support. It says the FILE is a
+  // recognizable list and the group_title is a plain label — only the container line the writer
+  // would EMIT is unsafe (YAML-mapping-shaped, or bare-path-shaped under a `*`/`+` marker). Whether
+  // the row already on disk sits under the right container is untouched by that. The fall-through is
+  // structurally incapable of manufacturing a false `ok`: `unwritable`/`group_title` is reachable
+  // only on the CREATE branch, which the writer takes precisely when no container matches `wanted`,
+  // so rule 5 below can only conclude `misplaced`. `unwritable`/`title` stays out — it blames the
+  // child row the fixed probe supplies, so reaching it at all would mean the probe itself is unsafe.
+  const comparable =
+    shapeVerdict.kind === 'inserted' ||
+    shapeVerdict.kind === 'present' ||
+    (shapeVerdict.kind === 'unwritable' && shapeVerdict.field === 'group_title');
+  if (!comparable) return { kind: 'unverifiable' };
 
   // Rule 5: the container comparison, via the writer's own shared scan. Structurally, `scan.kind`
   // cannot be 'not-a-list' here — an `inserted` or `present` shapeVerdict already proves the writer's
@@ -2305,7 +2488,10 @@ export function verifyNonHeadingPlacement(indexLines, selectedTarget, groupTitle
   // with the writer about what a container is called. NEVER re-trim it here — see the trimming note
   // above containerLabelKey for which parse branches trim and why the mdlink one deliberately does not.
   const ownerLabel = scan.ownerLabelOf[matchIndex];
-  if (ownerLabel === wantedLabel) return { kind: 'ok' };
+  // #351: compared through the same NFC step the writer's own container match uses, so the two can
+  // never disagree about whether a decomposed and a precomposed spelling are one container. The
+  // REPORTED label stays raw — a halt must quote the file, not a normalized rendering of it.
+  if (normalizeLabelForCompare(ownerLabel) === wantedLabel) return { kind: 'ok' };
   return { kind: 'misplaced', foundContainer: ownerLabel };
 }
 

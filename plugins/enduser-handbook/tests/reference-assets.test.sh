@@ -2797,16 +2797,18 @@ has "chapter-paths.d.mts: declares verifyNonHeadingPlacement"       'export func
 has "chapter-paths.d.mts: declares VerifyNonHeadingPlacementOptions" 'export interface VerifyNonHeadingPlacementOptions' "$CPD"
 has "chapter-paths.d.mts: declares VerifyNonHeadingPlacementResult"  'export type VerifyNonHeadingPlacementResult'      "$CPD"
 
-echo "== canonical verified-class sentence — verbatim at all four pinned sites (#330) =="
+echo "== canonical verified-class sentence — three current sites, plus the frozen 1.11.0 copy (#330) =="
 # ONE sentence, reused verbatim, joined across the ~95-column house wrap. Short independent
 # fragments were rejected during review: they enforce neither wording, order, nor adjacency, so a
 # site could drift into a paraphrase and stay green — which is exactly how an earlier revision came
 # to claim verbatim reuse it did not have. A site may add a labelled gloss BESIDE the sentence; a
 # site carrying only a gloss fails these pins.
-# These four are the complete set this suite pins — the only sites with a stable repository path
-# for a needle to target. A hand-off/planning document outside the repo may carry the same sentence
-# too; that copy has no such path, so it is out of scope for this gate rather than an oversight, and
-# requiring a needle in it would force an implementer to invent a file just to keep the count.
+# These four sites are the complete set this suite pins — the only sites with a stable repository
+# path for a needle to target — but they no longer pin ONE sentence. Three docs carry the CURRENT
+# class, and the CHANGELOG carries the frozen 1.11.0 one; the split is deliberate and both halves are
+# asserted below. A hand-off/planning document outside the repo may carry the same sentence too; that
+# copy has no such path, so it is out of scope for this gate rather than an oversight, and requiring
+# a needle in it would force an implementer to invent a file just to keep the count.
 # [1.11.0] The accepted-outcome list grew from one kind to two. The sentence said `inserted` alone
 # while `verifyNonHeadingPlacement` declined only `not-a-list`/`multiple` (a negative list), so the
 # new `present` outcome silently joined the accepted set and this pin — reused verbatim in four
@@ -2814,7 +2816,16 @@ echo "== canonical verified-class sentence — verbatim at all four pinned sites
 # tracks drift and cannot track truth. Reproduced before correcting: an index already carrying the
 # probe row makes the writer answer `present`, and the verifier returns `ok`, not `unverifiable`.
 # The gate is now written as a positive accept-list so the next added outcome fails it instead.
-CLASS_SENTENCE='files for which the fixed-probe writer call returns `kind === '\''inserted'\''` or `kind === '\''present'\''` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span.'
+# [#350/#337] The class widened again, exactly as the note above predicted a next time would look:
+# `unwritable`/`group_title` joined the accepted set (the file IS readable and the label IS plain —
+# only the container line the writer would emit is unsafe, which says nothing about where the
+# existing row sits), and the frontmatter clause became vacuous once the locator started blanking
+# that span, so it is restated as the fact it now is rather than as a restriction. The CHANGELOG
+# copy is deliberately NOT rewritten: its 1.11.0 entry is history and must keep the sentence that
+# was true then, so it gets its own pin below. Whoever ships the next release adds the CURRENT
+# sentence to the new CHANGELOG entry — that is what the third pin here would otherwise assert.
+CLASS_SENTENCE='files for which the fixed-probe writer call returns `kind === '\''inserted'\''`, `kind === '\''present'\''`, or `kind === '\''unwritable'\''` with `field === '\''group_title'\''`, and which hold exactly one selected-target match (a row inside a closed leading frontmatter block is not a match at all).'
+CLASS_SENTENCE_1_11_0='files for which the fixed-probe writer call returns `kind === '\''inserted'\''` or `kind === '\''present'\''` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span.'
 CHLOG="$PLUGIN_DIR/../../CHANGELOG.md"
 has_joined_in_section "static-md: limits section carries the class sentence verbatim" \
   "$SMD" '### Nested-list automation limits' "$CLASS_SENTENCE"
@@ -2822,7 +2833,7 @@ has_joined_in_section "obsidian-vault: limits section carries the class sentence
   "$OMD" '### Nested-list automation limits' "$CLASS_SENTENCE"
 has_joined_in_section "revalidation.md: convergence checklist carries the class sentence verbatim" \
   "$REVAL" '### Terminal-state convergence checklist' "$CLASS_SENTENCE"
-has "CHANGELOG: 1.11.0 entry carries the class sentence verbatim" "$CLASS_SENTENCE" "$CHLOG"
+has "CHANGELOG: the 1.11.0 entry keeps the class sentence that was true THEN, unedited" "$CLASS_SENTENCE_1_11_0" "$CHLOG"
 
 echo "== [1.11.0] wireNestedListChapter membership guard — retired claims, and the shared halt =="
 # ANTI-ROT, and deliberately NEGATIVE. The sentences forbidden below were never pinned at all, which
@@ -3142,9 +3153,16 @@ has_joined_in_section "obsidian-vault: step-4 carries the narrowed safety statem
 # that lands on the untouched headings branch, which completes with neither verification nor
 # confirmation. Pin the disclosure too, or a later edit could keep the narrow claim and drop the
 # admission that makes it narrow.
-HEADINGS_BRANCH_DISCLOSURE='The headings branch is unchanged by this PR and already completes silently'
-has "static-md: step-4 names the unchanged headings-branch gap"      "$HEADINGS_BRANCH_DISCLOSURE" "$SMD"
-has "obsidian-vault: step-4 names the unchanged headings-branch gap" "$HEADINGS_BRANCH_DISCLOSURE" "$OMD"
+# [#337] The gap this pin was guarding is CLOSED, so the pin follows it rather than outliving it:
+# the headings branch used to complete silently on a chapter row inside a frontmatter block whose
+# body carries a heading, because the locator saw that row and the writer did not. The locator now
+# blanks the frontmatter span, so the row is absent on both branches. What must stay disclosed is
+# therefore the OPPOSITE sentence — and it must stay disclosed for the same reason as before: a
+# later edit could keep the narrow safety claim above while dropping the sentence that explains why
+# the other branch no longer needs an admission.
+HEADINGS_BRANCH_DISCLOSURE='The headings branch no longer completes silently on that shape (#337)'
+has "static-md: step-4 names the closed headings-branch gap"      "$HEADINGS_BRANCH_DISCLOSURE" "$SMD"
+has "obsidian-vault: step-4 names the closed headings-branch gap" "$HEADINGS_BRANCH_DISCLOSURE" "$OMD"
 # HIGH 4 (round-13): the two `has` pins above need only ONE hit each, but static-md.md carries this
 # sentence TWICE — the primary statement plus a cross-reference elsewhere that quotes it verbatim
 # ("see '...' above ... for that gap's own description") — while obsidian-vault.md carries it once.
@@ -3155,17 +3173,24 @@ has "obsidian-vault: step-4 names the unchanged headings-branch gap" "$HEADINGS_
 # would silently return with the suite still fully green. Pinning the occurrence COUNT (2 for
 # static-md.md, 1 for obsidian-vault.md, re-verify both before trusting either number again — the
 # adapters are actively edited) makes that deletion fail loudly instead.
+# Counts RE-MEASURED for #337, exactly as the note above demands before trusting either number:
+# static-md.md dropped from 2 to 1 because the cross-reference that quoted the old sentence verbatim
+# ("see '...' above ... for that gap's own description") was rewritten into the "Three disclosures"
+# bullet, which now states the closure in its own words instead of quoting. obsidian-vault.md stays
+# at 1. The count pin keeps doing its job: deleting the statement drops the file to 0 and fails here
+# even though the `has` pins above would also fail — the pair is retained so a FUTURE second copy
+# (a re-introduced cross-reference) is a deliberate edit to this number, not a silent drift.
 SMD_HEADINGS_DISCLOSURE_COUNT="$(count_joined_fixed "$HEADINGS_BRANCH_DISCLOSURE" "$SMD")"
-if [ "$SMD_HEADINGS_DISCLOSURE_COUNT" -eq 2 ]; then
-  ok "static-md: unchanged headings-branch gap occurs exactly twice (primary statement + cross-reference)"
+if [ "$SMD_HEADINGS_DISCLOSURE_COUNT" -eq 1 ]; then
+  ok "static-md: closed headings-branch gap occurs exactly once"
 else
-  bad "static-md: unchanged headings-branch gap occurrence count drifted from 2 (found $SMD_HEADINGS_DISCLOSURE_COUNT) — the primary statement or its cross-reference may have been deleted"
+  bad "static-md: closed headings-branch gap occurrence count drifted from 1 (found $SMD_HEADINGS_DISCLOSURE_COUNT)"
 fi
 OMD_HEADINGS_DISCLOSURE_COUNT="$(count_joined_fixed "$HEADINGS_BRANCH_DISCLOSURE" "$OMD")"
 if [ "$OMD_HEADINGS_DISCLOSURE_COUNT" -eq 1 ]; then
-  ok "obsidian-vault: unchanged headings-branch gap occurs exactly once (no cross-reference copy)"
+  ok "obsidian-vault: closed headings-branch gap occurs exactly once (no cross-reference copy)"
 else
-  bad "obsidian-vault: unchanged headings-branch gap occurrence count drifted from 1 (found $OMD_HEADINGS_DISCLOSURE_COUNT)"
+  bad "obsidian-vault: closed headings-branch gap occurrence count drifted from 1 (found $OMD_HEADINGS_DISCLOSURE_COUNT)"
 fi
 #
 # Pinned as EXACT strings so that wording drift is caught rather than absorbed. These began as
