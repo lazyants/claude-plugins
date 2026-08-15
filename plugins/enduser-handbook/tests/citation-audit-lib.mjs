@@ -66,12 +66,42 @@
 // excluded exactly the way the heading parser excludes fenced headings. maskFencedRegions is
 // character-offset- and line-position-preserving, so a match offset in the masked text is the same
 // offset in the raw source — that is what makes the per-occurrence character offsets below reliable.
+//
+// IDENTITY vs POSITION (#342). `offset` is a POSITION: exact, unique, and invalidated by every edit
+// anywhere earlier in the file. The allowlist in citation-audit.test.mjs used to be keyed on it, so a
+// typo fix three paragraphs above a citation re-wrote every entry below it and buried any real change
+// in ~40 lines of pure position shift. Each record therefore also carries a positional-drift-immune
+// IDENTITY — `citationKey`: file + enclosing section (title AND `sectionNth`, which section of that
+// title) + quoted title + direction + `nth`, the ordinal among citations in that same section
+// repeating that same title. Both are kept: identity is what the allowlist pins, position is what the
+// human diagnostic prints.
+//
+// The identity is injective BY CONSTRUCTION, which is what preserves the per-occurrence
+// distinguishability the offset key was originally chosen for: `nth` is assigned by walking each
+// section's citations in document order, so two otherwise-identical citations — same line, same
+// title, same direction — still receive different ordinals and can never collapse into one entry.
+//
+// INJECTIVITY IS NOT THE WHOLE PROPERTY, and an earlier revision of this comment confused the two.
+// It argued that repeated section titles were harmless because they "merge into one ordinal group and
+// the ordinal separates the members" — true about injectivity, and wrong about what the allowlist is
+// for. Merging makes two DIFFERENT sections one namespace, so an unresolved citation moving from the
+// first `## Same` to the second keeps its whole key and moves invisibly; unresolved citations are
+// direction-unchecked, so that entry is the only record that it exists at all. Hence `sectionNth`:
+// which section of that title, counted among same-titled headings. Found by codex review, with a
+// working probe; the fixture that pins it is in citation-audit.test.mjs.
+//
+// What it deliberately does NOT survive, stated rather than implied: moving a citation into a
+// different section, and re-ordering two citations that share a section AND a title. Both are real
+// structural changes to a citation's context, not position noise, and should be re-reviewed — which
+// is exactly what a changed key forces. What it CANNOT see is a setext-underlined heading, because
+// parseHeadings recognizes ATX only — an inherited limit of md-structure, not of this key.
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  findOwner,
   maskFencedRegions,
   parseHeadings,
 } from '../skills/enduser-handbook/assets/lib/md-structure.mjs';
@@ -137,9 +167,9 @@ export function offsetToLine(lineStarts, offset) {
  * extractCitations(text) — every citation occurrence in `text`, fenced regions excluded. Returns one
  * record PER QUOTED TITLE (a compound span explodes into several), each:
  *   { offset, line, quotedRaw, quotedText, direction }
- * - `offset` is the absolute character offset of that title's opening `"` — a true per-occurrence
- *   identity (no two distinct occurrences share a starting offset), which is what the offset-keyed
- *   allowlist needs to tell two same-title citations apart.
+ * - `offset` is the absolute character offset of that title's opening `"`. It is exact and unique (no
+ *   two distinct occurrences share a starting offset) but POSITIONAL, so it is the human diagnostic
+ *   and the anchor for text surgery, never the allowlist key — see IDENTITY vs POSITION above.
  * - `quotedRaw` is the exact inner text (may contain a line break); `quotedText` is its
  *   whitespace-collapsed form, used for heading-title comparison; `direction` is lowercased.
  *
@@ -187,9 +217,107 @@ export function extractCitations(text) {
   return out;
 }
 
+// Section title used for a citation that sits above the file's first heading. Spelled as prose, not
+// as an empty string, so a pinned allowlist entry reads unambiguously instead of showing a blank.
+export const PREAMBLE_SECTION = '(before the first heading)';
+// ...and the ordinal that goes with it. Negative on purpose: a heading's ordinal among same-titled
+// headings is always >= 0, so nothing a document can contain collides with the preamble's identity —
+// including a heading whose title IS the sentinel string above.
+export const PREAMBLE_SECTION_NTH = -1;
+
+/**
+ * sectionIdentity(headings, line) — {section, sectionNth}: the enclosing section's collapsed title
+ * PLUS which section of that title it is, counted in document order among same-titled headings.
+ *
+ * The title alone is not an identity. Two sections can carry the same title in one file (identical
+ * spelling, or differing only in whitespace, which collapses to the same string), and a citation that
+ * moves from one to the other keeps every other key component — so without this ordinal the move is
+ * invisible, and a citation can silently acquire a different context without any allowlist entry
+ * changing. `sectionNth` is not positional in the sense #342 is about: inserting prose, or any
+ * heading with a DIFFERENT title, does not move it. It moves only when a same-titled section is added
+ * or removed before it, which is a structural change to exactly the thing this component identifies.
+ *
+ * @param {Array<{title: string, bodyStart: number, bodyEndExclusive: number}>} headings
+ * @param {number} line
+ * @returns {{section: string, sectionNth: number}}
+ */
+export function sectionIdentity(headings, line) {
+  const owner = findOwner(headings, line);
+  // The preamble is decided by the ABSENCE of an owner, never by its title matching the sentinel —
+  // and it takes an ordinal no heading can ever produce. Both halves are needed: a document whose
+  // first heading is literally titled `(before the first heading)` would otherwise hand its citations
+  // the preamble's exact identity, which is the same aliasing sectionNth exists to prevent, one level
+  // up. Deciding on `owner === null` alone does not close it; the ordinal is what does.
+  if (owner === null) return { section: PREAMBLE_SECTION, sectionNth: PREAMBLE_SECTION_NTH };
+  const section = collapseWhitespace(owner.title);
+  const sameTitle = headings
+    .filter((h) => collapseWhitespace(h.title) === section)
+    .sort((a, b) => a.bodyStart - b.bodyStart);
+  return { section, sectionNth: sameTitle.findIndex((h) => h.bodyStart === owner.bodyStart) };
+}
+
+/**
+ * enclosingSection(headings, line) — the collapsed title of the section `line` is written in.
+ *
+ * Resolved by md-structure's own `findOwner` rather than by a third copy of that logic living here:
+ * the same reuse rule the fence mask follows above, and the module that owns document structure owns
+ * this question too. `findOwner` returns the DEEPEST heading whose body contains the line, which for
+ * properly nested Markdown is also the nearest heading above it — measured across all 94 corpus
+ * citations, it agrees with a nearest-heading-above scan on every one.
+ *
+ * Two boundary answers follow from findOwner's contract, and are pinned by fixtures in
+ * citation-audit.test.mjs rather than left to be rediscovered:
+ *   - a citation that precedes the first heading's body has no owner -> PREAMBLE_SECTION;
+ *   - a citation written INTO a heading's own line belongs to that heading's PARENT (or, for a
+ *     top-level heading, to PREAMBLE_SECTION), because a heading is not inside its own body. No
+ *     corpus citation does this today.
+ *
+ * @param {Array<{title: string, bodyStart: number, bodyEndExclusive: number}>} headings
+ * @param {number} line
+ * @returns {string}
+ */
+export function enclosingSection(headings, line) {
+  const owner = findOwner(headings, line);
+  return owner === null ? PREAMBLE_SECTION : collapseWhitespace(owner.title);
+}
+
+/**
+ * citationKey(record) — the positional-drift-immune identity of one citation occurrence (#342):
+ * file + enclosing section (title AND which section of that title) + quoted title + direction + the
+ * `nth` ordinal within that group. NUL-joined because every component is free-form document text and
+ * any printable separator could occur inside one. `file` is absent on records from auditText (a
+ * single anonymous document) and empty there; auditCorpus records always carry it.
+ *
+ * @param {{file?: string, section: string, sectionNth: number, quotedText: string, direction: string, nth: number}} record
+ * @returns {string}
+ */
+export function citationKey(record) {
+  return [
+    record.file ?? '',
+    record.section,
+    record.sectionNth,
+    record.quotedText,
+    record.direction,
+    record.nth,
+  ].join('\0');
+}
+
+// The ordinal group — deliberately NOT everything in citationKey minus the ordinal: `direction` is
+// excluded, so two citations of one title in one section are numbered as a pair regardless of which
+// way each points. That is what makes SWAPPING their directions change the key SET rather than merely
+// reorder it, which is the hard constraint the offset key was originally chosen to satisfy: with
+// direction inside the group, both swapped records would keep `nth: 0` and the set comparison could
+// not see the swap at all. Per-file by construction — auditText only ever sees one document.
+function ordinalGroup(record) {
+  return [record.section, record.sectionNth, record.quotedText].join('\0');
+}
+
 /**
  * auditText(text) — extract every citation and resolve each against `text`'s own heading list.
  * Each returned record extends the extractCitations record with:
+ *   - section, sectionNth: the enclosing section's identity (see sectionIdentity)
+ *   - nth: 0-based ordinal among this document's citations sharing (section, sectionNth, quotedText),
+ *     assigned in document order — the tie-break that keeps citationKey injective
  *   - status: 'resolved' | 'unresolved' | 'ambiguous'
  *       resolved   = exactly one heading title equals the collapsed quoted text
  *       unresolved = zero matching headings (an over-match or a citation to a non-heading)
@@ -205,7 +333,8 @@ export function extractCitations(text) {
  */
 export function auditText(text) {
   const headings = parseHeadings(text);
-  return extractCitations(text).map((c) => {
+  const records = extractCitations(text).map((raw) => {
+    const c = { ...raw, ...sectionIdentity(headings, raw.line) };
     const matches = headings.filter((h) => collapseWhitespace(h.title) === c.quotedText);
     if (matches.length === 0) return { ...c, status: 'unresolved', matchLines: [] };
     if (matches.length >= 2) {
@@ -225,6 +354,16 @@ export function auditText(text) {
       directionOk: expectedDirection === c.direction,
     };
   });
+  // Ordinals last, over the finished records: extractCitations returns document order, so walking the
+  // list once and counting per group numbers each occurrence by its position among its own siblings.
+  const seen = new Map();
+  for (const record of records) {
+    const group = ordinalGroup(record);
+    const nth = seen.get(group) ?? 0;
+    seen.set(group, nth + 1);
+    record.nth = nth;
+  }
+  return records;
 }
 
 // Recursively list every *.md under `dir` (posix-style relative paths from `dir`), plus discovery of
@@ -270,4 +409,64 @@ export function auditCorpus(root = SKILL_ROOT) {
     for (const rec of auditText(text)) records.push({ file, ...rec });
   }
   return records;
+}
+
+// The BASIC-PLANE characters that are invisible (or render as something other than themselves) in a
+// source file: C0 controls, DEL + C1 including NEL, soft hyphen, the Arabic letter mark, the
+// zero-width and directional-mark block, the line/paragraph separators, the bidi embedding+override
+// block, word joiner and invisible operators, the bidi isolates, and ZWNBSP/BOM. Spelled entirely in
+// `\u` escapes: writing the characters themselves is how this class would silently acquire the very
+// payload it exists to neutralize, and a reviewer could not see the difference.
+//
+// Two reviewers independently measured the same boundary, so it is stated instead of implied: the
+// class is BMP-only, and the supplementary-plane invisibles — Unicode tag characters (U+E0000-E007F,
+// the ASCII-smuggling block), the variation selectors and their supplement — pass through raw.
+// Covering them needs the `u` flag and the variable-width `\u{...}` escape form, i.e. two escape
+// spellings in one emitter, which is more machinery than the threat here earns: the trust boundary is
+// contributors with commit access, and the value this pass actually adds is the zero-width and bidi
+// family that JS `\s` does NOT strip (collapseWhitespace already removes everything `\s` covers).
+// Widen it if that boundary ever changes; do not widen it because a scanner reports the gap.
+const INVISIBLE_IN_SOURCE_RE =
+  /[\u0000-\u001F\u007F-\u009F\u00AD\u061C\u200B-\u200F\u2028-\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
+
+// A JS single-quoted string literal for `s`. Backslashes first, then quotes, so an already-escaped
+// backslash is not double-counted — and the invisible-character pass runs LAST for the same reason
+// (it emits `\u` escapes, which an earlier backslash pass would double-escape). Matches the spelling
+// the pinned table in citation-audit.test.mjs uses, which is what lets a regenerated block be pasted
+// in verbatim.
+//
+// The invisible pass is defense-in-depth for the REVIEW, not for execution: nothing here is eval'd,
+// and a quote or backslash was already neutralized above. What it prevents is an allowlist entry that
+// renders to a human exactly like a different entry — a bidi override or a zero-width space inside a
+// heading title would otherwise be pasted into the pinned table invisibly, and the table's whole job
+// is to be a record a human can read and trust. Every such character comes back as an ASCII `\uXXXX`
+// escape, which is still the same string to the runtime and a visible difference to the reader.
+function jsQuote(s) {
+  const escaped = s
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(INVISIBLE_IN_SOURCE_RE, (c) => `\\u${c.codePointAt(0).toString(16).padStart(4, '0')}`);
+  return `'${escaped}'`;
+}
+
+/**
+ * formatUnresolvedAllowlist(records) — the EXPECTED_UNRESOLVED body of citation-audit.test.mjs,
+ * regenerated from an audit (#342). One entry per line, in corpus document order, each carrying only
+ * the citationKey components — so a real change is one changed line and there is nothing
+ * position-derived left to churn. The output is pasted between that array's brackets verbatim; a test
+ * in citation-audit.test.mjs asserts the regenerated text equals the block that file actually ships,
+ * so "run the command, paste, commit" is a closed loop rather than a hand-transcription.
+ *
+ * @param {Array<object>} records — an auditCorpus() result (any status; unresolved is selected here)
+ * @returns {string} newline-joined source lines, no trailing newline
+ */
+export function formatUnresolvedAllowlist(records) {
+  return records
+    .filter((r) => r.status === 'unresolved')
+    .map(
+      (r) =>
+        `  { file: ${jsQuote(r.file)}, section: ${jsQuote(r.section)}, sectionNth: ${r.sectionNth}, ` +
+        `quotedText: ${jsQuote(r.quotedText)}, direction: ${jsQuote(r.direction)}, nth: ${r.nth} },`,
+    )
+    .join('\n');
 }
