@@ -74,25 +74,12 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # anyone re-reading it.
 CITATION_ANCHORS = {
     # This map tracks the NEWEST changelog entry only, and is rewritten every
-    # release. 1.27.0 cites the four sites #537 moved. Each anchor is the
-    # decision itself rather than its comment, so a rewritten rationale does
-    # not fail this test while a moved or reverted decision does.
-    #
-    # The membership test, not `== SENTINEL_AMBIGUOUS`: what the release
-    # claims is that ABSENT and PRESENT are BOTH admitted and everything else
-    # is not, which is exactly what this spelling says and an equality check
-    # would not.
-    "select_segments.py:2667": ["if sentinel_state not in (SENTINEL_ABSENT, SENTINEL_PRESENT):"],
-    # The disclosure's PLACEMENT is the claim -- it is read off `extras` in
-    # run(), after publication, rather than printed inside the branch that
-    # decided. An anchor on the printed text alone would still pass if the
-    # print moved back into evaluate_claim_admission().
-    "select_segments.py:4731": ['if extras.get("from_cap_over_sentinel"):'],
-    # Both profile sets gained CLAIM_PROFILE_FROM_CAP. The anchor names the
-    # set being built as well, so the citation cannot drift onto the other
-    # one -- they are otherwise near-identical three-element tuples.
-    "select_segments.py:4529-4538": ["sentinel_bearing_requested = {", "CLAIM_PROFILE_FROM_CAP,"],
-    "select_segments.py:4793-4802": ["cleared = {", "CLAIM_PROFILE_FROM_CAP,"],
+    # release. 1.28.0 is documentation-only: it states one operator rule (R10)
+    # and cites no source line at all -- the rule is about which DIRECTORY a new
+    # volume may read from, not about a code path. An empty map is the correct
+    # state here, and the test below still enforces both halves: a citation
+    # appearing in the entry with no anchors fails, and an anchor no citation
+    # uses fails.
 }
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
