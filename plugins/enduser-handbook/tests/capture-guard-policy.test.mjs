@@ -348,6 +348,24 @@ test('deny patterns win on a hop exactly as on a fresh request', () => {
   assert.equal(audit.reason, 'redirect-hop:deny-pattern');
 });
 
+test('a body-shaped denyPattern is not hop-blind (307 preserves the body)', () => {
+  // Measured against the real engine: a 307 hop arrives carrying the origin's full postData, so the
+  // documented body-shaped backstop — a denyPattern like /\bmutation\b/ for a write the URL alone
+  // cannot identify — must reach a hop too. It does only because the audit passes the body through;
+  // dropping it downgrades this to a generic fail-closed and loses the reason that names the cause.
+  const audit = auditRedirectHop(
+    hopReq({
+      method: 'POST',
+      url: 'https://app.test/graphql',
+      postData: '{"query":"mutation { deleteUser(id: 1) { id } }"}',
+      redirectedFrom: 'https://app.test/search-start',
+    }),
+    { denyPatterns: [/\bmutation\b/] },
+  );
+  assert.equal(audit.verdict, 'dangerous');
+  assert.equal(audit.reason, 'redirect-hop:deny-pattern');
+});
+
 test('hasDangerousVerb decode-sequence scan completes quickly on a huge percent-run (no exponential blowup)', () => {
   const huge = 'https://app.test/x/' + '%25'.repeat(333333); // ~1,000,000 chars
   const start = Date.now();

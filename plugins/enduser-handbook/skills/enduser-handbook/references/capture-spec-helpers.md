@@ -46,8 +46,10 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   playwright-core 1.61.1 and 1.62.1, a `GET /reports/monthly` → 302 → `/orders/42/finalize` chain
   reached the server in full while the handler saw only the first request. The guard therefore runs a
   **second, audit-only channel** over the engine's request-observation event: every hop is
-  re-classified by the same ordered policy using the **hop's own method and URL** (307/308 preserve
-  the method; 301/302/303 may downgrade a POST to a GET), the whole chain is logged for inspection,
+  re-classified by the same ordered policy using the **hop's own method, URL and body** (307/308
+  preserve both the method and the body — so a body-shaped `denyPattern` reaches a hop exactly as it
+  reaches a fresh request; 301/302/303 may downgrade a POST to a GET), the chain is logged for
+  inspection,
   and any hop the policy would have blocked is pushed into the dangerous ledger so the end-of-run
   assertion **fails loudly**. This is detection, not prevention — the browser has already sent the
   hop, so a failure naming a `redirect-hop:` reason means a live request **fired**, not that one was

@@ -177,9 +177,10 @@ export async function installCaptureGuard(
   // Redirect hops (issue #471): AUDIT-ONLY second channel. The route handler above is never consulted
   // for a hop — the browser continues it internally and constructs no Route — but the context-level
   // 'request' event fires for EVERY hop, carrying redirectedFrom(). Classify each hop with the SAME
-  // policy on its OWN method and URL (307/308 preserve the method, 301/302/303 may downgrade a POST to
-  // a GET), log the chain, and count the dangerous ones so the end-of-run assertion fails. By the time
-  // the event fires the request has already been sent: this is detection, not prevention.
+  // policy on its OWN method, URL and body (307/308 preserve the method AND the body — measured, so a
+  // body-shaped denyPattern is not hop-blind; 301/302/303 may downgrade a POST to a GET), log the
+  // chain, and count the dangerous ones so the end-of-run assertion fails. By the time the event fires
+  // the request has already been sent: this is detection, not prevention.
   context.on('request', (req: Request) => {
     const from = req.redirectedFrom();
     // A browser-originated request — context.route already classified (and possibly aborted) it.
