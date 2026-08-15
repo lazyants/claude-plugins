@@ -1228,6 +1228,15 @@ has "capture-helpers: detects a hop via redirectedFrom()"                'req.re
 has "capture-helpers: delegates the hop verdict to auditRedirectHop"     'auditRedirectHop('                  "$CH"
 has "capture-helpers: a dangerous hop reaches the dangerous ledger"      'if (audit.verdict === '            "$CH"
 has "capture-helpers: exposes the hop chain for inspection"              'redirectHops: () => [...redirectHops]' "$CH"
+# The executable seam test (capture-guard-redirect-wiring.test.mjs) needs Node >= 22.6 to strip types
+# off the .ts driver and SKIPS below that. These two pins are environment-independent, so the specific
+# regression — a correct verdict computed and then never recorded, which IS #471's original failure —
+# stays caught even where the executable test cannot run.
+has "capture-helpers: the dangerous hop entry is actually recorded" \
+  'recordDangerous(`${audit.reason}: ${method} ${url} (redirected from ${fromUrl})`);' "$CH"
+has "redirect-hop seam test drives the REAL installCaptureGuard" \
+  "import { installCaptureGuard } from '../skills/enduser-handbook/assets/capture-helpers.playwright.ts'" \
+  "$TEST_DIR/capture-guard-redirect-wiring.fixture.mjs"
 
 # #470/#471/#472: the contract doc must stop promising guarantees the guard does not have. Each claim
 # is bound to the section that owns it, and each retired overstatement is pinned absent whole-file.
@@ -1257,6 +1266,20 @@ has_joined_in_section "capture-spec-helpers: redirect hops are detection, not pr
 has_joined_in_section "capture-spec-helpers: carve-out list now names the same-origin iframe (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   'the content of a same-origin `<iframe>`'
+# Two RECURRENCES of the same overstatement class, caught in review after the first pass fixed only
+# the headline instances: the classifyRequest fall-through is not fail-closed for a GET/HEAD, and a
+# 'benign' hop is a blocked-verdict that is deliberately NOT pushed to the dangerous ledger.
+hasnt "capture-spec-helpers: classifyRequest fall-through no longer claimed fail-closed (#470)" \
+  'including a stray truthy) **fails closed**' "$REFS/capture-spec-helpers.md"
+hasnt "capture-spec-helpers: hop-ledger claim no longer says EVERY blocked hop is pushed (#471)" \
+  'and any hop the policy would have blocked is pushed into the dangerous ledger' \
+  "$REFS/capture-spec-helpers.md"
+has_joined_in_section "capture-spec-helpers: fall-through fail-closed is scoped to non-GET/HEAD (#470)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'only for a request that is not a plain GET/HEAD'
+has_joined_in_section "capture-spec-helpers: a benign hop is named as the ledger exception (#471)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  "which is reported in the chain only"
 # The same carve-out has three write sites — the contract doc, the asset docblock, and the masking
 # rules. Correcting one and leaving the others is the recurring drift on this plugin.
 has "capture-helpers: scan carve-out names the same-origin iframe (#472)" \

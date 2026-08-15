@@ -48,11 +48,13 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   **second, audit-only channel** over the engine's request-observation event: every hop is
   re-classified by the same ordered policy using the **hop's own method, URL and body** (307/308
   preserve both the method and the body — so a body-shaped `denyPattern` reaches a hop exactly as it
-  reaches a fresh request; 301/302/303 may downgrade a POST to a GET), the chain is logged for
-  inspection,
-  and any hop the policy would have blocked is pushed into the dangerous ledger so the end-of-run
-  assertion **fails loudly**. This is detection, not prevention — the browser has already sent the
-  hop, so a failure naming a `redirect-hop:` reason means a live request **fired**, not that one was
+  reaches a fresh request; 301/302/303 may downgrade a POST to a GET), the whole chain is logged for
+  inspection, and any hop the policy would have blocked — **except** one the project's own
+  `classifyRequest` returns `'benign'` for, which is reported in the chain only — is pushed into the
+  dangerous ledger so the end-of-run assertion **fails loudly**. Note that a `'benign'` hop is a
+  weaker claim than a `'benign'` blocked request: the blocked one never fired, the hop already did.
+  This is detection, not prevention — the browser has already sent the hop, so a failure naming a
+  `redirect-hop:` reason means a live request **fired**, not that one was
   stopped. Admitting a request through `classifyRequest` never admits its hop target: the hop is
   classified on its own, and the predicate is told which request it came from. (Issue #471.)
 
@@ -61,9 +63,12 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   query is let through. `'benign'` **BLOCKS** the request — it never fires — but EXCLUDES it from
   the dangerous-hits assertion, so known-harmless dev telemetry (a laravel-boost `/_boost/` log
   POST, a Sentry beacon) does not false-trip `assertNoDangerousHits()` on any page that
-  console-logs. Everything else (any other return, including a stray truthy) **fails closed**
-  (blocked + recorded as dangerous). Note the asymmetry: `'read'` allows, `'benign'` blocks — they
-  are not "both block". `classifyRequest` must be **total**: return `undefined` for anything it does
+  console-logs. Everything else (any other return, including a stray truthy) is **not a verdict at
+  all** — the request simply falls through to the ordered default, which is **fail-closed (blocked +
+  recorded as dangerous) only for a request that is not a plain GET/HEAD**; a GET/HEAD that cleared
+  the deny step is still admitted unconditionally, as above. Note the asymmetry: `'read'` allows,
+  `'benign'` blocks — they are not "both block". `classifyRequest` must be **total**: return
+  `undefined` for anything it does
   not recognize and never throw (the guard now consults it for beacon/SSE requests too). There is
   still **NO write allowlist** — `'benign'` silences a block, it does not permit a write.
 
