@@ -35,6 +35,13 @@ index without saying so. Closes #337, #350, #351.
   one instruction an operator cannot execute for a character they cannot see.
 
 ### Changed
+- **The citation audit keys on identity, not file offset** (#342, merged separately as a test-only
+  change with no release entry of its own — 1.13.0 is the version that ships it). `EXPECTED_UNRESOLVED`
+  entries are now `file + section + sectionNth + quoted text + direction + ordinal`, so prose moving
+  around a citation no longer reddens the suite, and a documented regenerate-and-paste command plus a
+  test asserting the shipped block equals what that command emits replace hand-transcription. This
+  release exercises it: the doc edits above removed three citations, and the regenerated allowlist
+  differs by exactly those three and nothing else.
 - The **verified class** for present-line placement verification widened, and its sentence — quoted
   verbatim in both publish adapters and `revalidation.md` — now reads: files for which the
   fixed-probe writer call returns `kind === 'inserted'`, `kind === 'present'`, or `kind ===
