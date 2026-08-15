@@ -12,8 +12,9 @@
 //
 // This is DEFENSE-IN-DEPTH, not permission to click ambiguous controls — the human capture-safety
 // classification still governs every click. It fails closed on any NON-GET/HEAD request it cannot
-// prove is a read. A GET/HEAD is ADMITTED unconditionally once the deny step clears it — the origin
-// is never examined — so that allow is only as strong as the caller's denyPatterns plus the fixed
+// prove is a read. A GET/HEAD that reaches the get-head step — past the deny, benign, eventsource
+// and beacon branches above it — is ADMITTED unconditionally, and the origin is never examined, so
+// that allow is only as strong as the caller's denyPatterns plus the fixed
 // DANGEROUS_VERB_SET below (issue #470). And a redirect HOP never reaches the route handler at all:
 // it is audited after the fact by auditRedirectHop, which detects but cannot prevent (issue #471).
 

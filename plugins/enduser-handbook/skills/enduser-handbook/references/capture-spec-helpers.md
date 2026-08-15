@@ -30,8 +30,9 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   just grep-asserted. The end-of-run assertion **drains a short quiet period** before checking, so a
   delayed beacon/fetch fired after the last interaction is still caught.
 
-  **What the GET/HEAD allow does NOT check — the guard is not fail-closed on reads.** Once the deny
-  step clears a request, a GET or HEAD is admitted **unconditionally**: the **origin is never
+  **What the GET/HEAD allow does NOT check — the guard is not fail-closed on reads.** Once a request
+  reaches the general GET/HEAD allow — past the deny, benign, SSE and beacon blocks above it — a GET
+  or HEAD is admitted **unconditionally**: the **origin is never
   examined** (`decideRoute` takes no base URL or app origin), so a GET to a third-party host passes
   exactly like a same-origin one. The only built-in brake on a *writing* GET is a **fixed 16-verb
   token list** matched against the URL path and query (`DANGEROUS_VERB_SET` — 13 English, 3 German).
@@ -65,8 +66,10 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   POST, a Sentry beacon) does not false-trip `assertNoDangerousHits()` on any page that
   console-logs. Everything else (any other return, including a stray truthy) is **not a verdict at
   all** — the request simply falls through to the ordered default, which is **fail-closed (blocked +
-  recorded as dangerous) only for a request that is not a plain GET/HEAD**; a GET/HEAD that cleared
-  the deny step is still admitted unconditionally, as above. Note the asymmetry: `'read'` allows,
+  recorded as dangerous) only for a request that is not a plain GET/HEAD**; a GET/HEAD that reaches
+  the general allow is still admitted unconditionally, as above. **An SSE GET never reaches it** —
+  `[guard:eventsource]` blocks a stream the predicate did not admit, so returning `undefined` for an
+  event-source endpoint blocks it rather than passing it. Note the asymmetry: `'read'` allows,
   `'benign'` blocks — they are not "both block". `classifyRequest` must be **total**: return
   `undefined` for anything it does
   not recognize and never throw (the guard now consults it for beacon/SSE requests too). There is

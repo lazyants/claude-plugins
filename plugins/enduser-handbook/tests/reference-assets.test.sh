@@ -352,6 +352,22 @@ count_joined_fixed() {
   ' "$file"
 }
 
+# Whole-file, wrap-tolerant counterpart to `hasnt`: assert a fixed string is absent from the JOINED
+# text. Needed because house wrap splits most prose sentences, so a line-based `hasnt` on a needle
+# that straddles a wrap passes without ever seeing the sentence — a no-op gate that reads exactly
+# like a real one. Whole-file on purpose and takes no heading: scoping an ABSENCE claim to a section
+# WEAKENS it (see the note at hasnt_in_section), so there is no section-bound variant of this.
+hasnt_joined() {
+  local msg="$1" needle="$2" file="$3" c
+  if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
+  c="$(count_joined_fixed "$needle" "$file")"
+  if [ "$c" -eq 0 ]; then
+    ok "$msg"
+  else
+    bad "$msg ('$needle' still in $(basename "$file") — $c occurrence(s) in the joined text)"
+  fi
+}
+
 # Line number of the first match of a fixed string, or empty if absent.
 line_of() {
   grep -nF -- "$1" "$2" 2>/dev/null | head -n1 | cut -d: -f1
@@ -1287,6 +1303,32 @@ has "capture-helpers: scan carve-out names the same-origin iframe (#472)" \
 has_joined_in_section "capture-safety: masking rules name the framed-document gap (#472)" \
   "$REFS/capture-safety.md" '### Mask reproducibly, then prove the mask held' \
   'is a document of its own'
+# A THIRD recurrence of the same class, at four sites: "admitted unconditionally once the DENY step
+# clears it" names only the FIRST of the blocks standing between a request and the general GET/HEAD
+# allow. classify-benign, [guard:eventsource] and [guard:beacon] all decide before it, so an SSE GET
+# the predicate did not admit is BLOCKED, not passed. Wrong in the LENIENT direction (a false RED
+# for the author, never a false green for the guard) — but "the doc promises what the code does not"
+# is exactly the class this block exists to retire, so direction does not exempt it.
+# Counted on the JOINED text: all four sites are house-wrapped, and a line-based `hasnt` on any of
+# these needles would pass without ever seeing the sentence.
+hasnt_joined "capture-spec-helpers: GET/HEAD allow no longer gated on the deny step alone (#470)" \
+  'Once the deny step clears a request, a GET or HEAD is admitted' \
+  "$REFS/capture-spec-helpers.md"
+hasnt_joined "capture-spec-helpers: fall-through allow no longer gated on the deny step alone (#470)" \
+  'a GET/HEAD that cleared the deny step is still admitted unconditionally' \
+  "$REFS/capture-spec-helpers.md"
+hasnt_joined "capture-guard-policy.mjs: header no longer gates the allow on the deny step alone (#470)" \
+  'A GET/HEAD is ADMITTED unconditionally once the deny step clears it' \
+  "$ASSETS/lib/capture-guard-policy.mjs"
+hasnt_joined "capture-guard-policy.d.mts: decideRoute doc no longer gates the allow on the deny step alone (#470)" \
+  'a GET/HEAD that clears the deny step is admitted unconditionally' \
+  "$ASSETS/lib/capture-guard-policy.d.mts"
+has_joined_in_section "capture-spec-helpers: the allow names every block that precedes it (#470)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'past the deny, benign, SSE and beacon blocks above it'
+has_joined_in_section "capture-spec-helpers: an unadmitted SSE GET is documented as blocked (#470)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  '**An SSE GET never reaches it**'
 
 echo "== capture.example.spec.ts =="
 SPEC="$ASSETS/capture.example.spec.ts"

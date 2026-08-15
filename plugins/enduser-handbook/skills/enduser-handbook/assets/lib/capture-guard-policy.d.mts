@@ -68,7 +68,8 @@ export function matchesDeny(
 /**
  * Ordered classifier: deny < classify-benign < eventsource < beacon < classify-read < get-head <
  * fail-closed. Returns allow/block + a reason. Fails closed on any NON-GET/HEAD request not proven a
- * read; a GET/HEAD that clears the deny step is admitted unconditionally (issue #470).
+ * read; a GET/HEAD that reaches the get-head step — past every block listed before it — is admitted
+ * unconditionally (issue #470).
  */
 export function decideRoute(req: GuardRequest, opts?: GuardPolicyOptions): GuardDecision;
 
