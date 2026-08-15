@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.27.0 — 2026-08-15
+
+`--from-cap` admits a capped unit that had converged once. Closes #537.
+
+### The population that no profile could admit
+
+A unit can converge — earning its `.ever_converged` sentinel — then go stale when `style_contract_hash` or `prompt_hash` moves, re-enter the loop, exhaust `max_fix_rounds` there, and settle at `non_converged`/`reason: "cap"` **with the sentinel intact**. Every claim profile refused that intersection: `--from-cap` on the sentinel, `--from-converged` on the status and on the `reviewed_draft_sha1` the cap write erases (a cap write REPLACES the record), `--from-stalled` on requiring `in_progress`. Since `assemble.py` refuses a book while any unit is not converged, one such unit blocked a whole title.
+
+The refusal rested on a stated premise — *"--from-cap's population never converged at all"* — and the premise was false. Measured on two live books before this release: 12 of 12 capped units on one carried a sentinel, 11 of 81 on the other. Both books were blocked; both assembled once the population became admissible.
+
+### What changed
+
+- **Admission.** The sentinel condition narrows from "must be absent" to "must not be unreadable" (`select_segments.py:2667`). `ABSENT` and `PRESENT` are both admitted; `AMBIGUOUS` is still refused, because an unreadable sentinel is evidence of nothing and must not become admissible merely because its neighbour did. Every other `--from-cap` condition is untouched and still enforced: the materialized ledger must say `non_converged`/`reason: "cap"`, and the stored review must be `clean: false` WITH non-empty `findings`.
+- **Disclosure.** A `PRESENT`-sentinel admission is announced on stderr — after the claim record and the dispatch token are published, never at the moment the branch decides (`select_segments.py:4731`). The difference is not cosmetic: `evaluate_claim_admission()` can still refuse below the sentinel branch, and a sibling id can fail before any record is written, so a decision-time print can announce an admission that never happened.
+- **The `previously_converged` clearing (D5.2)** covers `--from-cap` too (`select_segments.py:4793-4802`). That list is built from sentinel state ALONE, so an admitted from-cap id now reaches it, and leaving the clearing alone would fire the unconditional fatal on the invocation's own successful admission — the #455 failure, one profile later.
+- **The `--allow-retranslate-converged` overlap guard (D5.3)** covers `--from-cap` too (`select_segments.py:4529-4538`). It defines its population by profile; once from-cap ids reach `previously_converged`, excluding it would mean that contradictory pair of flags — which the driver forwards verbatim — silently stopped being rejected for exactly the population this release admits.
+
+A claim still authorizes RE-REVIEW and never re-translation: `claim_capability_refusal_for_translate()` refuses on claim membership alone, with no profile branch.
+
+### What the removed condition was actually protecting, stated rather than assumed
+
+Security review of this change: nothing exploitable, and the relaxed condition was never a security boundary. It was a second, independent witness against a *corrupt* ledger fragment — a fragment claiming `non_converged`/`cap` for a unit that had in fact converged used to be contradicted by the sentinel. That check is gone for `--from-cap`, and the honest reason it costs nothing is uncomfortable but decisive: `segments/.ever_converged.<seg>` sits in the same directory as the review artifact any such forgery must also write, so deleting it always bought the same admission **and more** — with the sentinel gone the ordinary path would re-translate the unit outright. What remains enforced is unchanged: the materialized status, `clean:false` WITH findings, S1–S5, D6, `--only-segs` (the population is `human_escalation`), and three profile-independent translate chokepoints, none of which reads the sentinel or the profile.
+
+The disclosure's reach is also narrower than it looks and is documented as such in `SKILL.md`: `segment_dispatch_driver.py` captures the selector's stderr and drops it on success, so the line is visible on the hand-run recipe only. That is a pre-existing class — D9's lost-token disclosure has the same fate — and is filed rather than fixed here.
+
+### Not in this release
+
+#537 also proposes stopping the cap write from erasing `cache_key`/`reviewed_draft_sha1`, recovering an erased baseline from the segment's own review artifact, and re-deriving the profile set around what a unit NEEDS rather than how it arrived. All three stay open on the issue. This release makes the blocked population reachable; it does not redesign the partition.
+
+### Scripts
+
+`select_segments.py` is a `PLUGIN_BUNDLE_MEMBERS` member, so this release moves `plugin_bundle_hash` and marks every converged segment in every project stale.
+
 ## 1.26.0 — 2026-08-12
 
 Two operator rules the plugin relied on but never stated. Documentation only — no script, schema, template or workflow byte changes, so no cache key moves and no corpus re-stales.

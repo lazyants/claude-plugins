@@ -5,7 +5,9 @@ THE POPULATION. A unit that converged once and whose convergence bookkeeping
 never landed: materialized ledger `status: in_progress`, the
 `.ever_converged.<seg>` sentinel PRESENT, NO `reviewed_draft_sha1`, a draft on
 disk, and a stored review whose `draft_sha1` describes a draft that no longer
-exists. `--from-cap` refuses it (wrong status, and the sentinel is present) and
+exists. `--from-cap` refuses it (wrong status -- `in_progress`, not
+non_converged/reason=cap; since 1.27.0/#537 the sentinel alone no longer
+refuses under that profile) and
 `--from-converged` refuses it (wrong status, and there is no drift baseline), so
 before this profile the only route was a hand-driven `ledger_update.py`
 convergence write.
@@ -772,10 +774,11 @@ def test_an_admitted_from_stalled_id_does_not_leave_the_invocation_in_previously
 #
 # ITS SCENARIO IS NOT MERELY UNTESTED NOW -- IT IS STRUCTURALLY UNREACHABLE.
 # With `segs ⊆ claim_requests` enforced whenever a --from-stalled id is
-# requested, every emitted seg is a claimed id; every sentinel-bearing claimed id
-# is cleared by D5.2 (both sentinel-bearing profiles clear); and --from-cap's
-# population carries no sentinel, so it never enters previously_converged at
-# all. Therefore `previously_converged` after the clearing is ALWAYS empty in any
+# requested, every emitted seg is a claimed id; and every sentinel-bearing
+# claimed id is cleared by D5.2 -- ALL THREE profiles clear since #537, so a
+# --from-cap id that does carry a sentinel is cleared here too rather than
+# being the one uncleared case this paragraph used to rely on.
+# Therefore `previously_converged` after the clearing is ALWAYS empty in any
 # invocation carrying a --from-stalled id. An unclaimed sentinel-bearing sibling
 # cannot coexist with one. Rebuilding this test would mean building a fixture the
 # guard rejects, and it would fail on the guard's refusal rather than on
@@ -798,8 +801,9 @@ def test_an_admitted_from_stalled_id_does_not_leave_the_invocation_in_previously
 def test_from_stalled_with_allow_retranslate_converged_is_rejected_before_any_write(tmp_path):
     """D5.3. `--from-stalled`'s population carries a sentinel, so its ids reach
     `previously_converged` and the collision with `--allow-retranslate-converged`
-    is reachable -- exactly as for `--from-converged`, and unlike `--from-cap`,
-    whose population has no sentinel at all.
+    is reachable -- exactly as for `--from-converged`, and (since #537) for
+    `--from-cap` as well, whose population CAN carry a sentinel; all three
+    profiles are inside D5.3's guard now.
 
     REJECTED OUTRIGHT rather than resolved by precedence: one flag authorizes
     RE-TRANSLATION and the other authorizes RE-REVIEW only, and "the claim wins"
@@ -2588,8 +2592,10 @@ def test_the_disclosure_says_what_is_asserted_rather_than_proved(tmp_path):
 # ===========================================================================
 
 def build_from_cap_segment(root, seg, fixture_keys: dict, *, source_run_id=SOURCE_RUN_ID):
-    """P2 shape (--from-cap): non_converged/reason=cap, NO sentinel, no
-    cache_key on the fragment, stored review clean:false WITH findings.
+    """P2 shape (--from-cap): non_converged/reason=cap, no sentinel here (the
+    profile admits a PRESENT one too since #537 -- this builder simply does not
+    need one), no cache_key on the fragment, stored review clean:false WITH
+    findings.
     Verbatim in shape from tests/claim_selector.test.py's own builder, trimmed
     to the axes this file needs -- present only so the MIXED invocation below
     carries a genuinely different profile rather than a second --from-stalled id
