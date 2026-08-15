@@ -61,7 +61,7 @@ import {
 // total drops by one: a near-miss would have
 // had to leave this list too. Read the two numbers together whenever this pin moves; a total that
 // moves alone is the only shape consistent with a resolved citation being the one that went.
-const EXPECTED_TOTAL_CITATIONS = 94;
+const EXPECTED_TOTAL_CITATIONS = 89;
 
 // Every citation whose quoted text does NOT resolve to exactly one heading title in its own file — an
 // over-match, a near-miss (e.g. "INDEX wiring" vs the full parenthetical heading), or a title that
@@ -140,7 +140,6 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/obsidian-vault.md', section: 'Nested-list automation limits', sectionNth: 0, quotedText: 'Measured, across every placement', direction: 'above', nth: 0 },
   { file: 'references/publish-targets/obsidian-vault.md', section: 'Nested-list automation limits', sectionNth: 0, quotedText: 'Non-headings index, no existing line', direction: 'above', nth: 1 },
   { file: 'references/publish-targets/obsidian-vault.md', section: 'Nested-list automation limits', sectionNth: 0, quotedText: 'INDEX wiring', direction: 'above', nth: 1 },
-  { file: 'references/publish-targets/obsidian-vault.md', section: 'Nested-list automation limits', sectionNth: 0, quotedText: 'INDEX wiring', direction: 'above', nth: 2 },
   { file: 'references/publish-targets/obsidian-vault.md', section: 'Wikilinks vs Markdown links', sectionNth: 0, quotedText: 'INDEX wiring', direction: 'above', nth: 0 },
   { file: 'references/publish-targets/obsidian-vault.md', section: 'Link integrity gate before you publish', sectionNth: 0, quotedText: 'INDEX wiring', direction: 'above', nth: 0 },
   { file: 'references/publish-targets/static-md.md', section: 'Relative links — the general rule', sectionNth: 0, quotedText: 'Chapter path', direction: 'above', nth: 0 },
@@ -151,7 +150,6 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/static-md.md', section: 'Grouped index wiring (`anyGroup` manifests only)', sectionNth: 0, quotedText: 'After either halt', direction: 'below', nth: 0 },
   { file: 'references/publish-targets/static-md.md', section: 'Grouped index wiring (`anyGroup` manifests only)', sectionNth: 0, quotedText: 'Grouped index wiring', direction: 'above', nth: 0 },
   { file: 'references/publish-targets/static-md.md', section: 'Grouped index wiring (`anyGroup` manifests only)', sectionNth: 0, quotedText: 'The plain-label predicate, named exactly', direction: 'below', nth: 0 },
-  { file: 'references/publish-targets/static-md.md', section: 'Grouped index wiring (`anyGroup` manifests only)', sectionNth: 0, quotedText: 'Grouped entry, line present, `indexForm: \'non-heading\'`', direction: 'above', nth: 0 },
   { file: 'references/publish-targets/static-md.md', section: 'Grouped index wiring (`anyGroup` manifests only)', sectionNth: 0, quotedText: 'Grouped entry, line present, `indexForm: \'headings\'`', direction: 'above', nth: 0 },
   { file: 'references/publish-targets/static-md.md', section: 'Nested-list automation limits', sectionNth: 0, quotedText: 'The plain-label predicate, named exactly', direction: 'below', nth: 0 },
   { file: 'references/publish-targets/static-md.md', section: 'Nested-list automation limits', sectionNth: 0, quotedText: 'The plain-label predicate, named exactly', direction: 'below', nth: 1 },
@@ -159,7 +157,6 @@ const EXPECTED_UNRESOLVED = [
   { file: 'references/publish-targets/static-md.md', section: 'Nested-list automation limits', sectionNth: 0, quotedText: 'After either halt', direction: 'above', nth: 0 },
   { file: 'references/publish-targets/static-md.md', section: 'Nested-list automation limits', sectionNth: 0, quotedText: 'Grouped index wiring', direction: 'above', nth: 1 },
   { file: 'references/publish-targets/static-md.md', section: 'Nested-list automation limits', sectionNth: 0, quotedText: 'Grouped index wiring', direction: 'above', nth: 2 },
-  { file: 'references/publish-targets/static-md.md', section: 'Nested-list automation limits', sectionNth: 0, quotedText: 'The headings branch is unchanged by this PR and already completes silently', direction: 'above', nth: 0 },
   { file: 'references/publish-targets/static-md.md', section: 'Link-integrity gate before you publish', sectionNth: 0, quotedText: 'Grouped index wiring', direction: 'above', nth: 0 },
 ];
 

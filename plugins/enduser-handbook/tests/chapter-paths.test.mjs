@@ -922,6 +922,74 @@ test('indexView [parity]: locateChapterLine sees exactly what indexView produces
   );
 });
 
+// -------------------------------------------------------------------------------------------------
+// #337 — indexView blanks a CLOSED leading frontmatter block, so the locator and the writer agree
+// -------------------------------------------------------------------------------------------------
+// The shipped 1.10.0 disagreement: `prepareIndexLines` (the WRITER's own preparation, §5.1 step 5)
+// blanks a closed leading frontmatter block BEFORE stripInertContexts, precisely so a backtick
+// inside a YAML scalar cannot be misread as an inline-code-span opener. `indexView` — the LOCATOR's
+// view — did not, so one poisoned frontmatter line silently swallowed the rest of the document on
+// the locator side only. Measured at 1671d35, before the fix:
+//   indexView(['---','title: `Handbook','---','','## Admin','','- [A](admin/a.md)',''])
+//     -> ['---','title:          ','   ','','        ','','                 ','']  (body erased)
+//   locateChapterLine(same, 'admin/a.md') -> {present:false, indexForm:'non-heading', matches:[]}
+//   findContainer(same, 'Admin')          -> {kind:'non-heading'}
+// while the identical file with an ordinary `title: Handbook` reported present:true / 'headings' /
+// 'Admin' and {kind:'single'}. The damage is not the missed match: the caller then treats a
+// headings-form index as absent AND non-heading, reaches the nested-list writer — whose own view is
+// clean — and appends a bullet-shaped '- Admin' container plus a duplicate row INTO a headings-form
+// file, once per publish.
+
+test('#337: indexView blanks a CLOSED leading frontmatter block, so a backtick in a YAML scalar cannot swallow the body', () => {
+  const indexLines = ['---', 'title: `Handbook', '---', '', '## Admin', '', '- [A](admin/a.md)', ''];
+  const view = indexView(indexLines);
+  assert.equal(view.length, indexLines.length, 'newline-preserving 1:1 — same line count');
+  assert.deepEqual(view.slice(0, 3), ['', '', ''], 'the frontmatter block is blanked, both delimiters included');
+  assert.deepEqual(view.slice(3), indexLines.slice(3), 'every BODY line stays byte-identical');
+});
+
+test('#337: a backtick inside CLOSED frontmatter no longer flips a headings-form index to non-heading', () => {
+  const body = ['', '## Admin', '', '- [A](admin/a.md)', ''];
+  const poisoned = ['---', 'title: `Handbook', '---', ...body];
+  const clean = ['---', 'title: Handbook', '---', ...body];
+  const scanned = locateChapterLine(poisoned, 'admin/a.md');
+  assert.equal(scanned.present, true, 'the row is wired — the locator must see it');
+  assert.equal(scanned.indexForm, 'headings');
+  assert.equal(scanned.containerTitle, 'Admin');
+  assert.deepEqual(
+    scanned,
+    locateChapterLine(clean, 'admin/a.md'),
+    'a backtick is YAML scalar content — it must not change the locator verdict in any field',
+  );
+});
+
+test('#337: findContainer classifies the same poisoned file as headings-form, so the nested-list writer is never reached', () => {
+  const body = ['', '## Admin', '', '- [A](admin/a.md)', ''];
+  const poisoned = ['---', 'title: `Handbook', '---', ...body];
+  const clean = ['---', 'title: Handbook', '---', ...body];
+  // Measured before the fix: {kind:'non-heading'} here vs {kind:'single', location:{index:4,
+  // depth:2, title:'Admin'}} for `clean` — the divergence that routed a headings file into the
+  // bullet-list writer. The shared classifier means fixing indexView fixes both callers at once.
+  assert.deepEqual(findContainer(poisoned, 'Admin'), findContainer(clean, 'Admin'));
+  assert.deepEqual(findContainer(poisoned, 'Admin'), {
+    kind: 'single',
+    location: { index: 4, depth: 2, title: 'Admin' },
+  });
+});
+
+test('#337 scope guard: an UNCLOSED leading "---" is still not frontmatter — indexView leaves it alone (R4-F3)', () => {
+  // R4-F3 (hasYamlMappingStructure) already refuses to exempt an unclosed block, and
+  // prepareIndexLines refuses the file outright ('not-a-list'). indexView must draw the same line:
+  // blank a CLOSED span only. Unchanged behavior, pinned so the fix cannot quietly widen.
+  const indexLines = ['---', 'title: `Handbook', '', '## Admin', '', '- [A](admin/a.md)', ''];
+  assert.equal(indexView(indexLines)[0], '---', 'a document-start marker with no closer is body content');
+  assert.equal(
+    locateChapterLine(indexLines, 'admin/a.md').present,
+    false,
+    'unchanged: with no closer the stray backtick still swallows the body',
+  );
+});
+
 // =================================================================================================
 // #223 [1.10.0] — wireNestedListChapter (nested-list / GitBook SUMMARY.md write automation)
 // =================================================================================================
@@ -1527,6 +1595,10 @@ test('wireNestedListChapter, repeat-invocation isolation: a SINGLE call that pop
 // or multiple) -> unverifiable; 5. otherwise compare the container -> ok / misplaced(label|null).
 // Every "-> unverifiable" fixture below is scoped by the SINGLE-MATCH precondition: rules 1-2
 // already remove every wrong-cardinality file before rules 3-5 ever run.
+//
+// #337 made rule 3 UNREACHABLE: indexView blanks the same frontmatter span the writer's BODY does,
+// so a row inside it is not a match at all and rule 1 answers first. The rule-3 fixture below pins
+// that new verdict; #350 widened rule 4's accept-list — both are marked at their own fixtures.
 
 test('verifyNonHeadingPlacement rule 1 [isolating, mutation-confirmed]: ZERO selected-target matches -> inconsistent, even though the file is an otherwise-perfectly-formed container', () => {
   // Mutation-confirmed: narrowing the cardinality guard (`const { matches } =
@@ -1548,24 +1620,34 @@ test('verifyNonHeadingPlacement rule 2 [isolating, mutation-confirmed]: TWO sele
   assert.deepEqual(result, { kind: 'inconsistent' });
 });
 
-test('verifyNonHeadingPlacement rule 3 [isolating, mutation-confirmed]: a single match lying inside a closed leading frontmatter block -> unverifiable', () => {
-  // Measured: leadingFrontmatterSpan reports span {start:0, endExclusive:4} for this file, and the
-  // ONLY occurrence of "guide/items.md" (index 2) lies inside it — indexView does not blank
-  // frontmatter, so locateChapterLine still reports present:true, single match. Mutation-confirmed:
-  // disabling just the frontmatter-span check flips ONLY this fixture (to misplaced(null), since
-  // the blanked container line then has no owner) — no other fixture in this suite depends on it.
+test('verifyNonHeadingPlacement rule 3 [#337 CONTRACT CHANGE]: a row inside a closed leading frontmatter block is not a match at all — inconsistent, not the old unverifiable', () => {
+  // Until #337 this asserted `unverifiable`, and the reason was the defect itself: indexView did not
+  // blank frontmatter while the writer's own BODY did, so locateChapterLine reported present:true
+  // for a row that is YAML content, and rule 3 existed to refuse judging it. With indexView blanking
+  // the span (as the writer always has), that row is invisible to the locator — the SAME view the
+  // writer has — so the single-match precondition is no longer met and rule 1 answers first.
+  // `inconsistent` is the honest verdict: the caller said this chapter is wired, and it is not.
+  // Rule 3 is kept in the implementation as a structural guard (this file's own house style of
+  // checking every {kind,...} result rather than trusting an invariant), but it is now unreachable.
   const indexLines = ['---', '- Admin', '  - guide/items.md', '---', '- Admin'];
-  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
-  assert.deepEqual(result, { kind: 'unverifiable' });
+  assert.equal(
+    locateChapterLine(indexLines, 'guide/items.md').present,
+    false,
+    'the locator and the writer now agree: a row inside frontmatter is not a wired row',
+  );
+  assert.deepEqual(verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin'), { kind: 'inconsistent' });
 });
 
-test('verifyNonHeadingPlacement monotonicity [round-15/16 HIGH]: a match BOTH inside AND outside frontmatter is inconsistent (rule 2), never the softer unverifiable (rule 3) — this is what forced rules 2 and 3 to swap order', () => {
-  // Measured: 2 matches total (one inside the {0,4} frontmatter span, one outside) -> rule 2 fires
-  // before rule 3 is ever consulted. Watched against the pre-swap order this must flip to
-  // unverifiable, proving the reorder is load-bearing, not cosmetic.
+test('verifyNonHeadingPlacement monotonicity [round-15/16 HIGH, re-derived for #337]: with the frontmatter copy no longer counted, the surviving real row is verified on its own merits', () => {
+  // Before #337 this file produced TWO matches (one inside the {0,4} frontmatter span, one outside)
+  // and pinned rule 2 firing ahead of rule 3. Now only the real row is a match, so the fixture pins
+  // what actually protects the operator today: the frontmatter copy neither fakes a duplicate-line
+  // halt nor blocks verification of the genuine row beneath it.
   const indexLines = ['---', '- Admin', '  - guide/items.md', '---', '- Admin', '  - guide/items.md'];
-  const result = verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin');
-  assert.deepEqual(result, { kind: 'inconsistent' });
+  const scanned = locateChapterLine(indexLines, 'guide/items.md');
+  assert.equal(scanned.matches.length, 1, 'exactly one match — the one outside frontmatter');
+  assert.equal(scanned.matches[0].index, 5);
+  assert.deepEqual(verifyNonHeadingPlacement(indexLines, 'guide/items.md', 'Admin'), { kind: 'ok' });
 });
 
 test('verifyNonHeadingPlacement evaluation-order precondition [round-27 IMPORTANT] [isolating, mutation-confirmed]: a single match plus a trailing lone CR (prepareIndexLines declines) -> unverifiable, not a crash reading span/body off a refusal', () => {
@@ -1745,6 +1827,353 @@ test('verifyNonHeadingPlacement rule 5, container label comparison is UNTRIMMED 
   assert.deepEqual(result, { kind: 'misplaced', foundContainer: ' Admin ' });
 });
 
+// -------------------------------------------------------------------------------------------------
+// #350 — rule 4 must not fold `unwritable` into `unverifiable`
+// -------------------------------------------------------------------------------------------------
+// Rule 4 delegates shape recognition to the writer and accepts only 'inserted'/'present'. 1.11.0's
+// re-read postcondition added a THIRD refusal — {kind:'unwritable', field} — which says something
+// narrower than the other two: the FILE is a recognizable list and the group_title is a plain label;
+// only the line the writer would EMIT is unsafe (a "- FAQ: basics" container is YAML-mapping-shaped;
+// a "Sales/Marketing" container emitted with a `*` marker is bare-path-shaped). None of that touches
+// whether the EXISTING row sits under the right container, so folding it into `unverifiable`
+// discards a verdict the container comparison fully supports. Measured at 1671d35:
+//   verifyNonHeadingPlacement(['- Admin','  - [Items](admin/items.md)',''], 'admin/items.md',
+//                             'FAQ: basics') -> {kind:'unverifiable'}
+//   ... while the same file with a colon-free 'Billing' -> {kind:'misplaced', foundContainer:'Admin'}
+// SAFETY: unwritable/group_title can only arise on the created:true branch (a matching container
+// makes the writer emit no container line at all, so nothing can be refused), and created:true means
+// containers.length === 0 for `wanted`. The fall-through can therefore only ever produce `misplaced`
+// — it is structurally incapable of manufacturing a false `ok`. The two fixtures below cover both
+// measured causes; the scope guards after them pin what still declines.
+
+test('#350: a PLAIN but unwritable group_title (colon) yields the misplaced verdict its container comparison supports, not unverifiable', () => {
+  const indexLines = ['- Admin', '  - [Items](admin/items.md)', ''];
+  // The writer refuses this group_title — "- FAQ: basics" would be a YAML mapping — but the file is
+  // an ordinary list and the row is plainly under "Admin", which is not what the manifest asked for.
+  assert.deepEqual(wireNestedListChapter(indexLines, 'FAQ: basics', '[P](p.md)'), {
+    kind: 'unwritable',
+    field: 'group_title',
+  });
+  assert.deepEqual(verifyNonHeadingPlacement(indexLines, 'admin/items.md', 'FAQ: basics'), {
+    kind: 'misplaced',
+    foundContainer: 'Admin',
+  });
+});
+
+test('#350: the second unwritable cause (a bare-path-shaped title emitted with a `*` marker) reaches the same misplaced verdict', () => {
+  // The same defect through a cause with nothing to do with colons — so a fix keyed on ': ' alone
+  // stays red here.
+  const indexLines = ['* [Introduction](README.md)', '- Admin', '  - [Items](admin/items.md)', ''];
+  assert.deepEqual(wireNestedListChapter(indexLines, 'Sales/Marketing', '[P](p.md)'), {
+    kind: 'unwritable',
+    field: 'group_title',
+  });
+  assert.deepEqual(verifyNonHeadingPlacement(indexLines, 'admin/items.md', 'Sales/Marketing'), {
+    kind: 'misplaced',
+    foundContainer: 'Admin',
+  });
+});
+
+test('#350 scope guard: a colon-bearing CONTAINER makes the whole file YAML-shaped — still unverifiable, never compared', () => {
+  // The refusal here is `not-a-list`, not `unwritable`: hasYamlMappingStructure fires on the file's
+  // OWN "- FAQ: basics" line, so this is a file the writer cannot read, not a label it cannot write.
+  const indexLines = ['- FAQ: basics', '  - [Items](admin/items.md)', ''];
+  assert.deepEqual(wireNestedListChapter(indexLines, 'FAQ: basics', '[P](p.md)'), { kind: 'not-a-list' });
+  assert.deepEqual(verifyNonHeadingPlacement(indexLines, 'admin/items.md', 'FAQ: basics'), {
+    kind: 'unverifiable',
+  });
+});
+
+test('#350 scope guard: the SAME title stops being unwritable once its container already exists — the probe returns inserted/created:false and the verdict is the unchanged ok', () => {
+  // Exercises the property that makes the fall-through safe: `unwritable`/`group_title` blames a
+  // container line the writer would have to EMIT, so it cannot arise when the container is already
+  // there. The title here is the one the fixture two tests up proves unwritable on a create; with a
+  // matching container present the writer emits only the child row and the verdict is `ok` — this
+  // path never reaches the new branch, which is why the branch can only ever conclude `misplaced`.
+  const indexLines = ['* [Introduction](README.md)', '- Sales/Marketing', '  - [Items](admin/items.md)', ''];
+  const probe = wireNestedListChapter(indexLines, 'Sales/Marketing', '[P](p.md)');
+  assert.equal(probe.kind, 'inserted');
+  assert.equal(probe.created, false, 'no container line is emitted, so nothing can be refused');
+  assert.deepEqual(verifyNonHeadingPlacement(indexLines, 'admin/items.md', 'Sales/Marketing'), { kind: 'ok' });
+});
+
+// -------------------------------------------------------------------------------------------------
+// #351 — render-identical container labels: normalize what normalization can fix, refuse the rest
+// -------------------------------------------------------------------------------------------------
+// Two distinct causes were filed as one issue, and they need OPPOSITE remedies:
+//   (a) NFC vs NFD — the same label typed two ways. Neither spelling is wrong (macOS hands out the
+//       decomposed one), they render identically and mean the same container, so the comparison key
+//       must collapse them. containerLabelKey's own docstring already named NFC as the step this
+//       seam exists to absorb.
+//   (b) an invisible character inside a label (zero-width space and friends) — the two labels are
+//       NOT the same string and no normalization makes them one; collapsing them would be a guess.
+//       The operator cannot see the difference, so the safe outcome is REFUSAL (the manual halt),
+//       never a silent second container.
+// Measured at 1671d35, both silently duplicating: an NFD group_title against a precomposed container
+// returned {kind:'inserted', created:true} and appended a SECOND, pixel-identical container bullet;
+// so did a plain "Admin" title against a container carrying one U+200B. The verifier's own half
+// returned {kind:'misplaced', foundContainer:<the identical-looking label>} — a halt that tells the
+// operator to fix something that already looks fixed.
+//
+// Every boundary/invisible character below is BUILT AT RUNTIME (String.fromCharCode), never typed as
+// a literal or as a backslash-u escape: a literal is invisible to review, and an escape has twice
+// degraded into a literal in this repo's history. The runtime asserts prove each fixture really
+// carries the code point it claims.
+const NFC_UMLAUT = String.fromCharCode(0x00dc) + 'bersicht'; // precomposed U-with-diaeresis
+const NFD_UMLAUT = 'U' + String.fromCharCode(0x0308) + 'bersicht'; // U + COMBINING DIAERESIS
+const invisibleLabel = (codePoint) => 'Ad' + String.fromCharCode(codePoint) + 'min';
+
+test('#351 fixture integrity: the normalization pair and the invisible-character labels really carry the code points they claim', () => {
+  assert.equal(NFC_UMLAUT.length, 9, 'precomposed: one code unit for the accented letter');
+  assert.equal(NFD_UMLAUT.length, 10, 'decomposed: base letter + combining mark');
+  assert.notEqual(NFC_UMLAUT, NFD_UMLAUT, 'the two spellings are different strings');
+  assert.equal(NFC_UMLAUT.normalize('NFD'), NFD_UMLAUT, 'and they are the same label under normalization');
+  for (const cp of [0x200b, 0x200d, 0xfeff, 0x2028]) {
+    assert.equal(invisibleLabel(cp).codePointAt(2), cp, `fixture carries U+${cp.toString(16)}`);
+  }
+});
+
+test('#351(a): an NFD group_title matches a precomposed container instead of appending a second one', () => {
+  const indexLines = ['# S', '', `- ${NFC_UMLAUT}`, '  - [A](a.md)', ''];
+  const written = wireNestedListChapter(indexLines, NFD_UMLAUT, '[B](b.md)');
+  assert.equal(written.kind, 'inserted');
+  assert.equal(written.created, false, 'the existing container is reused, never duplicated');
+  assert.equal(
+    written.newLines.filter((l) => l.trim().normalize('NFC') === `- ${NFC_UMLAUT}`.trim()).length,
+    1,
+    'exactly one container line survives, in the spelling the file already used',
+  );
+});
+
+test('#351(a): the placement verifier agrees — an NFD group_title over a precomposed container is ok, not a halt naming two identical-looking strings', () => {
+  const indexLines = ['# S', '', `- ${NFC_UMLAUT}`, '  - [A](a.md)', ''];
+  assert.deepEqual(verifyNonHeadingPlacement(indexLines, 'a.md', NFD_UMLAUT), { kind: 'ok' });
+});
+
+test('#351(a): a container the NESTED-LIST WRITER creates is emitted in NFC — the headings-form create step is instructed prose and is not covered by this fixture', () => {
+  const indexLines = ['- Other', '  - [A](a.md)', ''];
+  const written = wireNestedListChapter(indexLines, NFD_UMLAUT, '[B](b.md)');
+  assert.equal(written.kind, 'inserted');
+  assert.equal(written.created, true);
+  assert.ok(written.newLines.includes(`- ${NFC_UMLAUT}`), 'the emitted container label is normalized');
+});
+
+test('#351(a) scope guard: normalization collapses spellings, never distinct labels', () => {
+  const indexLines = ['- Ubersicht', '  - [A](a.md)', ''];
+  assert.deepEqual(verifyNonHeadingPlacement(indexLines, 'a.md', NFD_UMLAUT), {
+    kind: 'misplaced',
+    foundContainer: 'Ubersicht',
+  });
+});
+
+test('#351(b): isPlainLabel refuses a label carrying an invisible character', () => {
+  assert.equal(isPlainLabel(invisibleLabel(0x200b)), false, 'ZERO WIDTH SPACE');
+  assert.equal(isPlainLabel(invisibleLabel(0xfeff)), false, 'ZERO WIDTH NO-BREAK SPACE');
+  assert.equal(isPlainLabel(invisibleLabel(0x00ad)), false, 'SOFT HYPHEN');
+  assert.equal(isPlainLabel(invisibleLabel(0x2066)), false, 'LEFT-TO-RIGHT ISOLATE');
+  assert.equal(isPlainLabel(invisibleLabel(0x061c)), false, 'ARABIC LETTER MARK — the bidi family is closed, not sampled');
+  // ZWNJ/ZWJ are deliberately still accepted: they are invisible, but they are required INSIDE
+  // ordinary words in Persian, Hindi and other scripts, so refusing them would lock a whole
+  // handbook out of automation over a correctly-spelled group title. The residual is disclosed in
+  // the adapters, not closed here — two labels differing only by one are still two containers.
+  assert.equal(isPlainLabel(invisibleLabel(0x200c)), true, 'ZERO WIDTH NON-JOINER stays legal');
+  assert.equal(isPlainLabel(invisibleLabel(0x200d)), true, 'ZERO WIDTH JOINER stays legal');
+  assert.equal(isPlainLabel(NFD_UMLAUT), true, 'a decomposed label is ordinary text, not an invisible one');
+  assert.equal(isPlainLabel('Admin'), true, 'and the ordinary case is untouched');
+  // Division of labour, pinned: U+2028/U+2029 are invisible too, and stay OUT of this allowlist on
+  // purpose — the writer's re-read postcondition already refuses them with the better diagnosis
+  // ({kind:'unwritable', field:'group_title'} names the manifest field to repair). Folding them in
+  // here would replace that with a bare not-a-list.
+  assert.equal(isPlainLabel(invisibleLabel(0x2028)), true, 'LINE SEPARATOR is the postcondition’s job');
+  assert.deepEqual(
+    wireNestedListChapter(['# S', '', '- Other', '  - [A](a.md)', ''], invisibleLabel(0x2028), '[B](b.md)'),
+    { kind: 'unwritable', field: 'group_title' },
+  );
+});
+
+test('#351(b) scope, pinned honestly: the invisible-label refusal covers the NESTED-LIST branch, and the headings branch is a disclosed residual', () => {
+  // The adapters' prose says exactly this, so the asymmetry cannot be read as an oversight in
+  // either direction. Nested list: refused, whole file. Headings: a `## ` container carrying the
+  // same character is NOT refused — findContainer simply fails to match it and the adapter creates
+  // a second, pixel-identical heading. That is pre-existing behaviour this change does not touch;
+  // closing it needs a new findContainer outcome both adapters would have to branch on.
+  const zwsp = String.fromCharCode(0x200b);
+  const nested = ['# S', '', `- Ad${zwsp}min`, '  - [A](a.md)', ''];
+  assert.deepEqual(wireNestedListChapter(nested, 'Admin', '[B](b.md)'), { kind: 'not-a-list' });
+  const headings = ['# Handbook', '', `## Ad${zwsp}min`, '', '- [A](a.md)', ''];
+  assert.deepEqual(findContainer(headings, 'Admin'), { kind: 'zero', headingDepth: 2 });
+});
+
+test('#351(b) class integrity: the assembled character class is EXACTLY the intended set — swept, not read', () => {
+  // The refusal is a regex built by string concatenation at module load, and a character class whose
+  // membership is inferred by reading is exactly how one silently ends up wider than it looks. So
+  // this sweeps the whole BMP through the real predicate and pins the complete refused set: the 20
+  // invisible code points, plus the 12 markup/whitespace characters the allowlist already refused
+  // before this change. Anything else appearing here is a widened class; anything missing is a
+  // narrowed one.
+  //
+  // SCOPE, so "EXACTLY" is not read wider than it is measured: String.fromCharCode and the `<= 0xffff`
+  // bound make this a BMP sweep only. Astral-plane format characters are NOT covered and are all
+  // accepted today — measured: U+E0001 LANGUAGE TAG, U+E0041 (the U+E0020-U+E007F tag block),
+  // U+1D173, U+110BD all return isPlainLabel === true. Whether any of them belongs in the refusal
+  // set is the same product question U+061C was, not an assertion this fixture makes.
+  const refused = [];
+  for (let cp = 0; cp <= 0xffff; cp += 1) {
+    if (!isPlainLabel('Ad' + String.fromCharCode(cp) + 'min')) refused.push(cp);
+  }
+  const INVISIBLE = [
+    0x00ad, 0x061c, 0x200b, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e,
+    0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0x2066, 0x2067, 0x2068, 0x2069, 0xfeff,
+  ];
+  const PRE_EXISTING = [0x09, 0x21, 0x26, 0x2a, 0x3c, 0x3e, 0x5b, 0x5c, 0x5d, 0x5f, 0x60, 0x7e];
+  // Both sides rendered as U+XXXX: on failure the diff has to be readable as code points, or the
+  // reader of a fixture about invisible characters is handed two columns of bare integers.
+  const hex = (list) => list.map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`);
+  assert.deepEqual(hex(refused), hex([...PRE_EXISTING, ...INVISIBLE].sort((a, b) => a - b)));
+});
+
+test('#351(b) upstream: an invisible-character group_title is refused by validateGroups, so it cannot reach publish time at all', () => {
+  // WHY THIS GATE EXISTS, measured rather than argued. Refusing the label in isPlainLabel fixes the
+  // ABSENT path (the writer stops silently growing a second container) but degrades the PRESENT
+  // path: the writer now declines the file, so verifyNonHeadingPlacement's rule 4 answers
+  // `unverifiable` where it used to answer `misplaced` — and both adapters PROCEED on
+  // `unverifiable`. A genuine misplacement would go silent, on every run, with nothing the operator
+  // could do about it, because the cause is the title rather than the file. This halt converts that
+  // into one actionable message at the place the title is authored.
+  const halts = validateGroups([
+    { group: 'admin', group_title: invisibleLabel(0x200b), slug: 'a' },
+    { group: 'ops', group_title: 'Ops', slug: 'b' },
+  ]);
+  assert.equal(halts.length, 1);
+  // The halt must NAME the character and its offset: "delete the invisible character" is otherwise
+  // an instruction the operator cannot carry out, since they cannot see which one or where.
+  assert.equal(
+    halts[0],
+    "Entry 'a' in group 'admin' has a group_title carrying an invisible character (U+200B at code-unit"
+      + ' offset 2) — delete that character: two labels differing only by an invisible one are'
+      + ' indistinguishable on screen and can never be matched to a container.',
+  );
+  // The offset must name the occurrence that FIRED, not the first one in the string. U+FEFF is both
+  // a member of this set and ECMAScript whitespace, so a leading BOM is trimmed away before the test
+  // runs — reporting it would send the operator to delete a character this gate deliberately
+  // tolerates, and the identical halt would come back. Measured: without the trimmed-prefix skip
+  // this reported offset 0.
+  const bom = String.fromCharCode(0xfeff);
+  const bothEnds = validateGroups([{ group: 'admin', group_title: `${bom}Ad${bom}min`, slug: 'a' }]);
+  assert.equal(bothEnds.length, 1);
+  assert.match(bothEnds[0], /U\+FEFF at code-unit offset 3\)/);
+  // The degradation it prevents, pinned so the gate cannot be removed as "belt and braces":
+  const present = ['# S', '', '- Other', '  - [A](a.md)', ''];
+  assert.deepEqual(verifyNonHeadingPlacement(present, 'a.md', invisibleLabel(0x200b)), { kind: 'unverifiable' });
+  assert.deepEqual(verifyNonHeadingPlacement(present, 'a.md', 'Admin'), { kind: 'misplaced', foundContainer: 'Other' });
+  // And an ordinary title is untouched by the new gate.
+  assert.deepEqual(validateGroups([{ group: 'admin', group_title: 'Admin', slug: 'a' }]), []);
+  // CONGRUENCE with the consumer, which is why the gate tests containerLabelKey's form rather than
+  // the raw value: it must refuse exactly what the writer refuses, no more. U+FEFF is ECMAScript
+  // whitespace, so a leading BOM is trimmed on both sides — validating it here while the writer
+  // published it fine would be a halt the operator could not reproduce.
+  const leadingBom = String.fromCharCode(0xfeff) + 'Admin';
+  assert.deepEqual(validateGroups([{ group: 'admin', group_title: leadingBom, slug: 'a' }]), []);
+  assert.equal(
+    wireNestedListChapter(['# S', '', '- Admin', '  - [A](a.md)', ''], leadingBom, '[B](b.md)').kind,
+    'inserted',
+    'the writer accepts it too — the gate and its consumer agree',
+  );
+});
+
+test('#351(b): a zero-width-bearing CONTAINER label refuses the file instead of silently growing a second container', () => {
+  const indexLines = ['# S', '', `- ${invisibleLabel(0x200b)}`, '  - [A](a.md)', ''];
+  assert.deepEqual(
+    wireNestedListChapter(indexLines, 'Admin', '[B](b.md)'),
+    { kind: 'not-a-list' },
+    'the operator gets the manual halt — the labels genuinely differ and only a human can say which is wanted',
+  );
+});
+
+test('#351(a) seventh site: re-encoding a group_title between its two spellings is not a title change, so it raises no migration halt', () => {
+  // Found by review AFTER the other six comparison sites were converted — the shape an enumeration
+  // takes when it is closed one member at a time. Without it, a manifest whose title is merely
+  // re-encoded (a macOS editor rewriting the file is enough) demands a manual group migration for a
+  // move that every other comparison in this module says did not happen.
+  const before = [{ group: 'ue', group_title: NFC_UMLAUT, slug: 'a' }];
+  const after = [{ group: 'ue', group_title: NFD_UMLAUT, slug: 'a' }];
+  assert.deepEqual(groupChanges(before, after).changes, [], 'a pure re-encoding is not a change');
+  // A genuine title change on the same entry still is one.
+  const renamed = [{ group: 'ue', group_title: 'Overview', slug: 'a' }];
+  assert.equal(groupChanges(before, renamed).changes.length, 1);
+  assert.equal(groupChanges(before, renamed).changes[0].kind, 'title-change');
+});
+
+test('#351(a) headings branch: a decomposed `##` container heading is the SAME container as a precomposed group_title', () => {
+  // The issue was filed against the nested-list writer, but the headings branch reaches the label
+  // through its own two comparisons — findContainer's heading filter and containerTitleMatches —
+  // and both had the identical gap: a second `## Übersicht` heading beside the first, or a
+  // wrong-container halt naming two strings that render the same.
+  const indexLines = ['# Handbook', '', `## ${NFC_UMLAUT}`, '', '- [A](a.md)', ''];
+  assert.deepEqual(findContainer(indexLines, NFD_UMLAUT), {
+    kind: 'single',
+    location: { index: 2, depth: 2, title: NFC_UMLAUT },
+  });
+  assert.equal(
+    containerTitleMatches(NFC_UMLAUT, { group: 'ue', group_title: NFD_UMLAUT, slug: 'a' }),
+    true,
+    'the placement check folds the two spellings too',
+  );
+  assert.equal(
+    containerTitleMatches('Ubersicht', { group: 'ue', group_title: NFD_UMLAUT, slug: 'a' }),
+    false,
+    'and a genuinely different title still mismatches',
+  );
+});
+
+test('#351(a) validator parity: two groups whose titles differ only by normalization now collide at gate 6, because they would wire into ONE container', () => {
+  // Without this the fix would introduce a NEW silent collision: the validator would declare the two
+  // groups distinct while the writer merged their containers. The gate that exists to stop
+  // "containers are located by title" collisions has to be keyed the same way the location is.
+  const halts = validateGroups([
+    { group: 'admin', group_title: NFC_UMLAUT, slug: 'a' },
+    { group: 'ops', group_title: NFD_UMLAUT, slug: 'b' },
+  ]);
+  assert.equal(halts.length, 1);
+  assert.match(halts[0], /^Groups 'admin' and 'ops' share group_title /);
+});
+
+test('#351(a) validator parity: the SAME two spellings inside ONE group stop being a conflict — gate 5 no longer names two identical-looking strings', () => {
+  assert.deepEqual(
+    validateGroups([
+      { group: 'admin', group_title: NFC_UMLAUT, slug: 'a' },
+      { group: 'admin', group_title: NFD_UMLAUT, slug: 'b' },
+    ]),
+    [],
+  );
+  // A genuine conflict still halts, and still quotes both spellings as the manifest wrote them.
+  const real = validateGroups([
+    { group: 'admin', group_title: 'Admin', slug: 'a' },
+    { group: 'admin', group_title: 'Ops', slug: 'b' },
+  ]);
+  assert.equal(real.length, 1);
+  assert.match(real[0], /conflicting group_title values \('Admin', 'Ops'\)/);
+});
+
+test('#351(a) migration case: an index ALREADY holding both spellings halts as `multiple` instead of quietly feeding two containers', () => {
+  // This is the state 1.10.0-1.12.0 could produce, and the one operator-visible regression the fix
+  // carries: before, each spelling appended into its own container and the run reported success;
+  // now the two are one label, so the file needs a human to merge them. Halting is the point.
+  const split = ['# S', '', `- ${NFC_UMLAUT}`, '  - [A](a.md)', `- ${NFD_UMLAUT}`, '  - [B](b.md)', ''];
+  const written = wireNestedListChapter(split, NFC_UMLAUT, '[C](c.md)');
+  assert.equal(written.kind, 'multiple');
+  assert.deepEqual(
+    written.matches.map((m) => m.index),
+    [2, 4],
+  );
+  assert.deepEqual(verifyNonHeadingPlacement(split, 'a.md', NFC_UMLAUT), { kind: 'unverifiable' });
+});
+
+test('#351(b): a zero-width-bearing group_title is refused on its own side too', () => {
+  const indexLines = ['# S', '', '- Admin', '  - [A](a.md)', ''];
+  assert.deepEqual(wireNestedListChapter(indexLines, invisibleLabel(0x200b), '[B](b.md)'), { kind: 'not-a-list' });
+});
+
 test('verifyNonHeadingPlacement rule 5, CRLF regression [round-18 panel] [isolating, mutation-confirmed]: a correctly-wired CRLF index -> ok, watched failing against a mutant that swaps the shared container walk for a walk over indexView instead of the writer\'s own BODY', () => {
   // Mutation-confirmed: swapping containerOwnerScan's array argument from prep.body to
   // indexView(indexLines) flips ONLY this fixture and the codex frontmatter+comment fixture below —
@@ -1755,14 +2184,25 @@ test('verifyNonHeadingPlacement rule 5, CRLF regression [round-18 panel] [isolat
   assert.deepEqual(result, { kind: 'ok' });
 });
 
-test('verifyNonHeadingPlacement rule 5, codex frontmatter+HTML-comment regression [round-18/19 panel — the decisive counterexample against walking indexView] [isolating, mutation-confirmed — see the CRLF fixture above for the paired mutant]: a chapter freshly wired by the writer into a file whose frontmatter contains an HTML comment spanning into the body -> ok, never a false misplaced(null)', () => {
+test('verifyNonHeadingPlacement rule 5, codex frontmatter+HTML-comment regression [round-18/19 panel — NO LONGER mutation-isolating, see the #337 note in its body]: a chapter freshly wired by the writer into a file whose frontmatter contains an HTML comment spanning into the body -> ok, never a false misplaced(null)', () => {
+  // #337 RE-MEASUREMENT of this fixture's own label. It was `[isolating, mutation-confirmed]` for
+  // the mutant that walks indexView instead of the writer's BODY, and that claim is now FALSE:
+  // re-run at this commit, the mutant reddens ONLY the CRLF fixture above. Cause — the divergence
+  // this fixture was cut to demonstrate is exactly what #337 removed. indexView used to leave the
+  // frontmatter's `<!--` open, blanking the `- Admin` container while the freshly inserted row
+  // survived; now the frontmatter span is blanked first, so both views agree and the mutant finds
+  // the same container either way. The fixture is KEPT as a plain regression guard on that
+  // agreement (it must stay `ok`), with the isolating claim withdrawn rather than left to rot —
+  // a label in this file is a measured claim, not decoration.
   // The writer accepts this file and reports inserted/created:false — by construction it agrees the
-  // inserted row IS correctly nested under "Admin". But indexView (unlike the writer's own BODY)
-  // sanitizes the WHOLE raw text with no frontmatter awareness: the "<!--" opened inside frontmatter
-  // runs all the way to the body's "-->", which BLANKS the "- Admin" container line while leaving the
-  // freshly-inserted chapter row (after the comment closes) untouched and visible. A container walk
-  // over indexView would therefore find no container at all for a row the writer itself just wired —
-  // the exact "second recognizer" drift the shared containerOwnerScan/BODY design exists to prevent.
+  // inserted row IS correctly nested under "Admin". The historical cause, kept because it is why
+  // this fixture was cut: indexView USED TO sanitize the WHOLE raw text with no frontmatter
+  // awareness, so the "<!--" opened inside frontmatter ran all the way to the body's "-->", BLANKING
+  // the "- Admin" container line while leaving the freshly-inserted chapter row (after the comment
+  // closes) untouched and visible. A container walk over indexView then found no container at all
+  // for a row the writer itself had just wired — the "second recognizer" drift the shared
+  // containerOwnerScan/BODY design exists to prevent. #337 blanks that span in indexView too, which
+  // is why the mutant no longer reddens here.
   const written = wireNestedListChapter(
     ['---', 'note: <!--', '---', '- Admin', '  - -->'],
     'Admin',

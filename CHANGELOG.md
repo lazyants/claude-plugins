@@ -2,6 +2,72 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.13.0] — 2026-08-15
+
+Three defects in the index-wiring path, all of which could put a wrong row into a real handbook
+index without saying so. Closes #337, #350, #351.
+
+### Fixed
+- **The locator and the writer now apply ONE frontmatter rule** (`indexView`, via a helper shared
+  with the writer's own `prepareIndexLines`) — #337. Only the writer blanked a closed leading
+  frontmatter block before sanitizing, so a single backtick inside a YAML scalar opened an
+  inline-code span that erased the rest of the document *for the locator alone*: a headings-form
+  index read as absent AND non-heading, the run routed it into the nested-list writer, and that
+  writer appended a bullet-shaped container plus a duplicate row on every publish. `findContainer`
+  is repaired by the same change — both callers share `classifyIndexForm`. Scope is a CLOSED block
+  only; an unclosed leading `---` remains a YAML document-start marker and exempts nothing.
+- **Container labels are compared under Unicode NFC** — #351. A decomposed and a precomposed
+  spelling of one label are one container, at every comparison site: the nested-list container
+  match, `findContainer`'s heading filter, `containerTitleMatches`, `validateGroups` gates 5 and 6,
+  `verifyNonHeadingPlacement` rule 5, and `classifyEntryDelta`'s title comparison.
+- **A `misplaced` verdict is no longer discarded as `unverifiable`** — #350. The writer's
+  `unwritable`/`group_title` refusal says the file is a readable list and the label is plain; only
+  the container line it would emit is unsafe, which says nothing about where the existing row sits.
+  That outcome now falls through to the container comparison, and can conclude only `misplaced` —
+  never a false `ok`, since the refusal is reachable solely on the create branch.
+
+### Added
+- **An invisible character in a label is refused rather than normalized** (#351) — no normalization
+  merges two labels differing by a zero-width space, and choosing one would be a guess.
+  `isPlainLabel` rejects a 20-member set (the complete bidi-control family plus ZWSP, soft hyphen,
+  word joiner, invisible operators and BOM), and `validateGroups` refuses such a `group_title` at
+  authoring time, naming the code point and its offset — "delete the invisible character" being the
+  one instruction an operator cannot execute for a character they cannot see.
+
+### Changed
+- **The citation audit keys on identity, not file offset** (#342, merged separately as a test-only
+  change with no release entry of its own — 1.13.0 is the version that ships it). `EXPECTED_UNRESOLVED`
+  entries are now `file + section + sectionNth + quoted text + direction + ordinal`, so prose moving
+  around a citation no longer reddens the suite, and a documented regenerate-and-paste command plus a
+  test asserting the shipped block equals what that command emits replace hand-transcription. This
+  release exercises it: the doc edits above removed five citations (`EXPECTED_TOTAL_CITATIONS` 94 →
+  89), three of them unresolved — and the regenerated allowlist differs by exactly those three and
+  nothing else. The other two were resolved cross-references carried by the "tracked separately as
+  #337" clause this release retired, so they never sat in the allowlist to begin with.
+- The **verified class** for present-line placement verification widened, and its sentence — quoted
+  verbatim in both publish adapters and `revalidation.md` — now reads: files for which the
+  fixed-probe writer call returns `kind === 'inserted'`, `kind === 'present'`, or `kind ===
+  'unwritable'` with `field === 'group_title'`, and which hold exactly one selected-target match (a
+  row inside a closed leading frontmatter block is not a match at all). The 1.11.0 entry below
+  deliberately keeps the narrower sentence that was true then; the suite pins each separately.
+
+### Migration
+- An index that already accumulated BOTH spellings of one container label now halts as `multiple`
+  instead of quietly feeding two containers. Merge them by hand; the two lines are pixel-identical,
+  so locate them with `python3 -c "import sys,unicodedata; [print(i+1, repr(l)) for i,l in
+  enumerate(open(sys.argv[1])) if l != unicodedata.normalize('NFC', l)]" INDEX.md`.
+- A `group_title` carrying an invisible character now fails manifest validation.
+- A chapter row that exists only inside a closed leading frontmatter block is no longer reported
+  present, so the run wires a real row in the body; a file that used to halt on "two lines match the
+  target" because one match sat in frontmatter now proceeds on the real row alone.
+
+### Known limitations
+- The headings branch does not refuse an invisible-character container heading (#553), and a
+  `group_title` carrying a line break passes every gate yet never resolves (#554). Both are
+  pre-existing, both are now stated in the two adapters rather than left to be rediscovered.
+- ZWNJ/ZWJ stay legal: they are required inside ordinary words in Persian, Hindi and other scripts,
+  so refusing them would lock a correctly-spelled title out of automation.
+
 ## [ai-cli-optout 1.1.2] — 2026-08-03
 
 The shipped `SKILL.md` frontmatter `description` was 1674 characters against the Agent Skills

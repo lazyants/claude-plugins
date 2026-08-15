@@ -676,12 +676,13 @@ the one exception to "do all of these" — see its own conditional note below.
        measured illustrations, not a closed list:
        - an inert region (a fenced code block, an HTML comment) blanks a representable pair, so
          it is reported absent again — repeating the convergent halt above, never completing;
-       - a chapter row that exists only inside leading frontmatter is reported present by the
-         shipped locator and reaches `unverifiable` in the present-line branch above — the check
-         ran and declined to conclude (see the safety statement below for what that does and
-         does not guarantee); the adapter proceeds unverified (the shipped 1.10.0 writer/locator
-         view disagreement, tracked separately as #337 — see "Nested-list automation limits"
-         below);
+       - a chapter row that exists only inside leading frontmatter is **not** a wired row: since
+         #337 the locator blanks a closed leading frontmatter block exactly as the writer's own
+         body preparation always did, so both read the same file and the pair is reported absent.
+         The run then wires a real row in the body — convergence, not an unverified completion.
+         (Before #337 the locator alone reported it present, and the present-line branch answered
+         `unverifiable`; that shipped 1.10.0 view disagreement is closed.) An UNCLOSED leading
+         `---` is still not frontmatter — it is a YAML document-start marker and exempts nothing;
        - a real index whose surroundings carry YAML structure, a wildcard, or an ordered list
          makes the writer decline the whole file on the next run too: once the pair is present,
          step 0 routes to the present-line branch above, whose own predicate call declines the
@@ -697,12 +698,11 @@ the one exception to "do all of these" — see its own conditional note below.
        unverified completion named just above: it is not that a false completion cannot occur
        there, and not that every way it can occur is named above.
 
-       **The headings branch is unchanged by this PR and already completes silently:** a
-       chapter row inside a valid frontmatter block whose body itself carries a heading sits
-       under a matching container per the headings-form placement check above
-       (`indexForm === 'headings'`, "The placement check is retained unchanged (D-8)") and
-       completes with neither verification nor confirmation — the same shipped 1.10.0
-       writer/locator view disagreement named above, tracked separately as #337.
+       **The headings branch no longer completes silently on that shape (#337):** a chapter row
+       inside a valid frontmatter block used to satisfy the headings-form placement check above
+       (`indexForm === 'headings'`, "The placement check is retained unchanged (D-8)") with
+       neither verification nor confirmation. The locator now blanks the frontmatter span, so
+       such a row is absent on both branches and the run wires a real one in the body.
 
    **Manual group migration is a different halt, not part of establishment.** A manifest
    edit that changes a retained entry's `group` or `group_title`, or removes a grouped
@@ -877,25 +877,77 @@ target-breaking title does instead: one inserted row, then a `present` halt when
 `-`, or an `unwritable` refusal — naming the title, nothing ever written — on a
 `*`/`+` child — never SILENT unbounded duplication for a fixed title, on either marker.
 
-As of 1.11.0, a **present** grouped chapter's placement under this container is also checked,
-but only for a narrow verified class — this exact sentence, reused verbatim everywhere it is
-cited (see `revalidation.md`'s "Terminal-state convergence checklist" and the 1.11.0 CHANGELOG
-entry):
+**Two labels that LOOK identical (#351).** Container labels are compared after Unicode NFC
+normalization — on BOTH branches: the `##` heading match and its placement check, and the
+nested-list container match. A `group_title` typed with a combining accent therefore resolves to a
+container written with the precomposed letter: the same label, two encodings, one container. A
+container the NESTED-LIST writer creates is written in NFC, because it emits the normalized key it
+matched on; the headings-form create step is instructed prose, and writes the `## ` heading with the
+`group_title` exactly as the manifest spells it — which still resolves later WHATEVER ITS
+NORMALIZATION, in either direction, because it is the COMPARISON that is normalized rather than the
+file. (That promise covers normalization only. A `group_title` carrying a line break — a raw
+newline, a CR, U+2028 or U+2029 — passes both the manifest gates and the plain-label check and still
+never resolves; the newline case re-creates its container on every publish. Pre-existing, unrelated
+to normalization, and filed separately.) An existing line is never rewritten either, so a
+file may legitimately end up holding an older decomposed container beside a newly created
+precomposed one for a DIFFERENT group. Two consequences you must know before running this on an
+index published by 1.10.0–1.12.0:
 
-files for which the fixed-probe writer call returns `kind === 'inserted'` or `kind ===
-'present'` and which hold exactly one selected-target match, that match lying outside the
-writer-recognized leading-frontmatter span.
+- **an index that already accumulated BOTH spellings of one label now halts** — `Found multiple
+  '<group_title>' containers in <index_file> — curate the index manually, then re-run.` on the
+  headings branch, `Found multiple '<group_title>' container bullets in <index_file> — curate the
+  index manually, then re-run.` on the nested-list one. They are one container now, so a human has
+  to merge them: move the rows under whichever line you keep and delete the other. The two lines
+  are pixel-identical — find them with `python3 -c "import sys,unicodedata; [print(i+1, repr(l))
+  for i,l in enumerate(open(sys.argv[1])) if l != unicodedata.normalize('NFC', l)]" INDEX.md`,
+  which prints exactly the lines that are not already NFC;
+- **a label carrying an invisible character is refused, not normalized** — a zero-width space, a
+  soft hyphen, a bidi control or a byte-order mark. No normalization can merge two such labels and
+  picking one would be a guess, so refusal is the honest outcome; the repair is to delete the
+  character. It is enforced in two places, and the scope of each is exact:
+  - in the MANIFEST, by `validateGroups`, which halts naming the entry and the group — so a
+    `group_title` carrying one never reaches this step at all;
+  - in a NESTED-LIST index, by `isPlainLabel` inside the container scan, which declines the WHOLE
+    file (`{kind: 'not-a-list'}`) exactly as any other non-plain indent-0 label does, including for
+    unrelated groups in the same file. The generic halt does not name the cause, which is why it is
+    named here.
+
+Three residuals stay open, deliberately. **A HEADINGS-form index is not covered by the second
+rule**: a `## ` container heading carrying an invisible character is not refused, so it fails to
+match a clean `group_title` and this adapter creates a second, pixel-identical heading beside it.
+That is unchanged pre-existing behaviour, not something this change introduced, and closing it
+needs a new `findContainer` outcome both adapters would have to branch on. U+200C/U+200D (ZWNJ/ZWJ)
+are still accepted everywhere, because they are required INSIDE ordinary words in Persian, Hindi
+and other scripts and refusing them would lock out a correctly-spelled title — so two labels
+differing only by one are still two containers. So are two labels differing by a no-break space
+versus an ordinary one (U+00A0 renders as a visible space, a different class).
+
+As of 1.11.0, a **present** grouped chapter's placement under this container is also checked,
+but only for a narrow verified class — this exact sentence, reused verbatim wherever it is cited,
+today `revalidation.md`'s "Terminal-state convergence checklist" and `static-md.md`'s own copy.
+The 1.11.0 CHANGELOG entry is NOT one of those copies: it keeps the narrower two-outcome sentence
+that was true when it shipped, because it is a record of that release rather than a statement of
+current behaviour, and the suite pins it separately for exactly that reason:
+
+files for which the fixed-probe writer call returns `kind === 'inserted'`, `kind === 'present'`,
+or `kind === 'unwritable'` with `field === 'group_title'`, and which hold exactly one
+selected-target match (a row inside a closed leading frontmatter block is not a match at all).
 
 **In practice:** this is the subset above, minus a selected target that resolves to zero lines
-or to more than one (`inconsistent` — see "INDEX wiring" above) and minus a match sitting inside
-leading frontmatter (`unverifiable` — the shipped 1.10.0 view disagreement, below). Operators
+or to more than one (`inconsistent` — see "INDEX wiring" above). The third accepted outcome is
+#350's: a `group_title` the writer cannot EMIT — YAML-mapping-shaped, or bare-path-shaped under
+a `*`/`+` marker — says nothing about where the row already on disk sits, so its placement is
+still compared. That member can only ever conclude `misplaced`, never `ok`: the writer reaches
+the branch that would emit a container precisely when no existing container matches. Operators
 land on `unverifiable` rather than inside the verified class most often for one of: a Markdown
 nav file using a wildcard, an ordered list, or an explicit `<!--nav-->` marker (all ordinary
-`mkdocs-literate-nav` features); two same-named containers; a chapter row sitting inside leading
-frontmatter; or a **native/YAML MkDocs `nav:` configuration**, which gets no placement
-verification at all (see the safety statement above under "Non-headings index, no existing
-line") — the run completes unverified, exactly as before 1.11.0, with no confirmation
-requested. First-class YAML `nav:` container automation remains its own follow-up, #328.
+`mkdocs-literate-nav` features); two same-named containers; a `group_title` that is not a plain
+label (a construct-bearing or invisible-character-bearing one — its rendered form does not equal
+its literal form, so no comparison is sound); or a **native/YAML MkDocs `nav:` configuration**,
+which gets no placement verification at all (see the safety statement above under "Non-headings
+index, no existing line") — the run completes unverified, exactly as before 1.11.0, with no
+confirmation requested. First-class YAML `nav:` container automation remains its own follow-up,
+#328.
 
 Three disclosures the operator is owed, not proved away:
 
@@ -906,20 +958,21 @@ Three disclosures the operator is owed, not proved away:
 - A bullet-only file that also happens to be valid YAML — an `ok` now verifies placement where
   1.10.0 completed silently with no check at all: a Markdown-reading answer about bytes some
   other consumer may read as YAML.
-- A chapter row sitting inside leading frontmatter is never verified **on the non-heading
-  branch above** — it returns `unverifiable` there, for the reason below, not because it was
-  overlooked. On the headings branch (unchanged by this PR), a frontmatter block whose body
-  itself carries a heading is a different, unfixed gap: it completes with neither
-  verification nor confirmation — see the safety note in "INDEX wiring" above.
+- A chapter row sitting inside leading frontmatter is not verified because it is not a row: both
+  branches now read it as absent (#337, below), so the run wires a real one in the body. What is
+  still owed: nothing here proves the YAML it was embedded in meant nothing to another consumer.
 
-**An index whose frontmatter poisons the view is a known defect, filed as #337 — not fixed
-here.** The writer's own body-preparation view blanks a leading frontmatter block before
-wiring, while the step-0 locator's view does not, so the two sides can disagree about what a
-frontmatter-embedded chapter line means. On a nested-list index this produces both a false
-"already wired" report and a chapter line that duplicates on every subsequent run (the shipped
-1.10.0 frontmatter bug, #337). `verifyNonHeadingPlacement` above only stops this case from
-returning a false `ok` — a match inside the span returns `unverifiable` instead — it does not
-repair the duplication.
+**The frontmatter view disagreement is FIXED (#337).** The writer's own body-preparation view
+always blanked a closed leading frontmatter block before wiring; the step-0 locator's view did
+not, so the two sides disagreed about what a frontmatter-embedded chapter line meant — and,
+worse, one backtick inside a YAML scalar opened an inline-code span that blanked the REST of the
+document for the locator alone. A headings-form index then read as absent AND non-heading, so the
+run routed it into the nested-list writer, which appended a bullet-shaped container plus a
+duplicate row on every publish (the shipped 1.10.0 frontmatter bug). Both views now apply the one
+shared rule, so a closed frontmatter block is invisible to both, and neither the false "already
+wired" report nor the per-publish duplication can arise from it. Scope: a CLOSED block only — an
+unclosed leading `---` is a YAML document-start marker, exempts nothing, and still lets a stray
+backtick inside it swallow the body (the writer refuses such a file outright).
 
 ## Wikilinks vs Markdown links
 
