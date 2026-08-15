@@ -269,7 +269,7 @@ test('hasDangerousVerb decode-cap fix does not regress the benign encoded/malfor
 
 // Build a redirect-hop GuardRequest (a fresh request has redirectedFrom: null).
 function hopReq(over = {}) {
-  return { ...req(over), redirectedFrom: over.redirectedFrom ?? 'https://app.test/reports/monthly' };
+  return req({ redirectedFrom: 'https://app.test/reports/monthly', ...over });
 }
 
 test('a redirect hop into a dangerous-verb path is flagged dangerous (the #471 silent pass)', () => {

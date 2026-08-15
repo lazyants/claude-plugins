@@ -129,9 +129,25 @@ export async function installCaptureGuard(
   // its audit verdict. Logged for ALL verdicts so the chain is visible; the dangerous ones are ALSO
   // pushed to dangerousHits below.
   const redirectHops: string[] = [];
+  // Set when a hop's audit verdict was 'dangerous' and its entry went into dangerousHits. Held as a
+  // flag rather than re-derived by string-matching the formatted ledger entries: the fact is known at
+  // push time, and the failure message must carry the "DETECTED, not blocked" note only when true.
+  let sawDangerousHop = false;
   // Bumped on every recorded DANGEROUS hit (HTTP or WebSocket) so the drain loop below can detect "a
   // new hit arrived during the quiet window" and reset its timer. Benign blocks do not bump it.
   let lastHitAt = 0;
+
+  // Every dangerous entry — route-blocked, redirect hop, or WebSocket — must land in the ledger AND
+  // bump the drain clock together. One place, so a new source cannot record a hit the drain loop
+  // never waits for.
+  const recordDangerous = (entry: string): void => {
+    dangerousHits.push(entry);
+    lastHitAt = Date.now();
+  };
+
+  // Both channels — the route handler and the redirect-hop audit — classify with the SAME policy, so
+  // build the options once rather than per request.
+  const policyOptions = { denyPatterns, classifyRequest, allowBeacons };
 
   const record = (route: Route, req: Request, reason: string): Promise<void> => {
     if (reason === 'classify-benign') {
@@ -139,8 +155,7 @@ export async function installCaptureGuard(
       blockedBenign.push(`${reason}: ${req.method()} ${req.url()}`);
       return route.abort();
     }
-    dangerousHits.push(`${reason}: ${req.method()} ${req.url()}`);
-    lastHitAt = Date.now();
+    recordDangerous(`${reason}: ${req.method()} ${req.url()}`);
     return route.abort();
   };
 
@@ -152,7 +167,7 @@ export async function installCaptureGuard(
       resourceType: req.resourceType(),
     };
 
-    const decision = decideRoute(classified, { denyPatterns, classifyRequest, allowBeacons });
+    const decision = decideRoute(classified, policyOptions);
     if (decision.action === 'allow') {
       return route.continue();
     }
@@ -169,20 +184,23 @@ export async function installCaptureGuard(
     const from = req.redirectedFrom();
     // A browser-originated request — context.route already classified (and possibly aborted) it.
     if (from === null) return;
+    const method = req.method();
+    const url = req.url();
+    const fromUrl = from.url();
     const audit = auditRedirectHop(
       {
-        method: req.method(),
-        url: req.url(),
+        method,
+        url,
         postData: req.postData(),
         resourceType: req.resourceType(),
-        redirectedFrom: from.url(),
+        redirectedFrom: fromUrl,
       },
-      { denyPatterns, classifyRequest, allowBeacons },
+      policyOptions,
     );
-    redirectHops.push(`${audit.reason} [${audit.verdict}]: ${req.method()} ${req.url()} <- ${from.url()}`);
+    redirectHops.push(`${audit.reason} [${audit.verdict}]: ${method} ${url} <- ${fromUrl}`);
     if (audit.verdict === 'dangerous') {
-      dangerousHits.push(`${audit.reason}: ${req.method()} ${req.url()} (redirected from ${from.url()})`);
-      lastHitAt = Date.now();
+      sawDangerousHop = true;
+      recordDangerous(`${audit.reason}: ${method} ${url} (redirected from ${fromUrl})`);
     }
   });
 
@@ -220,7 +238,7 @@ export async function installCaptureGuard(
       if (dangerousHits.length > 0) {
         // Only say it when it is true: the redirect-hop explainer describes entries that FIRED, and
         // appending it to a purely-blocked failure would misreport a request the guard did stop.
-        const hopNote = dangerousHits.some((hit) => hit.startsWith('redirect-hop:'))
+        const hopNote = sawDangerousHop
           ? '\nA "redirect-hop:" entry was DETECTED, not blocked — the browser had already sent it ' +
             'when the guard saw it, so treat it as a live action that fired.'
           : '';
