@@ -1208,6 +1208,63 @@ hasnt "capture-helpers: no inline unsafe-verbs set"              'UNSAFE_LEADING
 has   "capture-helpers: value-imports isSafeNegativeLabel" "import { isSafeNegativeLabel } from './lib/dismiss-safe-label-policy.mjs'" "$CH"
 has   "capture-helpers: value-imports clampClipToViewport" "import { clampClipToViewport } from './lib/viewport-clip.mjs'" "$CH"
 
+# #471: a redirect hop never reaches the route handler (measured on playwright-core 1.61.1 and
+# 1.62.1), so the guard needs a SECOND, audit-only channel. The verdict lives in the pure policy so it
+# is unit-testable without a browser; the driver only wires the event and the ledgers.
+echo "== #471 redirect-hop audit =="
+GUARD_DTS="$ASSETS/lib/capture-guard-policy.d.mts"
+has "capture-guard-policy: exports auditRedirectHop"                     'export function auditRedirectHop(' "$POLICY"
+has "capture-guard-policy: hop reasons carry the redirect-hop: prefix"   'redirect-hop:${decision.reason}'    "$POLICY"
+has "capture-guard-policy: a benign hop is not counted dangerous"        "verdict: 'benign'"                  "$POLICY"
+has "capture-guard-policy.d.mts: declares auditRedirectHop"              'export function auditRedirectHop('  "$GUARD_DTS"
+has "capture-guard-policy.d.mts: GuardRequest carries redirectedFrom"    'redirectedFrom?: string | null;'    "$GUARD_DTS"
+# The audit channel is context-level and keyed on redirectedFrom() — a page-level or route-only wiring
+# would silently see nothing.
+# Bind to the handler SIGNATURE, not to the bare call: the docblock above it names
+# context.on('request') too, so a looser needle would be satisfied by the prose alone after the
+# wiring was deleted.
+has "capture-helpers: audits hops on the context request event"          "context.on('request', (req: Request) =>" "$CH"
+has "capture-helpers: detects a hop via redirectedFrom()"                'req.redirectedFrom()'               "$CH"
+has "capture-helpers: delegates the hop verdict to auditRedirectHop"     'auditRedirectHop('                  "$CH"
+has "capture-helpers: a dangerous hop reaches the dangerous ledger"      'if (audit.verdict === '            "$CH"
+has "capture-helpers: exposes the hop chain for inspection"              'redirectHops: () => [...redirectHops]' "$CH"
+
+# #470/#471/#472: the contract doc must stop promising guarantees the guard does not have. Each claim
+# is bound to the section that owns it, and each retired overstatement is pinned absent whole-file.
+echo "== capture-spec-helpers.md: retired false guarantees (#470/#471/#472) =="
+GUARANTEE_SECTION='## What each helper must guarantee'
+hasnt "capture-spec-helpers: 'intercepts every request' claim retired (#471)" \
+  'intercepts every request' "$REFS/capture-spec-helpers.md"
+hasnt "capture-spec-helpers: unqualified 'everything else fails closed' retired (#470)" \
+  'everything else fails closed' "$REFS/capture-spec-helpers.md"
+hasnt "capture-spec-helpers: stale 'Four things' carve-out count retired (#472)" \
+  'Four things the automated scan' "$REFS/capture-spec-helpers.md"
+has_joined_in_section "capture-spec-helpers: guard covers only what the engine surfaces (#471)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'classifies **every request the engine surfaces to its interception handler**'
+has_joined_in_section "capture-spec-helpers: fail-closed is scoped to non-GET/HEAD (#470)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'every non-GET/HEAD request left unadmitted fails closed'
+has_joined_in_section "capture-spec-helpers: GET/HEAD allow is documented origin-blind (#470)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'the **origin is never examined**'
+has_joined_in_section "capture-spec-helpers: the dangerous-verb list is documented as a fixed 16 (#470)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'a **fixed 16-verb token list**'
+has_joined_in_section "capture-spec-helpers: redirect hops are detection, not prevention (#471)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'Redirect hops are DETECTED, not intercepted.'
+has_joined_in_section "capture-spec-helpers: carve-out list now names the same-origin iframe (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'the content of a same-origin `<iframe>`'
+# The same carve-out has three write sites — the contract doc, the asset docblock, and the masking
+# rules. Correcting one and leaving the others is the recurring drift on this plugin.
+has "capture-helpers: scan carve-out names the same-origin iframe (#472)" \
+  'nor THE CONTENT OF A SAME-ORIGIN' "$CH"
+has_joined_in_section "capture-safety: masking rules name the framed-document gap (#472)" \
+  "$REFS/capture-safety.md" '### Mask reproducibly, then prove the mask held' \
+  'is a document of its own'
+
 echo "== capture.example.spec.ts =="
 SPEC="$ASSETS/capture.example.spec.ts"
 has "example spec: blocks service workers" "serviceWorkers: 'block'" "$SPEC"

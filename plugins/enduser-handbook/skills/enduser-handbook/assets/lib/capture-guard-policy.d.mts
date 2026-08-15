@@ -12,11 +12,27 @@ export interface GuardRequest {
   url: string;
   postData: string | null;
   resourceType: string;
+  /**
+   * The previous hop's URL when this request is a REDIRECT HOP; absent/null for a browser-originated
+   * request. No decideRoute branch reads it — it is passed through so a project's classifyRequest can
+   * tell a hop from a fresh request. Admitting the ORIGIN never admits its hop.
+   */
+  redirectedFrom?: string | null;
 }
 
 /** The classifier decision. */
 export interface GuardDecision {
   action: 'allow' | 'block';
+  reason: string;
+}
+
+/**
+ * The audit result for a redirect hop. A VERDICT, not an action: the hop has already been sent when
+ * it becomes observable, so there is nothing left to allow or block. `reason` is decideRoute's reason
+ * prefixed with 'redirect-hop:'.
+ */
+export interface RedirectHopAudit {
+  verdict: 'clean' | 'dangerous' | 'benign';
   reason: string;
 }
 
@@ -51,6 +67,14 @@ export function matchesDeny(
 
 /**
  * Ordered classifier: deny < classify-benign < eventsource < beacon < classify-read < get-head <
- * fail-closed. Returns allow/block + a reason. Fails closed on anything not proven a read.
+ * fail-closed. Returns allow/block + a reason. Fails closed on any NON-GET/HEAD request not proven a
+ * read; a GET/HEAD that clears the deny step is admitted unconditionally (issue #470).
  */
 export function decideRoute(req: GuardRequest, opts?: GuardPolicyOptions): GuardDecision;
+
+/**
+ * Audit a redirect hop with the same ordered policy, on the hop's OWN method and URL. DETECTION, NOT
+ * PREVENTION — a hop never reaches the route handler (issue #471) and has already been sent by the
+ * time it is observable, so this reports a verdict the caller records; it cannot block anything.
+ */
+export function auditRedirectHop(req: GuardRequest, opts?: GuardPolicyOptions): RedirectHopAudit;

@@ -21,7 +21,9 @@ import type { Browser, BrowserContext, JSHandle, Locator, Page, Route, Request }
 // classify-benign < eventsource < beacon < classify-read < get-head < fail-closed) is unit-testable,
 // not just grep-able. The seven `// [guard:*]` sentinels live in decideRoute. This handler only maps
 // the decision onto abort/continue + recording.
-import { decideRoute } from './lib/capture-guard-policy.mjs';
+// auditRedirectHop re-asks that same policy about a REDIRECT HOP, which never reaches the route
+// handler (issue #471) — see the context.on('request') channel in installCaptureGuard.
+import { decideRoute, auditRedirectHop } from './lib/capture-guard-policy.mjs';
 import type { GuardRequest } from './lib/capture-guard-policy.mjs';
 // Pure, unit-tested URL-identity matcher (pathname-boundary, not substring) so route/API matching
 // cannot be fooled by '/api/users-old' or a '?next=/settings/users' redirect.
@@ -68,6 +70,11 @@ export interface CaptureGuard {
    * NOT a guarantee that every late request has settled; a request that fires after the drain window
    * is not detected. Call it in a `finally`, before closing the context. It gates on the
    * `dangerousHits` ledger ONLY — requests classified `'benign'` are excluded by construction.
+   *
+   * The ledger mixes two kinds of entry, and they mean different things. A plain reason
+   * (`fail-closed`, `deny-pattern`, …) is a request the guard BLOCKED — it never reached the server.
+   * A `redirect-hop:` reason is a hop the guard could only DETECT: the browser had already sent it
+   * (issue #471), so a failure carrying one means a live request DID fire.
    */
   assertNoDangerousHits(quietMs?: number, maxMs?: number): Promise<void>;
   /**
@@ -76,6 +83,14 @@ export interface CaptureGuard {
    * `assertNoDangerousHits()`. Returns a copy.
    */
   blockedBenign(): string[];
+  /**
+   * Read-only snapshot of the redirect-hop CHAIN observed during capture — every hop the browser
+   * issued to follow a 3xx `Location`, with its audit verdict and the URL it came from, in the order
+   * they fired. None of these passed through the route handler (see installCaptureGuard); the
+   * `'dangerous'` ones are ALSO pushed to the dangerous ledger so `assertNoDangerousHits()` fails on
+   * them. Returns a copy.
+   */
+  redirectHops(): string[];
 }
 
 /**
@@ -83,10 +98,18 @@ export interface CaptureGuard {
  * create the context with `serviceWorkers: 'block'` so service-worker traffic cannot slip past
  * context.route (page.route would miss it).
  *
- * HTTP is routed via context.route('**\/*'); each request is classified by the pure decideRoute
- * policy (deny < classify-benign < eventsource < beacon < classify-read < get-head < fail-closed).
- * denyPatterns and the built-in dangerous-verb path block win over everything; the default is
- * fail-closed on unclassified non-GET (and on dangerous-verb GETs).
+ * HTTP is routed via context.route('**\/*'); each request the engine surfaces to the route handler is
+ * classified by the pure decideRoute policy (deny < classify-benign < eventsource < beacon <
+ * classify-read < get-head < fail-closed). denyPatterns and the built-in dangerous-verb path block win
+ * over everything; the default is fail-closed on unclassified non-GET (and on dangerous-verb GETs).
+ *
+ * REDIRECT HOPS ARE DETECTED, NOT BLOCKED (issue #471). A request the browser issues itself to follow
+ * a 3xx `Location` never reaches the route handler — Chromium continues it without constructing a
+ * Route — so it cannot be intercepted, classified or aborted there. A second, AUDIT-ONLY channel
+ * (context.on('request'), which does see every hop) re-asks the same policy about each hop using the
+ * HOP's own method and URL, logs the chain in redirectHops(), and pushes every dangerous verdict into
+ * the dangerous ledger so assertNoDangerousHits() fails loudly. The hop has already been sent by then:
+ * this turns a silent pass into a loud failure, it does NOT prevent the request.
  *
  * WebSockets are routed via context.routeWebSocket (Playwright >= 1.48) so a socket is blocked
  * WITHOUT connecting. If routeWebSocket is unavailable we THROW at install time rather than fall
@@ -102,6 +125,10 @@ export async function installCaptureGuard(
   // assertNoDangerousHits, and do NOT bump lastHitAt — a chatty telemetry page must not stretch the
   // drain window.
   const blockedBenign: string[] = [];
+  // The redirect-hop chain (issue #471): every hop the browser issued to follow a 3xx Location, with
+  // its audit verdict. Logged for ALL verdicts so the chain is visible; the dangerous ones are ALSO
+  // pushed to dangerousHits below.
+  const redirectHops: string[] = [];
   // Bumped on every recorded DANGEROUS hit (HTTP or WebSocket) so the drain loop below can detect "a
   // new hit arrived during the quiet window" and reset its timer. Benign blocks do not bump it.
   let lastHitAt = 0;
@@ -130,6 +157,33 @@ export async function installCaptureGuard(
       return route.continue();
     }
     return record(route, req, decision.reason);
+  });
+
+  // Redirect hops (issue #471): AUDIT-ONLY second channel. The route handler above is never consulted
+  // for a hop — the browser continues it internally and constructs no Route — but the context-level
+  // 'request' event fires for EVERY hop, carrying redirectedFrom(). Classify each hop with the SAME
+  // policy on its OWN method and URL (307/308 preserve the method, 301/302/303 may downgrade a POST to
+  // a GET), log the chain, and count the dangerous ones so the end-of-run assertion fails. By the time
+  // the event fires the request has already been sent: this is detection, not prevention.
+  context.on('request', (req: Request) => {
+    const from = req.redirectedFrom();
+    // A browser-originated request — context.route already classified (and possibly aborted) it.
+    if (from === null) return;
+    const audit = auditRedirectHop(
+      {
+        method: req.method(),
+        url: req.url(),
+        postData: req.postData(),
+        resourceType: req.resourceType(),
+        redirectedFrom: from.url(),
+      },
+      { denyPatterns, classifyRequest, allowBeacons },
+    );
+    redirectHops.push(`${audit.reason} [${audit.verdict}]: ${req.method()} ${req.url()} <- ${from.url()}`);
+    if (audit.verdict === 'dangerous') {
+      dangerousHits.push(`${audit.reason}: ${req.method()} ${req.url()} (redirected from ${from.url()})`);
+      lastHitAt = Date.now();
+    }
   });
 
   // WebSockets: routeWebSocket blocks/records without connecting. No silent fallback.
@@ -164,13 +218,20 @@ export async function installCaptureGuard(
         await new Promise((resolve) => setTimeout(resolve, Math.max(wait, 0)));
       }
       if (dangerousHits.length > 0) {
+        // Only say it when it is true: the redirect-hop explainer describes entries that FIRED, and
+        // appending it to a purely-blocked failure would misreport a request the guard did stop.
+        const hopNote = dangerousHits.some((hit) => hit.startsWith('redirect-hop:'))
+          ? '\nA "redirect-hop:" entry was DETECTED, not blocked — the browser had already sent it ' +
+            'when the guard saw it, so treat it as a live action that fired.'
+          : '';
         throw new Error(
           `Capture guard recorded ${dangerousHits.length} dangerous/blocked request(s) during ` +
-            `capture — a live action may have fired:\n  ${dangerousHits.join('\n  ')}`,
+            `capture — a live action may have fired:\n  ${dangerousHits.join('\n  ')}${hopNote}`,
         );
       }
     },
     blockedBenign: () => [...blockedBenign],
+    redirectHops: () => [...redirectHops],
   };
 }
 
@@ -727,9 +788,16 @@ export interface MaskOptions {
  * content (::before/::after `content`), which IS painted into the screenshot; nor the `alt` text a
  * broken/failed <img> paints into the frame (browser replacement-rendering — painted, but not a DOM
  * text node, so the same carve-out as pseudo-content; a loaded image paints no alt); nor genuinely
- * non-rendered attributes (title/aria-label, never painted). Those surfaces rely on the human
- * eyeball-the-frame step (capture-safety.md) as the backstop — the scan is defense-in-depth, not a
- * complete proof.
+ * non-rendered attributes (title/aria-label, never painted); nor THE CONTENT OF A SAME-ORIGIN
+ * <iframe> (issue #472). That last one is a different class from the others: it IS ordinary DOM
+ * text, only in another document, and neither pass crosses a document boundary — queryDeep and the
+ * TreeWalker both stop at the <iframe> element, which has no text children, while page.screenshot
+ * composites the child document's pixels. A selector that only matches inside the frame at least
+ * throws on the coverage assert (it matches nothing); PII the author did NOT list is silent —
+ * nothing to mask, no text node to collect, no pattern to match, green run, value in the PNG. Mask
+ * the frame's content before the shot, scan it yourself per frame, or keep it out of the region.
+ * All of these surfaces rely on the human eyeball-the-frame step (capture-safety.md) as the
+ * backstop — the scan is defense-in-depth, not a complete proof.
  */
 export async function maskAndAssert(
   page: Page,
