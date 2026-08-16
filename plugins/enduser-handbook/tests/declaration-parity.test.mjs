@@ -92,6 +92,17 @@ test('the parity run enumerated a plausible tree — an empty audit is not a pas
     live.census.arityChecks >= 80,
     `the parity audit compared arity for only ${live.census.arityChecks} functions; 80 shipped when this gate was written`,
   );
+  // Three separate review findings were the same shape — a function export whose declared parameter
+  // list the extractor could not read, skipped without a word. Each was fixed by teaching it one more
+  // spelling, which only shortens the list of spellings nobody has thought of yet. This is what
+  // closes the class: the runtime says these exports are functions, so an arity that was never
+  // compared is named rather than absorbed into a total that still looks healthy.
+  assert.deepEqual(
+    live.arityUnread,
+    [],
+    `a function export's declared arity was never compared, and a skipped comparison is indistinguishable from a passing one:\n  ${live.arityUnread.join('\n  ')}\nEither teach functionTypeArity this declaration's spelling, or — if the type genuinely needs a compiler to resolve — spell the signature inline at the declaration so it can be read here.`,
+  );
+
   // Per module, not just in aggregate: one module falling silent is invisible in a total that another
   // module's exports keep above the floor.
   const silent = live.modules.filter((m) => m.runtimeExports === 0 || m.valueDeclarations === 0);
@@ -176,6 +187,21 @@ test('GREEN: an optional parameter admits BOTH the defaulted and the plain runti
   // …and the range still has a floor: dropping BOTH parameters is out of it.
   const dropped = await auditFixture({ 'm.mjs': 'export function alpha() { return []; }\n', 'm.d.mts': declaration });
   assertFinding(dropped, '`alpha` takes 0 parameter(s) at runtime, but m.d.mts declares 1-2');
+});
+
+test('RED: a function export whose declared arity could not be read is NAMED, never quietly skipped', async () => {
+  // Not a finding — a declaration may legitimately name a type only a compiler could resolve — but
+  // never silent either. A comparison that did not happen is indistinguishable from one that passed,
+  // and three separate review findings in this gate were exactly that shape.
+  const result = await auditFixture({
+    'm.mjs': 'export const handler = (a, b) => [a, b];\nexport function plain(a) { return a; }\n',
+    'm.d.mts': 'export interface Callback { (a: number): void }\nexport declare const handler: Callback;\nexport declare function plain(a: number): void;\n',
+  });
+  assert.deepEqual(result.findings, [], `an unreadable arity is not itself a defect:\n  ${result.findings.join('\n  ')}`);
+  assert.deepEqual(result.arityUnread, ['m: handler (const, line 2)'], 'the export whose arity went uncompared must be named');
+  assert.equal(result.census.arityUnread, 1);
+  // The readable sibling must still have been compared, or "unread" would just mean "gave up".
+  assert.equal(result.census.arityChecks, 1);
 });
 
 test('RED: a stale declaration-only module — the direction a .mjs walk cannot see', async () => {

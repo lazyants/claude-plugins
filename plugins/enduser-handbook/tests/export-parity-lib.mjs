@@ -780,13 +780,26 @@ export async function auditModulePair(libDir, base) {
   }
 
   let arityChecks = 0;
+  const arityUnread = [];
   for (const [name, records] of extracted.values) {
     const live = runtime.get(name);
     // Any declaration that resolved a parameter list counts, not only a `function` one — a binding
     // declared `const handler: (a: A, b: B) => void` is a function too, and gating on the KEYWORD
     // rather than on whether an arity was actually read skipped every one of them.
     const signatures = records.filter((r) => r.arity);
-    if (!live || !live.isFunction || signatures.length === 0) continue;
+    if (!live || !live.isFunction) continue;
+    if (signatures.length === 0) {
+      // The class-closing half. Three separate review findings were all the same shape: a function
+      // export whose declared parameter list this could not read, skipped in SILENCE — first every
+      // const-declared one, then one behind redundant parentheses. Each was fixed by teaching the
+      // reader one more spelling, which only ever shortens the list of spellings nobody has thought
+      // of yet. What actually closes the class is refusing to skip quietly: the runtime says this
+      // export is a function, so an arity that was never compared is recorded by NAME. A reader
+      // whose type genuinely cannot be resolved without a compiler still lands here, and that is the
+      // correct outcome — it is a gap either way, and the only question is whether anyone can see it.
+      arityUnread.push(`${name} (${records[0].kind}, line ${records[0].line})`);
+      continue;
+    }
     arityChecks += 1;
     // The ENVELOPE across all signatures, not a per-signature match. An earlier revision required the
     // runtime `length` to fall inside some ONE overload's range, on the argument that the union
@@ -813,11 +826,13 @@ export async function auditModulePair(libDir, base) {
 
   return {
     findings,
+    arityUnread: arityUnread.map((entry) => `${base}: ${entry}`),
     census: {
       runtimeExports: runtime.size,
       valueDeclarations: extracted.values.size,
       typeDeclarations: extracted.types.size,
       arityChecks,
+      arityUnread: arityUnread.length,
     },
   };
 }
@@ -833,12 +848,17 @@ export async function auditLibDirectory(libDir) {
   const pairs = enumerateModulePairs(libDir);
   const findings = [];
   const modules = [];
+  // Exports the runtime says are functions whose declared parameter list could not be read. Not
+  // findings — a declaration may legitimately name a type only a compiler could resolve — but never
+  // silent either, which is the whole point.
+  const arityUnread = [];
   const census = {
     modules: 0,
     runtimeExports: 0,
     valueDeclarations: 0,
     typeDeclarations: 0,
     arityChecks: 0,
+    arityUnread: 0,
   };
 
   for (const pair of pairs) {
@@ -852,13 +872,15 @@ export async function auditLibDirectory(libDir) {
     }
     const result = await auditModulePair(libDir, pair.base);
     findings.push(...result.findings);
+    arityUnread.push(...(result.arityUnread ?? []));
     modules.push({ base: pair.base, ...result.census });
     census.modules += 1;
     census.runtimeExports += result.census.runtimeExports;
     census.valueDeclarations += result.census.valueDeclarations;
     census.typeDeclarations += result.census.typeDeclarations;
     census.arityChecks += result.census.arityChecks;
+    census.arityUnread += result.census.arityUnread ?? 0;
   }
 
-  return { findings, census, pairs, modules };
+  return { findings, census, pairs, modules, arityUnread };
 }
