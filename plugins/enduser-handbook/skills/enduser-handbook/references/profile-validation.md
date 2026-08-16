@@ -79,8 +79,9 @@ not detected. Block scalars are treated as pure opacity: their content is never 
 flagged, by deliberate design. Modeling block-scalar-content lines (including one that happens to
 start with `#`) together with general indentation tracking reintroduces the exact mini-YAML-parser
 mis-parse risk this document warns against elsewhere — an indentation guard, for one, would
-false-reject the *valid* shipped `capture.command: |` block scalar. A properly false-reject-free
-design for B is tracked as a follow-up rather than rushed into this release.
+false-reject the *valid* shipped `capture.command: |` block scalar. Mechanism B stays a documented
+deferred residual, not a pending item — the two reasons above are properties of the design, not a
+gap waiting on a release.
 
 **Now accepted — tab in scalar content, leading/trailing document markers, explicit `? snake_case`
 keys.** Three shapes a real parser loads fine, and that earlier releases false-rejected, now scan

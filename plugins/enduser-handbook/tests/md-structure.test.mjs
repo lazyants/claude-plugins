@@ -345,7 +345,8 @@ test('integration fixture (static-md-shaped): H2-own-body content, a nested H3, 
 const STATIC_MD = readFileSync(STATIC_MD_PATH, 'utf8');
 const INDEX_WIRING_H2 = '## Index wiring (do this on every chapter create/update)';
 
-// The 6 witnesses the bash `assert_line_before` calls pin (reference-assets.test.sh ~1630-1686) —
+// The 6 witnesses the bash `assert_line_before` calls pin (grep assert_line_before in
+// reference-assets.test.sh; a line range here would rot silently) —
 // each proven to sit before the grouped-only H3. Structurally, "before the grouped H3" means "in
 // the H2's own body", i.e. findOwner === the H2 node.
 const BRANCH_WITNESSES = [
@@ -367,7 +368,7 @@ function assertBranchOwnership(text, sentinel, headingRaw) {
   );
   // Guard 2: the target H2 occurs exactly once — a duplicated heading would let findOwner resolve
   // to the wrong (first) node, silently validating nothing (mirrors the VAULT_ROOT_HEADING_COUNT
-  // pattern at reference-assets.test.sh:1333-1346).
+  // pattern in reference-assets.test.sh — grep that identifier; a line range would rot silently).
   assert.equal(
     lineCountContaining(text, headingRaw),
     1,

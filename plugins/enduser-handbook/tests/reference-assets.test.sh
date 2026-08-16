@@ -4109,6 +4109,167 @@ has_joined_in_section "capture-engines: manual's perpetual record_absent is expe
   "$REFS/capture-engines.md" '## Manual (halt boundary, not a ready mode)' \
   "That is the expected report for this engine value's halt boundary, not a provenance defect to chase"
 
+echo "== #477: page identity pins the verbatim labels a chapter quotes =="
+# The contract said "asserted VISIBLE" and nothing more, so a chapter could quote a column header
+# the capture spec never pinned; a rename then shipped a step whose label is absent from its own
+# screenshot with every gate green. These pins are JOINED-mode because both files hard-wrap and a
+# sentence-length needle matches no single physical line.
+PAGEID="$REFS/page-identity.md"
+ANTIFAB="$REFS/anti-fabrication.md"
+
+has_joined_in_section "page-identity: step 4 states a visibility assertion is not enough for a quoted label" \
+  "$PAGEID" '## The principle' \
+  'A visibility assertion is not enough when the chapter quotes that control'
+has_joined_in_section "page-identity: step 4 requires the assertion be keyed to the exact quoted text" \
+  "$PAGEID" '## The principle' \
+  'key the assertion to that exact text'
+has_joined_in_section "page-identity: step 4 requires the exact-text assertion be SCOPED to the captured region" \
+  "$PAGEID" '## The principle' \
+  'scope it to the region the screenshot captures'
+has_joined_in_section "page-identity: step 4 names why an unscoped page-wide exact match is not enough" \
+  "$PAGEID" '## The principle' \
+  'satisfied by the same string anywhere on the page'
+has_joined_in_section "page-identity: step 4 names the non-control label class that earns no matrix row" \
+  "$PAGEID" '## The principle' \
+  'A column header or a field label can be quoted by a chapter just as a button is'
+# The class is INERTNESS, not element type: a sortable header and a <label> that focuses its control
+# are clickable, so they ARE triggers and DO earn a row. #477's own worked example sorts by a column.
+has_joined_in_section "page-identity: step 4 keys the no-row case on INERTNESS, not on element type" \
+  "$PAGEID" '## The principle' \
+  'not sortable, not a `<label>` that focuses its control'
+has_joined_in_section "page-identity: step 4 states a sortable header IS a trigger and earns its row" \
+  "$PAGEID" '## The principle' \
+  'a sortable header is a trigger, not an exception'
+has_joined_in_section "page-identity: step 4 owes the assertion whether or not the label earned a row" \
+  "$PAGEID" '## The principle' \
+  'whether or not it earned a row'
+# Scoping alone is not identity: the shipped helpers take the FIRST match, so two rows both reading
+# `Edit` leave a region-scoped assertion green when only the narrated one is renamed.
+has_joined_in_section "page-identity: step 4 covers a label that REPEATS inside the scoped region" \
+  "$PAGEID" '## The principle' \
+  'Scoping is not yet identity when the same string repeats inside the region'
+has_joined_in_section "page-identity: step 4's remedy for a duplicate label is the distinguishing container" \
+  "$PAGEID" '## The principle' \
+  'the row, the card, the fieldset — and assert the label inside it'
+# A match COUNT is not an equal alternative: it goes red when the list legitimately grows, and it
+# stays green when one row loses the label while another gains it. Demoted to a bounded fallback.
+has_joined_in_section "page-identity: step 4 states the match-count fallback's precondition" \
+  "$PAGEID" '## The principle' \
+  'a weaker fallback, sound only over a fixed row set'
+has_joined_in_section "page-identity: step 4 states a matrix row is not an assertion" \
+  "$PAGEID" '## The principle' \
+  'a matrix row records a label, it does not assert one'
+has_joined_in_section "page-identity: spec checklist carries the exact-text clause, not visibility alone" \
+  "$PAGEID" '## What to write into the spec' \
+  'for every label the chapter quotes verbatim, assert that exact text'
+has_joined_in_section "anti-fabrication: self-audit carries the reciprocal every-quoted-label-is-pinned obligation" \
+  "$ANTIFAB" '## Self-audit before publish' \
+  'has a capture-time assertion pinned to that exact string'
+has_joined_in_section "anti-fabrication: self-audit says a visibility assertion is not that pin" \
+  "$ANTIFAB" '## Self-audit before publish' \
+  'A visibility assertion on the element is not that pin'
+# The obligation is scoped to CAPTURED steps. A control that could not be captured has no screenshot
+# to pin a label against, and this same file requires it be disclosed rather than dropped — an
+# unconditional rule would have made a required disclosure unsatisfiable.
+has_joined_in_section "anti-fabrication: the pin obligation is scoped to a CAPTURED step" \
+  "$ANTIFAB" '## Self-audit before publish' \
+  'every label a **captured** step quotes verbatim'
+has_joined_in_section "anti-fabrication: disclosure prose is a stated exception, not an unmet obligation" \
+  "$ANTIFAB" '## Self-audit before publish' \
+  'Disclosure prose is the exception, and deliberately so'
+has_joined_in_section "anti-fabrication: a disclosed label is still verbatim, sourced from the running UI" \
+  "$ANTIFAB" '## Self-audit before publish' \
+  'source it from the running UI per `running-ui-source.md` wherever some role or state can show it'
+# The exception is per-LABEL, not per-step. The not-fired case DOES embed a captured open state
+# (see the disclosure examples earlier in this file), so a label that screenshot documents is
+# pinned like any other — only the label the run never reached is excused.
+has_joined_in_section "anti-fabrication: the disclosure exception is per-label, not per-step" \
+  "$ANTIFAB" '## Self-audit before publish' \
+  'still pins every label that screenshot documents, and excuses only the one the run never reached'
+
+echo "== #563 item 7 (folds #344): two stale claims, both reproduced as filed =="
+# A line range is a citation that rots silently: nothing recomputes it, and an insertion anywhere
+# above it moves the target without moving the pointer. Both ranges in md-structure.test.mjs had
+# already rotted (VAULT_ROOT_HEADING_COUNT measured at :1716-1720, the six assert_line_before calls
+# at :2032-2090). The fix is to drop the range and keep the greppable identifier — renumbering just
+# reproduces the defect on the next insertion above it, so these are hasnt pins on the ranges, not
+# has pins on new ones.
+MDSTRUCT_TEST="$TEST_DIR/md-structure.test.mjs"
+
+# hasnt_joined, not hasnt: `hasnt` greps per PHYSICAL LINE and fails OPEN on a missing file, so a
+# needle re-wrapped across a line break — or a renamed file — reads as a satisfied negative claim.
+hasnt_joined "md-structure.test.mjs: no rotted line range on the VAULT_ROOT_HEADING_COUNT pointer" \
+  'reference-assets.test.sh:1333-1346' "$MDSTRUCT_TEST"
+has "md-structure.test.mjs: the VAULT_ROOT_HEADING_COUNT pointer keeps its greppable identifier" \
+  'VAULT_ROOT_HEADING_COUNT' "$MDSTRUCT_TEST"
+has "md-structure.test.mjs: the VAULT_ROOT_HEADING_COUNT pointer says to grep, not to renumber" \
+  'grep that identifier' "$MDSTRUCT_TEST"
+hasnt_joined "md-structure.test.mjs: no rotted line range on the assert_line_before pointer either" \
+  'reference-assets.test.sh ~1630-1686' "$MDSTRUCT_TEST"
+has "md-structure.test.mjs: the assert_line_before pointer keeps its greppable identifier" \
+  'grep assert_line_before in' "$MDSTRUCT_TEST"
+has_joined_in_section "profile-validation: mechanism B is a stated deferred residual, not a pending follow-up" \
+  "$PVALID" '## The `profile_version` pre-flight scan' \
+  'Mechanism B stays a documented deferred residual, not a pending item'
+hasnt_joined "profile-validation: the false tracked-as-a-follow-up clause is gone" \
+  'tracked as a follow-up rather than rushed into this release' "$PVALID"
+
+echo "== #563 item 3 (folds #478): whole-suite capture.command precedence in revalidation step 5 =="
+# Step 5 said "re-capture only the deltas" while container-isolation.md says the profile's command
+# runs exactly as written, and every shipped representative command is a whole-suite invocation. A
+# consumer holding both rules had no third option. The precedence is now stated: the verbatim rule
+# wins, and the bookkeeping is what changes. The claims about record_stale and capture_failed are
+# deliberately SCOPED — a chapter with no prior record reports record_absent, not record_stale, and
+# a failed command produces ONE run-level warning, not one per chapter row.
+has_joined_in_section "revalidation: step 5 resolves whole-suite capture.command precedence — run it whole" \
+  "$REVAL" '## The flow' \
+  'The delta rule above scopes what you re-author, never what you invoke'
+# The precedence paragraph is not enough on its own: step 5's own heading and body used to say
+# "Re-capture ... only the deltas" and "you do not re-shoot a no-op", which stay false for a
+# whole-suite command no matter what a later paragraph resolves. The step itself now scopes
+# re-AUTHORING only, and hands capture invocation to the verbatim command.
+has_joined_in_section "revalidation: step 5's own heading scopes re-authoring, not invocation" \
+  "$REVAL" '## The flow' \
+  'Re-author only the deltas; invoke capture exactly as the profile says'
+has_joined_in_section "revalidation: step 5's body hands the re-shoot scope to capture.command" \
+  "$REVAL" '## The flow' \
+  'What gets re-SHOT is not yours to scope'
+hasnt_joined "revalidation: the false no-op-recapture clause is gone from step 5" \
+  'you do not re-shoot a no-op' "$REVAL"
+has_joined_in_section "revalidation: step 5 re-runs the provenance substep for every chapter the run re-shot" \
+  "$REVAL" '## The flow' \
+  'every chapter the run actually re-shot'
+has_joined_in_section "revalidation: step 5 scopes record_stale to a record that ALREADY EXISTS" \
+  "$REVAL" '## The flow' \
+  'a record that already exists and no longer matches'
+has_joined_in_section "revalidation: step 5 does not promise the record gets rewritten" \
+  "$REVAL" '## The flow' \
+  'not a promise that the record gets rewritten'
+has_joined_in_section "revalidation: step 5 states capture_failed is ONE warning on the run, not a halt" \
+  "$REVAL" '## The flow' \
+  'one warning on the run'
+hasnt_joined "revalidation: D6 added no capture.command_scoped key" 'command_scoped' "$REVAL"
+hasnt_joined "revalidation: D6 added no scope placeholder" '{{scope}}' "$REVAL"
+
+echo "== #563 item 4 (from #246's closure): the one-time pre-1.6.0 embed sweep =="
+# #246 asked for a filesystem-owning production module to retroactively repair group-free chapter
+# links. Its population is a migration window that closed seven releases ago, and the remedy is a
+# scan-and-repair the consuming agent performs natively. This is the promised replacement: one
+# paragraph, no module. It sits in "Write-time canon" because that section already states 1.6.0
+# performs no automatic retroactive repair — the sweep is the manual answer to that exact claim.
+has_joined_in_section "revalidation: the one-time pre-1.6.0 embed sweep exists" \
+  "$REVAL" '## Write-time canon' \
+  'a handbook first authored before 1.6.0 can still carry embeds'
+has_joined_in_section "revalidation: the sweep rewrites only the embeds that do not resolve" \
+  "$REVAL" '## Write-time canon' \
+  'rewrite only the ones that do not resolve'
+has_joined_in_section "revalidation: the sweep leaves a resolving legacy embed byte for byte alone" \
+  "$REVAL" '## Write-time canon' \
+  'Leave a resolving embed byte for byte alone'
+has_joined_in_section "revalidation: the sweep prescribes no new module" \
+  "$REVAL" '## Write-time canon' \
+  'no repair module and no sweep pass added to the skill'
+
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
 # command and handed the assertion the leftover text. It kept passing while no longer checking the

@@ -39,6 +39,33 @@ For every screenshot the chapter will embed, the capture spec must, immediately 
    Export button", the Export button must be asserted visible before the click and before the
    shot that documents the click.
 
+   **A visibility assertion is not enough when the chapter quotes that control's label.**
+   Visibility is a predicate about a box, not about text: a `getByTestId` or CSS-selector anchor
+   satisfies it identically while pinning nothing the reader will actually read. Whenever the
+   prose quotes a string verbatim, key the assertion to that exact text, and scope it to the
+   region the screenshot captures. Use the exact-matched `getByText` that the state markers and
+   the modal identity check already use in `assets/capture-helpers.playwright.ts`, scoped the
+   way that modal check scopes its lookup to the dialog. A page-wide exact match is satisfied by
+   the same string anywhere on the page, so an unscoped assertion can stay green through the
+   very rename it was meant to catch.
+
+   **Scoping is not yet identity when the same string repeats inside the region.** The shipped
+   helpers take the FIRST match, so two rows that both read `Edit` leave a region-scoped
+   assertion green when only the narrated one is renamed. Anchor on the smallest container that
+   distinguishes the narrated instance — the row, the card, the fieldset — and assert the label
+   inside it. Asserting a count of exact matches instead is a weaker fallback, sound only over a
+   fixed row set: it goes red when the list legitimately grows, and it stays green when one row
+   loses the label while another gains it.
+
+   **Cover the labels that are not controls.** A column header or a field label can be quoted by
+   a chapter just as a button is. Where it is inert — not sortable, not a `<label>` that focuses
+   its control, not readable as a status — no row of the coverage matrix `completeness-gate.md`
+   builds names it, because that table is indexed by interactive trigger. Where it is not inert
+   it earns a row like any other trigger; a sortable header is a trigger, not an exception. The
+   assertion is owed either way: pin every string the chapter quotes, whatever element carries it
+   and whether or not it earned a row. Tab captions and empty-state copy usually do earn one, and
+   a matrix row records a label, it does not assert one.
+
 If any of these fail, the run must **fail loudly** — never fall back to capturing whatever is on
 screen. A wrong screenshot is worse than no screenshot, because the chapter will ship it.
 
@@ -104,7 +131,9 @@ For each capture step, the spec should:
 
 - Navigate to the route from the manifest entry.
 - Apply the `capture.page_identity_signal` directive verbatim (translated to the engine).
-- Assert the specific element the step narrates is visible.
+- Assert the specific element the step narrates is visible — and, for every label the chapter
+  quotes verbatim, assert that exact text, scoped narrowly enough to identify the one instance
+  the step narrates.
 - Take the screenshot.
 - If the next step changes state on the same page (opens a modal, expands a row), repeat the
   visibility assertion for the new element before the next shot.

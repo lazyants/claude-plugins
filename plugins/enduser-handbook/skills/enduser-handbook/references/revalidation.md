@@ -37,9 +37,30 @@ scope the user already accepted.
 4. **Halt on any material delta.**
    Revalidation skips only the initial accepted-manifest review for no-op or accepted-diff unchanged scope. Any material delta — to route, role, steps, glossary terms, side-effect class, or a changed/added/removed control or newly discovered interactive trigger — emits a delta manifest and halts for user acceptance per `manifest-discipline.md`.
    You do not re-capture a material delta before that acceptance closes.
-5. **Re-capture and re-author only the deltas.** Refresh artifacts for the
-   accepted-diff deltas and for the material deltas the user accepted in step 4.
-   Untouched scope keeps its existing artifacts; you do not re-shoot a no-op.
+5. **Re-author only the deltas; invoke capture exactly as the profile says.**
+   Re-author the accepted-diff deltas and the material deltas the user accepted
+   in step 4. Untouched scope keeps its existing authored content — you do not
+   rewrite a no-op chapter. What gets re-SHOT is not yours to scope: it is
+   whatever `capture.command` covers when run verbatim, which for a whole-suite
+   command includes chapters the delta set never touched.
+
+   **When `capture.command` is whole-suite, run it whole.** The delta rule above
+   scopes what you re-author, never what you invoke: `container-isolation.md`
+   requires the profile's command to run exactly as written, and that rule wins.
+   You do not narrow the invocation to the deltas, and you do not edit a profile
+   you were not asked to touch in order to give it a scope it never had. What
+   changes is the bookkeeping. Run the provenance substep for **every chapter the
+   run actually re-shot**, not only for the deltas — a chapter with an existing
+   record whose screenshots the whole-suite run refreshed otherwise keeps a record
+   describing the previous bytes, and a record that already exists and no longer
+   matches its chapter's embeds is what the next provenance report calls
+   `record_stale`. Running the substep is what you owe; it is not a promise that
+   the record gets rewritten, because the writer records only the chapters it
+   finds eligible and names the rule when it declines. The whole-suite exit status
+   is the one the run record sees, so a single unrelated red spec makes the run's
+   recorded build identity `capture_failed` — one warning on the run, not a halt.
+   That is the correct reading of a capture whose suite did not pass; it is not
+   something to route around by narrowing the command.
 6. **Run the completeness gate.** Build the coverage matrix and block on any
    unresolved row, exactly as on first authoring — see `completeness-gate.md`.
    Revalidation never publishes on a stale or incomplete matrix.
@@ -100,6 +121,17 @@ legitimately rewritten when something else causes it: an ordinary W6
 accepted-diff or material re-author ("The flow" above), or the manual
 group-migration recipe below. Neither of those is new in 1.6.0, and neither
 is what an `anyGroup` flip alone would do.
+
+**The one-time pre-1.6.0 sweep.** Because nothing repairs those chapters
+automatically, a handbook first authored before 1.6.0 can still carry embeds
+written with the flat-only spelling. Do the sweep by hand, once, on the first
+revalidation after the upgrade: read each chapter file, resolve every embed
+target it contains against the filesystem, and rewrite only the ones that do
+not resolve. Leave a resolving embed byte for byte alone — the gates are
+resolution checks, not spelling checks, so a legacy spelling that still
+resolves is already compliant and rewriting it is churn. Reading files and
+checking paths is the whole procedure: it needs no repair module and no sweep
+pass added to the skill.
 
 ## Manual-migration boundary (the group axis)
 
