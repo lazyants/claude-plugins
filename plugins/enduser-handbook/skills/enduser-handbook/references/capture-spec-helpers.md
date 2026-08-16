@@ -148,8 +148,12 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   that only matches inside the frame at least fails loudly — it matches nothing, so the
   mask-**coverage** assert throws. The case the scan exists for is the silent one: PII the author did
   *not* list has nothing to mask, no text node to collect and no pattern to match, so the run is
-  green and the value is in the PNG. Mask or remove the frame's content before the shot, scan it
-  yourself per frame, or keep the frame out of the captured region. (Issue #472.)
+  green and the value is in the PNG. So this one carve-out is **enforced, not merely disclosed**: the
+  helper counts the `<iframe>`/`<frame>` elements in the region it was asked to scan and **throws**
+  when it finds any, and the single opt-out `allowUnscannedFrames: true` is the only way past it —
+  take it only once you have proven the framed documents carry no PII. Otherwise mask or remove the
+  frame's content before the shot, scan it yourself per frame, or keep the frame out of the captured
+  region. (Issue #472.)
 
 ## The spec skeleton
 

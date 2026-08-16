@@ -1329,6 +1329,16 @@ has_joined_in_section "capture-spec-helpers: the allow names every block that pr
 has_joined_in_section "capture-spec-helpers: an unadmitted SSE GET is documented as blocked (#470)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   '**An SSE GET never reaches it**'
+# #472: the same-origin-iframe carve-out was documented but not ENFORCED. It is the one carve-out
+# whose silent half is reachable by no scan at all, so the mask helper now REFUSES a region that
+# frames another document unless the caller opts out explicitly.
+has "capture-helpers: maskAndAssert refuses an unscanned frame unless opted out (#472)" \
+  'allowUnscannedFrames' "$CH"
+has "capture-helpers: the frame count covers <iframe> AND <frame> (#472)" \
+  "'iframe, frame'" "$CH"
+has_joined_in_section "capture-spec-helpers: the iframe carve-out names the opt-out (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'allowUnscannedFrames: true'
 
 echo "== capture.example.spec.ts =="
 SPEC="$ASSETS/capture.example.spec.ts"

@@ -778,6 +778,12 @@ export interface MaskOptions {
   patterns: RegExp[];
   /** Exact number of targets the mask must cover; a mismatch is a coverage failure (throws). */
   expectedCount: number;
+  /**
+   * Opt out of the unscanned-frame refusal (issue #472). The region's `<iframe>`/`<frame>` content is
+   * photographed but never masked and never scanned, so a frame is refused by default. Set this only
+   * once you have proven the framed documents carry no PII.
+   */
+  allowUnscannedFrames?: boolean;
 }
 
 /**
@@ -813,14 +819,16 @@ export interface MaskOptions {
  * TreeWalker both stop at the <iframe> element, which has no text children, while page.screenshot
  * composites the child document's pixels. A selector that only matches inside the frame at least
  * throws on the coverage assert (it matches nothing); PII the author did NOT list is silent —
- * nothing to mask, no text node to collect, no pattern to match, green run, value in the PNG. Mask
+ * nothing to mask, no text node to collect, no pattern to match, green run, value in the PNG. That
+ * silent half is why the frame carve-out alone is ENFORCED rather than only documented: a frame in
+ * the scanned region THROWS unless the caller passes `allowUnscannedFrames: true`. Mask
  * the frame's content before the shot, scan it yourself per frame, or keep it out of the region.
  * All of these surfaces rely on the human eyeball-the-frame step (capture-safety.md) as the
  * backstop — the scan is defense-in-depth, not a complete proof.
  */
 export async function maskAndAssert(
   page: Page,
-  { dialog, selectors, placeholder, patterns, expectedCount }: MaskOptions,
+  { dialog, selectors, placeholder, patterns, expectedCount, allowUnscannedFrames = false }: MaskOptions,
 ): Promise<void> {
   const dialogHandle = await dialog.elementHandle();
   if (dialogHandle === null) {
@@ -828,8 +836,9 @@ export async function maskAndAssert(
   }
 
   // Step 1 + 3 run in one browser evaluate: mask + tag the targets, then collect scan parts from the
-  // UNMASKED remainder. Returns the matched count for the coverage assert.
-  const { matched, scanParts } = await dialogHandle.evaluate(
+  // UNMASKED remainder. Returns the matched count for the coverage assert, plus the framed-document
+  // count for the frame refusal (issue #472).
+  const { matched, scanParts, frames } = await dialogHandle.evaluate(
     (root: Element, args: { selectors: string[]; placeholder: string }) => {
       const ph = args.placeholder;
       const MASKED_ATTR = 'data-handbook-masked';
@@ -950,10 +959,31 @@ export async function maskAndAssert(
       };
       collect(root);
 
-      return { matched: matchedCount, scanParts: parts };
+      // --- Frame count (issue #472): the ONE place with DOM access, so the counting happens here
+      // and the caller fails closed on it, exactly as it does on the coverage count above. queryDeep
+      // is reused so open shadow roots are covered identically to the mask and the scan; the
+      // .matches() term covers the region BEING the frame, which querySelectorAll (descendants only)
+      // would miss. ---
+      const frameCount =
+        (root.matches('iframe, frame') ? 1 : 0) + queryDeep(root, 'iframe, frame').length;
+
+      return { matched: matchedCount, scanParts: parts, frames: frameCount };
     },
     { selectors, placeholder },
   );
+
+  // Step 2a: refuse a region that frames another document (issue #472). Checked BEFORE the coverage
+  // assert on purpose: when a listed selector matches only inside the frame BOTH gates fire, and
+  // naming the frame points at the cause where "selector drift" would misdirect.
+  if (frames > 0 && !allowUnscannedFrames) {
+    throw new Error(
+      `maskAndAssert: the captured region contains ${frames} <iframe>/<frame> element(s). Their ` +
+        'content is photographed but never masked and never scanned — neither pass crosses a ' +
+        'document boundary. Mask or remove the framed content before the shot, scan it yourself ' +
+        'per frame, keep the frame out of the region, or pass allowUnscannedFrames: true once you ' +
+        'have proven those documents carry no PII.',
+    );
+  }
 
   // Step 2: coverage assert — a missed target throws instead of leaking.
   if (matched !== expectedCount) {
