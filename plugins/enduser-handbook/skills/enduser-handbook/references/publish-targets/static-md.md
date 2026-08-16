@@ -299,13 +299,12 @@ rather than locating the line a second time.
 
 Both shipped adapters wire the index before their link-integrity gate, so a wiring halt below is
 convergent on re-run WHENEVER it names a form — and where one cannot be named it says so instead of
-promising convergence (the unnamed 1.10.0 fallback below is the case, and it can repeat verbatim).
+promising convergence (two below are that case and either can repeat verbatim: the unnamed 1.10.0
+fallback, and the ambiguous-container halt in the container-resolution branch, which reports a
+near-miss heading and deliberately prescribes no repair).
 For the named ones: a first run halts with instructions, the container and
 chapter line get added (by you, or by the user for a non-heading index), and the very next run's
-step 0 finds them and proceeds without re-halting. One named halt repairs a LABEL rather than
-adding a row — the ambiguous-container halt in the container-resolution branch below — so its
-re-run converges one step later: step 0 still finds the row absent, container resolution then
-matches the repaired heading, and the row is appended.
+step 0 finds them and proceeds without re-halting.
 
 These outcomes reuse the step-0 result computed above (`containerTitle`, `indexForm`,
 `multiple`) and cover a **grouped** entry only — step 0 above already decided the flat case:
@@ -566,25 +565,24 @@ unique across groups (see `manifest-discipline.md`):
   cost of doing so is a halt and the cost of missing one is a forked index. That comparison DETECTS
   a near miss and nothing more: it never selects a container to write into, so it cannot
   mis-target, and the write still needs the exact match that already came back empty.
-  - **One or more headings are a plausible spelling** ⇒ halt naming both spellings, with every
-    invisible codepoint in the heading written as its `U+XXXX` code point, so the operator can see
-    a difference the terminal will not render (the `'` delimiters around the heading are NOT
-    escaped, the same disclosed exposure the wrong-container halt's own found-title substitution
-    carries):
-    `Found no container titled '<group_title>' in <index_file>, but the heading '<heading>' may be the same section — rename the heading to match group_title, or change group_title, then re-run.`
-    Which remedy is right depends on what the two actually ARE, so decide that first:
-    - one section spelled two ways ⇒ either side may move, and whichever moves, make the two
-      byte-identical after NFC, because the next run's match is EXACT. A retyped title carrying an
-      emoji, a case difference or a no-break space lands back on zero and halts again.
-    - genuinely different sections ⇒ change `group_title`, or rename the heading to different
-      WORDS. Do NOT rename it to MATCH: that merges a section the operator curated into an
-      unrelated one. Only different words work, because this comparison folds away case, emphasis,
-      a wrapper, a leading or trailing decoration run and a trailing `{#anchor}`.
+  - **One or more headings are a plausible spelling** ⇒ halt, naming `group_title` and EVERY
+    heading that reads as a near miss rather than just the first, with every invisible codepoint in
+    each one written as its `U+XXXX` code point, so the operator can see a difference the terminal
+    will not render (the `'` delimiters around a heading are NOT escaped, the same disclosed
+    exposure the wrong-container halt's own found-title substitution carries):
+    `Found no container titled '<group_title>' in <index_file>, but these headings may render as the same section: <headings>. Decide whether they are one section or several, then curate <index_file> or the manifest accordingly and re-run — if you change group_title, change it on EVERY entry of this chapter's group, since it is group-scoped and changing it on this chapter alone halts on the conflicting-group_title gate instead.`
 
-    Convergent on those terms: once the two agree, or differ in words, the next run resolves and
-    appends without re-halting. The merge mistake is not kept silently either — the other group's
-    rows then sit under a heading that does not match their own `group_title`, which the
-    present-row placement halt above catches on the next run.
+    Prescribe no repair beyond that. Which edit is right turns on whether these are one section
+    spelled several ways or several sections that happen to render alike, and that is a question
+    about what the sections MEAN — the comparison above compares spellings and cannot reach it. A
+    halt that guessed would, in the over-rejected case this branch deliberately accepts, instruct
+    the operator to merge a section they curated into an unrelated one: precisely the outcome the
+    branch exists to prevent. Report and hand the file back, the way the multiple-candidate halt
+    below already does.
+
+    This halt names no form, and therefore promises no convergence: it is not self-clearing and
+    stays raised until someone who knows what the sections are decides. That is deliberate, and it
+    is the same trade the halt below makes.
   - **None is** ⇒ the create is safe: create a new `## <group_title>` heading matching the file's
     existing heading depth, then append the chapter line under it.
 

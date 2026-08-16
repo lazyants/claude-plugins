@@ -457,29 +457,26 @@ the one exception to "do all of these" — see its own conditional note below.
        comparison DETECTS a near miss and nothing more: it never selects a container to
        write into, so it cannot mis-target, and the write still needs the exact match
        that already came back empty.
-       - One or more headings are a plausible spelling — halt naming both spellings,
-         with every invisible codepoint in the heading written as its `U+XXXX` code
-         point, so the operator can see a difference the terminal will not render (the
-         `'` delimiters around the heading are NOT escaped, the same disclosed exposure
-         the wrong-container halt's own found-title substitution carries):
-         "Found no container titled '<group_title>' in <index_file>, but the heading '<heading>' may be the same section — rename the heading to match group_title, or change group_title, then re-run."
-         Which remedy is right depends on what the two actually ARE, so decide that
-         first:
-         - one section spelled two ways — either side may move, and whichever moves,
-           make the two byte-identical after NFC, because the next run's match is
-           EXACT. A retyped title carrying an emoji, a case difference or a no-break
-           space lands back on `zero` and halts again.
-         - genuinely different sections — change `group_title`, or rename the heading
-           to different WORDS. Do NOT rename it to MATCH: that merges a section the
-           operator curated into an unrelated one. Only different words work, because
-           this comparison folds away case, emphasis, a wrapper, a leading or trailing
-           decoration run and a trailing `{#anchor}`.
+       - One or more headings are a plausible spelling — halt, naming `group_title` and
+         EVERY heading that reads as a near miss rather than just the first, with every
+         invisible codepoint in each one written as its `U+XXXX` code point, so the
+         operator can see a difference the terminal will not render (the `'` delimiters
+         around a heading are NOT escaped, the same disclosed exposure the
+         wrong-container halt's own found-title substitution carries):
+         "Found no container titled '<group_title>' in <index_file>, but these headings may render as the same section: <headings>. Decide whether they are one section or several, then curate <index_file> or the manifest accordingly and re-run — if you change group_title, change it on EVERY entry of this chapter's group, since it is group-scoped and changing it on this chapter alone halts on the conflicting-group_title gate instead."
 
-         Convergent on those terms: once the two agree, or differ in words, the next run
-         resolves and appends without re-halting. The merge mistake is not kept silently
-         either — the other group's rows then sit under a heading that does not match
-         their own `group_title`, which the present-row placement halt above catches on
-         the next run.
+         Prescribe no repair beyond that. Which edit is right turns on whether these are
+         one section spelled several ways or several sections that happen to render
+         alike, and that is a question about what the sections MEAN — the comparison
+         above compares spellings and cannot reach it. A halt that guessed would, in the
+         over-rejected case this branch deliberately accepts, instruct the operator to
+         merge a section they curated into an unrelated one: precisely the outcome the
+         branch exists to prevent. Report and hand the file back, the way the
+         multiple-container halt below already does.
+
+         This halt names no form, and therefore promises no convergence: it is not
+         self-clearing and stays raised until someone who knows what the sections are
+         decides. That is deliberate, and it is the same trade the halt below makes.
        - None is — the create is safe: create one (`## <group_title>`, at the heading
          depth the file already uses for its top-level sections), then append the
          chapter line under it.
@@ -1057,16 +1054,29 @@ backtick inside it swallow the body (the writer refuses such a file outright).
 - Glossary link: see "Glossary backlink discipline" below for the exact target.
 - Handbook index link: the vault-root-relative path to `{{publish.index_file}}`, one
   terminal `.md` dropped, where that path is `relative(<vault-root>,
-  {{publish.index_file}})` — the SAME vault-root-relative coordinate the chapter link
-  above uses, never a BASENAME taken from a deeper index, which would resolve only
-  through the fragile suffix tier this adapter stopped emitting for chapter links in
-  1.8.0. Worked example (vault root `vault/`, `index_file: vault/handbook/INDEX.md`):
-  `[[handbook/INDEX|All chapters]]`. Root topology (`index_file` directly under
-  `<vault-root>`) collapses that path to the bare stem, so `vault/INDEX.md` yields
-  `[[INDEX|All chapters]]` — still the index's exact vault-root path, never a special
-  case, and the same collapse the chapter bullet above describes. This is the target
-  `assets/chapter-template.md`'s `{{handbook_index_link}}` placeholder takes, with
-  `{{handbook_index_label}}` as the display half after the pipe.
+  {{publish.index_file}})` with BOTH operands canonicalized first, by the "Path
+  canonicalization" procedure above — which is defined for an `index_file` whose file
+  does not exist yet, and which is why an index reached through a symlink lands on its
+  true vault-root position instead of the raw lexical path a naive `relative()` would
+  produce. Same discipline as `vaultRelChaptersDir`, and for the same reason. It is also
+  the SAME vault-root-relative coordinate the chapter link above uses, never a BASENAME
+  taken from a deeper index, which would resolve only through the fragile suffix tier
+  this adapter stopped emitting for chapter links in 1.8.0. Worked example (vault root
+  `vault/`, `index_file: vault/handbook/INDEX.md`): `[[handbook/INDEX|All chapters]]`.
+  Root topology (`index_file` directly under `<vault-root>`) collapses that path to the
+  bare stem, so `vault/INDEX.md` yields `[[INDEX|All chapters]]` — still the index's
+  exact vault-root path, never a special case, and the same collapse the chapter bullet
+  above describes. This is the target `assets/chapter-template.md`'s
+  `{{handbook_index_link}}` placeholder takes, with `{{handbook_index_label}}` as the
+  display half after the pipe.
+  - The form assumes `publish.index_file` NAMES A `.md` FILE, and the schema does not
+    require that — it constrains the value to a string and nothing more. For an
+    extensionless index the drop removes nothing, and the target then addresses
+    `<stem>.md`: a different note, or no note at all. Do not emit it. The index is one
+    OPTIONAL member of the Related block rather than a required one, so on such a profile
+    leave the index link out and meet the two-link floor with siblings and glossary
+    entries — an omitted link costs a navigation convenience, an emitted wrong one sends
+    the reader to another note and looks correct while doing it.
 - The pipe `|` separates target from display; omit it when display equals target.
 - The target is vault-root-relative, never a bare basename — grouping DOES change it
   (the `<group>` segment rides on the joined path), unlike the pre-1.8.0 bare `<slug>`

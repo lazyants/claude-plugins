@@ -1995,8 +1995,12 @@ test('#351(b) scope, pinned honestly: the invisible-label refusal covers the NES
   // The adapters' prose says exactly this, so the asymmetry cannot be read as an oversight in
   // either direction. Nested list: refused, whole file. Headings: a `## ` container carrying the
   // same character is NOT refused — findContainer simply fails to match it and the adapter creates
-  // a second, pixel-identical heading. That is pre-existing behaviour this change does not touch;
-  // closing it needs a new findContainer outcome both adapters would have to branch on.
+  // a second, pixel-identical heading. Still true for an INVISIBLE character after #476: that
+  // change made the create conditional on a near-miss re-read the consuming model performs, and
+  // invisible characters sit deliberately outside what that re-read recognizes, because ZWNJ/ZWJ
+  // are required INSIDE ordinary words in Persian, Hindi and other scripts, so folding them away
+  // would halt a correctly-spelled handbook. This fixture's behaviour is therefore unchanged, and
+  // `findContainer` still returns a plain `zero` — #476 added no outcome here and needed none.
   const zwsp = String.fromCharCode(0x200b);
   const nested = ['# S', '', `- Ad${zwsp}min`, '  - [A](a.md)', ''];
   assert.deepEqual(wireNestedListChapter(nested, 'Admin', '[B](b.md)'), { kind: 'not-a-list' });
