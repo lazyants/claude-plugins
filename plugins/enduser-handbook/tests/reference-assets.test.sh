@@ -3981,7 +3981,18 @@ has_joined_in_section "page-identity: step 4 names why an unscoped page-wide exa
   'satisfied by the same string anywhere on the page'
 has_joined_in_section "page-identity: step 4 names the non-control label class that earns no matrix row" \
   "$PAGEID" '## The principle' \
-  'Column headers and field labels can also be quoted'
+  'A column header or a field label can be quoted by a chapter just as a button is'
+# The class is INERTNESS, not element type: a sortable header and a <label> that focuses its control
+# are clickable, so they ARE triggers and DO earn a row. #477's own worked example sorts by a column.
+has_joined_in_section "page-identity: step 4 keys the no-row case on INERTNESS, not on element type" \
+  "$PAGEID" '## The principle' \
+  'not sortable, not a `<label>` that focuses its control'
+has_joined_in_section "page-identity: step 4 states a sortable header IS a trigger and earns its row" \
+  "$PAGEID" '## The principle' \
+  'a sortable header is a trigger, not an exception'
+has_joined_in_section "page-identity: step 4 owes the assertion whether or not the label earned a row" \
+  "$PAGEID" '## The principle' \
+  'whether or not it earned a row'
 # Scoping alone is not identity: the shipped helpers take the FIRST match, so two rows both reading
 # `Edit` leave a region-scoped assertion green when only the narrated one is renamed.
 has_joined_in_section "page-identity: step 4 covers a label that REPEATS inside the scoped region" \

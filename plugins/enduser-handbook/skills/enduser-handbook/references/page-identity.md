@@ -57,12 +57,14 @@ For every screenshot the chapter will embed, the capture spec must, immediately 
    fixed row set: it goes red when the list legitimately grows, and it stays green when one row
    loses the label while another gains it.
 
-   **Cover the labels that are not controls.** Column headers and field labels can also be
-   quoted by a chapter, and neither is clickable or readable as a status, so neither earns a row
-   in the coverage matrix `completeness-gate.md` builds — that table is indexed by interactive
-   trigger. Pin every string the chapter quotes, whatever kind of element carries it. Tab
-   captions and empty-state copy usually do earn a matrix row, and still need the same
-   exact-text assertion: a matrix row records a label, it does not assert one.
+   **Cover the labels that are not controls.** A column header or a field label can be quoted by
+   a chapter just as a button is. Where it is inert — not sortable, not a `<label>` that focuses
+   its control, not readable as a status — no row of the coverage matrix `completeness-gate.md`
+   builds names it, because that table is indexed by interactive trigger. Where it is not inert
+   it earns a row like any other trigger; a sortable header is a trigger, not an exception. The
+   assertion is owed either way: pin every string the chapter quotes, whatever element carries it
+   and whether or not it earned a row. Tab captions and empty-state copy usually do earn one, and
+   a matrix row records a label, it does not assert one.
 
 If any of these fail, the run must **fail loudly** — never fall back to capturing whatever is on
 screen. A wrong screenshot is worse than no screenshot, because the chapter will ship it.
