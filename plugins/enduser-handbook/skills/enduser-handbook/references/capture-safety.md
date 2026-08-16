@@ -116,9 +116,23 @@ fails silently (there is nothing to mask, so even the coverage assert stays gree
 clear the frame's content before the shot, run the same mask+scan inside each accessible
 frame, or keep the frame out of the captured region.
 
+A `<canvas>` is the same shape one step further out, and its remedies are
+different. What a canvas paints is a **bitmap**: there is no DOM text node to
+collect, no form-control value, and no element inside it to name in a selector.
+Listing the `<canvas>` itself masks nothing — a canvas's children are fallback
+content and paint nothing — so the mask has nothing to overwrite, the
+leak-assert has nothing to match, and the coverage assert stays satisfied by
+whatever you *did* list. A document preview rendered to a canvas (PDF.js renders
+every page that way), a canvas-mode data grid, or a signature pad therefore
+ships legible in the PNG with the run green. There is no "scan it yourself"
+here, because a canvas hosts no document: clear or overwrite the canvas before
+the shot, replace it with a placeholder element, or keep it out of the captured
+region. The reference helper refuses a region containing one unless you opt out
+explicitly, the same way it refuses a framed document.
+
 **Always eyeball masked and confirmation-dialog shots before publishing** — that is how the
-bleed-through and framed-document cases above get caught when the subtree-scoped assert
-passes but the frame still leaks.
+bleed-through, framed-document and canvas cases above get caught when the subtree-scoped
+assert passes but the frame still leaks.
 
 ## Disclosure in prose
 

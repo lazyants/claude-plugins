@@ -4930,6 +4930,99 @@ has "capture.example.spec.ts: the overview step says why the container assertion
 has "capture.example.spec.ts: the overview step warns that a role name match accepts an aria-label" \
   'a role `name` match would also accept an aria-label' "$SPEC"
 
+echo "== #565: the <canvas> scan carve-out is disclosed AND enforced =="
+# maskAndAssert's scan corpus is DOM text nodes + form-control values + placeholders. A <canvas>
+# contributes to none of them, while page.screenshot composites its pixels — so canvas-rendered PII
+# is photographed, unmaskable (there is no element inside it to list, and setting textContent on the
+# <canvas> paints nothing, since canvas children are fallback content) and unscannable. That is
+# #472's silent-half shape one element class over, so it gets #472's answer: refuse it, with one
+# explicit opt-out.
+#
+# The carve-out has the SAME THREE write sites #472 has — the contract doc, the asset docblock, and
+# capture-safety.md's masking rules. All three are pinned below; correcting one and leaving the
+# others is the recurring drift on this plugin.
+CS_MASK_SECTION='### Mask reproducibly, then prove the mask held'
+# --- Site 1: the contract doc. The count is load-bearing prose — it is what tells a reader the list
+# is complete — and a stale count is exactly how this list last went wrong (#472 left "Four things"
+# behind, pinned absent above). So pin the superseded value absent too.
+hasnt "capture-spec-helpers: stale 'Five things' carve-out count retired (#565)" \
+  '**Five** things the automated scan' "$REFS/capture-spec-helpers.md"
+has_joined_in_section "capture-spec-helpers: the carve-out count is now six (#565)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  '**Six** things the automated scan does **not**'
+has_joined_in_section "capture-spec-helpers: the carve-out list names the canvas (#565)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  '**anything a `<canvas>` paints**'
+has_joined_in_section "capture-spec-helpers: the canvas carve-out names its opt-out (#565)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'unless the caller passes `allowUnscannedCanvas: true`'
+# The frame remedy does NOT transfer. A canvas hosts no document, so "scan it yourself per frame"
+# has no counterpart — a paragraph that copied the frame remedies would send an author after a
+# remedy that cannot exist.
+has_joined_in_section "capture-spec-helpers: the canvas remedy is not the frame remedy (#565)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'there is no "scan it yourself per canvas"'
+# Listing the <canvas> in `selectors` paints nothing but DOES tag it, and a tagged element is
+# excluded from the SCAN. Admitting it on that basis would be a false green, so the doc says the tag
+# changes nothing about the pixels.
+has_joined_in_section "capture-spec-helpers: a listed canvas is documented as still counted (#565)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'still counts: tagging it removes it from the scan'
+# The refusal names <canvas> only. Without this sentence the paragraph reads as a general
+# painted-pixels gate, which it is not — an <img>/<video> is photographed and unscanned as well.
+has_joined_in_section "capture-spec-helpers: the refusal's element scope is stated, not implied (#565)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'The refusal names `<canvas>` only'
+# "this ONE carve-out is enforced" was true with one enforced carve-out and false with two. Joined
+# because the phrase straddles the file's hard wrap.
+hasnt_joined "capture-spec-helpers: the single-enforced-carve-out claim is retired (#565)" \
+  'That is why this one carve-out' "$REFS/capture-spec-helpers.md"
+# --- Site 2: the asset docblock + the code. In a .ts file every needle must sit on ONE physical
+# line and use the line-based helpers: the joined helpers collapse whitespace and nothing else, so a
+# needle spanning a JSDoc wrap swallows the next line's ` * ` and passes by construction.
+has "capture-helpers: the scan carve-out names the canvas (#565)" \
+  'nor ANYTHING A <canvas> PAINTS' "$CH"
+hasnt "capture-helpers: the single-enforced-carve-out claim is retired (#565)" \
+  'this carve-out alone is ENFORCED' "$CH"
+has "capture-helpers: MaskOptions carries the canvas opt-out (#565)" \
+  'allowUnscannedCanvas?: boolean;' "$CH"
+# These two pin the count's IMPLEMENTATION SHAPE, which the equivalent #472 frame lines are not
+# pinned on — a deliberate asymmetry, not an oversight. The node:test layer that proves the same
+# behaviour is OPTIONAL in this suite (gated on `command -v node`), so these are the
+# environment-independent floor beneath it, exactly as the #471 redirect-hop pins are. The cost is
+# that refactoring the count needs these two updated with it; that is the intended trade.
+has "capture-helpers: the canvas count is taken where the DOM access is (#565)" \
+  "const CANVAS_HOST = 'canvas';" "$CH"
+# Both terms of the count matter and fail differently: queryDeep covers descendants AND open shadow
+# roots, while the .matches() term covers the region ITSELF being the canvas — querySelectorAll
+# returns descendants only, so without it a canvas-scoped locator passes with the run green.
+has "capture-helpers: the canvas count covers the region itself and every descendant (#565)" \
+  '(root.matches(CANVAS_HOST) ? 1 : 0) + queryDeep(root, CANVAS_HOST).length;' "$CH"
+has "capture-helpers: maskAndAssert refuses an unscanned canvas unless opted out (#565)" \
+  'if (canvases > 0 && !allowUnscannedCanvas) {' "$CH"
+# PLACEMENT, not mere presence — a `has` on the refusal block cannot see it move. Past the coverage
+# assert, a region holding a canvas AND a drifted selector count reports "the mask missed a target",
+# sending the author after selector drift that is not the cause.
+L_CANVAS_REFUSAL="$(line_of 'if (canvases > 0 && !allowUnscannedCanvas) {' "$CH")"
+L_COVERAGE_ASSERT="$(line_of 'if (matched !== expectedCount) {' "$CH")"
+assert_line_before "capture-helpers: the canvas refusal precedes the coverage assert (#565)" \
+  "$L_CANVAS_REFUSAL" "$L_COVERAGE_ASSERT"
+# --- Site 3: the engine-agnostic masking rules a human reads before capturing.
+has_joined_in_section "capture-safety: the masking rules name the canvas gap (#565)" \
+  "$REFS/capture-safety.md" "$CS_MASK_SECTION" \
+  'What a canvas paints is a **bitmap**'
+# --- Executable coverage. Before #565 maskAndAssert had NO executable test at all: every guarantee
+# it makes was pinned by grep only, and a grep proves text is PRESENT, never that it WORKS. The
+# two-sided mutation #565 claims — RED on a region containing a canvas, GREEN on a legitimate
+# capture — is not expressible as a grep, so it is gated by node:test. These two pins only keep the
+# seam wired; the assertions themselves live in tests/mask-and-assert.test.mjs.
+has "mask-and-assert seam test drives the REAL maskAndAssert (#565)" \
+  "import { maskAndAssert } from '../skills/enduser-handbook/assets/capture-helpers.playwright.ts'" \
+  "$TEST_DIR/mask-and-assert.fixture.mjs"
+has "mask-and-assert seam test keeps the GREEN half of the mutation (#565)" \
+  'a legitimate masked capture stays green after the refusal lands' \
+  "$TEST_DIR/mask-and-assert.test.mjs"
+
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
 # command and handed the assertion the leftover text. It kept passing while no longer checking the

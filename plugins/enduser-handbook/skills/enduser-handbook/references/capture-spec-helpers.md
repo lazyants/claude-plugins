@@ -143,7 +143,7 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   scan string by **joining per-node values with a newline** (not one concatenated `textContent`,
   which fuses neighbouring cells into false tokens), then fail if any leak pattern matches **or** if
   the matched-mask count differs from the expected count (fail-closed coverage for unmatchable PII).
-  Both passes recurse into **open** shadow roots. **Five** things the automated scan does **not**
+  Both passes recurse into **open** shadow roots. **Six** things the automated scan does **not**
   cover — they all fall to the human eyeball-the-frame step as the backstop: **closed**
   shadow roots (inaccessible to script — mask inside the component or open the root for capture); **CSS
   pseudo-element content** (`::before`/`::after` `content:`, painted into the shot but not a DOM text
@@ -151,13 +151,15 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   replacement-rendering, but it is **not** a DOM text node — so the text/value/placeholder corpus
   misses it exactly as it misses pseudo-content; a successfully loaded image paints no `alt`);
   **genuinely non-rendered attributes** (`title`/`aria-label`, never painted into a static
-  screenshot); and **the content of a same-origin `<iframe>`**, which is a different class from the
-  four above because it *is* ordinary DOM text — just in another document. Neither the mask nor the
-  scan crosses a document boundary (a tree walk rooted in the parent stops at the `<iframe>` element,
-  which has no text children), while the screenshot composites the child document's pixels. Framed
-  content is therefore photographed but never masked and never scanned, and the dangerous half
-  of that is **silent**: PII the author did *not* list has nothing to mask, no text node to collect
-  and no pattern to match, so neither pass has anything to object to. That is why this one carve-out
+  screenshot); **the content of a same-origin `<iframe>`**, which is a different class from the
+  four above because it *is* ordinary DOM text — just in another document; and **anything a
+  `<canvas>` paints**, a class of its own again — a bitmap with no DOM representation at all.
+  Take the framed case first: neither the mask nor the scan crosses a document boundary (a tree walk
+  rooted in the parent stops at the `<iframe>` element, which has no text children), while the
+  screenshot composites the child document's pixels. Framed content is therefore photographed but
+  never masked and never scanned, and the dangerous half of that is **silent**: PII the author did
+  *not* list has nothing to mask, no text node to collect and no pattern to match, so neither pass
+  has anything to object to. That is why this carve-out
   is **enforced, not merely disclosed**: the helper counts every element in the region that hosts a
   **nested browsing context** — `<iframe>`, `<frame>`, `<object>`, `<embed>`, all of which can load a
   document of their own on exactly these terms — and **throws** when it finds any, checked **before**
@@ -177,6 +179,24 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   selector matching only inside the frame catches nothing and trips the mask-**coverage** assert,
   while PII the author never listed ships in the PNG with the run green. Take the opt-out only once
   you have proven those documents carry no PII. (Issue #472.)
+  **The `<canvas>` carve-out is enforced the same way, with different remedies.** A `<canvas>` is
+  composited into the PNG exactly like everything else, but what it paints is a **bitmap**:
+  `fillText` output is not a DOM text node, not a form-control value, and not reachable by any
+  selector. So it is silent in both directions, the way a framed document is — there is nothing for
+  `selectors` to match (listing the `<canvas>` itself only sets its `textContent`, and a canvas's
+  children are fallback content that paints nothing), no string for the leak patterns to fire on,
+  and the coverage assert stays satisfied by whatever *was* listed. The helper therefore counts
+  every `<canvas>` in the region — light DOM and **open** shadow roots, the region itself
+  included — and **throws** unless the caller passes `allowUnscannedCanvas: true`. A canvas the
+  caller *did* list in `selectors` still counts: tagging it removes it from the scan without
+  changing pixels no mask could overwrite. What differs from the framed case is the remedy — there
+  is no "scan it yourself per canvas", because a canvas hosts no document and carries no text to
+  scan. Clear or overwrite the canvas before the shot, replace it with a placeholder element, or
+  keep it out of the captured region. The refusal names `<canvas>` only: pixels an `<img>` or a
+  `<video>` brings into the frame are photographed and unscanned as well, and stay the human
+  eyeball-the-frame step's job. The case this is for is a document preview rendered to a canvas
+  (PDF.js renders every page that way), a canvas-mode data grid, or a signature pad — where a whole
+  document body, not a bounded label, rides into the shot. (Issue #565.)
 
 ## The spec skeleton
 

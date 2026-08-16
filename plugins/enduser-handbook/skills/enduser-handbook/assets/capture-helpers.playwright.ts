@@ -793,6 +793,14 @@ export interface MaskOptions {
    * documents carry no PII.
    */
   allowUnscannedFrames?: boolean;
+  /**
+   * Opt out of the unscanned-canvas refusal (issue #565). What a `<canvas>` paints is a BITMAP —
+   * composited into the PNG like everything else, but the painted pixels are not a DOM text node and
+   * not a form-control value, and no element exists inside the canvas for a selector to name, so the
+   * shot carries content neither pass can reach. See the SCAN CARVE-OUT below for why listing the
+   * `<canvas>` itself does not close the gap. Set this only once you have proven it paints no PII.
+   */
+  allowUnscannedCanvas?: boolean;
 }
 
 /**
@@ -822,29 +830,55 @@ export interface MaskOptions {
  * content (::before/::after `content`), which IS painted into the screenshot; nor the `alt` text a
  * broken/failed <img> paints into the frame (browser replacement-rendering — painted, but not a DOM
  * text node, so the same carve-out as pseudo-content; a loaded image paints no alt); nor genuinely
- * non-rendered attributes (title/aria-label, never painted); nor THE CONTENT OF A SAME-ORIGIN
+ * non-rendered attributes (title/aria-label, never painted); nor ANYTHING A <canvas> PAINTS (issue
+ * #565); nor THE CONTENT OF A SAME-ORIGIN
  * <iframe> (issue #472). That last one is a different class from the others: it IS ordinary DOM
  * text, only in another document, and neither pass crosses a document boundary — queryDeep and the
  * TreeWalker both stop at the <iframe> element, which has no text children, while page.screenshot
  * composites the child document's pixels. PII the author did NOT list is the silent half — nothing
  * to mask, no text node to collect, no pattern to match, so neither pass has anything to object to.
- * That is why this carve-out alone is ENFORCED rather than only documented: a nested browsing
+ * That is why this carve-out is ENFORCED rather than only documented: a nested browsing
  * context in the scanned region — <iframe>, <frame>, <object> or <embed>, all of which CAN load a
  * document of their own on the same terms — THROWS unless the caller passes
  * `allowUnscannedFrames: true`. Mask the framed content before the shot, scan it yourself per frame,
  * or keep it out of the region.
- * WHAT THE REFUSAL CAN SEE, exactly: the light DOM and OPEN shadow roots of the subtree it was
- * handed, at the moment it is called. A frame in a CLOSED shadow root, a frame painted over the
- * captured rectangle from OUTSIDE that subtree, and a frame attached AFTER the call (the skeleton
- * takes more than one shot off a single mask) are all still uncounted. Past the opt-out the old
- * behaviour is what remains: a selector matching only inside the frame catches nothing and trips the
- * coverage assert, while unlisted PII ships in the PNG with the run green.
+ * THE <canvas> CARVE-OUT IS ENFORCED THE SAME WAY, for the same reason and with DIFFERENT remedies
+ * (issue #565). It is silent in both directions too: what a canvas paints is a bitmap, so there is
+ * no element inside it for `selectors` to match, and listing the <canvas> itself only sets its
+ * textContent — canvas children are fallback content, so that paints nothing; the scan never sees
+ * what was painted, so `patterns` cannot fire on it (a canvas's FALLBACK text is an ordinary text
+ * node and IS scanned — it is just not what the canvas shows); and the coverage assert is satisfied
+ * by whatever WAS listed.
+ * A <canvas> in the scanned region therefore THROWS unless the caller passes
+ * `allowUnscannedCanvas: true`. What differs from the frame case is the remedy: there is no "scan it
+ * yourself per canvas", because a canvas hosts no document and carries no text to scan — clear or
+ * overwrite the canvas before the shot, replace it with a placeholder element, or keep it out of the
+ * region. A canvas the caller DID list in `selectors` is still counted, because tagging it excludes
+ * it from the scan without changing pixels the mask could never overwrite. This refusal names
+ * <canvas> only: pixels an <img> or a <video> brings into the frame are photographed and unscanned
+ * as well, and stay the human eyeball-the-frame step's job.
+ * WHAT THESE REFUSALS CAN SEE, exactly: the light DOM and OPEN shadow roots of the subtree they were
+ * handed, at the moment they are called. A frame or canvas in a CLOSED shadow root, one painted over
+ * the captured rectangle from OUTSIDE that subtree, and one attached AFTER the call (the skeleton
+ * takes more than one shot off a single mask) are all still uncounted. Past `allowUnscannedFrames`
+ * the old behaviour is what remains: a selector matching only inside the frame catches nothing and
+ * trips the coverage assert, while unlisted PII ships in the PNG with the run green. Past
+ * `allowUnscannedCanvas` there is no equivalent half-signal at all — nothing inside a canvas was
+ * ever selectable, so the coverage assert has nothing to trip on and the pixels simply ship.
  * All of these surfaces rely on the human eyeball-the-frame step (capture-safety.md) as the
  * backstop — the scan is defense-in-depth, not a complete proof.
  */
 export async function maskAndAssert(
   page: Page,
-  { dialog, selectors, placeholder, patterns, expectedCount, allowUnscannedFrames = false }: MaskOptions,
+  {
+    dialog,
+    selectors,
+    placeholder,
+    patterns,
+    expectedCount,
+    allowUnscannedFrames = false,
+    allowUnscannedCanvas = false,
+  }: MaskOptions,
 ): Promise<void> {
   const dialogHandle = await dialog.elementHandle();
   if (dialogHandle === null) {
@@ -854,7 +888,7 @@ export async function maskAndAssert(
   // Step 1 + 3 run in one browser evaluate: mask + tag the targets, then collect scan parts from the
   // UNMASKED remainder. Returns the matched count for the coverage assert, plus the framed-document
   // count for the frame refusal (issue #472).
-  const { matched, scanParts, frames } = await dialogHandle.evaluate(
+  const { matched, scanParts, frames, canvases } = await dialogHandle.evaluate(
     (root: Element, args: { selectors: string[]; placeholder: string }) => {
       const ph = args.placeholder;
       const MASKED_ATTR = 'data-handbook-masked';
@@ -993,7 +1027,18 @@ export async function maskAndAssert(
       const frameCount =
         (root.matches(FRAME_HOSTS) ? 1 : 0) + queryDeep(root, FRAME_HOSTS).length;
 
-      return { matched: matchedCount, scanParts: parts, frames: frameCount };
+      // --- Canvas count (issue #565): the same shape as the frame count above, and both of its
+      // terms are here for the reasons given there — do not restate them, they drift. What is
+      // specific to a <canvas> is WHY it needs counting at all: what it paints is a BITMAP, so
+      // ctx.fillText output is not a DOM text node, not a form-control value, and not reachable by
+      // any selector, while page.screenshot composites its pixels like everything else. A canvas the
+      // caller listed in `selectors` is deliberately still counted — the MASKED_ATTR tag excludes it
+      // from the scan, which changes nothing about pixels no mask could overwrite. ---
+      const CANVAS_HOST = 'canvas';
+      const canvasCount =
+        (root.matches(CANVAS_HOST) ? 1 : 0) + queryDeep(root, CANVAS_HOST).length;
+
+      return { matched: matchedCount, scanParts: parts, frames: frameCount, canvases: canvasCount };
     },
     { selectors, placeholder },
   );
@@ -1008,6 +1053,21 @@ export async function maskAndAssert(
         'never scanned — neither pass crosses a document boundary. Mask or remove the framed ' +
         'content before the shot, scan it yourself per frame, keep the frame out of the region, or ' +
         'pass allowUnscannedFrames: true once you have proven those documents carry no PII.',
+    );
+  }
+
+  // Step 2b: refuse a region that paints a <canvas> (issue #565). Placed before the coverage assert
+  // for the same reason as the frame refusal: naming the canvas points at the cause, where a
+  // coverage failure would misdirect at selector drift. The remedies differ — a canvas hosts no
+  // document, so "scan it yourself per frame" has no counterpart here.
+  if (canvases > 0 && !allowUnscannedCanvas) {
+    throw new Error(
+      `maskAndAssert: the captured region contains ${canvases} <canvas> element(s). Whatever a ` +
+        'canvas paints is a bitmap — photographed into the shot, but never masked and never ' +
+        'scanned: the painted pixels are not a DOM text node and there is no element inside the ' +
+        'canvas to list, so listing the <canvas> in selectors paints nothing over it. Clear or ' +
+        'overwrite the canvas before the shot, replace it with a placeholder element, keep it out ' +
+        'of the region, or pass allowUnscannedCanvas: true once you have proven it paints no PII.',
     );
   }
 
