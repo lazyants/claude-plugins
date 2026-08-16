@@ -1010,9 +1010,14 @@ fail it, and an emoji beside a nav heading is ordinary curation rather than an e
 near-miss check in the container-resolution branch
 above now HALTS on the spellings it recognizes instead of creating beside them, and its second
 compare folds the UNSAFE invisible characters as well, so an invisible character inside the label is
-no longer a residual as a class — what remains is the module's DELIBERATE ABSENCES, the format
-characters it spares because they occur inside real words, plus the astral TAG block its own SCOPE
-note excludes. The other remainder is any
+no longer a residual as a class — though it does not vanish, and what is left divides by REASON
+rather than by character. The module's word-internal absences (ZWNJ/ZWJ, and the Arabic, Syriac and
+Mongolian format characters) are spared because they occur inside ordinary words. U+2028/U+2029 are
+absent from that same set for an UNRELATED reason — the nested-list writer answers them with a
+better `unwritable` diagnosis — and that reason does not reach the headings path, so a heading
+carrying one still returns zero and still gets a duplicate created beside it; the line-break class
+is disclosed separately above. The astral TAG block sits outside the module's own BMP-only SCOPE
+note. The other remainder is any
 rendered equivalence the model fails to NOTICE. That one is keyed on RECOGNITION, not
 on the list: the list is illustrative and the rule past it is to err toward halting, so what stays
 open is not what the list omits but what goes unnoticed, and a heading nobody spots as a near miss

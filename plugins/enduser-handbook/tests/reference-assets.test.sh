@@ -4561,11 +4561,20 @@ ZERO_CLASS_DISCLOSURE='the gap it leaves is a CLASS rather than one exotic chara
 # an equivalence no list member names and the catch-all nonetheless halts on.
 ZERO_CLASS_REMAINDER='remainder is any rendered equivalence the model fails to NOTICE'
 # Round 4: the invisible half of the remainder NARROWS once the near-miss scan folds the unsafe set.
-# What is left is not "an invisible character" but specifically the module's DELIBERATE ABSENCES —
-# ZWNJ/ZWJ and the format characters that occur inside ordinary words — plus the astral TAG block
-# the module's own SCOPE note excludes. Pinned so a later edit cannot quietly re-widen the
-# disclosure back to the whole class it no longer describes.
-ZERO_INVISIBLE_REMAINDER='what remains is the module'"'"'s DELIBERATE ABSENCES'
+# Round 5 (ped-ant, second pass): the first cut of that narrowing was WRONG — it described every
+# deliberate absence as word-internal, which is true of ZWNJ/ZWJ and false of U+2028/U+2029, and so
+# silently dropped a reachable class. The module gives them a different reason (`chapter-paths.mjs`
+# "THREE deliberate ABSENCES": the nested-list writer answers them with a better `unwritable`
+# diagnosis) and that reason does not reach the HEADINGS path at all. Measured against the shipped
+# module: `findContainer(['## Other', '## Ad<U+2028>min'], 'Admin')` returns `zero`, and
+# `isPlainLabel` ACCEPTS a U+2028 label — so it is outside the set the second compare cites and the
+# duplicate really is still created.
+#
+# So the remainder is pinned on its ORGANIZING PRINCIPLE (it divides by reason, not by character)
+# plus the one slice whose reason is easiest to get wrong. A future edit that re-collapses these
+# into "the word-internal ones" goes red.
+ZERO_INVISIBLE_REMAINDER='what is left divides by REASON'
+ZERO_LINESEP_RESIDUAL='that reason does not reach the headings path'
 has_joined_in_section "static-md: the headings-form residual is disclosed as a CLASS, not one character" \
   "$SMD" '### Nested-list automation limits' \
   "$ZERO_CLASS_DISCLOSURE"
@@ -4584,6 +4593,12 @@ has_joined_in_section "static-md: the invisible remainder narrows to the module'
 has_joined_in_section "obsidian-vault: the invisible remainder narrows to the module's deliberate absences" \
   "$OMD" '### Nested-list automation limits' \
   "$ZERO_INVISIBLE_REMAINDER"
+has_joined_in_section "static-md: U+2028/U+2029 stay in the residual, with their own reason" \
+  "$SMD" '### Nested-list automation limits' \
+  "$ZERO_LINESEP_RESIDUAL"
+has_joined_in_section "obsidian-vault: U+2028/U+2029 stay in the residual, with their own reason" \
+  "$OMD" '### Nested-list automation limits' \
+  "$ZERO_LINESEP_RESIDUAL"
 # The count sentence itself was never pinned. It is now, in both adapters, because the widening
 # above is exactly the kind of edit that silently turns "Three" into a wrong number.
 has_in_section "static-md: the residual COUNT sentence still reads three" \
