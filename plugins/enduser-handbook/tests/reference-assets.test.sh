@@ -368,6 +368,57 @@ hasnt_joined() {
   fi
 }
 
+# Same as hasnt_joined, but for a CODE file (.ts/.mjs/.sh) rather than markdown.
+#
+# MEASURED, not theoretical: hasnt_joined is wrap-tolerant for markdown ONLY. count_joined_fixed
+# collapses whitespace and nothing else, so in a comment block the next line's own marker lands
+# inside the joined text — a JSDoc wrap yields 'all of which load a * document of their own' and a
+# `//` wrap yields '... once the * // deny step clears it'. A needle that straddles such a wrap then
+# matches nothing and the pin passes on text that is plainly present: green by construction, which is
+# the same silent no-op gate hasnt_joined itself was written to prevent. Verified by mutation on
+# capture-guard-policy.mjs — reintroducing the retired #470 sentence on ONE line was caught, and
+# reintroducing the identical sentence across a `//` wrap was MISSED.
+#
+# So strip a leading comment marker from each line before joining. Additive on purpose: no existing
+# hasnt_joined call changes behaviour, only the code-file negatives are re-keyed to this.
+count_joined_code_fixed() {
+  local needle="$1" file="$2"
+  if [ -z "$needle" ] || [ ! -f "$file" ]; then printf '0\n'; return; fi
+  awk -v needle="$needle" '
+    {
+      line = $0
+      sub(/^[ \t]*(\/\/+|\/\*+|\*+\/?|#+)[ \t]?/, "", line)
+      buf = buf line " "
+    }
+    END {
+      gsub(/[ \t]+/, " ", buf)
+      sub(/^ /, "", buf)
+      n = 0
+      start = 1
+      nlen = length(needle)
+      blen = length(buf)
+      while (start <= blen) {
+        p = index(substr(buf, start), needle)
+        if (p == 0) break
+        n++
+        start = start + p + nlen - 1
+      }
+      print n
+    }
+  ' "$file"
+}
+
+hasnt_joined_code() {
+  local msg="$1" needle="$2" file="$3" c
+  if [ ! -f "$file" ]; then bad "$msg (file not found: $(basename "$file"))"; return; fi
+  c="$(count_joined_code_fixed "$needle" "$file")"
+  if [ "$c" -eq 0 ]; then
+    ok "$msg"
+  else
+    bad "$msg ('$needle' still in $(basename "$file") — $c occurrence(s) in the joined comment text)"
+  fi
+}
+
 # Line number of the first match of a fixed string, or empty if absent.
 line_of() {
   grep -nF -- "$1" "$2" 2>/dev/null | head -n1 | cut -d: -f1
@@ -948,6 +999,40 @@ has_joined_in_section "self-test: a hard-wrapped sentence is found once the sect
   "$SELFTEST_DIR/joined-wrapped.md" '## Target' \
   "files for which the fixed-probe writer call returns \`kind === 'inserted'\` and which hold exactly one selected-target match, that match lying outside the writer-recognized leading-frontmatter span."
 
+# Self-test for hasnt_joined_code, mirroring the wrap self-test above. Guards the exact hole measured
+# on capture-guard-policy.mjs: a sentence split across a `//` wrap must still be FOUND, so a pin
+# built on it cannot pass by construction.
+#
+# The fixture is a FILE, not this script. A self-test that scans $0 for its own needle finds the
+# needle in its own source and reports a false result — the same self-reference that makes a
+# self-scanning `hasnt` unimplementable. Measured: the first draft of this block did exactly that.
+cat > "$SELFTEST_DIR/joined-comment-wrapped.mjs" <<'EOF'
+// a claim deliberately split
+// across a comment wrap
+/*
+ * and a second one split
+ * across a JSDoc wrap
+ */
+EOF
+if [ "$(count_joined_code_fixed 'a claim deliberately split across a comment wrap' "$SELFTEST_DIR/joined-comment-wrapped.mjs")" -eq 1 ]; then
+  ok "self-test: a //-wrapped sentence is found once the comment markers are stripped"
+else
+  bad "self-test: count_joined_code_fixed missed a sentence split across a // wrap"
+fi
+if [ "$(count_joined_code_fixed 'and a second one split across a JSDoc wrap' "$SELFTEST_DIR/joined-comment-wrapped.mjs")" -eq 1 ]; then
+  ok "self-test: a JSDoc-wrapped sentence is found once the comment markers are stripped"
+else
+  bad "self-test: count_joined_code_fixed missed a sentence split across a JSDoc wrap"
+fi
+# The discriminating half: the markdown-only joiner must MISS both, or the new helper is redundant
+# and the hole it was written for was never real.
+if [ "$(count_joined_fixed 'a claim deliberately split across a comment wrap' "$SELFTEST_DIR/joined-comment-wrapped.mjs")" -eq 0 ] \
+  && [ "$(count_joined_fixed 'and a second one split across a JSDoc wrap' "$SELFTEST_DIR/joined-comment-wrapped.mjs")" -eq 0 ]; then
+  ok "self-test: the markdown-only joiner demonstrably misses both comment-wrapped sentences"
+else
+  bad "self-test: count_joined_fixed matched across a comment marker — hasnt_joined_code would be redundant"
+fi
+
 # 2/3. NEGATIVES — the sentence inside a fenced code block must NOT satisfy the pin, in BOTH fence
 #    spellings. The tilde case is the one that discriminates: a backtick-only collector answers
 #    "not found" for the backtick fixture too, so the backtick fixture alone cannot tell a correct
@@ -1317,7 +1402,7 @@ hasnt_joined "capture-spec-helpers: GET/HEAD allow no longer gated on the deny s
 hasnt_joined "capture-spec-helpers: fall-through allow no longer gated on the deny step alone (#470)" \
   'a GET/HEAD that cleared the deny step is still admitted unconditionally' \
   "$REFS/capture-spec-helpers.md"
-hasnt_joined "capture-guard-policy.mjs: header no longer gates the allow on the deny step alone (#470)" \
+hasnt_joined_code "capture-guard-policy.mjs: header no longer gates the allow on the deny step alone (#470)" \
   'A GET/HEAD is ADMITTED unconditionally once the deny step clears it' \
   "$ASSETS/lib/capture-guard-policy.mjs"
 hasnt_joined "capture-guard-policy.d.mts: decideRoute doc no longer gates the allow on the deny step alone (#470)" \
@@ -1377,7 +1462,7 @@ has_joined_in_section "capture-spec-helpers: the unqualified selector is justifi
 # fixed-one-site-of-N defect the previous round had just been fixed for. The two `hasnt_joined`
 # below are therefore keyed on the WHOLE PLUGIN's maintained guidance sites, not on one file, so the
 # suite cannot go green while either retired claim survives anywhere a reader or an adopter meets it.
-hasnt_joined "capture-helpers: no false attribute-selector mechanism claim (#472)" \
+hasnt_joined_code "capture-helpers: no false attribute-selector mechanism claim (#472)" \
   'assigned by script after parse' "$ASSETS/capture-helpers.playwright.ts"
 # This file's OWN stale copy of the claim (it explained the pin above) is corrected in place rather
 # than pinned. A self-scanning `hasnt` is unimplementable, not merely awkward: the needle that
