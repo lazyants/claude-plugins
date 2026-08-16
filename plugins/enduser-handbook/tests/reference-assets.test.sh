@@ -4405,6 +4405,43 @@ else
   bad "obsidian-vault: by-eye instruction occurrence count drifted from 1 (found $OMD_BY_EYE_COUNT)"
 fi
 
+echo "== #563 item 6 (#261): obsidian-vault's Related block names three members =="
+# The template every Obsidian chapter starts from (assets/chapter-template.md) spends one of its
+# two Related lines on `{{handbook_index_link}}`, which resolves to `publish.index_file` — not a
+# sibling chapter. The rule named only two member types, and the "Wikilinks vs Markdown links"
+# section defined a target form for chapters and for glossary entries and none for the index, so
+# the consuming LLM was told to substitute a placeholder whose target form was defined nowhere.
+# Measured: `{{handbook_index_link}}` and `{{handbook_index_label}}` occur in exactly ONE file
+# corpus-wide — chapter-template.md — and are explained in none.
+#
+# What is deliberately NOT asserted: that the index member is MANDATORY. It is not, and making it
+# so would be a behaviour change. `revalidation.md` states, unpinned by design (see the round-19
+# note above), that obsidian-vault has "no equivalent mandatory index-target link"; that sentence
+# stays true only while this stays a legitimate-member claim. The third needle pins the clause
+# that keeps it that way.
+has_in_section "obsidian-vault: Related block names the handbook index as a third member (#261)" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  'a glossary entry, or the handbook index'
+has_in_section "obsidian-vault: the third member is tied to the template placeholder it explains" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  '`{{handbook_index_link}}` placeholder resolves to'
+has_joined_in_section "obsidian-vault: the >=2 floor counts LINKS, not member types — no mandatory index member" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  'That floor counts LINKS, not member types: unlike the static-Markdown target, this adapter requires no index member in particular'
+# The index TARGET FORM, previously defined nowhere for this adapter. Pinned per mode: the two
+# lists are separate and a fix applied to one is this plugin's signature defect. The wikilinks-on
+# form is the load-bearing one — the plausible invention it replaces is a bare `[[INDEX]]`, which
+# resolves only through the fragile suffix tier 1.8.0 stopped emitting for chapter links.
+has_in_section "obsidian-vault: wikilinks-on index target is vault-root-relative, .md dropped (#261)" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'Handbook index link: the vault-root-relative path to `{{publish.index_file}}`'
+has_in_section "obsidian-vault: the index target is explicitly NOT a bare basename wikilink" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'never a bare `[[INDEX]]` basename'
+has_in_section "obsidian-vault: wikilinks-off mode gets its own index target form (#261)" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  '`[<index label>](relative(dirname(chapter_file), {{publish.index_file}}))`'
+
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
 # command and handed the assertion the leftover text. It kept passing while no longer checking the

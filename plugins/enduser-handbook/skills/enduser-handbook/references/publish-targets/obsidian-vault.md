@@ -142,7 +142,7 @@ not the bare `<slug>` it emitted before 1.8.0. In `publish.wikilinks: false` mod
 adapter also changes group-free behavior further: the full-target glossary formula and
 the Markdown-link integrity gate both now cover group-free manifests (see "Glossary
 backlink discipline" and "Link integrity gate before you publish" below), and the
-Related block's sibling/glossary links — including the ≥2 floor — are required in
+Related block's sibling, glossary and index links — including the ≥2 floor — are required in
 Markdown form, not skipped (see "Wikilinks vs Markdown links" and "Chapter structure"
 below). This list names the group-free changes we are aware of; it is not a claim that
 every other section is unchanged. Flat and grouped entries coexist in one manifest.
@@ -265,12 +265,18 @@ mechanics matter at publish time:
   H2s render as `## {{publish.section_labels.prerequisites}}` and
   `## {{publish.section_labels.related}}` — literal strings the user wrote in their
   language. Do not translate them yourself.
-- **The Related block ends every chapter** and contains ≥2 links to sibling chapters or
-  glossary entries, in whichever form the profile dictates — see "Wikilinks vs Markdown
+- **The Related block ends every chapter** and contains ≥2 links, each one a sibling
+  chapter, a glossary entry, or the handbook index — `{{publish.index_file}}`, which is
+  what `assets/chapter-template.md`'s `{{handbook_index_link}}` placeholder resolves to,
+  and the same three-form list `static-md.md` states for its own target —
+  in whichever form the profile dictates — see "Wikilinks vs Markdown
   links" below for the exact syntax, by target type, in each `publish.wikilinks` mode.
   With wikilinks on, this is also what makes the Obsidian graph view useful — a chapter
   with no outbound wikilinks is a graph island. Either way, you halt the publish step
-  until at least two outbound Related-block links exist.
+  until at least two outbound Related-block links exist. That floor counts LINKS, not
+  member types: unlike the static-Markdown target, this adapter requires no index member
+  in particular, so two sibling chapters clear it and so does one index link beside one
+  glossary entry.
 
 Start from `assets/chapter-template.md` and substitute the placeholders — never
 hand-rewrite the skeleton from memory. Under `publish.wikilinks: false`, override the
@@ -1023,6 +1029,15 @@ backtick inside it swallow the body (the writer refuses such a file outright).
   flat entry's target is just `<slug>` — still the chapter's exact vault-root path (see
   "Vault root" above), never a special case.
 - Glossary link: see "Glossary backlink discipline" below for the exact target.
+- Handbook index link: the vault-root-relative path to `{{publish.index_file}}`, one
+  terminal `.md` dropped, where that path is `relative(<vault-root>,
+  {{publish.index_file}})` — the SAME vault-root-relative coordinate the chapter link
+  above uses, never a bare `[[INDEX]]` basename, which resolves only through the fragile
+  suffix tier this adapter stopped emitting for chapter links in 1.8.0. Worked example
+  (vault root `vault/`, `index_file: vault/handbook/INDEX.md`):
+  `[[handbook/INDEX|All chapters]]`. This is the target `assets/chapter-template.md`'s
+  `{{handbook_index_link}}` placeholder takes, with `{{handbook_index_label}}` as the
+  display half after the pipe.
 - The pipe `|` separates target from display; omit it when display equals target.
 - The target is vault-root-relative, never a bare basename — grouping DOES change it
   (the `<group>` segment rides on the joined path), unlike the pre-1.8.0 bare `<slug>`
@@ -1049,6 +1064,10 @@ backtick inside it swallow the body (the writer refuses such a file outright).
   naturally evaluates to `<chapter-slug>.md` — the same spelling as the shipped 1.4.1
   form, not a special case.
 - Glossary link: see "Glossary backlink discipline" below.
+- Handbook index link:
+  `[<index label>](relative(dirname(chapter_file), {{publish.index_file}}))` — the same
+  full-target formula as the chapter link above, pointed at the index instead of a
+  chapter, so the `.md` stays on.
 - Skip Dataview blocks; they require Obsidian to render.
 
 You do not mix the two styles in one chapter. The profile decides; the chapter follows.
