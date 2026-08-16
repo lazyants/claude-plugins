@@ -155,11 +155,11 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   four above because it *is* ordinary DOM text — just in another document. Neither the mask nor the
   scan crosses a document boundary (a tree walk rooted in the parent stops at the `<iframe>` element,
   which has no text children), while the screenshot composites the child document's pixels. Framed
-  framed content is therefore photographed but never masked and never scanned, and the dangerous half
+  content is therefore photographed but never masked and never scanned, and the dangerous half
   of that is **silent**: PII the author did *not* list has nothing to mask, no text node to collect
   and no pattern to match, so neither pass has anything to object to. That is why this one carve-out
   is **enforced, not merely disclosed**: the helper counts every element in the region that hosts a
-  **nested browsing context** — `<iframe>`, `<frame>`, `<object>`, `<embed>`, all of which load a
+  **nested browsing context** — `<iframe>`, `<frame>`, `<object>`, `<embed>`, all of which can load a
   document of their own on exactly these terms — and **throws** when it finds any, checked **before**
   the coverage assert, so a framed region is named as the cause rather than misreported as selector
   drift. Mask or remove the framed content before the shot, scan it yourself per frame, or keep it
@@ -168,9 +168,11 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   was handed, at the moment it is called. A frame inside a **closed** shadow root, a frame painted
   over the captured rectangle from **outside** that subtree, and a frame attached **after** the call
   (a spec may take more than one shot off a single mask) are all still uncounted, and stay the human
-  eyeball-the-frame step's job. The selector is deliberately unqualified — an `<object>` whose `data`
-  is assigned by script after parse would evade an `object[data]` form — so an `<object>` carrying no
-  document at all is refused too. That over-refusal is the correct direction for a PII gate.
+  eyeball-the-frame step's job. The selector is deliberately unqualified rather than
+  `object[data]`/`embed[src]`, because the count is taken when the helper runs and the pixels are
+  taken later: an element holding no document at that moment can still be holding one in the shot.
+  So an `<object>` carrying no document at all is refused too — one `allowUnscannedFrames: true` is
+  the whole cost of that over-refusal, and it is the correct direction for a PII gate.
   **Past the single opt-out `allowUnscannedFrames: true`, the old behaviour is what remains**: a
   selector matching only inside the frame catches nothing and trips the mask-**coverage** assert,
   while PII the author never listed ships in the PNG with the run green. Take the opt-out only once

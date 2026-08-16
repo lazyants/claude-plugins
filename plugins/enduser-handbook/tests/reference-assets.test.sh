@@ -1349,6 +1349,27 @@ has_joined_in_section "capture-spec-helpers: the carve-out names object/embed, n
 has_joined_in_section "capture-spec-helpers: the unqualified selector is justified, not an oversight (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   'The selector is deliberately unqualified'
+# Post-merge round (#567). Three defects the merged paragraph shipped, all introduced by the round-3
+# rewrite in PR #566. The first is why `hasnt` would be the wrong helper here: the duplicated word
+# straddles the file's hard wrap ("Framed\n  framed"), so a line-based grep sees two ordinary lines
+# and matches nothing. All three needles below are wrap-tolerant on purpose.
+hasnt_joined "capture-spec-helpers: no duplicated word in the framed-content sentence (#472)" \
+  'Framed framed' "$REFS/capture-spec-helpers.md"
+# The absolute form was contradicted three sentences later by "an <object> carrying no document at
+# all is refused too" — which is the whole point of leaving the selector unqualified.
+has_joined_in_section "capture-spec-helpers: hosting a nested context is stated as possible, not certain (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'all of which can load a document of their own'
+# The old justification claimed an attribute-qualified `object[data]` would miss a `data` assigned by
+# script after parse. That is false: a CSS attribute selector is evaluated against the LIVE DOM at
+# querySelectorAll time, and `HTMLObjectElement.data` reflects the content attribute, so a script
+# assignment made before the query is visible to `object[data]` exactly like a parse-time one. The
+# design is still right; the reason is the call/shot ordering, not attribute qualification.
+hasnt_joined "capture-spec-helpers: the unqualified selector is not justified by a false selector mechanism (#472)" \
+  'assigned by script after parse' "$REFS/capture-spec-helpers.md"
+has_joined_in_section "capture-spec-helpers: the unqualified selector is justified by call-vs-shot ordering (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'the count is taken when the helper runs and the pixels are taken later'
 has_joined_in_section "capture-spec-helpers: the refusal's reach is scoped, not claimed absolute (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   '**What the refusal can see, exactly:**'
