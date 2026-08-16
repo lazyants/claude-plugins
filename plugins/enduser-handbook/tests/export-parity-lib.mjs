@@ -348,7 +348,17 @@ function hasTopLevelDefault(param) {
  * binding exactly as before, rather than guessing at it.
  */
 function functionTypeArity(annotation) {
-  const text = annotation.trim();
+  let text = annotation.trim();
+  // Redundant parentheses around the whole type are pure grouping — `((a: A) => void)` declares
+  // exactly what `(a: A) => void` declares — but they hide the arrow behind a group that spans the
+  // entire annotation, so the arrow test below never fires and the arity is skipped without a word.
+  // Unwrapping is safe precisely because it is only done when the group spans EVERYTHING: a real
+  // parameter list is always followed by its arrow, so it never spans the whole annotation, and a
+  // parenthesized non-function type (`(A | B)`) unwraps to something the arrow test then rejects
+  // anyway. Each pass strictly shortens the text, so this terminates.
+  while (text.startsWith('(') && skipBracketed(text, 0) === text.length) {
+    text = text.slice(1, -1).trim();
+  }
   let i = 0;
   if (text[i] === '<') {
     i = skipAngles(text, i);

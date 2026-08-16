@@ -454,9 +454,25 @@ test('arity is read from a const of FUNCTION TYPE too, not only from a `function
   assert.deepEqual(correct.arity, [], 'a matching const-declared function must stay green');
   assert.equal(correct.census.arityChecks, 1);
 
+  // Redundant parentheses are pure grouping and must not cost the comparison. They hide the arrow
+  // behind a group spanning the whole annotation, so the arrow test never fired and the arity was
+  // skipped in silence — the same false green this const branch exists to close, wearing brackets.
+  for (const wrapped of [
+    'export declare const handler: ((a: number, b: string) => void);',
+    'export declare const handler: (((a: number, b: string) => void));',
+  ]) {
+    const parenthesized = await arityFindings('export const handler = (a, b, c, d) => [a, b, c, d];', wrapped);
+    assert.equal(parenthesized.arity.length, 1, `a parenthesized function type must still be compared: ${wrapped}`);
+    assert.equal(parenthesized.census.arityChecks, 1);
+    const matching = await arityFindings('export const handler = (a, b) => [a, b];', wrapped);
+    assert.deepEqual(matching.arity, [], `a matching runtime behind the same parentheses must stay green: ${wrapped}`);
+  }
+
   // A type this cannot read without RESOLVING it is skipped rather than guessed at — that is a
   // compiler's job. The census makes the skip visible instead of letting it look like a comparison.
-  for (const opaque of ['export interface Cb { (a: number): void }\nexport declare const handler: Cb;', 'export declare const handler: (1 | 2);']) {
+  // The parenthesized non-function type is here on purpose: unwrapping must not turn `(A | B)` into
+  // a parameter list and invent an arity of 2.
+  for (const opaque of ['export interface Cb { (a: number): void }\nexport declare const handler: Cb;', 'export declare const handler: (1 | 2);', 'export declare const handler: (a: number);']) {
     const skipped = await arityFindings('export const handler = (a, b, c) => [a, b, c];', opaque);
     assert.deepEqual(skipped.arity, [], `an unresolvable type must be skipped, never guessed: ${opaque}`);
     assert.equal(skipped.census.arityChecks, 0, 'a skipped arity must be reported as zero comparisons, not as a passing one');
