@@ -204,6 +204,25 @@ test('RED: a function export whose declared arity could not be read is NAMED, ne
   assert.equal(result.census.arityChecks, 1);
 });
 
+test('GREEN: a class, a specifier and a default are not "unread arities" — they carry no signature', async () => {
+  // `typeof` reports "function" for a class, so the check above initially failed a perfectly matched
+  // class pair and told the author to inline a function signature that cannot apply to a class — a
+  // false RED introduced by the very check added to stop false greens. A specifier and a default
+  // export are the same shape: a name, with no parameter list of their own anywhere in the
+  // declaration. Each is pinned, because the fix is a membership test and a membership test is
+  // exactly the kind of thing that gets one entry right and the next one wrong.
+  const cases = {
+    class: ['export class Widget { constructor(a) {} }', 'export declare class Widget { constructor(a: number); }'],
+    specifier: ['function f(a) { return a; }\nexport { f };', 'declare function f(a: number): void;\nexport { f };'],
+    default: ['export default function d(a) { return a; }', 'export default function d(a: number): void;'],
+  };
+  for (const [label, [mjs, dmts]] of Object.entries(cases)) {
+    const result = await auditFixture({ 'm.mjs': `${mjs}\n`, 'm.d.mts': `${dmts}\n` });
+    assert.deepEqual(result.findings, [], `a matched ${label} pair must be clean:\n  ${result.findings.join('\n  ')}`);
+    assert.deepEqual(result.arityUnread, [], `a ${label} declaration carries no parameter list of its own, so it is not an unread arity`);
+  }
+});
+
 test('RED: a stale declaration-only module — the direction a .mjs walk cannot see', async () => {
   const result = await auditFixture({
     'm.mjs': CLEAN_MJS,

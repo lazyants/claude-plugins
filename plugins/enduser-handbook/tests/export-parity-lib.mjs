@@ -41,6 +41,20 @@ const TYPE_ONLY_HEADS = new Set(['interface', 'type']);
 /** Modifiers that may sit between `export` and the declaration head, in any order TypeScript allows. */
 const MODIFIERS = new Set(['declare', 'abstract', 'async', 'default']);
 
+/**
+ * Declaration kinds whose OWN text can carry a parameter list, and so can have an arity to read.
+ *
+ * A class is excluded even though `typeof` calls it a function: its parameters sit on a constructor
+ * member, not on the declaration. A specifier, a star re-export and a default expression are excluded
+ * because they are a name and nothing else — the signature, if there is one, lives elsewhere.
+ *
+ * Known gap, stated rather than papered over: `export { f }` beside a local `declare function f(a)`
+ * DOES have a readable arity, in the local declaration, but specifiers are not linked back to it. No
+ * shipped module re-exports that way, and inventing the link would be guessing at which local a
+ * specifier means.
+ */
+const ARITY_BEARING_KINDS = new Set(['function', 'const', 'let', 'var']);
+
 
 /**
  * Blank every comment, string and template literal, preserving byte offsets and line breaks.
@@ -788,6 +802,14 @@ export async function auditModulePair(libDir, base) {
     // rather than on whether an arity was actually read skipped every one of them.
     const signatures = records.filter((r) => r.arity);
     if (!live || !live.isFunction) continue;
+    // `typeof` reports "function" for a CLASS too, and a class declaration is not a callable
+    // signature — its parameters live on a constructor member this reader does not descend into. A
+    // specifier (`export { f }`), a star re-export and a default expression carry no signature of
+    // their own at all: the shape is a name, and there is nothing in the declaration to read. Counting
+    // any of those as an unread arity would fail the gate on a perfectly matched pair, with guidance
+    // that cannot apply — a false RED introduced by the very check added to stop false greens.
+    // So the census is restricted to the kinds whose own declaration CAN carry a parameter list.
+    if (!ARITY_BEARING_KINDS.has(records[0].kind)) continue;
     if (signatures.length === 0) {
       // The class-closing half. Three separate review findings were all the same shape: a function
       // export whose declared parameter list this could not read, skipped in SILENCE — first every
