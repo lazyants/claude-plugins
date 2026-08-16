@@ -1382,6 +1382,14 @@ for f in "$SPEC" "$REAUDIT"; do
   has "$base: teardown keeps the body's failure as the primary error (#473)" 'primaryError' "$f"
   has "$base: the primary error is rethrown last (#473)" 'if (primaryError !== null) throw primaryError;' "$f"
 done
+# #560: all four example denyPatterns duplicated a built-in verb token-exactly while matching as a
+# raw substring over URL AND postData — strictly wider than the check they repeated.
+for f in "$SPEC" "$REAUDIT"; do
+  hasnt "$(basename "$f"): denyPatterns no longer repeat a built-in dangerous verb (#560)" \
+    "'/delete', '/send', '/approve', '/finalize'" "$f"
+done
+has "example spec: says what denyPatterns is actually for (#560)" \
+  'raw SUBSTRING match over the full URL' "$SPEC"
 # #474: LANG/LC_ALL never reach the browser — the browser-context locale is the only lever that sets
 # navigator.language and sends Accept-Language. Three shipped sentences claimed otherwise.
 for f in "$SPEC" "$REAUDIT"; do

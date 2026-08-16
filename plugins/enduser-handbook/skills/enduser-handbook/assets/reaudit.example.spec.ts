@@ -68,10 +68,12 @@ test('re-audit: items chapter, per role', async ({ browser }) => {
       locale: CONTEXT_LOCALE,
     });
     const guard = await installCaptureGuard(context, {
-      // Tune to your stack, exactly like capture.example.spec.ts's denyPatterns. A read-admitting
-      // classifyRequest (e.g. classifyGraphqlRead for a POST-read GraphQL app) can be added the same
-      // way as in capture.example.spec.ts; omitted here for brevity.
-      denyPatterns: ['/delete', '/send', '/approve', '/finalize'],
+      // Empty for the same reason as capture.example.spec.ts — the built-in 16-verb set already
+      // covers the destructive verbs token-exactly, and denyPatterns is a raw substring match over
+      // the URL and postData, so repeating them only blocks ordinary reads. Read that file's comment
+      // before adding any. A read-admitting classifyRequest (e.g. classifyGraphqlRead for a POST-read
+      // GraphQL app) can be added the same way as in capture.example.spec.ts; omitted here for brevity.
+      denyPatterns: [],
     });
     const page = await context.newPage();
     // This role's failure is the PRIMARY one: an abrupt completion in a `finally` would replace it

@@ -77,7 +77,14 @@ test('capture: items chapter', async ({ browser }) => {
   const isBenignTelemetry = (url: string): boolean => url.includes('/_boost/') || /sentry/i.test(url);
 
   const guard = await installCaptureGuard(context, {
-    denyPatterns: ['/delete', '/send', '/approve', '/finalize'],
+    // Empty on purpose. The guard's built-in DANGEROUS_VERB_SET already covers 16 destructive verbs
+    // (delete/send/approve/finalize/...) TOKEN-EXACTLY, so repeating them here adds no coverage and
+    // takes some away: denyPatterns is a raw SUBSTRING match over the full URL AND the postData, so
+    // '/delete' also blocks the read route '/items/deleted', '/send' blocks 'https://sendgrid.test/
+    // px.gif', and a deny hit cannot be downgraded by classifyRequest. Use denyPatterns only for what
+    // nothing else can do: a scheme/host rule, a body shape, or THIS project's own writing GETs
+    // (/orders/42/confirm, /reports/publish) that the fixed 16 verbs do not name.
+    denyPatterns: [],
     // The single read/benign escape-hatch. 'benign' silences known-harmless telemetry (above);
     // otherwise defer to the SAFE GraphQL classifier — admit ONLY a single, inline, unambiguous READ
     // document ('read'), fail closed on anything else (undefined). The full ordered GraphQL rules
@@ -174,7 +181,8 @@ test('capture: items chapter — error-state variant', async ({ browser }) => {
     locale: CONTEXT_LOCALE,
   });
   const guard = await installCaptureGuard(context, {
-    denyPatterns: ['/delete', '/send', '/approve', '/finalize'],
+    // Empty for the same reason as the main spec above — see the comment there before adding any.
+    denyPatterns: [],
   });
 
   const page = await context.newPage();
