@@ -5029,12 +5029,26 @@ has_joined_in_section "capture-spec-helpers: the false 'a canvas has no text' un
 # HONEST LIMIT: this gates the wordings that have actually appeared, not every possible phrasing of
 # the idea. It converts a KNOWN recurrence from review-caught to CI-caught; it does not make the
 # class unwriteable.
+#
+# THE RELEASE COPY IS A WRITE SITE TOO (lazy-ants-reviewer, P2 on PR #576). The first version of
+# this gate covered the three PLUGIN documents and stopped there — and the very release notes
+# announcing the fix then reintroduced the universal in two more public places, the root CHANGELOG
+# entry and the README section body, where nothing was watching. A gate scoped to the sites that had
+# already gone wrong cannot see the site that has not gone wrong YET, which is the whole failure mode
+# it exists for. Both root documents are in scope from here.
+CANVAS_UNIVERSAL_MD_SITES=(
+  "$REFS/capture-spec-helpers.md"
+  "$REFS/capture-safety.md"
+  "$PLUGIN_DIR/../../CHANGELOG.md"
+  "$PLUGIN_DIR/../../README.md"
+)
 for retired_canvas_universal in \
   'there is no DOM text node to collect' \
   'carries no text to scan' \
   'no string for the leak patterns' \
   'no text node to collect and no element inside it to list' \
-  'the leak-assert has nothing to match'
+  'the leak-assert has nothing to match' \
+  '`<canvas>` contributes to none of them'
 do
   # The .ts site takes the CODE variant. hasnt_joined is wrap-tolerant for MARKDOWN only: against a
   # JSDoc wrap the next line's ` * ` lands inside the needle, so a plain hasnt_joined here would pass
@@ -5042,11 +5056,23 @@ do
   # being added to prevent.
   hasnt_joined_code "canvas carve-out: retired universal absent from capture-helpers.playwright.ts — '$retired_canvas_universal' (#565)" \
     "$retired_canvas_universal" "$CH"
-  for canvas_doc in "$REFS/capture-spec-helpers.md" "$REFS/capture-safety.md"; do
+  for canvas_doc in "${CANVAS_UNIVERSAL_MD_SITES[@]}"; do
     hasnt_joined "canvas carve-out: retired universal absent from $(basename "$canvas_doc") — '$retired_canvas_universal' (#565)" \
       "$retired_canvas_universal" "$canvas_doc"
   done
 done
+# The two release documents also have to carry the SCOPED form, not merely lack the unscoped one:
+# deleting the sentence altogether would satisfy every absence pin above while leaving the release
+# silent about the thing it ships.
+# The CHANGELOG needle straddles the entry's wrap, so it must be joined; bind it to the 1.16.0
+# heading rather than the whole file, since scoping a POSITIVE claim tightens it and this sentence
+# belongs to exactly one release entry.
+has_joined_in_section "CHANGELOG: the 1.16.0 entry scopes the canvas claim to what it PAINTS (#565)" \
+  "$PLUGIN_DIR/../../CHANGELOG.md" '## [enduser-handbook 1.16.0] — 2026-08-16' \
+  'What a `<canvas>` paints contributes to none of them'
+# The README bullet is a single physical line, so the line-based helper is sufficient here.
+has "README: the enduser-handbook section scopes the canvas claim to what it PAINTS (#565)" \
+  'what a `<canvas>` paints contributes to none of them' "$PLUGIN_DIR/../../README.md"
 # --- Site 3: the engine-agnostic masking rules a human reads before capturing.
 has_joined_in_section "capture-safety: the masking rules name the canvas gap (#565)" \
   "$REFS/capture-safety.md" "$CS_MASK_SECTION" \

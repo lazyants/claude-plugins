@@ -12,9 +12,10 @@ Closes #565.
 ### Fixed
 
 - **`maskAndAssert`'s leak scan could not see a `<canvas>`, and no carve-out list named it (#565).**
-  The scan corpus is DOM text nodes, form-control values and input/textarea placeholders. A
-  `<canvas>` contributes to none of them — what it paints is a bitmap — while `page.screenshot`
-  composites its pixels like everything else. Canvas-rendered PII was therefore photographed,
+  The scan corpus is DOM text nodes, form-control values and input/textarea placeholders. What a
+  `<canvas>` paints contributes to none of them — it is a bitmap — while `page.screenshot`
+  composites its pixels like everything else. (Its *fallback* children are ordinary text nodes and
+  are scanned; they are simply not what the canvas shows.) Canvas-rendered PII was therefore photographed,
   unmaskable and unscannable, and silent in every direction at once: no element inside it for
   `selectors` to match, nothing of what was painted for `patterns` to fire on, and a coverage assert
   satisfied by whatever *was* listed. The author could not even mask it by listing the `<canvas>`,
