@@ -293,6 +293,53 @@ the one exception to "do all of these" — see its own conditional note below.
 1. **`{{publish.index_file}}`** — the section TOC. What "wire the chapter" means depends
    on whether the manifest entry sets `group` (`references/manifest-discipline.md`).
 
+   **Step 0's companion scan — rows that ADDRESS this chapter without RESOLVING to it
+   (#349).** This one runs for BOTH branches below, flat and grouped, before either acts
+   on its verdict, because a row that addresses this chapter without resolving to it is
+   the same defect whichever branch is wiring it. Call
+   `findStaleChapterRows(indexLines, expectedTarget, chapterLink, {wikilink})` from
+   `assets/lib/chapter-paths.mjs` with the same expected target the branch below computes,
+   the chapter link this run would write, and the same `wikilink` option that branch passes
+   to `locateChapterLine` — so "resolves" means exactly what it means at step 0 for this
+   profile's link mode. That option is not cosmetic: under `wikilinks: true` step 0 accepts
+   `[[handbook/admin/items.md|X]]` and `[[handbook/admin/items|X]]` as the same target, and
+   the scan folds the terminal `.md` the same way, so BOTH spellings of a leftover are named.
+   Pass it and a leftover in the `.md` spelling goes unreported. `locateChapterLine` answers which rows RESOLVE to the chapter;
+   this answers which rows carry that same destination as a whole link token and still
+   fail the parse. The two sets are disjoint by construction, so a row returned here is
+   never one step 0 matched. Halt on a non-empty result:
+   "Chapter '<slug>' has <n> stale row(s) in <index_file> at line(s) <lines> — each addresses '<expected_target>' without resolving to it, left behind by an earlier title for this chapter. Remove or repair them, then re-run. Nothing was written."
+   Report the RAW line text alongside each line number — the scan returns it for exactly
+   that reason, so the operator can find the row in their own file rather than in a
+   sanitized rendering of it.
+
+   The halt prescribes no repair beyond naming the rows, and the scan never deletes or
+   moves one: the index format carries no row-to-chapter OWNERSHIP record, so nothing
+   distinguishes a row a previous run wrote from one an operator hand-authored around a
+   link this tool cannot parse, and removing the second is not this tool's call. The
+   writer has been insert-only by deliberate design since 1.10.0 and this does not change
+   that. In wikilinks mode the leftover looks like `[[<qualified target>|<old title>]]`
+   with an unescaped `]` in the alias, which is why the scan's liveness half must run with
+   `{wikilink: true}`: the `.md`-folding the union scan already relies on has to apply
+   here too, or a `[[…orders.md|…]]` row reads as unresolved when it is merely spelled
+   with the suffix.
+
+   Over-reporting is the direction this scan errs in, deliberately. It requires the
+   destination to sit between a link-destination opener and closer, so a sibling chapter
+   whose target merely extends this one (`…/items-beta` against `…/items`) is left alone,
+   and it does not treat `#` as a closing delimiter, so a real `[[…#Heading|…]]` reference
+   to this chapter is never reported; a CommonMark link REFERENCE DEFINITION addressing
+   this chapter is skipped outright for the same reason, since it resolves even though
+   nothing else in the module parses one — a WHOLE valid one, matched to end of line, since
+   a row that merely contains `]:` is a leftover, not a definition. What it can still over-report is a row whose
+   ALIAS or link TITLE happens to contain destination-shaped text, or a bullet carrying more
+   than the bare link. Outside the `-`/`*`/`+` bullet the writer emits, the scan recognizes
+   its own row by containment instead and stays silent — see the extension contract in
+   `README.md` for why that direction is the safe one. That bias is the right way round here and
+   it is the opposite of `specReferencesDir`'s in `references/revalidation.md`: a false
+   positive there can never be cleared, while a false positive here names an exact line,
+   and deleting or repairing that line always clears the halt.
+
    **Flat entries** (no `group`, the 1.4.1 shipped case) — a flat entry never resolves a
    container, so wiring here is a membership check against one expected link target.
    A flat entry's expected link target uses `dirname(index_file)` — never
@@ -728,13 +775,22 @@ the one exception to "do all of these" — see its own conditional note below.
        measured against an EDITED one. When the operator instead edits a target-breaking title
        while the emitted child uses `-` (a new title yields a new display string, hence a new
        `chapterLink` the membership guard has never seen), that guard cannot recognize the
-       edited row as the same chapter and inserts it as a fresh child every time: measured, 20
-       publishes with the title edited on every fourth run accumulate 5 rows — one per distinct
-       edit, none ever removed. The run is not silent: the other 15 publishes each return
-       `present` and the adapter halts on it. No halt names the orphaned rows, though, which is
-       what leaves the growth unreported. The `present` bound above is per TITLE
-       STRING, not per chapter — it is bounded only by how many times the title is edited, a
-       count this file has no way to bound.
+       edited row as the same chapter and inserts it as a fresh child every time: measured
+       against 1.11.0, 20 publishes with the title edited on every fourth run accumulate 5
+       rows — one per distinct edit, none ever removed. The run was not silent even then: the
+       other 15 publishes each returned `present` and the adapter halted on it. No halt named
+       the orphaned rows, though, which is what left the growth unreported. The `present` bound
+       above is per TITLE STRING, not per chapter — on its own it is bounded only by how many
+       times the title is edited, a count this file has no way to bound. **Step 0's companion
+       scan (#349) is what bounds it**, and it does so by HALTING rather than by deleting: the
+       first edit's leftover is found on the very next run, named with its line number and raw
+       text, and nothing is written until the operator removes or repairs it — so at most one
+       orphan is ever outstanding. Nothing here RECOGNIZES the edited row as the same chapter;
+       the scan reports it as a leftover rather than adopting it, which is the honest verdict,
+       since whether the old row should go is a question about the operator's index rather than
+       about this manifest. Measured in wikilinks mode as well as path mode: an unescaped `]`
+       in the alias breaks the row's own target extraction identically, so the accumulation and
+       its bound are the same in both.
 
        Separately: a title that merely renders non-plain while its target still resolves — an
        ampersand,

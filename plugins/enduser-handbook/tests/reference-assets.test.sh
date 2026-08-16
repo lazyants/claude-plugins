@@ -5241,6 +5241,125 @@ has_joined_in_section "revalidation: the terminal-state facts are named as the f
   "$REVAL" '### The manual group-migration recipe' \
   'twelve fact kinds are derived from'
 
+echo "== #349: step 0 gains a companion scan for rows that address a chapter without resolving to it =="
+# 1.11.0 bounded re-runs of an UNCHANGED manifest entry by comparing the COMPLETE current link
+# string. A title EDIT produces a different string, so the guard correctly finds no match and one
+# unrecognizable row is left behind per distinct title. The scan below is what names them. Both
+# adapters must call it, both must halt on it, and neither may delete anything.
+has_joined_in_section "static-md: step 0 calls the stale-row companion scan" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'findStaleChapterRows(indexLines, expectedTarget, chapterLink)'
+has_joined_in_section "static-md: the companion scan halts BEFORE any step-0 branch acts" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'halt on a non-empty result BEFORE any branch above acts on its verdict'
+has_joined_in_section "static-md: the stale-row halt names count, line numbers and the unresolved target" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'stale row(s) in <index_file> at line(s) <lines>'
+has_joined_in_section "static-md: the scan reports and never deletes, for want of a row-to-chapter ownership record" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'the index format carries no row-to-chapter OWNERSHIP record'
+has_joined_in_section "static-md: the scan bounds a title EDIT and says so, in every form" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'It bounds a title EDIT, in every entry kind and every index form'
+# The claim a reader is most likely to over-read, so it is pinned as a NEGATIVE statement: a fixed
+# target-breaking title on the flat append branch is NOT bounded here, and that gap is filed, not
+# closed. Measured four publishes, four rows.
+has_joined_in_section "static-md: the scan does NOT bound a fixed target-breaking title on the flat branch" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'It does NOT bound a FIXED target-breaking title on the flat branch above'
+has_joined_in_section "static-md: the unbounded flat append is named as a separate, filed defect" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'That gap is a separate defect and is filed as one (#574)'
+has_joined_in_section "obsidian-vault: step 0 calls the stale-row companion scan for BOTH branches" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'This one runs for BOTH branches below, flat and grouped, before either acts on its verdict'
+has_joined_in_section "obsidian-vault: the scan is threaded the same wikilink option step 0 uses" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'the same `wikilink` option that branch passes to `locateChapterLine`'
+# [#349 / ped-ant PR #583] The option is load-bearing, not cosmetic: without it the `.md` spelling of
+# a leftover wikilink row is never matched, so an accepted spelling of the exact defect goes unnamed.
+has_joined_in_section "obsidian-vault: the wikilink option folds terminal .md for BOTH spellings" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'the scan folds the terminal `.md` the same way'
+has_joined_in_section "obsidian-vault: the stale-row halt names count, line numbers and the unresolved target" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'stale row(s) in <index_file> at line(s) <lines>'
+has_joined_in_section "obsidian-vault: the scan reports and never deletes, for want of a row-to-chapter ownership record" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'the index format carries no row-to-chapter OWNERSHIP record'
+# The over-report direction is deliberate and its justification is the thing that must not rot: the
+# opposite bias is correct for specReferencesDir, and a reader who sees only one of the two reads an
+# inconsistency instead of a decision.
+has_joined_in_section "static-md: the over-report bias is justified against specReferencesDir's opposite one" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'a false positive there can never be cleared, while a false positive here names an exact line'
+has_joined_in_section "obsidian-vault: the over-report bias is justified against specReferencesDir's opposite one" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'a false positive there can never be cleared, while a false positive here names an exact line'
+# The extension contract carries the obligation for a THIRD adapter, and points at the tests rather
+# than restating the properties as prose a reader has to trust.
+has_joined_in_section "publish-targets README: a third scan is required beside step 0 and the membership guard" \
+  "$PTREADME" '## Adding a new target X' \
+  'find the rows that ADDRESS this chapter without RESOLVING to it, and halt naming every one of them'
+has_joined_in_section "publish-targets README: the contract says REPORT, never delete" \
+  "$PTREADME" '## Adding a new target X' \
+  'REPORT those rows; do not delete them'
+has_joined_in_section "publish-targets README: the scan obligation covers every entry and every index form" \
+  "$PTREADME" '## Adding a new target X' \
+  'Run it for every entry and every index form, not only the grouped nested-list one'
+has_joined_in_section "publish-targets README: the contract warns the scan does not cover an append branch with no membership check" \
+  "$PTREADME" '## Adding a new target X' \
+  'is blind to an identical row your own append branch wrote a moment ago'
+# Three claims #349 falsifies. Each was true of 1.11.0 and is now wrong; a reader who finds one still
+# standing concludes the growth is unreported, which is the exact state this change retires.
+hasnt_joined "static-md: the never-named-orphans claim is retired" \
+  'no halt ever names the orphaned rows' "$SMD"
+hasnt_joined "obsidian-vault: the never-named-orphans claim is retired" \
+  'No halt names the orphaned rows' "$OMD"
+hasnt_joined "publish-targets README: the unbounded orphan-per-title residual claim is retired" \
+  'one orphan per distinct title' "$PTREADME"
+# [#349 round 1 / codex MAJOR] The own-row test is the scan's one unsound spot and the contract has to
+# say which comparison a third adapter may use: a title ending in the NEXT title's opening bracket
+# emits a row that CONTAINS the next run's complete link, so a containment test skips exactly the row
+# it exists to name. Measured three rows, none reported, before the fix.
+has_joined_in_section "publish-targets README: the own-row test is EXACT on the shape the writer emits" \
+  "$PTREADME" '## Adding a new target X' \
+  'On the shape your own writer emits, compare EXACTLY'
+# [#349 round 2 / codex MAJOR] The other direction is the one a reader will get wrong, so it is pinned
+# with its reason: an exact test against an index shape the adapter did not anticipate names the row
+# the adapter itself just appended, and re-appends it on the next publish. That halt has no clearing
+# edit, which is exactly what the over-report bias is justified on never producing.
+has_joined_in_section "publish-targets README: every other shape uses containment and goes SILENT" \
+  "$PTREADME" '## Adding a new target X' \
+  'On any OTHER shape, use containment and let the scan go SILENT'
+has_joined_in_section "publish-targets README: the over-report bias is bounded by clearability, not by taste" \
+  "$PTREADME" '## Adding a new target X' \
+  'An over-report is only cheap while it stays clearable'
+has_joined_in_section "static-md: the one leftover shape the scan deliberately does not report" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'the only leftover that contains the'
+has_joined_in_section "publish-targets README: the containment failure is stated as a measurement, not a caution" \
+  "$PTREADME" '## Adding a new target X' \
+  'measured, three rows accumulated and none was named'
+# A link reference definition addressing this chapter is a WORKING link, so it is not a stale row —
+# the only construct the scan skips that nothing else in the module parses.
+has_joined_in_section "static-md: a link reference definition is excluded because it resolves" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'link REFERENCE DEFINITION addressing'
+# [#349 round 3 / codex] Matching the definition OPENER alone let a row whose own text contained ']:'
+# pass as a definition, so a manifest title of `Old]: x y` hid its own leftover. The exemption is a
+# WHOLE-LINE match now, and the adapters say so, because a third adapter reading only the word
+# "definition" would reimplement the opener test.
+has_joined_in_section "static-md: only a WHOLE valid reference definition is exempt" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'a row whose own text merely contains'
+has_joined_in_section "obsidian-vault: a link reference definition is excluded because it resolves" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'link REFERENCE DEFINITION addressing'
+has_joined_in_section "static-md: the over-report residual names the link TITLE, not only the label" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'or link TITLE happens to contain destination-shaped text'
+
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
 # command and handed the assertion the leftover text. It kept passing while no longer checking the

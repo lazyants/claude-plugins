@@ -291,6 +291,56 @@ two `null` cases are not the same signal and are handled separately below:
   container, and that container machinery is form-restricted (a headings-form index, plus the
   bounded nested-list subset — see "Grouped index wiring" below).
 
+**Step 0's companion scan — rows that ADDRESS this chapter without RESOLVING to it (#349).** Run
+`findStaleChapterRows(indexLines, expectedTarget, chapterLink)` (`assets/lib/chapter-paths.mjs`)
+with the same `expectedTarget` step 0 just used and the path-mode chapter link item 1 computes,
+and halt on a non-empty result BEFORE any branch above acts on its verdict. `locateChapterLine`
+answers which rows RESOLVE to the chapter; this answers which rows carry that same destination as a
+whole link token and still fail the parse — the two sets are disjoint by construction, so a row
+returned here is never one step 0 matched. Halt with:
+`Chapter '<slug>' has <n> stale row(s) in <index_file> at line(s) <lines> — each addresses '<expected_target>' without resolving to it, left behind by an earlier title for this chapter. Remove or repair them, then re-run. Nothing was written.`
+Report the RAW line text alongside each line number; the scan returns it for exactly that reason,
+so the operator can find the row in their own file rather than in a sanitized rendering of it.
+
+The halt prescribes no repair beyond naming the rows, and the scan never deletes or moves one,
+because the index format carries no row-to-chapter OWNERSHIP record: a dead row is recognizable as
+addressing this chapter, and nothing distinguishes one a previous run wrote from one an operator
+hand-authored around a link this tool cannot parse. Removing the second is not this tool's call —
+the writer has been insert-only by deliberate design since 1.10.0 and this does not change that.
+This scan is form-agnostic, exactly as step 0 is: it runs for a flat entry and a grouped one, on a
+headings-form index and a non-heading one alike, because a row that addresses this chapter without
+resolving to it is the same defect whatever shape the file has. **State what that buys precisely,
+because the boundary is not where it first looks.** It bounds a title EDIT, in every entry kind and
+every index form: the leftover no longer carries the link this run would write, so it is reported
+and nothing is appended beside it. One shape escapes that, deliberately: outside the `-`/`*`/`+`
+bullet the writer itself emits, the scan recognizes its own row by CONTAINMENT rather than exactly,
+so a leftover from a title ending in `[` plus the NEXT title — the only leftover that contains the
+current link — goes unreported there. The alternative was halting on a numbered or table row the
+adapter had just appended and would append again, which is a false positive with no edit that clears
+it. It does NOT bound a FIXED target-breaking title on the flat
+branch above, and reading it as though it did would be the more dangerous mistake. That branch has
+no membership guard of its own — no flat analogue of the writer's `present` outcome — so step 0
+reports the chapter absent on every run and an identical row is appended each time, with the
+manifest never changing at all: measured, four publishes leave four rows. This scan is blind to them
+by construction, since each carries the link this run would write, which is the very test that tells
+this run's own row from a leftover. That gap is a separate defect and is filed as one (#574); nothing here
+closes it.
+
+Over-reporting is the direction this scan errs in, deliberately. It requires the destination to sit
+between a link-destination opener and closer, so a longer target carrying this one as a prefix or a
+suffix is left alone, and it deliberately does not treat `#` as a closing delimiter, so a real
+anchored link to this chapter is never reported; a CommonMark link REFERENCE DEFINITION addressing
+this chapter is skipped outright for the same reason, since it resolves even though nothing else in
+the module parses one — a WHOLE valid one, matched to end of line, because a row whose own text
+merely contains `]:` is not a definition and is exactly the leftover this scan exists to name. What
+it can still over-report is a row whose LABEL or link TITLE happens to contain destination-shaped
+text — `[Other](other.md "(admin/items.md)")` is the shape — or a bullet carrying more than the bare
+link. Neither recurs: the next publish writes the plain row, which the scan then recognizes. That
+bias is the right way round here and it is the
+opposite of `specReferencesDir`'s in `references/revalidation.md`: a false positive there can never
+be cleared, while a false positive here names an exact line, and deleting or repairing that line
+always clears the halt.
+
 **A grouped entry** (`anyGroup` manifests) — whether its line above came back present or
 absent — is resolved in "Grouped index wiring" below, which reuses this same step-0 result
 rather than locating the line a second time.
@@ -478,18 +528,26 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
     attempt, before any row exists (also new in 1.11.0); a non-plain `group_title` on any marker
     is refused immediately, before any row exists, unchanged since 1.10.0. No combination
     measured here, with the title held fixed, grows without bound.
-    **That fixed-title scope is load-bearing, not incidental: letting the title itself change
-    across runs reopens unbounded growth whenever the emitted child is `-`, nested under its
-    container.** Step 0's presence check and the writer's own membership guard both key on the CURRENT
+    **That fixed-title scope was load-bearing, not incidental: before #349, letting the title
+    itself change across runs reopened unbounded growth whenever the emitted child was `-`, nested
+    under its container.** Step 0's presence check and the writer's own membership guard both key on the CURRENT
     manifest title's own link string, never on whatever row already sits in the index — so an
     operator who edits a target-breaking title (say, re-wording an unescaped `]` differently)
     between publishes hands each edit its OWN distinct link string, one the membership guard has
-    never seen before and therefore inserts as a new row every time. Measured (`-` child, 20
-    publishes, the title edited once every four runs): 5 rows accumulate, one per edit, none
-    removed. The run is not silent — the other 15 publishes each return `present` and the adapter
-    halts on it — but no halt ever names the orphaned rows, so growth here is bounded only by the
-    number of distinct titles the operator has typed, which in practice is unbounded. Within the
-    harmless-manifest-title
+    never seen before and therefore inserts as a new row every time. Measured against 1.11.0 (`-`
+    child, 20 publishes, the title edited once every four runs): 5 rows accumulate, one per edit,
+    none removed. The run was not silent even then — the other 15 publishes each returned
+    `present` and the adapter halted on it — but no halt named the orphaned rows, so growth was
+    bounded only by the number of distinct titles the operator had typed, which in practice is
+    unbounded. **Step 0's companion scan (#349) is what closes this**, and it closes it by
+    HALTING rather than by deleting: the first edit's leftover row is found on the very next run,
+    named with its line number and raw text, and nothing is written until the operator removes or
+    repairs it. At most one orphan is ever outstanding, and no halt is silent about it. Note what
+    is still true underneath: the membership guard and step 0 both key on the CURRENT manifest
+    title's own link string, so nothing here RECOGNIZES an edited row as the same chapter — the
+    scan reports it as a leftover rather than adopting it, which is the honest verdict, since
+    whether the operator wants the old row gone is a question about their index and not about this
+    manifest. Within the harmless-manifest-title
     case above, a title whose markup still decodes to a plain label is verified like any
     other plain title — `[A\.B](x.md)` decodes to the plain `A.B` and is `misplaced` at the left
     margin, `ok` correctly nested. A title that stays non-plain even after decoding — an
