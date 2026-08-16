@@ -1994,9 +1994,17 @@ test('#351(b): isPlainLabel refuses a label carrying an invisible character', ()
 test('#351(b) scope, pinned honestly: the invisible-label refusal covers the NESTED-LIST branch, and the headings branch is a disclosed residual', () => {
   // The adapters' prose says exactly this, so the asymmetry cannot be read as an oversight in
   // either direction. Nested list: refused, whole file. Headings: a `## ` container carrying the
-  // same character is NOT refused — findContainer simply fails to match it and the adapter creates
-  // a second, pixel-identical heading. That is pre-existing behaviour this change does not touch;
-  // closing it needs a new findContainer outcome both adapters would have to branch on.
+  // same character is NOT refused — findContainer simply fails to match it, and BEFORE #476 the
+  // adapter then created a second, pixel-identical heading. The MODULE half of that is still true
+  // and is what this test pins: `findContainer` is unchanged and still returns a plain `zero` here.
+  // What changed is the ADAPTER contract. #476's near-miss branch runs a second compare with the
+  // unsafe invisible characters removed — exactly INVISIBLE_LABEL_CODE_POINTS, which this fixture's
+  // U+200B ZWSP is a member of — so both adapters now HALT on this shape instead of creating beside
+  // it, naming the code point and offset. That was #553's requirement, carried onto #476 when it
+  // was closed as a duplicate. U+200C/U+200D are deliberately absent from that set because they are
+  // required INSIDE ordinary words in Persian and Hindi, which is what makes folding the rest safe;
+  // the residual is now those deliberate absences, not invisible characters as a class.
+  // Still no new `findContainer` outcome — #476 needed none.
   const zwsp = String.fromCharCode(0x200b);
   const nested = ['# S', '', `- Ad${zwsp}min`, '  - [A](a.md)', ''];
   assert.deepEqual(wireNestedListChapter(nested, 'Admin', '[B](b.md)'), { kind: 'not-a-list' });

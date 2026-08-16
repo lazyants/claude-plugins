@@ -142,7 +142,7 @@ not the bare `<slug>` it emitted before 1.8.0. In `publish.wikilinks: false` mod
 adapter also changes group-free behavior further: the full-target glossary formula and
 the Markdown-link integrity gate both now cover group-free manifests (see "Glossary
 backlink discipline" and "Link integrity gate before you publish" below), and the
-Related block's sibling/glossary links — including the ≥2 floor — are required in
+Related block's sibling, glossary and index links — including the ≥2 floor — are required in
 Markdown form, not skipped (see "Wikilinks vs Markdown links" and "Chapter structure"
 below). This list names the group-free changes we are aware of; it is not a claim that
 every other section is unchanged. Flat and grouped entries coexist in one manifest.
@@ -265,12 +265,18 @@ mechanics matter at publish time:
   H2s render as `## {{publish.section_labels.prerequisites}}` and
   `## {{publish.section_labels.related}}` — literal strings the user wrote in their
   language. Do not translate them yourself.
-- **The Related block ends every chapter** and contains ≥2 links to sibling chapters or
-  glossary entries, in whichever form the profile dictates — see "Wikilinks vs Markdown
+- **The Related block ends every chapter** and contains ≥2 links, each one a sibling
+  chapter, a glossary entry, or the handbook index — `{{publish.index_file}}`, which is
+  what `assets/chapter-template.md`'s `{{handbook_index_link}}` placeholder resolves to,
+  and the same three-form list `static-md.md` states for its own target —
+  in whichever form the profile dictates — see "Wikilinks vs Markdown
   links" below for the exact syntax, by target type, in each `publish.wikilinks` mode.
   With wikilinks on, this is also what makes the Obsidian graph view useful — a chapter
   with no outbound wikilinks is a graph island. Either way, you halt the publish step
-  until at least two outbound Related-block links exist.
+  until at least two outbound Related-block links exist. That floor counts LINKS, not
+  member types: unlike the static-Markdown target, this adapter requires no index member
+  in particular, so two sibling chapters clear it and so does one index link beside one
+  glossary entry.
 
 Start from `assets/chapter-template.md` and substitute the placeholders — never
 hand-rewrite the skeleton from memory. Under `publish.wikilinks: false`, override the
@@ -408,9 +414,13 @@ the one exception to "do all of these" — see its own conditional note below.
          `legacy` line retargets in place unconditionally.
        - **`unverifiable`** ⇒ proceed — this file falls outside the verified class (see
          "Nested-list automation limits" below); the check ran and could not conclude — nothing
-         further verifies placement, no confirmation is requested, and the run continues
+         further automatically verifies placement, no confirmation is requested, and the run continues
          unverified, exactly as the shipped 1.10.0 behaviour did on this path — a `canonical`
          line is already complete and a `legacy` line still retargets in place unconditionally.
+         You are the only remaining check, so read the index region around it yourself and
+         confirm by eye that it sits under its `group_title` container — you already hold the
+         index lines. That is your own read, not a prompt to the operator, and it does not turn
+         this outcome into a confirmation step.
          See the safety statement under "Non-headings index, no existing line" below for what
          that does and does not guarantee.
        - **`misplaced`** ⇒ halt reusing the exact wording above:
@@ -431,8 +441,86 @@ the one exception to "do all of these" — see its own conditional note below.
      nested-list index is instead wired by `wireNestedListChapter`, "Non-headings index"
      below). Look for a heading whose text equals the entry's `group_title` — containers are
      located by title, never by the English `group` slug:
-     - Zero matches — create one (`## <group_title>`, at the heading depth the file
-       already uses for its top-level sections), then append the chapter line under it.
+     - Zero matches — **not automatically a create.** `zero` is two facts wearing one
+       name: this group has no container yet, or one exists and the equality compare
+       failed for a reason the match cannot see. Before creating anything, re-read the
+       container headings you already hold and ask whether any of them plausibly
+       RENDERS as `group_title`. Compare what each side RENDERS as, not how it is
+       spelled, and treat the list that follows as the common cases rather than a
+       complete one: NFC (the normalization the match itself already applies), case
+       folding, unwrapping a whole-content emphasis, strikethrough, inline-code,
+       markdown-link, wikilink or inline-HTML wrapper, resolving a character reference,
+       stripping a trailing `{#anchor}`, and dropping a leading OR trailing run of
+       ORNAMENT — an emoji, an icon, a bullet glyph, a run of punctuation — meaning a run
+       that carries no letters and no digits. Anything else that renders the same counts
+       too — err toward calling it a near miss, because the cost of doing so is a halt
+       and the cost of missing one is a forked index. That comparison DETECTS a near miss
+       and nothing more: it never selects a container to write into, so it cannot
+       mis-target, and the write still needs the exact match that already came back
+       empty.
+
+       One invisible-character case IS recognizable, and folding it costs the Persian and
+       Hindi handbooks nothing. Run the compare a second time with the UNSAFE invisible
+       characters removed from both sides — exactly the set `isPlainLabel` already
+       refuses, `INVISIBLE_LABEL_CODE_POINTS` in `assets/lib/chapter-paths.mjs` (a
+       zero-width space, a soft hyphen, the bidi controls, a BOM and their kin). Cite the
+       constant rather than copying its members here, so this contract cannot drift from
+       the module. If that compare matches, halt as above and additionally name the
+       offending code point and its offset in the heading, since nothing else makes it
+       visible to the operator. U+200C/U+200D stay OUT of that fold, together with the
+       other format characters the module records as deliberate absences, because they
+       occur INSIDE ordinary words — which is why a correctly-spelled Persian or Hindi
+       title never halts on this. Like the rest of this branch the second compare is
+       DETECT-only: it selects no container, so it cannot mis-target.
+
+       A run that DOES carry letters or digits is deliberately NOT folded, and a
+       parenthetical is the case to hold in mind. `Reports (2024)` and `Reports (2025)`
+       are two sections an operator maintains side by side; fold the parenthetical and
+       they read as a near miss, so a correct handbook halts and NOTHING clears it — the
+       token that distinguishes them is the token that was folded away. The governing
+       rule is what rules this out: compare what each side RENDERS as, and
+       `Reports (2024)` does not render as `Reports`. Stripping is not rendering. An
+       ornament run is different in kind — decoration an operator ADDS to a nav heading,
+       not a distinction they are drawing. The cost runs the other way and is accepted:
+       `## Reports (new)` beside a `Reports` container is no longer a named near miss,
+       and a fork there costs one duplicate heading, where the over-halt cost a handbook
+       nobody could publish at all.
+       - One or more headings are a plausible spelling — halt, naming `group_title` and
+         EVERY heading that reads as a near miss rather than just the first, with every
+         invisible codepoint in each one written as its `U+XXXX` code point, so the
+         operator can see a difference the terminal will not render (the `'` delimiters
+         around a heading are NOT escaped, the same disclosed exposure the
+         wrong-container halt's own found-title substitution carries):
+         "Found no container titled '<group_title>' in <index_file>, but one or more headings may render as the same section: <headings>. Decide whether they are one section or several, then curate <index_file> or the manifest accordingly and re-run — if you change group_title, change it on EVERY entry of this chapter's group, since it is group-scoped and changing it on this chapter alone halts on the conflicting-group_title gate instead."
+
+         Prescribe no repair beyond that. Which edit is right turns on whether these are
+         one section spelled several ways or several sections that happen to render
+         alike, and that is a question about what the sections MEAN — the comparison
+         above compares spellings and cannot reach it. A halt that guessed would, in the
+         over-rejected case this branch deliberately accepts, instruct the operator to
+         merge a section they curated into an unrelated one: precisely the outcome the
+         branch exists to prevent. Report and hand the file back, the way the
+         multiple-container halt below already does.
+
+         This halt names no form, and therefore promises no convergence: it is not
+         self-clearing and stays raised until someone who knows what the sections are
+         decides. That is deliberate.
+
+         If it names spellings you cannot tell apart, suspect STRUCTURE rather than the
+         label: the container scan reads ATX (`## `) headings only, so a setext heading —
+         a title underlined with `---` or `===` — is invisible to it and comes back
+         `zero` while rendering exactly as `group_title`. Rewriting that heading in ATX
+         form clears it. This only arises in a MIXED index; one carrying no depth-2 ATX
+         heading at all resolves as a non-headings index and never reaches this branch.
+       - None is — the create is safe: create one (`## <group_title>`, at the heading
+         depth the file already uses for its top-level sections), then append the
+         chapter line under it.
+
+       This deliberately over-rejects, in the same direction as the nested-list path's
+       plain-label refusal: a `group_title` of `Reports` halts against an existing
+       `reports` heading that belongs to a different group. A halt costs one edit; a
+       forked index is silent, permanent and never self-corrects, because the next run
+       matches the heading it wrote itself.
      - Exactly one — append the chapter line under it, respecting whatever ordering
        convention the file already follows.
      - More than one — halt:
@@ -913,10 +1001,27 @@ index published by 1.10.0–1.12.0:
     named here.
 
 Three residuals stay open, deliberately. **A HEADINGS-form index is not covered by the second
-rule**: a `## ` container heading carrying an invisible character is not refused, so it fails to
-match a clean `group_title` and this adapter creates a second, pixel-identical heading beside it.
-That is unchanged pre-existing behaviour, not something this change introduced, and closing it
-needs a new `findContainer` outcome both adapters would have to branch on. U+200C/U+200D (ZWNJ/ZWJ)
+rule**, and the gap it leaves is a CLASS rather than one exotic character: a `## ` container
+heading is never refused, so any heading that renders as `group_title` without being byte-equal to
+it fails the match. Measured against the shipped comparison, that is a wide set and not a short
+list of oddities: bold, a markdown link, a wikilink, inline code, strikethrough, inline HTML, a
+character reference, a leading or trailing emoji, a trailing `{#anchor}` and a case difference all
+fail it, and an emoji beside a nav heading is ordinary curation rather than an edge case. The
+near-miss check in the container-resolution branch
+above now HALTS on the spellings it recognizes instead of creating beside them, and its second
+compare folds the UNSAFE invisible characters as well, so an invisible character inside the label is
+no longer a residual as a class — though it does not vanish, and what is left divides by REASON
+rather than by character. The module's word-internal absences (ZWNJ/ZWJ, and the Arabic, Syriac and
+Mongolian format characters) are spared because they occur inside ordinary words. U+2028/U+2029 are
+absent from that same set for an UNRELATED reason — the nested-list writer answers them with a
+better `unwritable` diagnosis — and that reason does not reach the headings path, so a heading
+carrying one still returns zero and still gets a duplicate created beside it; the line-break class
+is disclosed separately above. The astral TAG block sits outside the module's own BMP-only SCOPE
+note. The other remainder is any
+rendered equivalence the model fails to NOTICE. That one is keyed on RECOGNITION, not
+on the list: the list is illustrative and the rule past it is to err toward halting, so what stays
+open is not what the list omits but what goes unnoticed, and a heading nobody spots as a near miss
+still gets a second, pixel-identical heading created beside it. U+200C/U+200D (ZWNJ/ZWJ)
 are still accepted everywhere, because they are required INSIDE ordinary words in Persian, Hindi
 and other scripts and refusing them would lock out a correctly-spelled title — so two labels
 differing only by one are still two containers. So are two labels differing by a no-break space
@@ -989,6 +1094,32 @@ backtick inside it swallow the body (the writer refuses such a file outright).
   flat entry's target is just `<slug>` — still the chapter's exact vault-root path (see
   "Vault root" above), never a special case.
 - Glossary link: see "Glossary backlink discipline" below for the exact target.
+- Handbook index link: the vault-root-relative path to `{{publish.index_file}}`, one
+  terminal `.md` dropped, where that path is `relative(<vault-root>,
+  {{publish.index_file}})` with BOTH operands canonicalized first, by the "Path
+  canonicalization" procedure above — which is defined for an `index_file` whose file
+  does not exist yet, and which is why an index reached through a symlink lands on its
+  true vault-root position instead of the raw lexical path a naive `relative()` would
+  produce. Same discipline as `vaultRelChaptersDir`, and for the same reason. It is also
+  the SAME vault-root-relative coordinate the chapter link above uses, never a BASENAME
+  taken from a deeper index, which would resolve only through the fragile suffix tier
+  this adapter stopped emitting for chapter links in 1.8.0. Worked example (vault root
+  `vault/`, `index_file: vault/handbook/INDEX.md`): `[[handbook/INDEX|All chapters]]`.
+  Root topology (`index_file` directly under `<vault-root>`) collapses that path to the
+  bare stem, so `vault/INDEX.md` yields `[[INDEX|All chapters]]` — still the index's
+  exact vault-root path, never a special case, and the same collapse the chapter bullet
+  above describes. This is the target `assets/chapter-template.md`'s
+  `{{handbook_index_link}}` placeholder takes, with `{{handbook_index_label}}` as the
+  display half after the pipe.
+  - The form assumes `publish.index_file` NAMES A `.md` FILE, and the schema does not
+    require that — it constrains the value to a string and nothing more. For an
+    `index_file` that does not end in `.md` — extensionless, or `.markdown`, or `.txt` —
+    the drop removes nothing, and the target then addresses
+    `<stem>.md`: a different note, or no note at all. Do not emit it. The index is one
+    OPTIONAL member of the Related block rather than a required one, so on such a profile
+    leave the index link out and meet the two-link floor with siblings and glossary
+    entries — an omitted link costs a navigation convenience, an emitted wrong one sends
+    the reader to another note and looks correct while doing it.
 - The pipe `|` separates target from display; omit it when display equals target.
 - The target is vault-root-relative, never a bare basename — grouping DOES change it
   (the `<group>` segment rides on the joined path), unlike the pre-1.8.0 bare `<slug>`
@@ -1015,6 +1146,16 @@ backtick inside it swallow the body (the writer refuses such a file outright).
   naturally evaluates to `<chapter-slug>.md` — the same spelling as the shipped 1.4.1
   form, not a special case.
 - Glossary link: see "Glossary backlink discipline" below.
+- Handbook index link:
+  `[<index label>](relative(dirname(chapter_file), {{publish.index_file}}))` — the same
+  full-target formula as the chapter link above, pointed at the index instead of a
+  chapter, so the `.md` stays on. This one is DEPTH-SENSITIVE, unlike the wikilinks-on
+  form: move a chapter between groups and its index link has to be rewritten with the
+  rest of its relative links. `revalidation.md`'s manual group-migration recipe does not
+  cover that case for this adapter — it names an index-target rewrite for `static-md.md`
+  only, on the grounds that this adapter has no MANDATORY index link, which is still
+  true and does not make a PRESENT one exempt. Rewrite it by hand until that recipe
+  says otherwise.
 - Skip Dataview blocks; they require Obsidian to render.
 
 You do not mix the two styles in one chapter. The profile decides; the chapter follows.

@@ -4407,6 +4407,513 @@ has_joined_in_section "revalidation: the sweep leaves a resolving legacy embed b
 has_joined_in_section "revalidation: the sweep prescribes no new module" \
   "$REVAL" '## Write-time canon' \
   'no repair module and no sweep pass added to the skill'
+echo "== #476: a zero container match is not an unconditional create =="
+# findContainer's `zero` is two facts wearing one name — this group has no container yet, or a
+# container exists and the equality compare failed for a reason the match cannot see. Both adapters
+# turned `zero` into an unconditional create, which forks a hand-curated index in two, reports
+# success, and never self-corrects (the next run matches the heading it wrote itself).
+#
+# RE-MEASURED against the CURRENT module before these pins were written, not copied from the issue:
+# of the seven spellings #476 tabulated against 1.12.0, five still land `zero` (emphasis, markdown
+# link, emoji prefix, trailing {#anchor}, case difference); the NFD-accent row now resolves to
+# `single` because #351 put NFC on both sides of the compare, so the issue's own table is STALE on
+# that row. Two spellings beyond its table also land `zero`: a wikilink-wrapped heading, and a
+# label carrying a zero-width space.
+#
+# Three pins per adapter, split by PROPERTY because no single needle proves all three and each
+# fails to a different mutation:
+#   (a) the near-miss check runs BEFORE the create, and is detect-only (a wrapped sentence, so
+#       joined) — a mutation that keeps the halt but restores the unconditional create leaves the
+#       halt-text pin green;
+#   (b) the halt text itself, verbatim on one physical line;
+#   (c) the halt occurs EXACTLY ONCE per adapter — a presence pin cannot tell one copy from two,
+#       and a second copy would mean the create branch was duplicated rather than replaced.
+# Deliberately NOT pinned: the individual members of the normalization list. It is an enumeration
+# whose members are expected to grow, and pinning them would fight a correct future widening rather
+# than catch a regression. What IS pinned is the property that makes the list safe to be incomplete
+# — review round 1 measured SEVEN spellings that reach `zero` and were NOT in the first cut's list
+# (inline code, strikethrough, inline HTML, a numeric character reference, a named character
+# reference, a TRAILING emoji, a trailing parenthetical), so a list read as exhaustive is a list
+# that licenses the fork #476 exists to stop.
+# Round-3 correction: this comment said TEN, and the round-1 commit message says the same. Three of
+# the ten were already reachable by the first cut's own members — `## *Reports*` and `## _Reports_`
+# via "unwrapping a whole-content emphasis", `## • Reports` via "a leading run of non-letter
+# decoration". Re-checked against the first cut's list rather than re-counted from the measurement.
+# The substantive point survives at seven; the commit message cannot be reworded, so the PR body
+# carries the correction.
+ZERO_LIST_NOT_EXHAUSTIVE='treat the list that follows as the common cases rather than a complete one'
+ZERO_ERR_TOWARD_HALT='err toward calling it a near miss, because the cost of doing so is a halt and the cost of missing one is a forked index'
+AMBIGUOUS_ZERO_HALT="Found no container titled '<group_title>' in <index_file>, but one or more headings may render as the same section: <headings>. Decide whether they are one section or several, then curate <index_file> or the manifest accordingly and re-run — if you change group_title, change it on EVERY entry of this chapter's group, since it is group-scoped and changing it on this chapter alone halts on the conflicting-group_title gate instead."
+ZERO_CHECK_FIRST='Before creating anything, re-read the container headings you already hold'
+ZERO_DETECT_ONLY='That comparison DETECTS a near miss and nothing more: it never selects a container to write into'
+has_joined_in_section "static-md: #476 the zero branch re-reads existing headings BEFORE creating" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_CHECK_FIRST"
+has_joined_in_section "static-md: #476 the near-miss comparison is detect-only, never a container selector" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_DETECT_ONLY"
+has_in_section "static-md: #476 ambiguous-zero halt, exact string" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$AMBIGUOUS_ZERO_HALT"
+has_joined_in_section "obsidian-vault: #476 the zero branch re-reads existing headings BEFORE creating" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_CHECK_FIRST"
+has_joined_in_section "obsidian-vault: #476 the near-miss comparison is detect-only, never a container selector" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_DETECT_ONLY"
+has_in_section "obsidian-vault: #476 ambiguous-zero halt, exact string" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$AMBIGUOUS_ZERO_HALT"
+has_joined_in_section "static-md: #476 the near-miss list is explicitly NOT exhaustive" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_LIST_NOT_EXHAUSTIVE"
+has_joined_in_section "static-md: #476 an unnamed rendered equivalence errs toward halting" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_ERR_TOWARD_HALT"
+has_joined_in_section "obsidian-vault: #476 the near-miss list is explicitly NOT exhaustive" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_LIST_NOT_EXHAUSTIVE"
+has_joined_in_section "obsidian-vault: #476 an unnamed rendered equivalence errs toward halting" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_ERR_TOWARD_HALT"
+# The halt PRESCRIBES NOTHING, and that is the load-bearing property here.
+#
+# Two review rounds landed admitted findings on this one paragraph, both because the halt tried to
+# tell the operator which edit to make. Round 1: the two remedies it offered were not mutually
+# exclusive and one of them merged a curated section into an unrelated one. Round 2, against the
+# patch: the corrective prose ("Do NOT rename it to MATCH") sat in the adapter, which the MODEL
+# reads, while the wrong instruction stayed inside the emitted string, which is what reaches the
+# OPERATOR — so the prose contradicted the halt instead of constraining it; the string named a
+# singular <heading> though the branch fires on one OR MORE, leaving no convergent repair for two
+# near misses; and "change group_title" ignored that group_title is GROUP-scoped.
+#
+# All three are the same defect: the halt cannot know which repair is right. Whether two headings
+# are one section or two is a question about what the sections MEAN, and nothing in the comparison
+# above can answer it. So the halt now reports and hands the file back, exactly as the
+# multiple-candidate halt further down each adapter has always done ("Multiple candidates" in
+# static-md, "More than one" in obsidian-vault) — a halt that prescribes nothing cannot prescribe
+# wrongly, which makes the class impossible rather than merely corrected.
+#
+# Four pins, one per property that a re-helpful rewrite would break first:
+ZERO_NAMES_EVERY_HEADING='EVERY heading that reads as a near miss rather than just the first'
+ZERO_PRESCRIBES_NOTHING='Prescribe no repair beyond that'
+ZERO_WHY_NO_REMEDY='that is a question about what the sections MEAN'
+ZERO_NOT_CONVERGENT='names no form, and therefore promises no convergence'
+has_joined_in_section "static-md: #476 the halt names every near-miss heading, not just the first" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_NAMES_EVERY_HEADING"
+has_joined_in_section "obsidian-vault: #476 the halt names every near-miss heading, not just the first" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_NAMES_EVERY_HEADING"
+has_joined_in_section "static-md: #476 the halt prescribes no repair" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_PRESCRIBES_NOTHING"
+has_joined_in_section "obsidian-vault: #476 the halt prescribes no repair" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_PRESCRIBES_NOTHING"
+has_joined_in_section "static-md: #476 says WHY no repair can be prescribed" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_WHY_NO_REMEDY"
+has_joined_in_section "obsidian-vault: #476 says WHY no repair can be prescribed" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_WHY_NO_REMEDY"
+has_joined_in_section "static-md: #476 the halt promises no convergence, and says so" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_NOT_CONVERGENT"
+has_joined_in_section "obsidian-vault: #476 the halt promises no convergence, and says so" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_NOT_CONVERGENT"
+# The group-scope constraint has to travel INSIDE the emitted string, not beside it — that is the
+# round-2 lesson in one assertion. It states the same constraint each adapter's own `unwritable`
+# remedy already states ~100-200 lines away (not the same WORDS — round 3 corrected this comment,
+# which claimed "borrowed verbatim"; the remedy reads "Give a plain group_title to EVERY entry of
+# this chapter's group in the manifest — it is group-scoped, so …"). Round 2 found the near-miss
+# halt had been written without checking that same-file sibling at all.
+ZERO_HALT_GROUP_SCOPED="change it on EVERY entry of this chapter's group, since it is group-scoped"
+has_in_section "static-md: #476 the emitted halt itself carries the group-scope constraint" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_HALT_GROUP_SCOPED"
+has_in_section "obsidian-vault: #476 the emitted halt itself carries the group-scope constraint" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_HALT_GROUP_SCOPED"
+# Round 3 — the OVER-halt the trailing arm created, which is the mirror of the fork #476 is about.
+# Measured against the shipped module: `group_title: "Reports (2025)"` against an existing
+# `## Reports (2024)` returns `zero`, and round 1's fold ("a leading OR trailing run of non-letter
+# decoration such as an emoji, an icon or A PARENTHETICAL") made the two read as a near miss. So a
+# CORRECT handbook halted — and nothing cleared it, because the token that distinguishes the two is
+# exactly the token the fold removed. `Billing (EU)` vs `## Billing (US)` is the same shape.
+#
+# The redesign made this worse rather than better: round 1's text at least offered "rename to
+# different WORDS", and round 2 deleted that without noticing this branch depended on it. A halt
+# with no satisfiable remedy is the one shape a halt must never have.
+#
+# The arm is now ORNAMENT-only — a run carrying no letters and no digits. That is also a move back
+# toward #476's own wording, which said "strip LEADING non-letter decoration"; the trailing arm and
+# the word "parenthetical" were a round-1 widening, not the request. Two pins, because a future
+# re-widening would restore the parenthetical and the carve-out is what argues against it: the
+# narrowed rule, and the reason. The reason is load-bearing prose, not commentary — it is the
+# governing rule applied ("compare what each side RENDERS as", and `Reports (2024)` does not render
+# as `Reports`; stripping is not rendering).
+ZERO_ORNAMENT_ONLY='meaning a run that carries no letters and no digits'
+ZERO_CONTENT_SUFFIX_KEPT='A run that DOES carry letters or digits is deliberately NOT folded'
+has_joined_in_section "static-md: #476 the decoration fold is ornament-only" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_ORNAMENT_ONLY"
+has_joined_in_section "obsidian-vault: #476 the decoration fold is ornament-only" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_ORNAMENT_ONLY"
+has_joined_in_section "static-md: #476 a content-bearing suffix is NOT folded, and says why" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_CONTENT_SUFFIX_KEPT"
+has_joined_in_section "obsidian-vault: #476 a content-bearing suffix is NOT folded, and says why" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_CONTENT_SUFFIX_KEPT"
+# Round 3 — the halt can name two spellings an operator cannot tell apart, and when it does the
+# cause is STRUCTURAL rather than in the label. Measured against the shipped module:
+#   mixed index (a real depth-2 ATX heading elsewhere) + setext `Reports` / `-------` => `zero`
+#   setext-only index, no depth-2 ATX heading anywhere                                => `non-heading`
+#   control, `## Reports`                                                              => `single`
+# Both halves are pinned. Naming only the first would send an operator of a setext-ONLY index
+# hunting a halt they will never see — that index takes the non-headings path and never reaches
+# this branch. (The reviewer reported this outcome as `zero` in both cases; re-measuring is what
+# separated them.)
+ZERO_SETEXT_CAUSE='suspect STRUCTURE rather than the label'
+ZERO_SETEXT_SCOPE='only arises in a MIXED index'
+# Round 4, the ped-ant bot's P2 — and it dissolves a tradeoff three earlier rounds treated as
+# irreducible. #553 (an invisible character in a `## ` container heading) was closed as a DUPLICATE
+# of #476, carrying one requirement forward in the closing comment, verbatim: "if the near-miss halt
+# is built, the cheap version is a match-modulo-invisibles scan of the collected headings on the
+# `zero` branch, halting with the code point and offset named". This branch built that halt and
+# declared exactly that case outside recognition — so shipping it as the #476 fix would have left a
+# CLOSED ticket's silent, permanent index fork with no tracker anywhere.
+#
+# The reason given for excluding it was a false dichotomy, and the module says so. Folding ALL
+# invisible characters would break Persian and Hindi, because ZWNJ/ZWJ are required inside ordinary
+# words. But `isPlainLabel` already ships a CURATED unsafe subset that spares them by construction —
+# `INVISIBLE_LABEL_CODE_POINTS` (verified: 20 members, U+200C/U+200D deliberately absent, with the
+# Persian/Hindi reasoning spelled out at the constant). Reusing that set folds the dangerous
+# characters and none of the linguistic ones. The scan stays DETECT-only, so it still cannot
+# mis-target.
+#
+# Pinned per property. The set is referenced by NAME rather than enumerated, so the contract cannot
+# drift from the module the way an inlined list would.
+ZERO_INVISIBLE_SCAN='Run the compare a second time with the UNSAFE invisible characters removed from both sides'
+ZERO_INVISIBLE_SET='exactly the set `isPlainLabel` already refuses'
+ZERO_INVISIBLE_DIAGNOSTIC='name the offending code point and its offset in the heading'
+ZERO_INVISIBLE_CARVEOUT='U+200C/U+200D stay OUT of that fold'
+has_joined_in_section "static-md: #553 the zero branch re-compares modulo unsafe invisibles" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_INVISIBLE_SCAN"
+has_joined_in_section "obsidian-vault: #553 the zero branch re-compares modulo unsafe invisibles" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_INVISIBLE_SCAN"
+has_joined_in_section "static-md: #553 the fold set is the module's, by name, not an inlined copy" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_INVISIBLE_SET"
+has_joined_in_section "obsidian-vault: #553 the fold set is the module's, by name, not an inlined copy" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_INVISIBLE_SET"
+has_joined_in_section "static-md: #553 the halt names the code point and offset" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_INVISIBLE_DIAGNOSTIC"
+has_joined_in_section "obsidian-vault: #553 the halt names the code point and offset" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_INVISIBLE_DIAGNOSTIC"
+has_joined_in_section "static-md: #553 ZWNJ/ZWJ stay outside the fold (the Persian/Hindi carve-out)" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_INVISIBLE_CARVEOUT"
+has_joined_in_section "obsidian-vault: #553 ZWNJ/ZWJ stay outside the fold (the Persian/Hindi carve-out)" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_INVISIBLE_CARVEOUT"
+has_joined_in_section "static-md: #476 two indistinguishable spellings point at a setext heading" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_SETEXT_CAUSE"
+has_joined_in_section "obsidian-vault: #476 two indistinguishable spellings point at a setext heading" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_SETEXT_CAUSE"
+has_joined_in_section "static-md: #476 the setext case is scoped to a MIXED index" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_SETEXT_SCOPE"
+has_joined_in_section "obsidian-vault: #476 the setext case is scoped to a MIXED index" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_SETEXT_SCOPE"
+SMD_AMBIG_ZERO_COUNT="$(count_fixed "$AMBIGUOUS_ZERO_HALT" "$SMD")"
+if [ "$SMD_AMBIG_ZERO_COUNT" -eq 1 ]; then
+  ok "static-md: #476 ambiguous-zero halt occurs exactly once"
+else
+  bad "static-md: #476 ambiguous-zero halt occurrence count drifted from 1 (found $SMD_AMBIG_ZERO_COUNT)"
+fi
+OMD_AMBIG_ZERO_COUNT="$(count_fixed "$AMBIGUOUS_ZERO_HALT" "$OMD")"
+if [ "$OMD_AMBIG_ZERO_COUNT" -eq 1 ]; then
+  ok "obsidian-vault: #476 ambiguous-zero halt occurs exactly once"
+else
+  bad "obsidian-vault: #476 ambiguous-zero halt occurrence count drifted from 1 (found $OMD_AMBIG_ZERO_COUNT)"
+fi
+# PLACEMENT, not just presence. Every obsidian-vault pin in this block binds `## INDEX wiring`,
+# whose scope legitimately includes its nested `### Nested-list automation limits` H3 — so
+# has_in_section cannot tell "in the container-resolution branch" from "relocated into the
+# nested-list section", where the rule would be scoped to a form it does not govern. static-md
+# needs no such bound: its pins bind an H3 that TERMINATES at that same heading. Same
+# placement-proof shape the §3.1/§3.2 groups above use, and the mutation it catches (relocate the
+# needle under a different heading) is the one uniqueness checks never imply.
+#
+# Round 3 bounded ALL FIVE rather than two. The earlier version opened with that universal and then
+# bounded the halt and the prescribe-nothing rule only, which is the exact shape this batch keeps
+# finding in the prose it reviews: a claim about every member, checked on some. Arguing that the two
+# bounds bracket a contiguous block would have been true today and silently false after any edit
+# that moved one needle out of it.
+#
+# Each needle here is passed in the single-physical-line form `line_of` needs (it is `grep -nF`), so
+# these deliberately do NOT reuse the joined pin variables above. `assert_line_before` fails CLOSED
+# on an empty line number, so a needle that vanishes goes red rather than passing quietly.
+OMD_NESTED_H3_LINE="$(line_of '### Nested-list automation limits' "$OMD")"
+assert_line_before "obsidian-vault: #476 the near-miss halt sits in container resolution, not the nested-list section" \
+  "$(line_of "$AMBIGUOUS_ZERO_HALT" "$OMD")" "$OMD_NESTED_H3_LINE"
+assert_line_before "obsidian-vault: #476 the prescribe-nothing rule sits in container resolution too" \
+  "$(line_of "$ZERO_PRESCRIBES_NOTHING" "$OMD")" "$OMD_NESTED_H3_LINE"
+assert_line_before "obsidian-vault: #476 the name-every-heading rule sits in container resolution too" \
+  "$(line_of 'EVERY heading that reads as a near miss rather than just the' "$OMD")" "$OMD_NESTED_H3_LINE"
+assert_line_before "obsidian-vault: #476 the why-no-repair rule sits in container resolution too" \
+  "$(line_of 'that is a question about what the sections MEAN' "$OMD")" "$OMD_NESTED_H3_LINE"
+assert_line_before "obsidian-vault: #476 the no-convergence statement sits in container resolution too" \
+  "$(line_of "$ZERO_NOT_CONVERGENT" "$OMD")" "$OMD_NESTED_H3_LINE"
+# The widened residual. Before this change both adapters disclosed only the RAREST slice of the
+# class ("a `## ` container heading carrying an invisible character is not refused"), while the
+# common slice — an emoji-prefixed nav heading — was undisclosed and silently duplicated. The
+# disclosure now names the class and scopes the remainder to what the near-miss check deliberately
+# cannot see. Pinned joined (the sentence wraps) and in BOTH adapters, because a one-sided edit to
+# this paragraph is this plugin's recurring defect. The residual COUNT stays three: the near-miss
+# check HALTS on the recognizable spellings, it does not close the invisible-character residual.
+#
+# Round-1 correction, and the reason this pin exists in this shape: the first version of the
+# disclosure said the remainder was "ONLY what that check deliberately cannot recognize: a heading
+# whose label carries an invisible character". That was measurably false — ten spellings reach
+# `zero` while being neither invisible nor named in the near-miss list — and the pin defending it
+# made the error harder to see, not easier. The remainder is now stated as TWO things, and the
+# second one is open-ended on purpose.
+ZERO_CLASS_DISCLOSURE='the gap it leaves is a CLASS rather than one exotic character'
+# Round-3 correction: the remainder was keyed on THE LIST ("any rendered equivalence the near-miss
+# list does not name"), but the rule has a catch-all PAST the list — anything that renders the same
+# counts, err toward halting. So the list omitting a spelling does not leave it open; only failing
+# to RECOGNIZE one does. Measured instance: `## Reports ##` returns `zero` and renders as `Reports`,
+# an equivalence no list member names and the catch-all nonetheless halts on.
+ZERO_CLASS_REMAINDER='remainder is any rendered equivalence the model fails to NOTICE'
+# Round 4: the invisible half of the remainder NARROWS once the near-miss scan folds the unsafe set.
+# Round 5 (ped-ant, second pass): the first cut of that narrowing was WRONG — it described every
+# deliberate absence as word-internal, which is true of ZWNJ/ZWJ and false of U+2028/U+2029, and so
+# silently dropped a reachable class. The module gives them a different reason (`chapter-paths.mjs`
+# "THREE deliberate ABSENCES": the nested-list writer answers them with a better `unwritable`
+# diagnosis) and that reason does not reach the HEADINGS path at all. Measured against the shipped
+# module: `findContainer(['## Other', '## Ad<U+2028>min'], 'Admin')` returns `zero`, and
+# `isPlainLabel` ACCEPTS a U+2028 label — so it is outside the set the second compare cites and the
+# duplicate really is still created.
+#
+# So the remainder is pinned on its ORGANIZING PRINCIPLE (it divides by reason, not by character)
+# plus the one slice whose reason is easiest to get wrong. A future edit that re-collapses these
+# into "the word-internal ones" goes red.
+ZERO_INVISIBLE_REMAINDER='what is left divides by REASON'
+ZERO_LINESEP_RESIDUAL='that reason does not reach the headings path'
+has_joined_in_section "static-md: the headings-form residual is disclosed as a CLASS, not one character" \
+  "$SMD" '### Nested-list automation limits' \
+  "$ZERO_CLASS_DISCLOSURE"
+has_joined_in_section "static-md: the headings-form residual names what the near-miss check cannot see" \
+  "$SMD" '### Nested-list automation limits' \
+  "$ZERO_CLASS_REMAINDER"
+has_joined_in_section "obsidian-vault: the headings-form residual is disclosed as a CLASS, not one character" \
+  "$OMD" '### Nested-list automation limits' \
+  "$ZERO_CLASS_DISCLOSURE"
+has_joined_in_section "obsidian-vault: the headings-form residual names what the near-miss check cannot see" \
+  "$OMD" '### Nested-list automation limits' \
+  "$ZERO_CLASS_REMAINDER"
+has_joined_in_section "static-md: the invisible remainder narrows to the module's deliberate absences" \
+  "$SMD" '### Nested-list automation limits' \
+  "$ZERO_INVISIBLE_REMAINDER"
+has_joined_in_section "obsidian-vault: the invisible remainder narrows to the module's deliberate absences" \
+  "$OMD" '### Nested-list automation limits' \
+  "$ZERO_INVISIBLE_REMAINDER"
+has_joined_in_section "static-md: U+2028/U+2029 stay in the residual, with their own reason" \
+  "$SMD" '### Nested-list automation limits' \
+  "$ZERO_LINESEP_RESIDUAL"
+has_joined_in_section "obsidian-vault: U+2028/U+2029 stay in the residual, with their own reason" \
+  "$OMD" '### Nested-list automation limits' \
+  "$ZERO_LINESEP_RESIDUAL"
+# The count sentence itself was never pinned. It is now, in both adapters, because the widening
+# above is exactly the kind of edit that silently turns "Three" into a wrong number.
+has_in_section "static-md: the residual COUNT sentence still reads three" \
+  "$SMD" '### Nested-list automation limits' \
+  'Three residuals stay open, deliberately.'
+has_in_section "obsidian-vault: the residual COUNT sentence still reads three" \
+  "$OMD" '### Nested-list automation limits' \
+  'Three residuals stay open, deliberately.'
+# The extension contract must carry the conditional-create rule too, or a new adapter modelled on
+# this README reproduces #476 verbatim. The halt enumeration is the load-bearing half: a new
+# adapter author reads that list to know which halts they owe.
+# Round-2 hardening: these were whole-file `has`, so the extension contract could have been moved
+# out of the section a new-adapter author reads and into any fenced example, with both staying
+# green. Bound to the section that owes the rule (§5 of enduser-handbook-ops: a claim with ONE
+# correct normative site takes has_in_section, never plain has).
+has_in_section "publish-targets README: the create branch is conditional, not automatic (#476)" \
+  "$PTREADME" '## Adding a new target X' \
+  'before creating a container because the label match came back zero'
+# Round 3: this halt was called "ambiguous-container", which THIS PLUGIN already uses for the
+# MULTIPLE-candidate outcome — `assets/lib/chapter-paths.mjs:1191` ("container-ambiguous halt") and
+# `tests/chapter-paths.test.mjs:822`/`:1756`. Two different halts under one name, in one plugin, is
+# the kind of collision an adapter author resolves by guessing. Renamed to "near-miss" everywhere it
+# is mine to rename; the module's own term is left alone.
+has_in_section "publish-targets README: names the near-miss halt a new adapter owes" \
+  "$PTREADME" '## Adding a new target X' \
+  'wrong-container / duplicate-line / near-miss / manual-wiring halts'
+# The two properties round 2 proved a new adapter cannot infer: the list is open, and the halt
+# prescribes nothing. Without these the README teaches the exact defect the adapters just shed.
+has_joined_in_section "publish-targets README: the near-miss list is NOT closed" \
+  "$PTREADME" '## Adding a new target X' \
+  'those are the common cases and NOT a closed list'
+has_joined_in_section "publish-targets README: a new adapter's halt prescribes no repair either" \
+  "$PTREADME" '## Adding a new target X' \
+  'Have that halt prescribe NO repair'
+
+echo "== #563 item 5 (#345): the unverifiable branch reads the placement by eye =="
+# #345 asked for an explicit confirmation STEP on `unverifiable` and was answered NO: a prompt on
+# the majority path is one operators learn to dismiss, and 75.7% of a measured 18-form x 6-title
+# corpus lands there. What was owed instead is an instruction to the consuming agent — it already
+# holds the index lines, so it can look. Pinned in both adapters, joined (the sentence wraps).
+#
+# The negative half matters as much as the positive one: this instruction is ESTABLISHMENT-time
+# and must not be read as reinstating the confirmation step, nor carried into W6, whose migration
+# checklist legitimately DOES require explicit user confirmation on this same outcome
+# (publish-targets/README.md and revalidation.md draw that split). The second needle pins the
+# disclaimer that keeps the two apart.
+# Round-2 hardening: this needle stopped at "under its", so a mutation naming any other container
+# — or none — kept it green. It now runs through the container it actually names.
+BY_EYE_RULE='read the index region around it yourself and confirm by eye that it sits under its `group_title` container'
+BY_EYE_NOT_A_PROMPT='That is your own read, not a prompt to the operator, and it does not turn this outcome'
+has_joined_in_section "static-md: unverifiable tells the agent to read the placement by eye" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$BY_EYE_RULE"
+has_joined_in_section "static-md: the by-eye read is NOT a confirmation step" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$BY_EYE_NOT_A_PROMPT"
+has_joined_in_section "obsidian-vault: unverifiable tells the agent to read the placement by eye" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$BY_EYE_RULE"
+has_joined_in_section "obsidian-vault: the by-eye read is NOT a confirmation step" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$BY_EYE_NOT_A_PROMPT"
+# EXACTLY one copy per adapter. Each adapter states `unverifiable` at several sites (the branch
+# itself, the safety statement, the measured label table); the instruction belongs to the BRANCH
+# only, and a second copy would mean it leaked into the safety statement or the table, where it
+# would read as covering shapes the branch never reaches.
+SMD_BY_EYE_COUNT="$(count_joined_fixed "$BY_EYE_RULE" "$SMD")"
+if [ "$SMD_BY_EYE_COUNT" -eq 1 ]; then
+  ok "static-md: the by-eye instruction occurs exactly once (the branch, not the safety statement)"
+else
+  bad "static-md: by-eye instruction occurrence count drifted from 1 (found $SMD_BY_EYE_COUNT)"
+fi
+OMD_BY_EYE_COUNT="$(count_joined_fixed "$BY_EYE_RULE" "$OMD")"
+if [ "$OMD_BY_EYE_COUNT" -eq 1 ]; then
+  ok "obsidian-vault: the by-eye instruction occurs exactly once (the branch, not the safety statement)"
+else
+  bad "obsidian-vault: by-eye instruction occurrence count drifted from 1 (found $OMD_BY_EYE_COUNT)"
+fi
+# The phrase #345 actually rejected was never pinned — pre-existing, not introduced here, but this
+# is the commit that makes it load-bearing: a future edit could keep the "NOT a confirmation step"
+# needle above while re-adding the prompt beside it, and nothing would go red. Pinned in both
+# adapters, joined, because the retained sentence wraps mid-phrase (a line-based grep for
+# "nothing further automatically verifies placement" returns ZERO hits in either file).
+NO_CONFIRMATION_REQUESTED='no confirmation is requested, and the run continues unverified'
+has_joined_in_section "static-md: the unverifiable branch still requests NO confirmation (#345)" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$NO_CONFIRMATION_REQUESTED"
+has_joined_in_section "obsidian-vault: the unverifiable branch still requests NO confirmation (#345)" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$NO_CONFIRMATION_REQUESTED"
+# And the qualifier that keeps the retained sentence true once a by-eye read is prescribed beside
+# it: "nothing further verifies placement" would otherwise be literally false.
+AUTOMATIC_QUALIFIER='nothing further automatically verifies placement'
+has_joined_in_section "static-md: the no-verifier claim is qualified to AUTOMATIC verification" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$AUTOMATIC_QUALIFIER"
+has_joined_in_section "obsidian-vault: the no-verifier claim is qualified to AUTOMATIC verification" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$AUTOMATIC_QUALIFIER"
+
+echo "== #563 item 6 (#261): obsidian-vault's Related block names three members =="
+# The template every Obsidian chapter starts from (assets/chapter-template.md) spends one of its
+# two Related lines on `{{handbook_index_link}}`, which resolves to `publish.index_file` — not a
+# sibling chapter. The rule named only two member types, and the "Wikilinks vs Markdown links"
+# section defined a target form for chapters and for glossary entries and none for the index, so
+# the consuming LLM was told to substitute a placeholder whose target form was defined nowhere.
+# Measured: `{{handbook_index_link}}` and `{{handbook_index_label}}` occur in exactly ONE file
+# corpus-wide — chapter-template.md — and are explained in none.
+#
+# What is deliberately NOT asserted: that the index member is MANDATORY. It is not, and making it
+# so would be a behaviour change. `revalidation.md` states, unpinned by design (see the round-19
+# note above), that obsidian-vault has "no equivalent mandatory index-target link"; that sentence
+# stays true only while this stays a legitimate-member claim. The third needle pins the clause
+# that keeps it that way.
+has_in_section "obsidian-vault: Related block names the handbook index as a third member (#261)" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  'a glossary entry, or the handbook index'
+# Round-2 hardening: this stopped at "resolves to", so a mutation deleting the pointer to where the
+# form is DEFINED kept it green — and the undefined-target-form gap is the whole of #261. It now
+# runs through that cross-reference.
+has_joined_in_section "obsidian-vault: the third member is tied to the template placeholder it explains" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  '`{{handbook_index_link}}` placeholder resolves to, and the same three-form list'
+has_joined_in_section "obsidian-vault: the >=2 floor counts LINKS, not member types — no mandatory index member" \
+  "$OMD" '## Chapter structure (Obsidian-flavoured)' \
+  'That floor counts LINKS, not member types: unlike the static-Markdown target, this adapter requires no index member in particular'
+# The index TARGET FORM, previously defined nowhere for this adapter. Pinned per mode: the two
+# lists are separate and a fix applied to one is this plugin's signature defect. The wikilinks-on
+# form is the load-bearing one — the plausible invention it replaces is a bare `[[INDEX]]`, which
+# resolves only through the fragile suffix tier 1.8.0 stopped emitting for chapter links.
+has_in_section "obsidian-vault: wikilinks-on index target is vault-root-relative, .md dropped (#261)" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'Handbook index link: the vault-root-relative path to `{{publish.index_file}}`'
+# Round-1 correction: the prohibition was first written as "never a bare `[[INDEX]]` basename",
+# which forbids the bullet's OWN correct output at root topology — `relative(vault, vault/INDEX.md)`
+# with one terminal `.md` dropped IS `INDEX`. The chapter bullet four lines above already carries
+# the carve-out ("Root topology ... never a special case"); the index bullet now mirrors it, so the
+# prohibition is scoped to a basename taken from a DEEPER index. Both halves are pinned: a future
+# edit that restores the unscoped prohibition, or that drops the carve-out, goes red.
+# Joined since round 2: the M4 canonicalization clause re-wrapped this sentence, and a line-based
+# needle across the new wrap returns zero hits — silently, which is this corpus's signature trap.
+has_joined_in_section "obsidian-vault: the index-target prohibition is scoped to a deeper index" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'never a BASENAME taken from a deeper index'
+has_joined_in_section "obsidian-vault: root topology legitimately yields the bare index stem" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'still the index'"'"'s exact vault-root path, never a special case'
+# Round 3: the pin above is named for the bare index stem but holds only the generic
+# "never a special case" clause, so prose that dropped the worked example entirely would keep it
+# green. The example IS the claim here — it is the one place the reader sees what the formula
+# produces at root topology, and it is what round 1's over-broad prohibition contradicted.
+has_in_section "obsidian-vault: the root-topology worked example itself is present" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  '`[[INDEX|All chapters]]`'
+has_in_section "obsidian-vault: wikilinks-off mode gets its own index target form (#261)" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  '`[<index label>](relative(dirname(chapter_file), {{publish.index_file}}))`'
+# Round 2, M4: the formula was not valid over the paths the schema admits, in two ways.
+# (a) `publish.index_file` is `{"type": "string"}` (verified against assets/profile.schema.json) —
+#     nothing requires a `.md` extension, and for an extensionless value the "one terminal .md
+#     dropped" step drops NOTHING, leaving a wikilink that addresses `<stem>.md`: a different note,
+#     or none. The adapter now declines to emit it, which it can only do because the index member is
+#     optional rather than mandatory — the pin three assertions above is what keeps that true, so
+#     these two are a pair and a future edit making the index mandatory must fail one of them.
+# (b) the formula took RAW operands while this same adapter realpaths BOTH operands of
+#     `vaultRelChaptersDir`, for the symlink reason it states there. Now canonicalized, by the
+#     procedure this file already defines for paths that need not exist yet — reusing the existing
+#     wording rather than inventing a second canonicalization rule beside it.
+has_joined_in_section "obsidian-vault: the index target canonicalizes both operands (M4)" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'with BOTH operands canonicalized first, by the "Path canonicalization" procedure above'
+has_joined_in_section "obsidian-vault: the index target form requires a .md index_file (M4)" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'The form assumes `publish.index_file` NAMES A `.md` FILE, and the schema does not require that'
+has_joined_in_section "obsidian-vault: an extensionless index_file yields no wikilink at all (M4)" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'leave the index link out and meet the two-link floor with siblings and glossary entries'
 
 echo "== #568: the shipped skeleton satisfies the label-pin contract it teaches =="
 # #477 made an exact-TEXT assertion mandatory for any label a chapter quotes, but the skeleton every
