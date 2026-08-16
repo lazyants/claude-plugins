@@ -3959,6 +3959,42 @@ has_joined_in_section "capture-engines: manual's perpetual record_absent is expe
   "$REFS/capture-engines.md" '## Manual (halt boundary, not a ready mode)' \
   "That is the expected report for this engine value's halt boundary, not a provenance defect to chase"
 
+echo "== #477: page identity pins the verbatim labels a chapter quotes =="
+# The contract said "asserted VISIBLE" and nothing more, so a chapter could quote a column header
+# the capture spec never pinned; a rename then shipped a step whose label is absent from its own
+# screenshot with every gate green. These pins are JOINED-mode because both files hard-wrap and a
+# sentence-length needle matches no single physical line.
+PAGEID="$REFS/page-identity.md"
+ANTIFAB="$REFS/anti-fabrication.md"
+
+has_joined_in_section "page-identity: step 4 states a visibility assertion is not enough for a quoted label" \
+  "$PAGEID" '## The principle' \
+  'A visibility assertion is not enough when the chapter quotes that control'
+has_joined_in_section "page-identity: step 4 requires the assertion be keyed to the exact quoted text" \
+  "$PAGEID" '## The principle' \
+  'key the assertion to that exact text'
+has_joined_in_section "page-identity: step 4 requires the exact-text assertion be SCOPED to the captured region" \
+  "$PAGEID" '## The principle' \
+  'scope it to the region the screenshot captures'
+has_joined_in_section "page-identity: step 4 names why an unscoped page-wide exact match is not enough" \
+  "$PAGEID" '## The principle' \
+  'satisfied by the same string anywhere on the page'
+has_joined_in_section "page-identity: step 4 names the non-control label class that earns no matrix row" \
+  "$PAGEID" '## The principle' \
+  'Column headers and field labels are quoted by'
+has_joined_in_section "page-identity: step 4 states a matrix row is not an assertion" \
+  "$PAGEID" '## The principle' \
+  'a matrix row records a label, it does not assert one'
+has_joined_in_section "page-identity: spec checklist carries the exact-text clause, not visibility alone" \
+  "$PAGEID" '## What to write into the spec' \
+  'for every label the chapter quotes verbatim, assert that exact text'
+has_joined_in_section "anti-fabrication: self-audit carries the reciprocal every-quoted-label-is-pinned obligation" \
+  "$ANTIFAB" '## Self-audit before publish' \
+  'has a capture-time assertion pinned to that exact string'
+has_joined_in_section "anti-fabrication: self-audit says a visibility assertion is not that pin" \
+  "$ANTIFAB" '## Self-audit before publish' \
+  'A visibility assertion on the element is not that pin'
+
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
 # command and handed the assertion the leftover text. It kept passing while no longer checking the

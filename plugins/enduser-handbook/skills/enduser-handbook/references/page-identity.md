@@ -39,6 +39,23 @@ For every screenshot the chapter will embed, the capture spec must, immediately 
    Export button", the Export button must be asserted visible before the click and before the
    shot that documents the click.
 
+   **A visibility assertion is not enough when the chapter quotes that control's label.**
+   Visibility is a predicate about a box, not about text: a `getByTestId` or CSS-selector anchor
+   satisfies it identically while pinning nothing the reader will actually read. Whenever the
+   prose quotes a string verbatim, key the assertion to that exact text — the exact-matched
+   `getByText` that the state markers and the modal identity check already use in
+   `assets/capture-helpers.playwright.ts` — and scope it to the region the screenshot captures,
+   the way that modal check scopes its lookup to the dialog. A page-wide exact match is
+   satisfied by the same string anywhere on the page, so an unscoped assertion can stay green
+   through the very rename it was meant to catch.
+
+   **Cover the labels that are not controls.** Column headers and field labels are quoted by
+   chapters as often as buttons are, and neither is clickable nor readable as a status, so
+   neither earns a row in the coverage matrix `completeness-gate.md` builds — that table is
+   indexed by interactive trigger. Pin every string the chapter quotes, whatever kind of element
+   carries it. Tab captions and empty-state copy usually do earn a matrix row, and still need
+   the same exact-text assertion: a matrix row records a label, it does not assert one.
+
 If any of these fail, the run must **fail loudly** — never fall back to capturing whatever is on
 screen. A wrong screenshot is worse than no screenshot, because the chapter will ship it.
 
@@ -104,7 +121,8 @@ For each capture step, the spec should:
 
 - Navigate to the route from the manifest entry.
 - Apply the `capture.page_identity_signal` directive verbatim (translated to the engine).
-- Assert the specific element the step narrates is visible.
+- Assert the specific element the step narrates is visible — and, for every label the chapter
+  quotes verbatim, assert that exact text, scoped to the region the shot captures.
 - Take the screenshot.
 - If the next step changes state on the same page (opens a modal, expands a row), repeat the
   visibility assertion for the new element before the next shot.
