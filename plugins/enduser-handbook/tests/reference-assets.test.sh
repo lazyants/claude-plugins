@@ -5019,6 +5019,34 @@ has "capture-helpers: the carve-out does not claim a canvas has no text at all (
 has_joined_in_section "capture-spec-helpers: the false 'a canvas has no text' universal is named as false (#565)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   '"A canvas has no text" is a false universal'
+# A CLASS GATE over all three write sites, not three more per-site pins. Three review rounds each
+# found one instance of this universal and each fix left another standing, because the wordings
+# differ and the sites are three files: the round-1 self-check fixed one, round 2 found the sentence
+# eight lines below it, round 3 found the one in capture-safety.md that a positive pin cannot see
+# (the file stated the correction AND the universal, and stayed green). What no positive pin catches
+# is a doc that says both. So every retired wording is pinned ABSENT in EVERY one of the three files
+# at once — a recurrence in the site that did not have it before still goes red.
+# HONEST LIMIT: this gates the wordings that have actually appeared, not every possible phrasing of
+# the idea. It converts a KNOWN recurrence from review-caught to CI-caught; it does not make the
+# class unwriteable.
+for retired_canvas_universal in \
+  'there is no DOM text node to collect' \
+  'carries no text to scan' \
+  'no string for the leak patterns' \
+  'no text node to collect and no element inside it to list' \
+  'the leak-assert has nothing to match'
+do
+  # The .ts site takes the CODE variant. hasnt_joined is wrap-tolerant for MARKDOWN only: against a
+  # JSDoc wrap the next line's ` * ` lands inside the needle, so a plain hasnt_joined here would pass
+  # by construction — green on text that is plainly present, which is the very failure this gate is
+  # being added to prevent.
+  hasnt_joined_code "canvas carve-out: retired universal absent from capture-helpers.playwright.ts — '$retired_canvas_universal' (#565)" \
+    "$retired_canvas_universal" "$CH"
+  for canvas_doc in "$REFS/capture-spec-helpers.md" "$REFS/capture-safety.md"; do
+    hasnt_joined "canvas carve-out: retired universal absent from $(basename "$canvas_doc") — '$retired_canvas_universal' (#565)" \
+      "$retired_canvas_universal" "$canvas_doc"
+  done
+done
 # --- Site 3: the engine-agnostic masking rules a human reads before capturing.
 has_joined_in_section "capture-safety: the masking rules name the canvas gap (#565)" \
   "$REFS/capture-safety.md" "$CS_MASK_SECTION" \

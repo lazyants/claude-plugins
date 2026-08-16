@@ -117,13 +117,15 @@ clear the frame's content before the shot, run the same mask+scan inside each ac
 frame, or keep the frame out of the captured region.
 
 A `<canvas>` is the same shape one step further out, and its remedies are
-different. What a canvas paints is a **bitmap**: there is no DOM text node to
-collect, no form-control value, and no element inside it to name in a selector.
+different. What a canvas paints is a **bitmap**: the painted pixels are not a DOM
+text node and not a form-control value, and no element exists inside the canvas
+to name in a selector.
 Listing the `<canvas>` itself masks nothing — a canvas's children are fallback
 content and paint nothing — so the mask has nothing to overwrite, the
 leak-assert never sees what was painted, and the coverage assert stays satisfied
-by whatever you *did* list. (The fallback text itself *is* scanned, like any
-other text node. It is just not what the canvas shows.) A document preview rendered to a canvas (PDF.js renders
+by whatever you *did* list. (A canvas's fallback children *are* ordinary text
+nodes and *are* scanned, like any other text node — they are simply not what the
+canvas shows. "A canvas has no text" is the wrong way to say this.) A document preview rendered to a canvas (PDF.js renders
 every page that way), a canvas-mode data grid, or a signature pad therefore
 ships legible in the PNG with the run green. There is no "scan it yourself"
 here, because a canvas hosts no document: clear or overwrite the canvas before

@@ -121,10 +121,11 @@ class ShimElement extends ShimNode {
   }
 
   // The getter is never read today — the helper only ASSIGNS textContent (that is the mask), and the
-  // scan reads text through the tree walk. Kept anyway, for the same reason attachOwnerDocument and
-  // the unused element constructors below are kept: a capability this stub LACKS fails SILENTLY
-  // (`undefined`), which is the false-green direction. Unused DOM fidelity is cheap; a stub that
-  // quietly answers `undefined` to a future read is not.
+  // scan reads text through the tree walk. Kept anyway, for the same reason ShimHTMLTextAreaElement's
+  // constructor below is kept though no scenario instantiates it: a capability this stub LACKS fails
+  // SILENTLY. A class with only a setter reads back `undefined` rather than throwing (verified), and
+  // silence is the false-green direction. Unused DOM fidelity is cheap; a stub that quietly answers
+  // `undefined` to a future read is not.
   get textContent() {
     let acc = '';
     for (const child of this.childNodes) {
