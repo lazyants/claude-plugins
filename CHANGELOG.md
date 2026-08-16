@@ -119,11 +119,14 @@ the lane that cut it.
 - The `<canvas>` refusal is a refusal, not a scan: `allowUnscannedCanvas: true` returns the caller to
   the eyeball-the-frame step, and `<img>`/`<video>` pixels were never covered and still are not.
 
-`tests/reference-assets.test.sh` goes from 959 to **1012 assertions** — +53, none removed, reconciled
-by diffing the two check-name sets rather than by arithmetic. Of those, 16 are carve-out disclosure
-pins, 2 correction pins, 2 release-copy pins, 30 class-gate pins, 2 seam pins and 1 node-suite
-runner; the parity gate's own block was already in the 959 baseline. The plugin now ships 20
-`node:test` suites, 1395 tests.
+`tests/reference-assets.test.sh` gains **+52 assertions, none removed**, plus one more wherever `node`
+is on PATH — 16 carve-out disclosure pins, 2 correction pins, 2 release-copy pins, 30 class-gate
+pins, 2 seam pins, and the node-suite runner that is the +1. Reconciled by diffing the two
+check-name sets rather than by arithmetic on totals. Absolute totals are deliberately not quoted:
+several blocks here are gated on an optional local tool (`node`, `ruby`, `esbuild`), so the endpoints
+move with the environment while the delta does not — measured +52/0 under stock tools with none of
+the three present, and +53/0 with node and ruby available. The plugin ships 20 `node:test` suites,
+1395 tests, wherever node is available to run them.
 
 ## [enduser-handbook 1.15.0] — 2026-08-16
 
