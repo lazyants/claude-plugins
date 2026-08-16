@@ -21,6 +21,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { readdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -207,6 +208,27 @@ test('every construct the extractor cannot read is REPORTED rather than silently
   }
 });
 
+test('unbalanced brackets are REPORTED — the depth counter cannot be trusted silently', () => {
+  // The whole extractor trusts bracket depth to decide which `export` is a module export, which makes
+  // the counter itself the one thing that must not fail quietly. An unclosed brace pins depth above
+  // zero for the rest of the file, so every later top-level export is skipped: no finding, no name
+  // compared, and an empty surface handed back as if the file simply exported nothing.
+  const hidden = 'export interface Broken { a: number\nexport declare const HIDDEN: 1;\n';
+  const { values, unsupported } = extractDeclarationExports(hidden, 'broken.d.mts');
+  assert.deepEqual([...values.keys()], [], 'the unclosed brace does hide the later export — that is the hazard');
+  assert.ok(
+    unsupported.some((u) => u.includes('bracket depth did not stay balanced')),
+    `the hidden export must be reported as unreadable, not returned as an empty surface; got ${JSON.stringify(unsupported)}`,
+  );
+  // A stray closer is the mirror image: depth goes negative, so the counts either side of it are
+  // wrong even though it happens to end back at zero.
+  const stray = extractDeclarationExports('}\nexport declare const A: 1;\n', 'stray.d.mts');
+  assert.ok(
+    stray.unsupported.some((u) => u.includes('went negative on the way')),
+    `a closer with no opener must be reported; got ${JSON.stringify(stray.unsupported)}`,
+  );
+});
+
 test('export lists and namespace re-exports resolve to the EXPORTED name, not the local one', () => {
   const source = [
     'declare const local: 1;',
@@ -216,7 +238,9 @@ test('export lists and namespace re-exports resolve to the EXPORTED name, not th
     'export * as bundled from "./m.mjs";',
   ].join('\n');
   assert.deepEqual(valueNames(source), ['bundled', 'plain', 'public', 'value']);
-  assert.deepEqual(typeNames(source), ['Inline', 'Other', 'Renamed', 'Shape'].filter((n) => n !== 'Other'));
+  // `Other` is deliberately absent: it is the LOCAL name of the type re-exported as `Renamed`, and a
+  // comparison keyed on the local name would demand a runtime export nothing declares.
+  assert.deepEqual(typeNames(source), ['Inline', 'Renamed', 'Shape']);
 });
 
 test('a default export is keyed `default`, whatever shape it takes', () => {
@@ -313,7 +337,6 @@ test('#339 reproduced end to end: deleting the ASYNC export`s declaration no lon
 // ---------------------------------------------------------------------------------------------
 
 test('the extractor reads the shipped declarations with no unsupported construct anywhere', async () => {
-  const { readdir, readFile } = await import('node:fs/promises');
   const files = (await readdir(LIB_DIR)).filter((f) => f.endsWith('.d.mts')).sort();
   assert.ok(files.length > 0, 'the declaration enumeration matched NOTHING — an empty sweep is not a clean one');
   const problems = [];

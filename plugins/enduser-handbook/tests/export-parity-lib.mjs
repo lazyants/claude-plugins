@@ -28,6 +28,7 @@
 // ways, arity where a signature is declared, and no orphan module on either side.
 
 import { readdirSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -164,10 +165,7 @@ class Reader {
   /** The next identifier-shaped word without consuming it, or '' if the next token is not a word. */
   peekWord() {
     const save = this.pos;
-    this.skipSpace();
-    let end = this.pos;
-    while (end < this.text.length && IDENT.test(this.text[end])) end += 1;
-    const word = this.text.slice(this.pos, end);
+    const word = this.takeWord();
     this.pos = save;
     return word;
   }
@@ -238,32 +236,50 @@ function skipBracketed(text, start) {
 }
 
 /**
- * Split a parameter or declarator list at commas belonging to THIS list only.
+ * Walk `text`, reporting for each character whether it sits at this text's OWN top level — outside
+ * every bracket group and every `<...>` type-argument list.
  *
- * Angle brackets are tracked alongside the three bracket kinds because a type argument list carries
- * its own commas — `x: Map<string, number>` is one parameter, not two. Angle tracking is ambiguous in
- * general TypeScript (`a < b, c > d` is a pair of comparisons), but not here: a `.d.mts` parameter or
- * declarator list holds types and nothing else — TypeScript forbids an initializer in an ambient
- * declaration — so there is no comparison expression for a `<` to belong to.
+ * Four scans below need exactly this and nothing else: split a list at its own commas, find a
+ * binding's annotation colon, spot a default, find a statement's terminator. Each was written wrong
+ * at least once on the same two traps, so both are answered here once rather than four times. An
+ * arrow `=>` is yielded as the single token `'=>'`, because its `>` closes nothing and its `=` is not
+ * a default. A type-argument list is tracked alongside the three bracket kinds, because it carries
+ * its own commas — `x: Map<string, number>` is one parameter, not two.
+ *
+ * Angle tracking is ambiguous in general TypeScript (`a < b, c > d` is a pair of comparisons), but
+ * not over the text scanned here: a `.d.mts` parameter or declarator list holds types and nothing
+ * else — TypeScript forbids an initializer in an ambient declaration — so there is no comparison
+ * expression for a `<` to belong to.
  */
-function splitTopLevel(text) {
-  const parts = [];
+function* scanTopLevel(text) {
   let depth = 0;
   let angle = 0;
-  let current = '';
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i];
-    if (ch === '=' && text[i + 1] === '>') { current += '=>'; i += 1; continue; }
+    if (ch === '=' && text[i + 1] === '>') {
+      yield { index: i, char: '=>', top: depth === 0 && angle === 0 };
+      i += 1;
+      continue;
+    }
     if (ch === '(' || ch === '[' || ch === '{') depth += 1;
     else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
     else if (ch === '<') angle += 1;
     else if (ch === '>' && angle > 0) angle -= 1;
-    if (ch === ',' && depth === 0 && angle === 0) {
+    yield { index: i, char: ch, top: depth === 0 && angle === 0 };
+  }
+}
+
+/** Split a parameter or declarator list at commas belonging to THIS list only. */
+function splitTopLevel(text) {
+  const parts = [];
+  let current = '';
+  for (const { char, top } of scanTopLevel(text)) {
+    if (char === ',' && top) {
       parts.push(current);
       current = '';
       continue;
     }
-    current += ch;
+    current += char;
   }
   parts.push(current);
   return parts.map((p) => p.trim()).filter((p) => p !== '');
@@ -284,53 +300,52 @@ function splitTopLevel(text) {
  */
 export function declaredArity(paramText) {
   const params = splitTopLevel(paramText).filter((p, i) => !(i === 0 && /^this\s*[?:]/.test(p)));
-  let min = params.length;
-  let max = params.length;
   for (let i = 0; i < params.length; i += 1) {
     const p = params[i];
-    if (p.startsWith('...')) { min = Math.min(min, i); max = Infinity; break; }
+    // A rest parameter is where `Function.prototype.length` stops counting and where the declaration
+    // stops constraining, so everything from here on is admitted.
+    if (p.startsWith('...')) return { min: i, max: Infinity };
     // The binding sits before the first top-level `:`; `?` on it, or a default, makes it optional.
-    const binding = splitOnTypeColon(p);
-    if (binding.endsWith('?') || hasTopLevelDefault(p)) { min = Math.min(min, i); break; }
+    if (splitOnTypeColon(p).endsWith('?') || hasTopLevelDefault(p)) return { min: i, max: params.length };
   }
-  return { min, max };
+  return { min: params.length, max: params.length };
 }
 
 /**
  * Whether a parameter carries a default value at its own top level.
  *
- * `=>` is checked first and consumed whole: an arrow-typed parameter (`cb: (a: A) => B`) carries an
- * `=` at depth 0 that a naive scan reads as a default, which would silently shrink the declared
- * minimum arity and turn a correct declaration into a false red.
+ * `==`, `!=` and `===` are not defaults, and neither is the `=` of an arrow — which the scan hands
+ * over whole. An arrow-typed parameter (`cb: (a: A) => B`) carries an `=` at depth 0 that a naive
+ * scan reads as a default, which would silently shrink the declared minimum arity and turn a correct
+ * declaration into a false red.
  */
 function hasTopLevelDefault(param) {
-  let depth = 0;
-  let angle = 0;
-  for (let i = 0; i < param.length; i += 1) {
-    const ch = param[i];
-    if (ch === '=' && param[i + 1] === '>') { i += 1; continue; }
-    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
-    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
-    else if (ch === '<') angle += 1;
-    else if (ch === '>' && angle > 0) angle -= 1;
-    else if (ch === '=' && depth === 0 && angle === 0 && param[i - 1] !== '=' && param[i - 1] !== '!' && param[i + 1] !== '=') return true;
+  for (const { index, char, top } of scanTopLevel(param)) {
+    if (char !== '=' || !top) continue;
+    if (param[index - 1] === '=' || param[index - 1] === '!' || param[index + 1] === '=') continue;
+    return true;
   }
   return false;
 }
 
 /** The binding half of a parameter — everything before the annotation's top-level `:`. */
 function splitOnTypeColon(param) {
-  let depth = 0;
-  let angle = 0;
-  for (let i = 0; i < param.length; i += 1) {
-    const ch = param[i];
-    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
-    else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
-    else if (ch === '<') angle += 1;
-    else if (ch === '>' && angle > 0) angle -= 1;
-    else if (ch === ':' && depth === 0 && angle === 0) return param.slice(0, i).trim();
+  for (const { index, char, top } of scanTopLevel(param)) {
+    if (char === ':' && top) return param.slice(0, index).trim();
   }
   return param.trim();
+}
+
+/**
+ * The offset of the `;` ending the statement that begins at `start`, or end of text for a file whose
+ * last statement omits it. A `.d.mts` declarator carries a type annotation and no initializer, so the
+ * first top-level `;` is the terminator.
+ */
+function findStatementEnd(text, start) {
+  for (const { index, char, top } of scanTopLevel(text.slice(start))) {
+    if (char === ';' && top) return start + index;
+  }
+  return text.length;
 }
 
 /**
@@ -362,10 +377,11 @@ export function extractDeclarationExports(source, label = '<source>') {
   }
 
   let depth = 0;
+  let wentNegative = false;
   for (let i = 0; i < masked.length; i += 1) {
     const ch = masked[i];
     if (ch === '(' || ch === '[' || ch === '{') { depth += 1; continue; }
-    if (ch === ')' || ch === ']' || ch === '}') { depth -= 1; continue; }
+    if (ch === ')' || ch === ']' || ch === '}') { depth -= 1; if (depth < 0) wentNegative = true; continue; }
     if (depth !== 0 || ch !== 'e') continue;
     if (masked.slice(i, i + 6) !== 'export') continue;
     if (i > 0 && IDENT.test(masked[i - 1])) continue;
@@ -445,23 +461,8 @@ export function extractDeclarationExports(source, label = '<source>') {
         types.add(enumName);
         continue;
       }
-      // The declarator list runs to the statement terminator. A `.d.mts` declarator carries a type
-      // annotation and no initializer, so the terminator is the first top-level `;` — or, for a file
-      // whose last statement omits it, end of text.
       const start = reader.pos;
-      let end = start;
-      let d = 0;
-      let a = 0;
-      while (end < masked.length) {
-        const c = masked[end];
-        if (c === '=' && masked[end + 1] === '>') { end += 2; continue; }
-        if (c === '(' || c === '[' || c === '{') d += 1;
-        else if (c === ')' || c === ']' || c === '}') d -= 1;
-        else if (c === '<') a += 1;
-        else if (c === '>' && a > 0) a -= 1;
-        else if (c === ';' && d === 0 && a === 0) break;
-        end += 1;
-      }
+      const end = findStatementEnd(masked, start);
       const declarators = splitTopLevel(masked.slice(start, end));
       if (declarators.length === 0) { unsupported.push(`${where}: \`export ${word}\` with no declarator`); continue; }
       for (const declarator of declarators) {
@@ -514,6 +515,18 @@ export function extractDeclarationExports(source, label = '<source>') {
     }
 
     unsupported.push(`${where}: unrecognized export construct — this extractor refuses to guess rather than skip it`);
+  }
+
+  // Everything above trusts the depth counter to say which `export` is a module export, so the
+  // counter is the one thing that must not be trusted silently. If masking ever mis-reads a construct
+  // and swallows a closing bracket, depth never returns to zero and EVERY later top-level export is
+  // skipped — no finding raised, no name compared, and an empty surface reported as a clean one. That
+  // is the exact false-green class this gate exists to close, arriving through its own front door.
+  // Balance is therefore asserted rather than assumed, and a negative excursion is reported too: it
+  // means a closer was read that no opener accounts for, so the counts either side of it are wrong
+  // even if they happen to end at zero.
+  if (depth !== 0 || wentNegative) {
+    unsupported.push(`${label}: bracket depth did not stay balanced (ended at ${depth}${wentNegative ? ', and went negative on the way' : ''}) — the file could not be read reliably, so its export surface is reported as unknown rather than as empty`);
   }
 
   return { values, types, unsupported };
@@ -603,7 +616,7 @@ export function enumerateModulePairs(libDir) {
  */
 export async function auditModulePair(libDir, base) {
   const findings = [];
-  const declarationText = await readUtf8(join(libDir, `${base}.d.mts`));
+  const declarationText = await readFile(join(libDir, `${base}.d.mts`), 'utf8');
   let extracted;
   try {
     extracted = extractDeclarationExports(declarationText, `${base}.d.mts`);
@@ -665,11 +678,6 @@ export async function auditModulePair(libDir, base) {
       arityChecks,
     },
   };
-}
-
-async function readUtf8(path) {
-  const { readFile } = await import('node:fs/promises');
-  return readFile(path, 'utf8');
 }
 
 /**
