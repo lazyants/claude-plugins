@@ -4043,6 +4043,25 @@ has_joined_in_section "revalidation: step 5 states capture_failed is ONE warning
 hasnt "revalidation: D6 added no capture.command_scoped key" 'command_scoped' "$REVAL"
 hasnt "revalidation: D6 added no scope placeholder" '{{scope}}' "$REVAL"
 
+echo "== #563 item 4 (from #246's closure): the one-time pre-1.6.0 embed sweep =="
+# #246 asked for a filesystem-owning production module to retroactively repair group-free chapter
+# links. Its population is a migration window that closed seven releases ago, and the remedy is a
+# scan-and-repair the consuming agent performs natively. This is the promised replacement: one
+# paragraph, no module. It sits in "Write-time canon" because that section already states 1.6.0
+# performs no automatic retroactive repair — the sweep is the manual answer to that exact claim.
+has_joined_in_section "revalidation: the one-time pre-1.6.0 embed sweep exists" \
+  "$REVAL" '## Write-time canon' \
+  'a handbook first authored before 1.6.0 can still carry embeds'
+has_joined_in_section "revalidation: the sweep rewrites only the embeds that do not resolve" \
+  "$REVAL" '## Write-time canon' \
+  'rewrite only the ones that do not resolve'
+has_joined_in_section "revalidation: the sweep leaves a resolving legacy embed byte for byte alone" \
+  "$REVAL" '## Write-time canon' \
+  'Leave a resolving embed byte for byte alone'
+has_joined_in_section "revalidation: the sweep prescribes no new module" \
+  "$REVAL" '## Write-time canon' \
+  'no repair module and no sweep pass added to the skill'
+
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
 # command and handed the assertion the leftover text. It kept passing while no longer checking the

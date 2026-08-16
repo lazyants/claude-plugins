@@ -119,6 +119,17 @@ accepted-diff or material re-author ("The flow" above), or the manual
 group-migration recipe below. Neither of those is new in 1.6.0, and neither
 is what an `anyGroup` flip alone would do.
 
+**The one-time pre-1.6.0 sweep.** Because nothing repairs those chapters
+automatically, a handbook first authored before 1.6.0 can still carry embeds
+written with the flat-only spelling. Do the sweep by hand, once, on the first
+revalidation after the upgrade: read each chapter file, resolve every embed
+target it contains against the filesystem, and rewrite only the ones that do
+not resolve. Leave a resolving embed byte for byte alone — the gates are
+resolution checks, not spelling checks, so a legacy spelling that still
+resolves is already compliant and rewriting it is churn. Reading files and
+checking paths is the whole procedure: it needs no repair module and no sweep
+pass added to the skill.
+
 ## Manual-migration boundary (the group axis)
 
 1.5.0 adds an optional `group`/`group_title` pair to manifest entries (see [manifest-discipline.md](manifest-discipline.md)). Moving an entry between groups, renaming a group's title, or removing a grouped entry all require moving files on disk — the chapter file, its asset directory, and its index-file line and container — and that relocation is **not automated in 1.5.0**. Instead of moving anything itself, the skill halts and hands you a recipe: no automated relocation, no in-place rewrite of chapters the delta did not touch, no journal or rollback machinery, no container rename/delete, no inbound-link rewriter, no capture-spec updater. You are the transaction engine; the halt text below tells you exactly what to move and edit.
