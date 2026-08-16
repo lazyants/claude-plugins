@@ -5924,3 +5924,46 @@ test('findPhysicalPathCollisions: all-distinct resolved paths produce NO collisi
   ]);
   assert.deepEqual(collisions, []);
 });
+
+// =================================================================================================
+// [#357] The contract's MEASURED claim about the fact enum, tied to the module that produces it
+// =================================================================================================
+
+test('#357: the twelve-fact claim in the extension contract is re-measured from the module, not trusted', () => {
+  // publish-targets/README.md tells a third-adapter author that manualMigrationChecklist emits a
+  // FIXED set of twelve fact kinds, and that this is why their revalidation contract can only be
+  // prose. A number written into prose rots silently: add a thirteenth kind and the contract keeps
+  // asserting twelve, with nothing red. So the number is derived here from the real function, over
+  // every delta kind and both provenance outcomes, and compared against the word in the document.
+  const p = {
+    capture: { output_dir: 'docs/assets' },
+    publish: { chapters_dir: 'docs', index_file: 'docs/SUMMARY.md', wikilinks: false },
+  };
+  const g = (o) => ({ slug: 'items', ...o });
+  const grouped = g({ group: 'admin', group_title: 'Admin' });
+  const deltas = [
+    [grouped, null],
+    [grouped, g({ group: 'admin', group_title: 'Ops' })],
+    [grouped, g({ group: 'mgmt', group_title: 'Admin' })],
+    [grouped, g({ group: 'mgmt', group_title: 'Ops' })],
+    [grouped, g({})],
+  ];
+  const kinds = new Set();
+  for (const [oldEntry, newEntry] of deltas) {
+    for (const provenanceActive of [true, false]) {
+      for (const fact of manualMigrationChecklist(p, oldEntry, newEntry, undefined, provenanceActive)) {
+        kinds.add(fact.kind);
+      }
+    }
+  }
+  assert.equal(kinds.size, 12);
+
+  const contract = readFileSync(join(HERE, '../skills/enduser-handbook/references/publish-targets/README.md'), 'utf8');
+  // Spelled as a word in the prose, so the assertion has to name the spelling it expects rather
+  // than matching whatever digit happens to be nearby.
+  const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen'];
+  assert.ok(
+    contract.includes(`emits a FIXED set of ${WORDS[kinds.size]} fact kinds`),
+    `publish-targets/README.md must state "${WORDS[kinds.size]} fact kinds" — manualMigrationChecklist emits ${kinds.size}`,
+  );
+});

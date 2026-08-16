@@ -61,7 +61,7 @@ import {
 // total drops by one: a near-miss would have
 // had to leave this list too. Read the two numbers together whenever this pin moves; a total that
 // moves alone is the only shape consistent with a resolved citation being the one that went.
-const EXPECTED_TOTAL_CITATIONS = 89;
+const EXPECTED_TOTAL_CITATIONS = 92;
 
 // Every citation whose quoted text does NOT resolve to exactly one heading title in its own file — an
 // over-match, a near-miss (e.g. "INDEX wiring" vs the full parenthetical heading), or a title that

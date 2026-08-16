@@ -5182,6 +5182,64 @@ process.stdout.write(["PARITY", r.census.modules, r.census.runtimeExports, r.cen
 else
   echo "  note  node not on PATH (or the extractor is missing) — skipping the assets/lib parity census"
 fi
+echo "== #357: the publish-target extension contract covers revalidation/W6, address derivation and the completion gate =="
+# The contract is the file a maintainer follows to add a third target. Until #357 it asked only which
+# link SYNTAX a target uses and never mentioned W6 at all, so a correct establishment-time adapter
+# could still leave the migration path undefined and report success without verifying anything. These
+# pins are section-bound (has_joined_in_section, not has): each claim has exactly ONE normative site,
+# and a whole-file grep would survive the claim being relocated into an unrelated section.
+has_joined_in_section "publish-targets README: address derivation separates syntax from coordinate system" \
+  "$PTREADME" '## Address derivation' \
+  'It says nothing about the COORDINATE SYSTEM an address is measured in, and the two are independent'
+has_joined_in_section "publish-targets README: address derivation demands origin, normalization, output and depth-sensitivity per class" \
+  "$PTREADME" '## Address derivation' \
+  'name (a) the ORIGIN the address is measured from'
+has_joined_in_section "publish-targets README: address normalization binds BOTH operands, or a scan misses its own rows" \
+  "$PTREADME" '## Address derivation' \
+  'Apply the normalization to BOTH operands'
+# The completion gate's SHAPE is fixed and its item list is not. Both divergences below are measured
+# against the shipped pair, and each is a case where copying the other adapter is actively wrong.
+has_joined_in_section "publish-targets README: the completion gate re-reads the index rather than trusting the wiring step" \
+  "$PTREADME" '## The completion gate' \
+  'the wiring step returning success is not evidence that the chapter is listed'
+has_joined_in_section "publish-targets README: containment is a per-adapter decision, and the shipped pair take opposite positions" \
+  "$PTREADME" '## The completion gate' \
+  'Two shipped adapters, opposite requirements, both correct for their own target'
+has_joined_in_section "publish-targets README: the navigability floor is derived from the target, not copied" \
+  "$PTREADME" '## The completion gate' \
+  'requires at least two outbound links in the Related block, because Obsidian does'
+has_joined_in_section "publish-targets README: the completion gate discloses that it is chapter-scoped" \
+  "$PTREADME" '## The completion gate' \
+  'a no-op revalidation never runs it, and it does not sweep untouched chapters'
+# W6 integration. The first pin is the sentence the whole section exists to make an adapter state.
+has_joined_in_section "publish-targets README: establishment never renames, moves or deletes" \
+  "$PTREADME" '## Revalidation and W6 integration' \
+  'Establishment never renames, moves, or deletes'
+has_joined_in_section "publish-targets README: the delta-kind set is closed and a new-only entry never produces one" \
+  "$PTREADME" '## Revalidation and W6 integration' \
+  'a new-only entry never produces a kind, however grouped the manifest becomes'
+has_joined_in_section "publish-targets README: terminal-state facts split into mechanically provable and user-confirmed" \
+  "$PTREADME" '## Revalidation and W6 integration' \
+  'which facts are mechanically provable and which resolve only by EXPLICIT USER CONFIRMATION'
+has_joined_in_section "publish-targets README: the shared recipe must be audited per target, not inherited" \
+  "$PTREADME" '## Revalidation and W6 integration' \
+  'Silence is not "not applicable"'
+# Honesty about the limit. The contract states obligations no extension point can currently verify;
+# a contract that implied otherwise would be worse than one that says so.
+has_joined_in_section "publish-targets README: the fixed twelve-fact enum is named as the reason the contract stays prose" \
+  "$PTREADME" '### What this contract cannot yet require' \
+  'emits a FIXED set of twelve fact kinds'
+has_joined_in_section "publish-targets README: a third target revalidation contract is declared prose-only" \
+  "$PTREADME" '### What this contract cannot yet require' \
+  'revalidation contract is prose-only'
+# revalidation.md's own recipe is the shipped INSTANCE of the obligation, not the obligation. Without
+# this note a third-adapter author reads a file-and-path recipe as the whole requirement.
+has_joined_in_section "revalidation: the manual recipe names itself the static/vault instance of a general obligation" \
+  "$REVAL" '### The manual group-migration recipe' \
+  'static/vault instance, not the obligation itself'
+has_joined_in_section "revalidation: the terminal-state facts are named as the file-target instance too" \
+  "$REVAL" '### The manual group-migration recipe' \
+  'twelve fact kinds are derived from'
 
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
