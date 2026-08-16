@@ -1334,8 +1334,18 @@ has_joined_in_section "capture-spec-helpers: an unadmitted SSE GET is documented
 # frames another document unless the caller opts out explicitly.
 has "capture-helpers: maskAndAssert refuses an unscanned frame unless opted out (#472)" \
   'allowUnscannedFrames' "$CH"
-has "capture-helpers: the frame count covers <iframe> AND <frame> (#472)" \
-  "'iframe, frame'" "$CH"
+# Review round 2: counting only iframe/frame left the IDENTICAL defect one element name over —
+# <object data> and <embed src> host a nested browsing context on exactly the same terms, so their
+# text is unreachable by both passes while their pixels are composited. The selector must name all
+# four, and the prose must not claim more reach than the count has.
+has "capture-helpers: the frame count covers every nested browsing context (#472)" \
+  "'iframe, frame, object, embed'" "$CH"
+has_joined_in_section "capture-spec-helpers: the carve-out names object/embed, not just iframe (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  '`<object data>`, `<embed src>`'
+has_joined_in_section "capture-spec-helpers: the refusal's reach is scoped, not claimed absolute (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  '**What the refusal can see, exactly:**'
 has_joined_in_section "capture-spec-helpers: the iframe carve-out names the opt-out (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   'allowUnscannedFrames: true'
@@ -1423,7 +1433,20 @@ for f in "$SPEC" "$REAUDIT"; do
     'denyPatterns: []' "$f"
 done
 has "example spec: says what denyPatterns is actually for (#560)" \
-  'raw SUBSTRING match over the full URL' "$SPEC"
+  'denyPatterns is a raw SUBSTRING match' "$SPEC"
+# Review round 2: the first version of that comment claimed the four verbs "adds no coverage", which
+# is measurably false — the bare verbs DID block the run-together lowercase spellings the tokenizer
+# splits differently ('/deleteuser', '/sendmail', '/approveall', '/finalizeorder' all go
+# block/deny-pattern -> allow/get-head when they are removed). The residue is now stated, so an
+# adopter with such a route is not told that re-adding coverage is pointless.
+has "example spec: the removed verbs' residue is stated, not denied (#560)" \
+  "// What the bare verbs DID add, measured: only the run-together lowercase spellings the tokenizer" "$SPEC"
+# Needle is the CLAIM alone, not the sentence that carried it: `hasnt_joined` matches case-sensitively
+# (count_joined_fixed uses awk index()), and a mutation test showed the longer needle
+# 'repeating them here adds no coverage' goes green the moment the sentence comes back capitalized at
+# the start of a line — the exact shape a rewrap produces.
+hasnt_joined "example spec: no longer claims the bare verbs add no coverage (#560)" \
+  'adds no coverage' "$SPEC"
 # #474: LANG/LC_ALL never reach the browser — the browser-context locale is the only lever that sets
 # navigator.language and sends Accept-Language. Three shipped sentences claimed otherwise.
 for f in "$SPEC" "$REAUDIT"; do

@@ -68,14 +68,16 @@ export interface CaptureGuard {
    * timer each time one arrives), giving a delayed beacon/fetch/WebSocket fired after the last
    * interaction time to reach the handler — capped at `maxMs` so it cannot hang. This is best-effort,
    * NOT a guarantee that every late request has settled; a request that fires after the drain window
-   * is not detected. Call it after the capture body, in a phase that cannot REPLACE the body's own
-   * failure: an abrupt completion inside a bare `finally` discards the exception already propagating
-   * out of the `try` AND skips every line after it, so a bare `finally { await
-   * assertNoDangerousHits(); await context.close(); }` reports a guard error instead of the real
-   * cause and never closes the context. Keep a `primaryError` slot (the shape `captureRegionClipped`
+   * is not detected. It gates on the `dangerousHits` ledger ONLY — requests classified `'benign'`
+   * are excluded by construction.
+   *
+   * WHERE TO CALL IT: after the capture body, in a phase that cannot REPLACE the body's own failure.
+   * An abrupt completion inside a bare `finally` discards the exception already propagating out of
+   * the `try` AND skips every line after it, so a bare
+   * `finally { await assertNoDangerousHits(); await context.close(); }` reports a guard error instead
+   * of the real cause and never closes the context. Keep a `primaryError` slot (the shape `captureRegionClipped`
    * below uses), let neither this assertion nor `context.close()` overwrite a value already in it,
-   * and rethrow it last. It gates on the
-   * `dangerousHits` ledger ONLY — requests classified `'benign'` are excluded by construction.
+   * and rethrow it last.
    *
    * The ledger mixes two kinds of entry, and they mean different things. A plain reason
    * (`fail-closed`, `deny-pattern`, …) is a request the guard BLOCKED — it never reached the server.
@@ -785,9 +787,10 @@ export interface MaskOptions {
   /** Exact number of targets the mask must cover; a mismatch is a coverage failure (throws). */
   expectedCount: number;
   /**
-   * Opt out of the unscanned-frame refusal (issue #472). The region's `<iframe>`/`<frame>` content is
-   * photographed but never masked and never scanned, so a frame is refused by default. Set this only
-   * once you have proven the framed documents carry no PII.
+   * Opt out of the unscanned-frame refusal (issue #472). Any nested browsing context in the region —
+   * `<iframe>`, `<frame>`, `<object data>`, `<embed src>` — is photographed but never masked and
+   * never scanned, so its presence is refused by default. Set this only once you have proven those
+   * documents carry no PII.
    */
   allowUnscannedFrames?: boolean;
 }
@@ -826,9 +829,15 @@ export interface MaskOptions {
  * composites the child document's pixels. A selector that only matches inside the frame at least
  * throws on the coverage assert (it matches nothing); PII the author did NOT list is silent —
  * nothing to mask, no text node to collect, no pattern to match, green run, value in the PNG. That
- * silent half is why the frame carve-out alone is ENFORCED rather than only documented: a frame in
- * the scanned region THROWS unless the caller passes `allowUnscannedFrames: true`. Mask
- * the frame's content before the shot, scan it yourself per frame, or keep it out of the region.
+ * silent half is why this carve-out alone is ENFORCED rather than only documented: a nested browsing
+ * context in the scanned region — <iframe>, <frame>, <object data> or <embed src>, all four load a
+ * document of their own on the same terms — THROWS unless the caller passes
+ * `allowUnscannedFrames: true`. Mask the framed content before the shot, scan it yourself per frame,
+ * or keep it out of the region.
+ * WHAT THE REFUSAL CAN SEE, exactly: the light DOM and OPEN shadow roots of the subtree it was
+ * handed, at the moment it is called. A frame in a CLOSED shadow root, a frame painted over the
+ * captured rectangle from OUTSIDE that subtree, and a frame attached AFTER the call (the skeleton
+ * takes more than one shot off a single mask) are all still uncounted.
  * All of these surfaces rely on the human eyeball-the-frame step (capture-safety.md) as the
  * backstop — the scan is defense-in-depth, not a complete proof.
  */
@@ -965,13 +974,19 @@ export async function maskAndAssert(
       };
       collect(root);
 
-      // --- Frame count (issue #472): the ONE place with DOM access, so the counting happens here
-      // and the caller fails closed on it, exactly as it does on the coverage count above. queryDeep
-      // is reused so open shadow roots are covered identically to the mask and the scan; the
-      // .matches() term covers the region BEING the frame, which querySelectorAll (descendants only)
-      // would miss. ---
+      // --- Framed-document count (issue #472): the ONE place with DOM access, so the counting
+      // happens here and the caller fails closed on it, exactly as it does on the coverage count
+      // above. queryDeep is reused so open shadow roots are covered identically to the mask and the
+      // scan; the .matches() term covers the region BEING the frame, which querySelectorAll
+      // (descendants only) would miss.
+      // The selector is every element that hosts a NESTED BROWSING CONTEXT, not just <iframe>:
+      // <object data> and <embed src> load a document of their own on exactly the same terms — its
+      // text nodes are in another document, so neither pass reaches them, while the browser
+      // composites its pixels into the shot. Counting only iframe/frame would leave the identical
+      // defect one element name over. ---
+      const FRAME_HOSTS = 'iframe, frame, object, embed';
       const frameCount =
-        (root.matches('iframe, frame') ? 1 : 0) + queryDeep(root, 'iframe, frame').length;
+        (root.matches(FRAME_HOSTS) ? 1 : 0) + queryDeep(root, FRAME_HOSTS).length;
 
       return { matched: matchedCount, scanParts: parts, frames: frameCount };
     },
@@ -983,11 +998,11 @@ export async function maskAndAssert(
   // naming the frame points at the cause where "selector drift" would misdirect.
   if (frames > 0 && !allowUnscannedFrames) {
     throw new Error(
-      `maskAndAssert: the captured region contains ${frames} <iframe>/<frame> element(s). Their ` +
-        'content is photographed but never masked and never scanned — neither pass crosses a ' +
-        'document boundary. Mask or remove the framed content before the shot, scan it yourself ' +
-        'per frame, keep the frame out of the region, or pass allowUnscannedFrames: true once you ' +
-        'have proven those documents carry no PII.',
+      `maskAndAssert: the captured region hosts ${frames} nested browsing context(s) ` +
+        '(<iframe>/<frame>/<object>/<embed>). Their content is photographed but never masked and ' +
+        'never scanned — neither pass crosses a document boundary. Mask or remove the framed ' +
+        'content before the shot, scan it yourself per frame, keep the frame out of the region, or ' +
+        'pass allowUnscannedFrames: true once you have proven those documents carry no PII.',
     );
   }
 

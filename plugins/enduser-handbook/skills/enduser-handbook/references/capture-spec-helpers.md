@@ -27,8 +27,8 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   `allowBeacons: true` admits **every** request the engine types as a `ping`, to any origin, GET and
   POST alike (measured — a cross-origin POST beacon returns `allow`/`beacon-allowed`), so it is a
   broad beacon allowlist, not a narrow one; `denyPatterns` still win over it. There is no write
-  allowlist and no origin allowlist. WebSockets
-  are blocked *without connecting*; an engine that cannot block a socket (only observe it) must fail
+  allowlist and no origin allowlist. WebSockets are blocked *without connecting*; an engine that
+  cannot block a socket (only observe it) must fail
   at install time, not silently open. The ordered decision is a **pure function**
   (`../assets/lib/capture-guard-policy.mjs`, `decideRoute`) so its branch order is unit-tested, not
   just grep-asserted. The end-of-run assertion **drains a short quiet period** before checking, so a
@@ -160,13 +160,18 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   the mask-**coverage** assert would have fired. The case the scan exists for is the silent one: PII
   the author did *not* list has nothing to mask, no text node to collect and no pattern to match, so
   the run is green and the value is in the PNG. So this one carve-out is **enforced, not merely
-  disclosed**: the helper counts the `<iframe>`/`<frame>` elements in the region it was asked to scan
-  and **throws** when it finds any — checked **before** the coverage assert, so a framed region is
-  named as the cause in both halves rather than misreported as selector drift — and the single
-  opt-out `allowUnscannedFrames: true` is the only way past it —
-  take it only once you have proven the framed documents carry no PII. Otherwise mask or remove the
-  frame's content before the shot, scan it yourself per frame, or keep the frame out of the captured
-  region. (Issue #472.)
+  disclosed**: the helper counts every element in the region that hosts a **nested browsing
+  context** — `<iframe>`, `<frame>`, `<object data>`, `<embed src>`, all four load a document of
+  their own on exactly these terms — and **throws** when it finds any, checked **before** the
+  coverage assert, so a framed region is named as the cause in both halves rather than misreported
+  as selector drift. The single opt-out `allowUnscannedFrames: true` is the only way past it; take
+  it only once you have proven those documents carry no PII. Otherwise mask or remove the framed
+  content before the shot, scan it yourself per frame, or keep it out of the captured region.
+  **What the refusal can see, exactly:** the light DOM and **open** shadow roots of the subtree it
+  was handed, at the moment it is called. A frame inside a **closed** shadow root, a frame painted
+  over the captured rectangle from **outside** that subtree, and a frame attached **after** the call
+  (a spec may take more than one shot off a single mask) are all still uncounted, and stay the human
+  eyeball-the-frame step's job. (Issue #472.)
 
 ## The spec skeleton
 
