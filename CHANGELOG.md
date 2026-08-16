@@ -2,6 +2,60 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.15.0] — 2026-08-16
+
+The two publish-target adapter contracts: a zero label match is not licence to create a container,
+and the outcome that declines to conclude now says who is left to look.
+
+Closes #476 and #563 — items 5 and 6 land here, which completes that eight-item batch — and carries
+out the requirement #553 left behind when it was closed as a duplicate of #476.
+
+### Fixed
+
+- **A zero container match licensed an unconditional create (#476).** Both publish adapters turned
+  `findContainer`'s `zero` outcome into an unconditional `## <group_title>` write, so a heading that
+  merely *rendered* as the group title got a second, render-identical section appended beside it in
+  an index the tool does not own. The run reported success and never self-corrected, because the
+  next run matched the heading it had written itself. Both adapters now re-read the container
+  headings first and halt when any of them plausibly renders as `group_title`, naming the group
+  title and every candidate. The halt prescribes no repair: whether two headings are one section
+  spelled two ways or two sections that render alike is a question about what the sections mean,
+  which a spelling comparison cannot reach, so it reports and hands the file back the way the
+  multiple-candidate halt beside it always has. The fold covers ornament only — a leading or
+  trailing run carrying no letters and no digits — and deliberately not a content-bearing suffix:
+  `Reports (2024)` and `Reports (2025)` are two sections an operator maintains side by side, and
+  folding the parenthetical would halt a correct handbook with no edit that clears it.
+- **An invisible character in a container heading forked the index silently (#476, delivering
+  #553).** A second compare now runs with the unsafe invisible characters removed from both sides —
+  exactly the curated set `isPlainLabel` already refuses, which spares U+200C and U+200D by
+  construction because those are required inside ordinary Persian and Hindi words — and names the
+  offending code point and its offset, since nothing else makes it visible to the operator. Both
+  compares are detect-only: neither selects a container to write into, so neither can mis-target.
+- **The Related block's index member had a category and no target form (#261, via #563 item 6).**
+  `obsidian-vault.md` now names the handbook index as a third legitimate member — the
+  `{{publish.index_file}}` that `assets/chapter-template.md`'s `{{handbook_index_link}}` placeholder
+  resolves to — and gives its target form in both `publish.wikilinks` modes. Legitimate, not
+  required: the ≥2 floor counts links rather than member types, so two sibling chapters still clear
+  it.
+
+### Changed
+
+- **The `unverifiable` placement outcome now says who looks (#345, via #563 item 5).** #345 asked
+  for an explicit confirmation step and was answered no on its own evidence. Both adapters instead
+  tell the consuming agent to read the index region and confirm by eye, which it can do because it
+  already holds the index lines, and the neighbouring claim that nothing further verifies placement
+  is qualified to *automatically*. That is the agent's own read, not a prompt to the operator, so
+  the outcome does not become a confirmation step — and W6's migration checklist keeps its own.
+
+### Note on the 1.14.0 label
+
+The commit delivering the above merged to `main` 2m14s after 1.14.0 and, by its own design, bumped
+nothing — that release lands centrally, here. For those 2m14s and until this bump, the artifact
+labelled 1.14.0 on `main` contained items 5 and 6 while its own entry below said it did not. That
+entry is left standing as the record of what its release shipped; this paragraph is the correction.
+A copy installed from `main` inside that window reports 1.14.0 and holds the newer adapter docs —
+`claude plugin update` repairs it, because a bump is what makes the update copy bytes at all.
+
 ## [enduser-handbook 1.14.0] — 2026-08-16
 
 Two parallel tracks over one theme: an assertion that never checked what it claimed to, and a batch
@@ -10,6 +64,11 @@ of sentences that were false about the shipped artifact.
 Closes #568. Also ships #472, #473, #474, #477 and #560, each closed on merge, and delivers #563
 items 1–4, 7 and 8; items 5 and 6 (the publish adapters' `unverifiable` branch and the Related-block
 category) are untouched here and #563 stays open for them.
+
+> **Superseded on the last sentence.** Items 5 and 6 merged to `main` 2m14s after this release,
+> under this version label and with no bump of its own; 1.15.0 released them and closed #563. See
+> "Note on the 1.14.0 label" in that entry. The sentence above is accurate about what *this release*
+> shipped and is kept for that reason, not about what the 1.14.0 label named after those 2m14s.
 
 ### Fixed
 
