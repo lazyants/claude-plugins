@@ -236,6 +236,10 @@ test('RED: an arity drift behind a specifier is reported as unread, not as a com
     'm.mjs': 'function f(a, b, c, d) { return [a, b, c, d]; }\nexport { f };\n',
     'm.d.mts': 'declare function f(a: number): void;\nexport { f };\n',
   });
+  // The test's own thesis, asserted rather than only asserted-about in prose: nothing else in the
+  // gate catches this pair. Names agree in both directions, so there is no finding — the census entry
+  // is the whole of what stands between a 4-vs-1 drift and a clean run.
+  assert.deepEqual(result.findings, [], `this drift is invisible to the name comparison, which is the point:\n  ${result.findings.join('\n  ')}`);
   assert.equal(result.census.arityChecks, 0, 'nothing was compared here — the census must not claim otherwise');
   assert.equal(result.arityUnread.length, 1, `the drift must be visible as unread, got ${JSON.stringify(result.arityUnread)}`);
   assert.match(result.arityUnread[0], /^m: f \(specifier, line 2\) — /);

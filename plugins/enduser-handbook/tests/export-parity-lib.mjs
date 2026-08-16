@@ -51,10 +51,19 @@ const MODIFIERS = new Set(['declare', 'abstract', 'async', 'default']);
  * function re-exported as `export { f }` against a 1-parameter local declaration passed green with
  * `arityChecks: 0`. Naming the reason is the difference between "we did not check this" and
  * "we checked everything".
+ *
+ * The map is deliberately partial. A kind that is absent — `const`, `let`, `var` — still lands in
+ * `arityUnread`, by name alone: there the reason belongs to the individual annotation (a type only a
+ * compiler could resolve) rather than to the kind, so there is nothing honest to say about it here.
+ * `enum` and `interface`/`type` are absent for a different reason and cannot reach that branch at
+ * all: an enum is an object at runtime and the type-space heads have no runtime binding, so the
+ * `live.isFunction` gate above rejects them first. Measured, not reasoned: a matched enum pair
+ * reports `arityUnread: []`, a `var`- and a `let`-declared function whose annotation is unresolvable
+ * both report one entry each.
  */
 const ARITY_NOT_READ_BECAUSE = {
   class: 'its parameters sit on a `constructor` member, which this reader does not descend into',
-  specifier: 'a specifier is a name only — the signature is in the local declaration it re-exports, which this reader does not link back to',
+  specifier: 'a specifier is a name only, and the signature it re-exports sits in a local declaration this reader does not link back to',
   'namespace-reexport': 'the surface belongs to the re-exported module, which this reader does not resolve',
   'default-expression': 'a default export expression carries no declared signature of its own',
 };
@@ -807,11 +816,10 @@ export async function auditModulePair(libDir, base) {
     const signatures = records.filter((r) => r.arity);
     if (!live || !live.isFunction) continue;
     if (signatures.length === 0) {
-      // `typeof` reports "function" for a class, and a `constructor` member's parameters are a real
-      // declared arity — just not one this reader reaches. Same for the name-only shapes: a specifier
-      // re-exports a local declaration that HAS a signature, a star re-export names another module's,
-      // a default expression has none at all. Excluding them from the census reads as "every arity
-      // was compared" while comparing none of them, so each is named with the reason instead.
+      // A class reaches this branch too — `typeof` reports "function" for one — and every kind that
+      // lands here has a declared signature SOMEWHERE this reader does not go, never an absent one.
+      // `ARITY_NOT_READ_BECAUSE` at the top of the file holds the per-kind reason the entry carries.
+      //
       // The class-closing half. Three separate review findings were all the same shape: a function
       // export whose declared parameter list this could not read, skipped in SILENCE — first every
       // const-declared one, then one behind redundant parentheses. Each was fixed by teaching the
