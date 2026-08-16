@@ -4408,6 +4408,15 @@ has_joined_in_section "revalidation: the sweep prescribes no new module" \
   "$REVAL" '## Write-time canon' \
   'no repair module and no sweep pass added to the skill'
 
+echo "== #568: the shipped skeleton satisfies the label-pin contract it teaches =="
+# #477 made an exact-TEXT assertion mandatory for any label a chapter quotes, but the skeleton every
+# adopter copies still pinned only `getByRole('main')` visibility. A normative sentence and a worked
+# example that contradicts it do not both get followed — the copied code wins, because it runs.
+has "capture.example.spec.ts: the overview step pins the narrated label by exact TEXT" \
+  "getByRole('columnheader', { name: 'Owner', exact: true })" "$SPEC"
+has "capture.example.spec.ts: the overview step says why the container assertion is not enough" \
+  'a visibility assertion on `list` alone stays green through a rename' "$SPEC"
+
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
 # command and handed the assertion the leftover text. It kept passing while no longer checking the

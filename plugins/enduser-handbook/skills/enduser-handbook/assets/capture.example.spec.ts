@@ -126,6 +126,17 @@ test('capture: items chapter', async ({ browser }) => {
     // 5b. Step: capture the overview region.
     const list = page.getByRole('main');
     await list.waitFor({ state: 'visible' });
+    // Pin every label THIS chapter quotes verbatim, keyed to the exact TEXT and scoped narrowly
+    // enough to identify the one instance the step narrates — here the 'Owner' column header the
+    // prose names. Visibility is a predicate about a box, not about text:
+    // a visibility assertion on `list` alone stays green through a rename,
+    // and ships a step whose quoted label is absent from its own screenshot.
+    // The role scope is what makes the pin unambiguous: a
+    // page-wide (or region-wide `.first()`) exact match is satisfied by a same-named cell
+    // elsewhere in the table. See references/page-identity.md step 4.
+    await list
+      .getByRole('columnheader', { name: 'Owner', exact: true })
+      .waitFor({ state: 'visible' });
     await captureRegion(list, `${OUTPUT_DIR}/overview.png`);
 
     // 5c. Step: open a dialog, mask the PII it shows, capture, then dismiss SAFELY (Escape first).
