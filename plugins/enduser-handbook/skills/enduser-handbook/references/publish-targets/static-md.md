@@ -547,8 +547,28 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
 found no existing line. Locate the container by the entry's **current** `group_title`, which is
 unique across groups (see `manifest-discipline.md`):
 
-- **Zero candidates** ⇒ create a new `## <group_title>` heading matching the file's existing
-  heading depth, then append the chapter line under it.
+- **Zero candidates** ⇒ **not automatically a create.** Zero is two facts wearing one name: this
+  group has no container yet, or one exists and the equality compare failed for a reason the match
+  cannot see. Before creating anything, re-read the container headings you already hold and ask
+  whether any of them plausibly RENDERS as `group_title` — comparing both sides under NFC (the
+  normalization the match itself already applies), case folding, unwrapping a whole-content
+  emphasis, markdown-link or wikilink wrapper, stripping a trailing `{#anchor}`, and dropping a
+  leading run of non-letter decoration such as an emoji or an icon. That comparison DETECTS a near
+  miss and nothing more: it never selects a container to write into, so it cannot mis-target, and
+  the write still needs the exact match that already came back empty.
+  - **One or more headings are a plausible spelling** ⇒ halt naming both spellings, with every
+    invisible codepoint in the heading escaped, so the operator can see a difference the terminal
+    will not render:
+    `Found no container titled '<group_title>' in <index_file>, but the heading '<heading>' may be the same section — rename the heading to match group_title, or change group_title, then re-run.`
+    Convergent like every other named halt here: the operator makes the two spellings agree, and
+    the next run's exact match resolves to one container.
+  - **None is** ⇒ the create is safe: create a new `## <group_title>` heading matching the file's
+    existing heading depth, then append the chapter line under it.
+  This deliberately over-rejects, in the same direction as the plain-label refusal this adapter
+  already applies on the nested-list path: a `group_title` of `Reports` halts against an existing
+  `reports` heading that belongs to a different group. A halt costs one edit; a forked index is
+  silent, permanent and never self-corrects, because the next run matches the heading it wrote
+  itself.
 - **Exactly one candidate** ⇒ append the chapter line under it — append is always allowed, even
   under an inhomogeneous, user-curated container.
 - **Multiple candidates** ⇒ halt with:
@@ -702,10 +722,17 @@ index published by 1.10.0–1.12.0:
     named here.
 
 Three residuals stay open, deliberately. **A HEADINGS-form index is not covered by the second
-rule**: a `## ` container heading carrying an invisible character is not refused, so it fails to
-match a clean `group_title` and this adapter creates a second, pixel-identical heading beside it.
-That is unchanged pre-existing behaviour, not something this change introduced, and closing it
-needs a new `findContainer` outcome both adapters would have to branch on. U+200C/U+200D (ZWNJ/ZWJ)
+rule**, and the gap it leaves is a CLASS rather than one exotic character: a `## ` container
+heading is never refused, so any heading that renders as `group_title` without being byte-equal to
+it fails the match. Measured against the shipped comparison — bold, a markdown link, an emoji
+prefix, a trailing `{#anchor}` and a case difference all fail it, and an emoji prefix is ordinary
+index curation rather than an edge case. The near-miss check in the container-resolution branch
+above now HALTS on that whole set instead of creating beside it, so what remains here is only what
+that check deliberately cannot recognize: a heading whose label carries an invisible character is
+neither refused nor read as a near miss, and this adapter still creates a second, pixel-identical
+heading beside it. That remainder is unchanged pre-existing behaviour, and it stays open by choice
+rather than for want of a mechanism — the near-miss comparison could ignore invisible characters
+too, and the sentence immediately below is why it must not. U+200C/U+200D (ZWNJ/ZWJ)
 are still accepted everywhere, because they are required INSIDE ordinary words in Persian, Hindi
 and other scripts and refusing them would lock out a correctly-spelled title — so two labels
 differing only by one are still two containers. So are two labels differing by a no-break space

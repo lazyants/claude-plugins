@@ -4269,6 +4269,99 @@ has_joined_in_section "revalidation: the sweep leaves a resolving legacy embed b
 has_joined_in_section "revalidation: the sweep prescribes no new module" \
   "$REVAL" '## Write-time canon' \
   'no repair module and no sweep pass added to the skill'
+echo "== #476: a zero container match is not an unconditional create =="
+# findContainer's `zero` is two facts wearing one name — this group has no container yet, or a
+# container exists and the equality compare failed for a reason the match cannot see. Both adapters
+# turned `zero` into an unconditional create, which forks a hand-curated index in two, reports
+# success, and never self-corrects (the next run matches the heading it wrote itself).
+#
+# RE-MEASURED against the CURRENT module before these pins were written, not copied from the issue:
+# of the seven spellings #476 tabulated against 1.12.0, five still land `zero` (emphasis, markdown
+# link, emoji prefix, trailing {#anchor}, case difference); the NFD-accent row now resolves to
+# `single` because #351 put NFC on both sides of the compare, so the issue's own table is STALE on
+# that row. Two spellings beyond its table also land `zero`: a wikilink-wrapped heading, and a
+# label carrying a zero-width space.
+#
+# Three pins per adapter, split by PROPERTY because no single needle proves all three and each
+# fails to a different mutation:
+#   (a) the near-miss check runs BEFORE the create, and is detect-only (a wrapped sentence, so
+#       joined) — a mutation that keeps the halt but restores the unconditional create leaves the
+#       halt-text pin green;
+#   (b) the halt text itself, verbatim on one physical line;
+#   (c) the halt occurs EXACTLY ONCE per adapter — a presence pin cannot tell one copy from two,
+#       and a second copy would mean the create branch was duplicated rather than replaced.
+# Deliberately NOT pinned: the normalization list itself. It is an enumeration whose members are
+# expected to grow, and pinning it would fight a correct future widening rather than catch a
+# regression — the load-bearing claims are "check before create", "detect only" and "halt".
+AMBIGUOUS_ZERO_HALT="Found no container titled '<group_title>' in <index_file>, but the heading '<heading>' may be the same section — rename the heading to match group_title, or change group_title, then re-run."
+ZERO_CHECK_FIRST='Before creating anything, re-read the container headings you already hold'
+ZERO_DETECT_ONLY='That comparison DETECTS a near miss and nothing more: it never selects a container to write into'
+has_joined_in_section "static-md: #476 the zero branch re-reads existing headings BEFORE creating" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_CHECK_FIRST"
+has_joined_in_section "static-md: #476 the near-miss comparison is detect-only, never a container selector" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_DETECT_ONLY"
+has_in_section "static-md: #476 ambiguous-zero halt, exact string" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$AMBIGUOUS_ZERO_HALT"
+has_joined_in_section "obsidian-vault: #476 the zero branch re-reads existing headings BEFORE creating" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_CHECK_FIRST"
+has_joined_in_section "obsidian-vault: #476 the near-miss comparison is detect-only, never a container selector" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_DETECT_ONLY"
+has_in_section "obsidian-vault: #476 ambiguous-zero halt, exact string" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$AMBIGUOUS_ZERO_HALT"
+SMD_AMBIG_ZERO_COUNT="$(count_fixed "$AMBIGUOUS_ZERO_HALT" "$SMD")"
+if [ "$SMD_AMBIG_ZERO_COUNT" -eq 1 ]; then
+  ok "static-md: #476 ambiguous-zero halt occurs exactly once"
+else
+  bad "static-md: #476 ambiguous-zero halt occurrence count drifted from 1 (found $SMD_AMBIG_ZERO_COUNT)"
+fi
+OMD_AMBIG_ZERO_COUNT="$(count_fixed "$AMBIGUOUS_ZERO_HALT" "$OMD")"
+if [ "$OMD_AMBIG_ZERO_COUNT" -eq 1 ]; then
+  ok "obsidian-vault: #476 ambiguous-zero halt occurs exactly once"
+else
+  bad "obsidian-vault: #476 ambiguous-zero halt occurrence count drifted from 1 (found $OMD_AMBIG_ZERO_COUNT)"
+fi
+# The widened residual. Before this change both adapters disclosed only the RAREST slice of the
+# class ("a `## ` container heading carrying an invisible character is not refused"), while the
+# common slice — an emoji-prefixed nav heading — was undisclosed and silently duplicated. The
+# disclosure now names the class and scopes the remainder to what the near-miss check deliberately
+# cannot see. Pinned joined (the sentence wraps) and in BOTH adapters, because a one-sided edit to
+# this paragraph is this plugin's recurring defect. The residual COUNT stays three: the near-miss
+# check HALTS on the recognizable spellings, it does not close the invisible-character residual.
+ZERO_CLASS_DISCLOSURE='the gap it leaves is a CLASS rather than one exotic character'
+ZERO_CLASS_REMAINDER='a heading whose label carries an invisible character is neither refused nor read as a near miss'
+has_joined_in_section "static-md: the headings-form residual is disclosed as a CLASS, not one character" \
+  "$SMD" '### Nested-list automation limits' \
+  "$ZERO_CLASS_DISCLOSURE"
+has_joined_in_section "static-md: the headings-form residual names what the near-miss check cannot see" \
+  "$SMD" '### Nested-list automation limits' \
+  "$ZERO_CLASS_REMAINDER"
+has_joined_in_section "obsidian-vault: the headings-form residual is disclosed as a CLASS, not one character" \
+  "$OMD" '### Nested-list automation limits' \
+  "$ZERO_CLASS_DISCLOSURE"
+has_joined_in_section "obsidian-vault: the headings-form residual names what the near-miss check cannot see" \
+  "$OMD" '### Nested-list automation limits' \
+  "$ZERO_CLASS_REMAINDER"
+# The count sentence itself was never pinned. It is now, in both adapters, because the widening
+# above is exactly the kind of edit that silently turns "Three" into a wrong number.
+has_in_section "static-md: the residual COUNT sentence still reads three" \
+  "$SMD" '### Nested-list automation limits' \
+  'Three residuals stay open, deliberately.'
+has_in_section "obsidian-vault: the residual COUNT sentence still reads three" \
+  "$OMD" '### Nested-list automation limits' \
+  'Three residuals stay open, deliberately.'
+# The extension contract must carry the conditional-create rule too, or a new adapter modelled on
+# this README reproduces #476 verbatim. The halt enumeration is the load-bearing half: a new
+# adapter author reads that list to know which halts they owe.
+has "publish-targets README: the create branch is conditional, not automatic (#476)" \
+  'before creating a container because the label match came back zero' "$PTREADME"
+has "publish-targets README: names the ambiguous-container halt a new adapter owes" \
+  'wrong-container / duplicate-line / ambiguous-container / manual-wiring halts' "$PTREADME"
 
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
