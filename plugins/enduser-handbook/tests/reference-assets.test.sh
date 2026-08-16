@@ -1342,25 +1342,36 @@ has "capture-helpers: the frame count covers every nested browsing context (#472
   "'iframe, frame, object, embed'" "$CH"
 has_joined_in_section "capture-spec-helpers: the carve-out names object/embed, not just iframe (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
-  '`<object data>`, `<embed src>`'
+  '`<object>`, `<embed>`'
+# The prose must match the selector, which is deliberately unqualified — an attribute form
+# (`object[data]`) is defeated by a script-assigned `data`, so the over-refusal is intentional and
+# has to be stated rather than left as an apparent doc/code mismatch.
+has_joined_in_section "capture-spec-helpers: the unqualified selector is justified, not an oversight (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'The selector is deliberately unqualified'
 has_joined_in_section "capture-spec-helpers: the refusal's reach is scoped, not claimed absolute (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   '**What the refusal can see, exactly:**'
 has_joined_in_section "capture-spec-helpers: the iframe carve-out names the opt-out (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   'allowUnscannedFrames: true'
-# Review round 1: enforcing the carve-out made the SAME paragraph's older sentence false — it still
-# told the reader that a selector matching only inside the frame trips the mask-COVERAGE assert,
-# which the frame refusal now pre-empts unconditionally. Both halves of that sentence are pinned so
-# the paragraph cannot drift back to naming the wrong gate.
-has_joined_in_section "capture-spec-helpers: the loud half is stated in the past tense (#472)" \
-  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
-  'was ever loud on its own'
+# Rounds 1-3 each found a DIFFERENT sentence of this one paragraph gone stale, which is the class
+# #557 named. Round 3's answer is structural within prose scope: the paragraph no longer narrates
+# what USED to happen — a tense that has to be maintained against the code — it states what happens
+# now, and states the opt-out path separately because that is where the old behaviour genuinely
+# survives. These pins hold that shape: the pre-empting order, the opt-out path being spelled out,
+# and no unconditional claim about the coverage assert firing on a framed region.
 has_joined_in_section "capture-spec-helpers: the refusal is documented as pre-empting the coverage assert (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
-  'checked **before** the coverage assert'
-hasnt_joined "capture-spec-helpers: the frame case no longer claims the coverage assert throws (#472)" \
-  'it matches nothing, so the mask-**coverage** assert throws' "$REFS/capture-spec-helpers.md"
+  'checked **before**'
+has_joined_in_section "capture-spec-helpers: the opt-out path spells out what survives it (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'the old behaviour is what remains'
+# Keyed on the CLAIM, not on the sentence that carried it: round 1's rewrite happened to change
+# "matches nothing" to "catches nothing", and a mutation test proved the longer needle stayed green
+# when the retired present-tense claim came back with the other verb. This needle survives both.
+hasnt_joined "capture-spec-helpers: no unconditional claim that the coverage assert throws on a frame (#472)" \
+  'so the mask-**coverage** assert throws' "$REFS/capture-spec-helpers.md"
 # #473: the assertNoDangerousHits contract must stop prescribing a BARE finally — an abrupt
 # completion there replaces the body's error and skips the close after it.
 hasnt_joined "capture-helpers: assertNoDangerousHits no longer prescribes a bare finally (#473)" \

@@ -53,6 +53,9 @@ const OUTPUT_DIR = chapterAssetDir(PROFILE, ENTRY);
 // This is NOT redundant with the sandbox's LANG/LC_ALL, which pin the PROCESS locale only: they set
 // neither navigator.language nor an Accept-Language header, so an app that negotiates its UI language
 // from the request would serve its own default. See references/container-isolation.md.
+// Known limit: a POSIX MODIFIER is dropped, not translated — sr_RS@latin -> sr-RS and ca_ES@valencia
+// -> ca-ES both lose the script/variant the modifier carried. If your handbook's locale needs it,
+// set the context locale to the explicit BCP-47 tag (sr-Latn-RS) instead of deriving it here.
 const CONTEXT_LOCALE = PROFILE.capture.locale.split(/[.@]/)[0].replace(/_/g, '-');
 
 test('capture: items chapter', async ({ browser }) => {

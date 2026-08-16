@@ -788,8 +788,8 @@ export interface MaskOptions {
   expectedCount: number;
   /**
    * Opt out of the unscanned-frame refusal (issue #472). Any nested browsing context in the region —
-   * `<iframe>`, `<frame>`, `<object data>`, `<embed src>` — is photographed but never masked and
-   * never scanned, so its presence is refused by default. Set this only once you have proven those
+   * `<iframe>`, `<frame>`, `<object>`, `<embed>` — is photographed but never masked and never
+   * scanned, so its presence is refused by default. Set this only once you have proven those
    * documents carry no PII.
    */
   allowUnscannedFrames?: boolean;
@@ -826,18 +826,19 @@ export interface MaskOptions {
  * <iframe> (issue #472). That last one is a different class from the others: it IS ordinary DOM
  * text, only in another document, and neither pass crosses a document boundary — queryDeep and the
  * TreeWalker both stop at the <iframe> element, which has no text children, while page.screenshot
- * composites the child document's pixels. A selector that only matches inside the frame at least
- * throws on the coverage assert (it matches nothing); PII the author did NOT list is silent —
- * nothing to mask, no text node to collect, no pattern to match, green run, value in the PNG. That
- * silent half is why this carve-out alone is ENFORCED rather than only documented: a nested browsing
- * context in the scanned region — <iframe>, <frame>, <object data> or <embed src>, all four load a
+ * composites the child document's pixels. PII the author did NOT list is the silent half — nothing
+ * to mask, no text node to collect, no pattern to match, so neither pass has anything to object to.
+ * That is why this carve-out alone is ENFORCED rather than only documented: a nested browsing
+ * context in the scanned region — <iframe>, <frame>, <object> or <embed>, all of which load a
  * document of their own on the same terms — THROWS unless the caller passes
  * `allowUnscannedFrames: true`. Mask the framed content before the shot, scan it yourself per frame,
  * or keep it out of the region.
  * WHAT THE REFUSAL CAN SEE, exactly: the light DOM and OPEN shadow roots of the subtree it was
  * handed, at the moment it is called. A frame in a CLOSED shadow root, a frame painted over the
  * captured rectangle from OUTSIDE that subtree, and a frame attached AFTER the call (the skeleton
- * takes more than one shot off a single mask) are all still uncounted.
+ * takes more than one shot off a single mask) are all still uncounted. Past the opt-out the old
+ * behaviour is what remains: a selector matching only inside the frame catches nothing and trips the
+ * coverage assert, while unlisted PII ships in the PNG with the run green.
  * All of these surfaces rely on the human eyeball-the-frame step (capture-safety.md) as the
  * backstop — the scan is defense-in-depth, not a complete proof.
  */
@@ -980,10 +981,12 @@ export async function maskAndAssert(
       // scan; the .matches() term covers the region BEING the frame, which querySelectorAll
       // (descendants only) would miss.
       // The selector is every element that hosts a NESTED BROWSING CONTEXT, not just <iframe>:
-      // <object data> and <embed src> load a document of their own on exactly the same terms — its
-      // text nodes are in another document, so neither pass reaches them, while the browser
-      // composites its pixels into the shot. Counting only iframe/frame would leave the identical
-      // defect one element name over. ---
+      // <object> and <embed> load a document of their own on exactly the same terms — its text
+      // nodes are in another document, so neither pass reaches them, while the browser composites
+      // its pixels into the shot. Counting only iframe/frame would leave the identical defect one
+      // element name over. Deliberately UNQUALIFIED (not `object[data]`): an <object> whose `data`
+      // is assigned by script after parse would evade the attribute form, so an <object> carrying
+      // no document is refused too — the over-refusal is the right direction for a PII gate. ---
       const FRAME_HOSTS = 'iframe, frame, object, embed';
       const frameCount =
         (root.matches(FRAME_HOSTS) ? 1 : 0) + queryDeep(root, FRAME_HOSTS).length;
