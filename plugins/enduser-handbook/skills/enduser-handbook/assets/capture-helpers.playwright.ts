@@ -68,7 +68,13 @@ export interface CaptureGuard {
    * timer each time one arrives), giving a delayed beacon/fetch/WebSocket fired after the last
    * interaction time to reach the handler — capped at `maxMs` so it cannot hang. This is best-effort,
    * NOT a guarantee that every late request has settled; a request that fires after the drain window
-   * is not detected. Call it in a `finally`, before closing the context. It gates on the
+   * is not detected. Call it after the capture body, in a phase that cannot REPLACE the body's own
+   * failure: an abrupt completion inside a bare `finally` discards the exception already propagating
+   * out of the `try` AND skips every line after it, so a bare `finally { await
+   * assertNoDangerousHits(); await context.close(); }` reports a guard error instead of the real
+   * cause and never closes the context. Keep a `primaryError` slot (the shape `captureRegionClipped`
+   * below uses), let neither this assertion nor `context.close()` overwrite a value already in it,
+   * and rethrow it last. It gates on the
    * `dangerousHits` ledger ONLY — requests classified `'benign'` are excluded by construction.
    *
    * The ledger mixes two kinds of entry, and they mean different things. A plain reason

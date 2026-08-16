@@ -80,6 +80,12 @@ test('capture: items chapter', async ({ browser }) => {
 
   // 3. Only now create the page.
   const page = await context.newPage();
+  // The body's failure is the PRIMARY one and must survive teardown. An abrupt completion inside a
+  // `finally` replaces the exception already propagating out of the `try` and skips every line after
+  // it — so a bare `finally { await guard.assertNoDangerousHits(); await context.close(); }` reports
+  // a guard error for, say, a mask-coverage failure AND leaks the context. Same primaryError
+  // discipline as captureRegionClipped in capture-helpers.playwright.ts.
+  let primaryError: unknown = null;
   try {
     await page.goto(ROUTE);
 
@@ -124,12 +130,26 @@ test('capture: items chapter', async ({ browser }) => {
     // await captureRegionClipped(dialog, path, { settleTimeoutMs: 2500 });
 
     await dismissModal(page, { dialog, expectedText: 'Details', cancelLabel: 'Cancel' });
-  } finally {
-    // 6. In a finally so a delayed beacon/fetch fired during teardown is still drained and asserted
-    //    before the context closes. assertNoDangerousHits is async (it awaits a quiet period).
-    await guard.assertNoDangerousHits();
-    await context.close();
+  } catch (err) {
+    primaryError = err;
   }
+  try {
+    // 6. Asserted after the body — pass or fail — so a delayed beacon/fetch fired during teardown is
+    //    still drained and asserted before the context closes. assertNoDangerousHits is async (it
+    //    awaits a quiet period).
+    await guard.assertNoDangerousHits();
+  } catch (err) {
+    // Cleanup never REPLACES the body's failure; it only fills an empty slot.
+    primaryError = primaryError ?? err;
+  } finally {
+    // Always close, on every path — and do not let a close failure mask the primary error either.
+    try {
+      await context.close();
+    } catch (err) {
+      primaryError = primaryError ?? err;
+    }
+  }
+  if (primaryError !== null) throw primaryError;
 });
 
 // State-variant capture (references/state-variants.md) — a REAL error screen the app paints itself,
@@ -147,6 +167,7 @@ test('capture: items chapter — error-state variant', async ({ browser }) => {
   });
 
   const page = await context.newPage();
+  let primaryError: unknown = null;
   try {
     // A bad-id route the seeded role can genuinely never resolve — the app's own real not-found
     // screen, reached read-only.
@@ -156,8 +177,19 @@ test('capture: items chapter — error-state variant', async ({ browser }) => {
     const main = page.getByRole('main');
     await main.waitFor({ state: 'visible' });
     await captureRegion(main, `${OUTPUT_DIR}/error-not-found.png`);
-  } finally {
-    await guard.assertNoDangerousHits();
-    await context.close();
+  } catch (err) {
+    primaryError = err;
   }
+  try {
+    await guard.assertNoDangerousHits();
+  } catch (err) {
+    primaryError = primaryError ?? err;
+  } finally {
+    try {
+      await context.close();
+    } catch (err) {
+      primaryError = primaryError ?? err;
+    }
+  }
+  if (primaryError !== null) throw primaryError;
 });

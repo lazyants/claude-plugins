@@ -1339,6 +1339,12 @@ has "capture-helpers: the frame count covers <iframe> AND <frame> (#472)" \
 has_joined_in_section "capture-spec-helpers: the iframe carve-out names the opt-out (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   'allowUnscannedFrames: true'
+# #473: the assertNoDangerousHits contract must stop prescribing a BARE finally — an abrupt
+# completion there replaces the body's error and skips the close after it.
+hasnt_joined "capture-helpers: assertNoDangerousHits no longer prescribes a bare finally (#473)" \
+  'Call it in a `finally`, before closing the context.' "$CH"
+has "capture-helpers: assertNoDangerousHits prescribes the primaryError shape (#473)" \
+  'a `primaryError` slot' "$CH"
 
 echo "== capture.example.spec.ts =="
 SPEC="$ASSETS/capture.example.spec.ts"
@@ -1365,6 +1371,17 @@ has "graphql-read-classifier: rejects mutation/subscription" 'mutation|subscript
 # admits a query-string decoy like '/collect?next=/graphql'. Negative tests gate this in node:test.
 has   "graphql-read-classifier: endpoint matched by pathname (new URL)"        'new URL(' "$GQL"
 hasnt "graphql-read-classifier: no full-URL substring endpoint test"           ".includes('/graphql')" "$GQL"
+
+# Group A: the two SHIPPED capture-spec skeletons — the artifacts an adopter copies once per chapter,
+# so a defect in either is reproduced per chapter per project — plus the documents that describe what
+# a capture run actually pins. Both files are asserted together wherever the claim is identical.
+REAUDIT="$ASSETS/reaudit.example.spec.ts"
+# #473: the teardown must keep the body's failure as the primary one and still close the context.
+for f in "$SPEC" "$REAUDIT"; do
+  base="$(basename "$f")"
+  has "$base: teardown keeps the body's failure as the primary error (#473)" 'primaryError' "$f"
+  has "$base: the primary error is rethrown last (#473)" 'if (primaryError !== null) throw primaryError;' "$f"
+done
 
 echo "== wording contracts (some files owned by other groups; pass once the full set lands) =="
 REVAL="$REFS/revalidation.md"

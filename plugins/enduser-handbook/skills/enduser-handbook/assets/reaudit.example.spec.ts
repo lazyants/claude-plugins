@@ -63,17 +63,31 @@ test('re-audit: items chapter, per role', async ({ browser }) => {
       denyPatterns: ['/delete', '/send', '/approve', '/finalize'],
     });
     const page = await context.newPage();
+    // This role's failure is the PRIMARY one: an abrupt completion in a `finally` would replace it
+    // and skip the close after it. Same primaryError discipline as capture.example.spec.ts.
+    let primaryError: unknown = null;
     try {
       // auditSurface itself navigates and asserts identity before enumerating — no separate goto/
       // assertIdentity call is needed here.
       const controls = await auditSurface({ page, route: ROUTE, heading: HEADING });
       perRole.push({ role: label, controls });
-    } finally {
-      // In a finally so a delayed beacon/fetch fired during this role's pass is still drained and
-      // asserted before its context closes — mirrors capture.example.spec.ts.
-      await guard.assertNoDangerousHits();
-      await context.close();
+    } catch (err) {
+      primaryError = err;
     }
+    try {
+      // Asserted after this role's pass so a delayed beacon/fetch fired during it is still drained
+      // and asserted before its context closes — mirrors capture.example.spec.ts.
+      await guard.assertNoDangerousHits();
+    } catch (err) {
+      primaryError = primaryError ?? err;
+    } finally {
+      try {
+        await context.close();
+      } catch (err) {
+        primaryError = primaryError ?? err;
+      }
+    }
+    if (primaryError !== null) throw primaryError;
   }
 
   const { roles, matrix, diff } = diffSurfaces(perRole);
