@@ -155,13 +155,15 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   four above because it *is* ordinary DOM text — just in another document. Neither the mask nor the
   scan crosses a document boundary (a tree walk rooted in the parent stops at the `<iframe>` element,
   which has no text children), while the screenshot composites the child document's pixels. Framed
-  iframe content is therefore photographed but never masked and never scanned. Listing a selector
-  that only matches inside the frame at least fails loudly — it matches nothing, so the
-  mask-**coverage** assert throws. The case the scan exists for is the silent one: PII the author did
-  *not* list has nothing to mask, no text node to collect and no pattern to match, so the run is
-  green and the value is in the PNG. So this one carve-out is **enforced, not merely disclosed**: the
-  helper counts the `<iframe>`/`<frame>` elements in the region it was asked to scan and **throws**
-  when it finds any, and the single opt-out `allowUnscannedFrames: true` is the only way past it —
+  iframe content is therefore photographed but never masked and never scanned. Only one half of that
+  was ever loud on its own: listing a selector that matches only inside the frame catches nothing, so
+  the mask-**coverage** assert would have fired. The case the scan exists for is the silent one: PII
+  the author did *not* list has nothing to mask, no text node to collect and no pattern to match, so
+  the run is green and the value is in the PNG. So this one carve-out is **enforced, not merely
+  disclosed**: the helper counts the `<iframe>`/`<frame>` elements in the region it was asked to scan
+  and **throws** when it finds any — checked **before** the coverage assert, so a framed region is
+  named as the cause in both halves rather than misreported as selector drift — and the single
+  opt-out `allowUnscannedFrames: true` is the only way past it —
   take it only once you have proven the framed documents carry no PII. Otherwise mask or remove the
   frame's content before the shot, scan it yourself per frame, or keep the frame out of the captured
   region. (Issue #472.)

@@ -1339,6 +1339,18 @@ has "capture-helpers: the frame count covers <iframe> AND <frame> (#472)" \
 has_joined_in_section "capture-spec-helpers: the iframe carve-out names the opt-out (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   'allowUnscannedFrames: true'
+# Review round 1: enforcing the carve-out made the SAME paragraph's older sentence false — it still
+# told the reader that a selector matching only inside the frame trips the mask-COVERAGE assert,
+# which the frame refusal now pre-empts unconditionally. Both halves of that sentence are pinned so
+# the paragraph cannot drift back to naming the wrong gate.
+has_joined_in_section "capture-spec-helpers: the loud half is stated in the past tense (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'was ever loud on its own'
+has_joined_in_section "capture-spec-helpers: the refusal is documented as pre-empting the coverage assert (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'checked **before** the coverage assert'
+hasnt_joined "capture-spec-helpers: the frame case no longer claims the coverage assert throws (#472)" \
+  'it matches nothing, so the mask-**coverage** assert throws' "$REFS/capture-spec-helpers.md"
 # #473: the assertNoDangerousHits contract must stop prescribing a BARE finally — an abrupt
 # completion there replaces the body's error and skips the close after it.
 hasnt_joined "capture-helpers: assertNoDangerousHits no longer prescribes a bare finally (#473)" \
@@ -1402,6 +1414,13 @@ done
 for f in "$SPEC" "$REAUDIT"; do
   hasnt "$(basename "$f"): denyPatterns no longer repeat a built-in dangerous verb (#560)" \
     "'/delete', '/send', '/approve', '/finalize'" "$f"
+  # Paired POSITIVE pin: the `hasnt` above only retires ONE literal, so any other non-empty seed
+  # would satisfy it. The shipped example must ship the empty list, not merely a different list.
+  # Known limit, measured: this is a whole-file `has`, and capture.example.spec.ts has TWO guard
+  # installs — seeding only one of them still satisfies this pin. The pair is a regression guard,
+  # not a proof of every site; the `hasnt` above is what catches the specific literal coming back.
+  has "$(basename "$f"): the shipped example seeds an EMPTY denyPatterns (#560)" \
+    'denyPatterns: []' "$f"
 done
 has "example spec: says what denyPatterns is actually for (#560)" \
   'raw SUBSTRING match over the full URL' "$SPEC"
@@ -1424,6 +1443,15 @@ has_joined_in_section "container-isolation: names the browser-context locale as 
 has_joined_in_section "container-isolation: states the POSIX-to-BCP-47 derivation (#474)" \
   "$ISOLATION" "$ISOLATION_SECTION" \
   'take the part before the first `.` or `@` and replace'
+# The other two corrected passages had absence-only pins: deleting the replacement text without
+# reintroducing the retired phrase would have gone undetected. One positive pin each, bound to its
+# own section so the claim cannot satisfy the pin from the wrong place.
+has_joined_in_section "container-isolation: the host-drift bullet attributes translation choice to the browser (#474)" \
+  "$ISOLATION" '## Why' \
+  "the host browser's own language preference is what decides which translation file"
+has_joined_in_section "container-isolation: the container-pattern bullet sends the reader to the context locale (#474)" \
+  "$ISOLATION" '## Common command patterns (engine-agnostic)' \
+  'These env vars never reach the browser'
 hasnt "SKILL.md: locale claim no longer says UI language (#474)" \
   'drives both process locale and UI language' "$SKILL_DIR/SKILL.md"
 has "SKILL.md: names the browser-context locale as the Accept-Language lever (#474)" \
