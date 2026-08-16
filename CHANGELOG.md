@@ -83,9 +83,13 @@ the lane that cut it.
   where nothing was watching, which is the failure mode the gate exists for. Both root documents are
   in scope, and both scoped sentences are also pinned *present* so deleting them cannot satisfy the
   absence pins by silence; the CHANGELOG pin is bound to this heading, so relocating the sentence to
-  another entry fails too. Every pin was proved by reintroducing its wording split across a wrap. It
-  gates the wordings that have actually appeared — it moves a known recurrence from review-caught to
-  CI-caught, and does not make the class unwriteable. One site it structurally cannot cover is
+  another entry fails too. All 30 class-gate pins were watched going red by reintroducing their
+  wording — 15 in the round that introduced the gate, 15 in the round that extended it to the release
+  copy — as were the two positive pins and the heading binding. One reintroduction was split across a
+  hard wrap, which is what proves the absence helper's wrap tolerance; splitting every one of them
+  would re-prove the helper rather than the pin. It gates the wordings that have actually appeared —
+  it moves a known recurrence from review-caught to CI-caught, and does not make the class
+  unwriteable. One site it structurally cannot cover is
   `reference-assets.test.sh` itself, where the retired wordings live as needles; that is stated at
   the block rather than left as a silent hole.
 
@@ -123,10 +127,11 @@ the lane that cut it.
 is on PATH — 16 carve-out disclosure pins, 2 correction pins, 2 release-copy pins, 30 class-gate
 pins, 2 seam pins, and the node-suite runner that is the +1. Reconciled by diffing the two
 check-name sets rather than by arithmetic on totals. Absolute totals are deliberately not quoted:
-several blocks here are gated on an optional local tool (`node`, `ruby`, `esbuild`), so the endpoints
-move with the environment while the delta does not — measured +52/0 under stock tools with none of
-the three present, and +53/0 with node and ruby available. The plugin ships 20 `node:test` suites,
-1395 tests, wherever node is available to run them.
+several blocks here are gated on an optional local tool (`node`, `ruby`, `esbuild`), so an endpoint
+is a fact about the machine that measured it. The delta is the more stable figure but not an
+invariant either — measured +52/0 under stock tools with none of the three present, and +53/0 with
+node and ruby available, the difference being the node-gated runner named above and nothing else. The
+plugin ships 20 `node:test` suites, 1395 tests, wherever node is available to run them.
 
 ## [enduser-handbook 1.15.0] — 2026-08-16
 
