@@ -80,9 +80,8 @@ flagged, by deliberate design. Modeling block-scalar-content lines (including on
 start with `#`) together with general indentation tracking reintroduces the exact mini-YAML-parser
 mis-parse risk this document warns against elsewhere — an indentation guard, for one, would
 false-reject the *valid* shipped `capture.command: |` block scalar. Mechanism B stays a documented
-deferred residual, not a pending item: block-scalar content is opaque here by design, and a detector
-that could see an invalid dedent inside one is the same mini-YAML-parser mis-parse risk this
-paragraph has just ruled out.
+deferred residual, not a pending item — the two reasons above are properties of the design, not a
+gap waiting on a release.
 
 **Now accepted — tab in scalar content, leading/trailing document markers, explicit `? snake_case`
 keys.** Three shapes a real parser loads fine, and that earlier releases false-rejected, now scan

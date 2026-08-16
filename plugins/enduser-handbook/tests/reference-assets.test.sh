@@ -3981,7 +3981,15 @@ has_joined_in_section "page-identity: step 4 names why an unscoped page-wide exa
   'satisfied by the same string anywhere on the page'
 has_joined_in_section "page-identity: step 4 names the non-control label class that earns no matrix row" \
   "$PAGEID" '## The principle' \
-  'Column headers and field labels are quoted by'
+  'Column headers and field labels can also be quoted'
+# Scoping alone is not identity: the shipped helpers take the FIRST match, so two rows both reading
+# `Edit` leave a region-scoped assertion green when only the narrated one is renamed.
+has_joined_in_section "page-identity: step 4 covers a label that REPEATS inside the scoped region" \
+  "$PAGEID" '## The principle' \
+  'Scoping is not yet identity when the same string repeats inside the region'
+has_joined_in_section "page-identity: step 4 gives the two ways out of a duplicate label" \
+  "$PAGEID" '## The principle' \
+  'or assert the number of exact matches you expect'
 has_joined_in_section "page-identity: step 4 states a matrix row is not an assertion" \
   "$PAGEID" '## The principle' \
   'a matrix row records a label, it does not assert one'
@@ -3994,6 +4002,18 @@ has_joined_in_section "anti-fabrication: self-audit carries the reciprocal every
 has_joined_in_section "anti-fabrication: self-audit says a visibility assertion is not that pin" \
   "$ANTIFAB" '## Self-audit before publish' \
   'A visibility assertion on the element is not that pin'
+# The obligation is scoped to CAPTURED steps. A control that could not be captured has no screenshot
+# to pin a label against, and this same file requires it be disclosed rather than dropped — an
+# unconditional rule would have made a required disclosure unsatisfiable.
+has_joined_in_section "anti-fabrication: the pin obligation is scoped to a CAPTURED step" \
+  "$ANTIFAB" '## Self-audit before publish' \
+  'every label a **captured** step quotes verbatim'
+has_joined_in_section "anti-fabrication: disclosure prose is a stated exception, not an unmet obligation" \
+  "$ANTIFAB" '## Self-audit before publish' \
+  'Disclosure prose is the exception, and deliberately so'
+has_joined_in_section "anti-fabrication: a disclosed label is still verified, against the running UI" \
+  "$ANTIFAB" '## Self-audit before publish' \
+  'verified against the running UI per `running-ui-source.md` rather than against a PNG'
 
 echo "== #563 item 7 (folds #344): two stale claims, both reproduced as filed =="
 # A line range is a citation that rots silently: nothing recomputes it, and an insertion anywhere
@@ -4004,18 +4024,22 @@ echo "== #563 item 7 (folds #344): two stale claims, both reproduced as filed ==
 # has pins on new ones.
 MDSTRUCT_TEST="$TEST_DIR/md-structure.test.mjs"
 
-hasnt "md-structure.test.mjs: no rotted line range on the VAULT_ROOT_HEADING_COUNT pointer" \
+# hasnt_joined, not hasnt: `hasnt` greps per PHYSICAL LINE and fails OPEN on a missing file, so a
+# needle re-wrapped across a line break — or a renamed file — reads as a satisfied negative claim.
+hasnt_joined "md-structure.test.mjs: no rotted line range on the VAULT_ROOT_HEADING_COUNT pointer" \
   'reference-assets.test.sh:1333-1346' "$MDSTRUCT_TEST"
 has "md-structure.test.mjs: the VAULT_ROOT_HEADING_COUNT pointer keeps its greppable identifier" \
   'VAULT_ROOT_HEADING_COUNT' "$MDSTRUCT_TEST"
-hasnt "md-structure.test.mjs: no rotted line range on the assert_line_before pointer either" \
+has "md-structure.test.mjs: the VAULT_ROOT_HEADING_COUNT pointer says to grep, not to renumber" \
+  'grep that identifier' "$MDSTRUCT_TEST"
+hasnt_joined "md-structure.test.mjs: no rotted line range on the assert_line_before pointer either" \
   'reference-assets.test.sh ~1630-1686' "$MDSTRUCT_TEST"
 has "md-structure.test.mjs: the assert_line_before pointer keeps its greppable identifier" \
   'grep assert_line_before in' "$MDSTRUCT_TEST"
 has_joined_in_section "profile-validation: mechanism B is a stated deferred residual, not a pending follow-up" \
   "$PVALID" '## The `profile_version` pre-flight scan' \
   'Mechanism B stays a documented deferred residual, not a pending item'
-hasnt "profile-validation: the false tracked-as-a-follow-up clause is gone" \
+hasnt_joined "profile-validation: the false tracked-as-a-follow-up clause is gone" \
   'tracked as a follow-up rather than rushed into this release' "$PVALID"
 
 echo "== #563 item 3 (folds #478): whole-suite capture.command precedence in revalidation step 5 =="
@@ -4040,8 +4064,8 @@ has_joined_in_section "revalidation: step 5 does not promise the record gets rew
 has_joined_in_section "revalidation: step 5 states capture_failed is ONE warning on the run, not a halt" \
   "$REVAL" '## The flow' \
   'one warning on the run'
-hasnt "revalidation: D6 added no capture.command_scoped key" 'command_scoped' "$REVAL"
-hasnt "revalidation: D6 added no scope placeholder" '{{scope}}' "$REVAL"
+hasnt_joined "revalidation: D6 added no capture.command_scoped key" 'command_scoped' "$REVAL"
+hasnt_joined "revalidation: D6 added no scope placeholder" '{{scope}}' "$REVAL"
 
 echo "== #563 item 4 (from #246's closure): the one-time pre-1.6.0 embed sweep =="
 # #246 asked for a filesystem-owning production module to retroactively repair group-free chapter

@@ -47,17 +47,17 @@ scope the user already accepted.
    You do not narrow the invocation to the deltas, and you do not edit a profile
    you were not asked to touch in order to give it a scope it never had. What
    changes is the bookkeeping. Run the provenance substep for **every chapter the
-   run actually re-shot**, not only for the deltas — a chapter whose screenshots
-   the whole-suite run refreshed otherwise keeps a record describing the previous
-   bytes, and a record that already exists and no longer matches its chapter's
-   embeds is what the next provenance report calls `record_stale`. Running the
-   substep is what you owe; it is not a promise that the record gets rewritten,
-   because the writer records only the chapters it finds eligible and names the
-   rule when it declines. The whole-suite exit status is the one the run record
-   sees, so a single unrelated red spec makes the run's recorded build identity
-   `capture_failed` — one warning on the run, not a halt, and the correct reading
-   of a capture whose suite did not pass rather than something to route around by
-   narrowing the command.
+   run actually re-shot**, not only for the deltas — a chapter with an existing
+   record whose screenshots the whole-suite run refreshed otherwise keeps a record
+   describing the previous bytes, and a record that already exists and no longer
+   matches its chapter's embeds is what the next provenance report calls
+   `record_stale`. Running the substep is what you owe; it is not a promise that
+   the record gets rewritten, because the writer records only the chapters it
+   finds eligible and names the rule when it declines. The whole-suite exit status
+   is the one the run record sees, so a single unrelated red spec makes the run's
+   recorded build identity `capture_failed` — one warning on the run, not a halt.
+   That is the correct reading of a capture whose suite did not pass; it is not
+   something to route around by narrowing the command.
 6. **Run the completeness gate.** Build the coverage matrix and block on any
    unresolved row, exactly as on first authoring — see `completeness-gate.md`.
    Revalidation never publishes on a stale or incomplete matrix.
