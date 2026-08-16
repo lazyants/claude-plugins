@@ -37,9 +37,12 @@ scope the user already accepted.
 4. **Halt on any material delta.**
    Revalidation skips only the initial accepted-manifest review for no-op or accepted-diff unchanged scope. Any material delta — to route, role, steps, glossary terms, side-effect class, or a changed/added/removed control or newly discovered interactive trigger — emits a delta manifest and halts for user acceptance per `manifest-discipline.md`.
    You do not re-capture a material delta before that acceptance closes.
-5. **Re-capture and re-author only the deltas.** Refresh artifacts for the
-   accepted-diff deltas and for the material deltas the user accepted in step 4.
-   Untouched scope keeps its existing artifacts; you do not re-shoot a no-op.
+5. **Re-author only the deltas; invoke capture exactly as the profile says.**
+   Re-author the accepted-diff deltas and the material deltas the user accepted
+   in step 4. Untouched scope keeps its existing authored content — you do not
+   rewrite a no-op chapter. What gets re-SHOT is not yours to scope: it is
+   whatever `capture.command` covers when run verbatim, which for a whole-suite
+   command includes chapters the delta set never touched.
 
    **When `capture.command` is whole-suite, run it whole.** The delta rule above
    scopes what you re-author, never what you invoke: `container-isolation.md`

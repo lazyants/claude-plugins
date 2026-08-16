@@ -4074,6 +4074,18 @@ echo "== #563 item 3 (folds #478): whole-suite capture.command precedence in rev
 has_joined_in_section "revalidation: step 5 resolves whole-suite capture.command precedence — run it whole" \
   "$REVAL" '## The flow' \
   'The delta rule above scopes what you re-author, never what you invoke'
+# The precedence paragraph is not enough on its own: step 5's own heading and body used to say
+# "Re-capture ... only the deltas" and "you do not re-shoot a no-op", which stay false for a
+# whole-suite command no matter what a later paragraph resolves. The step itself now scopes
+# re-AUTHORING only, and hands capture invocation to the verbatim command.
+has_joined_in_section "revalidation: step 5's own heading scopes re-authoring, not invocation" \
+  "$REVAL" '## The flow' \
+  'Re-author only the deltas; invoke capture exactly as the profile says'
+has_joined_in_section "revalidation: step 5's body hands the re-shoot scope to capture.command" \
+  "$REVAL" '## The flow' \
+  'What gets re-SHOT is not yours to scope'
+hasnt_joined "revalidation: the false no-op-recapture clause is gone from step 5" \
+  'you do not re-shoot a no-op' "$REVAL"
 has_joined_in_section "revalidation: step 5 re-runs the provenance substep for every chapter the run re-shot" \
   "$REVAL" '## The flow' \
   'every chapter the run actually re-shot'
