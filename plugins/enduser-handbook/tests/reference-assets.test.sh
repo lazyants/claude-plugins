@@ -4363,6 +4363,48 @@ has "publish-targets README: the create branch is conditional, not automatic (#4
 has "publish-targets README: names the ambiguous-container halt a new adapter owes" \
   'wrong-container / duplicate-line / ambiguous-container / manual-wiring halts' "$PTREADME"
 
+echo "== #563 item 5 (#345): the unverifiable branch reads the placement by eye =="
+# #345 asked for an explicit confirmation STEP on `unverifiable` and was answered NO: a prompt on
+# the majority path is one operators learn to dismiss, and 75.7% of a measured 18-form x 6-title
+# corpus lands there. What was owed instead is an instruction to the consuming agent — it already
+# holds the index lines, so it can look. Pinned in both adapters, joined (the sentence wraps).
+#
+# The negative half matters as much as the positive one: this instruction is ESTABLISHMENT-time
+# and must not be read as reinstating the confirmation step, nor carried into W6, whose migration
+# checklist legitimately DOES require explicit user confirmation on this same outcome
+# (publish-targets/README.md and revalidation.md draw that split). The second needle pins the
+# disclaimer that keeps the two apart.
+BY_EYE_RULE='read the index region around it yourself and confirm by eye that it sits under its'
+BY_EYE_NOT_A_PROMPT='That is your own read, not a prompt to the operator, and it does not turn this outcome'
+has_joined_in_section "static-md: unverifiable tells the agent to read the placement by eye" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$BY_EYE_RULE"
+has_joined_in_section "static-md: the by-eye read is NOT a confirmation step" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$BY_EYE_NOT_A_PROMPT"
+has_joined_in_section "obsidian-vault: unverifiable tells the agent to read the placement by eye" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$BY_EYE_RULE"
+has_joined_in_section "obsidian-vault: the by-eye read is NOT a confirmation step" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$BY_EYE_NOT_A_PROMPT"
+# EXACTLY one copy per adapter. Each adapter states `unverifiable` at several sites (the branch
+# itself, the safety statement, the measured label table); the instruction belongs to the BRANCH
+# only, and a second copy would mean it leaked into the safety statement or the table, where it
+# would read as covering shapes the branch never reaches.
+SMD_BY_EYE_COUNT="$(count_joined_fixed "$BY_EYE_RULE" "$SMD")"
+if [ "$SMD_BY_EYE_COUNT" -eq 1 ]; then
+  ok "static-md: the by-eye instruction occurs exactly once (the branch, not the safety statement)"
+else
+  bad "static-md: by-eye instruction occurrence count drifted from 1 (found $SMD_BY_EYE_COUNT)"
+fi
+OMD_BY_EYE_COUNT="$(count_joined_fixed "$BY_EYE_RULE" "$OMD")"
+if [ "$OMD_BY_EYE_COUNT" -eq 1 ]; then
+  ok "obsidian-vault: the by-eye instruction occurs exactly once (the branch, not the safety statement)"
+else
+  bad "obsidian-vault: by-eye instruction occurrence count drifted from 1 (found $OMD_BY_EYE_COUNT)"
+fi
+
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
 # command and handed the assertion the leftover text. It kept passing while no longer checking the

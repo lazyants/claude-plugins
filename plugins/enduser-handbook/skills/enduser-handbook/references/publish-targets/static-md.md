@@ -314,8 +314,11 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
   - **`unverifiable`** ⇒ proceed — this file falls outside the verified class (see "Nested-list
     automation limits" below); the check ran and could not conclude — nothing further verifies
     placement, no confirmation is requested, and the run continues unverified, exactly as the
-    shipped 1.10.0 behaviour did on this path. See the safety statement below for what this does
-    and does not guarantee.
+    shipped 1.10.0 behaviour did on this path. Nothing automated will verify this row, so read the
+    index region around it yourself and confirm by eye that it sits under its `group_title`
+    container — you already hold the index lines. That is your own read, not a prompt to the
+    operator, and it does not turn this outcome into a confirmation step. See the safety statement
+    below for what this does and does not guarantee.
   - **`misplaced`** ⇒ halt reusing the exact headings-form wording above:
     `Chapter '<slug>' is listed in <index_file> under '<found_title>' instead of '<group_title>' — move the line (or curate the index manually), then re-run.`
     (`<found_title>` reads `(none)` when the line sits at the left margin, uncontained.)

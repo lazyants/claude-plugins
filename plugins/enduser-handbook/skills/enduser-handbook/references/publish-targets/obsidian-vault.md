@@ -411,6 +411,10 @@ the one exception to "do all of these" — see its own conditional note below.
          further verifies placement, no confirmation is requested, and the run continues
          unverified, exactly as the shipped 1.10.0 behaviour did on this path — a `canonical`
          line is already complete and a `legacy` line still retargets in place unconditionally.
+         Nothing automated will verify this row, so read the index region around it yourself and
+         confirm by eye that it sits under its `group_title` container — you already hold the
+         index lines. That is your own read, not a prompt to the operator, and it does not turn
+         this outcome into a confirmation step.
          See the safety statement under "Non-headings index, no existing line" below for what
          that does and does not guarantee.
        - **`misplaced`** ⇒ halt reusing the exact wording above:
