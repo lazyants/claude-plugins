@@ -1899,12 +1899,24 @@ once the driver returns it still reports PRE-run state and reads `stale` for
 a segment that has just converged. The driver's own printed JSON
 (`summary.converged`/`summary.needs_fix`/`summary.failed`) is the authority
 for what this run did. To refresh the durable view before reading it, run the
-merge BARE — no `--expected-*` flag, exactly as `select_segments.py` itself
-runs it:
+merge with no `--expected-*` flag — that is the only thing "bare" means here,
+and it is how `select_segments.py` itself runs it:
 
 ```
-python3 {durable_root}/scripts/ledger_merge.py --durable-root {durable_root}
+python3 {durable_root}/scripts/ledger_merge.py \
+    --durable-root {durable_root} --plugin-root {plugin_root}
 ```
+
+`--plugin-root` is not optional in practice, for the same reason it is not on
+the `reject_review.py` invocation below: it decides where the trusted
+`cache_key.py` sibling is loaded from, and `{durable_root}/scripts/` is a
+Step-0a copy the codex process holds write access over (`codex_job.py` grants
+`--write` across the whole durable root). Omit it and this merge resolves its
+stale-checker from inside the very tree the check exists to audit — a tampered
+copy passes itself, and the segment materializes as non-stale after a real
+cache-key change. `select_segments.py` forwards both roots for this reason;
+`tests/ledger_merge.test.py` pins both directions, the detection with the flag
+and the false green without it.
 
 Do NOT reach for `--expected-from-manifest`/`--expected-segs` here, and never
 add `--run-token` to them. Either expected-segment flag turns on the
