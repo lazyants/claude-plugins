@@ -409,6 +409,58 @@ test('the ONE shape this arity check can be wrong about is named in its own fail
   }
 });
 
+/** Audit one throwaway module pair and return only its arity findings. */
+async function arityFindings(mjs, dmts) {
+  const dir = mkdtempSync(join(tmpdir(), 'eh-arity-'));
+  try {
+    writeFileSync(join(dir, 'm.mjs'), `${mjs}\n`);
+    writeFileSync(join(dir, 'm.d.mts'), `${dmts}\n`);
+    const { findings, census } = await auditLibDirectory(dir);
+    return { arity: findings.filter((f) => f.includes('at runtime, but')), census };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('arity is read from a const of FUNCTION TYPE too, not only from a `function` declaration', async () => {
+  // Gating on the declaration KEYWORD rather than on whether an arity was actually read skipped every
+  // export declared `const handler: (a: A) => void` — an idiomatic spelling — so a parameter added to
+  // or removed from its runtime went completely uncaught. Both spellings describe the same thing.
+  const declaration = 'export declare const handler: (a: number, b: string) => void;';
+  const drifted = await arityFindings('export const handler = (a, b, c, d) => [a, b, c, d];', declaration);
+  assert.equal(drifted.arity.length, 1, `a const-declared function that gained parameters must be caught; got ${JSON.stringify(drifted.arity)}`);
+  assert.equal(drifted.census.arityChecks, 1, 'the comparison must actually have run, not been skipped into a pass');
+
+  const correct = await arityFindings('export const handler = (a, b) => [a, b];', declaration);
+  assert.deepEqual(correct.arity, [], 'a matching const-declared function must stay green');
+  assert.equal(correct.census.arityChecks, 1);
+
+  // A type this cannot read without RESOLVING it is skipped rather than guessed at — that is a
+  // compiler's job. The census makes the skip visible instead of letting it look like a comparison.
+  for (const opaque of ['export interface Cb { (a: number): void }\nexport declare const handler: Cb;', 'export declare const handler: (1 | 2);']) {
+    const skipped = await arityFindings('export const handler = (a, b, c) => [a, b, c];', opaque);
+    assert.deepEqual(skipped.arity, [], `an unresolvable type must be skipped, never guessed: ${opaque}`);
+    assert.equal(skipped.census.arityChecks, 0, 'a skipped arity must be reported as zero comparisons, not as a passing one');
+  }
+});
+
+test('each overload is satisfied SEPARATELY — their union is a range no signature declares', async () => {
+  // Taking the min of the mins and the max of the maxes builds a range nothing actually declares:
+  // against `f(a)` and `f(a, b, c, d, e)` the union is 1-5, so a runtime `length` of 3 — matching
+  // neither overload — was accepted. The union answers "is a call legal", which is not the question
+  // this check asks: whether the runtime's single `length` corresponds to any declared shape at all.
+  const overloads = 'export declare function f(a: number): void;\nexport declare function f(a: number, b: number, c: number, d: number, e: number): void;';
+  const between = await arityFindings('export function f(a, b, c) { return [a, b, c]; }', overloads);
+  assert.equal(between.arity.length, 1, `an arity matching NO overload must be caught; got ${JSON.stringify(between.arity)}`);
+  assert.match(between.arity[0], /declares 1 or 5/, 'the message must name the declared shapes, not the union it is not');
+
+  // Both real shapes must still be admitted, or the fix has simply become stricter than the truth.
+  for (const [runtime, length] of [['export function f(a) { return a; }', 1], ['export function f(a, b, c, d, e) { return [a, b, c, d, e]; }', 5]]) {
+    const ok = await arityFindings(runtime, overloads);
+    assert.deepEqual(ok.arity, [], `a runtime length of ${length} matches a declared overload and must stay green`);
+  }
+});
+
 test('a generic type-parameter list is skipped before the real parameters are read', () => {
   const { values } = extractDeclarationExports('export declare function pick<T extends (a: A) => B, U>(t: T, u: U): void;');
   assert.deepEqual(values.get('pick')[0].arity, { min: 2, max: 2 });

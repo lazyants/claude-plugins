@@ -335,6 +335,43 @@ function hasTopLevelDefault(param) {
   return false;
 }
 
+/**
+ * The declared arity of a binding whose TYPE is a function type — `const handler: (a: A) => void`.
+ *
+ * Arity used to be read only from a `function` declaration, so every export declared as a const of
+ * arrow type was skipped entirely and silently: a parameter added to or removed from its runtime went
+ * uncaught. The two spellings describe the same thing and both are idiomatic, so both are read.
+ *
+ * Returns null for anything that is not directly an arrow type — a named callable interface, an
+ * object type carrying a call signature, an overloaded type. Those would each need the type RESOLVED
+ * rather than read, which is a compiler's job (#573); returning null skips the arity check for that
+ * binding exactly as before, rather than guessing at it.
+ */
+function functionTypeArity(annotation) {
+  const text = annotation.trim();
+  let i = 0;
+  if (text[i] === '<') {
+    i = skipAngles(text, i);
+    while (/\s/.test(text[i] ?? '')) i += 1;
+  }
+  if (text[i] !== '(') return null;
+  const close = skipBracketed(text, i);
+  let j = close;
+  while (/\s/.test(text[j] ?? '')) j += 1;
+  // Without the arrow this is a parenthesized type, not a signature — `const x: (A | B)` declares no
+  // parameters at all, and reading one out of it would invent an arity nothing stated.
+  if (text[j] !== '=' || text[j + 1] !== '>') return null;
+  return declaredArity(text.slice(i + 1, close - 1));
+}
+
+/** The annotation half of a declarator — everything after its top-level `:`, or '' if untyped. */
+function annotationOf(declarator) {
+  for (const { index, char, top } of scanTopLevel(declarator)) {
+    if (char === ':' && top) return declarator.slice(index + 1);
+  }
+  return '';
+}
+
 /** The binding half of a parameter — everything before the annotation's top-level `:`. */
 function splitOnTypeColon(param) {
   for (const { index, char, top } of scanTopLevel(param)) {
@@ -539,7 +576,7 @@ export function extractDeclarationExports(source, label = '<source>') {
           unsupported.push(`${where}: \`export ${word}\` declarator '${declarator.trim()}' is not a plain binding name`);
           continue;
         }
-        addValue(name, { kind: word, line, arity: null });
+        addValue(name, { kind: word, line, arity: functionTypeArity(annotationOf(declarator)) });
       }
       i = end;
       continue;
@@ -730,15 +767,22 @@ export async function auditModulePair(libDir, base) {
   let arityChecks = 0;
   for (const [name, records] of extracted.values) {
     const live = runtime.get(name);
-    const signatures = records.filter((r) => r.kind === 'function' && r.arity);
+    // Any declaration that resolved a parameter list counts, not only a `function` one — a binding
+    // declared `const handler: (a: A, b: B) => void` is a function too, and gating on the KEYWORD
+    // rather than on whether an arity was actually read skipped every one of them.
+    const signatures = records.filter((r) => r.arity);
     if (!live || !live.isFunction || signatures.length === 0) continue;
-    // Overload signatures widen the admitted range rather than each constraining it: a call matching
-    // any one of them is legal, so the runtime only has to satisfy their union.
-    const min = Math.min(...signatures.map((s) => s.arity.min));
-    const max = Math.max(...signatures.map((s) => s.arity.max));
     arityChecks += 1;
-    if (live.length < min || live.length > max) {
-      const range = max === Infinity ? `${min}+` : (min === max ? `${min}` : `${min}-${max}`);
+    // Each overload is checked SEPARATELY and the runtime has to satisfy at least one. Taking the
+    // min of the mins and the max of the maxes instead builds a range no signature actually declares:
+    // against `f(a)` and `f(a, b, c, d, e)` the union is 1-5, so a runtime `length` of 3 — matching
+    // neither overload — was accepted. The union is the right answer to "is a call legal", which is a
+    // different question from the one asked here, namely whether the runtime's single `length`
+    // corresponds to any declared shape at all.
+    const accepted = signatures.some((s) => live.length >= s.arity.min && live.length <= s.arity.max);
+    if (!accepted) {
+      const describe = (a) => (a.max === Infinity ? `${a.min}+` : (a.min === a.max ? `${a.min}` : `${a.min}-${a.max}`));
+      const range = [...new Set(signatures.map((s) => describe(s.arity)))].join(' or ');
       // The `length === 0` case gets its own sentence because it is the one where the gate can be
       // wrong. `Function.prototype.length` reports 0 for a function that takes its arguments through
       // a rest parameter or through `arguments`, both of which are legitimate and neither of which
