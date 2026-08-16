@@ -23,8 +23,12 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   closed (blocked + recorded)**. It exposes one assertion that throws if any dangerous/blocked
   request fired during capture. This is **defense-in-depth, not permission to click ambiguous
   controls** — the human capture-safety classification still governs every click. There is exactly
-  **one** read escape hatch (`classifyRequest`); no broad write/stream/origin allowlists. WebSockets
-  are blocked *without connecting*; an engine that cannot block a socket (only observe it) must fail
+  **one** read escape hatch (`classifyRequest`) and exactly **one** opt-in allowlist:
+  `allowBeacons: true` admits **every** request the engine types as a `ping`, to any origin, GET and
+  POST alike (measured — a cross-origin POST beacon returns `allow`/`beacon-allowed`), so it is a
+  broad beacon allowlist, not a narrow one; `denyPatterns` still win over it. There is no write
+  allowlist and no origin allowlist. WebSockets are blocked *without connecting*; an engine that
+  cannot block a socket (only observe it) must fail
   at install time, not silently open. The ordered decision is a **pure function**
   (`../assets/lib/capture-guard-policy.mjs`, `decideRoute`) so its branch order is unit-tested, not
   just grep-asserted. The end-of-run assertion **drains a short quiet period** before checking, so a
@@ -40,7 +44,11 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   `/orders/42/confirm`, `/reports/publish` or `/users/7/impersonate` is **admitted**. So it is *not*
   true that a destructive GET the author forgot to deny-list still fails closed — that holds only
   when the forgotten verb happens to be one of the 16. Every other writing GET must be listed in
-  `denyPatterns` or refused by `classifyRequest`. (Tracked as issue #470.)
+  `denyPatterns` or refused by `classifyRequest` — and that refusal is **silent**: the predicate's
+  only refusing verdict is `'benign'`, which blocks the request but is excluded from
+  `assertNoDangerousHits()` by design, so no return value means "block this GET **and** count it
+  dangerous". For a writing GET outside the 16, `denyPatterns` is the only lever that both stops the
+  request and fails the run. (Tracked as issue #470.)
 
   **Redirect hops are DETECTED, not intercepted.** A request the browser issues itself to follow a
   3xx `Location` never reaches the interception handler — measured against the real engine on
@@ -69,7 +77,10 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   recorded as dangerous) only for a request that is not a plain GET/HEAD**; a GET/HEAD that reaches
   the general allow is still admitted unconditionally, as above. **An SSE GET never reaches it** —
   `[guard:eventsource]` blocks a stream the predicate did not admit, so returning `undefined` for an
-  event-source endpoint blocks it rather than passing it. Note the asymmetry: `'read'` allows,
+  event-source endpoint blocks it rather than passing it. **A beacon never reaches it either** —
+  `[guard:beacon]` also decides before `[guard:classify-read]`, so a request the engine types as
+  `ping` is blocked for GET and POST alike (measured) even when the predicate returns `'read'`; the
+  only thing that admits one is the `allowBeacons: true` opt-in above. Note the asymmetry: `'read'` allows,
   `'benign'` blocks — they are not "both block". `classifyRequest` must be **total**: return
   `undefined` for anything it does
   not recognize and never throw (the guard now consults it for beacon/SSE requests too). There is
@@ -144,12 +155,26 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   four above because it *is* ordinary DOM text — just in another document. Neither the mask nor the
   scan crosses a document boundary (a tree walk rooted in the parent stops at the `<iframe>` element,
   which has no text children), while the screenshot composites the child document's pixels. Framed
-  iframe content is therefore photographed but never masked and never scanned. Listing a selector
-  that only matches inside the frame at least fails loudly — it matches nothing, so the
-  mask-**coverage** assert throws. The case the scan exists for is the silent one: PII the author did
-  *not* list has nothing to mask, no text node to collect and no pattern to match, so the run is
-  green and the value is in the PNG. Mask or remove the frame's content before the shot, scan it
-  yourself per frame, or keep the frame out of the captured region. (Issue #472.)
+  framed content is therefore photographed but never masked and never scanned, and the dangerous half
+  of that is **silent**: PII the author did *not* list has nothing to mask, no text node to collect
+  and no pattern to match, so neither pass has anything to object to. That is why this one carve-out
+  is **enforced, not merely disclosed**: the helper counts every element in the region that hosts a
+  **nested browsing context** — `<iframe>`, `<frame>`, `<object>`, `<embed>`, all of which load a
+  document of their own on exactly these terms — and **throws** when it finds any, checked **before**
+  the coverage assert, so a framed region is named as the cause rather than misreported as selector
+  drift. Mask or remove the framed content before the shot, scan it yourself per frame, or keep it
+  out of the captured region.
+  **What the refusal can see, exactly:** the light DOM and **open** shadow roots of the subtree it
+  was handed, at the moment it is called. A frame inside a **closed** shadow root, a frame painted
+  over the captured rectangle from **outside** that subtree, and a frame attached **after** the call
+  (a spec may take more than one shot off a single mask) are all still uncounted, and stay the human
+  eyeball-the-frame step's job. The selector is deliberately unqualified — an `<object>` whose `data`
+  is assigned by script after parse would evade an `object[data]` form — so an `<object>` carrying no
+  document at all is refused too. That over-refusal is the correct direction for a PII gate.
+  **Past the single opt-out `allowUnscannedFrames: true`, the old behaviour is what remains**: a
+  selector matching only inside the frame catches nothing and trips the mask-**coverage** assert,
+  while PII the author never listed ships in the PNG with the run green. Take the opt-out only once
+  you have proven those documents carry no PII. (Issue #472.)
 
 ## The spec skeleton
 

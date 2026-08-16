@@ -1329,6 +1329,70 @@ has_joined_in_section "capture-spec-helpers: the allow names every block that pr
 has_joined_in_section "capture-spec-helpers: an unadmitted SSE GET is documented as blocked (#470)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   '**An SSE GET never reaches it**'
+# #472: the same-origin-iframe carve-out was documented but not ENFORCED. It is the one carve-out
+# whose silent half is reachable by no scan at all, so the mask helper now REFUSES a region that
+# frames another document unless the caller opts out explicitly.
+has "capture-helpers: maskAndAssert refuses an unscanned frame unless opted out (#472)" \
+  'allowUnscannedFrames' "$CH"
+# Review round 2: counting only iframe/frame left the IDENTICAL defect one element name over —
+# <object data> and <embed src> host a nested browsing context on exactly the same terms, so their
+# text is unreachable by both passes while their pixels are composited. The selector must name all
+# four, and the prose must not claim more reach than the count has.
+has "capture-helpers: the frame count covers every nested browsing context (#472)" \
+  "'iframe, frame, object, embed'" "$CH"
+has_joined_in_section "capture-spec-helpers: the carve-out names object/embed, not just iframe (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  '`<object>`, `<embed>`'
+# The prose must match the selector, which is deliberately unqualified — an attribute form
+# (`object[data]`) is defeated by a script-assigned `data`, so the over-refusal is intentional and
+# has to be stated rather than left as an apparent doc/code mismatch.
+has_joined_in_section "capture-spec-helpers: the unqualified selector is justified, not an oversight (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'The selector is deliberately unqualified'
+has_joined_in_section "capture-spec-helpers: the refusal's reach is scoped, not claimed absolute (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  '**What the refusal can see, exactly:**'
+has_joined_in_section "capture-spec-helpers: the iframe carve-out names the opt-out (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'allowUnscannedFrames: true'
+# Rounds 1-3 each found a DIFFERENT sentence of this one paragraph gone stale, which is the class
+# #557 named. Round 3's answer is structural within prose scope: the paragraph no longer narrates
+# what USED to happen — a tense that has to be maintained against the code — it states what happens
+# now, and states the opt-out path separately because that is where the old behaviour genuinely
+# survives. These pins hold that shape: the pre-empting order, the opt-out path being spelled out,
+# and no unconditional claim about the coverage assert firing on a framed region.
+has_joined_in_section "capture-spec-helpers: the refusal is documented as pre-empting the coverage assert (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'checked **before**'
+has_joined_in_section "capture-spec-helpers: the opt-out path spells out what survives it (#472)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'the old behaviour is what remains'
+# Keyed on the CLAIM, not on the sentence that carried it: round 1's rewrite happened to change
+# "matches nothing" to "catches nothing", and a mutation test proved the longer needle stayed green
+# when the retired present-tense claim came back with the other verb. This needle survives both.
+hasnt_joined "capture-spec-helpers: no unconditional claim that the coverage assert throws on a frame (#472)" \
+  'so the mask-**coverage** assert throws' "$REFS/capture-spec-helpers.md"
+# #473: the assertNoDangerousHits contract must stop prescribing a BARE finally — an abrupt
+# completion there replaces the body's error and skips the close after it.
+hasnt_joined "capture-helpers: assertNoDangerousHits no longer prescribes a bare finally (#473)" \
+  'Call it in a `finally`, before closing the context.' "$CH"
+has "capture-helpers: assertNoDangerousHits prescribes the primaryError shape (#473)" \
+  'a `primaryError` slot' "$CH"
+# #563 items 1-2: two more admission claims in the same contract doc were measurably wrong —
+# `allowBeacons` is a broad opt-in allowlist the "no broad allowlists" sentence denied, the
+# "'read' ADMITS" paragraph carved out only SSE while [guard:beacon] also decides before
+# [guard:classify-read], and `classifyRequest`'s only refusal is silent.
+hasnt_joined "capture-spec-helpers: the blanket no-allowlists claim is retired (#563 item 1)" \
+  'no broad write/stream/origin allowlists' "$REFS/capture-spec-helpers.md"
+has_joined_in_section "capture-spec-helpers: allowBeacons is named and its breadth stated (#563 item 1)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'admits **every** request the engine types as a `ping`'
+has_joined_in_section "capture-spec-helpers: a beacon is not admitted by a 'read' verdict either (#563 item 1)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  '**A beacon never reaches it either**'
+has_joined_in_section "capture-spec-helpers: the 'benign' refusal is documented as silent (#563 item 2)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'that refusal is **silent**'
 
 echo "== capture.example.spec.ts =="
 SPEC="$ASSETS/capture.example.spec.ts"
@@ -1355,6 +1419,92 @@ has "graphql-read-classifier: rejects mutation/subscription" 'mutation|subscript
 # admits a query-string decoy like '/collect?next=/graphql'. Negative tests gate this in node:test.
 has   "graphql-read-classifier: endpoint matched by pathname (new URL)"        'new URL(' "$GQL"
 hasnt "graphql-read-classifier: no full-URL substring endpoint test"           ".includes('/graphql')" "$GQL"
+
+# Group A: the two SHIPPED capture-spec skeletons — the artifacts an adopter copies once per chapter,
+# so a defect in either is reproduced per chapter per project — plus the documents that describe what
+# a capture run actually pins. Both files are asserted together wherever the claim is identical.
+REAUDIT="$ASSETS/reaudit.example.spec.ts"
+# #473: the teardown must keep the body's failure as the primary one and still close the context.
+for f in "$SPEC" "$REAUDIT"; do
+  base="$(basename "$f")"
+  has "$base: teardown keeps the body's failure as the primary error (#473)" 'primaryError' "$f"
+  has "$base: the primary error is rethrown last (#473)" 'if (primaryError !== null) throw primaryError;' "$f"
+done
+# #560: all four example denyPatterns duplicated a built-in verb token-exactly while matching as a
+# raw substring over URL AND postData — strictly wider than the check they repeated.
+for f in "$SPEC" "$REAUDIT"; do
+  hasnt "$(basename "$f"): denyPatterns no longer repeat a built-in dangerous verb (#560)" \
+    "'/delete', '/send', '/approve', '/finalize'" "$f"
+  # Paired POSITIVE pin: the `hasnt` above only retires ONE literal, so any other non-empty seed
+  # would satisfy it. The shipped example must ship the empty list, not merely a different list.
+  # Known limit, measured: this is a whole-file `has`, and capture.example.spec.ts has TWO guard
+  # installs — seeding only one of them still satisfies this pin. The pair is a regression guard,
+  # not a proof of every site; the `hasnt` above is what catches the specific literal coming back.
+  has "$(basename "$f"): the shipped example seeds an EMPTY denyPatterns (#560)" \
+    'denyPatterns: []' "$f"
+done
+has "example spec: says what denyPatterns is actually for (#560)" \
+  'denyPatterns is a raw SUBSTRING match' "$SPEC"
+# Review round 2: the first version of that comment claimed the four verbs "adds no coverage", which
+# is measurably false — the bare verbs DID block the run-together lowercase spellings the tokenizer
+# splits differently ('/deleteuser', '/sendmail', '/approveall', '/finalizeorder' all go
+# block/deny-pattern -> allow/get-head when they are removed). The residue is now stated, so an
+# adopter with such a route is not told that re-adding coverage is pointless.
+has "example spec: the removed verbs' residue is stated, not denied (#560)" \
+  'run-together and verb+digit spellings the' "$SPEC"
+has "example spec: the residue names the body-only class too (#560)" \
+  'plus a body-only match where YOUR OWN' "$SPEC"
+# Needle is the CLAIM MINUS ITS FIRST WORD, deliberately. `hasnt_joined` matches case-sensitively
+# (count_joined_fixed uses awk index(), no tolower anywhere), so any needle whose first word can
+# start a sentence has a capitalization hole: 'adds no coverage' does not match 'Adds no coverage',
+# which is exactly the shape a rewrap produces. Measured — the earlier, longer needle had the same
+# hole one word further along. Dropping to ' no coverage' makes the pin independent of how the
+# sentence begins.
+hasnt_joined "example spec: no longer claims the bare verbs add no coverage (#560)" \
+  ' no coverage' "$SPEC"
+# Review round 5 (bot P2): the re-audit skeleton carried its OWN one-line summary of the residue, and
+# the verification-round correction to $SPEC left it stale — it still said the bare verbs added
+# "only" the run-together spellings, omitting the verb+digit forms and the body-only class. Two
+# copies of a measured enumeration in two copyable skeletons is the drift that produced this finding,
+# so the summary is retired rather than duplicated: the residue is enumerated ONCE, in $SPEC, and the
+# re-audit file points at it. The needle below starts mid-phrase with a space on purpose — same
+# capitalization hole as the pin above, and no rewrap can hide the claim behind a capital letter.
+hasnt_joined "re-audit spec: no local summary that understates the residue (#560)" \
+  ' adding only' "$REAUDIT"
+has "re-audit spec: points at the canonical residue enumeration (#560)" \
+  'enumerated ONCE in the denyPatterns comment' "$REAUDIT"
+# #474: LANG/LC_ALL never reach the browser — the browser-context locale is the only lever that sets
+# navigator.language and sends Accept-Language. Three shipped sentences claimed otherwise.
+for f in "$SPEC" "$REAUDIT"; do
+  has "$(basename "$f"): the browser context is given a locale (#474)" 'locale: CONTEXT_LOCALE' "$f"
+done
+ISOLATION="$REFS/container-isolation.md"
+ISOLATION_SECTION="## What the project's command must guarantee"
+hasnt_joined "container-isolation: LANG/LC_ALL no longer claimed to set the app's language (#474)" \
+  "and the app under test renders in that locale's language" "$ISOLATION"
+hasnt_joined "container-isolation: the container-pattern bullet drops the translation-file claim (#474)" \
+  'and which translation file the app serves' "$ISOLATION"
+hasnt_joined "container-isolation: the host-drift bullet no longer attributes translation choice to LANG (#474)" \
+  'sort order, and which translation file the app picks' "$ISOLATION"
+has_joined_in_section "container-isolation: names the browser-context locale as the real lever (#474)" \
+  "$ISOLATION" "$ISOLATION_SECTION" \
+  'sets neither `navigator.language` nor an `Accept-Language`'
+has_joined_in_section "container-isolation: states the POSIX-to-BCP-47 derivation (#474)" \
+  "$ISOLATION" "$ISOLATION_SECTION" \
+  'take the part before the first `.` or `@` and replace'
+# The other two corrected passages had absence-only pins: deleting the replacement text without
+# reintroducing the retired phrase would have gone undetected. One positive pin each, bound to its
+# own section so the claim cannot satisfy the pin from the wrong place.
+has_joined_in_section "container-isolation: the host-drift bullet attributes translation choice to the browser (#474)" \
+  "$ISOLATION" '## Why' \
+  "the host browser's own language preference is what decides which translation file"
+has_joined_in_section "container-isolation: the container-pattern bullet sends the reader to the context locale (#474)" \
+  "$ISOLATION" '## Common command patterns (engine-agnostic)' \
+  'These env vars never reach the browser'
+hasnt "SKILL.md: locale claim no longer says UI language (#474)" \
+  'drives both process locale and UI language' "$SKILL_DIR/SKILL.md"
+has "SKILL.md: names the browser-context locale as the Accept-Language lever (#474)" \
+  'browser.newContext({ locale:' "$SKILL_DIR/SKILL.md"
 
 echo "== wording contracts (some files owned by other groups; pass once the full set lands) =="
 REVAL="$REFS/revalidation.md"

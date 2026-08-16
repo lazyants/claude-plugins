@@ -11,11 +11,13 @@ You enforce isolation so that captures are reproducible across machines and CI,
 not portraits of one developer's desk. Concretely, you keep these out of the
 sandbox:
 
-- **Host locale drift.** The developer's `LANG` / `LC_ALL` / OS language pack
-  decides date formats, number separators, sort order, and which translation
-  file the app picks. If host locale leaks in, two developers produce
-  visibly different chapters from the same code. The sandbox pins locale to
-  `capture.locale` so every run looks the same regardless of who launched it.
+- **Host locale drift.** The developer's `LANG` / `LC_ALL` decide date
+  formats, number separators and sort order; the host browser's own language
+  preference is what decides which translation file the app picks. If either
+  leaks in, two developers produce visibly different chapters from the same
+  code. The sandbox pins the process locale to `capture.locale`, and the
+  capture spec pins the browser context's locale to its BCP-47 form, so every
+  run looks the same regardless of who launched it.
 - **Cached cookies and storage.** The developer's logged-in browser session,
   saved form autofill, prior consent banners dismissed, and feature-flag
   overrides set during debugging all silently change what the app renders. A
@@ -67,10 +69,17 @@ met, you halt and tell the user to fix the command before running captures.
    locale (e.g. `de_DE.UTF-8`), not a bare ISO language code — a bare code
    cannot pin date/number/sort formatting, which is the whole point of this
    guarantee. The sandbox sets `LANG` and `LC_ALL` (or the runtime's
-   equivalent) to `capture.locale` *verbatim*, and the app under test renders
-   in that locale's language. The content language alone lives in
-   `language.code`; `capture.locale` is the process locale. You do not accept
-   "it usually picks the right one" — pin it.
+   equivalent) to `capture.locale` *verbatim*. That pins the **process**
+   locale only: it sets neither `navigator.language` nor an `Accept-Language`
+   request header, so an app that negotiates its UI language from the request
+   keeps serving its own default. The lever that does *that* is the
+   **browser-context locale** — `browser.newContext({ locale: 'de-DE' })`,
+   Playwright's `use.locale` — which sets `navigator.language` **and** sends
+   `Accept-Language`, and the capture spec must pass it. Derive it from
+   `capture.locale`: take the part before the first `.` or `@` and replace
+   `_` with `-` (`de_DE.UTF-8` → `de-DE`). The content language alone lives
+   in `language.code`; `capture.locale` is the process locale. You do not
+   accept "it usually picks the right one" — pin both.
 2. **All capture output lands under `capture.output_dir`.** The command
    mounts `capture.output_dir` writable into the sandbox and the spec writes
    only there. No writes to other host paths. The path in `capture.output_dir`
@@ -101,8 +110,10 @@ the *shape* is general:
   Guarantee 1 requires the sandbox locale to equal `capture.locale`, which is itself a full
   POSIX locale (e.g. `de_DE.UTF-8`) — so set both `LANG` and `LC_ALL` to that value verbatim.
   An unpinned container inherits the image default (often `C`/POSIX), which changes date and
-  number formats, sort order, and which translation file the app serves — so two machines
-  produce visibly different chapters.
+  number formats and sort order — so two machines produce visibly different chapters. These
+  env vars never reach the browser: pass `capture.locale`'s BCP-47 form to the browser context
+  as well (`newContext({ locale: 'de-DE' })`), or an app that negotiates its UI language from
+  `Accept-Language` serves its default language underneath your translated prose.
 - **Run as the host user**, e.g. `--user "$(id -u):$(id -g)"`. A container running as root
   writes root-owned PNGs into `capture.output_dir` that the developer then cannot edit or
   clean without sudo. Map the host UID/GID so captured artifacts stay owned by the user.

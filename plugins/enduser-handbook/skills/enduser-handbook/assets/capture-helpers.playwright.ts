@@ -68,8 +68,16 @@ export interface CaptureGuard {
    * timer each time one arrives), giving a delayed beacon/fetch/WebSocket fired after the last
    * interaction time to reach the handler — capped at `maxMs` so it cannot hang. This is best-effort,
    * NOT a guarantee that every late request has settled; a request that fires after the drain window
-   * is not detected. Call it in a `finally`, before closing the context. It gates on the
-   * `dangerousHits` ledger ONLY — requests classified `'benign'` are excluded by construction.
+   * is not detected. It gates on the `dangerousHits` ledger ONLY — requests classified `'benign'`
+   * are excluded by construction.
+   *
+   * WHERE TO CALL IT: after the capture body, in a phase that cannot REPLACE the body's own failure.
+   * An abrupt completion inside a bare `finally` discards the exception already propagating out of
+   * the `try` AND skips every line after it, so a bare
+   * `finally { await assertNoDangerousHits(); await context.close(); }` reports a guard error instead
+   * of the real cause and never closes the context. Keep a `primaryError` slot (the shape `captureRegionClipped`
+   * below uses), let neither this assertion nor `context.close()` overwrite a value already in it,
+   * and rethrow it last.
    *
    * The ledger mixes two kinds of entry, and they mean different things. A plain reason
    * (`fail-closed`, `deny-pattern`, …) is a request the guard BLOCKED — it never reached the server.
@@ -778,6 +786,13 @@ export interface MaskOptions {
   patterns: RegExp[];
   /** Exact number of targets the mask must cover; a mismatch is a coverage failure (throws). */
   expectedCount: number;
+  /**
+   * Opt out of the unscanned-frame refusal (issue #472). Any nested browsing context in the region —
+   * `<iframe>`, `<frame>`, `<object>`, `<embed>` — is photographed but never masked and never
+   * scanned, so its presence is refused by default. Set this only once you have proven those
+   * documents carry no PII.
+   */
+  allowUnscannedFrames?: boolean;
 }
 
 /**
@@ -811,16 +826,25 @@ export interface MaskOptions {
  * <iframe> (issue #472). That last one is a different class from the others: it IS ordinary DOM
  * text, only in another document, and neither pass crosses a document boundary — queryDeep and the
  * TreeWalker both stop at the <iframe> element, which has no text children, while page.screenshot
- * composites the child document's pixels. A selector that only matches inside the frame at least
- * throws on the coverage assert (it matches nothing); PII the author did NOT list is silent —
- * nothing to mask, no text node to collect, no pattern to match, green run, value in the PNG. Mask
- * the frame's content before the shot, scan it yourself per frame, or keep it out of the region.
+ * composites the child document's pixels. PII the author did NOT list is the silent half — nothing
+ * to mask, no text node to collect, no pattern to match, so neither pass has anything to object to.
+ * That is why this carve-out alone is ENFORCED rather than only documented: a nested browsing
+ * context in the scanned region — <iframe>, <frame>, <object> or <embed>, all of which load a
+ * document of their own on the same terms — THROWS unless the caller passes
+ * `allowUnscannedFrames: true`. Mask the framed content before the shot, scan it yourself per frame,
+ * or keep it out of the region.
+ * WHAT THE REFUSAL CAN SEE, exactly: the light DOM and OPEN shadow roots of the subtree it was
+ * handed, at the moment it is called. A frame in a CLOSED shadow root, a frame painted over the
+ * captured rectangle from OUTSIDE that subtree, and a frame attached AFTER the call (the skeleton
+ * takes more than one shot off a single mask) are all still uncounted. Past the opt-out the old
+ * behaviour is what remains: a selector matching only inside the frame catches nothing and trips the
+ * coverage assert, while unlisted PII ships in the PNG with the run green.
  * All of these surfaces rely on the human eyeball-the-frame step (capture-safety.md) as the
  * backstop — the scan is defense-in-depth, not a complete proof.
  */
 export async function maskAndAssert(
   page: Page,
-  { dialog, selectors, placeholder, patterns, expectedCount }: MaskOptions,
+  { dialog, selectors, placeholder, patterns, expectedCount, allowUnscannedFrames = false }: MaskOptions,
 ): Promise<void> {
   const dialogHandle = await dialog.elementHandle();
   if (dialogHandle === null) {
@@ -828,8 +852,9 @@ export async function maskAndAssert(
   }
 
   // Step 1 + 3 run in one browser evaluate: mask + tag the targets, then collect scan parts from the
-  // UNMASKED remainder. Returns the matched count for the coverage assert.
-  const { matched, scanParts } = await dialogHandle.evaluate(
+  // UNMASKED remainder. Returns the matched count for the coverage assert, plus the framed-document
+  // count for the frame refusal (issue #472).
+  const { matched, scanParts, frames } = await dialogHandle.evaluate(
     (root: Element, args: { selectors: string[]; placeholder: string }) => {
       const ph = args.placeholder;
       const MASKED_ATTR = 'data-handbook-masked';
@@ -950,10 +975,39 @@ export async function maskAndAssert(
       };
       collect(root);
 
-      return { matched: matchedCount, scanParts: parts };
+      // --- Framed-document count (issue #472): the ONE place with DOM access, so the counting
+      // happens here and the caller fails closed on it, exactly as it does on the coverage count
+      // above. queryDeep is reused so open shadow roots are covered identically to the mask and the
+      // scan; the .matches() term covers the region BEING the frame, which querySelectorAll
+      // (descendants only) would miss.
+      // The selector is every element that hosts a NESTED BROWSING CONTEXT, not just <iframe>:
+      // <object> and <embed> load a document of their own on exactly the same terms — its text
+      // nodes are in another document, so neither pass reaches them, while the browser composites
+      // its pixels into the shot. Counting only iframe/frame would leave the identical defect one
+      // element name over. Deliberately UNQUALIFIED (not `object[data]`): an <object> whose `data`
+      // is assigned by script after parse would evade the attribute form, so an <object> carrying
+      // no document is refused too — the over-refusal is the right direction for a PII gate. ---
+      const FRAME_HOSTS = 'iframe, frame, object, embed';
+      const frameCount =
+        (root.matches(FRAME_HOSTS) ? 1 : 0) + queryDeep(root, FRAME_HOSTS).length;
+
+      return { matched: matchedCount, scanParts: parts, frames: frameCount };
     },
     { selectors, placeholder },
   );
+
+  // Step 2a: refuse a region that frames another document (issue #472). Checked BEFORE the coverage
+  // assert on purpose: when a listed selector matches only inside the frame BOTH gates fire, and
+  // naming the frame points at the cause where "selector drift" would misdirect.
+  if (frames > 0 && !allowUnscannedFrames) {
+    throw new Error(
+      `maskAndAssert: the captured region hosts ${frames} nested browsing context(s) ` +
+        '(<iframe>/<frame>/<object>/<embed>). Their content is photographed but never masked and ' +
+        'never scanned — neither pass crosses a document boundary. Mask or remove the framed ' +
+        'content before the shot, scan it yourself per frame, keep the frame out of the region, or ' +
+        'pass allowUnscannedFrames: true once you have proven those documents carry no PII.',
+    );
+  }
 
   // Step 2: coverage assert — a missed target throws instead of leaking.
   if (matched !== expectedCount) {

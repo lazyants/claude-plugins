@@ -5,7 +5,7 @@
 //
 // reaudit.example.spec.ts — the OPT-IN per-role driver: runs the mechanical surface-enumeration pass
 // (surface-audit.playwright.ts's auditSurface) ONCE PER ROLE, each against its own seeded, hermetic
-// browser.newContext({ storageState }) — the exact in-repo pattern at capture.example.spec.ts:40-43 —
+// browser.newContext({ storageState }) — the exact in-repo pattern capture.example.spec.ts uses —
 // then diffs the collected inventories with diffSurfaces (lib/surface-diff.mjs). Single-role
 // enumeration stays the default (capture.example.spec.ts is untouched by this file); this driver is
 // opt-in, for when `capture.auth_role_enum` lists more than one role and you want to see how the
@@ -14,7 +14,7 @@
 // The roles list (label + storageState path) lives HERE, in the spec — not the profile.
 // references/manifest-discipline.md is explicit that storage-state paths are a spec-level artifact
 // ("Not a place to encode engine APIs... storage state paths... live in the capture spec"), and the
-// existing single STORAGE_STATE const already lives in capture.example.spec.ts:35. The profile keeps
+// existing single STORAGE_STATE const already lives in capture.example.spec.ts. The profile keeps
 // only `capture.auth_role_enum` as the role vocabulary — each AUDIT_ROLES `label` below must be a
 // member of it.
 //
@@ -48,6 +48,13 @@ const AUDIT_ROLES: { label: string; storageState: string }[] = [
   { label: 'external', storageState: 'storage/seeded-external.json' },
 ];
 
+// The profile's capture.locale (a full POSIX locale) mapped to the BCP-47 tag the browser context
+// wants, exactly as capture.example.spec.ts derives it: keep the part before the first '.' or '@' and
+// turn '_' into '-'. The sandbox's LANG/LC_ALL pin the PROCESS locale only — they set neither
+// navigator.language nor an Accept-Language header. See references/container-isolation.md.
+const CAPTURE_LOCALE = 'de_DE.UTF-8';
+const CONTEXT_LOCALE = CAPTURE_LOCALE.split(/[.@]/)[0].replace(/_/g, '-');
+
 test('re-audit: items chapter, per role', async ({ browser }) => {
   const perRole: { role: string; controls: NormalizedControl[] }[] = [];
 
@@ -55,25 +62,49 @@ test('re-audit: items chapter, per role', async ({ browser }) => {
     // Canonical order per role, mirroring capture.example.spec.ts: context with service workers
     // blocked + a pre-seeded storageState (no live login), THEN installCaptureGuard BEFORE any page
     // exists, THEN newPage.
-    const context = await browser.newContext({ serviceWorkers: 'block', storageState });
+    const context = await browser.newContext({
+      serviceWorkers: 'block',
+      storageState,
+      locale: CONTEXT_LOCALE,
+    });
     const guard = await installCaptureGuard(context, {
-      // Tune to your stack, exactly like capture.example.spec.ts's denyPatterns. A read-admitting
-      // classifyRequest (e.g. classifyGraphqlRead for a POST-read GraphQL app) can be added the same
-      // way as in capture.example.spec.ts; omitted here for brevity.
-      denyPatterns: ['/delete', '/send', '/approve', '/finalize'],
+      // Empty for the same reason as capture.example.spec.ts — the built-in 16-verb set already
+      // covers the destructive verbs token-exactly, and denyPatterns is a raw substring match over
+      // the URL and postData, so seeding the bare verbs blocks ordinary reads. Removing them is not
+      // free either: what it costs is measured and enumerated ONCE in the denyPatterns comment of
+      // capture.example.spec.ts — read it there rather than trusting a second-hand summary here,
+      // which is how the summary that used to sit in this comment went stale. List a whole route
+      // rather than a bare verb. A read-admitting classifyRequest (e.g. classifyGraphqlRead for a
+      // POST-read GraphQL app) can be added the same way as in capture.example.spec.ts; omitted
+      // here for brevity.
+      denyPatterns: [],
     });
     const page = await context.newPage();
+    // This role's failure is the PRIMARY one: an abrupt completion in a `finally` would replace it
+    // and skip the close after it. Same primaryError discipline as capture.example.spec.ts.
+    let primaryError: unknown = null;
     try {
       // auditSurface itself navigates and asserts identity before enumerating — no separate goto/
       // assertIdentity call is needed here.
       const controls = await auditSurface({ page, route: ROUTE, heading: HEADING });
       perRole.push({ role: label, controls });
-    } finally {
-      // In a finally so a delayed beacon/fetch fired during this role's pass is still drained and
-      // asserted before its context closes — mirrors capture.example.spec.ts.
-      await guard.assertNoDangerousHits();
-      await context.close();
+    } catch (err) {
+      primaryError = err;
     }
+    try {
+      // Asserted after this role's pass so a delayed beacon/fetch fired during it is still drained
+      // and asserted before its context closes — mirrors capture.example.spec.ts.
+      await guard.assertNoDangerousHits();
+    } catch (err) {
+      primaryError = primaryError ?? err;
+    } finally {
+      try {
+        await context.close();
+      } catch (err) {
+        primaryError = primaryError ?? err;
+      }
+    }
+    if (primaryError !== null) throw primaryError;
   }
 
   const { roles, matrix, diff } = diffSurfaces(perRole);

@@ -44,15 +44,28 @@ const STORAGE_STATE = 'storage/seeded-user.json'; // pre-seeded auth; NEVER a li
 // with however this project loads them (a project-specific loader, not part of this skeleton).
 // chapterAssetDir is group-aware (D3, issue #19): flat entries get output_dir/<slug>/ unchanged;
 // an entry carrying `group` gets output_dir/<group>/<slug>/ instead — never hardcode either form.
-const PROFILE = { capture: { output_dir: 'handbook/assets' } };
+const PROFILE = { capture: { output_dir: 'handbook/assets', locale: 'de_DE.UTF-8' } };
 const ENTRY = { slug: 'items' };
 const OUTPUT_DIR = chapterAssetDir(PROFILE, ENTRY);
 
+// capture.locale is a full POSIX locale; the browser context wants a BCP-47 tag. Derive one from the
+// other: keep the part before the first '.' or '@' and turn '_' into '-' (de_DE.UTF-8 -> de-DE).
+// This is NOT redundant with the sandbox's LANG/LC_ALL, which pin the PROCESS locale only: they set
+// neither navigator.language nor an Accept-Language header, so an app that negotiates its UI language
+// from the request would serve its own default. See references/container-isolation.md.
+// Known limit: a POSIX MODIFIER is dropped, not translated — sr_RS@latin -> sr-RS and ca_ES@valencia
+// -> ca-ES both lose the script/variant the modifier carried. If your handbook's locale needs it,
+// set the context locale to the explicit BCP-47 tag (sr-Latn-RS) instead of deriving it here.
+const CONTEXT_LOCALE = PROFILE.capture.locale.split(/[.@]/)[0].replace(/_/g, '-');
+
 test('capture: items chapter', async ({ browser }) => {
-  // 1. Context with service workers blocked (so context.route cannot be bypassed) + seeded auth.
+  // 1. Context with service workers blocked (so context.route cannot be bypassed) + seeded auth, and
+  //    the locale the handbook is written in — the context option is what sets navigator.language and
+  //    sends Accept-Language.
   const context = await browser.newContext({
     serviceWorkers: 'block',
     storageState: STORAGE_STATE,
+    locale: CONTEXT_LOCALE,
   });
 
   // 2. Install the guard at context level, BEFORE any page exists. denyPatterns are seeded from the
@@ -67,7 +80,22 @@ test('capture: items chapter', async ({ browser }) => {
   const isBenignTelemetry = (url: string): boolean => url.includes('/_boost/') || /sentry/i.test(url);
 
   const guard = await installCaptureGuard(context, {
-    denyPatterns: ['/delete', '/send', '/approve', '/finalize'],
+    // Empty on purpose. The guard's built-in DANGEROUS_VERB_SET already covers 16 destructive verbs
+    // (delete/send/approve/finalize/...) TOKEN-EXACTLY, and denyPatterns is a raw SUBSTRING match
+    // over the full URL AND the postData, so seeding the bare verbs here costs real reads: '/delete'
+    // also blocks '/items/deleted', '/send' blocks 'https://sendgrid.test/px.gif', and a deny hit
+    // cannot be downgraded by classifyRequest — the run hard-fails after the screenshots are taken.
+    // What the bare verbs DID cover, measured: the run-together and verb+digit spellings the
+    // tokenizer splits differently — '/deleteuser', '/sendmail', '/approveall', '/finalizeorder',
+    // '/delete2' are allow/get-head without them — plus a body-only match where YOUR OWN
+    // classifyRequest admits the endpoint as a read (with no predicate a writing POST still fails
+    // closed). The rest of what they blocked were ordinary reads: a verb in the host, the fragment,
+    // or a query value. ('/x/delete', '/delete-now', '/deleteUser', '/send_now', '/x/APPROVE' and
+    // the percent-encoded forms stay blocked either way.) If your app really has such a route, list
+    // THAT route, not the bare verb. Use denyPatterns for what nothing else can
+    // do: a scheme/host rule, a body shape, or THIS project's own writing GETs
+    // (/orders/42/confirm, /reports/publish) that the fixed 16 verbs do not name.
+    denyPatterns: [],
     // The single read/benign escape-hatch. 'benign' silences known-harmless telemetry (above);
     // otherwise defer to the SAFE GraphQL classifier — admit ONLY a single, inline, unambiguous READ
     // document ('read'), fail closed on anything else (undefined). The full ordered GraphQL rules
@@ -80,6 +108,12 @@ test('capture: items chapter', async ({ browser }) => {
 
   // 3. Only now create the page.
   const page = await context.newPage();
+  // The body's failure is the PRIMARY one and must survive teardown. An abrupt completion inside a
+  // `finally` replaces the exception already propagating out of the `try` and skips every line after
+  // it — so a bare `finally { await guard.assertNoDangerousHits(); await context.close(); }` reports
+  // a guard error for, say, a mask-coverage failure AND leaks the context. Same primaryError
+  // discipline as captureRegionClipped in capture-helpers.playwright.ts.
+  let primaryError: unknown = null;
   try {
     await page.goto(ROUTE);
 
@@ -124,12 +158,26 @@ test('capture: items chapter', async ({ browser }) => {
     // await captureRegionClipped(dialog, path, { settleTimeoutMs: 2500 });
 
     await dismissModal(page, { dialog, expectedText: 'Details', cancelLabel: 'Cancel' });
-  } finally {
-    // 6. In a finally so a delayed beacon/fetch fired during teardown is still drained and asserted
-    //    before the context closes. assertNoDangerousHits is async (it awaits a quiet period).
-    await guard.assertNoDangerousHits();
-    await context.close();
+  } catch (err) {
+    primaryError = err;
   }
+  try {
+    // 6. Asserted after the body — pass or fail — so a delayed beacon/fetch fired during teardown is
+    //    still drained and asserted before the context closes. assertNoDangerousHits is async (it
+    //    awaits a quiet period).
+    await guard.assertNoDangerousHits();
+  } catch (err) {
+    // Cleanup never REPLACES the body's failure; it only fills an empty slot.
+    primaryError = primaryError ?? err;
+  } finally {
+    // Always close, on every path — and do not let a close failure mask the primary error either.
+    try {
+      await context.close();
+    } catch (err) {
+      primaryError = primaryError ?? err;
+    }
+  }
+  if (primaryError !== null) throw primaryError;
 });
 
 // State-variant capture (references/state-variants.md) — a REAL error screen the app paints itself,
@@ -141,12 +189,15 @@ test('capture: items chapter — error-state variant', async ({ browser }) => {
   const context = await browser.newContext({
     serviceWorkers: 'block',
     storageState: STORAGE_STATE,
+    locale: CONTEXT_LOCALE,
   });
   const guard = await installCaptureGuard(context, {
-    denyPatterns: ['/delete', '/send', '/approve', '/finalize'],
+    // Empty for the same reason as the main spec above — see the comment there before adding any.
+    denyPatterns: [],
   });
 
   const page = await context.newPage();
+  let primaryError: unknown = null;
   try {
     // A bad-id route the seeded role can genuinely never resolve — the app's own real not-found
     // screen, reached read-only.
@@ -156,8 +207,19 @@ test('capture: items chapter — error-state variant', async ({ browser }) => {
     const main = page.getByRole('main');
     await main.waitFor({ state: 'visible' });
     await captureRegion(main, `${OUTPUT_DIR}/error-not-found.png`);
-  } finally {
-    await guard.assertNoDangerousHits();
-    await context.close();
+  } catch (err) {
+    primaryError = err;
   }
+  try {
+    await guard.assertNoDangerousHits();
+  } catch (err) {
+    primaryError = primaryError ?? err;
+  } finally {
+    try {
+      await context.close();
+    } catch (err) {
+      primaryError = primaryError ?? err;
+    }
+  }
+  if (primaryError !== null) throw primaryError;
 });
