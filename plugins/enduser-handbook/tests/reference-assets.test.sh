@@ -4018,6 +4018,31 @@ has_joined_in_section "profile-validation: mechanism B is a stated deferred resi
 hasnt "profile-validation: the false tracked-as-a-follow-up clause is gone" \
   'tracked as a follow-up rather than rushed into this release' "$PVALID"
 
+echo "== #563 item 3 (folds #478): whole-suite capture.command precedence in revalidation step 5 =="
+# Step 5 said "re-capture only the deltas" while container-isolation.md says the profile's command
+# runs exactly as written, and every shipped representative command is a whole-suite invocation. A
+# consumer holding both rules had no third option. The precedence is now stated: the verbatim rule
+# wins, and the bookkeeping is what changes. The claims about record_stale and capture_failed are
+# deliberately SCOPED — a chapter with no prior record reports record_absent, not record_stale, and
+# a failed command produces ONE run-level warning, not one per chapter row.
+has_joined_in_section "revalidation: step 5 resolves whole-suite capture.command precedence — run it whole" \
+  "$REVAL" '## The flow' \
+  'The delta rule above scopes what you re-author, never what you invoke'
+has_joined_in_section "revalidation: step 5 re-runs the provenance substep for every chapter the run re-shot" \
+  "$REVAL" '## The flow' \
+  'every chapter the run actually re-shot'
+has_joined_in_section "revalidation: step 5 scopes record_stale to a record that ALREADY EXISTS" \
+  "$REVAL" '## The flow' \
+  'a record that already exists and no longer matches'
+has_joined_in_section "revalidation: step 5 does not promise the record gets rewritten" \
+  "$REVAL" '## The flow' \
+  'not a promise that the record gets rewritten'
+has_joined_in_section "revalidation: step 5 states capture_failed is ONE warning on the run, not a halt" \
+  "$REVAL" '## The flow' \
+  'one warning on the run'
+hasnt "revalidation: D6 added no capture.command_scoped key" 'command_scoped' "$REVAL"
+hasnt "revalidation: D6 added no scope placeholder" '{{scope}}' "$REVAL"
+
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
 # command and handed the assertion the leftover text. It kept passing while no longer checking the

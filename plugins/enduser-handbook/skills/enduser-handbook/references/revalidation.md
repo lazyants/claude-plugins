@@ -40,6 +40,24 @@ scope the user already accepted.
 5. **Re-capture and re-author only the deltas.** Refresh artifacts for the
    accepted-diff deltas and for the material deltas the user accepted in step 4.
    Untouched scope keeps its existing artifacts; you do not re-shoot a no-op.
+
+   **When `capture.command` is whole-suite, run it whole.** The delta rule above
+   scopes what you re-author, never what you invoke: `container-isolation.md`
+   requires the profile's command to run exactly as written, and that rule wins.
+   You do not narrow the invocation to the deltas, and you do not edit a profile
+   you were not asked to touch in order to give it a scope it never had. What
+   changes is the bookkeeping. Run the provenance substep for **every chapter the
+   run actually re-shot**, not only for the deltas — a chapter whose screenshots
+   the whole-suite run refreshed otherwise keeps a record describing the previous
+   bytes, and a record that already exists and no longer matches its chapter's
+   embeds is what the next provenance report calls `record_stale`. Running the
+   substep is what you owe; it is not a promise that the record gets rewritten,
+   because the writer records only the chapters it finds eligible and names the
+   rule when it declines. The whole-suite exit status is the one the run record
+   sees, so a single unrelated red spec makes the run's recorded build identity
+   `capture_failed` — one warning on the run, not a halt, and the correct reading
+   of a capture whose suite did not pass rather than something to route around by
+   narrowing the command.
 6. **Run the completeness gate.** Build the coverage matrix and block on any
    unresolved row, exactly as on first authoring — see `completeness-gate.md`.
    Revalidation never publishes on a stale or incomplete matrix.
