@@ -221,6 +221,25 @@ export function classifyChapterWiring(
   lScan: LocateChapterLineResult,
 ): ChapterWiringClassification;
 
+// [1.16.0] #349 — one index row that carries this chapter's expected target as a whole link
+// destination while failing to resolve to it. `index` is the position into indexView(indexLines),
+// the same coordinate LocateChapterLineMatch.index uses; `line` is the RAW index line.
+export interface StaleChapterRow {
+  index: number;
+  line: string;
+}
+
+/** See chapter-paths.mjs: [1.16.0] #349 the step-0 companion scan. REPORT-ONLY — it never deletes
+ * or moves a row, because the index format carries no row-to-chapter ownership record. Throws a
+ * TypeError when `expectedTarget` or `chapterLink` is not a non-empty string. Disjoint from
+ * locateChapterLine's matches by construction. */
+export function findStaleChapterRows(
+  indexLines: string[],
+  expectedTarget: string,
+  chapterLink: string,
+  options?: LocateChapterLineOptions,
+): StaleChapterRow[];
+
 /** See chapter-paths.mjs: the D6 container-resolution classifier. */
 export function findContainer(indexLines: string[], groupTitle: string): FindContainerResult;
 

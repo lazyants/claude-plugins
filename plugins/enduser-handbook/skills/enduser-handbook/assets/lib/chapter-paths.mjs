@@ -1120,6 +1120,196 @@ export function locateChapterLine(indexLines, expectedTarget, options = {}) {
   };
 }
 
+// [1.16.0] #349 — the two character sets that bound a link DESTINATION in every link form
+// extractLineTargets above parses. A destination opens after '(' (a Markdown inline link), '['
+// (the second bracket of a wikilink opener), or '<' (an angle-bracket-wrapped Markdown
+// destination); it closes at ')', ']', '|' (a wikilink alias separator) or '>'. Deliberately
+// narrow at BOTH ends, and the omissions are the point rather than an oversight: '#' and '^' are
+// left out of the closers, so `[[handbook/orders#Heading|X]]` and `[x](orders.md#anchor)` — real,
+// resolvable links to this very chapter — are never reported, and start-of-text is not an opener,
+// so a bare-path row is left to the parser that already recognizes it.
+const DESTINATION_OPENERS = new Set(['(', '[', '<']);
+const DESTINATION_CLOSERS = new Set([')', ']', '|', '>']);
+
+// CommonMark's link reference definition, matched as a WHOLE LINE rather than as an opener: up to
+// three leading spaces, a bracketed label, a colon, a destination, an optional title, end of line.
+// Every part of that is load-bearing, and each was added because the looser form let a real leftover
+// escape:
+//   - the label alternation, because CommonMark closes a label at the first UNESCAPED ']', so
+//     `[items\]]:` is a valid definition and a naive `[^\]]*` stops at the escaped bracket, misses
+//     the colon, and reports a WORKING reference as stale — the one thing this exemption exists for;
+//   - the '[' exclusion and the non-blank label check below, because a label may not contain an
+//     unescaped '[' and may not be empty, so `[a[b]: …` and `[]: …` are not definitions at all;
+//   - the ANCHORED tail, because matching only the opener made any row whose own text happened to
+//     contain `]:` look like a definition. A manifest title of `Old]: x y` emits the bare row
+//     `[Old]: x y](admin/items.md)`, whose `[Old]:` prefix passed the opener test — so editing that
+//     title left a leftover this scan silently skipped, which is exactly the #349 defect it exists
+//     to report. As a whole line it is not a definition: `y](admin/items.md)` is neither a title nor
+//     permitted trailing content.
+// The destination alternatives are the spec's two forms (angle-bracketed, or a non-whitespace run);
+// the optional title is the spec's three quoting forms.
+const LINK_REFERENCE_DEFINITION_RE =
+  /^ {0,3}\[((?:\\.|[^\]\\[])*)\]:[ \t]*(?:<[^<>]*>|[^\s<]\S*)(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^()]*\)))?[ \t]*$/;
+
+// A definition's label needs at least one non-whitespace character (CommonMark), which the regex
+// above cannot express without a lookahead that would obscure the rest of it.
+function isLinkReferenceDefinition(line) {
+  const match = line.match(LINK_REFERENCE_DEFINITION_RE);
+  return match !== null && match[1].trim() !== '';
+}
+
+// True iff some destination-delimited span of `text` names this chapter under the SAME equivalence
+// step 0 uses. SUBSTRING containment alone is unsound in both directions and that is the whole
+// reason this predicate exists: `admin/items.md` is a substring of `deep/admin/items.md` (a
+// different chapter, ours as a suffix) and of `admin/items.md.bak` (ours as a prefix), and both of
+// those are legitimate rows a substring test would condemn. Taking the whole span between an opener
+// and the next closer makes the comparison a destination TOKEN instead of a fragment of one.
+//
+// The comparison itself is `foldTargetForMatch`, not string equality, and it is called rather than
+// re-derived: it is what `locateChapterLine` compares with, so "addresses this chapter" here means
+// exactly what "resolves to this chapter" means at step 0 — including the wikilink rule that folds
+// ONE terminal `.md`. A raw search for `expectedTarget` missed `[[handbook/admin/items.md|Items]v1]]`
+// against the extensionless target that step 0 accepts, so an old row in a supported wikilink
+// spelling went unnamed (ped-ant review, PR #583). A span carrying a fragment (`orders.md#anchor`)
+// or a heading (`orders#Heading|X`) folds to neither target and is still never reported, which is
+// what keeps a real anchored reference to this chapter out of the halt.
+function targetInDestinationPosition(text, expectedTarget, wikilink) {
+  const wanted = foldTargetForMatch(expectedTarget, wikilink);
+  for (let i = 0; i < text.length; i += 1) {
+    if (!DESTINATION_OPENERS.has(text[i])) continue;
+    let j = i + 1;
+    while (j < text.length && !DESTINATION_CLOSERS.has(text[j])) j += 1;
+    // No closer before end-of-text: this opener does not bound a destination at all.
+    if (j >= text.length) continue;
+    const span = text.slice(i + 1, j);
+    if (span !== '' && foldTargetForMatch(span, wikilink) === wanted) return true;
+  }
+  return false;
+}
+
+/**
+ * [1.16.0] #349 — the step-0 companion scan: index rows that ADDRESS this chapter but do not
+ * RESOLVE to it. `locateChapterLine` above answers "which rows resolve to `expectedTarget`"; this
+ * answers "which rows carry `expectedTarget` as a whole link destination that the same parser then
+ * fails to extract". The two are disjoint by construction — a row this function returns is never a
+ * row `locateChapterLine` matched — and together they are what a caller needs to tell a chapter
+ * that is not wired yet from one that is wired by a row nothing can read.
+ *
+ * The defect this exists for: a manifest `title` whose text breaks its own row's link-target parse
+ * (an unescaped ']' is the measured case) makes step 0 report the chapter absent forever, so every
+ * publish writes another row. 1.11.0's membership check in `wireNestedListChapter` bounds that for
+ * an UNCHANGED title — it compares the complete current link string verbatim — but a title EDIT
+ * produces a different string, so the check correctly finds no match and one dead row is left
+ * behind per distinct title, without limit. Measured in both link modes; the issue's own scope
+ * paragraph named only path mode, and `[[handbook/admin/items|Items]v1]]` accumulates identically.
+ *
+ * REPORT-ONLY, and that is a contract, not an implementation stage. This module has never deleted
+ * or moved an index line (the writer is insert-only by deliberate design since 1.10.0) and this
+ * function does not change that: it returns rows for a caller to name in a halt. Deletion is
+ * withheld because the index format carries no row-to-chapter OWNERSHIP record — a dead row is
+ * recognizable as addressing this chapter, but nothing distinguishes one this tool wrote from one
+ * an operator hand-authored around a link the tool cannot parse, and the only safe repair for the
+ * second is the operator's own.
+ *
+ * The bias is toward OVER-reporting, the opposite of `specReferencesDir`'s below, and the reason
+ * the two differ is worth stating rather than looking like an inconsistency: a false positive there
+ * can never be cleared (the checklist fact would deadlock), whereas a false positive here names an
+ * exact line the operator can delete or repair, so the halt always has an edit that clears it. The
+ * known over-report is a row whose LABEL contains destination-shaped text — `[(orders.md)](x.md)` —
+ * which addresses this chapter by the letter of the test and by nothing else.
+ *
+ * @param {string[]} indexLines  index file split on '\n'
+ * @param {string} expectedTarget  the same step-0 target `locateChapterLine` is called with —
+ *   `relative(dirname(index_file), chapter_file)` in path mode, `currentIndexExpectedTarget`'s
+ *   vault-root-relative form in wikilinks mode. Must be a non-empty string.
+ * @param {string} chapterLink  the fully-formatted link THIS run would write. A row carrying it is
+ *   this run's own row, not a leftover, and is never reported — which is what keeps an unchanged
+ *   manifest reaching `wireNestedListChapter`'s `present` outcome instead of being re-diagnosed
+ *   here. Must be a non-empty string.
+ * @param {{wikilink?: boolean}} [options]  threaded verbatim into the `locateChapterLine` call
+ *   below, so "resolves" means exactly what it means at step 0 for this profile's link mode
+ * @returns {Array<{index: number, line: string}>} in file order; `line` is the RAW index line, never
+ *   the sanitized view, because it is halt output a reader must be able to find in the real file
+ */
+export function findStaleChapterRows(indexLines, expectedTarget, chapterLink, options = {}) {
+  const { wikilink = false } = options;
+  // Fail-loud on both strings, this module's established idiom (currentIndexExpectedTarget's three
+  // guards, manualMigrationChecklist's provenanceActive). An empty `expectedTarget` folds to the
+  // empty string, which every empty destination span would equal — the scan would report `[]()` and
+  // `[[|x]]` rows as addressing this chapter. (Before the span rewrite the same argument was worse:
+  // `String.prototype.indexOf('')` returns its clamped `from`, so the scan never terminated.)
+  if (typeof expectedTarget !== 'string' || expectedTarget === '') {
+    throw new TypeError(
+      'findStaleChapterRows: expectedTarget must be a non-empty string — the same step-0 target ' +
+        'locateChapterLine is called with.',
+    );
+  }
+  if (typeof chapterLink !== 'string' || chapterLink === '') {
+    throw new TypeError(
+      'findStaleChapterRows: chapterLink must be a non-empty string — the link this run would ' +
+        "write. Without it this run's own already-written row is indistinguishable from a leftover.",
+    );
+  }
+
+  // The live set comes from the real scanner over the WHOLE file, never from a per-line re-scan: an
+  // inert region can span lines, so only a whole-file scan agrees with what step 0 itself saw.
+  // That sanitizes the document twice — locateChapterLine calls indexView internally — and the
+  // duplication is accepted rather than overlooked: removing it means widening locateChapterLine's
+  // return shape to publish its view, and the alternative, re-deriving the view's own matches here,
+  // is the second recognizer this module's name-the-expression rule exists to prevent.
+  const live = new Set(locateChapterLine(indexLines, expectedTarget, { wikilink }).matches.map((m) => m.index));
+  const view = indexView(indexLines);
+  const rows = [];
+
+  // "Is this run's own row" is decided in two directions, and the ASYMMETRY is the design, not an
+  // oversight — the two row populations have opposite safe failure modes.
+  //
+  // On a '-'/'*'/'+' bullet — the only row shape this module's own writer emits, and the shape the
+  // defect reproduces in — the test is EXACT, on the same content slice wireNestedListChapter's
+  // membership guard compares (`bm[3] === chapterLink`), with a trailing '\r' stripped first so a
+  // CRLF index is read the way the writer reads it (the writer splits CRLF into '\r'-free logical
+  // lines at the eol handling below; without the strip the two disagree about an UNCHANGED row and
+  // the scan halts on a tree that is already correct). Containment is unsound here and the
+  // counterexample is cheap rather than exotic: a title ending in `[<next title>` makes the row it
+  // emits CONTAIN the next run's complete link, so a containment test skips the very row it exists
+  // to report. Measured on the '-' child path, titles `P[Q[Z]v` -> `Q[Z]v` -> `Z]v`: three
+  // unrecognizable rows accumulated and none was reported.
+  //
+  // On any OTHER row shape the test is CONTAINMENT, and it deliberately errs the other way. The
+  // flat branch appends "regardless of index form" (static-md.md), so the shapes are open-ended — a
+  // numbered TOC, a table cell, an MkDocs `nav:` entry — and an exact comparison against a shape
+  // this function does not know reports the row the ADAPTER ITSELF just wrote. The operator deletes
+  // it, the next publish appends the same row, the next scan halts again: a false positive with no
+  // edit that clears it, which is precisely what the over-report bias above is justified on never
+  // producing. Under-reporting there costs a leftover that only a title ending in `[<next title>`
+  // can produce, in a row shape this module never writes — the pre-existing state, and the same
+  // blind direction #574 already documents for the flat branch. That is the direction to fail in.
+  const isOwnRow = (raw) => {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
+    const bullet = line.match(NESTED_BULLET_RE);
+    return bullet ? bullet[3] === chapterLink : line.includes(chapterLink);
+  };
+
+  for (const [index, line] of view.entries()) {
+    if (live.has(index)) continue;
+    // R3-F2(a), reused rather than re-decided: a line whose first non-whitespace character is '#'
+    // is a heading or a YAML end-of-line comment, and extractLineTargets refuses to read a target
+    // out of one. A commented-out nav row is deliberately not a TOC entry, so it is not a dead one
+    // either — reporting it would tell an operator to delete a row they commented out on purpose.
+    if (line.trimStart().startsWith('#') || isOwnRow(line)) continue;
+    // A CommonMark link REFERENCE DEFINITION addressing this chapter is a working link, not a dead
+    // row, even though nothing else in this module parses one — `extractLineTargets` has no
+    // reference-definition branch, so such a line is invisible to `live` above and would otherwise
+    // be reported. Skipping it keeps the same promise the omitted '#'/'^' closers keep: this scan
+    // never names a reference that resolves.
+    if (isLinkReferenceDefinition(line)) continue;
+    if (!targetInDestinationPosition(line, expectedTarget, wikilink)) continue;
+    rows.push({ index, line: indexLines[index] });
+  }
+
+  return rows;
+}
+
 /**
  * classifyChapterWiring(qualifiedTarget, legacyBareTarget, qScan, lScan) — D7: the single
  * union-count algorithm the vault-rel legacy-transition Step-0 idempotency check (§1b) drives at

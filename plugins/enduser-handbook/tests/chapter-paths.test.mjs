@@ -24,6 +24,7 @@ import {
   validateGroups,
   indexView,
   locateChapterLine,
+  findStaleChapterRows,
   leadingFrontmatterSpan,
   currentIndexExpectedTarget,
   classifyChapterWiring,
@@ -5923,4 +5924,387 @@ test('findPhysicalPathCollisions: all-distinct resolved paths produce NO collisi
     { entry: entry({ slug: 'two' }), resolved: 'out/assets/two' },
   ]);
   assert.deepEqual(collisions, []);
+});
+
+// =================================================================================================
+// [1.16.0] #349 — findStaleChapterRows: index rows that ADDRESS a chapter without RESOLVING to it
+// =================================================================================================
+
+const STALE_TARGET = 'admin/items.md';
+const staleLink = (title) => `[${title}](${STALE_TARGET})`;
+
+test('#349 repro: a title edit leaves one unrecognizable row per distinct title, and findStaleChapterRows counts every leftover', () => {
+  // The issue's own measurement, re-derived here rather than quoted: step 0 cannot parse a target
+  // out of a row whose title carries an unescaped ']', so it reports the chapter absent on every
+  // run, and 1.11.0's verbatim membership check finds no match because each edit produces a
+  // different link string. The scan below is what turns that silent growth into a nameable set.
+  let lines = ['# Summary', '', '- Admin', '  - [Overview](admin/overview.md)', ''];
+  const staleCounts = [];
+  for (const title of ['Items]v1', 'Items]v2', 'Items]v3', 'Items]v4']) {
+    const link = staleLink(title);
+    assert.equal(locateChapterLine(lines, STALE_TARGET).present, false, `step 0 must stay blind for ${title}`);
+    staleCounts.push(findStaleChapterRows(lines, STALE_TARGET, link).length);
+    const written = wireNestedListChapter(lines, 'Admin', link);
+    assert.equal(written.kind, 'inserted');
+    lines = written.newLines;
+  }
+  assert.deepEqual(staleCounts, [0, 1, 2, 3]);
+  assert.equal(lines.filter((l) => l.includes(STALE_TARGET)).length, 4);
+});
+
+test('#349: an UNCHANGED manifest reports no stale row, so it still reaches the 1.11.0 `present` guard', () => {
+  // The row already on disk carries THIS run's link, so it is this run's own row, not a leftover.
+  // Reporting it would re-diagnose a case the writer already answers correctly and would replace a
+  // precise halt with a vaguer one.
+  const link = staleLink('Items]v1');
+  const lines = ['# Summary', '', '- Admin', `  - ${link}`, ''];
+  assert.deepEqual(findStaleChapterRows(lines, STALE_TARGET, link), []);
+  assert.equal(wireNestedListChapter(lines, 'Admin', link).kind, 'present');
+});
+
+test('#349: wikilinks mode accumulates identically — the issue scoped the defect to path mode and that scope was too narrow', () => {
+  const wTarget = 'handbook/admin/items';
+  let lines = ['# Summary', '', '- Admin', '  - [[handbook/admin/overview|Overview]]', ''];
+  const staleCounts = [];
+  for (const title of ['Items]v1', 'Items]v2', 'Items]v3']) {
+    const link = `[[${wTarget}|${title}]]`;
+    assert.equal(locateChapterLine(lines, wTarget, { wikilink: true }).present, false);
+    staleCounts.push(findStaleChapterRows(lines, wTarget, link, { wikilink: true }).length);
+    const written = wireNestedListChapter(lines, 'Admin', link);
+    assert.equal(written.kind, 'inserted');
+    lines = written.newLines;
+  }
+  assert.deepEqual(staleCounts, [0, 1, 2]);
+});
+
+test('#349: a row that RESOLVES to the target is never reported — the two scans are disjoint by construction', () => {
+  // The fixture carries BOTH kinds on purpose. An index holding only the resolving row makes the
+  // returned array empty, and a `.some()` over an empty array cannot fail — the disjointness claim
+  // would then be asserted by a loop that never runs. Here the scan returns one row, so the
+  // cross-check has something to be wrong about.
+  const lines = ['# Summary', '', '- Admin', `  - [Items](${STALE_TARGET})`, `  - ${staleLink('Items]v1')}`, ''];
+  const scan = locateChapterLine(lines, STALE_TARGET);
+  const stale = findStaleChapterRows(lines, STALE_TARGET, staleLink('Items]v9'));
+  assert.equal(scan.present, true);
+  // The two exact index lists ARE the disjointness statement, so no `.some()` cross-check follows
+  // them: with both sides pinned to a literal, an overlap cannot occur without one of these two
+  // going red first, and a further assertion that can never fail is not a stronger test.
+  assert.deepEqual(scan.matches.map((m) => m.index), [3]);
+  assert.deepEqual(stale.map((row) => row.index), [4]);
+});
+
+test('#349: substring containment is NOT the test — a longer target carrying ours as a suffix or a prefix is left alone', () => {
+  const link = staleLink('Items]v1');
+  // `admin/items.md` is a substring of both of these, and neither is this chapter's row.
+  const suffixed = ['- Admin', '  - [Notes](deep/admin/items.md)'];
+  const prefixed = ['- Admin', '  - [Backup](admin/items.md.bak)'];
+  assert.deepEqual(findStaleChapterRows(suffixed, STALE_TARGET, link), []);
+  assert.deepEqual(findStaleChapterRows(prefixed, STALE_TARGET, link), []);
+  // ... while the row that IS ours, with the same target string, is reported.
+  assert.equal(findStaleChapterRows(['- Admin', `  - ${staleLink('Items]v0')}`], STALE_TARGET, link).length, 1);
+});
+
+test('#349: the same suffix/prefix immunity holds in wikilinks mode', () => {
+  const wTarget = 'handbook/admin/items';
+  const link = `[[${wTarget}|Items]v1]]`;
+  assert.deepEqual(findStaleChapterRows(['- Admin', '  - [[handbook/admin/items-beta|Beta]]'], wTarget, link, { wikilink: true }), []);
+  assert.deepEqual(findStaleChapterRows(['- Admin', '  - [[deep/handbook/admin/items|Deep]]'], wTarget, link, { wikilink: true }), []);
+});
+
+test('#349: the target sitting in a row LABEL rather than a destination is not a stale row', () => {
+  const link = staleLink('Items]v1');
+  const lines = ['- Admin', '  - [see admin/items.md](admin/other.md)', '    consult admin/items.md for details'];
+  assert.deepEqual(findStaleChapterRows(lines, STALE_TARGET, link), []);
+});
+
+test('#349: an ANCHORED link to this chapter is deliberately not reported — `#` and `^` are left out of the closers', () => {
+  // Both rows below are real, resolvable references to this chapter. Admitting '#' as a closer
+  // would report them, and the operator would be told to delete a working link.
+  const link = staleLink('Items]v1');
+  assert.deepEqual(findStaleChapterRows(['- Admin', `  - [Items](${STALE_TARGET}#setup)`], STALE_TARGET, link), []);
+  const wTarget = 'handbook/admin/items';
+  assert.deepEqual(
+    findStaleChapterRows(['- Admin', `  - [[${wTarget}#Setup|Items]]`], wTarget, `[[${wTarget}|Items]v1]]`, { wikilink: true }),
+    [],
+  );
+});
+
+test('#349: a commented-out nav row is not a stale row (R3-F2(a), reused rather than re-decided)', () => {
+  // extractLineTargets refuses to read a target out of a '#'-leading line, so such a row is not a
+  // TOC entry at all — and therefore not a dead one. An operator commented it out on purpose.
+  const link = staleLink('Items]v1');
+  const lines = ['- Admin', `  # - ${staleLink('Items]v0')}`, '## Admin'];
+  assert.deepEqual(findStaleChapterRows(lines, STALE_TARGET, link), []);
+});
+
+test('#349: a dead row inside a fenced block, an HTML comment, or leading frontmatter is invisible, exactly as it is to step 0', () => {
+  const link = staleLink('Items]v1');
+  const dead = `  - ${staleLink('Items]v0')}`;
+  assert.deepEqual(findStaleChapterRows(['# S', '', '```', dead, '```', '- Admin'], STALE_TARGET, link), []);
+  assert.deepEqual(findStaleChapterRows(['# S', '', '<!--', dead, '-->', '- Admin'], STALE_TARGET, link), []);
+  assert.deepEqual(findStaleChapterRows(['---', `x: "${dead}"`, '---', '- Admin'], STALE_TARGET, link), []);
+});
+
+test('#349: the reported `line` is the RAW index line, not the sanitized view a reader could not find in the file', () => {
+  // The trailing HTML comment is blanked in indexView, so raw and sanitized differ on this line and
+  // the assertion can tell which one came back. A halt naming the sanitized text would send the
+  // operator looking for a line that is not in their file.
+  const link = staleLink('Items]v1');
+  const raw = `  - ${staleLink('Items]v0')} <!-- left over -->`;
+  const lines = ['- Admin', raw];
+  const rows = findStaleChapterRows(lines, STALE_TARGET, link);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].line, raw);
+  assert.equal(indexView(lines)[rows[0].index] === raw, false);
+});
+
+test('#349: rows come back in file order, and `index` addresses the caller\'s own array', () => {
+  const link = staleLink('Items]v3');
+  const lines = ['- Admin', `  - ${staleLink('Items]v1')}`, '  - [Overview](admin/overview.md)', `  - ${staleLink('Items]v2')}`];
+  const rows = findStaleChapterRows(lines, STALE_TARGET, link);
+  assert.deepEqual(rows.map((r) => r.index), [1, 3]);
+  for (const row of rows) assert.equal(lines[row.index], row.line);
+});
+
+test('#349: report-only — the scan never mutates the index it was handed', () => {
+  const link = staleLink('Items]v2');
+  const lines = ['- Admin', `  - ${staleLink('Items]v1')}`];
+  const before = lines.slice();
+  findStaleChapterRows(lines, STALE_TARGET, link);
+  assert.deepEqual(lines, before);
+});
+
+test('#349: both string arguments fail loud — an empty expectedTarget would match every empty destination', () => {
+  // The empty target folds to the empty string, which an empty destination span equals, so `[]()`
+  // and `[[|x]]` rows would be reported as addressing this chapter. (Before the span rewrite the
+  // argument was sharper still: `indexOf('')` returns its clamped `from`, so the scan never ended.)
+  const lines = ['- Admin', '  - [Items](admin/items.md)'];
+  assert.throws(() => findStaleChapterRows(lines, '', 'x'), TypeError);
+  assert.throws(() => findStaleChapterRows(lines, undefined, 'x'), TypeError);
+  assert.throws(() => findStaleChapterRows(lines, 5, 'x'), TypeError);
+  assert.throws(() => findStaleChapterRows(lines, STALE_TARGET, ''), TypeError);
+  assert.throws(() => findStaleChapterRows(lines, STALE_TARGET, undefined), TypeError);
+});
+
+test('#349: a destination needs BOTH delimiters — end-of-text closes nothing, start-of-text opens nothing', () => {
+  // Found by mutating the predicate rather than by review: accepting an unterminated span was
+  // invisible to every other test. An unclosed destination is not a link anyone can follow, and a
+  // BARE path row is left to the parser that already recognizes it, so neither is this scan's row.
+  const link = staleLink('New]v2');
+  for (const row of [`- [Old]v1](${STALE_TARGET}`, `- [[${STALE_TARGET}`, `${STALE_TARGET}`, `- ${STALE_TARGET}`]) {
+    assert.deepEqual(findStaleChapterRows([row], STALE_TARGET, link), [], row);
+  }
+  // The same row, closed, IS reported — so the pair above fails for the delimiter, not for content.
+  assert.equal(findStaleChapterRows([`- [Old]v1](${STALE_TARGET})`], STALE_TARGET, link).length, 1);
+});
+
+test('#349: wikilink mode folds one terminal `.md`, so BOTH accepted spellings of an old row are named', () => {
+  // ped-ant review on PR #583, MAJOR. `locateChapterLine` treats `[[handbook/admin/items.md|X]]` and
+  // `[[handbook/admin/items|X]]` as the same target under `wikilink: true`; the scan searched for the
+  // raw extensionless `expectedTarget`, so the `.md` spelling of a MALFORMED old row was never
+  // matched and went unnamed — a supported spelling of the exact defect #349 exists to report.
+  const target = 'handbook/admin/items';
+  const current = '[[handbook/admin/items|Items]v2]]';
+  for (const row of ['[[handbook/admin/items.md|Items]v1]]', '[[handbook/admin/items|Items]v1]]']) {
+    assert.equal(locateChapterLine([row], target, { wikilink: true }).present, false, row);
+    assert.deepEqual(findStaleChapterRows([row], target, current, { wikilink: true }),
+      [{ index: 0, line: row }], row);
+  }
+  // The equivalence is the SAME one step 0 uses, not a wider one: a heading reference and a
+  // fragment fold to neither target, so a resolving link to this chapter is still never named.
+  for (const row of ['[[handbook/admin/items#Setup|X]]', '[[handbook/admin/items.md#Setup|X]]']) {
+    assert.deepEqual(findStaleChapterRows([row], target, current, { wikilink: true }), [], row);
+  }
+  // And it does NOT leak into path mode, where `.md` is significant: an extensionless row addresses
+  // a different file and is not this chapter's leftover.
+  assert.deepEqual(
+    findStaleChapterRows(['- [Old]v1](admin/items)'], STALE_TARGET, staleLink('New]v2')), []);
+});
+
+test('#349: a title ending in the NEXT title\'s opening bracket does not hide its own leftover row', () => {
+  // codex review, MAJOR. The own-row test used to be `line.includes(chapterLink)`, and containment
+  // is unsound in exactly one cheap shape: a title ending in `[<next title>` makes the row it emits
+  // CONTAIN the next run's complete link, so the row that must be reported is skipped as though it
+  // were this run's own. Measured before the fix: three rows, none reported, and no title needs a
+  // nested angle-bracket destination to build it.
+  const t = ['P[Q[Z]v', 'Q[Z]v', 'Z]v'];
+  assert.ok(staleLink(t[0]).includes(staleLink(t[1])), 'fixture must exhibit the containment shape');
+  assert.ok(staleLink(t[1]).includes(staleLink(t[2])), 'fixture must exhibit the containment shape');
+  let lines = ['# Summary', '', '- Admin', '  - [Overview](admin/overview.md)', ''];
+  const reported = [];
+  for (const title of t) {
+    const link = staleLink(title);
+    const stale = findStaleChapterRows(lines, STALE_TARGET, link);
+    reported.push(stale.length);
+    if (stale.length > 0) continue; // the adapter halts here and writes nothing
+    const written = wireNestedListChapter(lines, 'Admin', link);
+    assert.equal(written.kind, 'inserted');
+    lines = written.newLines;
+  }
+  assert.deepEqual(reported, [0, 1, 1]);
+  assert.equal(lines.filter((l) => l.includes(STALE_TARGET)).length, 1);
+});
+
+test('#349: a link REFERENCE DEFINITION addressing this chapter is a working link, never a stale row', () => {
+  // Nothing else in this module parses a reference definition, so it is invisible to
+  // locateChapterLine and would be reported without its own skip — and it resolves, which is the
+  // one thing this scan promises never to name.
+  const link = staleLink('Items]v1');
+  for (const row of ['[items]: <admin/items.md>', '[items]: admin/items.md', '   [x]: <admin/items.md> "t"']) {
+    assert.deepEqual(findStaleChapterRows([row], STALE_TARGET, link), [], row);
+  }
+});
+
+test('#349: a reference definition whose label carries an ESCAPED bracket is still a working link', () => {
+  // codex verification round, MINOR. CommonMark closes a link label at the first UNESCAPED ']', so
+  // `[items\]]:` opens a valid definition; the first exemption regex used `[^\]]*`, stopped at the
+  // escaped bracket, missed the colon, and reported a resolving reference as a leftover.
+  const link = staleLink('Items]v1');
+  for (const row of ['[items\\]]: <admin/items.md>', '[a\\]b\\]c]: admin/items.md']) {
+    assert.deepEqual(findStaleChapterRows([row], STALE_TARGET, link), [], row);
+  }
+  // The alternation must not swallow the terminator: an UNescaped ']' still closes the label, so a
+  // bare stale row starting with a bracket is not mistaken for a definition and is still reported.
+  assert.equal(findStaleChapterRows(['[Old]v1](admin/items.md)'], STALE_TARGET, link).length, 1);
+  // Every title form the spec allows is still exempt, so tightening the test did not cost coverage.
+  for (const row of ['[i]: admin/items.md "t"', "[i]: admin/items.md 't'", '[i]: admin/items.md (t)']) {
+    assert.deepEqual(findStaleChapterRows([row], STALE_TARGET, link), [], row);
+  }
+});
+
+test('#349: only a WHOLE valid definition is exempt — a definition-looking prefix is a stale row', () => {
+  // codex verification round 2, admitted. Matching the definition OPENER alone made any row whose
+  // own text happened to contain ']:' look like a definition. A manifest title of `Old]: x y` emits
+  // the bare row `[Old]: x y](admin/items.md)`; editing that title then left a leftover this scan
+  // silently skipped, which is the #349 defect itself. The line is not a definition as a whole —
+  // `y](admin/items.md)` is neither a title nor permitted trailing content.
+  const bare = `[Old]: x y](${STALE_TARGET})`;
+  assert.deepEqual(locateChapterLine([bare], STALE_TARGET).matches, [], 'fixture must not resolve');
+  assert.deepEqual(findStaleChapterRows([bare], STALE_TARGET, staleLink('New]v2')), [
+    { index: 0, line: bare },
+  ]);
+  // A label may not be empty and may not carry an unescaped '[', so neither of these is a
+  // definition — and both address the chapter, so both are leftovers.
+  for (const row of [`[]: (${STALE_TARGET})`, `[a[b]: (${STALE_TARGET})`]) {
+    assert.equal(findStaleChapterRows([row], STALE_TARGET, staleLink('New]v2')).length, 1, row);
+  }
+});
+
+test('#349: a CRLF index is read the way the writer reads it — an unchanged row is not a leftover', () => {
+  // codex verification round, MAJOR. `indexLines` for a CRLF file carry a trailing '\r' (the
+  // module's stated convention), while wireNestedListChapter compares '\r'-free logical lines. The
+  // own-row test skipped that strip, so on a CRLF tree in its steady state the scan reported the
+  // very row the writer simultaneously called `present` — a halt with no edit that clears it.
+  const link = staleLink('Items]v1');
+  const lines = ['# Summary\r', '\r', '- Admin\r', `  - ${link}\r`, ''];
+  assert.deepEqual(findStaleChapterRows(lines, STALE_TARGET, link), []);
+  assert.equal(wireNestedListChapter(lines, 'Admin', link).kind, 'present');
+  // Two-sided: an EARLIER title's row in the same CRLF file is still named, with its raw '\r'.
+  const older = ['# Summary\r', '\r', '- Admin\r', `  - ${staleLink('Old]v0')}\r`, ''];
+  assert.deepEqual(findStaleChapterRows(older, STALE_TARGET, link), [
+    { index: 3, line: `  - ${staleLink('Old]v0')}\r` },
+  ]);
+  // The assertions above pass with or without the strip, by different routes, so neither pins it:
+  // '\r' is a LINE TERMINATOR to a JS regex, so `(.*)$` refuses the whole line and an unstripped
+  // CRLF bullet silently takes the non-bullet containment path instead. This is the case where the
+  // two routes disagree — the nested-bracket shape containment is unsound against, in a CRLF file.
+  // Without the strip it is exempted as this run's own row and goes unreported.
+  const attack = ['- Admin\r', `  - ${staleLink('P[Q[Z]v')}\r`];
+  assert.deepEqual(findStaleChapterRows(attack, STALE_TARGET, staleLink('Q[Z]v')), [
+    { index: 1, line: `  - ${staleLink('P[Q[Z]v')}\r` },
+  ]);
+});
+
+test('#349: a row shape this module never writes fails toward SILENCE, not toward a halt it cannot clear', () => {
+  // codex verification round, MAJOR. The flat branch appends "regardless of index form", so the
+  // shapes are open-ended. An exact comparison against a shape the scan does not know reports the
+  // row the adapter itself just wrote; the operator deletes it, the next publish re-appends it, and
+  // the halt never clears. So the own-row test is EXACT only on the '-'/'*'/'+' bullet the writer
+  // emits, and CONTAINMENT everywhere else.
+  const link = staleLink('Items]v1');
+  for (const own of [`2. ${link}`, `| ${link} |`, `| a | ${link} | b |`, link, `> ${link}`]) {
+    assert.deepEqual(findStaleChapterRows([own], STALE_TARGET, link), [], own);
+  }
+  // A BULLET carrying more than the link is still reported, and that is not the unclearable case:
+  // the writer's own next row is the bare link under the same bullet, so the halt clears in one
+  // publish instead of recurring. The exact/containment split is by row SHAPE, not by decoration.
+  assert.equal(findStaleChapterRows([`  - Items: ${link}`], STALE_TARGET, link).length, 1);
+  // The reporting guarantee survives in every one of those shapes: a leftover from an EARLIER title
+  // does not carry this run's link, so containment does not exempt it.
+  const old = staleLink('Old]v1');
+  for (const row of [`2. ${old}`, `| ${old} |`, old, `- ${old}`]) {
+    assert.equal(findStaleChapterRows([row], STALE_TARGET, link).length, 1, row);
+  }
+  // The price, pinned so a future change has to decide about it on purpose: in a NON-bullet shape a
+  // title ending in `[<next title>` is exempted by containment and goes unreported. On the bullet
+  // shape — the one the writer emits and the one #349 reproduces — it is still reported.
+  const nested = staleLink('P [Q]v');
+  assert.deepEqual(findStaleChapterRows([`2. ${nested}`], STALE_TARGET, staleLink('Q]v')), []);
+  assert.equal(findStaleChapterRows([`- ${nested}`], STALE_TARGET, staleLink('Q]v')).length, 1);
+});
+
+test('#349: the known over-report is destination-shaped text in a LABEL, and it is deliberate', () => {
+  // Documented rather than fixed: the halt this feeds names the exact line, so an over-report costs
+  // one operator edit, while an under-report costs silent unbounded growth. Pinned so that a future
+  // change to the bounding-character sets has to decide about this case on purpose.
+  const link = staleLink('Items]v1');
+  const rows = findStaleChapterRows(['- Admin', '  - [(admin/items.md)](admin/other.md)'], STALE_TARGET, link);
+  assert.equal(rows.length, 1);
+  // Same class, found by review rather than by construction: a link TITLE, which is also not a
+  // destination position in any renderer, and is also cheap for the operator to look at and dismiss.
+  const titled = findStaleChapterRows(['- Admin', '  - [Other](other.md "(admin/items.md)")'], STALE_TARGET, link);
+  assert.equal(titled.length, 1);
+});
+
+test('#349: stale rows do not degrade verifyNonHeadingPlacement — no writer outcome was added, so rule 4\'s accept-list is untouched', () => {
+  // The scan is a sibling of locateChapterLine, not a new wireNestedListChapter outcome. A file
+  // carrying dead rows still verifies its one live row's placement normally.
+  const lines = ['# Summary', '', '- Admin', `  - ${staleLink('Items]v1')}`, `  - [Items](${STALE_TARGET})`, ''];
+  assert.equal(findStaleChapterRows(lines, STALE_TARGET, staleLink('Items]v2')).length, 1);
+  assert.deepEqual(verifyNonHeadingPlacement(lines, STALE_TARGET, 'Admin'), { kind: 'ok' });
+});
+
+// =================================================================================================
+// [#357] The contract's MEASURED claim about the fact enum, tied to the module that produces it
+// =================================================================================================
+
+test('#357: the twelve-fact claim in the extension contract is re-measured from the module, not trusted', () => {
+  // publish-targets/README.md tells a third-adapter author that manualMigrationChecklist emits a
+  // FIXED set of twelve fact kinds, and that this is why their revalidation contract can only be
+  // prose. A number written into prose rots silently: add a thirteenth kind and the contract keeps
+  // asserting twelve, with nothing red. So the number is derived here from the real function, over
+  // every delta kind and both provenance outcomes, and compared against the word in the document.
+  const p = {
+    capture: { output_dir: 'docs/assets' },
+    publish: { chapters_dir: 'docs', index_file: 'docs/SUMMARY.md', wikilinks: false },
+  };
+  const g = (o) => ({ slug: 'items', ...o });
+  const grouped = g({ group: 'admin', group_title: 'Admin' });
+  const deltas = [
+    [grouped, null],
+    [grouped, g({ group: 'admin', group_title: 'Ops' })],
+    [grouped, g({ group: 'mgmt', group_title: 'Admin' })],
+    [grouped, g({ group: 'mgmt', group_title: 'Ops' })],
+    [grouped, g({})],
+  ];
+  const kinds = new Set();
+  for (const [oldEntry, newEntry] of deltas) {
+    for (const provenanceActive of [true, false]) {
+      for (const fact of manualMigrationChecklist(p, oldEntry, newEntry, undefined, provenanceActive)) {
+        kinds.add(fact.kind);
+      }
+    }
+  }
+  const contract = readFileSync(join(HERE, '../skills/enduser-handbook/references/publish-targets/README.md'), 'utf8');
+  // Spelled as a word in the prose, so the assertion has to name the spelling it expects rather
+  // than matching whatever digit happens to be nearby. Deliberately NOT preceded by an
+  // `assert.equal(kinds.size, 12)`: pinning the count here as well would throw before the document
+  // was ever consulted, which is the one comparison this test exists to make. The count is allowed
+  // to change — the document is required to change with it.
+  const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen'];
+  assert.ok(kinds.size < WORDS.length, `add a spelling for ${kinds.size} to WORDS`);
+  assert.ok(
+    contract.includes(`emits a FIXED set of ${WORDS[kinds.size]} fact kinds`),
+    `publish-targets/README.md must state "${WORDS[kinds.size]} fact kinds" — manualMigrationChecklist emits ${kinds.size}`,
+  );
 });
