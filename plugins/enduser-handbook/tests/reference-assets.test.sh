@@ -3987,9 +3987,14 @@ has_joined_in_section "page-identity: step 4 names the non-control label class t
 has_joined_in_section "page-identity: step 4 covers a label that REPEATS inside the scoped region" \
   "$PAGEID" '## The principle' \
   'Scoping is not yet identity when the same string repeats inside the region'
-has_joined_in_section "page-identity: step 4 gives the two ways out of a duplicate label" \
+has_joined_in_section "page-identity: step 4's remedy for a duplicate label is the distinguishing container" \
   "$PAGEID" '## The principle' \
-  'or assert the number of exact matches you expect'
+  'the row, the card, the fieldset — and assert the label inside it'
+# A match COUNT is not an equal alternative: it goes red when the list legitimately grows, and it
+# stays green when one row loses the label while another gains it. Demoted to a bounded fallback.
+has_joined_in_section "page-identity: step 4 states the match-count fallback's precondition" \
+  "$PAGEID" '## The principle' \
+  'a weaker fallback, sound only over a fixed row set'
 has_joined_in_section "page-identity: step 4 states a matrix row is not an assertion" \
   "$PAGEID" '## The principle' \
   'a matrix row records a label, it does not assert one'
@@ -4011,9 +4016,15 @@ has_joined_in_section "anti-fabrication: the pin obligation is scoped to a CAPTU
 has_joined_in_section "anti-fabrication: disclosure prose is a stated exception, not an unmet obligation" \
   "$ANTIFAB" '## Self-audit before publish' \
   'Disclosure prose is the exception, and deliberately so'
-has_joined_in_section "anti-fabrication: a disclosed label is still verified, against the running UI" \
+has_joined_in_section "anti-fabrication: a disclosed label is still verbatim, sourced from the running UI" \
   "$ANTIFAB" '## Self-audit before publish' \
-  'verified against the running UI per `running-ui-source.md` rather than against a PNG'
+  'source it from the running UI per `running-ui-source.md` wherever some role or state can show it'
+# The exception is per-LABEL, not per-step. The not-fired case DOES embed a captured open state
+# (see the disclosure examples earlier in this file), so a label that screenshot documents is
+# pinned like any other — only the label the run never reached is excused.
+has_joined_in_section "anti-fabrication: the disclosure exception is per-label, not per-step" \
+  "$ANTIFAB" '## Self-audit before publish' \
+  'still pins every label that screenshot documents, and excuses only the one the run never reached'
 
 echo "== #563 item 7 (folds #344): two stale claims, both reproduced as filed =="
 # A line range is a citation that rots silently: nothing recomputes it, and an insertion anywhere

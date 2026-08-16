@@ -52,8 +52,10 @@ For every screenshot the chapter will embed, the capture spec must, immediately 
    **Scoping is not yet identity when the same string repeats inside the region.** The shipped
    helpers take the FIRST match, so two rows that both read `Edit` leave a region-scoped
    assertion green when only the narrated one is renamed. Anchor on the smallest container that
-   distinguishes the narrated instance — the row, the card, the fieldset — or assert the number
-   of exact matches you expect, so a duplicate cannot silently satisfy the pin.
+   distinguishes the narrated instance — the row, the card, the fieldset — and assert the label
+   inside it. Asserting a count of exact matches instead is a weaker fallback, sound only over a
+   fixed row set: it goes red when the list legitimately grows, and it stays green when one row
+   loses the label while another gains it.
 
    **Cover the labels that are not controls.** Column headers and field labels can also be
    quoted by a chapter, and neither is clickable or readable as a status, so neither earns a row
