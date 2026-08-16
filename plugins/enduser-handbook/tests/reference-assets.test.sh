@@ -1382,6 +1382,29 @@ for f in "$SPEC" "$REAUDIT"; do
   has "$base: teardown keeps the body's failure as the primary error (#473)" 'primaryError' "$f"
   has "$base: the primary error is rethrown last (#473)" 'if (primaryError !== null) throw primaryError;' "$f"
 done
+# #474: LANG/LC_ALL never reach the browser — the browser-context locale is the only lever that sets
+# navigator.language and sends Accept-Language. Three shipped sentences claimed otherwise.
+for f in "$SPEC" "$REAUDIT"; do
+  has "$(basename "$f"): the browser context is given a locale (#474)" 'locale: CONTEXT_LOCALE' "$f"
+done
+ISOLATION="$REFS/container-isolation.md"
+ISOLATION_SECTION="## What the project's command must guarantee"
+hasnt_joined "container-isolation: LANG/LC_ALL no longer claimed to set the app's language (#474)" \
+  "and the app under test renders in that locale's language" "$ISOLATION"
+hasnt_joined "container-isolation: the container-pattern bullet drops the translation-file claim (#474)" \
+  'and which translation file the app serves' "$ISOLATION"
+hasnt_joined "container-isolation: the host-drift bullet no longer attributes translation choice to LANG (#474)" \
+  'sort order, and which translation file the app picks' "$ISOLATION"
+has_joined_in_section "container-isolation: names the browser-context locale as the real lever (#474)" \
+  "$ISOLATION" "$ISOLATION_SECTION" \
+  'sets neither `navigator.language` nor an `Accept-Language`'
+has_joined_in_section "container-isolation: states the POSIX-to-BCP-47 derivation (#474)" \
+  "$ISOLATION" "$ISOLATION_SECTION" \
+  'take the part before the first `.` or `@` and replace'
+hasnt "SKILL.md: locale claim no longer says UI language (#474)" \
+  'drives both process locale and UI language' "$SKILL_DIR/SKILL.md"
+has "SKILL.md: names the browser-context locale as the Accept-Language lever (#474)" \
+  'browser.newContext({ locale:' "$SKILL_DIR/SKILL.md"
 
 echo "== wording contracts (some files owned by other groups; pass once the full set lands) =="
 REVAL="$REFS/revalidation.md"

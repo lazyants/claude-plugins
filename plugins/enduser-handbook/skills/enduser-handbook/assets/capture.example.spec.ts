@@ -44,15 +44,25 @@ const STORAGE_STATE = 'storage/seeded-user.json'; // pre-seeded auth; NEVER a li
 // with however this project loads them (a project-specific loader, not part of this skeleton).
 // chapterAssetDir is group-aware (D3, issue #19): flat entries get output_dir/<slug>/ unchanged;
 // an entry carrying `group` gets output_dir/<group>/<slug>/ instead — never hardcode either form.
-const PROFILE = { capture: { output_dir: 'handbook/assets' } };
+const PROFILE = { capture: { output_dir: 'handbook/assets', locale: 'de_DE.UTF-8' } };
 const ENTRY = { slug: 'items' };
 const OUTPUT_DIR = chapterAssetDir(PROFILE, ENTRY);
 
+// capture.locale is a full POSIX locale; the browser context wants a BCP-47 tag. Derive one from the
+// other: keep the part before the first '.' or '@' and turn '_' into '-' (de_DE.UTF-8 -> de-DE).
+// This is NOT redundant with the sandbox's LANG/LC_ALL, which pin the PROCESS locale only: they set
+// neither navigator.language nor an Accept-Language header, so an app that negotiates its UI language
+// from the request would serve its own default. See references/container-isolation.md.
+const CONTEXT_LOCALE = PROFILE.capture.locale.split(/[.@]/)[0].replace(/_/g, '-');
+
 test('capture: items chapter', async ({ browser }) => {
-  // 1. Context with service workers blocked (so context.route cannot be bypassed) + seeded auth.
+  // 1. Context with service workers blocked (so context.route cannot be bypassed) + seeded auth, and
+  //    the locale the handbook is written in — the context option is what sets navigator.language and
+  //    sends Accept-Language.
   const context = await browser.newContext({
     serviceWorkers: 'block',
     storageState: STORAGE_STATE,
+    locale: CONTEXT_LOCALE,
   });
 
   // 2. Install the guard at context level, BEFORE any page exists. denyPatterns are seeded from the
@@ -161,6 +171,7 @@ test('capture: items chapter — error-state variant', async ({ browser }) => {
   const context = await browser.newContext({
     serviceWorkers: 'block',
     storageState: STORAGE_STATE,
+    locale: CONTEXT_LOCALE,
   });
   const guard = await installCaptureGuard(context, {
     denyPatterns: ['/delete', '/send', '/approve', '/finalize'],
