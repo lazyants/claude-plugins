@@ -4944,12 +4944,18 @@ fi
 if command -v node >/dev/null 2>&1 && [ -f "$PARITY_LIB" ]; then
   PARITY_PROGRAM='import { auditLibDirectory } from "./tests/export-parity-lib.mjs";
 const r = await auditLibDirectory("./skills/enduser-handbook/assets/lib");
-process.stdout.write([r.census.modules, r.census.runtimeExports, r.census.valueDeclarations, r.census.arityChecks, r.findings.length].join(" "));'
+process.stdout.write(["PARITY", r.census.modules, r.census.runtimeExports, r.census.valueDeclarations, r.census.arityChecks, r.findings.length].join(" "));'
+  # stderr is merged in so a failure is diagnosable, which means the counts are not reliably the
+  # first line — node emits a deprecation or experimental warning there whenever it feels like it, and
+  # an anchored match that scanned the whole blob would then validate one line while `read` consumed
+  # another. The counts carry a marker and are selected by it, so nothing else node says can be read
+  # as a census, in either order and however many lines it takes.
   PARITY_OUT="$( (cd "$PLUGIN_DIR" && node --input-type=module -e "$PARITY_PROGRAM") 2>&1 )" || true
-  if ! printf '%s' "$PARITY_OUT" | grep -qE '^[0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+$'; then
+  PARITY_COUNTS="$(printf '%s\n' "$PARITY_OUT" | grep -E '^PARITY [0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+$' | tail -1)"
+  if [ -z "$PARITY_COUNTS" ]; then
     bad "declaration parity: the census did not produce its five counts, so nothing was compared — node said: $(printf '%s' "$PARITY_OUT" | head -3)"
   else
-    read -r P_MODULES P_EXPORTS P_DECLS P_ARITY P_FINDINGS <<< "$PARITY_OUT"
+    read -r _PARITY_MARKER P_MODULES P_EXPORTS P_DECLS P_ARITY P_FINDINGS <<< "$PARITY_COUNTS"
     echo "  note  assets/lib parity: $P_MODULES module pairs, $P_EXPORTS runtime exports, $P_DECLS value declarations, $P_ARITY arity comparisons, $P_FINDINGS findings"
     if [ "$P_FINDINGS" -eq 0 ]; then
       ok "declaration parity: every assets/lib module agrees with its own .d.mts — names in both directions, and arity"
