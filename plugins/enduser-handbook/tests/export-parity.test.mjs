@@ -177,6 +177,33 @@ test('maskInert preserves offsets and line structure, so a name slices out of th
   assert.ok(masked.includes('export declare const B'), 'live code must survive untouched');
 });
 
+test('maskInert holds its offset invariant across a NON-ASCII character, not just an ASCII one', () => {
+  // The invariant above was asserted only over ASCII, and that is how it came to be false: the mask
+  // was built with `Array.from`, which splits by code POINT, while every read and every offset it
+  // hands back index by UTF-16 code UNIT. One emoji in a doc comment shortened the array and shifted
+  // the mask by one for the whole rest of the file — no throw, no visible symptom, just offsets that
+  // quietly stopped meaning what the caller thought. An invariant test that only ever sees the
+  // characters the bug cannot reach is not testing the invariant.
+  const astral = String.fromCodePoint(0x1F600);
+  const combining = 'é';                       // a combining mark: two units, one grapheme
+  const bmpNonAscii = '—«»';                          // multi-byte in UTF-8 but single UTF-16 units
+  for (const marker of [astral, combining, bmpNonAscii]) {
+    const source = `/** ${marker} */\nexport declare const AFTER: 1;\n`;
+    const masked = maskInert(source);
+    assert.equal(
+      masked.length,
+      source.length,
+      `masking moved an offset around ${JSON.stringify(marker)} — every position after it now points at the wrong character`,
+    );
+    assert.equal(
+      masked.indexOf('export declare const AFTER'),
+      source.indexOf('export declare const AFTER'),
+      `the export's offset shifted around ${JSON.stringify(marker)}, so a name sliced from the original would come out wrong`,
+    );
+    assert.deepEqual([...extractDeclarationExports(source).values.keys()], ['AFTER']);
+  }
+});
+
 test('an unterminated comment, string or template is a hard failure, never a blank-to-end-of-file', () => {
   // Blanking the tail of a file is the failure that reads green while checking nothing: everything
   // after the unterminated construct simply stops existing, and an empty surface raises no finding by

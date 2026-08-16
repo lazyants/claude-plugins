@@ -52,7 +52,13 @@ const MODIFIERS = new Set(['declare', 'abstract', 'async', 'default']);
  * file is exactly the shape that reads green while checking nothing.
  */
 export function maskInert(source) {
-  const out = Array.from(source);
+  // `split('')` and NOT `Array.from(source)`: the two disagree on astral characters. `Array.from`
+  // splits by code POINT, while every read below (`source[i]`) and every offset this function hands
+  // back index by UTF-16 code UNIT — so one emoji in a doc comment shortens the array and silently
+  // shifts the mask off by one for the whole rest of the file. Nothing would throw; the offsets would
+  // just stop meaning what the caller thinks they mean, which is the failure this gate exists to
+  // catch, arriving inside the gate itself.
+  const out = source.split('');
   const n = source.length;
   const blank = (from, to) => {
     for (let k = from; k < to && k < n; k += 1) if (out[k] !== '\n') out[k] = ' ';
@@ -373,7 +379,9 @@ export function extractDeclarationExports(source, label = '<source>') {
   // Refusing the whole file is the only honest answer: silently reporting the depth-0 exports would
   // describe a surface the file does not have.
   for (const m of masked.matchAll(/(^|[^A-Za-z0-9_$])declare\s+(module|namespace|global)\b/g)) {
-    unsupported.push(`${label}:${lineOf(source, m.index)}: ambient \`declare ${m[2]}\` block — this extractor reads a flat module surface only`);
+    // `m.index` points at the boundary character the prefix group matched, not at `declare` — and
+    // when that character is the preceding newline, the reported line is the one above the block.
+    unsupported.push(`${label}:${lineOf(source, m.index + m[1].length)}: ambient \`declare ${m[2]}\` block — this extractor reads a flat module surface only`);
   }
 
   let depth = 0;
