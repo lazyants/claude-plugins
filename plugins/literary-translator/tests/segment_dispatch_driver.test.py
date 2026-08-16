@@ -2300,7 +2300,7 @@ def test_resume_digest_stays_stable_as_a_segment_converges_and_drops_out_of_the_
     SHRINKS by one entry every time a segment converges
     (DEFAULT_ELIGIBLE_CATEGORIES excludes `reusable`). resolve_run_id()
     must NOT hash that shrinking list into compute_input_digest()'s
-    `domain` (resume_setup.py:433-445), or a single convergence mints a
+    `domain` (resume_setup.py:437-449), or a single convergence mints a
     fresh RUN_ID and orphans every dispatch_token already on disk --
     including the just-converged segment's own draft/review, and any fix
     just applied by hand to a DIFFERENT still-in-progress segment."""
@@ -2912,7 +2912,7 @@ def test_derive_next_action_already_converged_round_1_when_clean_and_draft_match
 def test_derive_next_action_already_converged_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """codex round-4 ("Tests that could not fail"): current_draft_sha1()'s
     third argument -- dirs["scripts_dir"] -- is what makes this "clean and
-    draft matches" branch (segment_dispatch_driver.py:2321, feeding the
+    draft matches" branch (segment_dispatch_driver.py:2342, feeding the
     already_converged decision at :2338) hash the draft using the TRUSTED
     plugin tree's draft_sha1.py under --plugin-root, never the durable
     root's own writable, self-anchored copy (current_draft_sha1()'s own
@@ -3712,7 +3712,7 @@ def test_derive_next_action_fabricated_loc_gate_respects_node_bin(tmp_path):
 
 def test_derive_next_action_invalid_post_fix_draft_uses_the_plugin_root_scripts_dir_for_draft_sha1(tmp_path):
     """The invalid_post_fix_draft branch's own current_draft_sha1() call
-    (segment_dispatch_driver.py:2225) is a SECOND call site sharing the
+    (segment_dispatch_driver.py:2246) is a SECOND call site sharing the
     identical --plugin-root trust boundary as the already_converged
     branch's (see the sibling test above) -- untested here for the same
     reason: every existing --plugin-root fixture stages the REAL,
@@ -3964,7 +3964,7 @@ def test_derive_next_action_invalid_post_retranslate_draft_with_a_same_run_revie
 
 def test_render_fix_prompt_never_inlines_poisoned_review_findings_text(tmp_path):
     """Pins (as a real assertion, not a comment) that fixPrompt's 3-argument
-    signature (mass-translate-wf.template.js:1277, documented at :1228-1235
+    signature (mass-translate-wf.template.js:1281, documented at :1232-1239
     as deliberate: "revObj is still passed through ... but fixPrompt itself
     no longer splices it into the prompt as the findings source") really
     does hold. Verified against the real template directly: fixPrompt's
@@ -5090,7 +5090,7 @@ def _resume_setup_result(proc):
 def test_resolve_run_id_resumes_via_a_plural_candidate_that_is_not_the_newest(tmp_path, monkeypatch):
     """The property this integration test exists to prove: resolve_run_id()
     now sends EVERY offered candidate in ONE resume_from_run_ids call --
-    the shipped resume_setup.py's own resolve_run() (resume_setup.py:720)
+    the shipped resume_setup.py's own resolve_run() (resume_setup.py:724)
     does the try-each-in-order/first-match-wins loop SERVER-side -- not the
     deprecated one-call-per-candidate CLIENT loop this function used
     before. Constructs a project with TWO real run directories: an OLDER

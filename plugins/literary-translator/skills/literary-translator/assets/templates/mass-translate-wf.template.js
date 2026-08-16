@@ -891,8 +891,12 @@ function mentionedAnywhere(reply, sentinel) {
 // READY test, so every #228/#308 property is preserved unchanged: a fail
 // sentinel glued behind ANY character still rejects (rejectedAnywhere is raw
 // indexOf and never asks where the sentinel sits), while READY stays whole-line
-// equality via sentinelVerdict, so a quoted-but-disavowed success form is still
-// not a success.
+// equality via sentinelVerdict, so a sentinel-shaped line the agent's own LATER
+// prose overrides is still not a success. That qualifier is exact rather than a
+// hedge (#371): sentinelVerdict reads the LAST trimmed non-empty line, so a
+// disavowal that PRECEDES a bare sentinel on the final line is the prose
+// preamble #308 tolerates by design, and it passes unless one of the
+// containment guards above catches it first.
 //
 // The fail-safe direction is the default: an unparseable reply, a null return,
 // or a tool error is PENDING -- never READY. At worst that costs one more chunk

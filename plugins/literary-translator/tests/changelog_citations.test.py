@@ -74,12 +74,14 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # anyone re-reading it.
 CITATION_ANCHORS = {
     # This map tracks the NEWEST changelog entry only, and is rewritten every
-    # release. 1.28.0 is documentation-only: it states one operator rule (R10)
-    # and cites no source line at all -- the rule is about which DIRECTORY a new
-    # volume may read from, not about a code path. An empty map is the correct
-    # state here, and the test below still enforces both halves: a citation
-    # appearing in the entry with no anchors fails, and an anchor no citation
-    # uses fails.
+    # release. 1.29.0 is the docs-accuracy batch (#572): 23 sentences corrected
+    # across prose, docstrings, templates and CLI help. It names files but cites
+    # no source LINE -- deliberately, because a batch touching sixteen files at
+    # once would need sixteen anchor ranges that go stale together, and the
+    # entry's claims are about what each file now SAYS rather than about where
+    # a branch sits. An empty map is the correct state here, and the test below
+    # still enforces both halves: a citation appearing in the entry with no
+    # anchors fails, and an anchor no citation uses fails.
 }
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an

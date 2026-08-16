@@ -3,7 +3,7 @@
 
 THE BUG (#194): ``cache_key.compute_plugin_bundle_hash`` (cache_key.py:503)
 READS ``${durable_root}/runs/.plugin_bundle_hash`` and
-``resume_setup.compute_input_digest`` (resume_setup.py:285-288) reads BOTH
+``resume_setup.compute_input_digest`` (resume_setup.py:289-292) reads BOTH
 ``.plugin_bundle_hash`` and ``.orchestration_bundle_hash`` -- but before
 #194 SKILL.md's Step 0a only PROSE-described "computes/writes" them: no
 shipped script actually wrote either marker, so a real run failed with

@@ -326,7 +326,7 @@ def test_orchestration_batching_already_accurate_review_resume_sentence_not_flag
 
 
 def test_resume_setup_py_own_docstring_never_carried_the_stale_phrasing():
-    """resume_setup.py:106 already correctly self-describes as
+    """resume_setup.py:110 already correctly self-describes as
     correctness-gating, not diagnostic-only -- it was never one of the
     nine #186 sites, so none of the STALE_PHRASES keys should ever match
     it (a sanity guard, not evidence the fix touched this file)."""

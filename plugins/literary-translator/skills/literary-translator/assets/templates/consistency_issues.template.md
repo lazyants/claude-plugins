@@ -31,10 +31,15 @@ part of the W7 final audit. Each item below should record: what was found, the d
 normalization to apply across every affected segment (if any) -- or, when the honest answer is "leave it
 as genuinely ambiguous," record that decision explicitly too, rather than silently resolving it.
 
-Typical sources for an item: `final_audit.py`'s WARN-only checks (glossary-diff, link-graph,
-foreign-remainder scan, verse-structure -- see `references/assembly-and-output.md`), a reviewer flagging
-the same drift independently in two different segments, or a `canon.json` `review_queue[]` entry that
-turns out to affect more than one already-converged segment.
+Typical sources for an item: a direct READ of this batch's converged drafts, in `manifest.json`'s
+`segments[]` order, for narrative voice, for how each recurring character is rendered, and for recurring
+motifs and epithets; `final_audit.py`'s WARN-only checks (glossary-diff, link-graph, foreign-remainder
+scan, verse-structure -- see `references/assembly-and-output.md`); a reviewer flagging the same drift
+independently in two different segments; or a `canon.json` `review_queue[]` entry that turns out to
+affect more than one already-converged segment.
+
+The first source is a direct read rather than a report because no other pass compares translated prose
+across segments at all.
 
 ## Open
 

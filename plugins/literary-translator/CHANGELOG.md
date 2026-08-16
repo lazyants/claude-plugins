@@ -1,5 +1,106 @@
 # Changelog
 
+## 1.29.0 — 2026-08-16
+
+The docs-accuracy batch: 23 named sentences that were wrong, missing, or promised what the code does not do — 21 applied whole, 2 in part, and the parts left out are named under *What it does not do* below. Closes #572, and with it the 23 issues folded into it — #200, #229, #266, #281, #371, #401, #434, #435, #440, #447, #456, #468, #496, #509, #511, #513, #519, #521, #522, #523, #531, #540, #542.
+
+### Why 23 sentences are one release rather than 23 tickets
+
+This plugin's consumer is a model that **executes** its prose. `SKILL.md`, the references and the TASK templates are enforcement sites, not documentation about enforcement sites — so a sentence that is wrong is a defect with the same failure mode as a wrong branch, and one whose failure mode is worse: the reader follows it literally, reports success, and the run goes green over a wrong artifact.
+
+A tracker triage of all 160 open `literary-translator` issues found 23 whose entire defect was one such sentence. Each named its file, its sentence, and the smallest edit that makes the sentence true. Almost none needed code — the exceptions are the two parts that did and were therefore left out, and one test line whose defect was a fixture's type — and none was worth a ticket of its own once the sentence was named, so they ship together.
+
+### What the sentences were wrong about
+
+- **The driver's observability.** A redirected log is not a progress log and no flag makes it one; the live channel is the append-only journal, flushed and fsynced per entry. The `Effort:` line the rendered fix prompt opens with pins no tier when the prompt is run by hand — it exists because the same text is built for the `pipeline()` path, where the tier is carried beside it as an `agent()` option.
+- **What the driver leaves behind.** It writes only `runs/ledger.d/<seg>.json`; `runs/ledger.json` still reports pre-run state when the driver returns, so its own printed JSON is the authority and the ledger needs an explicit merge. Triage a `stale` by its `stale_reason`, never by the materialized ledger's status.
+- **Claims.** "Never re-translates" is a property of the claim profile, not of every consumer: the local driver derives each segment's next action from the draft on disk, while `pipeline()` has no claim-aware branch and dispatches a translate that is adopted or refused — wasted, never destructive. And raising `engine.max_fix_rounds` returns no capped segment to a numbered round, because `final` is absorbing and its successor is computed before that knob is read.
+- **The codex-job budget.** `max_fix_rounds + 2` is EXACT for the workflow template, whose review retry re-reads the artifact rather than starting a second job, and a FLOOR for the local driver, which may additionally spend one hard-capped fabricated-loc re-review. The 1.20.0 entry's claim that the overspend is "unbounded" is corrected in place there: it is at most one job per segment per invocation.
+- **Canon scope.** `canon.json` is book-local, and a previous volume's canon is not an input to the next one — R10's rule, which the canon reference never mirrored. A form known to be splitting but with no adjudicated senses belongs in `review_queue[]`, not in an invented project-local sidecar.
+- **The rest.** The sentinel-verdict comment's disavowal claim is now directional; `suspicion_scan.py`'s "always-distinct" dispersion unit matches what the code actually keys on; `claim_record.py` no longer claims a retrofit is owed for readers that fail closed; `resume_setup.py` states that an identical digest alone never resumes — only a candidate offered by the caller does; the constellation doc no longer recommends a per-round fresh/resume choice the driver does not implement; and the ops skill stops hand-copying a bundle list that had drifted three members behind the tuple it mirrors. One row (#266) has a test line rather than prose as its subject — a fixture field typed `bool` where the assertion is about a *shaped* field — and even there the fix is a pragma and three comments: the executable statement is unchanged byte-for-byte, so no assertion in this release changes what it exercises.
+
+### Seven of these change an instruction, not a description
+
+Flagged rather than buried, because prose is control flow here and the distinction is the whole risk of a release like this one. W6's sweep now names its own input — a read of this batch's converged drafts in `manifest.json` order — where before it named only its output (#519). The canon reference routes a splitting-but-unresolved form to `review_queue[]` explicitly (#401). The style bible's invalidation blockquote now names a different lever (#511, below). Three `--from-*` help strings now tell the operator which path to consume a claim with (#513). The style bible gains an authoring rule that a measured claim must name the universe it was counted over (#542) — new, not a restatement, and it constrains what an operator writes into a file every translate call reads. **#468 adds an operator command that did not previously exist** — nothing told anyone to refresh `ledger.json` after a driver run. And **#435 tells the operator to set the reasoning effort of the hand-run fix turn**, which no shipped sentence said.
+
+The count was five in review and is seven here, because two reviewers accounted for it differently and the narrower list was wrong. #468 settled it: a **new command** is the most instruction-shaped thing a docs release can ship, and the branch review caught that its first form omitted `--plugin-root` — which would have had an operator resolve the stale-checker from `{durable_root}/scripts/`, the tree the check exists to audit and the one the codex process can write. `tests/ledger_merge.test.py` pins both directions of exactly that, detection with the flag and a silent "not stale" without it. The shipped command passes both roots and says why.
+
+**#511 is the one to read closely, because the correction needed a correction.** The old blockquote told the operator to bump `style_bible_version` — a field with zero readers anywhere in the repo, so following it did nothing. The first fix pointed at `project.pipeline_version` instead. That is a live cache-key field, but it is still not the mechanism: `style_contract_hash` is *also* a cache-key field and it hashes the A–F bytes directly, so **editing sections A–F invalidates every converged segment by itself, with no bump at all**. The shipped sentence now says that, and gives `pipeline_version` its actual job — an invalidation the hashed span cannot express, where the contract text is unchanged but what the pipeline does with it is not.
+
+### Three new style-bible sections ship empty, on purpose
+
+`G-cast` (dramatis personae plus a one-paragraph synopsis), `G-voices` (per-character voice) and `G-motifs` (recurring phrases held to one rendering) are new stubs beside `G-address`. They are **scaffolding, not prose fixes** — a translate or review call sees one segment and nothing else, and these are the slots for what a one-segment reader cannot see. They sit outside the hashed `STYLE_CONTRACT` span, `style_bible.md` is already read in full by every translate prompt, and an empty section changes nothing *semantically*, on existing roots, until an operator fills it in per book. It is not free in bytes — see the arithmetic below. Calling this a documentation change would be under-stating it.
+
+One reasoning trap this release did NOT walk into, recorded because it is easy to walk into next time: "outside the markers, therefore safe" is not the reason nothing re-stales. `style_contract_hash` is a cache-key field with **no** stale carve-out, and this batch did add fifteen lines *inside* the markers, from three additions rather than two: #509's timing rule and its section-F note, and #542's measured-claim rule. Nothing re-stales because `compute_style_contract_hash()` hashes the durable root's own `style_bible.md`, and Step 0a copies the template once and never re-copies — the template is in no bundle and is hashed nowhere.
+
+The arithmetic that inverts one of this batch's own headlines, stated here rather than left to be found: #511 complains that two live books' style bibles reached 62 KB and 54 KB, a third of it not rule text — and this release makes the shipped template **larger**, 15 551 → 20 137 bytes, of which the hashed span takes 1 395 (paid only by newly scaffolded projects; Step 0a copies the template once and never re-copies, so no existing root's `style_contract_hash` moves) and the un-hashed remainder 3 191. That is the price of shipping #511's authoring rule and #522/#523's slots in one release. It is affordable against the per-book read costs #507 measured, but it is a cost, and #511's title now over-states what this release did about it.
+
+### What it does not do
+
+**The honest count is 21 rows applied whole, 2 applied in part, 0 refused outright.** The two partials are named here rather than folded into the headline, because a release whose thesis is that a sentence claiming completeness when it isn't is a defect cannot open with one.
+
+**#521 ships its prose half only.** The row asked for four sentences in the style bible's authoring header *and* one line in `scaffold_validate.py`'s clean-exit summary reporting the `STYLE_CONTRACT` span's byte size. The header sentences are here; the summary line is not. It needs a fresh read of `style_bible.md` and marker arithmetic inside `main()` — new runtime I/O and new stdout in a release whose hard rule is that nothing behavioural changes. Refused deliberately, not missed, and filed as its own follow-up.
+
+**#511 ships three of its five parts**, and the two that did not ship failed for different reasons:
+
+- *Cutting the `Queues (discipline)` section: refuted, not deferred.* The row justified the cut by noting that `translate_TASK.md` already carries the `NEW:` convention to the only job that acts on it. That is true of `NEW:` and of nothing else in the section. `REVIEW:` occurs in exactly one shipped file — this template — where section C's transliteration rule sends unresolved cases to "the `REVIEW:` queue" and the Queues section is the only place that defines it. Making the cut would leave a rule pointing at a queue defined nowhere, which is the defect this release exists to remove, not the fix.
+- *Turning section B's "delete this whole section if the target has no T-V distinction" into an `LT_REQUIRED_FILL` decision: scope-cut.* It arms a new required-fill gate in `scaffold_validate.py` for every scaffold from here on. That is a behavioural change, and this release does not make those.
+
+### The 23 rows moved sixteen files, and stale line citations are a defect of exactly this kind
+
+Growing a file pushes everything below the insertion down, and this repo's prose cites source by
+`file.ext:NNN` in hundreds of places. Twenty-eight live-source citations — in `SKILL.md`'s
+neighbours, in three shipped scripts' comments, in eight test modules, and in the ops skill this
+release also edits — pointed three to twenty-one lines high once the row edits landed. A
+twenty-ninth moved later, in a ninth test module, when the review round extracted a constant in
+`select_segments.py`. All twenty-nine are re-resolved here, each verified by content: the line a
+citation now names holds the same text it named before. Two deliberate exclusions, stated rather
+than left to be discovered:
+
+- **Historical CHANGELOG entries are not renumbered.** Measured on the final tree: past entries hold
+  99 citations pointing into a file this release changed, and **89** of them now name a line that
+  moved. An entry records what a past release cited, and this repo's own maintenance contract
+  (`tests/changelog_citations.test.py`) already says the anchor map tracks the newest entry only.
+- **A bare continuation reference** (`documented at :1228-1235`, no filename) is invisible to any
+  scan keyed on `name.ext:NNN`. This release contains exactly one, found by a second search on a
+  different assumption and fixed by hand — but the blind spot is real and still open.
+
+And the limitation worth stating loudest, because it is what makes the sweep look stronger than it
+is: **content-verification proves PRESERVATION, not CORRECTNESS.** "The line this citation now names
+holds the same text it named before the batch" is true of every one of the twenty-nine — and it is
+exactly the property that carries a wrong citation through unchanged. Three were already wrong
+before this batch, each quoting code its target line does not hold, and renumbering them produced
+citations that were still wrong and now read as re-verified:
+
+- `claim_forces_review_only.test.py` twice, naming a `segment_dispatch_driver.py` line for
+  `claims=claims` — that string occurs exactly once in the driver, ~500 lines away, in the real
+  `DispatchContext(...)` construction. Both the old and the new line held an unrelated
+  `write_ledger(` call, which is *why* content-verification passed.
+- `claim_run_ordering.test.py`, naming a `select_segments.py` line ~2 400 away from the
+  `validate_run_id(run_id)` call it quotes.
+
+All three are repointed at the line that actually holds the quoted code. The general check remains
+unsolved: a repo-wide scan of the one pattern that makes such a claim machine-checkable — a citation
+immediately followed by the code it names — finds only three instances, so it does not cover the
+class, and a looser regex flags prose fragments at a rate that makes its output unusable. Stated as
+an open gap rather than a solved one.
+
+### Hash impact
+
+Seven `PLUGIN_BUNDLE_MEMBERS` change bytes (`mass-translate-wf.template.js`,
+`glossary-pass-wf.template.js`, `segment_dispatch_driver.py`, `claim_record.py`, `resume_setup.py`,
+`glossary_batch_plan.py`, `canon_senses.py`), so **`plugin_bundle_hash` moves**. It is inside the machinery-only stale carve-out, so a converged unit that flips after a root refresh is still admitted at assembly.
+
+That admission has preconditions, and stating it unqualified would be this release's own defect. The carve-out requires all four of: a present, non-empty `stale_mismatched_fields`; every member a `str`; every member inside `SAFE_STALE_CARVEOUT_FIELDS`; and an `.ever_converged.<seg>` sentinel that is not ABSENT — plus the separate `reviewed_draft_sha1` comparison, which is not part of the carve-out at all. So, for a freshly merged, well-formed, machinery-only record: **no book with complete sentinel coverage and an un-hand-edited draft is blocked by this release.** A root predating 1.18.0 that was never backfilled fails the fourth condition, and a draft hand-edited after convergence is refused by the sha1 check regardless — both were already true before this release, and neither is made worse by it.
+
+**Three further surfaces move**, worth naming because none of them is the carve-out:
+
+- `claim_record.py` and `select_segments.py` are `ORCHESTRATION_BUNDLE_MEMBERS`, and the `profile.schema.json` edit moves `resume_setup.py`'s `schemas/` glob hash. Both fold into the resume `input_digest`, which is non-gating for convergence but decides resume versus a fresh `RUN_ID`.
+- `suspicion_scan.py` and `canon_senses.py` are two of the five members of `PRODUCER_CODE_CLOSURE`, so `producer_input_digest` moves — and `skeptic_setup.py` recomputes that digest specifically to reject a stale worklist fail-closed.
+- `skeptic_setup.py` keeps its own copy of the `schemas/*.schema.json` glob hash, which the same `profile.schema.json` edit moves.
+
+Consequences: a run that is **mid-batch** when its root refreshes loses its resume and restarts. A run that is **mid-skeptic-pass** meets two separate effects, not one — its worklist is refused **fail-closed**, with the remedy (`re-run suspicion_scan.py`) inside the refusal's own text rather than degrading silently; and the schemas-hash move re-keys `compute_skeptic_input_digest()` itself — a third, separate resume domain — so that pass takes a fresh skeptic `RUN_ID`. A converged or not-yet-started root pays nothing on any of them. None of the three gates convergence or assembly. Both live books were fully converged when this shipped.
+
 ## 1.28.0 — 2026-08-15
 
 R10: a previous volume is not an input. Documentation only — no script, schema, template or workflow byte changes, so no cache key moves and no corpus re-stales.
@@ -773,6 +874,17 @@ that "three and one" count while the list grew to six.
   invocation, so the overspend is unbounded across invocations. Both obvious repairs either reach
   admission (`check_volume_cap()`) or kill a legitimately retrying segment. It needs its own change
   and its own review.
+
+  **Corrected in 1.29.0 (#440).** "Unbounded" was wrong in both halves, and the entry is left
+  standing rather than rewritten so the correction is legible. A single invocation is bounded:
+  `process_segment()`'s loop runs at most `codex_jobs_per_segment(...) + 1` iterations and can
+  dispatch at most one codex job per iteration, and the fabricated-loc re-review is hard-capped at
+  one — so the real per-invocation ceiling is `max_fix_rounds + 3`, an overspend of exactly one job
+  per segment against the estimate the cap uses, not an open-ended one. And the per-invocation
+  reset is not a leak: `engine.max_codex_jobs_per_batch` is a per-BATCH knob by its own schema
+  description, so resetting each invocation is its contract rather than a defect. What survives of
+  #440 is the off-by-one alone, now stated where the estimate is defined and in the schema
+  description — which is all 1.29.0 changes here.
 - **`_cap_still_binds_what_was_reviewed()` narrows the cap-write race; it does not close it.** The
   helper runs immediately before the `write_ledger()` call it guards, so a draft replaced in the
   window BETWEEN the helper returning `None` and that write still gets a cap recorded over bytes no
