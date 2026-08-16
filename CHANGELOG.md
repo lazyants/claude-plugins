@@ -44,6 +44,16 @@ category) are untouched here and #563 stays open for them.
   `finally { await guard.assertNoDangerousHits(); await context.close(); }` discards the body's error
   and skips the close when the guard ledger is non-empty — permanent for an adopter whose REST POST
   reads fail closed into that ledger.
+- **The `<iframe>` carve-out justified its selector with a mechanism that does not exist (#567).**
+  Three defects `#472`'s own round-3 rewrite introduced into `capture-spec-helpers.md`: a duplicated
+  word straddling the hard wrap (invisible to a line-based `hasnt`, so the pin added for it is
+  wrap-tolerant), a sentence contradicted three sentences later, and — the one that matters in a file
+  an LLM executes — a false technical claim. The unqualified `<object>` selector was defended by
+  saying an `object[data]` form would miss a `data` assigned by script after parse. It would not: a
+  CSS attribute selector is evaluated against the live DOM at `querySelectorAll` time and
+  `HTMLObjectElement.data` reflects the content attribute. The design choice is unchanged and still
+  right — over-refusal is the correct direction for a PII gate — but it is right for the reason now
+  stated, that the count is taken when the helper runs and the pixels are taken later.
 - **Seven documentation claims measured wrong (#560, #563 items 1–2, #344 via item 7).** The
   example's `denyPatterns` were a raw substring match where the built-in verb block is token-exact,
   so they blocked ordinary reads (a verb in the host, the fragment or a query value) while still
