@@ -414,10 +414,10 @@ the one exception to "do all of these" — see its own conditional note below.
          `legacy` line retargets in place unconditionally.
        - **`unverifiable`** ⇒ proceed — this file falls outside the verified class (see
          "Nested-list automation limits" below); the check ran and could not conclude — nothing
-         further verifies placement, no confirmation is requested, and the run continues
+         further automatically verifies placement, no confirmation is requested, and the run continues
          unverified, exactly as the shipped 1.10.0 behaviour did on this path — a `canonical`
          line is already complete and a `legacy` line still retargets in place unconditionally.
-         Nothing automated will verify this row, so read the index region around it yourself and
+         You are the only remaining check, so read the index region around it yourself and
          confirm by eye that it sits under its `group_title` container — you already hold the
          index lines. That is your own read, not a prompt to the operator, and it does not turn
          this outcome into a confirmation step.
@@ -445,22 +445,45 @@ the one exception to "do all of these" — see its own conditional note below.
        name: this group has no container yet, or one exists and the equality compare
        failed for a reason the match cannot see. Before creating anything, re-read the
        container headings you already hold and ask whether any of them plausibly
-       RENDERS as `group_title` — comparing both sides under NFC (the normalization the
-       match itself already applies), case folding, unwrapping a whole-content emphasis,
-       markdown-link or wikilink wrapper, stripping a trailing `{#anchor}`, and dropping
-       a leading run of non-letter decoration such as an emoji or an icon. That
+       RENDERS as `group_title`. Compare what each side RENDERS as, not how it is
+       spelled, and treat the list that follows as the common cases rather than a
+       complete one: NFC (the normalization the match itself already applies), case
+       folding, unwrapping a whole-content emphasis, strikethrough, inline-code,
+       markdown-link, wikilink or inline-HTML wrapper, resolving a character reference,
+       stripping a trailing `{#anchor}`, and dropping a leading OR trailing run of
+       non-letter decoration such as an emoji, an icon or a parenthetical. Anything else
+       that renders the same counts too — err toward calling it a near miss, because the
+       cost of doing so is a halt and the cost of missing one is a forked index. That
        comparison DETECTS a near miss and nothing more: it never selects a container to
        write into, so it cannot mis-target, and the write still needs the exact match
        that already came back empty.
        - One or more headings are a plausible spelling — halt naming both spellings,
-         with every invisible codepoint in the heading escaped, so the operator can see
-         a difference the terminal will not render:
+         with every invisible codepoint in the heading written as its `U+XXXX` code
+         point, so the operator can see a difference the terminal will not render (the
+         `'` delimiters around the heading are NOT escaped, the same disclosed exposure
+         the wrong-container halt's own found-title substitution carries):
          "Found no container titled '<group_title>' in <index_file>, but the heading '<heading>' may be the same section — rename the heading to match group_title, or change group_title, then re-run."
-         Convergent like every other named halt here: the operator makes the two
-         spellings agree, and the next run's exact match resolves to one container.
+         Which remedy is right depends on what the two actually ARE, so decide that
+         first:
+         - one section spelled two ways — either side may move, and whichever moves,
+           make the two byte-identical after NFC, because the next run's match is
+           EXACT. A retyped title carrying an emoji, a case difference or a no-break
+           space lands back on `zero` and halts again.
+         - genuinely different sections — change `group_title`, or rename the heading
+           to different WORDS. Do NOT rename it to MATCH: that merges a section the
+           operator curated into an unrelated one. Only different words work, because
+           this comparison folds away case, emphasis, a wrapper, a leading or trailing
+           decoration run and a trailing `{#anchor}`.
+
+         Convergent on those terms: once the two agree, or differ in words, the next run
+         resolves and appends without re-halting. The merge mistake is not kept silently
+         either — the other group's rows then sit under a heading that does not match
+         their own `group_title`, which the present-row placement halt above catches on
+         the next run.
        - None is — the create is safe: create one (`## <group_title>`, at the heading
          depth the file already uses for its top-level sections), then append the
          chapter line under it.
+
        This deliberately over-rejects, in the same direction as the nested-list path's
        plain-label refusal: a `group_title` of `Reports` halts against an existing
        `reports` heading that belongs to a different group. A halt costs one edit; a
@@ -948,15 +971,18 @@ index published by 1.10.0–1.12.0:
 Three residuals stay open, deliberately. **A HEADINGS-form index is not covered by the second
 rule**, and the gap it leaves is a CLASS rather than one exotic character: a `## ` container
 heading is never refused, so any heading that renders as `group_title` without being byte-equal to
-it fails the match. Measured against the shipped comparison — bold, a markdown link, an emoji
-prefix, a trailing `{#anchor}` and a case difference all fail it, and an emoji prefix is ordinary
-index curation rather than an edge case. The near-miss check in the container-resolution branch
-above now HALTS on that whole set instead of creating beside it, so what remains here is only what
-that check deliberately cannot recognize: a heading whose label carries an invisible character is
-neither refused nor read as a near miss, and this adapter still creates a second, pixel-identical
-heading beside it. That remainder is unchanged pre-existing behaviour, and it stays open by choice
-rather than for want of a mechanism — the near-miss comparison could ignore invisible characters
-too, and the sentence immediately below is why it must not. U+200C/U+200D (ZWNJ/ZWJ)
+it fails the match. Measured against the shipped comparison, that is a wide set and not a short
+list of oddities: bold, a markdown link, a wikilink, inline code, strikethrough, inline HTML, a
+character reference, a leading or trailing emoji, a trailing `{#anchor}` and a case difference all
+fail it, and an emoji beside a nav heading is ordinary curation rather than an edge case. The
+near-miss check in the container-resolution branch
+above now HALTS on the spellings it recognizes instead of creating beside them. What remains here
+is an invisible character inside the label — neither refused nor readable as a near miss — plus any
+rendered equivalence the near-miss list does not name; that list is illustrative, and a heading it
+misses still gets a second, pixel-identical heading created beside it. Both remainders are
+unchanged pre-existing behaviour, and the first stays open by choice rather than for want of a
+mechanism — the near-miss comparison could ignore invisible characters too, and the sentence
+immediately below is why it must not. U+200C/U+200D (ZWNJ/ZWJ)
 are still accepted everywhere, because they are required INSIDE ordinary words in Persian, Hindi
 and other scripts and refusing them would lock out a correctly-spelled title — so two labels
 differing only by one are still two containers. So are two labels differing by a no-break space
@@ -1032,12 +1058,15 @@ backtick inside it swallow the body (the writer refuses such a file outright).
 - Handbook index link: the vault-root-relative path to `{{publish.index_file}}`, one
   terminal `.md` dropped, where that path is `relative(<vault-root>,
   {{publish.index_file}})` — the SAME vault-root-relative coordinate the chapter link
-  above uses, never a bare `[[INDEX]]` basename, which resolves only through the fragile
-  suffix tier this adapter stopped emitting for chapter links in 1.8.0. Worked example
-  (vault root `vault/`, `index_file: vault/handbook/INDEX.md`):
-  `[[handbook/INDEX|All chapters]]`. This is the target `assets/chapter-template.md`'s
-  `{{handbook_index_link}}` placeholder takes, with `{{handbook_index_label}}` as the
-  display half after the pipe.
+  above uses, never a BASENAME taken from a deeper index, which would resolve only
+  through the fragile suffix tier this adapter stopped emitting for chapter links in
+  1.8.0. Worked example (vault root `vault/`, `index_file: vault/handbook/INDEX.md`):
+  `[[handbook/INDEX|All chapters]]`. Root topology (`index_file` directly under
+  `<vault-root>`) collapses that path to the bare stem, so `vault/INDEX.md` yields
+  `[[INDEX|All chapters]]` — still the index's exact vault-root path, never a special
+  case, and the same collapse the chapter bullet above describes. This is the target
+  `assets/chapter-template.md`'s `{{handbook_index_link}}` placeholder takes, with
+  `{{handbook_index_label}}` as the display half after the pipe.
 - The pipe `|` separates target from display; omit it when display equals target.
 - The target is vault-root-relative, never a bare basename — grouping DOES change it
   (the `<group>` segment rides on the joined path), unlike the pre-1.8.0 bare `<slug>`
@@ -1067,7 +1096,13 @@ backtick inside it swallow the body (the writer refuses such a file outright).
 - Handbook index link:
   `[<index label>](relative(dirname(chapter_file), {{publish.index_file}}))` — the same
   full-target formula as the chapter link above, pointed at the index instead of a
-  chapter, so the `.md` stays on.
+  chapter, so the `.md` stays on. This one is DEPTH-SENSITIVE, unlike the wikilinks-on
+  form: move a chapter between groups and its index link has to be rewritten with the
+  rest of its relative links. `revalidation.md`'s manual group-migration recipe does not
+  cover that case for this adapter — it names an index-target rewrite for `static-md.md`
+  only, on the grounds that this adapter has no MANDATORY index link, which is still
+  true and does not make a PRESENT one exempt. Rewrite it by hand until that recipe
+  says otherwise.
 - Skip Dataview blocks; they require Obsidian to render.
 
 You do not mix the two styles in one chapter. The profile decides; the chapter follows.

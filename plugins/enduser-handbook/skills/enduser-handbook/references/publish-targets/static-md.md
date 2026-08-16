@@ -302,7 +302,10 @@ convergent on re-run WHENEVER it names a form — and where one cannot be named 
 promising convergence (the unnamed 1.10.0 fallback below is the case, and it can repeat verbatim).
 For the named ones: a first run halts with instructions, the container and
 chapter line get added (by you, or by the user for a non-heading index), and the very next run's
-step 0 finds them and proceeds without re-halting.
+step 0 finds them and proceeds without re-halting. One named halt repairs a LABEL rather than
+adding a row — the ambiguous-container halt in the container-resolution branch below — so its
+re-run converges one step later: step 0 still finds the row absent, container resolution then
+matches the repaired heading, and the row is appended.
 
 These outcomes reuse the step-0 result computed above (`containerTitle`, `indexForm`,
 `multiple`) and cover a **grouped** entry only — step 0 above already decided the flat case:
@@ -312,9 +315,9 @@ These outcomes reuse the step-0 result computed above (`containerTitle`, `indexF
   `selectedTarget` = step 0's own expected link target) and branch on the result:
   - **`ok`** ⇒ placement complete, move to the next chapter.
   - **`unverifiable`** ⇒ proceed — this file falls outside the verified class (see "Nested-list
-    automation limits" below); the check ran and could not conclude — nothing further verifies
-    placement, no confirmation is requested, and the run continues unverified, exactly as the
-    shipped 1.10.0 behaviour did on this path. Nothing automated will verify this row, so read the
+    automation limits" below); the check ran and could not conclude — nothing further
+    automatically verifies placement, no confirmation is requested, and the run continues unverified, exactly as the
+    shipped 1.10.0 behaviour did on this path. You are the only remaining check, so read the
     index region around it yourself and confirm by eye that it sits under its `group_title`
     container — you already hold the index lines. That is your own read, not a prompt to the
     operator, and it does not turn this outcome into a confirmation step. See the safety statement
@@ -553,20 +556,38 @@ unique across groups (see `manifest-discipline.md`):
 - **Zero candidates** ⇒ **not automatically a create.** Zero is two facts wearing one name: this
   group has no container yet, or one exists and the equality compare failed for a reason the match
   cannot see. Before creating anything, re-read the container headings you already hold and ask
-  whether any of them plausibly RENDERS as `group_title` — comparing both sides under NFC (the
-  normalization the match itself already applies), case folding, unwrapping a whole-content
-  emphasis, markdown-link or wikilink wrapper, stripping a trailing `{#anchor}`, and dropping a
-  leading run of non-letter decoration such as an emoji or an icon. That comparison DETECTS a near
-  miss and nothing more: it never selects a container to write into, so it cannot mis-target, and
-  the write still needs the exact match that already came back empty.
+  whether any of them plausibly RENDERS as `group_title`. Compare what each side RENDERS as, not
+  how it is spelled, and treat the list that follows as the common cases rather than a complete
+  one: NFC (the normalization the match itself already applies), case folding, unwrapping a
+  whole-content emphasis, strikethrough, inline-code, markdown-link, wikilink or inline-HTML
+  wrapper, resolving a character reference, stripping a trailing `{#anchor}`, and dropping a
+  leading OR trailing run of non-letter decoration such as an emoji, an icon or a parenthetical.
+  Anything else that renders the same counts too — err toward calling it a near miss, because the
+  cost of doing so is a halt and the cost of missing one is a forked index. That comparison DETECTS
+  a near miss and nothing more: it never selects a container to write into, so it cannot
+  mis-target, and the write still needs the exact match that already came back empty.
   - **One or more headings are a plausible spelling** ⇒ halt naming both spellings, with every
-    invisible codepoint in the heading escaped, so the operator can see a difference the terminal
-    will not render:
+    invisible codepoint in the heading written as its `U+XXXX` code point, so the operator can see
+    a difference the terminal will not render (the `'` delimiters around the heading are NOT
+    escaped, the same disclosed exposure the wrong-container halt's own found-title substitution
+    carries):
     `Found no container titled '<group_title>' in <index_file>, but the heading '<heading>' may be the same section — rename the heading to match group_title, or change group_title, then re-run.`
-    Convergent like every other named halt here: the operator makes the two spellings agree, and
-    the next run's exact match resolves to one container.
+    Which remedy is right depends on what the two actually ARE, so decide that first:
+    - one section spelled two ways ⇒ either side may move, and whichever moves, make the two
+      byte-identical after NFC, because the next run's match is EXACT. A retyped title carrying an
+      emoji, a case difference or a no-break space lands back on zero and halts again.
+    - genuinely different sections ⇒ change `group_title`, or rename the heading to different
+      WORDS. Do NOT rename it to MATCH: that merges a section the operator curated into an
+      unrelated one. Only different words work, because this comparison folds away case, emphasis,
+      a wrapper, a leading or trailing decoration run and a trailing `{#anchor}`.
+
+    Convergent on those terms: once the two agree, or differ in words, the next run resolves and
+    appends without re-halting. The merge mistake is not kept silently either — the other group's
+    rows then sit under a heading that does not match their own `group_title`, which the
+    present-row placement halt above catches on the next run.
   - **None is** ⇒ the create is safe: create a new `## <group_title>` heading matching the file's
     existing heading depth, then append the chapter line under it.
+
   This deliberately over-rejects, in the same direction as the plain-label refusal this adapter
   already applies on the nested-list path: a `group_title` of `Reports` halts against an existing
   `reports` heading that belongs to a different group. A halt costs one edit; a forked index is
@@ -727,15 +748,18 @@ index published by 1.10.0–1.12.0:
 Three residuals stay open, deliberately. **A HEADINGS-form index is not covered by the second
 rule**, and the gap it leaves is a CLASS rather than one exotic character: a `## ` container
 heading is never refused, so any heading that renders as `group_title` without being byte-equal to
-it fails the match. Measured against the shipped comparison — bold, a markdown link, an emoji
-prefix, a trailing `{#anchor}` and a case difference all fail it, and an emoji prefix is ordinary
-index curation rather than an edge case. The near-miss check in the container-resolution branch
-above now HALTS on that whole set instead of creating beside it, so what remains here is only what
-that check deliberately cannot recognize: a heading whose label carries an invisible character is
-neither refused nor read as a near miss, and this adapter still creates a second, pixel-identical
-heading beside it. That remainder is unchanged pre-existing behaviour, and it stays open by choice
-rather than for want of a mechanism — the near-miss comparison could ignore invisible characters
-too, and the sentence immediately below is why it must not. U+200C/U+200D (ZWNJ/ZWJ)
+it fails the match. Measured against the shipped comparison, that is a wide set and not a short
+list of oddities: bold, a markdown link, a wikilink, inline code, strikethrough, inline HTML, a
+character reference, a leading or trailing emoji, a trailing `{#anchor}` and a case difference all
+fail it, and an emoji beside a nav heading is ordinary curation rather than an edge case. The
+near-miss check in the container-resolution branch
+above now HALTS on the spellings it recognizes instead of creating beside them. What remains here
+is an invisible character inside the label — neither refused nor readable as a near miss — plus any
+rendered equivalence the near-miss list does not name; that list is illustrative, and a heading it
+misses still gets a second, pixel-identical heading created beside it. Both remainders are
+unchanged pre-existing behaviour, and the first stays open by choice rather than for want of a
+mechanism — the near-miss comparison could ignore invisible characters too, and the sentence
+immediately below is why it must not. U+200C/U+200D (ZWNJ/ZWJ)
 are still accepted everywhere, because they are required INSIDE ordinary words in Persian, Hindi
 and other scripts and refusing them would lock out a correctly-spelled title — so two labels
 differing only by one are still two containers. So are two labels differing by a no-break space

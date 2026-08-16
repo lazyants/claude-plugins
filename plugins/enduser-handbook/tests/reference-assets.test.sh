@@ -4290,9 +4290,15 @@ echo "== #476: a zero container match is not an unconditional create =="
 #   (b) the halt text itself, verbatim on one physical line;
 #   (c) the halt occurs EXACTLY ONCE per adapter — a presence pin cannot tell one copy from two,
 #       and a second copy would mean the create branch was duplicated rather than replaced.
-# Deliberately NOT pinned: the normalization list itself. It is an enumeration whose members are
-# expected to grow, and pinning it would fight a correct future widening rather than catch a
-# regression — the load-bearing claims are "check before create", "detect only" and "halt".
+# Deliberately NOT pinned: the individual members of the normalization list. It is an enumeration
+# whose members are expected to grow, and pinning them would fight a correct future widening rather
+# than catch a regression. What IS pinned is the property that makes the list safe to be incomplete
+# — review round 1 measured ten spellings that reach `zero` and are NOT in it (inline code,
+# strikethrough, inline HTML, a numeric or named character reference, single-star and underscore
+# emphasis, a TRAILING emoji, a trailing parenthetical, a leading bullet glyph), so a list read as
+# exhaustive is a list that licenses the fork #476 exists to stop.
+ZERO_LIST_NOT_EXHAUSTIVE='treat the list that follows as the common cases rather than a complete one'
+ZERO_ERR_TOWARD_HALT='err toward calling it a near miss, because the cost of doing so is a halt and the cost of missing one is a forked index'
 AMBIGUOUS_ZERO_HALT="Found no container titled '<group_title>' in <index_file>, but the heading '<heading>' may be the same section — rename the heading to match group_title, or change group_title, then re-run."
 ZERO_CHECK_FIRST='Before creating anything, re-read the container headings you already hold'
 ZERO_DETECT_ONLY='That comparison DETECTS a near miss and nothing more: it never selects a container to write into'
@@ -4314,6 +4320,41 @@ has_joined_in_section "obsidian-vault: #476 the near-miss comparison is detect-o
 has_in_section "obsidian-vault: #476 ambiguous-zero halt, exact string" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
   "$AMBIGUOUS_ZERO_HALT"
+has_joined_in_section "static-md: #476 the near-miss list is explicitly NOT exhaustive" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_LIST_NOT_EXHAUSTIVE"
+has_joined_in_section "static-md: #476 an unnamed rendered equivalence errs toward halting" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_ERR_TOWARD_HALT"
+has_joined_in_section "obsidian-vault: #476 the near-miss list is explicitly NOT exhaustive" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_LIST_NOT_EXHAUSTIVE"
+has_joined_in_section "obsidian-vault: #476 an unnamed rendered equivalence errs toward halting" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_ERR_TOWARD_HALT"
+# The over-halt case the contract accepts needs a CORRECT remedy, not just an acknowledged cost.
+# Review round 1: of the two remedies the halt offers, only one is right when the near-miss heading
+# genuinely belongs to a different section — renaming it would MERGE two distinct sections. The
+# halt string is unchanged; the guidance that disambiguates it sits beside it and is pinned here.
+ZERO_DIFFERENT_SECTIONS='Do NOT rename it to MATCH: that merges a section the operator curated into an unrelated one'
+has_joined_in_section "static-md: #476 names which remedy applies when the sections really differ" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_DIFFERENT_SECTIONS"
+has_joined_in_section "obsidian-vault: #476 names which remedy applies when the sections really differ" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_DIFFERENT_SECTIONS"
+# Convergence is CHECKED, not asserted. Both adapters state, twice each, "Verify the named form
+# before naming it — a halt is convergent only if the exact pair it prescribes would actually be
+# recognized on the very next run". Post-remedy matching is EXACT (NFC only), measured, so a
+# retyped title carrying an emoji, a case difference or a no-break space still returns zero and
+# re-halts. The halt has to say what "match" means.
+ZERO_RETYPE_CONSTRAINT='make the two byte-identical after NFC'
+has_joined_in_section "static-md: #476 the halt says what 'match' has to mean for the next run" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_RETYPE_CONSTRAINT"
+has_joined_in_section "obsidian-vault: #476 the halt says what 'match' has to mean for the next run" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_RETYPE_CONSTRAINT"
 SMD_AMBIG_ZERO_COUNT="$(count_fixed "$AMBIGUOUS_ZERO_HALT" "$SMD")"
 if [ "$SMD_AMBIG_ZERO_COUNT" -eq 1 ]; then
   ok "static-md: #476 ambiguous-zero halt occurs exactly once"
@@ -4333,8 +4374,15 @@ fi
 # cannot see. Pinned joined (the sentence wraps) and in BOTH adapters, because a one-sided edit to
 # this paragraph is this plugin's recurring defect. The residual COUNT stays three: the near-miss
 # check HALTS on the recognizable spellings, it does not close the invisible-character residual.
+#
+# Round-1 correction, and the reason this pin exists in this shape: the first version of the
+# disclosure said the remainder was "ONLY what that check deliberately cannot recognize: a heading
+# whose label carries an invisible character". That was measurably false — ten spellings reach
+# `zero` while being neither invisible nor named in the near-miss list — and the pin defending it
+# made the error harder to see, not easier. The remainder is now stated as TWO things, and the
+# second one is open-ended on purpose.
 ZERO_CLASS_DISCLOSURE='the gap it leaves is a CLASS rather than one exotic character'
-ZERO_CLASS_REMAINDER='a heading whose label carries an invisible character is neither refused nor read as a near miss'
+ZERO_CLASS_REMAINDER='plus any rendered equivalence the near-miss list does not name'
 has_joined_in_section "static-md: the headings-form residual is disclosed as a CLASS, not one character" \
   "$SMD" '### Nested-list automation limits' \
   "$ZERO_CLASS_DISCLOSURE"
@@ -4404,6 +4452,27 @@ if [ "$OMD_BY_EYE_COUNT" -eq 1 ]; then
 else
   bad "obsidian-vault: by-eye instruction occurrence count drifted from 1 (found $OMD_BY_EYE_COUNT)"
 fi
+# The phrase #345 actually rejected was never pinned — pre-existing, not introduced here, but this
+# is the commit that makes it load-bearing: a future edit could keep the "NOT a confirmation step"
+# needle above while re-adding the prompt beside it, and nothing would go red. Pinned in both
+# adapters, joined, because the retained sentence wraps mid-phrase (a line-based grep for
+# "nothing further automatically verifies placement" returns ZERO hits in either file).
+NO_CONFIRMATION_REQUESTED='no confirmation is requested, and the run continues unverified'
+has_joined_in_section "static-md: the unverifiable branch still requests NO confirmation (#345)" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$NO_CONFIRMATION_REQUESTED"
+has_joined_in_section "obsidian-vault: the unverifiable branch still requests NO confirmation (#345)" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$NO_CONFIRMATION_REQUESTED"
+# And the qualifier that keeps the retained sentence true once a by-eye read is prescribed beside
+# it: "nothing further verifies placement" would otherwise be literally false.
+AUTOMATIC_QUALIFIER='nothing further automatically verifies placement'
+has_joined_in_section "static-md: the no-verifier claim is qualified to AUTOMATIC verification" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$AUTOMATIC_QUALIFIER"
+has_joined_in_section "obsidian-vault: the no-verifier claim is qualified to AUTOMATIC verification" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$AUTOMATIC_QUALIFIER"
 
 echo "== #563 item 6 (#261): obsidian-vault's Related block names three members =="
 # The template every Obsidian chapter starts from (assets/chapter-template.md) spends one of its
@@ -4435,9 +4504,18 @@ has_joined_in_section "obsidian-vault: the >=2 floor counts LINKS, not member ty
 has_in_section "obsidian-vault: wikilinks-on index target is vault-root-relative, .md dropped (#261)" \
   "$OMD" '## Wikilinks vs Markdown links' \
   'Handbook index link: the vault-root-relative path to `{{publish.index_file}}`'
-has_in_section "obsidian-vault: the index target is explicitly NOT a bare basename wikilink" \
+# Round-1 correction: the prohibition was first written as "never a bare `[[INDEX]]` basename",
+# which forbids the bullet's OWN correct output at root topology — `relative(vault, vault/INDEX.md)`
+# with one terminal `.md` dropped IS `INDEX`. The chapter bullet four lines above already carries
+# the carve-out ("Root topology ... never a special case"); the index bullet now mirrors it, so the
+# prohibition is scoped to a basename taken from a DEEPER index. Both halves are pinned: a future
+# edit that restores the unscoped prohibition, or that drops the carve-out, goes red.
+has_in_section "obsidian-vault: the index-target prohibition is scoped to a deeper index" \
   "$OMD" '## Wikilinks vs Markdown links' \
-  'never a bare `[[INDEX]]` basename'
+  'never a BASENAME taken from a deeper index'
+has_joined_in_section "obsidian-vault: root topology legitimately yields the bare index stem" \
+  "$OMD" '## Wikilinks vs Markdown links' \
+  'still the index'"'"'s exact vault-root path, never a special case'
 has_in_section "obsidian-vault: wikilinks-off mode gets its own index target form (#261)" \
   "$OMD" '## Wikilinks vs Markdown links' \
   '`[<index label>](relative(dirname(chapter_file), {{publish.index_file}}))`'
