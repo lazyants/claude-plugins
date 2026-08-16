@@ -2,6 +2,137 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.16.0] — 2026-08-16
+
+What a `<canvas>` paints is photographed and unscannable, so the region that holds one is now
+refused rather than quietly captured.
+
+Closes #565.
+
+This is also the release that carries the `assets/lib` declaration/runtime parity gate (#420, #339),
+which merged without a version bump for the release sequencer to fold in. Its lines are below under
+*Added*, *Changed* and *Known limitations*, so this entry describes its own artifact rather than only
+the lane that cut it.
+
+### Fixed
+
+- **`maskAndAssert`'s leak scan could not see a `<canvas>`, and no carve-out list named it (#565).**
+  The scan corpus is DOM text nodes, form-control values and input/textarea placeholders. What a
+  `<canvas>` paints contributes to none of them — it is a bitmap — while `page.screenshot`
+  composites its pixels like everything else. (Its *fallback* children are ordinary text nodes and
+  are scanned; they are simply not what the canvas shows.) Canvas-rendered PII was therefore photographed,
+  unmaskable and unscannable, and silent in every direction at once: no element inside it for
+  `selectors` to match, nothing of what was painted for `patterns` to fire on, and a coverage assert
+  satisfied by whatever *was* listed. The author could not even mask it by listing the `<canvas>`,
+  because that sets `textContent` and a canvas's children are fallback content that paints nothing.
+  The concrete shapes are a document preview rendered to a canvas (PDF.js renders every page that
+  way), a canvas-mode data grid, and a signature pad — where a whole document body, not a bounded
+  label, rides into the shot.
+
+  This is #472's silent-half shape one element class over, so it takes #472's answer rather than a
+  new mechanism: the count is taken in the same browser `evaluate` that already counts nested
+  browsing contexts, and a region containing a `<canvas>` **throws** unless the caller passes
+  `allowUnscannedCanvas: true`. The count reuses `queryDeep`, so a canvas inside an open shadow root
+  is covered identically to the mask and the scan, and keeps the `root.matches()` term so a
+  canvas-scoped locator is counted too — `querySelectorAll` returns descendants only. A canvas the
+  caller *did* list in `selectors` still counts: the mask tag removes it from the scan without
+  changing pixels no mask could overwrite. The refusal is checked **before** the coverage assert,
+  for the reason the frame refusal is — past it, a drifted selector count misreports the cause as
+  selector drift.
+
+  The remedies differ from the framed case and the docs now say so: there is no "scan it yourself
+  per canvas", because a canvas hosts no document — no second corpus to run the mask and the scan
+  over. The refusal names `<canvas>` only; `<img>`/`<video>` pixels are photographed and unscanned
+  as well and stay the human eyeball-the-frame step's job, stated rather than left implied.
+
+- **Three write sites, and a claim that stopped being true when the second gate landed (#565).** The
+  carve-out is stated in `references/capture-spec-helpers.md`, in `maskAndAssert`'s own
+  `SCAN CARVE-OUT` docblock, and in `references/capture-safety.md`'s masking rules; all three now
+  name the canvas, and the contract doc's count goes from **Five** things the scan does not cover to
+  **Six**. "That is why this ONE carve-out is enforced" was true with one enforced carve-out and
+  false with two, and is retired in both copies that carried it.
+
+- **"A canvas has no text" was a false universal, written three times (#565).** A `<canvas>`'s
+  **fallback** children are ordinary text nodes and the TreeWalker *does* collect them; what no pass
+  can reach is what the canvas **paints**. Measured in a real browser rather than reasoned about:
+  run over a canvas that both paints one string and carries another as fallback, the collected
+  corpus contains the fallback string and never the painted one. Three review rounds each found one instance of this
+  universal and each fix left another standing, because the wordings differ per site and one file
+  ended up stating the correction *and* the universal at once — which no positive assertion can
+  catch. Every canvas sentence is now scoped to the painted pixels.
+
+### Added
+
+- **`maskAndAssert` has executable coverage for the first time (#565).** Every guarantee it makes
+  was previously pinned by grep only, and a grep proves text is present, never that it works — which
+  cannot express #565's actual claim, a two-sided mutation (red on a region containing a canvas,
+  green on a legitimate capture). `tests/mask-and-assert.test.mjs` drives the **real** shipped
+  helper against a DOM stub — a stub of the *engine*, in the shape
+  `capture-guard-redirect-wiring.fixture.mjs` already established — over 14 scenarios. Five
+  mutations of the shipped refusal were each watched going red for the right reason, and two
+  scenarios exist so that a stub silently producing empty results could not yield a false green. The
+  stub throws on any selector form it does not implement rather than answering "no match", and what
+  it does not prove is enumerated in its own header.
+
+- **A class gate over every write site, including the release copy (#565).** Each retired wording of
+  the false universal is pinned absent in *every* one of the five files, so a recurrence in a site
+  that did not previously have it still goes red; the `.ts` site uses the code-aware absence helper,
+  since the markdown-only one would have been green by construction against a JSDoc wrap. The first
+  version of the gate covered only the three plugin documents that had already gone wrong — and these
+  very release notes then reintroduced the universal in the CHANGELOG entry and the README section,
+  where nothing was watching, which is the failure mode the gate exists for. Both root documents are
+  in scope, and both scoped sentences are also pinned *present* so deleting them cannot satisfy the
+  absence pins by silence; the CHANGELOG pin is bound to this heading, so relocating the sentence to
+  another entry fails too. All 30 class-gate pins were watched going red by reintroducing their
+  wording — 15 in the round that introduced the gate, 15 in the round that extended it to the release
+  copy — as were the two positive pins and the heading binding. One reintroduction was split across a
+  hard wrap, which is what proves the absence helper's wrap tolerance; splitting every one of them
+  would re-prove the helper rather than the pin. It gates the wordings that have actually appeared —
+  it moves a known recurrence from review-caught to CI-caught, and does not make the class
+  unwriteable. One site it structurally cannot cover is
+  `reference-assets.test.sh` itself, where the retired wordings live as needles; that is stated at
+  the block rather than left as a silent hole.
+
+- `tests/export-parity-lib.mjs` + `tests/declaration-parity.test.mjs` — a compile-free
+  declaration/runtime parity gate over `assets/lib` (#420, #339). Every module's `.d.mts` is compared
+  against the REAL import namespace of its `.mjs`: names in both directions, declared arity as a range
+  against `Function.prototype.length`, and orphan modules on either side including a stale
+  declaration-only module that a `*.mjs` walk cannot see. The declaration side is read by a
+  statement-aware extractor rather than a regex — #339 records five consecutive rounds of measured
+  false-greens from regex designs — and any construct it cannot read fails the gate instead of being
+  skipped. Verified by exhaustive mutation over the shipped tree: 89/89 renamed declarations and 72/72
+  emptied signatures caught.
+
+### Changed
+
+- `tests/reference-assets.test.sh`: the six per-name `chapter-paths.d.mts` needles from #330 and the
+  per-release "one needle per added declaration" recount are retired in favour of the general gate,
+  which enumerates every declaration in every module rather than the ones a release remembered to pin.
+  A new census block prints the module/export/arity counts, because the `node --test` block discards
+  stdout and a parity run that enumerated nothing is otherwise indistinguishable from a clean one.
+
+### Known limitations
+
+- Declaration TYPE correctness remains unchecked: a declared type that is wrong while the name and the
+  parameter count are both right is invisible to the parity gate. Closing that needs a TypeScript
+  toolchain this repository does not have; tracked in #573.
+- Four declaration kinds have a declared arity the reader does not reach — a class (`constructor`
+  member), a specifier, a star re-export and a default expression. Each is named in the gate's own
+  census rather than skipped, so the count of unread arities is pinned and cannot grow in silence;
+  reading them is tracked in #577. No shipped `.d.mts` uses any of these forms today.
+- The `<canvas>` refusal is a refusal, not a scan: `allowUnscannedCanvas: true` returns the caller to
+  the eyeball-the-frame step, and `<img>`/`<video>` pixels were never covered and still are not.
+
+`tests/reference-assets.test.sh` gains **+52 assertions, none removed**, plus one more wherever `node`
+is on PATH — 16 carve-out disclosure pins, 2 correction pins, 2 release-copy pins, 30 class-gate
+pins, 2 seam pins, and the node-suite runner that is the +1. Reconciled by diffing the two
+check-name sets rather than by arithmetic on totals. Absolute totals are deliberately not quoted:
+several blocks here are gated on an optional local tool (`node`, `ruby`, `esbuild`), so an endpoint
+is a fact about the machine that measured it. The delta is the more stable figure but not an
+invariant either — measured +52/0 under stock tools with none of the three present, and +53/0 with
+node and ruby available, the difference being the node-gated runner named above and nothing else. The
+plugin ships 20 `node:test` suites, 1395 tests, wherever node is available to run them.
+
 ## [enduser-handbook 1.15.0] — 2026-08-16
 
 The two publish-target adapter contracts: a zero label match is not licence to create a container,
