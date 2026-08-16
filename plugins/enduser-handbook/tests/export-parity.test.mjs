@@ -331,6 +331,36 @@ test('declared arity is not fooled by commas, arrows or a `this` annotation', ()
   assert.deepEqual(declaredArity('this: Host, a: A'), { min: 1, max: 1 });
 });
 
+test('the ONE shape this arity check can be wrong about is named in its own failure message', async () => {
+  // Measured, not assumed: of seven candidate false-RED pairs, exactly two land — a runtime that
+  // takes its arguments through a rest parameter, and one that reads `arguments`. Both report
+  // `length === 0` while the declaration legitimately spells real parameters. A fully destructured
+  // signature, a declared rest, a const of function type, a bound function and an overload union all
+  // stay green, so the hole is exactly this one and it is not general.
+  //
+  // Left as a false RED on purpose. It fails LOUD and the message says what to do, whereas every way
+  // of suppressing it requires deciding from the outside which zero is a real zero — and being wrong
+  // in THAT direction is silent, which is the trade this whole gate exists to refuse. No shipped
+  // module takes arguments either way today.
+  for (const runtime of ['export function f(...args) { return args; }', 'export function f() { return arguments[0]; }']) {
+    const dir = mkdtempSync(join(tmpdir(), 'eh-arity-zero-'));
+    try {
+      writeFileSync(join(dir, 'm.mjs'), `${runtime}\n`);
+      writeFileSync(join(dir, 'm.d.mts'), 'export declare function f(a: A, b: B): void;\n');
+      const { findings } = await auditLibDirectory(dir);
+      const arity = findings.filter((x) => x.includes('at runtime, but'));
+      assert.equal(arity.length, 1, `expected exactly one arity finding for ${runtime}; got ${JSON.stringify(findings)}`);
+      assert.match(
+        arity[0],
+        /rest parameter or an `arguments`-style body also reports 0 here/,
+        'when the gate reports a zero-arity mismatch it must name the legitimate reason it might be wrong, or the operator has no way to tell a real drift from this case',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('a generic type-parameter list is skipped before the real parameters are read', () => {
   const { values } = extractDeclarationExports('export declare function pick<T extends (a: A) => B, U>(t: T, u: U): void;');
   assert.deepEqual(values.get('pick')[0].arity, { min: 2, max: 2 });

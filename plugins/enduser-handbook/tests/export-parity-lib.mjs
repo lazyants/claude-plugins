@@ -713,7 +713,17 @@ export async function auditModulePair(libDir, base) {
     arityChecks += 1;
     if (live.length < min || live.length > max) {
       const range = max === Infinity ? `${min}+` : (min === max ? `${min}` : `${min}-${max}`);
-      findings.push(`${base}: \`${name}\` takes ${live.length} parameter(s) at runtime, but ${base}.d.mts declares ${range} (line ${records[0].line}) — one of the two moved without the other`);
+      // The `length === 0` case gets its own sentence because it is the one where the gate can be
+      // wrong. `Function.prototype.length` reports 0 for a function that takes its arguments through
+      // a rest parameter or through `arguments`, both of which are legitimate and neither of which
+      // the declaration is expected to spell that way — so a correct pair can land here. Saying so in
+      // the message is the whole remedy: this fails LOUD, and an operator who reads it can spell the
+      // parameters optional in one edit. A gate that guessed instead would have to decide from the
+      // outside which zero is real, and guessing wrong in that direction is silent.
+      const zeroHint = live.length === 0
+        ? ' — note that a rest parameter or an `arguments`-style body also reports 0 here, so if this export takes its arguments that way the declaration should spell them optional rather than required'
+        : ' — one of the two moved without the other';
+      findings.push(`${base}: \`${name}\` takes ${live.length} parameter(s) at runtime, but ${base}.d.mts declares ${range} (line ${records[0].line})${zeroHint}`);
     }
   }
 
