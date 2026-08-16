@@ -23,7 +23,11 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   closed (blocked + recorded)**. It exposes one assertion that throws if any dangerous/blocked
   request fired during capture. This is **defense-in-depth, not permission to click ambiguous
   controls** — the human capture-safety classification still governs every click. There is exactly
-  **one** read escape hatch (`classifyRequest`); no broad write/stream/origin allowlists. WebSockets
+  **one** read escape hatch (`classifyRequest`) and exactly **one** opt-in allowlist:
+  `allowBeacons: true` admits **every** request the engine types as a `ping`, to any origin, GET and
+  POST alike (measured — a cross-origin POST beacon returns `allow`/`beacon-allowed`), so it is a
+  broad beacon allowlist, not a narrow one; `denyPatterns` still win over it. There is no write
+  allowlist and no origin allowlist. WebSockets
   are blocked *without connecting*; an engine that cannot block a socket (only observe it) must fail
   at install time, not silently open. The ordered decision is a **pure function**
   (`../assets/lib/capture-guard-policy.mjs`, `decideRoute`) so its branch order is unit-tested, not
@@ -40,7 +44,11 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   `/orders/42/confirm`, `/reports/publish` or `/users/7/impersonate` is **admitted**. So it is *not*
   true that a destructive GET the author forgot to deny-list still fails closed — that holds only
   when the forgotten verb happens to be one of the 16. Every other writing GET must be listed in
-  `denyPatterns` or refused by `classifyRequest`. (Tracked as issue #470.)
+  `denyPatterns` or refused by `classifyRequest` — and that refusal is **silent**: the predicate's
+  only refusing verdict is `'benign'`, which blocks the request but is excluded from
+  `assertNoDangerousHits()` by design, so no return value means "block this GET **and** count it
+  dangerous". For a writing GET outside the 16, `denyPatterns` is the only lever that both stops the
+  request and fails the run. (Tracked as issue #470.)
 
   **Redirect hops are DETECTED, not intercepted.** A request the browser issues itself to follow a
   3xx `Location` never reaches the interception handler — measured against the real engine on
@@ -69,7 +77,10 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   recorded as dangerous) only for a request that is not a plain GET/HEAD**; a GET/HEAD that reaches
   the general allow is still admitted unconditionally, as above. **An SSE GET never reaches it** —
   `[guard:eventsource]` blocks a stream the predicate did not admit, so returning `undefined` for an
-  event-source endpoint blocks it rather than passing it. Note the asymmetry: `'read'` allows,
+  event-source endpoint blocks it rather than passing it. **A beacon never reaches it either** —
+  `[guard:beacon]` also decides before `[guard:classify-read]`, so a request the engine types as
+  `ping` is blocked for GET and POST alike (measured) even when the predicate returns `'read'`; the
+  only thing that admits one is the `allowBeacons: true` opt-in above. Note the asymmetry: `'read'` allows,
   `'benign'` blocks — they are not "both block". `classifyRequest` must be **total**: return
   `undefined` for anything it does
   not recognize and never throw (the guard now consults it for beacon/SSE requests too). There is

@@ -1345,6 +1345,21 @@ hasnt_joined "capture-helpers: assertNoDangerousHits no longer prescribes a bare
   'Call it in a `finally`, before closing the context.' "$CH"
 has "capture-helpers: assertNoDangerousHits prescribes the primaryError shape (#473)" \
   'a `primaryError` slot' "$CH"
+# #563 items 1-2: two more admission claims in the same contract doc were measurably wrong —
+# `allowBeacons` is a broad opt-in allowlist the "no broad allowlists" sentence denied, the
+# "'read' ADMITS" paragraph carved out only SSE while [guard:beacon] also decides before
+# [guard:classify-read], and `classifyRequest`'s only refusal is silent.
+hasnt_joined "capture-spec-helpers: the blanket no-allowlists claim is retired (#563 item 1)" \
+  'no broad write/stream/origin allowlists' "$REFS/capture-spec-helpers.md"
+has_joined_in_section "capture-spec-helpers: allowBeacons is named and its breadth stated (#563 item 1)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'admits **every** request the engine types as a `ping`'
+has_joined_in_section "capture-spec-helpers: a beacon is not admitted by a 'read' verdict either (#563 item 1)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  '**A beacon never reaches it either**'
+has_joined_in_section "capture-spec-helpers: the 'benign' refusal is documented as silent (#563 item 2)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  'that refusal is **silent**'
 
 echo "== capture.example.spec.ts =="
 SPEC="$ASSETS/capture.example.spec.ts"
