@@ -42,6 +42,14 @@ const TYPE_ONLY_HEADS = new Set(['interface', 'type']);
 const MODIFIERS = new Set(['declare', 'abstract', 'async', 'default']);
 
 /**
+ * Keywords that can only introduce a DECLARATION, never continue a property named `export`.
+ *
+ * Used to tell a real export declaration hiding below the top level from an interface member that
+ * merely happens to be called `export` — a member is always followed by `:`, `?`, `(` or `<`.
+ */
+const DECLARATION_HEADS = new Set(['function', 'class', 'const', 'let', 'var', 'interface', 'type', 'enum']);
+
+/**
  * Blank every comment, string and template literal, preserving byte offsets and line breaks.
  *
  * Offsets are preserved rather than the text removed so that a name found in the masked copy can be
@@ -397,10 +405,32 @@ export function extractDeclarationExports(source, label = '<source>') {
       if (depth < 0 && firstUnmatchedCloser === -1) firstUnmatchedCloser = i;
       continue;
     }
-    if (depth !== 0 || ch !== 'e') continue;
+    if (ch !== 'e') continue;
     if (masked.slice(i, i + 6) !== 'export') continue;
     if (i > 0 && IDENT.test(masked[i - 1])) continue;
     if (IDENT.test(masked[i + 6] ?? '')) continue;
+
+    if (depth !== 0) {
+      // An `export` below the top level. Balance alone cannot catch what this catches: a stray
+      // opener and a stray closer STRADDLING a real declaration leave depth ending at zero and never
+      // going negative, so the balance check above passes while the declaration between them is
+      // skipped and reported by nothing — invisible in both directions, because a name that never
+      // enters the extracted set is a name no comparison can miss.
+      //
+      // The discriminator is cheap and needs no grammar engine. A property may legally be NAMED
+      // `export` (`{ export: number }`, `export(): void`, `export?: string`), and every such use is
+      // followed by `:`, `?`, `(` or `<`. A declaration HEAD after it is not a property name — it is
+      // a real export declaration sitting where this scan will never read it. In a flat `.d.mts`
+      // that cannot happen legitimately at all: the only place a nested `export` is legal is inside
+      // an ambient `declare module`/`namespace` block, which is refused outright above.
+      const probe = new Reader(masked, i + 6);
+      let head = probe.peekWord();
+      while (MODIFIERS.has(head)) { probe.takeWord(); head = probe.peekWord(); }
+      if (DECLARATION_HEADS.has(head)) {
+        unsupported.push(`${label}:${lineOf(source, i)}: an \`export ${head}\` declaration sits inside a nested block (bracket depth ${depth}) — it would be skipped silently, so the file's export surface is reported as unknown rather than as complete`);
+      }
+      continue;
+    }
 
     const line = lineOf(source, i);
     const where = `${label}:${line}`;

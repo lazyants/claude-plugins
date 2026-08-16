@@ -256,6 +256,40 @@ test('unbalanced brackets are REPORTED — the depth counter cannot be trusted s
   );
 });
 
+test('a stray opener and closer STRADDLING a declaration cannot hide it — balance alone misses this', () => {
+  // Bracket balance is necessary but not sufficient, and this is the shape that proves it: a stray
+  // `{` before a declaration and a stray `}` after it leave depth ending at zero, never going
+  // negative. The balance check passes; the declaration between them sits at depth 1 and is skipped.
+  // Nothing reports it, and — the part that makes it a false green rather than a wrong answer — a
+  // name that never enters the extracted set is a name that no comparison in either direction can
+  // miss, so a genuinely stale `ghost` declaration would be invisible to the whole gate.
+  const straddled = [
+    'export declare function realA(): void; {',
+    'export declare function ghost(x: number): void; }',
+    'export declare function realB(): void;',
+  ].join('\n');
+  const { values, unsupported } = extractDeclarationExports(straddled, 'm.d.mts');
+  assert.deepEqual([...values.keys()], ['realA', 'realB'], 'the hidden declaration is genuinely not extracted — that is the hazard');
+  assert.ok(
+    unsupported.some((u) => u.includes('sits inside a nested block') && u.includes('m.d.mts:2')),
+    `the straddled declaration must be reported, at its own line; got ${JSON.stringify(unsupported)}`,
+  );
+
+  // The other side of the discriminator: a member merely NAMED `export` must stay silent, or the
+  // check is a false-red generator over ordinary interface bodies.
+  const named = [
+    'export interface Holder {',
+    '  export: number;',
+    '  nested: { export: string };',
+    '  export?: string;',
+    '}',
+    'export declare const REAL: 1;',
+  ].join('\n');
+  const plain = extractDeclarationExports(named, 'holder.d.mts');
+  assert.deepEqual([...plain.values.keys()], ['REAL']);
+  assert.deepEqual(plain.unsupported, [], 'a property named `export` is not a hidden declaration');
+});
+
 test('export lists and namespace re-exports resolve to the EXPORTED name, not the local one', () => {
   const source = [
     'declare const local: 1;',
