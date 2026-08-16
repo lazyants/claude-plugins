@@ -3188,24 +3188,18 @@ has "surface-diff.md: documents the structural diff key"  'tag / role / name / d
 hasnt "surface-diff: no import type in the .mjs" 'import type' "$SD"
 has "surface-diff: imports matrixLabel from control-inventory" "from './control-inventory.mjs'" "$SD"
 
-echo "== chapter-paths.d.mts — 1.11.0 public surface (#330) =="
-CPD="$ASSETS/lib/chapter-paths.d.mts"
-# Declaration-SHAPED needles (round-15/round-26). `has` is an unscoped fixed-string grep, so a
-# name-only needle for a type stays green after its declaration is deleted — the name survives
-# inside the function signature. Each needle therefore carries its declaration keyword, and each
-# gets its own deletion mutant. These pin EXISTENCE only: never compatibility, never syntax.
-# The rule is one needle per declaration this version ADDS, and it is checkable: the needle count
-# below must equal `git diff 44545bb..HEAD -- plugins/enduser-handbook/skills/enduser-handbook/assets/lib/chapter-paths.d.mts | grep -c '^+export'`,
-# run from the repository root (44545bb is the 1.10.0 release commit; this repo has no
-# enduser-handbook release tags). That check is what caught LeadingFrontmatterSpan: its
-# declaration was added without a matching needle, so an unpinned deletion of the interface
-# stayed green while a pinned deletion correctly went red.
-has "chapter-paths.d.mts: declares indexView"                       'export function indexView'                        "$CPD"
-has "chapter-paths.d.mts: declares leadingFrontmatterSpan"          'export function leadingFrontmatterSpan'           "$CPD"
-has "chapter-paths.d.mts: declares LeadingFrontmatterSpan"          'export interface LeadingFrontmatterSpan'          "$CPD"
-has "chapter-paths.d.mts: declares verifyNonHeadingPlacement"       'export function verifyNonHeadingPlacement'        "$CPD"
-has "chapter-paths.d.mts: declares VerifyNonHeadingPlacementOptions" 'export interface VerifyNonHeadingPlacementOptions' "$CPD"
-has "chapter-paths.d.mts: declares VerifyNonHeadingPlacementResult"  'export type VerifyNonHeadingPlacementResult'      "$CPD"
+# [#339] The six per-name `chapter-paths.d.mts` needles that stood here are RETIRED, along with the
+# per-release checklist rule that came with them ("one needle per declaration this version adds",
+# recounted by hand against a `git diff | grep -c '^+export'` every release). They were the scoped
+# stand-in #330 shipped because the general gate did not exist; it does now, and it enumerates every
+# declaration in every module instead of the ones a release remembered to pin. Keeping both would
+# leave a hand-maintained count whose only failure mode is a human forgetting to bump it — which is
+# how LeadingFrontmatterSpan came to be declared with no needle in the first place.
+#
+# Enforced instead by tests/declaration-parity.test.mjs (run by the `node --test` block above), which
+# compares each module's REAL import namespace against its `.d.mts` in both directions and on arity.
+# Do not re-add a per-name needle here: a name pinned in two places is a name that can disagree with
+# itself, and the pointer is what stays true when the surface changes.
 
 echo "== canonical verified-class sentence — three current sites, plus the frozen 1.11.0 copy (#330) =="
 # ONE sentence, reused verbatim, joined across the ~95-column house wrap. Short independent
@@ -4929,6 +4923,51 @@ has "capture.example.spec.ts: the overview step says why the container assertion
 # stay green against a string the reader never sees — the very failure #477 exists to close.
 has "capture.example.spec.ts: the overview step warns that a role name match accepts an aria-label" \
   'a role `name` match would also accept an aria-label' "$SPEC"
+
+echo "== assets/lib declaration-vs-runtime parity census (#420, #339) =="
+# tests/declaration-parity.test.mjs is the GATE, and the `node --test` block above already runs it.
+# This block is deliberately NOT a second gate: it re-derives the same census and PRINTS it, because
+# that block discards stdout, and a parity run that enumerated ZERO modules raises no finding and so
+# reads byte for byte like a clean tree. The counts belong in this file's own output, where an
+# operator watching the suite scroll past can see that something was actually compared.
+PARITY_LIB="$TEST_DIR/export-parity-lib.mjs"
+if [ -f "$PARITY_LIB" ]; then
+  ok "declaration parity: tests/export-parity-lib.mjs (the statement-aware extractor) is present"
+else
+  bad "declaration parity: tests/export-parity-lib.mjs is MISSING — the parity gate cannot run, and a gate that did not run looks exactly like one that passed"
+fi
+if [ -f "$TEST_DIR/declaration-parity.test.mjs" ]; then
+  ok "declaration parity: tests/declaration-parity.test.mjs (the gate) is present"
+else
+  bad "declaration parity: tests/declaration-parity.test.mjs is MISSING — #330's per-name .d.mts needles were retired in favour of it, so nothing is checking declaration drift at all"
+fi
+if command -v node >/dev/null 2>&1 && [ -f "$PARITY_LIB" ]; then
+  PARITY_PROGRAM='import { auditLibDirectory } from "./tests/export-parity-lib.mjs";
+const r = await auditLibDirectory("./skills/enduser-handbook/assets/lib");
+process.stdout.write([r.census.modules, r.census.runtimeExports, r.census.valueDeclarations, r.census.arityChecks, r.findings.length].join(" "));'
+  PARITY_OUT="$( (cd "$PLUGIN_DIR" && node --input-type=module -e "$PARITY_PROGRAM") 2>&1 )" || true
+  if ! printf '%s' "$PARITY_OUT" | grep -qE '^[0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+$'; then
+    bad "declaration parity: the census did not produce its five counts, so nothing was compared — node said: $(printf '%s' "$PARITY_OUT" | head -3)"
+  else
+    read -r P_MODULES P_EXPORTS P_DECLS P_ARITY P_FINDINGS <<< "$PARITY_OUT"
+    echo "  note  assets/lib parity: $P_MODULES module pairs, $P_EXPORTS runtime exports, $P_DECLS value declarations, $P_ARITY arity comparisons, $P_FINDINGS findings"
+    if [ "$P_FINDINGS" -eq 0 ]; then
+      ok "declaration parity: every assets/lib module agrees with its own .d.mts — names in both directions, and arity"
+    else
+      bad "declaration parity: $P_FINDINGS disagreement(s) between assets/lib runtime exports and their declarations — run 'node --test tests/declaration-parity.test.mjs' for the list"
+    fi
+    # A floor, not a census: it exists to refuse an enumeration that silently half-matched, and a
+    # deliberate module removal lowers it in the same commit. The detailed floors (exports, arity
+    # comparisons, and the per-module non-emptiness check) live in the gate itself.
+    if [ "$P_MODULES" -ge 12 ]; then
+      ok "declaration parity: the census enumerated $P_MODULES module pairs (12 shipped when this block was written)"
+    else
+      bad "declaration parity: the census enumerated only $P_MODULES module pairs, below the 12 that shipped when this block was written — the enumeration half-matched, or a module went away without this floor moving with it"
+    fi
+  fi
+else
+  echo "  note  node not on PATH (or the extractor is missing) — skipping the assets/lib parity census"
+fi
 
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
