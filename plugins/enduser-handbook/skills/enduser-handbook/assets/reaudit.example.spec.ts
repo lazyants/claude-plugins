@@ -70,11 +70,13 @@ test('re-audit: items chapter, per role', async ({ browser }) => {
     const guard = await installCaptureGuard(context, {
       // Empty for the same reason as capture.example.spec.ts — the built-in 16-verb set already
       // covers the destructive verbs token-exactly, and denyPatterns is a raw substring match over
-      // the URL and postData, so seeding the bare verbs blocks ordinary reads while adding only the
-      // run-together spellings ('/deleteuser', '/sendmail'). Read that file's comment before adding
-      // any, and list a whole route rather than a bare verb. A read-admitting classifyRequest (e.g.
-      // classifyGraphqlRead for a POST-read GraphQL app) can be added the same way as in
-      // capture.example.spec.ts; omitted here for brevity.
+      // the URL and postData, so seeding the bare verbs blocks ordinary reads. Removing them is not
+      // free either: what it costs is measured and enumerated ONCE in the denyPatterns comment of
+      // capture.example.spec.ts — read it there rather than trusting a second-hand summary here,
+      // which is how the summary that used to sit in this comment went stale. List a whole route
+      // rather than a bare verb. A read-admitting classifyRequest (e.g. classifyGraphqlRead for a
+      // POST-read GraphQL app) can be added the same way as in capture.example.spec.ts; omitted
+      // here for brevity.
       denyPatterns: [],
     });
     const page = await context.newPage();

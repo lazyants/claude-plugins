@@ -1462,6 +1462,17 @@ has "example spec: the residue names the body-only class too (#560)" \
 # sentence begins.
 hasnt_joined "example spec: no longer claims the bare verbs add no coverage (#560)" \
   ' no coverage' "$SPEC"
+# Review round 5 (bot P2): the re-audit skeleton carried its OWN one-line summary of the residue, and
+# the verification-round correction to $SPEC left it stale — it still said the bare verbs added
+# "only" the run-together spellings, omitting the verb+digit forms and the body-only class. Two
+# copies of a measured enumeration in two copyable skeletons is the drift that produced this finding,
+# so the summary is retired rather than duplicated: the residue is enumerated ONCE, in $SPEC, and the
+# re-audit file points at it. The needle below starts mid-phrase with a space on purpose — same
+# capitalization hole as the pin above, and no rewrap can hide the claim behind a capital letter.
+hasnt_joined "re-audit spec: no local summary that understates the residue (#560)" \
+  ' adding only' "$REAUDIT"
+has "re-audit spec: points at the canonical residue enumeration (#560)" \
+  'enumerated ONCE in the denyPatterns comment' "$REAUDIT"
 # #474: LANG/LC_ALL never reach the browser — the browser-context locale is the only lever that sets
 # navigator.language and sends Accept-Language. Three shipped sentences claimed otherwise.
 for f in "$SPEC" "$REAUDIT"; do
