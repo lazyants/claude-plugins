@@ -566,6 +566,19 @@ unique across groups (see `manifest-discipline.md`):
   a near miss and nothing more: it never selects a container to write into, so it cannot
   mis-target, and the write still needs the exact match that already came back empty.
 
+  One invisible-character case IS recognizable, and folding it costs the Persian and Hindi
+  handbooks nothing. Run the compare a second time with the UNSAFE invisible characters removed
+  from both sides — exactly the set `isPlainLabel` already refuses,
+  `INVISIBLE_LABEL_CODE_POINTS` in `assets/lib/chapter-paths.mjs` (a zero-width space, a soft
+  hyphen, the bidi controls, a BOM and their kin). Cite the constant rather than copying its
+  members here, so this contract cannot drift from the module. If that compare matches, halt as
+  above and additionally name the offending code point and its offset in the heading, since
+  nothing else makes it visible to the operator. U+200C/U+200D stay OUT of that fold, together
+  with the other format characters the module records as deliberate absences, because they occur
+  INSIDE ordinary words — which is why a correctly-spelled Persian or Hindi title never halts on
+  this. Like the rest of this branch the second compare is DETECT-only: it selects no container,
+  so it cannot mis-target.
+
   A run that DOES carry letters or digits is deliberately NOT folded, and a parenthetical is the
   case to hold in mind. `Reports (2024)` and `Reports (2025)` are two sections an operator
   maintains side by side; fold the parenthetical and they read as a near miss, so a correct
@@ -768,15 +781,15 @@ list of oddities: bold, a markdown link, a wikilink, inline code, strikethrough,
 character reference, a leading or trailing emoji, a trailing `{#anchor}` and a case difference all
 fail it, and an emoji beside a nav heading is ordinary curation rather than an edge case. The
 near-miss check in the container-resolution branch
-above now HALTS on the spellings it recognizes instead of creating beside them. What remains here
-is an invisible character inside the label — neither refused nor readable as a near miss — plus any
-rendered equivalence the model fails to NOTICE. That second remainder is keyed on RECOGNITION, not
+above now HALTS on the spellings it recognizes instead of creating beside them, and its second
+compare folds the UNSAFE invisible characters as well, so an invisible character inside the label is
+no longer a residual as a class — what remains is the module's DELIBERATE ABSENCES, the format
+characters it spares because they occur inside real words, plus the astral TAG block its own SCOPE
+note excludes. The other remainder is any
+rendered equivalence the model fails to NOTICE. That one is keyed on RECOGNITION, not
 on the list: the list is illustrative and the rule past it is to err toward halting, so what stays
 open is not what the list omits but what goes unnoticed, and a heading nobody spots as a near miss
-still gets a second, pixel-identical heading created beside it. Both remainders are
-unchanged pre-existing behaviour, and the first stays open by choice rather than for want of a
-mechanism — the near-miss comparison could ignore invisible characters too, and the sentence
-immediately below is why it must not. U+200C/U+200D (ZWNJ/ZWJ)
+still gets a second, pixel-identical heading created beside it. U+200C/U+200D (ZWNJ/ZWJ)
 are still accepted everywhere, because they are required INSIDE ordinary words in Persian, Hindi
 and other scripts and refusing them would lock out a correctly-spelled title — so two labels
 differing only by one are still two containers. So are two labels differing by a no-break space

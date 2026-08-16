@@ -4441,6 +4441,52 @@ has_joined_in_section "obsidian-vault: #476 a content-bearing suffix is NOT fold
 # separated them.)
 ZERO_SETEXT_CAUSE='suspect STRUCTURE rather than the label'
 ZERO_SETEXT_SCOPE='only arises in a MIXED index'
+# Round 4, the ped-ant bot's P2 — and it dissolves a tradeoff three earlier rounds treated as
+# irreducible. #553 (an invisible character in a `## ` container heading) was closed as a DUPLICATE
+# of #476, carrying one requirement forward in the closing comment, verbatim: "if the near-miss halt
+# is built, the cheap version is a match-modulo-invisibles scan of the collected headings on the
+# `zero` branch, halting with the code point and offset named". This branch built that halt and
+# declared exactly that case outside recognition — so shipping it as the #476 fix would have left a
+# CLOSED ticket's silent, permanent index fork with no tracker anywhere.
+#
+# The reason given for excluding it was a false dichotomy, and the module says so. Folding ALL
+# invisible characters would break Persian and Hindi, because ZWNJ/ZWJ are required inside ordinary
+# words. But `isPlainLabel` already ships a CURATED unsafe subset that spares them by construction —
+# `INVISIBLE_LABEL_CODE_POINTS` (verified: 20 members, U+200C/U+200D deliberately absent, with the
+# Persian/Hindi reasoning spelled out at the constant). Reusing that set folds the dangerous
+# characters and none of the linguistic ones. The scan stays DETECT-only, so it still cannot
+# mis-target.
+#
+# Pinned per property. The set is referenced by NAME rather than enumerated, so the contract cannot
+# drift from the module the way an inlined list would.
+ZERO_INVISIBLE_SCAN='Run the compare a second time with the UNSAFE invisible characters removed from both sides'
+ZERO_INVISIBLE_SET='exactly the set `isPlainLabel` already refuses'
+ZERO_INVISIBLE_DIAGNOSTIC='name the offending code point and its offset in the heading'
+ZERO_INVISIBLE_CARVEOUT='U+200C/U+200D stay OUT of that fold'
+has_joined_in_section "static-md: #553 the zero branch re-compares modulo unsafe invisibles" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_INVISIBLE_SCAN"
+has_joined_in_section "obsidian-vault: #553 the zero branch re-compares modulo unsafe invisibles" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_INVISIBLE_SCAN"
+has_joined_in_section "static-md: #553 the fold set is the module's, by name, not an inlined copy" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_INVISIBLE_SET"
+has_joined_in_section "obsidian-vault: #553 the fold set is the module's, by name, not an inlined copy" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_INVISIBLE_SET"
+has_joined_in_section "static-md: #553 the halt names the code point and offset" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_INVISIBLE_DIAGNOSTIC"
+has_joined_in_section "obsidian-vault: #553 the halt names the code point and offset" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_INVISIBLE_DIAGNOSTIC"
+has_joined_in_section "static-md: #553 ZWNJ/ZWJ stay outside the fold (the Persian/Hindi carve-out)" \
+  "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
+  "$ZERO_INVISIBLE_CARVEOUT"
+has_joined_in_section "obsidian-vault: #553 ZWNJ/ZWJ stay outside the fold (the Persian/Hindi carve-out)" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  "$ZERO_INVISIBLE_CARVEOUT"
 has_joined_in_section "static-md: #476 two indistinguishable spellings point at a setext heading" \
   "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
   "$ZERO_SETEXT_CAUSE"
@@ -4513,7 +4559,13 @@ ZERO_CLASS_DISCLOSURE='the gap it leaves is a CLASS rather than one exotic chara
 # counts, err toward halting. So the list omitting a spelling does not leave it open; only failing
 # to RECOGNIZE one does. Measured instance: `## Reports ##` returns `zero` and renders as `Reports`,
 # an equivalence no list member names and the catch-all nonetheless halts on.
-ZERO_CLASS_REMAINDER='plus any rendered equivalence the model fails to NOTICE'
+ZERO_CLASS_REMAINDER='remainder is any rendered equivalence the model fails to NOTICE'
+# Round 4: the invisible half of the remainder NARROWS once the near-miss scan folds the unsafe set.
+# What is left is not "an invisible character" but specifically the module's DELIBERATE ABSENCES —
+# ZWNJ/ZWJ and the format characters that occur inside ordinary words — plus the astral TAG block
+# the module's own SCOPE note excludes. Pinned so a later edit cannot quietly re-widen the
+# disclosure back to the whole class it no longer describes.
+ZERO_INVISIBLE_REMAINDER='what remains is the module'"'"'s DELIBERATE ABSENCES'
 has_joined_in_section "static-md: the headings-form residual is disclosed as a CLASS, not one character" \
   "$SMD" '### Nested-list automation limits' \
   "$ZERO_CLASS_DISCLOSURE"
@@ -4526,6 +4578,12 @@ has_joined_in_section "obsidian-vault: the headings-form residual is disclosed a
 has_joined_in_section "obsidian-vault: the headings-form residual names what the near-miss check cannot see" \
   "$OMD" '### Nested-list automation limits' \
   "$ZERO_CLASS_REMAINDER"
+has_joined_in_section "static-md: the invisible remainder narrows to the module's deliberate absences" \
+  "$SMD" '### Nested-list automation limits' \
+  "$ZERO_INVISIBLE_REMAINDER"
+has_joined_in_section "obsidian-vault: the invisible remainder narrows to the module's deliberate absences" \
+  "$OMD" '### Nested-list automation limits' \
+  "$ZERO_INVISIBLE_REMAINDER"
 # The count sentence itself was never pinned. It is now, in both adapters, because the widening
 # above is exactly the kind of edit that silently turns "Three" into a wrong number.
 has_in_section "static-md: the residual COUNT sentence still reads three" \
