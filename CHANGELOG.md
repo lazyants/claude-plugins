@@ -50,11 +50,19 @@ out the requirement #553 left behind when it was closed as a duplicate of #476.
 ### Note on the 1.14.0 label
 
 The commit delivering the above merged to `main` 2m14s after 1.14.0 and, by its own design, bumped
-nothing — that release lands centrally, here. For those 2m14s and until this bump, the artifact
+nothing — that release lands centrally, here. **From that merge until this bump**, the artifact
 labelled 1.14.0 on `main` contained items 5 and 6 while its own entry below said it did not. That
 entry is left standing as the record of what its release shipped; this paragraph is the correction.
-A copy installed from `main` inside that window reports 1.14.0 and holds the newer adapter docs —
-`claude plugin update` repairs it, because a bump is what makes the update copy bytes at all.
+
+Two populations of installed copy differ, and only one of them has anything to repair. A copy
+installed **in the 2m14s before that merge** reports 1.14.0 and holds the older adapter docs;
+`claude plugin update` repairs it, because a bump is what makes the update copy bytes at all — an
+unbumped edit returns `up_to_date` and copies zero bytes, which is why the wrong label would
+otherwise have stuck indefinitely. A copy installed **after that merge** already holds the newer
+docs under the 1.14.0 label, so only the label was ever wrong. Measured on the author's machine:
+`obsidian-vault.md` is 1107 lines in the tree 1.14.0 was cut from and 1248 lines after that merge,
+and four independently-installed caches *named* 1.14.0 hold 1248 — an installed copy's version
+label names which release it was fetched under, never which bytes it contains.
 
 ## [enduser-handbook 1.14.0] — 2026-08-16
 
