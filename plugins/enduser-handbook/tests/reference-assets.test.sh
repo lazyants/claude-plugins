@@ -3201,17 +3201,39 @@ has "surface-diff: imports matrixLabel from control-inventory" "from './control-
 # Do not re-add a per-name needle here: a name pinned in two places is a name that can disagree with
 # itself, and the pointer is what stays true when the surface changes.
 #
-# ONE COVERAGE LOSS, STATED RATHER THAN LEFT TO BE DISCOVERED. Three of the six retired needles pinned
-# TYPE-ONLY declarations — `LeadingFrontmatterSpan`, `VerifyNonHeadingPlacementOptions`,
-# `VerifyNonHeadingPlacementResult`. An interface has no runtime binding, so a gate that compares
-# against an import namespace can never reach one, and nothing here replaces that specific check:
-# deleting any of those three declarations outright is now invisible to this whole suite (measured, by
-# deleting each in turn against a copy of the tree — the gate reported zero findings all three times).
-# The replacement is a strict superset on the VALUE side and a genuine gap on the type side, and the
-# honest reason not to close it here is that a type-existence check needs a list of the TypeScript lib
-# types a reference is allowed to resolve to — an allowlist, which is the design #339 records scoring
-# 31 false reds on an unmodified tree. The check that does close it is a compiler over the
-# declarations, which is #573.
+# THREE OF THE SIX ARE KEPT, because retiring them was a REGRESSION, not a simplification. Those three
+# pinned TYPE-ONLY declarations, and an interface has no runtime binding, so a gate comparing against
+# an import namespace structurally cannot reach one: with all six gone, deleting any of the three was
+# invisible to this entire suite (measured, by deleting each in turn against a copy of the tree — the
+# gate reported zero findings all three times).
+#
+# The first attempt here dropped them and filed the gap instead, arguing that a type-existence check
+# needs an allowlist of the TypeScript lib types a reference may resolve to — the design #339 records
+# scoring 31 false reds on an unmodified tree. That argument is sound about the GENERAL check and does
+# not reach these three at all: re-adding three fixed-string existence pins for three stable names is
+# not a census over the tree, costs nothing, and leaves the tree no worse than before this change.
+# Conflating the two is what made the regression look like a tradeoff.
+#
+# What is NOT restored is the per-release rule ("one needle per declaration this version adds"),
+# recounted by hand against a `git diff | grep -c '^+export'` each release. That rule failed silently
+# when a human forgot it, which is exactly how `LeadingFrontmatterSpan` came to be declared with no
+# needle. So these three are a ratchet against a known regression, not a general guarantee: a type
+# added in a FUTURE release gets no pin here, and closing that properly still needs a compiler over
+# the declarations, which is #573.
+#
+# What these three actually guarantee, measured rather than assumed: DELETING any of the three
+# declarations turns the matching pin RED. RENAMING one does NOT — `has` is a fixed-string grep, and
+# every needle here is a PREFIX of its own renamed form, so `LeadingFrontmatterSpanRenamed` still
+# contains `export interface LeadingFrontmatterSpan`. The original #330 needles had exactly this
+# property and never said so. Deletion is the regression these exist to ratchet; a rename that leaves
+# the signatures referring to the old name is a compiler's finding, not a grep's.
+CPD="$ASSETS/lib/chapter-paths.d.mts"
+has "chapter-paths.d.mts: declares LeadingFrontmatterSpan (type-only — no runtime binding for the parity gate to reach)" \
+  'export interface LeadingFrontmatterSpan'          "$CPD"
+has "chapter-paths.d.mts: declares VerifyNonHeadingPlacementOptions (type-only)" \
+  'export interface VerifyNonHeadingPlacementOptions' "$CPD"
+has "chapter-paths.d.mts: declares VerifyNonHeadingPlacementResult (type-only)" \
+  'export type VerifyNonHeadingPlacementResult'      "$CPD"
 
 echo "== canonical verified-class sentence — three current sites, plus the frozen 1.11.0 copy (#330) =="
 # ONE sentence, reused verbatim, joined across the ~95-column house wrap. Short independent

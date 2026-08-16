@@ -336,6 +336,21 @@ test('bracket KINDS are matched, not just counted — a count-balanced file can 
   // …and a correctly bracketed file with all three kinds nested must stay silent.
   const fine = 'export declare function f(a: Array<[number, { b: string }]>): void;\n';
   assert.deepEqual(extractDeclarationExports(fine, 'ok.d.mts').unsupported, []);
+
+  // The kind check has to cover the WHOLE file, and it briefly did not: the const/let/var branch
+  // jumped the cursor past its own declarator, so the outer scanner — the only thing that matches
+  // kinds — never saw the annotation's brackets. The interface fixture above walks that loop and so
+  // could not notice. A variable declaration is the case that proves the coverage, not the mechanism.
+  const inAnnotation = extractDeclarationExports('export declare const A: [number);\n', 'v.d.mts');
+  assert.ok(
+    inAnnotation.unsupported.some((u) => u.includes('brackets did not pair up')),
+    `a mismatched pair inside a variable annotation must be caught too; got ${JSON.stringify(inAnnotation.unsupported)}`,
+  );
+  // Bracketed annotations that ARE well formed must stay silent, including several declarators.
+  const wellFormed = 'export declare const A: Array<[number, { b: string }]>, B: (a: number) => void;\n';
+  const ok = extractDeclarationExports(wellFormed, 'v2.d.mts');
+  assert.deepEqual(ok.unsupported, []);
+  assert.deepEqual([...ok.values.keys()], ['A', 'B'], 'walking the declarator must not cost the second binding');
 });
 
 test('export lists and namespace re-exports resolve to the EXPORTED name, not the local one', () => {
@@ -379,33 +394,37 @@ test('declared arity is not fooled by commas, arrows or a `this` annotation', ()
   assert.deepEqual(declaredArity('this: Host, a: A'), { min: 1, max: 1 });
 });
 
-test('the ONE shape this arity check can be wrong about is named in its own failure message', async () => {
-  // Measured, not assumed: of seven candidate false-RED pairs, exactly two land — a runtime that
-  // takes its arguments through a rest parameter, and one that reads `arguments`. Both report
-  // `length === 0` while the declaration legitimately spells real parameters. A fully destructured
-  // signature, a declared rest, a const of function type, a bound function and an overload union all
-  // stay green, so the hole is exactly this one and it is not general.
+test('the way this arity check can be wrong is named in its own failure message, at any length', async () => {
+  // `Function.prototype.length` counts the formal parameters before the first default or rest — it is
+  // the implementation's PREFIX, not what it accepts. So a correct pair lands here whenever the
+  // runtime gathers arguments some other way, and that is not confined to a length of zero: a
+  // one-named-parameter implementation reading `arguments[1]` reports 1 against a declared 2.
   //
-  // Left as a false RED on purpose. It fails LOUD and the message says what to do, whereas every way
-  // of suppressing it requires deciding from the outside which zero is a real zero — and being wrong
-  // in THAT direction is silent, which is the trade this whole gate exists to refuse. No shipped
-  // module takes arguments either way today.
-  for (const runtime of ['export function f(...args) { return args; }', 'export function f() { return arguments[0]; }']) {
-    const dir = mkdtempSync(join(tmpdir(), 'eh-arity-zero-'));
-    try {
-      writeFileSync(join(dir, 'm.mjs'), `${runtime}\n`);
-      writeFileSync(join(dir, 'm.d.mts'), 'export declare function f(a: A, b: B): void;\n');
-      const { findings } = await auditLibDirectory(dir);
-      const arity = findings.filter((x) => x.includes('at runtime, but'));
-      assert.equal(arity.length, 1, `expected exactly one arity finding for ${runtime}; got ${JSON.stringify(findings)}`);
-      assert.match(
-        arity[0],
-        /rest parameter or an `arguments`-style body also reports 0 here/,
-        'when the gate reports a zero-arity mismatch it must name the legitimate reason it might be wrong, or the operator has no way to tell a real drift from this case',
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  // Left as a false RED on purpose. It fails LOUD, and every way of suppressing it means deciding
+  // from outside which low count is real — being wrong in THAT direction is silent, which is the
+  // trade this gate exists to refuse. No shipped module gathers arguments either way today.
+  //
+  // The message must NOT tell anyone to relax the declaration. Weakening a correct declaration to
+  // satisfy a heuristic trades a loud wrong answer for a quiet one; the message states the fact and
+  // asks which side moved.
+  for (const [runtime, declared] of [
+    ['export function f(...args) { return args; }', 'a: A, b: B'],
+    ['export function f() { return arguments[0]; }', 'a: A, b: B'],
+    ['export function f(a) { return [a, arguments[1]]; }', 'a: A, b: B'],
+  ]) {
+    const { arity } = await arityFindings(runtime, `export declare function f(${declared}): void;`);
+    assert.equal(arity.length, 1, `expected exactly one arity finding for ${runtime}; got ${JSON.stringify(arity)}`);
+    assert.match(
+      arity[0],
+      /counts only the formal parameters before the first default or rest/,
+      'the gate must name the legitimate reason it might be wrong, or an operator cannot tell a real drift from this case',
+    );
+    assert.match(arity[0], /check which of the two actually moved before changing either/);
+    assert.doesNotMatch(
+      arity[0],
+      /should spell them optional|declaration should/,
+      'the remedy must not be "weaken the declaration" — that converts a loud wrong answer into a quiet one',
+    );
   }
 });
 
@@ -444,21 +463,34 @@ test('arity is read from a const of FUNCTION TYPE too, not only from a `function
   }
 });
 
-test('each overload is satisfied SEPARATELY — their union is a range no signature declares', async () => {
-  // Taking the min of the mins and the max of the maxes builds a range nothing actually declares:
-  // against `f(a)` and `f(a, b, c, d, e)` the union is 1-5, so a runtime `length` of 3 — matching
-  // neither overload — was accepted. The union answers "is a call legal", which is not the question
-  // this check asks: whether the runtime's single `length` corresponds to any declared shape at all.
+test('overloads are checked as an ENVELOPE, because `length` is a prefix and not a set of call arities', async () => {
+  // A round of review argued the opposite and I implemented it: require the runtime `length` to fall
+  // inside some ONE overload's range, since the min/max envelope admits an arity no signature
+  // declares. That reasoning is wrong, and the correction is the durable part.
+  // `Function.prototype.length` is the implementation's formal-parameter PREFIX, not the set of calls
+  // it accepts. These are hand-written declarations over plain JavaScript, with no TypeScript
+  // implementation signature to constrain them, so overloads `f(a)` and `f(a, b, c, d, e)` are
+  // legitimately implemented as `function f(a, b, c)` reading `arguments[3]` and `arguments[4]`.
+  // Requiring an exact overload match rejects that valid implementation.
   const overloads = 'export declare function f(a: number): void;\nexport declare function f(a: number, b: number, c: number, d: number, e: number): void;';
-  const between = await arityFindings('export function f(a, b, c) { return [a, b, c]; }', overloads);
-  assert.equal(between.arity.length, 1, `an arity matching NO overload must be caught; got ${JSON.stringify(between.arity)}`);
-  assert.match(between.arity[0], /declares 1 or 5/, 'the message must name the declared shapes, not the union it is not');
-
-  // Both real shapes must still be admitted, or the fix has simply become stricter than the truth.
-  for (const [runtime, length] of [['export function f(a) { return a; }', 1], ['export function f(a, b, c, d, e) { return [a, b, c, d, e]; }', 5]]) {
+  for (const [runtime, length] of [
+    ['export function f(a) { return a; }', 1],
+    ['export function f(a, b, c) { return [a, b, c, arguments[3], arguments[4]]; }', 3],
+    ['export function f(a, b, c, d, e) { return [a, b, c, d, e]; }', 5],
+  ]) {
     const ok = await arityFindings(runtime, overloads);
-    assert.deepEqual(ok.arity, [], `a runtime length of ${length} matches a declared overload and must stay green`);
+    assert.deepEqual(ok.arity, [], `a runtime length of ${length} is a legal implementation of these overloads and must stay green`);
   }
+  // The envelope still has edges, or it would assert nothing at all.
+  const outside = await arityFindings('export function f(a, b, c, d, e, f2, g) { return [a, b, c, d, e, f2, g]; }', overloads);
+  assert.equal(outside.arity.length, 1, `a length outside the whole envelope must still be caught; got ${JSON.stringify(outside.arity)}`);
+  assert.match(outside.arity[0], /declares 1-5/);
+  // …and the message must explain the heuristic rather than tell anyone to relax the declaration.
+  assert.match(
+    outside.arity[0],
+    /counts only the formal parameters before the first default or rest/,
+    'the message must state why `length` can legitimately be lower, and must not recommend weakening a correct declaration to satisfy this check',
+  );
 });
 
 test('a generic type-parameter list is skipped before the real parameters are read', () => {

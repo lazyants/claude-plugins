@@ -578,7 +578,12 @@ export function extractDeclarationExports(source, label = '<source>') {
         }
         addValue(name, { kind: word, line, arity: functionTypeArity(annotationOf(declarator)) });
       }
-      i = end;
+      // Deliberately NOT jumping the cursor past the declarator. Doing so skipped the outer scanner
+      // over the whole statement, and the outer scanner is what matches bracket KINDS — so
+      // `export declare const A: [number);` was extracted as a clean declaration while being invalid
+      // TypeScript, which is the very thing the kind stack was added to catch. Letting the loop walk
+      // the declarator costs nothing (it holds no `export` keyword of its own to re-read) and keeps
+      // one scanner responsible for brackets everywhere instead of two that can disagree.
       continue;
     }
 
@@ -773,27 +778,26 @@ export async function auditModulePair(libDir, base) {
     const signatures = records.filter((r) => r.arity);
     if (!live || !live.isFunction || signatures.length === 0) continue;
     arityChecks += 1;
-    // Each overload is checked SEPARATELY and the runtime has to satisfy at least one. Taking the
-    // min of the mins and the max of the maxes instead builds a range no signature actually declares:
-    // against `f(a)` and `f(a, b, c, d, e)` the union is 1-5, so a runtime `length` of 3 — matching
-    // neither overload — was accepted. The union is the right answer to "is a call legal", which is a
-    // different question from the one asked here, namely whether the runtime's single `length`
-    // corresponds to any declared shape at all.
-    const accepted = signatures.some((s) => live.length >= s.arity.min && live.length <= s.arity.max);
-    if (!accepted) {
-      const describe = (a) => (a.max === Infinity ? `${a.min}+` : (a.min === a.max ? `${a.min}` : `${a.min}-${a.max}`));
-      const range = [...new Set(signatures.map((s) => describe(s.arity)))].join(' or ');
-      // The `length === 0` case gets its own sentence because it is the one where the gate can be
-      // wrong. `Function.prototype.length` reports 0 for a function that takes its arguments through
-      // a rest parameter or through `arguments`, both of which are legitimate and neither of which
-      // the declaration is expected to spell that way — so a correct pair can land here. Saying so in
-      // the message is the whole remedy: this fails LOUD, and an operator who reads it can spell the
-      // parameters optional in one edit. A gate that guessed instead would have to decide from the
-      // outside which zero is real, and guessing wrong in that direction is silent.
-      const zeroHint = live.length === 0
-        ? ' — note that a rest parameter or an `arguments`-style body also reports 0 here, so if this export takes its arguments that way the declaration should spell them optional rather than required'
-        : ' — one of the two moved without the other';
-      findings.push(`${base}: \`${name}\` takes ${live.length} parameter(s) at runtime, but ${base}.d.mts declares ${range} (line ${records[0].line})${zeroHint}`);
+    // The ENVELOPE across all signatures, not a per-signature match. An earlier revision required the
+    // runtime `length` to fall inside some ONE overload's range, on the argument that the union
+    // admits an arity no signature declares. That argument was wrong, and it is worth writing down
+    // why, because it sounded right for a full round: `Function.prototype.length` is the
+    // implementation's formal-parameter PREFIX, not the set of call arities it accepts. Overloads
+    // `f(a)` and `f(a, b, c, d, e)` are legitimately implemented here as `function f(a, b, c)` reading
+    // `arguments[3]` and `arguments[4]` for the long branch — these are hand-written declarations over
+    // plain JavaScript, with no TypeScript implementation signature to constrain them. Requiring an
+    // exact overload match rejects that valid implementation, so the envelope stands.
+    const min = Math.min(...signatures.map((s) => s.arity.min));
+    const max = Math.max(...signatures.map((s) => s.arity.max));
+    if (live.length < min || live.length > max) {
+      const range = max === Infinity ? `${min}+` : (min === max ? `${min}` : `${min}-${max}`);
+      // The same `length`-is-a-prefix fact is the one way this check can be wrong, and it is not
+      // confined to zero: any implementation that reads `arguments` past its named parameters, or
+      // gathers them with a rest parameter, reports fewer than it accepts. So the message states the
+      // fact and asks which side moved, rather than telling anyone to relax the declaration —
+      // weakening a correct declaration to satisfy a heuristic would trade a loud wrong answer for a
+      // quiet one, which is the trade this gate exists to refuse.
+      findings.push(`${base}: \`${name}\` takes ${live.length} parameter(s) at runtime, but ${base}.d.mts declares ${range} (line ${records[0].line}) — \`Function.prototype.length\` counts only the formal parameters before the first default or rest, so an implementation reading \`arguments\` or gathering a rest reports fewer than it accepts; check which of the two actually moved before changing either`);
     }
   }
 
