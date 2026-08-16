@@ -42,18 +42,22 @@ const TYPE_ONLY_HEADS = new Set(['interface', 'type']);
 const MODIFIERS = new Set(['declare', 'abstract', 'async', 'default']);
 
 /**
- * Declaration kinds whose OWN text can carry a parameter list, and so can have an arity to read.
+ * Why a function-valued export's declared arity was not compared, keyed by declaration kind.
  *
- * A class is excluded even though `typeof` calls it a function: its parameters sit on a constructor
- * member, not on the declaration. A specifier, a star re-export and a default expression are excluded
- * because they are a name and nothing else — the signature, if there is one, lives elsewhere.
- *
- * Known gap, stated rather than papered over: `export { f }` beside a local `declare function f(a)`
- * DOES have a readable arity, in the local declaration, but specifiers are not linked back to it. No
- * shipped module re-exports that way, and inventing the link would be guessing at which local a
- * specifier means.
+ * Every one of these is a signature that exists somewhere the reader does not go, NOT a signature
+ * that is absent — so each is named in `arityUnread` rather than skipped. An earlier revision
+ * excluded these kinds from the census outright, on the argument that a matched class pair should
+ * not be flagged; that turned an unread arity into an invisible one, and a 4-parameter runtime
+ * function re-exported as `export { f }` against a 1-parameter local declaration passed green with
+ * `arityChecks: 0`. Naming the reason is the difference between "we did not check this" and
+ * "we checked everything".
  */
-const ARITY_BEARING_KINDS = new Set(['function', 'const', 'let', 'var']);
+const ARITY_NOT_READ_BECAUSE = {
+  class: 'its parameters sit on a `constructor` member, which this reader does not descend into',
+  specifier: 'a specifier is a name only — the signature is in the local declaration it re-exports, which this reader does not link back to',
+  'namespace-reexport': 'the surface belongs to the re-exported module, which this reader does not resolve',
+  'default-expression': 'a default export expression carries no declared signature of its own',
+};
 
 
 /**
@@ -802,15 +806,12 @@ export async function auditModulePair(libDir, base) {
     // rather than on whether an arity was actually read skipped every one of them.
     const signatures = records.filter((r) => r.arity);
     if (!live || !live.isFunction) continue;
-    // `typeof` reports "function" for a CLASS too, and a class declaration is not a callable
-    // signature — its parameters live on a constructor member this reader does not descend into. A
-    // specifier (`export { f }`), a star re-export and a default expression carry no signature of
-    // their own at all: the shape is a name, and there is nothing in the declaration to read. Counting
-    // any of those as an unread arity would fail the gate on a perfectly matched pair, with guidance
-    // that cannot apply — a false RED introduced by the very check added to stop false greens.
-    // So the census is restricted to the kinds whose own declaration CAN carry a parameter list.
-    if (!ARITY_BEARING_KINDS.has(records[0].kind)) continue;
     if (signatures.length === 0) {
+      // `typeof` reports "function" for a class, and a `constructor` member's parameters are a real
+      // declared arity — just not one this reader reaches. Same for the name-only shapes: a specifier
+      // re-exports a local declaration that HAS a signature, a star re-export names another module's,
+      // a default expression has none at all. Excluding them from the census reads as "every arity
+      // was compared" while comparing none of them, so each is named with the reason instead.
       // The class-closing half. Three separate review findings were all the same shape: a function
       // export whose declared parameter list this could not read, skipped in SILENCE — first every
       // const-declared one, then one behind redundant parentheses. Each was fixed by teaching the
@@ -819,7 +820,8 @@ export async function auditModulePair(libDir, base) {
       // export is a function, so an arity that was never compared is recorded by NAME. A reader
       // whose type genuinely cannot be resolved without a compiler still lands here, and that is the
       // correct outcome — it is a gap either way, and the only question is whether anyone can see it.
-      arityUnread.push(`${name} (${records[0].kind}, line ${records[0].line})`);
+      const because = ARITY_NOT_READ_BECAUSE[records[0].kind];
+      arityUnread.push(`${name} (${records[0].kind}, line ${records[0].line})${because ? ` — ${because}` : ''}`);
       continue;
     }
     arityChecks += 1;

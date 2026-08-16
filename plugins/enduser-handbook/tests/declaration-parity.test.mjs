@@ -204,23 +204,41 @@ test('RED: a function export whose declared arity could not be read is NAMED, ne
   assert.equal(result.census.arityChecks, 1);
 });
 
-test('GREEN: a class, a specifier and a default are not "unread arities" — they carry no signature', async () => {
-  // `typeof` reports "function" for a class, so the check above initially failed a perfectly matched
-  // class pair and told the author to inline a function signature that cannot apply to a class — a
-  // false RED introduced by the very check added to stop false greens. A specifier and a default
-  // export are the same shape: a name, with no parameter list of their own anywhere in the
-  // declaration. Each is pinned, because the fix is a membership test and a membership test is
-  // exactly the kind of thing that gets one entry right and the next one wrong.
+test('CENSUS: a class, a specifier and a default are NAMED as unread, never quietly excluded', async () => {
+  // A revision of this check excluded these three kinds from the census on the argument that a
+  // matched class pair should not be reported. That was wrong, and the counter-example is the whole
+  // reason the census exists: `export { f }` over a 4-parameter runtime function, against a local
+  // `declare function f(a: number)`, then read as findings: [], arityUnread: [], arityChecks: 0 —
+  // a real declaration drift, invisible, under a gate reporting that every arity had been compared.
+  //
+  // Each of the three has a declared signature SOMEWHERE this reader does not go (a `constructor`
+  // member; the local declaration behind the specifier; another module). "Not compared" is the true
+  // statement about all of them, and that is what the census must say.
   const cases = {
     class: ['export class Widget { constructor(a) {} }', 'export declare class Widget { constructor(a: number); }'],
     specifier: ['function f(a) { return a; }\nexport { f };', 'declare function f(a: number): void;\nexport { f };'],
-    default: ['export default function d(a) { return a; }', 'export default function d(a: number): void;'],
+    'default-expression': ['export default (a) => a;', 'declare const d: (a: number) => number;\nexport default d;'],
   };
-  for (const [label, [mjs, dmts]] of Object.entries(cases)) {
+  for (const [kind, [mjs, dmts]] of Object.entries(cases)) {
     const result = await auditFixture({ 'm.mjs': `${mjs}\n`, 'm.d.mts': `${dmts}\n` });
-    assert.deepEqual(result.findings, [], `a matched ${label} pair must be clean:\n  ${result.findings.join('\n  ')}`);
-    assert.deepEqual(result.arityUnread, [], `a ${label} declaration carries no parameter list of its own, so it is not an unread arity`);
+    assert.deepEqual(result.findings, [], `a matched ${kind} pair is not a name mismatch:\n  ${result.findings.join('\n  ')}`);
+    assert.equal(result.arityUnread.length, 1, `${kind}: expected exactly one unread arity, got ${JSON.stringify(result.arityUnread)}`);
+    assert.match(result.arityUnread[0], new RegExp(`\\(${kind}, line \\d+\\) — .`),
+      `${kind}: the census entry must name the kind AND why the arity was not read, so nobody reads it as a defect in the pair`);
   }
+});
+
+test('RED: an arity drift behind a specifier is reported as unread, not as a completed comparison', async () => {
+  // The counter-example from the review, pinned on its own: the runtime function takes four
+  // parameters and the declaration one, and the ONLY thing standing between that and a silent pass
+  // is that the gate refuses to call the comparison done.
+  const result = await auditFixture({
+    'm.mjs': 'function f(a, b, c, d) { return [a, b, c, d]; }\nexport { f };\n',
+    'm.d.mts': 'declare function f(a: number): void;\nexport { f };\n',
+  });
+  assert.equal(result.census.arityChecks, 0, 'nothing was compared here — the census must not claim otherwise');
+  assert.equal(result.arityUnread.length, 1, `the drift must be visible as unread, got ${JSON.stringify(result.arityUnread)}`);
+  assert.match(result.arityUnread[0], /^m: f \(specifier, line 2\) — /);
 });
 
 test('RED: a stale declaration-only module — the direction a .mjs walk cannot see', async () => {
