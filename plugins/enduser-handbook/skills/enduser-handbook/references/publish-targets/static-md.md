@@ -300,8 +300,7 @@ rather than locating the line a second time.
 Both shipped adapters wire the index before their link-integrity gate, so a wiring halt below is
 convergent on re-run WHENEVER it names a form — and where one cannot be named it says so instead of
 promising convergence (two below are that case and either can repeat verbatim: the unnamed 1.10.0
-fallback, and the ambiguous-container halt in the container-resolution branch, which reports a
-near-miss heading and deliberately prescribes no repair).
+fallback, and the near-miss halt in the container-resolution branch).
 For the named ones: a first run halts with instructions, the container and
 chapter line get added (by you, or by the user for a non-heading index), and the very next run's
 step 0 finds them and proceeds without re-halting.
@@ -560,17 +559,29 @@ unique across groups (see `manifest-discipline.md`):
   one: NFC (the normalization the match itself already applies), case folding, unwrapping a
   whole-content emphasis, strikethrough, inline-code, markdown-link, wikilink or inline-HTML
   wrapper, resolving a character reference, stripping a trailing `{#anchor}`, and dropping a
-  leading OR trailing run of non-letter decoration such as an emoji, an icon or a parenthetical.
+  leading OR trailing run of ORNAMENT — an emoji, an icon, a bullet glyph, a run of punctuation —
+  meaning a run that carries no letters and no digits.
   Anything else that renders the same counts too — err toward calling it a near miss, because the
   cost of doing so is a halt and the cost of missing one is a forked index. That comparison DETECTS
   a near miss and nothing more: it never selects a container to write into, so it cannot
   mis-target, and the write still needs the exact match that already came back empty.
+
+  A run that DOES carry letters or digits is deliberately NOT folded, and a parenthetical is the
+  case to hold in mind. `Reports (2024)` and `Reports (2025)` are two sections an operator
+  maintains side by side; fold the parenthetical and they read as a near miss, so a correct
+  handbook halts and NOTHING clears it — the token that distinguishes them is the token that was
+  folded away. The governing rule is what rules this out: compare what each side RENDERS as, and
+  `Reports (2024)` does not render as `Reports`. Stripping is not rendering. An ornament run is
+  different in kind — decoration an operator ADDS to a nav heading, not a distinction they are
+  drawing. The cost runs the other way and is accepted: `## Reports (new)` beside a `Reports`
+  container is no longer a named near miss, and a fork there costs one duplicate heading, where the
+  over-halt cost a handbook nobody could publish at all.
   - **One or more headings are a plausible spelling** ⇒ halt, naming `group_title` and EVERY
     heading that reads as a near miss rather than just the first, with every invisible codepoint in
     each one written as its `U+XXXX` code point, so the operator can see a difference the terminal
     will not render (the `'` delimiters around a heading are NOT escaped, the same disclosed
     exposure the wrong-container halt's own found-title substitution carries):
-    `Found no container titled '<group_title>' in <index_file>, but these headings may render as the same section: <headings>. Decide whether they are one section or several, then curate <index_file> or the manifest accordingly and re-run — if you change group_title, change it on EVERY entry of this chapter's group, since it is group-scoped and changing it on this chapter alone halts on the conflicting-group_title gate instead.`
+    `Found no container titled '<group_title>' in <index_file>, but one or more headings may render as the same section: <headings>. Decide whether they are one section or several, then curate <index_file> or the manifest accordingly and re-run — if you change group_title, change it on EVERY entry of this chapter's group, since it is group-scoped and changing it on this chapter alone halts on the conflicting-group_title gate instead.`
 
     Prescribe no repair beyond that. Which edit is right turns on whether these are one section
     spelled several ways or several sections that happen to render alike, and that is a question
@@ -581,8 +592,14 @@ unique across groups (see `manifest-discipline.md`):
     below already does.
 
     This halt names no form, and therefore promises no convergence: it is not self-clearing and
-    stays raised until someone who knows what the sections are decides. That is deliberate, and it
-    is the same trade the halt below makes.
+    stays raised until someone who knows what the sections are decides. That is deliberate.
+
+    If it names spellings you cannot tell apart, suspect STRUCTURE rather than the label: the
+    container scan reads ATX (`## `) headings only, so a setext heading — a title underlined with
+    `---` or `===` — is invisible to it and comes back zero while rendering exactly as
+    `group_title`. Rewriting that heading in ATX form clears it. This only arises in a MIXED index;
+    one carrying no depth-2 ATX heading at all resolves as a non-headings index and never reaches
+    this branch.
   - **None is** ⇒ the create is safe: create a new `## <group_title>` heading matching the file's
     existing heading depth, then append the chapter line under it.
 
@@ -753,8 +770,10 @@ fail it, and an emoji beside a nav heading is ordinary curation rather than an e
 near-miss check in the container-resolution branch
 above now HALTS on the spellings it recognizes instead of creating beside them. What remains here
 is an invisible character inside the label — neither refused nor readable as a near miss — plus any
-rendered equivalence the near-miss list does not name; that list is illustrative, and a heading it
-misses still gets a second, pixel-identical heading created beside it. Both remainders are
+rendered equivalence the model fails to NOTICE. That second remainder is keyed on RECOGNITION, not
+on the list: the list is illustrative and the rule past it is to err toward halting, so what stays
+open is not what the list omits but what goes unnoticed, and a heading nobody spots as a near miss
+still gets a second, pixel-identical heading created beside it. Both remainders are
 unchanged pre-existing behaviour, and the first stays open by choice rather than for want of a
 mechanism — the near-miss comparison could ignore invisible characters too, and the sentence
 immediately below is why it must not. U+200C/U+200D (ZWNJ/ZWJ)

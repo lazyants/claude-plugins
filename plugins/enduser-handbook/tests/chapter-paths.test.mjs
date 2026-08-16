@@ -1996,11 +1996,14 @@ test('#351(b) scope, pinned honestly: the invisible-label refusal covers the NES
   // either direction. Nested list: refused, whole file. Headings: a `## ` container carrying the
   // same character is NOT refused — findContainer simply fails to match it and the adapter creates
   // a second, pixel-identical heading. Still true for an INVISIBLE character after #476: that
-  // change made the create conditional on a near-miss re-read the consuming model performs, and
-  // invisible characters sit deliberately outside what that re-read recognizes, because ZWNJ/ZWJ
-  // are required INSIDE ordinary words in Persian, Hindi and other scripts, so folding them away
-  // would halt a correctly-spelled handbook. This fixture's behaviour is therefore unchanged, and
-  // `findContainer` still returns a plain `zero` — #476 added no outcome here and needed none.
+  // change made the create conditional on a near-miss re-read the consuming model performs, and an
+  // invisible character — this fixture's U+200B ZWSP included — sits deliberately outside what
+  // that re-read recognizes. The reason is the CLASS, not this character: U+200C/U+200D (ZWNJ/ZWJ)
+  // are required INSIDE ordinary words in Persian, Hindi and other scripts, so a rule that folded
+  // invisible characters away would halt a correctly-spelled handbook. The adapters keep the two
+  // apart deliberately — the class is the residual, ZWNJ/ZWJ is the named reason it stays open.
+  // This fixture's behaviour is therefore unchanged, and `findContainer` still returns a plain
+  // `zero` — #476 added no outcome here and needed none.
   const zwsp = String.fromCharCode(0x200b);
   const nested = ['# S', '', `- Ad${zwsp}min`, '  - [A](a.md)', ''];
   assert.deepEqual(wireNestedListChapter(nested, 'Admin', '[B](b.md)'), { kind: 'not-a-list' });
