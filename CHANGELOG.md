@@ -1,6 +1,73 @@
 # Changelog
 
-All notable changes to `lazyants/claude-plugins` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
+All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
+
+## [enduser-handbook 1.14.0] — 2026-08-16
+
+Two parallel tracks over one theme: an assertion that never checked what it claimed to, and a batch
+of sentences that were false about the shipped artifact.
+
+### Fixed
+
+- **Page identity never pinned the labels a chapter quotes (#477).** Step 4 required only that the
+  narrated element be asserted **visible**. Visibility is a predicate about a box, not about text, so
+  a spec anchored on a testid or a CSS selector satisfied it while pinning nothing the reader will
+  read. Rename a column header: route, heading, steps and triggers unchanged, the delta classifies as
+  an accepted diff, the re-capture writes a PNG showing the new string, and the published step quotes
+  a label absent from its own screenshot — every gate green. Step 4 now requires the assertion be
+  keyed to the exact quoted text **and** scoped narrowly enough to identify the one instance the step
+  narrates: a page-wide exact match is satisfied by the same string anywhere on the page, and because
+  the shipped helpers take the FIRST match, scoping to the captured region is not yet identity when
+  the same string repeats inside it. The remedy is the smallest distinguishing container; a count of
+  exact matches is a fallback sound only over a fixed row set. The label class that earns no
+  coverage-matrix row is keyed on **inertness**, not element type — a sortable column header, or a
+  `<label>` that focuses its control, is an interactive trigger and earns a row like any other, and
+  the assertion is owed either way, since a matrix row records a label rather than asserting one.
+  `anti-fabrication.md`'s self-audit carries the reciprocal obligation, with disclosure prose as the
+  stated exception; that exception runs through the **label**, not the step, so a disclosure that
+  embeds a captured open state still pins every label that screenshot documents. No option was added
+  to `IdentityOptions` and no runtime behaviour changed — the exact-matched primitive already shipped.
+- **The shipped capture skeleton contradicted the contract it teaches (#568).** `capture.example.spec.ts`'s
+  overview step asserted `getByRole('main')` visibility and pinned no text — the file every adopter
+  copies as their starting point. It now demonstrates the pin (an exact-text, role-scoped assertion on
+  the narrated column header) and says why the container assertion above it is not enough.
+- **`maskAndAssert` refuses a region that frames another document (#472).** Neither the mask nor the
+  leak scan crosses a document boundary while `page.screenshot` composites the child document's
+  pixels, so unlisted PII inside an `<iframe>` had nothing to mask, no text node to collect and no
+  pattern to match — a green run with the value in the published PNG. The carve-out is now enforced
+  rather than only disclosed, behind a new `MaskOptions.allowUnscannedFrames` opt-out.
+- **Both capture skeletons stopped letting `finally` replace the primary failure (#473).** A bare
+  `finally { await guard.assertNoDangerousHits(); await context.close(); }` discards the body's error
+  and skips the close when the guard ledger is non-empty — permanent for an adopter whose REST POST
+  reads fail closed into that ledger.
+- **Five documentation claims measured wrong (#560, #563 items 1–2, #344 via item 7).** The example's
+  `denyPatterns` duplicated the built-in verbs and were strictly wider; three admission claims in the
+  guard contract were wrong against the shipped `decideRoute`; and two cross-file pointers in the test
+  suite cited line ranges that had both rotted — fixed by dropping the range and keeping the greppable
+  identifier, since renumbering only reproduces the defect on the next insertion above it.
+  `profile-validation.md` claimed a false-reject-free design for mechanism B was "tracked as a
+  follow-up"; nothing tracks it, so the text states the resolution instead — a documented deferred
+  residual.
+
+### Changed
+
+- **`capture.locale` pins the process locale, never the app's UI language (#474).**
+- **Whole-suite `capture.command` beats the delta rule (#478, #563 item 3).** Revalidation step 5 told
+  the consumer to re-capture only the deltas while `container-isolation.md` requires the profile's
+  command to run exactly as written, and every shipped representative command is a whole-suite
+  invocation — no third option existed. The step now scopes only re-**authoring** to the delta set and
+  hands the re-shot scope to the verbatim command; provenance is re-recorded for every chapter the run
+  actually re-shot. Three claims are deliberately narrower than the original ticket's wording, which
+  is falsifiable against the shipped code: `record_stale` applies to a record that already exists (a
+  chapter with none reports `record_absent`), running the provenance substep is not a promise the
+  record gets rewritten, and `capture_failed` is one run-level warning rather than a halt.
+- **A one-time pre-1.6.0 embed sweep (#246, #563 item 4).** Read each chapter's embeds once, resolve
+  each target on disk, rewrite only the ones that do not resolve, and leave a resolving embed byte for
+  byte alone. This replaces the filesystem-owning repair module the original ticket asked for.
+- **The root changelog states its one exception (#147, #563 item 8).** `literary-translator` keeps its
+  own changelog under `plugins/literary-translator/`; this file is frozen for it at the 1.1.0 entry.
+  The absence of that pointer is what manufactured the original backfill request, and the README
+  plugin table now carries the same note.
 
 ## [enduser-handbook 1.13.0] — 2026-08-15
 
