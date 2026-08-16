@@ -607,7 +607,7 @@ def test_usage_agreeing_token_and_run_id_clear_every_new_check(tmp_path, capsys,
     before the FIRST colon, so a review token has one colon more than the check
     needs and must still clear it: were the check to demand exactly one colon,
     every review dispatch the shipped template makes
-    (mass-translate-wf.template.js:1028 builds RUN_ID + ":" + seg + ":r" +
+    (mass-translate-wf.template.js:1032 builds RUN_ID + ":" + seg + ":r" +
     roundLabel, segment_dispatch_driver.py's review_dispatch_token() the same
     shape) would be refused at the chokepoint, which no test asserting only the
     translate form would notice."""

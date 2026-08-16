@@ -44,12 +44,33 @@
   never move section G inside them. (This paragraph deliberately spells the
   marker names without their comment delimiters, for the same
   regex-nesting reason explained above.)
+
+  What belongs inside those markers: rule text a translator or reviewer
+  must APPLY, plus the boundary case that keeps each rule from being
+  over-applied -- nothing else. The reasoning that produced a rule, the
+  measurements behind it, and the running log of a campaign belong in a
+  sibling file (`consistency_issues.md`), never in here: every byte
+  between the markers is hashed into `style_contract_hash`, and every
+  byte of this file is re-read by every translator and reviewer call.
+  Do not restate a rule `translate_TASK.md`/`review_TASK.md`, the
+  segpack, or `profile.yml` already owns -- two statements of one rule
+  drift apart, and the freshly resolved surface is the one the pipeline
+  actually obeys (verse policy, section E, is the standing example).
+  Outside the markers, keep two things: the glossary summary a human
+  skimmer needs, and the section-G tables -- those are read in full by
+  every translate and review call, and carry what a one-segment reader
+  cannot otherwise see. Being outside the markers means they are unhashed,
+  not that they are decoration.
 -->
 
 # Style bible -- [PROJECT TITLE / AUTHOR / PERIOD -- fill in]
 
-> `style_bible_version: v1-draft` -- bump when `style_contract` (sections A-F) changes in a way that must
-> invalidate every already-converged segment (see `project.pipeline_version` in `profile.yml`).
+> Editing `style_contract` (sections A-F) invalidates every already-converged segment BY ITSELF: those
+> bytes are hashed into `style_contract_hash`, which is a cache-key field, so no version bump is needed
+> and none is available -- this document carries no version field of its own that any script reads.
+> `project.pipeline_version` in `profile.yml` is the operator's lever for the other case: an invalidation
+> the hashed span cannot express, where the contract text is unchanged but what the pipeline does with it
+> is not.
 > Living document, read in full by every translator (codex) and reviewer (codex) call, every segment.
 > Two parts with different invalidation scope: `style_contract` (A-F, global, changes rarely and on
 > purpose) and `glossary` (G, per-term, backed by `canon.json`, grows continuously via the
@@ -187,13 +208,28 @@ way. Append one bullet per trap as it's found: the source term, the wrong (moder
 right (period/domain-specific) reading, and which segment surfaced it. This is the project's own running
 defense against the same mistake recurring in a later segment.
 
+**A measured claim carries its own scope.** A bullet that reports a count names, in the same sentence, the
+universe it was counted over ("all 7 title strings enumerated in `consistency_issues.md`", never a bare
+"205 of 205 title sites") -- a total whose scope did not travel with it reads as a closed class when the
+real class is still open. Where the class is open-ended, say so instead of reporting a total, and prefer
+recording the enumeration, or a path to it, over the count.
+
+**Timing, not content, is the constraint on appending here.** These lines sit inside the style_contract
+span, so one more bullet moves `style_contract_hash` and flips every already-converged segment to `stale`.
+That flip is bookkeeping, not an order to re-review anything (SKILL.md's R9) -- but it is only free while
+the loop is still running, so collect traps in `consistency_issues.md` as they surface and promote them
+here in one batch at a batch boundary. A promotion landing after the last segment converges re-stales the
+whole corpus and blocks W9 assembly, buying nothing but a re-run for the stamp.
+
 ### F. Reference samples (voice anchor -- fill in AFTER the W4 stress gate converges, not at scaffold time)
 
 Not a required-fill span: this content doesn't exist yet when the project is first scaffolded (the stress
 gate hasn't run). Once the W4 stress-gate segment converges, cite/quote it here as the prose voice anchor
 every subsequent batch is told to match. If this project has an early landmark passage (e.g. a
 particularly hard verse or set-piece) that converged cleanly and is worth citing as its own anchor, add it
-here too.
+here too. Filling this in at W4 is cheap by construction: only the stress-gate segment has converged by
+then, so the `style_contract_hash` move it causes costs one segment's stamp, not a book's. Adding a later
+anchor is a style_contract edit like any other -- the timing rule under E-traps above applies to it too.
 
 <!-- STYLE_CONTRACT_END -->
 
@@ -212,15 +248,46 @@ this document.
 `segpack.py` injects `canon_names[]` (locked forms a translator must use verbatim) and `new_names[]` (not
 yet canonized -- the translator resolves by context and flags `NEW:` in its own notes) into every segment.
 
+Three of this section's sub-sections -- `G-cast`, `G-voices` and `G-motifs` -- are optional and ship
+empty; an empty one is a legitimate final state for a book that doesn't need it. Like the rest of section
+G they sit OUTSIDE the style_contract markers, so filling one in mid-run moves no cache-key field and
+re-stales nothing -- and, for the same reason, a segment that already converged never sees what was
+added: they bind the segments still to come.
+
 | source form | canonical target form | basis |
 |----|--------------|-------|
-| _(populated once the glossary-pass has run)_ | | |
 
 ### G-address. Address-register matrix by person-pair (only if section B applies; PENDING -- fills in as `NEW:` pairs are resolved)
 
 | person A | person B | A -> B | B -> A | basis |
 |--------|--------|-----|-----|-----------|
-| _(populated as pairs come up, if section B applies to this language pair)_ | | | | |
+
+### G-cast. Dramatis personae + one-paragraph synopsis (fills in once the recurring cast is known)
+
+A translate or review call is given one segment and nothing else -- no neighbouring segment, no synopsis,
+no cast list. Put that context here if this book needs it: one paragraph on what the book is about, then
+one row per recurring person.
+
+| person | who they are | relation to the others | what a translator must not get wrong |
+|--------|--------------|------------------------|--------------------------------------|
+
+### G-voices. Per-character voice (fills in as a character's own voice settles)
+
+Section A fixes the narrator's voice book-wide and section B the address register between persons; neither
+says how one character sounds. Record that here once it settles, so a reviewer holding one segment can
+check a voice it cannot otherwise see.
+
+| person | register | tics / habitual constructions | forbidden for this person |
+|--------|----------|-------------------------------|---------------------------|
+
+### G-motifs. Recurring phrases held to one rendering (fills in as a motif is recognized)
+
+A phrase the author repeats on purpose is a link across segments (section E's repetition rule), and a
+reviewer holding one segment cannot see the other end of it. Fix the rendering once here and cite where it
+first occurs.
+
+| source phrase | fixed target rendering | first occurrence |
+|---------------|------------------------|------------------|
 
 ### Queues (discipline)
 

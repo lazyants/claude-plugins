@@ -15,6 +15,26 @@ this name" inside each segment's own translation pass would silently drift acros
 apart. `canon.json` exists so that decision is made once, validated, frozen, and
 then injected into every segment that needs it — never re-litigated.
 
+**That freeze is book-local, and only book-local.** `canon.json` lives in one
+book's `durable_root` and every shipped reader resolves exactly one of them —
+`final_audit.py`'s cross-segment `warn_glossary_diff` reads this root's
+`canon.json` and the converged segments beside it, so a name rendered one way in
+volume 1 and another way in volume 2 is invisible to it. **The previous volume's
+`canon.json` is not an input to the next one**: `SKILL.md`'s R10 lists it under
+*Never copied*, because it is book-shaped — duplicate spellings that resolved to
+one target *in that book*, a `review_queue` left unfrozen for *that book's*
+cast.
+
+What does outlive a book is R10's third legitimate input: a **cross-volume name
+or person registry kept in the series' own directory**. That is the sanctioned
+home for a name that recurs across volumes, and the thing to consult when the
+next volume's glossary pass surfaces it again — re-decided into that volume's
+own canon through that volume's own pass, never copied in. The route is
+operator-driven end to end: no script seeds W3's candidates from such a
+registry, and nothing diffs one volume's canon against another's, so
+cross-volume consistency is an adjudication the operator makes, not a check the
+pipeline runs.
+
 ## Bootstrap sequence
 
 Canon population is not "paste the whole book into context and ask for a glossary"
@@ -45,6 +65,24 @@ Canon population is not "paste the whole book into context and ask for a glossar
    a `review_queue` for low-confidence/disputed cases. Routing is driven by each
    batch item's own `disposition` field (`"accepted"` vs `"review_queue"`) — never
    inferred after the fact from `basis`/`confidence`.
+
+   **A form known to be SPLITTING, with none of its senses resolved yet, is a
+   `review_queue[]` item too — it needs no third home and no project-local
+   sidecar of splitting forms.** The QUEUED shape (`canon-batch.schema.json`'s
+   `items.oneOf[1]`) requires only `source_form`, `is_proper_name`,
+   `disposition` and `note` — the resolution fields stay optional and absent,
+   and `additionalProperties: false` leaves no other slot — so the evidence
+   that the form splits goes in the `note`, and nothing has to be resolved to
+   record it. `canon_senses.json` is not the place: its `is_split` predicate
+   needs >=2 ADJUDICATED senses, which is exactly what this form does not have
+   yet. Queueing it is what makes the pipeline leave it alone —
+   `glossary_batch_plan.py` excludes every `review_queue[].source_form` from
+   every batch, so the form stops being proposed for single-target
+   adjudication, and `segpack.py` never reads `review_queue` at all, so no
+   fixed target for it ever reaches a translate prompt (it surfaces
+   per-segment through `new_names[]` instead — see **`segpack.py`'s canon
+   injection contract**). `glossary_batch_plan.py --retry` is the one thing
+   that reinstates it, once its senses are worth researching.
 4. **Hash stamping.** The merge step records `generation_hashes.particle_config_hash`
    AND `generation_hashes.derivation_bundle_hash` into `canon.json` at the moment of
    merge, via `cache_key.py --field particle_config_hash` / `--field

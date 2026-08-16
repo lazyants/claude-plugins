@@ -1052,8 +1052,8 @@ def test_run_fails_closed_on_frozen_input_specs_key_mismatch_after_upstream_dige
     proving nothing about the guard this test targets. `compute_producer_input_digest()`
     (step 3, skeptic_setup.py:650) is NOT part of this trap and this test
     says nothing about it either way: it's imported from `suspicion_scan`
-    (skeptic_setup.py:187-188), is DEFINED there (suspicion_scan.py:868),
-    and its own `FROZEN_INPUT_SPECS` name lookup (suspicion_scan.py:966)
+    (skeptic_setup.py:187-188), is DEFINED there (suspicion_scan.py:871),
+    and its own `FROZEN_INPUT_SPECS` name lookup (suspicion_scan.py:969)
     resolves through a Python function's `__globals__`, which is bound to
     the module it was DEFINED in -- so it reads `suspicion_scan`'s own
     `FROZEN_INPUT_SPECS` binding, never this module's `mod.FROZEN_INPUT_SPECS`.

@@ -280,7 +280,7 @@ def test_split_exclusion_leaves_non_split_candidates_alone(tmp_path):
 
 # ---------------------------------------------------------------------------
 # --senses-path path-state policy (contract §10 / §11b, mirrors --canon's
-# explicit-vs-default split at glossary_batch_plan.py:470)
+# explicit-vs-default split at glossary_batch_plan.py:482)
 # ---------------------------------------------------------------------------
 
 
@@ -300,7 +300,7 @@ def test_explicit_missing_senses_path_fails(tmp_path):
     """(§10.2) An explicit --senses-path that does not exist is a caller
     error -> BLOCK (allow_absent=False), proving
     `senses_explicit = args.senses_path is not None` mirrors
-    `canon_explicit` at glossary_batch_plan.py:470 exactly. A silently-empty
+    `canon_explicit` at glossary_batch_plan.py:482 exactly. A silently-empty
     result here would let a typo'd --senses-path bypass the exclusion
     entirely."""
     nc, canon = write_inputs(tmp_path, [cand("Alice", freq=20)])

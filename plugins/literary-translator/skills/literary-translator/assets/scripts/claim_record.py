@@ -32,9 +32,17 @@ standing permission. This mirrors the argument already written for
 with a wildcard escape is the invisible warning this check exists to
 replace. Per-run makes the wildcard structurally impossible"). Only the
 LOCATION argument is borrowed from that precedent -- NOT its read
-discipline: `.resume_gate_ack`'s own readers use `.exists()`, which is
-exactly the predicate this module forbids (see below). Retrofitting those
-readers is out of scope and is recorded in OPEN.md.
+discipline: `.resume_gate_ack`'s own readers do use `.exists()`
+(select_segments.py's runs_acknowledged_pre_gate / runs_missing_digest
+split, backfill_resume_gate_ack.py's needs_ack one). That collapse is safe
+THERE because it fails CLOSED: a False -- genuinely absent or merely
+unreadable, which `.exists()` cannot tell apart -- keeps the run id out of
+the acknowledged list and puts it in runs_missing_digest, where
+select_segments.py refuses to authorize any dispatch and
+backfill_resume_gate_ack.py --apply is the sanctioned way to clear it
+(create-only, and it warns on stderr when the create failed). Here the
+polarity is the other way round -- ABSENT means PERMIT (see below) -- so
+the same collapse would fail OPEN. No retrofit of those readers is owed.
 
 WHY "claim"/"claimed" AND NEVER "adopt"/"adopted": that word is already
 taken for a different operation in this pipeline -- codex_job.py sets

@@ -79,6 +79,18 @@ never approaches the 600 s ceiling; only WAITING on the driver's own exit
 would, which nothing does, by design (`disown` + closed stdin/stdout is
 what keeps the driver alive past this Bash call's own return).
 
+That redirect is NOT a progress log, and no flag makes it one. Stdout
+carries exactly ONE JSON line, printed on `main()`'s terminal path once
+the run is over (see the exit-code paragraph at the end of this
+docstring); this script emits no per-segment progress on stdout at all,
+by design, so for the whole run that file holds nothing but the stderr
+warnings below. The live progress and liveness channel is the append-only
+journal (Property 5 below) at `runs/<SESSION_ID>/driver_journal.jsonl`,
+flushed and fsynced per entry and opening with a `driver_started` entry
+carrying this process's pid -- where that `<SESSION_ID>` is the one this
+driver generates for itself, never the caller-chosen label in the
+redirect above.
+
 ## The 8 mandatory safety properties, and how each is closed
 
 1. **Launch shape** -- see above; enforced by convention/documentation,
@@ -1274,7 +1286,16 @@ def release_driver_lock(fd) -> None:
 def codex_jobs_per_segment(max_fix_rounds: int) -> int:
     """1 translate job + (max_fix_rounds + 1) review jobs (one per normal
     round, plus the one mandatory final confirming review). Fix rounds are
-    NOT counted -- see module docstring."""
+    NOT counted -- see module docstring.
+
+    EXACT for mass-translate-wf.template.js, whose review retry re-reads
+    the artifact codex already wrote instead of starting a second job; a
+    FLOOR here, because `process_segment()` below may additionally spend
+    the fabricated-loc re-review, hard-capped at one per segment by its own
+    `fabricated_loc_retries` counter. That function's `max_iterations` is
+    sized off this one accordingly, so this driver's real per-invocation
+    ceiling is max_fix_rounds + 3 -- an overspend of at most one job per
+    segment against the cap this function feeds."""
     return max_fix_rounds + 2
 
 
@@ -2382,9 +2403,9 @@ def _resumable_run_id_candidates(runs_dir: Path, durable_root: Path) -> list:
     that "it might be a real run, so do not silently forget it" -- was
     rejected: this function's return value is forwarded verbatim into
     resume_setup.py's own `resume_from_run_ids`, and that authority's
-    resolve_run() (resume_setup.py:781) decides a MATCH by reading
+    resolve_run() (resume_setup.py:785) decides a MATCH by reading
     `runs/<id>/input.digest` with its OWN `Path.is_file()` call
-    (resume_setup.py:803) -- the identical swallow-pattern, one layer
+    (resume_setup.py:807) -- the identical swallow-pattern, one layer
     down, in a file this fix does not own. Passing an unreadable candidate
     through would not close the hole; it would only relocate it to a site
     this change cannot reach, while looking closed here. Refusing at the
@@ -2454,7 +2475,7 @@ def resolve_run_id(dirs: dict, *, translate_cfg: dict,
     Deliberately does NOT send `segs` (codex round-2 follow-up, post-
     8815800): the shipped resume_setup.py derives the input_digest's
     domain itself, straight from manifest.json's own segments[]
-    (_load_manifest_seg_ids(), resume_setup.py:548) -- never from a
+    (_load_manifest_seg_ids(), resume_setup.py:552) -- never from a
     caller-supplied list -- and reads a `segs` field literally NOWHERE in
     its own source; resume_integrity.test.py:test_mass_segs_field_omitted_
     still_works proves omission is accepted for kind="mass" specifically,
@@ -2482,7 +2503,7 @@ def resolve_run_id(dirs: dict, *, translate_cfg: dict,
     codex round-2 follow-up: `resume_from_run_ids` (plural, shipped
     8815800) carries EVERY candidate _resumable_run_id_candidates() offers
     (most recent first) in this ONE call, omitted entirely when there are
-    none -- resume_setup.py's own resolve_run() (resume_setup.py:720) now
+    none -- resume_setup.py's own resolve_run() (resume_setup.py:724) now
     does the try-each-candidate-in-order/first-match-wins loop internally
     and computes input_digest EXACTLY ONCE regardless of candidate count.
     This replaces an earlier version of this function that called
@@ -2504,7 +2525,7 @@ def resolve_run_id(dirs: dict, *, translate_cfg: dict,
     `args` is always `{}` for kind="mass" -- resume_setup.py now REJECTS
     (ResumeSetupError) any other value outright, before its own expensive
     per-segment cache_key.py shell-outs (compute_input_digest(),
-    resume_setup.py:622-634), for the reason this driver already applies:
+    resume_setup.py:626-638), for the reason this driver already applies:
     this driver's own CLI scoping flags (--only-segs/
     --allow-retranslate-converged/--allow-empty) govern Step 1's OWN
     gating (select_segments.py, already run and already enforced before
@@ -5436,7 +5457,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "prove the rest, and does not pretend to. If the assertion is "
             "wrong, a concurrent fix turn writes the canonical draft "
             "directly and copies whatever dispatch_token it read "
-            "(mass-translate-wf.template.js:1284): depending on timing it "
+            "(mass-translate-wf.template.js:1288): depending on timing it "
             "either loses its own work, or leaves the claim's re-stamped "
             "draft carrying content that nobody has re-reviewed. Never a "
             "blanket authorization: only the ids named here."

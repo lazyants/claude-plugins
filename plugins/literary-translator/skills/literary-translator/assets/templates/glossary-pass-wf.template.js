@@ -1432,7 +1432,11 @@ function rejectedAnywhere(reply, failSentinel) {
 // sentinel glued behind ANY character still keeps this reply away from READY
 // (rejectedAnywhere is raw indexOf and never asks where the sentinel sits),
 // while READY stays whole-line equality via sentinelVerdict, so a
-// quoted-but-disavowed success form is still not a success. See
+// sentinel-shaped line the agent's own LATER prose overrides is still not a
+// success. That qualifier is exact rather than a hedge (#371): sentinelVerdict
+// reads the LAST trimmed non-empty line, so a disavowal that PRECEDES a bare
+// sentinel on the final line is the prose preamble #308 tolerates by design,
+// and it passes unless the containment guard above catches it first. See
 // rejectedAnywhere()'s own comment for the measurement behind that ordering, and
 // for what the false-RED costs here.
 //

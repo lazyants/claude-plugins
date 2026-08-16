@@ -1622,6 +1622,20 @@ FROM_STALLED_DISCLOSURE = (
     "this claim's re-stamped draft carrying content that nobody has re-reviewed."
 )
 
+# #513. Which PATH consumes a claim is not neutral, and the answer is the same
+# for all three claim profiles -- so it is a constant here for the same reason
+# FROM_STALLED_DISCLOSURE above is one: three help strings that restate one
+# clause in their own words agree only until someone edits one of them, and
+# --help prints all three back to back, where a divergence is visible to the
+# operator and to nobody else. The framing AROUND it stays local to each flag;
+# none of them may paraphrase what is inside it.
+CLAIM_CONSUMPTION_NOTE = (
+    "Consume the claim with segment_dispatch_driver.py, which reviews the draft on "
+    "disk as it stands; pipeline() has no claim-aware branch and dispatches a "
+    "translate per claimed id, which codex_job.py adopts (draft preserved) or "
+    "refuses under D8 -- wasted, never destructive."
+)
+
 # final_audit.py's own SAFE_STALE_CARVEOUT_FIELDS, restated per this
 # project's "no shared lib between self-contained scripts" convention (this
 # file already restates CACHE_KEY_FIELDS/DERIVATION_STATE_FIELDS the same
@@ -2890,7 +2904,7 @@ def evaluate_claim_admission(
         # `current_cache_key`, computed once directly above: a second
         # cache_key.py subprocess call here would be exactly the kind of
         # second, later-timestamped invocation D4's own "the key as of
-        # publication" contract must not tolerate (claim_record.py:430-431).
+        # publication" contract must not tolerate (claim_record.py:438-439).
         stored_cache_key_for_drift = ledger_record.get("cache_key")
         if not isinstance(stored_cache_key_for_drift, dict):
             reasons.append(
@@ -3847,7 +3861,7 @@ def acquire_and_hold_lease(lock_path: Path, what: str) -> "tuple[bool, str]":
     the admission decision rest on state that changed while we waited).
 
     The self-test after a successful acquire is
-    segment_dispatch_driver.py:1195-1250's, with ONE deliberate difference: it
+    segment_dispatch_driver.py:1207-1262's, with ONE deliberate difference: it
     warns and proceeds, THIS REFUSES. The asymmetry is the point. On an
     unenforced mount the driver's own acquire is merely not exclusive, whereas
     this script's standalone path would FALSELY ACQUIRE runs/.driver.lock while
@@ -5115,7 +5129,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "#438: claim these ids for RE-REVIEW under the --from-converged profile "
             "(PLAN.md D2) -- a segment that converged cleanly at least once and was then "
             "hand-edited. Never re-translates. Requires --run-id. A successfully-admitted id "
-            "clears the previously_converged refusal for itself only (D5.2)."
+            "clears the previously_converged refusal for itself only (D5.2). "
+            + CLAIM_CONSUMPTION_NOTE
         ),
     )
     parser.add_argument(
@@ -5126,7 +5141,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "#438: claim these ids for RE-REVIEW under the --from-cap profile (PLAN.md D2) "
             "-- a segment that hit the review cap (non_converged, reason=cap) and was then "
             "hand-edited. Never re-translates. Requires --run-id and, being human_escalation, "
-            "--only-segs naming the same ids."
+            "--only-segs naming the same ids. "
+            + CLAIM_CONSUMPTION_NOTE
         ),
     )
     parser.add_argument(
@@ -5158,7 +5174,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
             + " Where those two facts live in the code: the per-segment lock is the one "
             "whose critical section contains codex_job.py's canonical draft promotion "
             "(codex_job.py:1524), and the fix turn's byte-for-byte dispatch_token copy is "
-            "mass-translate-wf.template.js:1284."
+            "mass-translate-wf.template.js:1288. "
+            + CLAIM_CONSUMPTION_NOTE
         ),
     )
     parser.add_argument(

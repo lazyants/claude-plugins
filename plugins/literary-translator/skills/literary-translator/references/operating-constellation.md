@@ -60,7 +60,13 @@ trusting it — the pattern is the part meant to outlive any one generation.
     for a "confirm my fix holds" delta pass, because the reviewer already
     remembers exactly what it flagged. Always-fresh re-reads everything
     every round, which costs more tokens — worth it for the hunting rounds,
-    wasteful for a pure confirm-the-fix round.
+    wasteful for a pure confirm-the-fix round. (This plugin's own
+    per-segment loop offers no such per-round choice: it is always-fresh
+    by construction — the shipped `codex_job.py` driver hardcodes `--fresh`
+    on every codex turn it launches, and its own `--fresh`/`--write` flags
+    are accepted for dispatcher compatibility but implied-always. The
+    delta-pass saving above is a pattern for review work elsewhere, not a
+    knob to look for here.)
 - **Pin effort explicitly — never inherit whatever the tool's config default
   happens to be that day.** Defaults drift (see the dated snapshot below);
   an unpinned review silently rides that drift.

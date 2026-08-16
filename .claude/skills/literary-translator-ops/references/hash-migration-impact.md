@@ -22,13 +22,11 @@ Editing a member invalidates every converged segment. Members whose BYTES feed i
 - `schema_hash` = `compute_schema_hash`, a sha1 of ONLY **`draft.schema.json` + `review.schema.json` +
   `segpack.schema.json`** (`cache_key.py` ~:351-360). Editing any byte — including a `description` — of
   those three flips it. `manifest.schema.json` / `language-smoke-report.schema.json` are NOT here.
-- `plugin_bundle_hash` = the `PLUGIN_BUNDLE_MEMBERS` tuple (`cache_key.py:117-132` — **verify against this
-  tuple directly, never trust an enumeration copied into a doc**: this exact list drifted once already,
-  omitting `codex_job.py`/`canon_senses.py` and under-pricing an edit to either as migration-inert when it
-  actually flips `plugin_bundle_hash`, filed as lazyants/claude-plugins#281):
-  `validate_draft.py, canon_validate.py, cache_key.py, draft_sha1.py, review_artifact_check.py,
-  ledger_update.py, review_ready.py, resume_setup.py, glossary_batch_plan.py, codex_job.py,
-  canon_senses.py, fetch_citation.py`, `mass-translate-wf.template.js`, `glossary-pass-wf.template.js`.
+- `plugin_bundle_hash` = the `PLUGIN_BUNDLE_MEMBERS` tuple in `cache_key.py` — **verify against that
+  tuple directly, never trust an enumeration copied into a doc**, so neither the members nor a line
+  range are restated here. The copy that used to live in this bullet drifted twice — first omitting
+  `codex_job.py`/`canon_senses.py` (lazyants/claude-plugins#281), then again as later releases
+  appended members — each time pricing an unlisted member's edit as inert when it flips this hash.
 - `derivation_bundle_hash` = `DERIVATION_BUNDLE_MEMBERS` = `bootstrap_names.py` + `segpack.py`.
 
 **`source_input_hash` covers the source's ABSOLUTE PATH, not only its bytes — so MOVING a
@@ -153,7 +151,7 @@ glossary pass alone** for a fully-converged project (canon frozen, **zero unreso
 candidates**). The ONLY writer of `canon.json`'s `derivation_bundle_hash` was glossary **MERGE** mode
 (`_stamp_write_verify`, `canon_validate.py:1140-1201`; callers `run_merge` / `run_merge_batches` /
 `run_init` / `run_restamp_derivation`). The glossary pass **SKIPS entirely** when there are no candidates
-(`glossary_batch_plan.py:559-563`, a *tested* supported state, prints `{"no_new_candidates": true,
+(`glossary_batch_plan.py:571-575`, a *tested* supported state, prints `{"no_new_candidates": true,
 "batches": []}`) → canon was never restamped → segpack rebuild copies the stale hash **verbatim, never
 recomputed** (`segpack.py:472-483`) → `select_segments` stayed `blocked_needs_regeneration`.
 
