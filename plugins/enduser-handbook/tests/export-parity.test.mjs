@@ -244,11 +244,17 @@ test('unbalanced brackets are REPORTED — the depth counter cannot be trusted s
   const { values, unsupported } = extractDeclarationExports(hidden, 'broken.d.mts');
   assert.deepEqual([...values.keys()], [], 'the unclosed brace does hide the later export — that is the hazard');
   assert.ok(
-    unsupported.some((u) => u.includes('bracket depth did not stay balanced')),
-    `the hidden export must be reported as unreadable, not returned as an empty surface; got ${JSON.stringify(unsupported)}`,
+    unsupported.some((u) => u.includes('brackets did not pair up')),
+    `the unclosed bracket must be named; got ${JSON.stringify(unsupported)}`,
   );
-  // A stray closer is the mirror image: depth goes negative, so the counts either side of it are
-  // wrong even though it happens to end back at zero.
+  // Both layers fire here, and that is the design rather than redundancy: the bracket check says the
+  // FILE is broken, the nested-export check says which DECLARATION was lost by it.
+  assert.ok(
+    unsupported.some((u) => u.includes('HIDDEN') && u.includes('sits inside a nested block')),
+    `the hidden export must be named, not merely implied by a bracket complaint; got ${JSON.stringify(unsupported)}`,
+  );
+  // A stray closer is the mirror image: it accounts for no opener, so the structure either side of
+  // it is wrong even when the count happens to end back at zero.
   const stray = extractDeclarationExports('export declare const A: 1;\n\n}\nexport declare const B: 2;\n', 'stray.d.mts');
   assert.ok(
     stray.unsupported.some((u) => u.includes('first unmatched closer at stray.d.mts:3')),
@@ -275,19 +281,61 @@ test('a stray opener and closer STRADDLING a declaration cannot hide it — bala
     `the straddled declaration must be reported, at its own line; got ${JSON.stringify(unsupported)}`,
   );
 
-  // The other side of the discriminator: a member merely NAMED `export` must stay silent, or the
-  // check is a false-red generator over ordinary interface bodies.
-  const named = [
-    'export interface Holder {',
-    '  export: number;',
-    '  nested: { export: string };',
-    '  export?: string;',
-    '}',
-    'export declare const REAL: 1;',
-  ].join('\n');
-  const plain = extractDeclarationExports(named, 'holder.d.mts');
-  assert.deepEqual([...plain.values.keys()], ['REAL']);
-  assert.deepEqual(plain.unsupported, [], 'a property named `export` is not a hidden declaration');
+  // EVERY export spelling, not the ones an allowlist remembered. The first revision of this check
+  // listed the declaration heads that count as a hidden export, and each spelling missing from that
+  // list passed silently — an allowlist of what is forbidden fails green on everything it forgot.
+  for (const hidden of [
+    'export declare function ghost(x: number): void;',
+    'export { ghost };',
+    'export { ghost } from "./x.mjs";',
+    'export * as ghost from "./x.mjs";',
+    'export default ghost;',
+    'export namespace ghost {}',
+    'export declare class Ghost {}',
+    'export declare enum GhostEnum {}',
+    'export type Ghost = 1;',
+    'export = ghost;',
+  ]) {
+    const src = `export declare const before: 1; {\n${hidden} }\nexport declare const after: 2;\n`;
+    const r = extractDeclarationExports(src, 'h.d.mts');
+    assert.ok(
+      r.unsupported.some((u) => u.includes('sits inside a nested block')),
+      `a nested \`${hidden}\` must be refused, not skipped; got ${JSON.stringify(r.unsupported)}`,
+    );
+  }
+
+  // The other side of the discriminator: every shape of member merely NAMED `export` must stay
+  // silent, or the check is a false-red generator over ordinary bodies.
+  for (const member of [
+    'export: number;',
+    'export?: string;',
+    'export(): void;',
+    'export<T>(t: T): void;',
+    'export?(): void;',
+    'readonly export: number;',
+    'export: (a: number) => void;',
+    'export: { const: number };',
+  ]) {
+    const src = `export interface Holder {\n  ${member}\n}\nexport declare const REAL: 1;\n`;
+    const r = extractDeclarationExports(src, 'holder.d.mts');
+    assert.deepEqual(r.unsupported, [], `a member named \`export\` (${member}) is not a hidden declaration`);
+    assert.deepEqual([...r.values.keys()], ['REAL']);
+  }
+});
+
+test('bracket KINDS are matched, not just counted — a count-balanced file can still be invalid', () => {
+  // `[number)` counts as one opener and one closer, so a bare depth counter finishes at zero and
+  // calls the file reliable. It is not valid TypeScript, and with no compile step anywhere in this
+  // repository this gate is the only thing that would ever say so.
+  const mismatched = 'export interface Broken { field: [number) }\nexport declare const OK: 1;\n';
+  const { unsupported } = extractDeclarationExports(mismatched, 'b.d.mts');
+  assert.ok(
+    unsupported.some((u) => u.includes('brackets did not pair up') && u.includes('mismatched closer at b.d.mts:1')),
+    `a mismatched bracket pair must be reported at its own line; got ${JSON.stringify(unsupported)}`,
+  );
+  // …and a correctly bracketed file with all three kinds nested must stay silent.
+  const fine = 'export declare function f(a: Array<[number, { b: string }]>): void;\n';
+  assert.deepEqual(extractDeclarationExports(fine, 'ok.d.mts').unsupported, []);
 });
 
 test('export lists and namespace re-exports resolve to the EXPORTED name, not the local one', () => {

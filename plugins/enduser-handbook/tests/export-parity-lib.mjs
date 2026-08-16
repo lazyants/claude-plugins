@@ -41,13 +41,6 @@ const TYPE_ONLY_HEADS = new Set(['interface', 'type']);
 /** Modifiers that may sit between `export` and the declaration head, in any order TypeScript allows. */
 const MODIFIERS = new Set(['declare', 'abstract', 'async', 'default']);
 
-/**
- * Keywords that can only introduce a DECLARATION, never continue a property named `export`.
- *
- * Used to tell a real export declaration hiding below the top level from an interface member that
- * merely happens to be called `export` — a member is always followed by `:`, `?`, `(` or `<`.
- */
-const DECLARATION_HEADS = new Set(['function', 'class', 'const', 'let', 'var', 'interface', 'type', 'enum']);
 
 /**
  * Blank every comment, string and template literal, preserving byte offsets and line breaks.
@@ -392,42 +385,70 @@ export function extractDeclarationExports(source, label = '<source>') {
     unsupported.push(`${label}:${lineOf(source, m.index + m[1].length)}: ambient \`declare ${m[2]}\` block — this extractor reads a flat module surface only`);
   }
 
-  let depth = 0;
-  // The offset of the FIRST unmatched closer, not merely the fact of one: an end-of-file report tells
-  // a reader that some bracket somewhere is wrong, which in a 700-line hand-maintained declaration is
+  // A STACK of expected closers, not a counter. Both agree on depth, so a counter never changes which
+  // exports get extracted — but only a stack can tell that `[number)` is not a bracket pair at all.
+  // These declarations are hand-maintained with no compiler anywhere in the repository, so a file
+  // that is not valid TypeScript reaches this extractor unchallenged, and claiming to have read it
+  // reliably is a claim this had no basis for making.
+  const CLOSER_FOR = { '(': ')', '[': ']', '{': '}' };
+  const stack = [];
+  // The offset of the FIRST bad closer, not merely the fact of one: an end-of-file report tells a
+  // reader that some bracket somewhere is wrong, which in a 700-line hand-maintained declaration is
   // the least actionable form the same information can take.
-  let firstUnmatchedCloser = -1;
+  let firstBadCloser = -1;
+  let mismatchedKind = false;
   for (let i = 0; i < masked.length; i += 1) {
     const ch = masked[i];
-    if (ch === '(' || ch === '[' || ch === '{') { depth += 1; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') { stack.push(CLOSER_FOR[ch]); continue; }
     if (ch === ')' || ch === ']' || ch === '}') {
-      depth -= 1;
-      if (depth < 0 && firstUnmatchedCloser === -1) firstUnmatchedCloser = i;
+      if (stack.length === 0) {
+        if (firstBadCloser === -1) firstBadCloser = i;
+      } else if (stack[stack.length - 1] !== ch) {
+        if (firstBadCloser === -1) { firstBadCloser = i; mismatchedKind = true; }
+        stack.pop();
+      } else {
+        stack.pop();
+      }
       continue;
     }
+    const depth = stack.length;
     if (ch !== 'e') continue;
     if (masked.slice(i, i + 6) !== 'export') continue;
     if (i > 0 && IDENT.test(masked[i - 1])) continue;
     if (IDENT.test(masked[i + 6] ?? '')) continue;
 
     if (depth !== 0) {
-      // An `export` below the top level. Balance alone cannot catch what this catches: a stray
-      // opener and a stray closer STRADDLING a real declaration leave depth ending at zero and never
-      // going negative, so the balance check above passes while the declaration between them is
-      // skipped and reported by nothing — invisible in both directions, because a name that never
-      // enters the extracted set is a name no comparison can miss.
+      // THE invariant, and the only one here that is not a proxy: no export declaration may sit
+      // where this top-level scan will not read it. A stray opener and a stray closer STRADDLING a
+      // declaration leave the brackets balanced and every kind matched, so neither check below sees
+      // anything wrong, while the declaration between them is skipped and reported by nothing — and a
+      // name that never enters the extracted set is a name no comparison in either direction can
+      // miss. Bracket balance and bracket kinds are corroborating syntax checks; this is the guard.
       //
-      // The discriminator is cheap and needs no grammar engine. A property may legally be NAMED
-      // `export` (`{ export: number }`, `export(): void`, `export?: string`), and every such use is
-      // followed by `:`, `?`, `(` or `<`. A declaration HEAD after it is not a property name — it is
-      // a real export declaration sitting where this scan will never read it. In a flat `.d.mts`
-      // that cannot happen legitimately at all: the only place a nested `export` is legal is inside
-      // an ambient `declare module`/`namespace` block, which is refused outright above.
+      // The polarity matters more than the check. An earlier revision listed the declaration HEADS
+      // that count as a hidden export, and every spelling absent from that list — `export { ghost }`,
+      // `export * as ghost`, `export default ghost`, `export namespace ghost` — passed silently,
+      // because an allowlist of what is FORBIDDEN fails green on everything it forgot. Inverted: the
+      // small closed set is what may legally follow a member NAMED `export` inside a body, and
+      // anything else is refused. A spelling nobody thought of now fails RED, which is the direction
+      // a gate is allowed to be wrong in.
+      //
+      // The set is closed because the grammar closes it: an identifier in a type or interface body is
+      // followed by `:` or `?` (property), `(` or `<` (method), and in an enum body by `,`, `;` or
+      // `}`. There is no member position in which a declaration keyword may follow it.
+      //
+      // `=` is deliberately NOT in the set, though an enum member may carry an initializer. `export =`
+      // is itself a TypeScript export form — one this extractor does not support and refuses at the
+      // top level — so admitting `=` here would let a nested `export = ghost` pass as a member and
+      // take its refusal with it, which is the fail-closed hole this whole check exists to shut. The
+      // cost is that an enum member literally named `export` and carrying an initializer fails red;
+      // it fails LOUD, no shipped module has an enum at all, and that is the direction to be wrong in.
+      const MEMBER_CONTINUATIONS = new Set([':', '?', '(', '<', ',', ';', '}']);
       const probe = new Reader(masked, i + 6);
-      let head = probe.peekWord();
-      while (MODIFIERS.has(head)) { probe.takeWord(); head = probe.peekWord(); }
-      if (DECLARATION_HEADS.has(head)) {
-        unsupported.push(`${label}:${lineOf(source, i)}: an \`export ${head}\` declaration sits inside a nested block (bracket depth ${depth}) — it would be skipped silently, so the file's export surface is reported as unknown rather than as complete`);
+      const next = probe.peekChar();
+      if (!MEMBER_CONTINUATIONS.has(next)) {
+        const spelling = source.slice(i, i + 48).split('\n')[0].trim();
+        unsupported.push(`${label}:${lineOf(source, i)}: \`${spelling}\` sits inside a nested block (bracket depth ${depth}), where it is neither a member named \`export\` nor anything this scan will read — the file's export surface is reported as unknown rather than as complete`);
       }
       continue;
     }
@@ -562,19 +583,24 @@ export function extractDeclarationExports(source, label = '<source>') {
     unsupported.push(`${where}: unrecognized export construct — this extractor refuses to guess rather than skip it`);
   }
 
-  // Everything above trusts the depth counter to say which `export` is a module export, so the
-  // counter is the one thing that must not be trusted silently. If masking ever mis-reads a construct
-  // and swallows a closing bracket, depth never returns to zero and EVERY later top-level export is
-  // skipped — no finding raised, no name compared, and an empty surface reported as a clean one. That
-  // is the exact false-green class this gate exists to close, arriving through its own front door.
-  // Balance is therefore asserted rather than assumed, and a negative excursion is reported too: it
-  // means a closer was read that no opener accounts for, so the counts either side of it are wrong
-  // even if they happen to end at zero.
-  if (depth !== 0 || firstUnmatchedCloser !== -1) {
-    const where = firstUnmatchedCloser !== -1
-      ? `, first unmatched closer at ${label}:${lineOf(source, firstUnmatchedCloser)}`
+  // The second of the two corroborating syntax checks (the first is the kind match, made as each
+  // closer is read). Everything above trusts bracket depth to say which `export` is a module export,
+  // so depth is the one thing that must not be trusted silently: if masking ever mis-reads a
+  // construct and swallows a closer, depth never returns to zero and every later top-level export is
+  // skipped, with no finding raised and an empty surface reported as a clean one.
+  //
+  // Neither of these two is the real guard, and it is worth being explicit about that, because three
+  // separate review findings landed here and patching each one in turn would have been the wrong
+  // answer. Balance and kind-matching detect a CORRUPTED FILE; they are proxies, and a proxy can
+  // always be satisfied by a corruption shaped to satisfy it. The guard is the nested-export check
+  // above, which tests the thing that actually matters — is a real export declaration sitting
+  // somewhere this scan will not read it — and is written so that an unrecognized spelling fails red.
+  // These two stay because a broken file is worth naming on its own, and because they name a LINE.
+  if (stack.length !== 0 || firstBadCloser !== -1) {
+    const where = firstBadCloser !== -1
+      ? `, first ${mismatchedKind ? 'mismatched' : 'unmatched'} closer at ${label}:${lineOf(source, firstBadCloser)}`
       : '';
-    unsupported.push(`${label}: bracket depth did not stay balanced (ended at ${depth}${where}) — the file could not be read reliably, so its export surface is reported as unknown rather than as empty`);
+    unsupported.push(`${label}: brackets did not pair up (${stack.length} still open at end of file${where}) — the file could not be read reliably, so its export surface is reported as unknown rather than as empty`);
   }
 
   return { values, types, unsupported };
