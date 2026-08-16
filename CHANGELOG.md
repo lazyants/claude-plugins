@@ -7,6 +7,10 @@ All notable changes to `lazyants/claude-plugins` are documented here, with one e
 Two parallel tracks over one theme: an assertion that never checked what it claimed to, and a batch
 of sentences that were false about the shipped artifact.
 
+Closes #568. Also ships #472, #473, #474, #477 and #560, each closed on merge, and delivers #563
+items 1–4, 7 and 8; items 5 and 6 (the publish adapters' `unverifiable` branch and the Related-block
+category) are untouched here and #563 stays open for them.
+
 ### Fixed
 
 - **Page identity never pinned the labels a chapter quotes (#477).** Step 4 required only that the
@@ -40,18 +44,25 @@ of sentences that were false about the shipped artifact.
   `finally { await guard.assertNoDangerousHits(); await context.close(); }` discards the body's error
   and skips the close when the guard ledger is non-empty — permanent for an adopter whose REST POST
   reads fail closed into that ledger.
-- **Five documentation claims measured wrong (#560, #563 items 1–2, #344 via item 7).** The example's
-  `denyPatterns` duplicated the built-in verbs and were strictly wider; three admission claims in the
-  guard contract were wrong against the shipped `decideRoute`; and two cross-file pointers in the test
-  suite cited line ranges that had both rotted — fixed by dropping the range and keeping the greppable
-  identifier, since renumbering only reproduces the defect on the next insertion above it.
-  `profile-validation.md` claimed a false-reject-free design for mechanism B was "tracked as a
+- **Seven documentation claims measured wrong (#560, #563 items 1–2, #344 via item 7).** The
+  example's `denyPatterns` were a raw substring match where the built-in verb block is token-exact,
+  so they blocked ordinary reads (a verb in the host, the fragment or a query value) while still
+  missing encoded and query-string spellings the built-in catches — the two sets overlap, neither is
+  a superset, and the shipped comment beside them says so precisely. Three admission claims in the
+  guard contract were wrong against the shipped `decideRoute`. Two cross-file pointers in the test
+  suite cited line ranges that had both rotted — fixed by dropping the range and keeping the
+  greppable identifier, since renumbering only reproduces the defect on the next insertion above it.
+  And `profile-validation.md` claimed a false-reject-free design for mechanism B was "tracked as a
   follow-up"; nothing tracks it, so the text states the resolution instead — a documented deferred
   residual.
 
 ### Changed
 
-- **`capture.locale` pins the process locale, never the app's UI language (#474).**
+- **`capture.locale` pins the process locale, never the app's UI language (#474).** This is now a
+  normative requirement rather than a clarification, and it carries an adopter action:
+  `container-isolation.md` requires the capture spec to pass the browser-context locale as well —
+  pin **both** — and both shipped skeletons now set `locale` on their `newContext` call. An existing
+  spec that relies on the process locale alone has an edit to make.
 - **Whole-suite `capture.command` beats the delta rule (#478, #563 item 3).** Revalidation step 5 told
   the consumer to re-capture only the deltas while `container-isolation.md` requires the profile's
   command to run exactly as written, and every shipped representative command is a whole-suite

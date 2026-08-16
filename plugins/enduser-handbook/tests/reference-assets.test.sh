@@ -4412,10 +4412,16 @@ echo "== #568: the shipped skeleton satisfies the label-pin contract it teaches 
 # #477 made an exact-TEXT assertion mandatory for any label a chapter quotes, but the skeleton every
 # adopter copies still pinned only `getByRole('main')` visibility. A normative sentence and a worked
 # example that contradicts it do not both get followed — the copied code wins, because it runs.
-has "capture.example.spec.ts: the overview step pins the narrated label by exact TEXT" \
-  "getByRole('columnheader', { name: 'Owner', exact: true })" "$SPEC"
+has "capture.example.spec.ts: the overview step pins the narrated label by exact RENDERED text" \
+  ".getByText('Owner', { exact: true })" "$SPEC"
+has "capture.example.spec.ts: the overview step scopes the pin to a distinguishing container" \
+  ".locator('thead')" "$SPEC"
 has "capture.example.spec.ts: the overview step says why the container assertion is not enough" \
   'a visibility assertion on `list` alone stays green through a rename' "$SPEC"
+# getByRole's `name` matches the ACCESSIBLE name, so a role-only pin would accept an aria-label and
+# stay green against a string the reader never sees — the very failure #477 exists to close.
+has "capture.example.spec.ts: the overview step warns that a role name match accepts an aria-label" \
+  'a role `name` match would also accept an aria-label' "$SPEC"
 
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
