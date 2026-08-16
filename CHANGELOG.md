@@ -9,6 +9,11 @@ refused rather than quietly captured.
 
 Closes #565.
 
+This is also the release that carries the `assets/lib` declaration/runtime parity gate (#420, #339),
+which merged without a version bump for the release sequencer to fold in. Its lines are below under
+*Added*, *Changed* and *Known limitations*, so this entry describes its own artifact rather than only
+the lane that cut it.
+
 ### Fixed
 
 - **`maskAndAssert`'s leak scan could not see a `<canvas>`, and no carve-out list named it (#565).**
@@ -69,16 +74,56 @@ Closes #565.
   stub throws on any selector form it does not implement rather than answering "no match", and what
   it does not prove is enumerated in its own header.
 
-- **A class gate over all three write sites (#565).** Each retired wording of the false universal is
-  pinned absent in *every* one of the three files, so a recurrence in the site that did not
-  previously have it still goes red; the `.ts` site uses the code-aware absence helper, since the
-  markdown-only one would have been green by construction against a JSDoc wrap. Each of the 15 was
-  proved by reintroducing its wording split across a wrap. It gates the wordings that have actually
-  appeared — it moves a known recurrence from review-caught to CI-caught, and does not make the
-  class unwriteable.
+- **A class gate over every write site, including the release copy (#565).** Each retired wording of
+  the false universal is pinned absent in *every* one of the five files, so a recurrence in a site
+  that did not previously have it still goes red; the `.ts` site uses the code-aware absence helper,
+  since the markdown-only one would have been green by construction against a JSDoc wrap. The first
+  version of the gate covered only the three plugin documents that had already gone wrong — and these
+  very release notes then reintroduced the universal in the CHANGELOG entry and the README section,
+  where nothing was watching, which is the failure mode the gate exists for. Both root documents are
+  in scope, and both scoped sentences are also pinned *present* so deleting them cannot satisfy the
+  absence pins by silence; the CHANGELOG pin is bound to this heading, so relocating the sentence to
+  another entry fails too. Every pin was proved by reintroducing its wording split across a wrap. It
+  gates the wordings that have actually appeared — it moves a known recurrence from review-caught to
+  CI-caught, and does not make the class unwriteable. One site it structurally cannot cover is
+  `reference-assets.test.sh` itself, where the retired wordings live as needles; that is stated at
+  the block rather than left as a silent hole.
 
-`tests/reference-assets.test.sh` gains **+36 assertions** (18 carve-out pins, 2 correction pins, 15
-class-gate pins, and the new node suite), and the plugin now ships 18 `node:test` suites.
+- `tests/export-parity-lib.mjs` + `tests/declaration-parity.test.mjs` — a compile-free
+  declaration/runtime parity gate over `assets/lib` (#420, #339). Every module's `.d.mts` is compared
+  against the REAL import namespace of its `.mjs`: names in both directions, declared arity as a range
+  against `Function.prototype.length`, and orphan modules on either side including a stale
+  declaration-only module that a `*.mjs` walk cannot see. The declaration side is read by a
+  statement-aware extractor rather than a regex — #339 records five consecutive rounds of measured
+  false-greens from regex designs — and any construct it cannot read fails the gate instead of being
+  skipped. Verified by exhaustive mutation over the shipped tree: 89/89 renamed declarations and 72/72
+  emptied signatures caught.
+
+### Changed
+
+- `tests/reference-assets.test.sh`: the six per-name `chapter-paths.d.mts` needles from #330 and the
+  per-release "one needle per added declaration" recount are retired in favour of the general gate,
+  which enumerates every declaration in every module rather than the ones a release remembered to pin.
+  A new census block prints the module/export/arity counts, because the `node --test` block discards
+  stdout and a parity run that enumerated nothing is otherwise indistinguishable from a clean one.
+
+### Known limitations
+
+- Declaration TYPE correctness remains unchecked: a declared type that is wrong while the name and the
+  parameter count are both right is invisible to the parity gate. Closing that needs a TypeScript
+  toolchain this repository does not have; tracked in #573.
+- Four declaration kinds have a declared arity the reader does not reach — a class (`constructor`
+  member), a specifier, a star re-export and a default expression. Each is named in the gate's own
+  census rather than skipped, so the count of unread arities is pinned and cannot grow in silence;
+  reading them is tracked in #577. No shipped `.d.mts` uses any of these forms today.
+- The `<canvas>` refusal is a refusal, not a scan: `allowUnscannedCanvas: true` returns the caller to
+  the eyeball-the-frame step, and `<img>`/`<video>` pixels were never covered and still are not.
+
+`tests/reference-assets.test.sh` goes from 959 to **1012 assertions** — +53, none removed, reconciled
+by diffing the two check-name sets rather than by arithmetic. Of those, 16 are carve-out disclosure
+pins, 2 correction pins, 2 release-copy pins, 30 class-gate pins, 2 seam pins and 1 node-suite
+runner; the parity gate's own block was already in the 959 baseline. The plugin now ships 20
+`node:test` suites, 1395 tests.
 
 ## [enduser-handbook 1.15.0] — 2026-08-16
 
