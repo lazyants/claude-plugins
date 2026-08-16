@@ -85,11 +85,14 @@ test('capture: items chapter', async ({ browser }) => {
     // over the full URL AND the postData, so seeding the bare verbs here costs real reads: '/delete'
     // also blocks '/items/deleted', '/send' blocks 'https://sendgrid.test/px.gif', and a deny hit
     // cannot be downgraded by classifyRequest — the run hard-fails after the screenshots are taken.
-    // What the bare verbs DID add, measured: only the run-together lowercase spellings the tokenizer
-    // splits differently — '/deleteuser', '/sendmail', '/approveall', '/finalizeorder' are
-    // allow/get-head without them. ('/x/delete', '/delete-now', '/deleteUser', '/send_now',
-    // '/x/APPROVE' and the percent-encoded forms stay blocked either way.) If your app really has
-    // such a route, list THAT route, not the bare verb. Use denyPatterns for what nothing else can
+    // What the bare verbs DID cover, measured: the run-together and verb+digit spellings the
+    // tokenizer splits differently — '/deleteuser', '/sendmail', '/approveall', '/finalizeorder',
+    // '/delete2' are allow/get-head without them — plus a body-only match where YOUR OWN
+    // classifyRequest admits the endpoint as a read (with no predicate a writing POST still fails
+    // closed). The rest of what they blocked were ordinary reads: a verb in the host, the fragment,
+    // or a query value. ('/x/delete', '/delete-now', '/deleteUser', '/send_now', '/x/APPROVE' and
+    // the percent-encoded forms stay blocked either way.) If your app really has such a route, list
+    // THAT route, not the bare verb. Use denyPatterns for what nothing else can
     // do: a scheme/host rule, a body shape, or THIS project's own writing GETs
     // (/orders/42/confirm, /reports/publish) that the fixed 16 verbs do not name.
     denyPatterns: [],

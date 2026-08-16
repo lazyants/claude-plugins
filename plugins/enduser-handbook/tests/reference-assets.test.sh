@@ -1451,13 +1451,17 @@ has "example spec: says what denyPatterns is actually for (#560)" \
 # block/deny-pattern -> allow/get-head when they are removed). The residue is now stated, so an
 # adopter with such a route is not told that re-adding coverage is pointless.
 has "example spec: the removed verbs' residue is stated, not denied (#560)" \
-  "// What the bare verbs DID add, measured: only the run-together lowercase spellings the tokenizer" "$SPEC"
-# Needle is the CLAIM alone, not the sentence that carried it: `hasnt_joined` matches case-sensitively
-# (count_joined_fixed uses awk index()), and a mutation test showed the longer needle
-# 'repeating them here adds no coverage' goes green the moment the sentence comes back capitalized at
-# the start of a line — the exact shape a rewrap produces.
+  'run-together and verb+digit spellings the' "$SPEC"
+has "example spec: the residue names the body-only class too (#560)" \
+  'plus a body-only match where YOUR OWN' "$SPEC"
+# Needle is the CLAIM MINUS ITS FIRST WORD, deliberately. `hasnt_joined` matches case-sensitively
+# (count_joined_fixed uses awk index(), no tolower anywhere), so any needle whose first word can
+# start a sentence has a capitalization hole: 'adds no coverage' does not match 'Adds no coverage',
+# which is exactly the shape a rewrap produces. Measured — the earlier, longer needle had the same
+# hole one word further along. Dropping to ' no coverage' makes the pin independent of how the
+# sentence begins.
 hasnt_joined "example spec: no longer claims the bare verbs add no coverage (#560)" \
-  'adds no coverage' "$SPEC"
+  ' no coverage' "$SPEC"
 # #474: LANG/LC_ALL never reach the browser — the browser-context locale is the only lever that sets
 # navigator.language and sends Accept-Language. Three shipped sentences claimed otherwise.
 for f in "$SPEC" "$REAUDIT"; do
