@@ -214,25 +214,36 @@ test('CENSUS: a class, a specifier and a default are NAMED as unread, never quie
   // Each of the three has a declared signature SOMEWHERE this reader does not go (a `constructor`
   // member; the local declaration behind the specifier; another module). "Not compared" is the true
   // statement about all of them, and that is what the census must say.
+  //
   // Which kinds reach the unread branch is decided by the RUNTIME binding, not by the declaration
   // head, so `enum` and `namespace-reexport` are here too: a matched enum pair or a real namespace
   // pair never reaches it, but the same head over a runtime function does. That was got wrong in both
   // directions while writing this, which is why every reachable kind is pinned with a fixture rather
-  // than argued about — and why the assertion below is that each entry carries a REASON, since a kind
-  // reaching this branch with no entry in `ARITY_NOT_READ_BECAUSE` prints a bare name.
+  // than argued about.
+  //
+  // The `reason` half of each case is pinned as a distinctive PHRASE, deliberately not imported from
+  // `ARITY_NOT_READ_BECAUSE` and deliberately not a wildcard. An earlier revision asserted
+  // `\\(${kind}, line \\d+\\) — .`, where the trailing `.` matches any single character — a review ran
+  // `(class, line 999) — completely wrong reason` against it and it passed. That assertion tested that
+  // SOME reason was present, while its own name promised it named WHY. Reading the expected text out
+  // of the map instead would be the other failure: a check keyed on the same source as its target
+  // agrees with it by construction, including when the target is wrong.
   const cases = {
-    class: ['export class Widget { constructor(a) {} }', 'export declare class Widget { constructor(a: number); }'],
-    specifier: ['function f(a) { return a; }\nexport { f };', 'declare function f(a: number): void;\nexport { f };'],
-    'default-expression': ['export default (a) => a;', 'declare const d: (a: number) => number;\nexport default d;'],
-    enum: ['export function Color(a) { return a; }', 'export declare enum Color { A, B }'],
-    'namespace-reexport': ['export const helpers = (a, b) => [a, b];', "export * as helpers from './other.js';"],
+    class: ['export class Widget { constructor(a) {} }', 'export declare class Widget { constructor(a: number); }', /`constructor` member/],
+    specifier: ['function f(a) { return a; }\nexport { f };', 'declare function f(a: number): void;\nexport { f };', /local declaration this reader does not link back to/],
+    'default-expression': ['export default (a) => a;', 'declare const d: (a: number) => number;\nexport default d;', /carries no declared signature of its own/],
+    enum: ['export function Color(a) { return a; }', 'export declare enum Color { A, B }', /declaration says this is an enum while the runtime binding is a function/],
+    'namespace-reexport': ['export const helpers = (a, b) => [a, b];', "export * as helpers from './other.js';", /declaration says this is a re-exported module namespace while the runtime binding is a function/],
   };
-  for (const [kind, [mjs, dmts]] of Object.entries(cases)) {
+  for (const [kind, [mjs, dmts, reason]] of Object.entries(cases)) {
     const result = await auditFixture({ 'm.mjs': `${mjs}\n`, 'm.d.mts': `${dmts}\n` });
     assert.deepEqual(result.findings, [], `a matched ${kind} pair is not a name mismatch:\n  ${result.findings.join('\n  ')}`);
     assert.equal(result.arityUnread.length, 1, `${kind}: expected exactly one unread arity, got ${JSON.stringify(result.arityUnread)}`);
-    assert.match(result.arityUnread[0], new RegExp(`\\(${kind}, line \\d+\\) — .`),
-      `${kind}: the census entry must name the kind AND why the arity was not read, so nobody reads it as a defect in the pair`);
+    const entry = result.arityUnread[0];
+    assert.match(entry, new RegExp(`\\(${kind}, line \\d+\\) — `),
+      `${kind}: the census entry must name the kind and be followed by a reason`);
+    assert.match(entry, reason,
+      `${kind}: the entry carries the wrong reason — with several unread kinds in one map, the wrong key reads as plausible prose:\n  ${entry}`);
   }
 });
 

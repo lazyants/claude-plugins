@@ -77,7 +77,11 @@ const MODIFIERS = new Set(['declare', 'abstract', 'async', 'default']);
  * both directions, and surfaces only as a census entry. Tracked in #577 with the linking work.
  */
 const ARITY_NOT_READ_BECAUSE = {
-  class: 'its parameters sit on a `constructor` member, which this reader does not descend into',
+  // "if it declares any" is load-bearing: `export declare class Widget {}` has no `constructor`
+  // member at all, and the earlier wording asserted one was there. Both spellings are unread all the
+  // same — the reader does not descend into a class body either way — but a reason that describes a
+  // member the file does not contain sends its reader looking for the wrong thing.
+  class: 'its parameters, if it declares any, sit on a `constructor` member, which this reader does not descend into',
   specifier: 'a specifier is a name only, and the signature it re-exports sits in a local declaration this reader does not link back to',
   'namespace-reexport': 'the declaration says this is a re-exported module namespace while the runtime binding is a function — a shape disagreement the name comparison cannot see',
   enum: 'the declaration says this is an enum while the runtime binding is a function — a shape disagreement the name comparison cannot see',
