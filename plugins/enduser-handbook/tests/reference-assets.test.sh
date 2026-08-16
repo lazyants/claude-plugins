@@ -5007,6 +5007,18 @@ L_CANVAS_REFUSAL="$(line_of 'if (canvases > 0 && !allowUnscannedCanvas) {' "$CH"
 L_COVERAGE_ASSERT="$(line_of 'if (matched !== expectedCount) {' "$CH")"
 assert_line_before "capture-helpers: the canvas refusal precedes the coverage assert (#565)" \
   "$L_CANVAS_REFUSAL" "$L_COVERAGE_ASSERT"
+# CLASS CLOSURE, not an instance fix. "a canvas has no text" is a FALSE UNIVERSAL: a <canvas>'s
+# FALLBACK children are ordinary text nodes and the TreeWalker DOES collect them — what is
+# unreachable is what the canvas PAINTS. The first draft shipped that universal in THREE separate
+# sentences across all three files, and two review rounds each found only the instance in front of
+# them; a line-based grep found one of three, because the other two straddle the files' hard wrap.
+# So both surviving statements of the correction are pinned, and the .ts needle sits on ONE physical
+# line as this file's .ts rule requires.
+has "capture-helpers: the carve-out does not claim a canvas has no text at all (#565)" \
+  'FALLBACK text is an ordinary text' "$CH"
+has_joined_in_section "capture-spec-helpers: the false 'a canvas has no text' universal is named as false (#565)" \
+  "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
+  '"A canvas has no text" is a false universal'
 # --- Site 3: the engine-agnostic masking rules a human reads before capturing.
 has_joined_in_section "capture-safety: the masking rules name the canvas gap (#565)" \
   "$REFS/capture-safety.md" "$CS_MASK_SECTION" \

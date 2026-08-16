@@ -184,14 +184,18 @@ as-is. The reference doc is normative; the `*.playwright.*` asset is one impleme
   `fillText` output is not a DOM text node, not a form-control value, and not reachable by any
   selector. So it is silent in both directions, the way a framed document is — there is nothing for
   `selectors` to match (listing the `<canvas>` itself only sets its `textContent`, and a canvas's
-  children are fallback content that paints nothing), no string for the leak patterns to fire on,
-  and the coverage assert stays satisfied by whatever *was* listed. The helper therefore counts
+  children are fallback content that paints nothing), nothing *of what was painted* for the leak
+  patterns to fire on, and the coverage assert stays satisfied by whatever *was* listed. Be precise
+  about that middle one: a canvas's **fallback** text is an ordinary text node and **is** scanned —
+  it is simply not what the canvas shows. "A canvas has no text" is a false universal; the true
+  statement is that the painted pixels are in no corpus either pass can read. The helper therefore counts
   every `<canvas>` in the region — light DOM and **open** shadow roots, the region itself
   included — and **throws** unless the caller passes `allowUnscannedCanvas: true`. A canvas the
   caller *did* list in `selectors` still counts: tagging it removes it from the scan without
   changing pixels no mask could overwrite. What differs from the framed case is the remedy — there
-  is no "scan it yourself per canvas", because a canvas hosts no document and carries no text to
-  scan. Clear or overwrite the canvas before the shot, replace it with a placeholder element, or
+  is no "scan it yourself per canvas", because a canvas hosts no document — there is no second
+  corpus to run the mask and the scan over, and the painted pixels are not text in any corpus.
+  Clear or overwrite the canvas before the shot, replace it with a placeholder element, or
   keep it out of the captured region. The refusal names `<canvas>` only: pixels an `<img>` or a
   `<video>` brings into the frame are photographed and unscanned as well, and stay the human
   eyeball-the-frame step's job. The case this is for is a document preview rendered to a canvas

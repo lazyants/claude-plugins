@@ -851,8 +851,9 @@ export interface MaskOptions {
  * by whatever WAS listed.
  * A <canvas> in the scanned region therefore THROWS unless the caller passes
  * `allowUnscannedCanvas: true`. What differs from the frame case is the remedy: there is no "scan it
- * yourself per canvas", because a canvas hosts no document and carries no text to scan — clear or
- * overwrite the canvas before the shot, replace it with a placeholder element, or keep it out of the
+ * yourself per canvas", because a canvas hosts no document — there is no second corpus to run the
+ * mask and the scan over, and the painted pixels are not text in any corpus. Clear or overwrite the
+ * canvas before the shot, replace it with a placeholder element, or keep it out of the
  * region. A canvas the caller DID list in `selectors` is still counted, because tagging it excludes
  * it from the scan without changing pixels the mask could never overwrite. This refusal names
  * <canvas> only: pixels an <img> or a <video> brings into the frame are photographed and unscanned
