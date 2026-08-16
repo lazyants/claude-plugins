@@ -3995,6 +3995,29 @@ has_joined_in_section "anti-fabrication: self-audit says a visibility assertion 
   "$ANTIFAB" '## Self-audit before publish' \
   'A visibility assertion on the element is not that pin'
 
+echo "== #563 item 7 (folds #344): two stale claims, both reproduced as filed =="
+# A line range is a citation that rots silently: nothing recomputes it, and an insertion anywhere
+# above it moves the target without moving the pointer. Both ranges in md-structure.test.mjs had
+# already rotted (VAULT_ROOT_HEADING_COUNT measured at :1716-1720, the six assert_line_before calls
+# at :2032-2090). The fix is to drop the range and keep the greppable identifier — renumbering just
+# reproduces the defect on the next insertion above it, so these are hasnt pins on the ranges, not
+# has pins on new ones.
+MDSTRUCT_TEST="$TEST_DIR/md-structure.test.mjs"
+
+hasnt "md-structure.test.mjs: no rotted line range on the VAULT_ROOT_HEADING_COUNT pointer" \
+  'reference-assets.test.sh:1333-1346' "$MDSTRUCT_TEST"
+has "md-structure.test.mjs: the VAULT_ROOT_HEADING_COUNT pointer keeps its greppable identifier" \
+  'VAULT_ROOT_HEADING_COUNT' "$MDSTRUCT_TEST"
+hasnt "md-structure.test.mjs: no rotted line range on the assert_line_before pointer either" \
+  'reference-assets.test.sh ~1630-1686' "$MDSTRUCT_TEST"
+has "md-structure.test.mjs: the assert_line_before pointer keeps its greppable identifier" \
+  'grep assert_line_before in' "$MDSTRUCT_TEST"
+has_joined_in_section "profile-validation: mechanism B is a stated deferred residual, not a pending follow-up" \
+  "$PVALID" '## The `profile_version` pre-flight scan' \
+  'Mechanism B stays a documented deferred residual, not a pending item'
+hasnt "profile-validation: the false tracked-as-a-follow-up clause is gone" \
+  'tracked as a follow-up rather than rushed into this release' "$PVALID"
+
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a
 # command and handed the assertion the leftover text. It kept passing while no longer checking the
