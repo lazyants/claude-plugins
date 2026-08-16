@@ -249,10 +249,10 @@ test('unbalanced brackets are REPORTED — the depth counter cannot be trusted s
   );
   // A stray closer is the mirror image: depth goes negative, so the counts either side of it are
   // wrong even though it happens to end back at zero.
-  const stray = extractDeclarationExports('}\nexport declare const A: 1;\n', 'stray.d.mts');
+  const stray = extractDeclarationExports('export declare const A: 1;\n\n}\nexport declare const B: 2;\n', 'stray.d.mts');
   assert.ok(
-    stray.unsupported.some((u) => u.includes('went negative on the way')),
-    `a closer with no opener must be reported; got ${JSON.stringify(stray.unsupported)}`,
+    stray.unsupported.some((u) => u.includes('first unmatched closer at stray.d.mts:3')),
+    `a closer with no opener must be reported AT ITS OWN LINE — an end-of-file report is the least actionable form of the same fact; got ${JSON.stringify(stray.unsupported)}`,
   );
 });
 

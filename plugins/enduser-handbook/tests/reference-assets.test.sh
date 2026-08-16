@@ -3200,6 +3200,18 @@ has "surface-diff: imports matrixLabel from control-inventory" "from './control-
 # compares each module's REAL import namespace against its `.d.mts` in both directions and on arity.
 # Do not re-add a per-name needle here: a name pinned in two places is a name that can disagree with
 # itself, and the pointer is what stays true when the surface changes.
+#
+# ONE COVERAGE LOSS, STATED RATHER THAN LEFT TO BE DISCOVERED. Three of the six retired needles pinned
+# TYPE-ONLY declarations — `LeadingFrontmatterSpan`, `VerifyNonHeadingPlacementOptions`,
+# `VerifyNonHeadingPlacementResult`. An interface has no runtime binding, so a gate that compares
+# against an import namespace can never reach one, and nothing here replaces that specific check:
+# deleting any of those three declarations outright is now invisible to this whole suite (measured, by
+# deleting each in turn against a copy of the tree — the gate reported zero findings all three times).
+# The replacement is a strict superset on the VALUE side and a genuine gap on the type side, and the
+# honest reason not to close it here is that a type-existence check needs a list of the TypeScript lib
+# types a reference is allowed to resolve to — an allowlist, which is the design #339 records scoring
+# 31 false reds on an unmodified tree. The check that does close it is a compiler over the
+# declarations, which is #573.
 
 echo "== canonical verified-class sentence — three current sites, plus the frozen 1.11.0 copy (#330) =="
 # ONE sentence, reused verbatim, joined across the ~95-column house wrap. Short independent

@@ -385,11 +385,18 @@ export function extractDeclarationExports(source, label = '<source>') {
   }
 
   let depth = 0;
-  let wentNegative = false;
+  // The offset of the FIRST unmatched closer, not merely the fact of one: an end-of-file report tells
+  // a reader that some bracket somewhere is wrong, which in a 700-line hand-maintained declaration is
+  // the least actionable form the same information can take.
+  let firstUnmatchedCloser = -1;
   for (let i = 0; i < masked.length; i += 1) {
     const ch = masked[i];
     if (ch === '(' || ch === '[' || ch === '{') { depth += 1; continue; }
-    if (ch === ')' || ch === ']' || ch === '}') { depth -= 1; if (depth < 0) wentNegative = true; continue; }
+    if (ch === ')' || ch === ']' || ch === '}') {
+      depth -= 1;
+      if (depth < 0 && firstUnmatchedCloser === -1) firstUnmatchedCloser = i;
+      continue;
+    }
     if (depth !== 0 || ch !== 'e') continue;
     if (masked.slice(i, i + 6) !== 'export') continue;
     if (i > 0 && IDENT.test(masked[i - 1])) continue;
@@ -533,8 +540,11 @@ export function extractDeclarationExports(source, label = '<source>') {
   // Balance is therefore asserted rather than assumed, and a negative excursion is reported too: it
   // means a closer was read that no opener accounts for, so the counts either side of it are wrong
   // even if they happen to end at zero.
-  if (depth !== 0 || wentNegative) {
-    unsupported.push(`${label}: bracket depth did not stay balanced (ended at ${depth}${wentNegative ? ', and went negative on the way' : ''}) — the file could not be read reliably, so its export surface is reported as unknown rather than as empty`);
+  if (depth !== 0 || firstUnmatchedCloser !== -1) {
+    const where = firstUnmatchedCloser !== -1
+      ? `, first unmatched closer at ${label}:${lineOf(source, firstUnmatchedCloser)}`
+      : '';
+    unsupported.push(`${label}: bracket depth did not stay balanced (ended at ${depth}${where}) — the file could not be read reliably, so its export surface is reported as unknown rather than as empty`);
   }
 
   return { values, types, unsupported };
