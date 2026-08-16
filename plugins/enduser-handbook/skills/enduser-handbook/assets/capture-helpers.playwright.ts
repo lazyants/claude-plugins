@@ -829,7 +829,7 @@ export interface MaskOptions {
  * composites the child document's pixels. PII the author did NOT list is the silent half — nothing
  * to mask, no text node to collect, no pattern to match, so neither pass has anything to object to.
  * That is why this carve-out alone is ENFORCED rather than only documented: a nested browsing
- * context in the scanned region — <iframe>, <frame>, <object> or <embed>, all of which load a
+ * context in the scanned region — <iframe>, <frame>, <object> or <embed>, all of which CAN load a
  * document of their own on the same terms — THROWS unless the caller passes
  * `allowUnscannedFrames: true`. Mask the framed content before the shot, scan it yourself per frame,
  * or keep it out of the region.
@@ -981,12 +981,14 @@ export async function maskAndAssert(
       // scan; the .matches() term covers the region BEING the frame, which querySelectorAll
       // (descendants only) would miss.
       // The selector is every element that hosts a NESTED BROWSING CONTEXT, not just <iframe>:
-      // <object> and <embed> load a document of their own on exactly the same terms — its text
+      // <object> and <embed> can load a document of their own on exactly the same terms — its text
       // nodes are in another document, so neither pass reaches them, while the browser composites
       // its pixels into the shot. Counting only iframe/frame would leave the identical defect one
-      // element name over. Deliberately UNQUALIFIED (not `object[data]`): an <object> whose `data`
-      // is assigned by script after parse would evade the attribute form, so an <object> carrying
-      // no document is refused too — the over-refusal is the right direction for a PII gate. ---
+      // element name over. Deliberately UNQUALIFIED (not `object[data]`) because
+      // the count is taken here and the pixels are taken later: an element holding no document at
+      // this moment can still be holding one in the shot, and an attribute-qualified selector
+      // misses exactly that window. So an <object> carrying no document is refused too — the
+      // over-refusal is the right direction for a PII gate. ---
       const FRAME_HOSTS = 'iframe, frame, object, embed';
       const frameCount =
         (root.matches(FRAME_HOSTS) ? 1 : 0) + queryDeep(root, FRAME_HOSTS).length;

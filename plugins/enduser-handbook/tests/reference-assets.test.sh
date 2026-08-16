@@ -1343,9 +1343,11 @@ has "capture-helpers: the frame count covers every nested browsing context (#472
 has_joined_in_section "capture-spec-helpers: the carve-out names object/embed, not just iframe (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   '`<object>`, `<embed>`'
-# The prose must match the selector, which is deliberately unqualified — an attribute form
-# (`object[data]`) is defeated by a script-assigned `data`, so the over-refusal is intentional and
-# has to be stated rather than left as an apparent doc/code mismatch.
+# The prose must match the selector, which is deliberately unqualified: the count is taken when the
+# helper runs and the pixels are taken later, so an element holding no document at that moment can
+# still be holding one in the shot, and an attribute form (`object[data]`) misses exactly that
+# window. The over-refusal is intentional and has to be stated rather than left as an apparent
+# doc/code mismatch.
 has_joined_in_section "capture-spec-helpers: the unqualified selector is justified, not an oversight (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   'The selector is deliberately unqualified'
@@ -1370,6 +1372,36 @@ hasnt_joined "capture-spec-helpers: the unqualified selector is not justified by
 has_joined_in_section "capture-spec-helpers: the unqualified selector is justified by call-vs-shot ordering (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   'the count is taken when the helper runs and the pixels are taken later'
+# The first pass of this round fixed the REFERENCE and left the same two claims standing in the
+# copyable asset and in this file's own explanatory comment above — the identical
+# fixed-one-site-of-N defect the previous round had just been fixed for. The two `hasnt_joined`
+# below are therefore keyed on the WHOLE PLUGIN's maintained guidance sites, not on one file, so the
+# suite cannot go green while either retired claim survives anywhere a reader or an adopter meets it.
+hasnt_joined "capture-helpers: no false attribute-selector mechanism claim (#472)" \
+  'assigned by script after parse' "$ASSETS/capture-helpers.playwright.ts"
+# This file's OWN stale copy of the claim (it explained the pin above) is corrected in place rather
+# than pinned. A self-scanning `hasnt` is unimplementable, not merely awkward: the needle that
+# forbids a phrase IS that phrase, so the pin reports its own needle and can never go green. Noted
+# because the first draft of this round shipped exactly that pin and it failed for that reason.
+# Absolute "all of which load a document of their own" is contradicted by the deliberate refusal of
+# an <object> that carries none. Retired in the asset's two copies as well as the reference.
+#
+# MEASURED TRAP, worth more than these two pins: `hasnt_joined` is wrap-tolerant for MARKDOWN but NOT
+# for a .ts COMMENT. count_joined_fixed collapses whitespace and nothing else, so a needle spanning a
+# JSDoc wrap has the leading ` * ` of the next line sitting inside it ("all of which load a * document
+# of their own"), and a needle spanning a `//` wrap gets a `//`. Such a pin passes on text that is
+# plainly present — green by construction, the exact failure the shell suite's wrap trap describes.
+# In a .ts file, keep every needle on ONE physical line and use the line-based helpers.
+hasnt "capture-helpers: the JSDoc does not state the nested context as certain (#472)" \
+  'all of which load a' "$ASSETS/capture-helpers.playwright.ts"
+hasnt "capture-helpers: the in-page comment does not state the nested context as certain (#472)" \
+  '<embed> load a document of their own' "$ASSETS/capture-helpers.playwright.ts"
+has "capture-helpers: the JSDoc states the nested context as possible, not certain (#472)" \
+  'all of which CAN load a' "$ASSETS/capture-helpers.playwright.ts"
+has "capture-helpers: the in-page comment states the nested context as possible, not certain (#472)" \
+  'and <embed> can load a document of their own' "$ASSETS/capture-helpers.playwright.ts"
+has "capture-helpers: the unqualified selector is justified by call-vs-shot ordering (#472)" \
+  'the count is taken here and the pixels are taken later' "$ASSETS/capture-helpers.playwright.ts"
 has_joined_in_section "capture-spec-helpers: the refusal's reach is scoped, not claimed absolute (#472)" \
   "$REFS/capture-spec-helpers.md" "$GUARANTEE_SECTION" \
   '**What the refusal can see, exactly:**'
