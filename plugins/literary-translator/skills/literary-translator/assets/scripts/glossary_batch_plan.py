@@ -45,6 +45,18 @@ Selection, per candidate, in this exact precedence order:
         decision, not a pending research item, so --retry cannot reinstate
         it.
 
+      A form KNOWN to be splitting but whose senses are not adjudicated yet
+      is neither of the two cases above: it has no canon_senses.json record
+      to be split-excluded by (that predicate needs >=2 RESOLVED senses),
+      and it must not be dispatched for a single canonical target either.
+      Its home is a canon.json review_queue[] item -- the QUEUED shape needs
+      only source_form / is_proper_name / disposition / note, so the
+      splitting evidence goes in the note and nothing has to be resolved to
+      record it -- which puts it under the review_queue exclusion above,
+      reinstated only by --retry. No project-local sidecar of splitting
+      forms is needed, and none is read (references/canon-and-glossary.md
+      carries the operator-facing statement).
+
   (2) Among the survivors of (1): included only if `likely_name` AND
       `freq >= --min-candidate-freq`, EXCEPT the #91 elision bypass:
       - any surviving row with `elision_ambiguous: true` is force-included,

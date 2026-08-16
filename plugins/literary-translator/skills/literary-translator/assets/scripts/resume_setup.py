@@ -22,12 +22,16 @@ dispatch happens:
    pinned glossary rule + canon.json state (glossary), and every durable
    byte that can invalidate a cached result (plugin_bundle_hash,
    orchestration_bundle_hash, and a hash of schemas/ itself) -- is folded
-   into one `input_digest`. MATCH against the prior run's own recorded
-   digest -> resume (`effectiveRunId` = the prior RUN_ID, `resume: true`,
-   every cached artifact is trustworthy). MISMATCH, or no prior digest at
-   all -> a FRESH run: a brand-new RUN_ID, `resume: false`, reuse NOTHING.
-   `input.digest`, once written for a RUN_ID, is NEVER overwritten with a
-   different value -- a mismatch always produces a fresh RUN_ID instead.
+   into one `input_digest`. That digest is only ever compared against the
+   candidates the caller offered in `resume_from_run_ids` (see its own
+   paragraph below) -- an identical digest alone never resumes. MATCH
+   against a candidate's own recorded digest -> resume (`effectiveRunId`
+   = that candidate's RUN_ID, `resume: true`, every cached artifact is
+   trustworthy). MISMATCH on every candidate, an absent candidate digest,
+   or no candidate at all -> a FRESH run: a brand-new RUN_ID,
+   `resume: false`, reuse NOTHING. `input.digest`, once written for a
+   RUN_ID, is NEVER overwritten with a different value -- a mismatch
+   always produces a fresh RUN_ID instead.
 
 2. GLOSSARY MANIFEST TRUST: for a glossary-pass run, this script is the
    SINGLE TRUSTED WRITER of `manifest_{index}.json` (one per batch, this

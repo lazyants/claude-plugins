@@ -642,7 +642,7 @@ def load_senses_from_snapshot(
        explicit path the caller expected to exist (`allow_absent=False`)
        is a BLOCK when absent. ANY non-regular path -- a directory, a
        dangling symlink, a device node -- is a BLOCK regardless of
-       `allow_absent` (mirrors glossary_batch_plan.py:187 +
+       `allow_absent` (mirrors glossary_batch_plan.py:199 +
        canon_adjudication_audit.py:739).
     2. When present, schema-validates against `schema_path` FIRST, before
        any emptiness decision -- a schema failure is always BLOCKING,

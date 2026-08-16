@@ -243,7 +243,10 @@ def test_validate_fragment_rejects_confirmed_ok_shaped_field(tmp_path):
 
     frag_path = tmp_path / "triage_0.json"
     rec = insufficient_record("Jean")
-    rec["confirmed_ok"] = True
+    # Bool-valued on purpose: the shape a buggy agent emits. The reject is
+    # by additionalProperties, never by value type, and pyright infers
+    # insufficient_record()'s dict as dict[str, str] from its literals.
+    rec["confirmed_ok"] = True  # pyright: ignore[reportArgumentType]
     original_doc = {"schema_version": 1, "run_id": "run-1", "records": [rec]}
     write_json(frag_path, original_doc)
 

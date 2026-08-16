@@ -1694,7 +1694,12 @@ is called. It:
      as a `stale_reason` sub-field: `cache_key_mismatch` and/or
      `draft_sha1_mismatch`. A `draft_sha1_mismatch`-triggered stale is never
      reclassified as `blocked_needs_regeneration` — the two gates are
-     independent.
+     independent. Triage a `stale` by that `stale_reason`, never by the
+     materialized ledger's own status or its `stale_mismatched_fields`:
+     `ledger_merge.py` computes ITS `stale` from the cache key alone and
+     never reads the draft, so a segment stale HERE for draft drift alone
+     is still plain `converged` there, with no mismatched fields to show.
+     `assemble.py` refuses that drifted draft outright either way.
    - **`blocked_needs_regeneration`** — a `converged` segment whose
      cache-key mismatch is due to a language-config/extraction-config/
      source-file/derivation-script change the segpack itself hasn't caught
@@ -1887,6 +1892,35 @@ the printed JSON's `summary.failed`/`summary.needs_fix`. Exit 1 means a gate
 refused before any dispatch (lock contention, the Step 1 re-translate gate,
 the volume cap). Exit 2 is a usage/environment error.
 
+**The driver does not refresh `runs/ledger.json`.** Its only ledger write is
+the per-segment fragment at `runs/ledger.d/<seg>.json`; `ledger.json` itself
+was last materialized by this same run's Step 1 `select_segments.py` call, so
+once the driver returns it still reports PRE-run state and reads `stale` for
+a segment that has just converged. The driver's own printed JSON
+(`summary.converged`/`summary.needs_fix`/`summary.failed`) is the authority
+for what this run did. To refresh the durable view before reading it, run the
+merge BARE — no `--expected-*` flag, exactly as `select_segments.py` itself
+runs it:
+
+```
+python3 {durable_root}/scripts/ledger_merge.py --durable-root {durable_root}
+```
+
+Do NOT reach for `--expected-from-manifest`/`--expected-segs` here, and never
+add `--run-token` to them. Either expected-segment flag turns on the
+missing-fragment completeness check, which REFUSES outright for a manifest id
+that has no fragment yet — the normal state of a book mid-way through; adding
+`--run-token` further arms the batch-final re-verification that
+`mass-translate-wf.template.js`'s `batchComplete` step exists for. Both
+refusals raise BEFORE `ledger.json` is written at all, so what you get is
+exactly the staleness you were trying to clear. Second axis, and this one
+survives the merge: a fragment records the LAST CONVERGENCE, not the current
+draft, so a converged segment hand-edited afterwards goes on reading
+`converged`. Neither artifact answers "is the draft on disk the one the
+reviewer saw" — that is `reviewed_draft_sha1` against the draft's current
+content sha1, which `final_audit.py` and `assemble.py` each recompute for
+themselves before anything ships.
+
 **The driver cannot perform the fix step, and nothing today automates the
 hand-off.** When a segment's review comes back not-clean, the driver stops
 at that segment and returns `outcome: "needs_fix"` — the round label, the
@@ -1896,14 +1930,27 @@ plain Python process cannot perform). Someone — a human, or an orchestrating
 session — must notice this in the driver's own JSON output or its redirected
 log (`runs/driver.<SESSION_ID>.log`, per the launch command above), perform
 ONE Claude turn using that exact fix prompt to rewrite the draft, and
-re-invoke the driver to resume. No script or template anywhere in this
-plugin currently reads `needs_fix`, the driver's stdout, or its own journal
+re-invoke the driver to resume. **That JSON arrives only at exit** — stdout
+carries exactly ONE line, printed on the driver's terminal path, so the
+redirected log shows no per-segment progress at all while the run is in
+flight; only the driver's stderr warnings land there live. The channel that
+IS live is its own journal: one entry per event, each flushed and fsynced as
+it is written, opening with a `driver_started` entry carrying the pid —
+which is also how you tell a driver still working from one that died. No
+script or template anywhere in this plugin currently reads `needs_fix`, the
+driver's stdout, or its own journal
 (`runs/<internal-session-id>/driver_journal.jsonl`) on the driver's behalf.
 Do not launch this driver unattended expecting it to complete a batch
 end-to-end — a `needs_fix` segment sits stalled until someone checks.
 **R8 governs WHO performs that turn** — this session, or at most two
 long-lived executors kept open across rounds; never a fresh spawn per round,
-per segment, or per defect class.
+per segment, or per defect class. It does not govern the TIER, and the
+prompt does not either: the rendered fix prompt opens with an `Effort:`
+line only because the same text is built for the `pipeline()` path, where
+the tier is really carried beside it, as `callFix`'s own `agent()` option
+(`references/engine-loop.md`, "Effort discipline"). Run by hand, that
+opener pins nothing — set the reasoning effort of the turn you dispatch
+yourself, to the same `engine.effort` value the line names.
 
 **When the finding is WRONG (#461) — rejecting a verdict instead of
 applying it.** The fix turn above assumes the finding is actionable. A
@@ -2119,6 +2166,15 @@ reclassified into another one:
   `human_escalation`, `--only-segs` naming the same id(s) is ALSO required
   — the same explicit-retry mechanism any other `human_escalation` retry
   already needs, now doubled as a second, independent authorization.
+  A capped unit sits at the absorbing `final` round, and `final`'s
+  successor is `final` — computed before `engine.max_fix_rounds` is read
+  at all, so RAISING that knob returns no capped segment to a numbered fix
+  round; it only lengthens the ladder for units that have not capped yet.
+  The two routes back are the ones documented above, and which one applies
+  turns on whether the verdict or the draft was wrong: `reject_review.py`
+  when the stored finding is false (one fresh review at `final` per
+  rejected verdict), or a hand-edit of the draft followed by this flag
+  plus `--only-segs` when the finding was right.
 - **`--from-stalled SEG1[,SEG2,...]`** — for a segment stalled with
   genuinely incomplete bookkeeping: previously converged, then left
   `in_progress` with no `reviewed_draft_sha1` and a review that no longer
@@ -2167,7 +2223,16 @@ draft's own text — only its `dispatch_token` is re-stamped, byte-identical
 content otherwise. A claim and `--allow-retranslate-converged` are mutually
 exclusive for the same id and rejected OUTRIGHT if both are given for it:
 one authorizes re-TRANSLATION, the other re-REVIEW, and "claim wins" would
-let one flag silently change what the other one means.
+let one flag silently change what the other one means. Which path CONSUMES
+the claim afterwards is not neutral, though. `segment_dispatch_driver.py`
+derives each segment's next action from the draft on disk, so a claimed,
+healthy one goes straight to review. `pipeline()` has no claim-aware
+branch: its translate stage dispatches one `codex_job.py` translate per id
+in `SEGS`, claimed ids included — and `codex_job.py` then ADOPTS the
+claim-restamped draft without launching codex at all, or refuses the
+translate outright (#438 D8) if that draft is missing or fails validation.
+The hand-edit survives either way; what the claim costs on that path is
+one wasted dispatch per claimed id, never the draft.
 
 **P3 — a stalled, previously-converged, incompletely-bookkept unit.**
 `--from-stalled SEG1[,SEG2,...]` (1.24.0, #455) admits a segment stuck with
@@ -2325,6 +2390,12 @@ reviewer, which reads `style_bible.md` and the segpack's `canon_map` only —
 so promoting a decision into the contract is what makes it enforceable, and
 **R9 governs what that promotion does and does not oblige**: it binds the
 segments still to come, never a re-review of the ones already converged.
+The sweep's own input is a READ of this batch's converged drafts, in
+`manifest.json`'s `segments[]` order — no other pass in this pipeline
+compares translated prose across segments at all: each reviewer call sees
+one segment in isolation, and `final_audit.py`'s whole-book checks are
+lexical and WARN-only. Read for narrative voice, for how each recurring
+character is rendered, and for recurring motifs and epithets.
 
 **W7 Final audit** — `scripts/final_audit.py`, generalized directly from the
 proven `final_audit.py` in the in-house historiettes-t3 provenance project

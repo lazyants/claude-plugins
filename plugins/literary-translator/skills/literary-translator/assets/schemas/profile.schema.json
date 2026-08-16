@@ -503,7 +503,7 @@
           "type": "integer",
           "minimum": 1,
           "default": 400,
-          "description": "#409 stage 0. OPTIONAL -- a worst-case CODEX-JOB-COUNT preflight cap for mass-translate, independent of batch_agent_cap above (which estimates Workflow agent() calls; this estimates real codex dispatches). Per segment, worst case: 1 translate job + (max_fix_rounds + 1) review jobs = max_fix_rounds + 2. The fix rounds are NOT codex jobs -- the fix step is a plain Workflow agent() call, never a codex_job.py launch. Deliberately NOT required (unlike batch_agent_cap): many existing profiles/fixtures predate this knob and must stay valid without it."
+          "description": "#409 stage 0. OPTIONAL -- a worst-case CODEX-JOB-COUNT preflight cap for mass-translate, independent of batch_agent_cap above (which estimates Workflow agent() calls; this estimates real codex dispatches). Per segment: 1 translate job + (max_fix_rounds + 1) review jobs = max_fix_rounds + 2 -- EXACT for mass-translate-wf.template.js, whose review retry re-reads the artifact codex already wrote rather than starting a second job, and a FLOOR for segment_dispatch_driver.py, which may additionally spend one fabricated-loc re-review per segment (hard-capped at one, so max_fix_rounds + 3 per invocation on that path). The fix rounds are NOT codex jobs -- the fix step is a plain Workflow agent() call, never a codex_job.py launch. Deliberately NOT required (unlike batch_agent_cap): many existing profiles/fixtures predate this knob and must stay valid without it."
         },
         "model": {
           "type": "string",

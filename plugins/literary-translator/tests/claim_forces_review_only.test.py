@@ -615,7 +615,7 @@ def test_a_claimed_segment_whose_action_is_needs_fix_is_unaffected(tmp_path):
 
 # ===========================================================================
 # C -- the WIRING itself: does segment_dispatch_driver.py's own run()
-# (segment_dispatch_driver.py:5227's `claims=claims`) actually carry a REAL
+# (segment_dispatch_driver.py:5750's `claims=claims`) actually carry a REAL
 # select_segments.py admission into ctx.claims, or does
 # claim_capability_refusal_for_translate() only ever get exercised against a
 # context THIS SUITE injected `claims=` into by hand? Every test in Sections
@@ -983,7 +983,7 @@ def test_a_real_selector_claim_reaches_process_segment_through_the_real_run_wiri
     they prove `claim_capability_refusal_for_translate()` works but prove
     NOTHING about whether run() actually populates `ctx.claims` from the
     selector's own output -- deleting `claims=claims` from the real
-    construction at segment_dispatch_driver.py:5227 leaves all eleven of
+    construction at segment_dispatch_driver.py:5750 leaves all eleven of
     them green, because none of them ever go through run() at all.
 
     This test drives run() end to end. A real `--from-cap seg01` invocation
@@ -1103,7 +1103,7 @@ def test_a_real_selector_from_stalled_claim_reaches_process_segment_through_the_
 
     --from-stalled additionally drives run()'s own runs/.driver.lock
     acquisition and its --driver-lease-held forwarding to the child
-    selector (segment_dispatch_driver.py:1499-1537) -- both real here, not
+    selector (segment_dispatch_driver.py:1520-1558) -- both real here, not
     stubbed, since this test calls run() directly rather than through a
     subprocess and nothing about that machinery is mocked."""
     seg = "seg21"

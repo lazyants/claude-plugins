@@ -334,9 +334,12 @@ def verse_occurrences(source_form: str, manifest: dict, language_config) -> list
     handled as belt-and-suspenders defense: `seg`/`block_type` come back
     `None` (never guessed), and the caller tags this occurrence
     `VERSE_PARENT_UNRESOLVED_TAG` and folds it into dispersion under a
-    synthetic, always-distinct `("verse", vid)` unit rather than merging it
-    into a shared `seg: None` bucket (which could silently UNDER-count
-    dispersion).
+    synthetic `("verse", vid)` unit rather than merging it into a shared
+    `seg: None` bucket (which could silently UNDER-count dispersion).
+    That unit is only as distinct as `vid` is: a non-str/absent `vid`
+    normalizes to `None` below, so several such occurrences share ONE
+    `("verse", None)` unit -- narrower than the `seg: None` bucket, but
+    not one unit each.
     """
     blocks = manifest.get("blocks") if isinstance(manifest, dict) else None
     blocks = blocks if isinstance(blocks, dict) else {}
