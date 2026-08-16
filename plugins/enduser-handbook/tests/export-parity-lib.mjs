@@ -52,19 +52,35 @@ const MODIFIERS = new Set(['declare', 'abstract', 'async', 'default']);
  * `arityChecks: 0`. Naming the reason is the difference between "we did not check this" and
  * "we checked everything".
  *
- * The map is deliberately partial. A kind that is absent — `const`, `let`, `var` — still lands in
- * `arityUnread`, by name alone: there the reason belongs to the individual annotation (a type only a
- * compiler could resolve) rather than to the kind, so there is nothing honest to say about it here.
- * `enum` and `interface`/`type` are absent for a different reason and cannot reach that branch at
- * all: an enum is an object at runtime and the type-space heads have no runtime binding, so the
- * `live.isFunction` gate above rejects them first. Measured, not reasoned: a matched enum pair
- * reports `arityUnread: []`, a `var`- and a `let`-declared function whose annotation is unresolvable
- * both report one entry each.
+ * The map is partial, and the omission is `const` / `let` / `var` only. Those land in `arityUnread`
+ * by name alone because the reason belongs to the individual annotation — a type only a compiler
+ * could resolve — rather than to the kind, so there is nothing kind-level to say about them. Every
+ * other kind that can reach the branch has an entry here.
+ *
+ * Which kinds CAN reach it is not obvious and was got wrong twice, in both directions, so it is
+ * recorded as measured fixtures rather than as reasoning. The gate one line above is
+ * `live.isFunction`, on the RUNTIME binding — so what reaches this branch is decided by the runtime,
+ * not by the declaration head, and a matched pair and a shape disagreement behave differently under
+ * the same head:
+ *
+ *   - `enum` — a matched enum pair reports NOTHING (an enum is an object at runtime, so the gate
+ *     rejects it). But `export declare enum Color {}` against a runtime `export function Color(a)`
+ *     IS a function at runtime and does reach here. An earlier revision of this comment claimed enum
+ *     could not reach it at all, generalising from the matched pair alone.
+ *   - `namespace-reexport` — the same shape: a real namespace pair never reaches here, and the only
+ *     way `export * as ns` lands is a runtime function under it.
+ *   - `interface` / `type` — genuinely unreachable, and for a stronger reason than the gate: a
+ *     type-space head never enters `values` at all, so there is no record for the loop to reach.
+ *
+ * That `enum` and `namespace-reexport` are reachable ONLY through a declaration/runtime shape
+ * disagreement is itself worth knowing: such a pair produces no finding, because the NAMES agree in
+ * both directions, and surfaces only as a census entry. Tracked in #577 with the linking work.
  */
 const ARITY_NOT_READ_BECAUSE = {
   class: 'its parameters sit on a `constructor` member, which this reader does not descend into',
   specifier: 'a specifier is a name only, and the signature it re-exports sits in a local declaration this reader does not link back to',
-  'namespace-reexport': 'the surface belongs to the re-exported module, which this reader does not resolve',
+  'namespace-reexport': 'the declaration says this is a re-exported module namespace while the runtime binding is a function — a shape disagreement the name comparison cannot see',
+  enum: 'the declaration says this is an enum while the runtime binding is a function — a shape disagreement the name comparison cannot see',
   'default-expression': 'a default export expression carries no declared signature of its own',
 };
 

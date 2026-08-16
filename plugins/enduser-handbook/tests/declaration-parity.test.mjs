@@ -214,10 +214,18 @@ test('CENSUS: a class, a specifier and a default are NAMED as unread, never quie
   // Each of the three has a declared signature SOMEWHERE this reader does not go (a `constructor`
   // member; the local declaration behind the specifier; another module). "Not compared" is the true
   // statement about all of them, and that is what the census must say.
+  // Which kinds reach the unread branch is decided by the RUNTIME binding, not by the declaration
+  // head, so `enum` and `namespace-reexport` are here too: a matched enum pair or a real namespace
+  // pair never reaches it, but the same head over a runtime function does. That was got wrong in both
+  // directions while writing this, which is why every reachable kind is pinned with a fixture rather
+  // than argued about — and why the assertion below is that each entry carries a REASON, since a kind
+  // reaching this branch with no entry in `ARITY_NOT_READ_BECAUSE` prints a bare name.
   const cases = {
     class: ['export class Widget { constructor(a) {} }', 'export declare class Widget { constructor(a: number); }'],
     specifier: ['function f(a) { return a; }\nexport { f };', 'declare function f(a: number): void;\nexport { f };'],
     'default-expression': ['export default (a) => a;', 'declare const d: (a: number) => number;\nexport default d;'],
+    enum: ['export function Color(a) { return a; }', 'export declare enum Color { A, B }'],
+    'namespace-reexport': ['export const helpers = (a, b) => [a, b];', "export * as helpers from './other.js';"],
   };
   for (const [kind, [mjs, dmts]] of Object.entries(cases)) {
     const result = await auditFixture({ 'm.mjs': `${mjs}\n`, 'm.d.mts': `${dmts}\n` });
