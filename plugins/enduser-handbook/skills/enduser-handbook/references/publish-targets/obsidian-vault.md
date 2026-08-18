@@ -360,7 +360,36 @@ the one exception to "do all of these" — see its own conditional note below.
      entry never creates a container of its own. Order alphabetically by display title
      unless the existing file uses a different order — match what is there. The row's
      display text is always the manifest entry's `title`, never a slug or a hand-typed
-     label.
+     label. **Read the row back before you write it (#574).** Compose the row exactly as
+     you would append it, then call `locateChapterLine([row], expectedTarget)` on that ONE
+     line — the same helper, with the same expected target and the same options this
+     branch just used over the whole file, which in path mode means no `wikilink` option
+     at all. If it does not report `present`, write NOTHING and halt with:
+     `Cannot wire '<slug>' into <index_file>: the flat index row this run would write is not recognizable to the next run, so nothing was written. The chapter's own title does not yield a resolvable link destination. Give the chapter a title in the manifest made only of Unicode letters and numbers, with words separated by single ASCII spaces, then re-run.`
+     A row the next run cannot read back is one step 0 reports absent forever, so every
+     publish appends another identical copy while the manifest never changes — measured,
+     four publishes leave four rows, in both link modes. The companion scan above is blind
+     to them by construction, so the shipped refusal is what bounds them.
+     This mirrors the nested-list writer's `unwritable` outcome and carries the same
+     remedy: the check is on the row THIS run composes, never on rows already in the file,
+     and it names a title the operator can change rather than an edit they cannot find.
+     Which titles it refuses is a property of the link mode AND of the exact spelling,
+     and the measured cases do not support any simple character-presence rule — which is
+     the reason the instruction is to run the helper rather than to restate a rule from
+     memory. Measured, in all three directions: `Items]v1` and `A [b] c` are refused in
+     both modes; `Items]` and `Items [beta]` are refused in path mode and accepted under
+     wikilinks; and `Items \] esc` runs the other way, accepted in path mode and refused
+     under wikilinks. Neither mode is uniformly the stricter one, so a verdict measured in
+     one mode says nothing about the other. In that last title the backslash is ONE
+     literal character and it is load-bearing: `Items ] esc` without it is refused in both
+     modes, so a reader who drops it sees no asymmetry and concludes this paragraph is
+     wrong. Run the helper; never predict its answer.
+     What the refusal does NOT depend on is the row's SHAPE: it parses the line for the
+     destination, so a numbered TOC line, a table cell, an indented child and a bare link
+     all read back the same as the `-` bullet this adapter emits — measured. That is the
+     opposite of the companion scan's own-row test above, which IS shape-sensitive by
+     design, and it is why the refusal cannot fire spuriously on an index convention this
+     adapter did not anticipate.
 
    Wikilinks mode instead runs the qualified/legacy-bare **union scan** through
    `classifyChapterWiring` (`assets/lib/chapter-paths.mjs`) — see the "Step 0" bullet
@@ -370,7 +399,18 @@ the one exception to "do all of these" — see its own conditional note below.
    "Two or more matches"; `canonical` → already wired, same as "Exactly one match";
    `legacy` → retarget the matched bare-slug line to the qualified form in place,
    unconditionally — a flat entry has no container to be wrong about, so there is no
-   placement check to run first here (unlike the grouped case below).
+   placement check to run first here (unlike the grouped case below). The `absent` → append
+   mapping carries the read-back refusal (#574) with it, spelled for this mode: call
+   `locateChapterLine([row], <qualified target>, {wikilink: true})` on the composed row
+   alone and halt with the same text unless it reports `present`. Read the row back against
+   the QUALIFIED target, never the legacy bare slug: the union scan's `legacy` half retargets
+   a row that already exists rather than composing one, so the bare spelling is not what this
+   check is reading. Pass `{wikilink: true}` because step 0 passed it, not because this row
+   needs it — measured, the qualified row this branch composes reads back identically with
+   and without the option, and what the option actually buys is folding a terminal `.md`, so
+   it is what stops a `.md`-spelled row from reading as unwritable. Keeping the two calls
+   spelled the same way is what makes "this row is readable" mean the same thing here as it
+   does at step 0; a check that diverges from the reader it is predicting is worth nothing.
 
    Two worked examples (`publish.wikilinks: false`): `index_file` and the chapter share
    one directory ⇒ the target is the bare `<slug>.md`, no `../` climb; a repo-root
