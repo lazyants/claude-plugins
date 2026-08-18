@@ -432,7 +432,7 @@ def test_the_short_target_still_links_where_it_stands_alone(tmp_path):
 
 
 def test_a_boundary_refused_delinked_span_is_still_consumed(tmp_path):
-    """1.32.1. The span is consumed even when #587's `_boundary_ok` REFUSES
+    """1.33.1. The span is consumed even when #587's `_boundary_ok` REFUSES
     the de-linked match, and that costs the short target its link at exactly
     that spot.
 
@@ -447,7 +447,7 @@ def test_a_boundary_refused_delinked_span_is_still_consumed(tmp_path):
     `## Mentions` appendix, a link on the wrong man is not (#207), and
     `John Smithson` is plausibly not the `John` this canon means. 1.32.0's
     prose claimed the opposite ("the short target still links wherever it
-    genuinely stands alone"), which is the defect 1.32.1 fixed -- so this
+    genuinely stands alone"), which is the defect 1.33.1 fixed -- so this
     test exists to keep the corrected sentence true."""
     ns = make_nodestream([make_node("n1", "seg01", "John Smithson arrived.")])
     out_dir, result = render_into(tmp_path, ns, make_canon(COLLIDING_LONG_PLUS_SHORT),
