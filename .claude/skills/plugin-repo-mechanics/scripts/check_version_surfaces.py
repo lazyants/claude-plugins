@@ -57,12 +57,16 @@ MIN_PLAUSIBLE_PLUGINS = 2
 
 # The version cell is captured whole and stripped in code: letting `\s*` and a lazy `[^|]+?`
 # negotiate the same run of spaces is ambiguous, and quadratic-to-cubic on a pathological line.
-ROW_RE = re.compile(r"^\|\s*\[`([a-z0-9][a-z0-9-]*)`\]\(#([^)]+)\)\s*\|([^|]*)\|", re.M)
-# What a plugin may be called. The README regexes already enforce this shape; marketplace.json
-# and the filesystem do not, and a name reaches the filesystem as a path component -- so a name
-# of "../../elsewhere" in a manifest, or a symlinked plugins/<x>, would otherwise be read.
+ROW_RE = re.compile(r"^\|[ \t]*\[`([a-z0-9][a-z0-9-]*)`\]\(#([^)]+)\)[ \t]*\|([^|]*)\|", re.M)
+# What a plugin may be called. The README regexes already enforce this shape and a directory
+# name is a single path component by construction; marketplace.json is the one source that
+# could otherwise put "../../elsewhere" where a path component belongs. read_text's
+# containment check is the backstop that does not depend on which source a name came from.
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-HEADING_RE = re.compile(r"^##\s+`([a-z0-9][a-z0-9-]*)`\s+—\s+v(\S+)\s*$", re.M)
+# Blanks are [ \t], never \s: under re.M a `\s` still matches a NEWLINE, so `\s`-separated
+# patterns accept a "heading" broken across lines that GitHub renders as no heading at all --
+# and a heading the check believes in but the reader never sees is the false green here.
+HEADING_RE = re.compile(r"^##[ \t]+`([a-z0-9][a-z0-9-]*)`[ \t]+—[ \t]+v(\S+)[ \t]*$", re.M)
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 SURFACES = ("manifest", "marketplace", "row", "heading")
 COLUMN = "  "
@@ -129,10 +133,20 @@ def collect(repo: Path, unsound: list[str]) -> dict[str, dict[str, object]]:
         return {}
 
     try:
-        entries = [(p["name"], p.get("version")) for p in json.loads(marketplace_raw)["plugins"]]
+        listed = list(json.loads(marketplace_raw)["plugins"])
     except (ValueError, KeyError, TypeError) as exc:
         unsound.append(f"marketplace.json is not readable as a plugin list: {exc}")
         return {}
+    entries: list[tuple[str, object]] = []
+    for entry in listed:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        # Typed here rather than trusted downstream: a name that is present but not a string
+        # (JSON null, a number, an object) used to survive as far as sorting the union and die
+        # there on a TypeError -- an unclassified traceback exiting 1, the DISAGREEMENT code.
+        if not isinstance(name, str) or not NAME_RE.match(name):
+            unsound.append(f"marketplace.json lists {display(name)}, which is not a plugin name")
+            continue
+        entries.append((name, entry.get("version")))
 
     rows = {m.group(1): (m.group(2), m.group(3).strip()) for m in ROW_RE.finditer(readme)}
     headings = {m.group(1): (m.group(2), m.group(0)[2:].strip()) for m in HEADING_RE.finditer(readme)}
@@ -146,7 +160,10 @@ def collect(repo: Path, unsound: list[str]) -> dict[str, dict[str, object]]:
     }
 
     try:
-        on_disk = {p.name for p in (repo / "plugins").iterdir() if (p / ".claude-plugin" / "plugin.json").is_file()}
+        # Every directory, NOT only those carrying a manifest: a plugin directory with no
+        # plugin.json is exactly the half-added plugin worth reporting, and filtering on the
+        # manifest would drop the one case it should catch.
+        on_disk = {d.name for d in (repo / "plugins").iterdir() if d.is_dir() and not d.name.startswith(".")}
     except OSError as exc:
         unsound.append(f"cannot list plugins/: {exc}")
         return {}
@@ -156,9 +173,6 @@ def collect(repo: Path, unsound: list[str]) -> dict[str, dict[str, object]]:
     # would let it pass as "not a plugin".
     found: dict[str, dict[str, object]] = {}
     for name in sorted(set(marketplace) | set(rows) | set(headings) | on_disk):
-        if not NAME_RE.match(name):
-            unsound.append(f"{display(name)} is not a plugin name this sweep will build a path from")
-            continue
         rel_manifest = f"plugins/{name}/.claude-plugin/plugin.json"
         manifest_version = None
         # Existence is checked HERE rather than inside the reader because an absent manifest is a
