@@ -74,14 +74,31 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # anyone re-reading it.
 CITATION_ANCHORS = {
     # This map tracks the NEWEST changelog entry only, and is rewritten every
-    # release. 1.29.0 is the docs-accuracy batch (#572): 23 sentences corrected
-    # across prose, docstrings, templates and CLI help. It names files but cites
-    # no source LINE -- deliberately, because a batch touching sixteen files at
-    # once would need sixteen anchor ranges that go stale together, and the
-    # entry's claims are about what each file now SAYS rather than about where
-    # a branch sits. An empty map is the correct state here, and the test below
-    # still enforces both halves: a citation appearing in the entry with no
-    # anchors fails, and an anchor no citation uses fails.
+    # release. 1.30.0 is #587: the inline wikilinker's alphanumeric boundary.
+    # Three citations, all about WHERE a decision sits rather than what a file
+    # says, so each carries anchors.
+    "render_obsidian.py:530": [
+        # The alternation the entry calls "longest-first" -- the ordering lives
+        # in `targets_sorted`, built above, and the claim is that this compile
+        # carries no boundary of its own.
+        "re.compile",
+        "targets_sorted",
+    ],
+    "render_obsidian.py:636-680": [
+        # The guard itself, then its ONE call site. Both ends are anchored and
+        # the order is part of the claim: the definition precedes the call, and
+        # the call must sit inside the match loop rather than in the pattern.
+        "def _boundary_ok",
+        "text[start - 1].isalnum()",
+        "text[end].isalnum()",
+        "for m in self.pattern.finditer(text):",
+        "if not _boundary_ok(m.start(), m.end()):",
+    ],
+    "diff_rendered_output.py:106": [
+        # The render-baseline version hash the cost section names.
+        "_RENDER_VERSION_FILES",
+        "render_obsidian.py",
+    ],
 }
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
