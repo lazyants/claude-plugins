@@ -1,5 +1,69 @@
 # Changelog
 
+## 1.32.0 — 2026-08-18
+
+Collision de-linking finally says what it costs, and a book can tell the renderer that two spellings are one man. Closes #588.
+
+### The defect: a silence no gate could see
+
+When 2+ canon entries share one `canonical_target_form`, the obsidian adapter links none of them (#206/#207) — a click landing on the wrong entity's note is worse than no link. That rule cannot tell two spellings of one person from two different people, and in a pointed-script corpus the first case is the *normal* one: the same name with and without maqaf, or with different niqqud, is several canon entries and one man.
+
+So the book's most-named figures lose every inline link they have — and nothing anywhere counts it. Measured in one delivered vault: **1373 unlinked occurrences against 537 emitted links**, with `validate_backlinks.py`, `diff_rendered_output.py` and `validate_assembled.py` all green. The vault was not broken by any definition the pipeline had. It was just mostly unlinked.
+
+### Half one — `delink_cost`
+
+`render()` now returns, and stamps into the vault marker, what de-linking cost this render:
+
+```json
+{"delinked_targets": [{"canonical_target_form": "…", "owners": ["…", "…"],
+                        "unlinked_occurrences": 1373}],
+ "unlinked_occurrences_total": 1373,
+ "inline_links_emitted": 537}
+```
+
+It rides out on `assemble.py`'s stdout as `adapter_result.delink_cost`, and a non-zero total always prints one stderr `WARN` naming the number and the largest offenders. `validate_backlinks.py` republishes the block verbatim (exit-neutral — `warnings` stays `len(missing)`).
+
+Four decisions in that sentence are load-bearing, and each was a review round:
+
+- **The renderer reports it, not the W9 gate.** `validate_backlinks.py` short-circuits to `mentions_coverage.status: disabled` when the `## Mentions` appendix is off — which is exactly the configuration the measured vault ran under. De-linking is *decoupled* from that flag, so its cost has to be reported from somewhere that runs unconditionally.
+- **The count comes from inside `_Linker`, never from re-scanning the finished markdown.** A post-hoc scan is both over- and under-inclusive: `_render_verse_block` links a gloss BEFORE wrapping it as `> *Literal: …*`, the segment title is duplicated into YAML frontmatter, entity notes repeat every target in their own frontmatter, and the inline-verse label is protected by position rather than by regex. The linker sees the one text the wikilink rule is actually applied to.
+- **Every occurrence counts, not one per block** — the question is how many unlinked mentions a reader meets. A de-linked short name nested inside a longer linked one is charged to the longer name (the diagnostic alternation is the longest-first union of linkable *and* de-linked targets, precisely so each physical occurrence has exactly one owner).
+- **A de-linked target consumes its span, and nothing links inside it.** Linking and counting are ONE scan over the union of linkable and de-linked targets. A linking scan that knew only the *surviving* targets matched a shorter one inside a de-linked longer one: canon holding a colliding `John Smith` and a single-owner `John` rendered `[[…|John]] Smith` — a link landing on the wrong man inside the very span de-linking had just suppressed, while the cost report simultaneously called that occurrence unlinked. #587's word boundary cannot catch it, since the character after `John` is a space. This was reachable in 1.29.0 too; it is fixed here because the same scan now decides both. The short target still links wherever it genuinely stands alone.
+- **A match #587's word-boundary guard refuses is not charged here.** The metric counts occurrences that carry no link *because of the collision*; `Teplik` inside the demonym `Tepliker` would carry no link with a single owner either, so charging it would inflate the number with occurrences a link group could never recover.
+- **`null` is not zero.** The marker is re-stamped WITHOUT a measurement the moment the old vault is cleaned, so an interrupted render cannot leave a previous render's number standing over notes it no longer describes. `delink_cost: null` in the GATE report means "not republished here", never "measured zero" — on the enabled path because no usable measurement is in the marker, and on the disabled path because the gate short-circuits before reading the vault at all. The renderer's own WARN and `adapter_result.delink_cost` are the authority there.
+
+`unlinked_occurrences` and `inline_links_emitted` are different cardinalities on purpose — occurrences versus links, and the wikilink rule emits at most one link per target per block. Both are reported under names that say which is which, and nothing is claimed about their ratio.
+
+### Half two — `canon_link_groups.json`
+
+An optional sidecar at `{durable_root}/canon_link_groups.json` (schema `canon-link-groups.schema.json`, loader `scripts/canon_link_groups.py`) records that N canon `source_form`s denote ONE referent:
+
+```json
+{"schema_version": 1,
+ "groups": [{"primary": "משה לייב", "members": ["משה לייב", "משה־לייב"],
+             "note": "same man, with and without maqaf — adjudicated W7"}]}
+```
+
+When every owner of a colliding target reduces to the same group primary, and no owner is `sense_translated`, the shared target links to that primary's note instead of being de-linked. Four things a group deliberately does **not** do:
+
+1. **It changes only targets that would otherwise be de-linked.** A single-owner target is untouched, group or no group.
+2. **It never widens the matcher.** The alternation is built from the same `canonical_target_form` strings either way — no string becomes newly matchable, no prose is newly rewritten.
+3. **A group plus an outsider still de-links**, and so does a group containing a `sense_translated` owner. The anti-flood invariant (#138) and the misattribution rule (#207) both outrank a routing preference.
+4. **It is not an entity layer.** `canon.json` stays a 1:1 name dictionary; every member keeps its own entity note and its own source-anchored `## Mentions` appendix, which remains the authoritative, collapse-free occurrence index per form.
+
+**No script decides membership.** `note` is required and non-blank because the file records a call it does not make — the iron rule, unchanged. Membership is byte-exact against `canon['entries']` keys: never folded, never NFC-normalized, and a member that is not a key is a hard load error rather than a tolerated no-op, because the no-op is the failure that leaves an operator believing their identity pass was applied. A **dangling symlink is not "absent"** either. `assemble.py` is fail-closed throughout: a malformed sidecar halts assembly rather than shipping a vault whose links contradict the operator's own decision.
+
+Two consumers, one authority: `render()` validates whatever map it is handed (`RenderError("link_groups_invalid")`) **before** `_clean_vault_content` touches the existing vault — a rejected input must not cost the operator the vault already on disk — and `validate_backlinks.py` reads the map from the *persisted NodeStream*, never re-loading the sidecar, so the gate describes the vault that exists rather than predicting a re-link that never happened.
+
+### Migration
+
+**No converged segment is re-translated, ever.** The sidecar sits outside all 15 cache-key fields — this is the whole reason it is a sidecar rather than a `canon.json` field, since `compute_used_terms_hash` hashes the entire referenced entry object. No edited or added file is a member of `PLUGIN_BUNDLE_MEMBERS`, `DERIVATION_BUNDLE_MEMBERS` or `ORCHESTRATION_BUNDLE_MEMBERS`, and `schema_hash` covers only the draft/review/segpack schemas. Adopting a group later costs nothing at all.
+
+**The upgrade itself is not free for a book that is mid-run.** `_schemas_dir_hash` hashes every `*.schema.json` in `{durable_root}/schemas/`, and Step 0a copies the new `canon-link-groups.schema.json` in — so the first refresh after upgrading moves the resume digest, `resume_setup.py` declines to resume and mints a fresh run id, and any `pending`/`in_progress` segment's existing draft then fails `draft_ready.py`'s dispatch-token gate as a straggler from a different run and is re-dispatched. **Converged work is untouched** (it is keyed on the cache key, which this does not move) — what can be discarded is in-flight translate work that was never accepted. Finish or park the run before upgrading if that matters; this is the ordinary cost of adding any schema file, not something specific to this feature.
+
+`render_obsidian.py`'s own bytes changed, so `render_version` moved. With no sidecar the rendered markdown is unchanged, so `diff_rendered_output.py` still MATCHES — it prints the advisory `stale_baseline` WARN and exits `0`, and re-accepting is optional. **Adopting a group that takes effect changes the rendered links**, so the diff then MISMATCHES (exit `1`) and a deliberate re-accept is required. A book that carried a fall-through link (a short name linked inside a de-linked longer one) will also mismatch without any group, since that link is now correctly absent. (A group whose target has no occurrences, or one the outsider/`sense_translated` rules leave de-linked anyway, changes no Markdown and still matches.) Either way the re-accept is `--accept-baseline --force-accept-baseline`: `--accept-baseline` alone refuses to overwrite a baseline that already exists. (The new schema file's own `_schemas_dir_hash` effect is the mid-run cost described above; it is not a cache-key field and never re-translates converged work.)
+
+Doing nothing is a supported outcome: with no sidecar present the loader is never imported (and neither is `jsonschema` on its behalf), and no `link_groups` key is attached. The rendered Markdown is unchanged from 1.31.1's apart from the marker's new block — with the one exception named above, a book that carried a fall-through link.
 ## 1.31.2 — 2026-08-18
 
 Corrections: ten sentences that state how many scripts a hashed bundle covers or enumerate them, and the drift test that was holding one of the enumerations wrong. No runtime behaviour changes and no new instruction. Closes #591 in part — one site is deliberately left, see below.

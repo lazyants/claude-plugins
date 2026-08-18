@@ -109,6 +109,25 @@ empty too -- nothing below this point is loaded), `warnings=0`, exit 0.
     limitation, not a bug (see `obsidian.md`'s own note on this).
   - **`unresolved_homonyms`** (exit-neutral): `occurrence_targets.build`'s
     own split-form accounting, surfaced verbatim.
+  - **`delink_cost`** (exit-neutral, #588): what collision de-linking cost
+    THIS vault -- the de-linked targets, their owners, and how many
+    occurrences of each carry no inline link, plus how many inline links
+    this render emitted in total. NOT computed here: it is the block
+    `render_obsidian.render()` measured during its own linking pass and
+    stamped into the vault's ownership marker, republished verbatim. That
+    is deliberate on both counts -- only the render pass sees the text the
+    linker actually scans (a re-scan of the finished markdown counts
+    renderer-authored wrappers and misses gloss text linked before it was
+    wrapped), and reading the number out of the vault binds it to the vault
+    rather than to a prediction from current canon. `null` means NOT
+    REPUBLISHED HERE, never "measured zero", and has TWO causes: on this
+    enabled path, no usable measurement in the marker (an older vault, or a
+    render that did not finish -- an interrupted render re-stamps an
+    unmeasured marker before it writes anything); on the disabled
+    short-circuit, the gate returns `null` without reading the vault at
+    all, so it says nothing about whether the render measured anything (the
+    renderer's own WARN and `adapter_result.delink_cost` are the authority
+    there -- see `_disabled_report`). Never routed into `warnings`/exit.
 
 ## Report shape (one JSON line to stdout)
 
@@ -121,13 +140,21 @@ empty too -- nothing below this point is loaded), `warnings=0`, exit 0.
                                  "orphaned_owners": [source_form, ...]}, ... ],
       "inline_advisory":     { "thin_coverage": [
           {"source_form", "inline_links", "source_occurrences"}, ... ] },
+      "delink_cost":         null | { "delinked_targets": [
+          {"canonical_target_form", "owners": [...],
+           "unlinked_occurrences": int}, ... ],
+          "unlinked_occurrences_total": int, "inline_links_emitted": int },
       "warnings": int }
 
 ## Exit codes
 
   0 = feature not effective-enabled, OR `warnings == 0`.
   1 = `warnings > 0` (advisory -- does NOT halt W9; logged as WARN).
-  2 = hard error: unreadable/malformed manifest.json, canon.json (when
+  2 = hard error: a malformed `link_groups` map in the assembled NodeStream
+      (#588 -- validated through the renderer's own `_validate_link_groups`,
+      so the gate and the renderer can never disagree about what a
+      well-formed one-entity map is), or unreadable/malformed manifest.json,
+      canon.json (when
       present -- an ABSENT canon.json is tolerated as zero entries, exactly
       like `assemble.py`'s own default; a PRESENT `entries` that is not an
       object is still fatal, #236), canon_senses.json, profile.yml, the
@@ -378,6 +405,14 @@ def _disabled_report():
         "unresolved_homonyms": [],
         "collisions": [],
         "inline_advisory": {"thin_coverage": []},
+        # #588: null, not a zeroed block -- this gate computes no
+        # `delink_cost` of its own, it republishes the renderer's, and on
+        # this path it never reads the vault at all. A zero here would
+        # assert "de-linking cost nothing", which is exactly the false
+        # green the issue is about. The renderer still prints the real
+        # number on every obsidian render (assemble.py's own summary), so
+        # an operator who opts out of the appendix is not left blind.
+        "delink_cost": None,
         "warnings": 0,
     }
 
@@ -751,7 +786,61 @@ def _compute_inline_advisory(aggregate, note_identity_by_source_form, seg_filena
 # Collisions + unresolved_homonyms (exit-neutral diagnostics).
 # ---------------------------------------------------------------------------
 
-def _renderer_delinked_targets(entries, note_identity_by_source_form):
+def _link_groups_from_nodestream(nodestream, note_identity_by_source_form):
+    """The `{member: primary}` map that ACTUALLY reached `render()` (#588).
+
+    Read from the persisted NodeStream -- never re-read from
+    `canon_link_groups.json` -- on purpose: this gate describes the vault on
+    disk, and the sidecar can have changed since it was rendered. Taking the
+    map the renderer was handed keeps one authority, and makes the
+    write-the-sidecar-after-assembling case report the cost that is really
+    still there rather than predicting a re-link that never happened.
+
+    Validated through the renderer's OWN `_validate_link_groups`, so this
+    gate can never disagree with it about what a well-formed map is; a
+    malformed persisted map is a hard error (exit 2), like every other
+    malformed input this gate reads."""
+    raw = nodestream.get("link_groups")
+    if raw is None:
+        return {}
+    try:
+        return render_obsidian._validate_link_groups(raw, note_identity_by_source_form)
+    except render_obsidian.RenderError as exc:
+        _fatal(
+            f"assembled nodestream: 'link_groups' is not a valid link-group "
+            f"map ({exc.reason}): {exc}"
+        )
+
+
+def _delink_cost_from_vault(out_dir):
+    """The `delink_cost` block the RENDERER stamped into this vault's own
+    ownership marker (#588), or None.
+
+    Republished verbatim rather than recomputed: the count is of
+    occurrences the linker saw and left unlinked, which only the render pass
+    can observe (see `render_obsidian._Linker`'s docstring -- a re-scan of
+    the finished markdown is both over- and under-inclusive). Reading the
+    number out of the vault also binds it to the vault: a render that was
+    interrupted re-stamps an UNMEASURED marker before it starts writing, so
+    a stale measurement from a previous render can never be republished as
+    if it described these notes.
+
+    None (never a zeroed block) when the marker is absent, unreadable, not
+    this adapter's, or carries no measurement -- e.g. a vault rendered by a
+    version before this feature, or one whose render did not finish."""
+    marker_path = Path(out_dir) / render_obsidian.VAULT_MARKER_FILENAME
+    if not render_obsidian._is_valid_vault_marker(marker_path):
+        return None
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    cost = payload.get(render_obsidian.DELINK_COST_KEY)
+    return cost if isinstance(cost, dict) else None
+
+
+def _renderer_delinked_targets(entries, note_identity_by_source_form,
+                               primary_by_source_form=None):
     """#240 gate half: the set of NFC-normalized, case-SENSITIVE target
     strings `render_obsidian.build_entity_index` actually removes from its
     link map once collision de-linking engages -- i.e. present in the
@@ -794,10 +883,12 @@ def _renderer_delinked_targets(entries, note_identity_by_source_form):
     down here so a future edit to one side cannot break the other
     invisibly."""
     _, no_delink = render_obsidian.build_entity_index(
-        entries, note_identity_by_source_form, collision_delink=False
+        entries, note_identity_by_source_form, collision_delink=False,
+        primary_by_source_form=primary_by_source_form,
     )
     _, delinked = render_obsidian.build_entity_index(
-        entries, note_identity_by_source_form, collision_delink=True
+        entries, note_identity_by_source_form, collision_delink=True,
+        primary_by_source_form=primary_by_source_form,
     )
     return set(no_delink) - set(delinked)
 
@@ -1038,7 +1129,12 @@ def main():
     thin_coverage, inline_counts = _compute_inline_advisory(
         aggregate, note_identity_by_source_form, seg_map, out_dir
     )
-    renderer_delinked_targets = _renderer_delinked_targets(entries, note_identity_by_source_form)
+    primary_by_source_form = _link_groups_from_nodestream(
+        nodestream, note_identity_by_source_form
+    )
+    renderer_delinked_targets = _renderer_delinked_targets(
+        entries, note_identity_by_source_form, primary_by_source_form
+    )
     collisions = _compute_collisions(entries, renderer_delinked_targets, coverage_by_sf, inline_counts)
     unresolved = _unresolved_homonyms_list(aggregate)
 
@@ -1051,6 +1147,11 @@ def main():
         "unresolved_homonyms": unresolved,
         "collisions": collisions,
         "inline_advisory": {"thin_coverage": thin_coverage},
+        # #588: the renderer's own measurement of what collision de-linking
+        # cost, republished from this vault's marker -- exit-neutral, like
+        # every diagnostic here. `warnings` stays `len(missing)`: Metric 1
+        # remains the SOLE warnings source.
+        "delink_cost": _delink_cost_from_vault(out_dir),
         "warnings": len(missing),
     }
     print(json.dumps(report, ensure_ascii=False))

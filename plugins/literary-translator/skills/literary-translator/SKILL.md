@@ -2601,6 +2601,31 @@ model) that supersedes the older "native backlinks are the occurrence index"
 stance for `output.target: obsidian` projects; see
 `references/output-target-adapters/obsidian.md`.
 
+**What collision de-linking cost this book (1.32.0, #588).** On every
+`output.target: obsidian` render — appendix on or off — a
+`canonical_target_form` owned by 2+ canon entries is de-linked (unless an
+operator-recorded `canon_link_groups.json` group covers every one of its
+owners, below), and the
+renderer now REPORTS what that cost: `adapter_result.delink_cost` on
+`assemble.py`'s stdout line, plus one stderr `WARN` whenever the total is
+non-zero. `validate_backlinks.py` republishes the same block verbatim as
+`delink_cost` (exit-neutral). `null` there means **not republished by this
+gate** — never "measured zero": either no usable measurement in the vault
+marker, or the disabled short-circuit, which returns `null` without reading
+the vault at all. The renderer's own WARN and `adapter_result.delink_cost`
+are the authority in that case. **Read the WARN — do not just log it.** A book whose de-linked
+occurrences dwarf its emitted links has had its most-named figures
+silenced, and every gate above will still be green. When the WARN names
+targets that are spelling variants of ONE referent, the fix is
+`canon_link_groups.json` (an identity call recorded upstream, never made by
+a script — see `references/canon-and-glossary.md`) and a re-render. A group helps only when
+EVERY owner of that target is in it and none is `sense_translated` —
+otherwise the target stays de-linked by design, so read the reported
+`owners` before editing. Adopting a group re-translates nothing; when it
+takes effect it does change the rendered links, so `diff_rendered_output.py`
+MISMATCHES (exit `1`) until the baseline is deliberately re-accepted with
+`--accept-baseline --force-accept-baseline`.
+
 ## Reference docs
 
 - `references/engine-loop.md` — R1, R6

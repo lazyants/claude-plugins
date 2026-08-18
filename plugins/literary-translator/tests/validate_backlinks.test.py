@@ -315,6 +315,11 @@ def test_disabled_flag_off_short_circuits_and_never_loads_manifest(tmp_path):
         "unresolved_homonyms": [],
         "collisions": [],
         "inline_advisory": {"thin_coverage": []},
+        # #588: the disabled path reports `delink_cost: null` -- it never
+        # reads the vault, so it has no measurement to republish, and a
+        # zeroed block would assert "de-linking cost nothing". The renderer
+        # still prints the real number on every obsidian render.
+        "delink_cost": None,
         "warnings": 0,
     }
     assert read_build_call(root) is None, "occurrence_targets.build() must never run when disabled"
@@ -1408,3 +1413,185 @@ def test_exit_code_contract_across_the_three_states(tmp_path):
     assembled_dir.mkdir(parents=True)
     (assembled_dir / "nodestream.json").write_text("not json", encoding="utf-8")
     assert run_gate(hard_error_root).returncode == 2
+
+
+# ===========================================================================
+# #588: the delink_cost republication + the persisted link_groups map
+#
+# The gate does not RE-DERIVE either one. `delink_cost` is read verbatim out
+# of the vault's own ownership marker (the count is of occurrences only the
+# render pass can observe), and the `{member: primary}` map is read from the
+# persisted NodeStream that render() was actually handed -- never re-loaded
+# from canon_link_groups.json, which may have changed since. Both choices
+# are what keeps gate and renderer from disagreeing about a vault on disk.
+# ===========================================================================
+
+VAULT_MARKER = ".literary-translator-vault.json"
+
+SAMPLE_COST = {
+    "delinked_targets": [
+        {"canonical_target_form": "Peter", "owners": ["Pavlo", "Petro"],
+         "unlinked_occurrences": 1373},
+    ],
+    "unlinked_occurrences_total": 1373,
+    "inline_links_emitted": 537,
+}
+
+
+def write_vault_marker(root: Path, payload, *, vault_dir="out") -> Path:
+    path = root / vault_dir / VAULT_MARKER
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(payload, (dict, list)):
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    else:
+        path.write_text(payload, encoding="utf-8")
+    return path
+
+
+def measured_marker(cost=None):
+    payload = {"managed_by": "literary-translator", "target": "obsidian"}
+    if cost is not None:
+        payload["delink_cost"] = cost
+    return payload
+
+
+def write_nodestream_with_link_groups(root: Path, link_groups) -> None:
+    _write_raw_nodestream(root, {
+        "book": {"seg_order": []}, "nodes": [], "link_groups": link_groups,
+    })
+
+
+def _colliding_pair(root):
+    write_canon(root, {
+        "Petro": canon_entry("Petro", "Peter"),
+        "Pavlo": canon_entry("Pavlo", "Peter"),
+    })
+    set_aggregate(root, {"eligible_by_source_form": {}, "unresolved_homonyms": {}})
+
+
+def test_delink_cost_is_republished_verbatim_from_the_vault_marker(tmp_path):
+    root = make_root(tmp_path)
+    _colliding_pair(root)
+    write_nodestream(root, [])
+    write_vault_marker(root, measured_marker(SAMPLE_COST))
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    assert report_of(proc)["delink_cost"] == SAMPLE_COST
+
+
+def test_delink_cost_is_null_when_the_marker_carries_no_measurement(tmp_path):
+    """An interrupted render re-stamps an UNMEASURED marker before writing
+    anything, precisely so a stale number can never be republished as if it
+    described these notes. `null`, never a zeroed block -- "not measured"
+    and "measured zero" are different facts."""
+    root = make_root(tmp_path)
+    _colliding_pair(root)
+    write_nodestream(root, [])
+    write_vault_marker(root, measured_marker())
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    assert report_of(proc)["delink_cost"] is None
+
+
+@pytest.mark.parametrize("payload,label", [
+    (None, "absent"),
+    ("not json", "unparseable"),
+    ({"managed_by": "someone-else", "target": "obsidian", "delink_cost": SAMPLE_COST},
+     "foreign-marker"),
+    ({"managed_by": "literary-translator", "target": "docusaurus",
+      "delink_cost": SAMPLE_COST}, "other-adapter"),
+    ({"managed_by": "literary-translator", "target": "obsidian",
+      "delink_cost": "1373"}, "non-object-cost"),
+])
+def test_delink_cost_is_null_for_any_marker_this_adapter_does_not_own(tmp_path, payload, label):
+    """A number is republished only when it came from THIS adapter's own
+    completed render. Everything else -- no marker, garbage, another tool's
+    marker, another output target's marker, a malformed block -- reports
+    `null` rather than a figure whose provenance the operator cannot trust."""
+    root = make_root(tmp_path)
+    _colliding_pair(root)
+    write_nodestream(root, [])
+    if payload is not None:
+        write_vault_marker(root, payload)
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    assert report_of(proc)["delink_cost"] is None, label
+
+
+def test_delink_cost_is_exit_neutral_and_never_inflates_warnings(tmp_path):
+    """Metric 1 (`missing`) stays the SOLE warnings source: a large cost is a
+    diagnostic the operator acts on, not a gate failure."""
+    root = make_root(tmp_path)
+    _colliding_pair(root)
+    write_nodestream(root, [])
+    write_vault_marker(root, measured_marker(SAMPLE_COST))
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    report = report_of(proc)
+    assert report["delink_cost"]["unlinked_occurrences_total"] == 1373
+    assert report["warnings"] == 0
+
+
+def test_disabled_short_circuit_reports_delink_cost_null(tmp_path):
+    """Even with a measured marker sitting in the vault: the short circuit
+    reads nothing at all, and must not appear to have measured something."""
+    root = make_root(tmp_path, mentions_enabled=False)
+    write_vault_marker(root, measured_marker(SAMPLE_COST))
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["status"] == "disabled"
+    assert report["delink_cost"] is None
+
+
+def test_persisted_link_groups_flips_renderer_delinked_to_false(tmp_path):
+    """The gate's own `renderer_delinked` must agree with the vault: once a
+    group establishes the pair as one referent, the renderer links it, and
+    the gate must stop reporting it as de-linked."""
+    root = make_root(tmp_path)
+    _colliding_pair(root)
+    write_nodestream_with_link_groups(root, {"Petro": "Petro", "Pavlo": "Petro"})
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    report = report_of(proc)
+    assert len(report["collisions"]) == 1
+    assert report["collisions"][0]["canonical_target_form"] == "Peter"
+    assert report["collisions"][0]["renderer_delinked"] is False
+
+
+def test_absent_link_groups_key_keeps_the_pair_delinked(tmp_path):
+    """The same fixture without the map -- the control for the test above,
+    so a green there cannot come from the collision having vanished."""
+    root = make_root(tmp_path)
+    _colliding_pair(root)
+    write_nodestream(root, [])
+
+    report = report_of(run_gate(root))
+    assert report["collisions"][0]["renderer_delinked"] is True
+
+
+@pytest.mark.parametrize("bad,label", [
+    ({"Petro": "Ghost", "Pavlo": "Ghost"}, "primary-not-in-canon"),
+    ({"Ghost": "Petro"}, "member-not-in-canon"),
+    ({"Petro": "Pavlo"}, "primary-not-in-its-own-group"),
+    ("not-a-map", "not-an-object"),
+    ({"Petro": 7}, "non-string-value"),
+])
+def test_invalid_persisted_link_groups_is_a_clean_hard_error_exit_2(tmp_path, bad, label):
+    """A malformed persisted map is a hard error, like every other malformed
+    input this gate reads -- and validated through the RENDERER's own
+    `_validate_link_groups`, so gate and renderer can never disagree about
+    what a well-formed map is. Clean exit 2, never a traceback."""
+    root = make_root(tmp_path)
+    _colliding_pair(root)
+    write_nodestream_with_link_groups(root, bad)
+
+    proc = run_gate(root)
+    assert proc.returncode == 2, f"{label}: {proc.stdout!r} {proc.stderr!r}"
+    assert "Traceback" not in proc.stderr, label
+    assert "link_groups" in (proc.stdout + proc.stderr), label

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "canon-link-groups.schema.json",
+  "title": "Canon Link Groups",
+  "description": "The one-entity link-routing sidecar, sibling of canon.json (default path {durable_root}/canon_link_groups.json). Records that N canon entries -- N distinct source_form spellings of ONE referent -- may share a single inline wikilink target instead of being de-linked as a homonym collision (#588). This is NOT an entity/coreference layer: canon.json stays a 1:1 name dictionary, every member keeps its own entity note and its own ## Mentions appendix, and the ONLY thing a group changes is which note a canonical_target_form that would otherwise be DE-LINKED points at (render_obsidian.build_entity_index). A target with a single owner never moves, and no group can make the matcher match a string it did not already match. Cache-safe by construction: the data lives OUTSIDE canon['entries'], so used_terms_hash -- which hashes the referenced ENTRY objects -- never moves and no converged segment is re-translated. The identity call itself ('are these forms one referent?') is NEVER made by a script (THE IRON RULE); this file is where an already-made call is RECORDED, which is why 'note' is required. Read exclusively through canon_link_groups.py::load_link_groups, which schema-validates against THIS file first and then applies three procedural rejects this schema cannot express: a primary that is not one of its own members, a member that is not a key of canon['entries'], and one source_form appearing in two groups. Strict at every level (additionalProperties:false + a full required[]) so an authoring bug fails LOUD at load time rather than silently routing a link to the wrong note.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "groups"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "groups": {
+      "type": "array",
+      "description": "An empty array is the schema-valid EMPTY state load_link_groups distinguishes from a genuinely-absent file. Order is immaterial.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["primary", "members", "note"],
+        "properties": {
+          "primary": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "The member whose entity note every shared, would-be-de-linked target of this group links to. Must itself appear in members[] (enforced procedurally) and must be a key of canon['entries'] -- the LITERAL, byte-exact key as canon.json spells it, never a folded, casefolded or re-normalized form, because the renderer looks the owner's own raw source_form up in this map."
+          },
+          "members": {
+            "type": "array",
+            "description": "Every source_form of this group, INCLUDING primary. minItems:2 -- a group of one asserts nothing and is a hard validation failure, never a silent no-op.",
+            "minItems": 2,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "\\S" }
+          },
+          "note": {
+            "type": "string",
+            "pattern": "\\S",
+            "description": "Why these forms are one referent, in prose -- the provenance of an identity call no script is allowed to make. Required and non-blank on purpose: a group with no stated reason is indistinguishable from a mistake."
+          }
+        }
+      }
+    }
+  }
+}
