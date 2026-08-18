@@ -1595,3 +1595,328 @@ def test_invalid_persisted_link_groups_is_a_clean_hard_error_exit_2(tmp_path, ba
     assert proc.returncode == 2, f"{label}: {proc.stdout!r} {proc.stderr!r}"
     assert "Traceback" not in proc.stderr, label
     assert "link_groups" in (proc.stdout + proc.stderr), label
+
+
+# --entity-note-map: aiming both metrics at a POST-PROCESSED vault (#589).
+#
+# Every fixture below writes its entity note at a path the renderer's own
+# derivation would NEVER produce ("other/<source_form>.md"), so a test that
+# passes cannot be quietly reading the derived location.
+# ===========================================================================
+
+RENAMED_NOTE = "Registry/Ivan the Great.md"
+MERGED_NOTE = "Registry/Ivan (merged).md"
+
+
+def write_entity_note_map(root: Path, mapping, name="entity_note_map.json") -> Path:
+    path = root / name
+    path.write_text(json.dumps(mapping, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _renamed_vault_root(tmp_path, canon_entries, notes_by_relpath):
+    root = make_root(tmp_path)
+    write_canon(root, canon_entries)
+    write_nodestream(root, ["seg01"])
+    for relpath, mention_targets in notes_by_relpath.items():
+        write_note(root, relpath, raw_entity_note(body_lines=mentions_block(mention_targets)))
+    write_note(root, "001 seg01.md", raw_segment_note())
+    return root
+
+
+def test_entity_note_map_recovers_coverage_on_a_renamed_vault(tmp_path):
+    """The measured #589 symptom in miniature: a CORRECT vault whose entity
+    note was renamed reports its occurrence missing, and the same vault with
+    the map supplied reports zero warnings over the same entity count."""
+    root = _renamed_vault_root(
+        tmp_path,
+        {"Ivan": canon_entry("Ivan", "Ivan")},
+        {RENAMED_NOTE: ["001 seg01"]},
+    )
+    set_aggregate(root, {
+        "eligible_by_source_form": {"Ivan": [{"source_form": "Ivan", "seg": "seg01", "origin": "block"}]},
+        "unresolved_homonyms": {},
+    })
+
+    without = run_gate(root)
+    assert without.returncode == 1
+    without_report = report_of(without)
+    assert without_report["warnings"] == 1
+    assert without_report["mentions_coverage"]["missing"] == [{"source_form": "Ivan", "seg": "seg01"}]
+    assert "note_map_source" not in without_report
+
+    note_map = write_entity_note_map(root, {"Ivan": RENAMED_NOTE})
+    with_map = run_gate(root, ["--entity-note-map", str(note_map)])
+    assert with_map.returncode == 0, with_map.stderr
+    with_map_report = report_of(with_map)
+    assert with_map_report["warnings"] == 0
+    assert with_map_report["mentions_coverage"]["checked_entities"] == (
+        without_report["mentions_coverage"]["checked_entities"]
+    )
+    assert with_map_report["note_map_source"] == "supplied"
+
+
+def test_entity_note_map_allows_many_spellings_to_share_one_note(tmp_path):
+    """One note per ENTITY rather than one per spelling -- the shape the
+    measured vault actually had."""
+    root = _renamed_vault_root(
+        tmp_path,
+        {"Ivan": canon_entry("Ivan", "Ivan"), "Ivanu": canon_entry("Ivanu", "Ivan")},
+        {MERGED_NOTE: ["001 seg01"]},
+    )
+    set_aggregate(root, {
+        "eligible_by_source_form": {
+            "Ivan": [{"source_form": "Ivan", "seg": "seg01", "origin": "block"}],
+            "Ivanu": [{"source_form": "Ivanu", "seg": "seg01", "origin": "block"}],
+        },
+        "unresolved_homonyms": {},
+    })
+    note_map = write_entity_note_map(root, {"Ivan": MERGED_NOTE, "Ivanu": MERGED_NOTE})
+
+    proc = run_gate(root, ["--entity-note-map", str(note_map)])
+    assert proc.returncode == 0, proc.stderr
+    report = report_of(proc)
+    assert report["warnings"] == 0
+    assert report["mentions_coverage"]["checked_entities"] == 2
+
+
+def test_entity_note_map_credits_a_merged_note_inline_link_to_every_owner(tmp_path):
+    """Metric 2 must be aimed by the map too, not just metric 1: the segment
+    note links the MERGED note once, and BOTH spellings sharing it are
+    credited, so neither is reported thin. An implementation that wired the
+    supplied map only into the coverage metric fails here."""
+    root = _renamed_vault_root(
+        tmp_path,
+        {"Ivan": canon_entry("Ivan", "Ivan"), "Ivanu": canon_entry("Ivanu", "Ivan")},
+        {MERGED_NOTE: ["001 seg01"]},
+    )
+    write_note(root, "001 seg01.md", raw_segment_note(
+        body_lines=[f"Text about [[{MERGED_NOTE[: -len('.md')]}|Ivan]] here."]
+    ))
+    set_aggregate(root, {
+        "eligible_by_source_form": {
+            "Ivan": [{"source_form": "Ivan", "seg": "seg01", "origin": "block"}],
+            "Ivanu": [{"source_form": "Ivanu", "seg": "seg01", "origin": "block"}],
+        },
+        "unresolved_homonyms": {},
+    })
+    note_map = write_entity_note_map(root, {"Ivan": MERGED_NOTE, "Ivanu": MERGED_NOTE})
+
+    report = report_of(run_gate(root, ["--entity-note-map", str(note_map)]))
+    assert report["inline_advisory"]["thin_coverage"] == []
+
+
+def test_entity_note_map_still_reports_a_genuinely_missing_mention(tmp_path):
+    """A supplied map RELOCATES where a note is looked for -- it never
+    blanket-passes. The mapped note exists and resolves; its Mentions region
+    simply omits the expected segment, and that exact pair must still be
+    reported with exit 1. An implementation that clears `missing` whenever
+    the flag is present cannot pass this."""
+    root = _renamed_vault_root(
+        tmp_path,
+        {"Ivan": canon_entry("Ivan", "Ivan")},
+        {RENAMED_NOTE: []},
+    )
+    set_aggregate(root, {
+        "eligible_by_source_form": {"Ivan": [{"source_form": "Ivan", "seg": "seg01", "origin": "block"}]},
+        "unresolved_homonyms": {},
+    })
+    note_map = write_entity_note_map(root, {"Ivan": RENAMED_NOTE})
+
+    proc = run_gate(root, ["--entity-note-map", str(note_map)])
+    assert proc.returncode == 1, proc.stdout
+    report = report_of(proc)
+    assert report["warnings"] == 1
+    assert report["mentions_coverage"]["missing"] == [{"source_form": "Ivan", "seg": "seg01"}]
+    assert report["note_map_source"] == "supplied"
+
+
+def test_entity_note_map_omitted_entry_counts_as_a_missing_note(tmp_path):
+    """An entity the map does not mention has no note in THIS vault -- its
+    occurrences count as missing, exactly like an unreadable note file
+    today. Never a hard error.
+
+    The vault also holds a COVERING note at the derived path Ivan would
+    resolve to (`other/Ivan.md`), so an empty map treated as an absent one
+    would fall back to that note and report zero warnings. Without it the
+    assertion below is satisfied by either behaviour."""
+    root = _renamed_vault_root(
+        tmp_path,
+        {"Ivan": canon_entry("Ivan", "Ivan")},
+        {RENAMED_NOTE: ["001 seg01"], "other/Ivan.md": ["001 seg01"]},
+    )
+    set_aggregate(root, {
+        "eligible_by_source_form": {"Ivan": [{"source_form": "Ivan", "seg": "seg01", "origin": "block"}]},
+        "unresolved_homonyms": {},
+    })
+    note_map = write_entity_note_map(root, {})
+
+    proc = run_gate(root, ["--entity-note-map", str(note_map)])
+    assert proc.returncode == 1, proc.stdout
+    assert report_of(proc)["warnings"] == 1
+
+
+@pytest.mark.parametrize("mapping,stderr_fragment", [
+    ({"Ivan": "../outside.md"}, "vault-relative"),
+    ({"Ivan": "/abs/outside.md"}, "vault-relative"),
+    ({"Ivan": "Registry/./Ivan.md"}, "vault-relative"),
+    ({"Ivan": "Registry/Ivan"}, "vault-relative"),
+    # A bare `.md` BASENAME, in a subfolder as well as at the top level: the
+    # extension check alone accepts `Registry/.md`, which names a stemless
+    # hidden file, never an entity note.
+    ({"Ivan": ".md"}, "vault-relative"),
+    ({"Ivan": "Registry/.md"}, "vault-relative"),
+    # An embedded NUL: lexically `*.md` and lexically relative, but no such
+    # pathname can exist. Path.is_file() answers False rather than raising, so
+    # without an explicit rejection this reaches the gate as a missing note --
+    # exit 1, which W9 CONTINUES PAST. The documented contract for a malformed
+    # map is a hard error, and only exit 2 delivers one.
+    ({"Ivan": "Registry/Ivan\x00.md"}, "vault-relative"),
+    ({"Ivan": 7}, "must be a string"),
+    ({"Nobody": RENAMED_NOTE}, "not a canon.json entry"),
+])
+def test_entity_note_map_malformed_input_is_a_hard_error(tmp_path, mapping, stderr_fragment):
+    root = _renamed_vault_root(
+        tmp_path,
+        {"Ivan": canon_entry("Ivan", "Ivan")},
+        {RENAMED_NOTE: ["001 seg01"]},
+    )
+    set_aggregate(root, {"eligible_by_source_form": {}, "unresolved_homonyms": {}})
+    note_map = write_entity_note_map(root, mapping)
+
+    proc = run_gate(root, ["--entity-note-map", str(note_map)])
+    assert proc.returncode == 2, proc.stdout
+    assert stderr_fragment in proc.stderr
+
+
+@pytest.mark.parametrize("content", ["not json", '["a", "b"]'])
+def test_entity_note_map_unparseable_or_non_object_is_a_hard_error(tmp_path, content):
+    root = _renamed_vault_root(
+        tmp_path,
+        {"Ivan": canon_entry("Ivan", "Ivan")},
+        {RENAMED_NOTE: ["001 seg01"]},
+    )
+    set_aggregate(root, {"eligible_by_source_form": {}, "unresolved_homonyms": {}})
+    path = root / "entity_note_map.json"
+    path.write_text(content, encoding="utf-8")
+
+    proc = run_gate(root, ["--entity-note-map", str(path)])
+    assert proc.returncode == 2, proc.stdout
+    # The reason must come from THIS input, not from argparse rejecting an
+    # unknown flag -- otherwise the test would pass against a build that
+    # never implemented the flag at all.
+    assert "entity note map" in proc.stderr
+
+
+def test_entity_note_map_absent_file_is_a_hard_error(tmp_path):
+    root = _renamed_vault_root(
+        tmp_path,
+        {"Ivan": canon_entry("Ivan", "Ivan")},
+        {RENAMED_NOTE: ["001 seg01"]},
+    )
+    set_aggregate(root, {"eligible_by_source_form": {}, "unresolved_homonyms": {}})
+
+    proc = run_gate(root, ["--entity-note-map", str(root / "nope.json")])
+    assert proc.returncode == 2, proc.stdout
+    assert "entity note map missing" in proc.stderr
+
+
+def test_entity_note_map_duplicate_source_form_keys_are_a_hard_error(tmp_path):
+    """`json.loads` keeps the LAST of two duplicate object members silently, so
+    a map naming one source_form twice would reach the gate as a well-formed
+    one-entry map aimed at whichever line came second -- both metrics pointed
+    at a note the operator did not choose, with no exit-code signal. Written
+    as raw text because `json.dumps` cannot emit a duplicate key."""
+    root = make_root(tmp_path)
+    write_canon(root, {"Ivan": canon_entry("Ivan", "Ivan")})
+    write_nodestream(root, {"seg01": "001 seg01"})
+    write_note(root, "001 seg01.md", raw_segment_note(["Ivan"]))
+    set_aggregate(root, {"eligible_by_source_form": {}, "unresolved_homonyms": {}})
+    note_map = root / "entity_note_map.json"
+    note_map.write_text(
+        '{"Ivan": "People/Ivan.md", "Ivan": "People/Wrong.md"}', encoding="utf-8"
+    )
+
+    proc = run_gate(root, ["--entity-note-map", str(note_map)])
+    assert proc.returncode == 2, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert "duplicate key 'Ivan'" in proc.stderr, proc.stderr
+
+
+def test_entity_note_map_distinct_keys_still_parse(tmp_path):
+    """The duplicate-key hook must not reject an ordinary map -- the guard is
+    two-sided, so a legitimate multi-entry file is pinned beside the refusal."""
+    root = _renamed_vault_root(
+        tmp_path,
+        {"Ivan": canon_entry("Ivan", "Ivan"), "Pyotr": canon_entry("Pyotr", "Pyotr")},
+        {RENAMED_NOTE: ["001 seg01"], "Registry/Pyotr the Great.md": ["001 seg01"]},
+    )
+    set_aggregate(root, {
+        "eligible_by_source_form": {
+            "Ivan": [{"source_form": "Ivan", "seg": "seg01", "origin": "block"}],
+            "Pyotr": [{"source_form": "Pyotr", "seg": "seg01", "origin": "block"}],
+        },
+        "unresolved_homonyms": {},
+    })
+    note_map = write_entity_note_map(
+        root, {"Ivan": RENAMED_NOTE, "Pyotr": "Registry/Pyotr the Great.md"}
+    )
+
+    proc = run_gate(root, ["--entity-note-map", str(note_map)])
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    report = report_of(proc)
+    assert report["warnings"] == 0
+    assert report["note_map_source"] == "supplied"
+
+
+def test_entity_note_map_empty_string_is_the_map_missing_hard_error(tmp_path):
+    """`--entity-note-map "$VAR"` with VAR unset yields a SUPPLIED-but-empty
+    path. Truthiness would read that as "no map" and silently run derived
+    mode against paths the operator did not choose; the presence check is
+    `is not None`, so it reaches the loader's exit 2 instead."""
+    root = make_root(tmp_path)
+    write_canon(root, {"Ivan": canon_entry("Ivan", "Ivan")})
+    write_nodestream(root, {"seg01": "001 seg01"})
+    write_note(root, "001 seg01.md", raw_segment_note(["Ivan"]))
+    set_aggregate(root, {"eligible_by_source_form": {}, "unresolved_homonyms": {}})
+
+    proc = run_gate(root, ["--entity-note-map", ""])
+    assert proc.returncode == 2, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert "entity note map missing" in proc.stderr
+
+
+def test_entity_note_map_is_not_read_on_the_disabled_path(tmp_path):
+    """The disabled short-circuit loads NO metric input -- a structurally
+    invalid map must not turn a `disabled` exit 0 into an exit 2."""
+    root = make_root(tmp_path, target="custom")
+    note_map = write_entity_note_map(root, {"Ivan": "../escape.md"})
+
+    proc = run_gate(root, ["--entity-note-map", str(note_map)])
+    assert proc.returncode == 0, proc.stderr
+    report = report_of(proc)
+    assert report["mentions_coverage"]["status"] == "disabled"
+    assert "note_map_source" not in report
+
+
+def test_default_enabled_report_keeps_exactly_its_documented_keys(tmp_path):
+    """The no-flag enabled report gains no key at all -- the new field is
+    emitted ONLY in supplied mode, and its absence is what says `derived`."""
+    root = _renamed_vault_root(
+        tmp_path,
+        {"Ivan": canon_entry("Ivan", "Ivan")},
+        {"other/Ivan.md": ["001 seg01"]},
+    )
+    set_aggregate(root, {
+        "eligible_by_source_form": {"Ivan": [{"source_form": "Ivan", "seg": "seg01", "origin": "block"}]},
+        "unresolved_homonyms": {},
+    })
+
+    proc = run_gate(root)
+    assert proc.returncode == 0, proc.stderr
+    assert sorted(report_of(proc)) == [
+        # `delink_cost` is 1.32.0's (#588), not this release's -- listed
+        # because this assertion is about the WHOLE key set, so a field
+        # arriving from any release has to be named here or the test is
+        # asserting a shape the gate stopped having.
+        "collisions", "delink_cost", "inline_advisory", "mentions_coverage",
+        "unresolved_homonyms", "warnings",
+    ]

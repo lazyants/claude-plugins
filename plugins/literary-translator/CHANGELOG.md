@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.33.0 — 2026-08-18
+
+Neither output gate could judge a second tree: the render+diff gate had only one baseline slot to compare against, and the backlink gate re-derived every entity note's path however you aimed it. Each gains the one input it was missing, so a project that post-processes the rendered vault can verify what it actually ships. Closes #589.
+
+### What was wrong
+
+`diff_rendered_output.py` compares a candidate directory against the ONE frozen baseline a durable root has. `--accept-baseline` will freeze whatever `--candidate-dir` names, but it overwrites that single slot — so **two directories could not be compared without destroying the reduction the pipeline's own acceptance gate depends on**, which is precisely the check a post-processing layer needs ("did I preserve the render?"). `validate_backlinks.py --vault DIR` looks like "check this vault", but the flag moves only the ROOT: every entity note's path is still re-derived through `render_obsidian._resolve_entity_notes`, so the gate can only pass a directory the renderer named. Measured on a real second vault rendered from the same nodestream (entity notes renamed to their printed English names, one note per entity instead of one per spelling, chapter prose byte-identical, all 112 Mentions appendices preserved): **334 missing pairs reported, nothing wrong with the vault.**
+
+That false red is louder than a real regression would be. An operator who post-processes learns to ignore the gate, and having learnt that, is blind to the real one.
+
+### `diff_rendered_output.py --baseline-dir A --candidate-dir B`
+
+Reduces *both* trees with the reducer the script already had and compares them positionally (`diff_rendered_output.py:505-527`) — same verdict rule, second input. Read-only: no baseline is read, written, or needed, so a project with no `out/.baseline/` at all can use it, and a frozen baseline that disagrees with both trees cannot influence the verdict. Mutually exclusive with `--accept-baseline` (freezing a hand-supplied tree as *the* baseline would silently discard the project's own). No `stale_baseline` field — there is no stored render-version behind either tree — and the `ok`/`mismatch` payloads carry `"mode": "two_tree"`, so a consumer can never mistake a two-tree verdict for a frozen-baseline one. A missing directory is exit `1`, `reason: "baseline_dir_not_found"`.
+
+### `validate_backlinks.py --entity-note-map FILE`
+
+A JSON object `{source_form: "<vault-relative>.md"}` that replaces the derived note resolution wholesale — for **both** metrics, because coverage consumes the relpath map while the inline advisory independently inverts the identity map, and a map reaching only one of them would leave the vault half-verified. Several source_forms may share one path (the merge case): an inline link to the shared note then credits every owner of it (`validate_backlinks.py:898-913`), an exit-neutral aggregation disclosed in the docstring rather than guessed at, because attribution between merged spellings is genuinely ambiguous. Under the default derivation identities are unique, so nothing changes there. A canon entry the map omits is treated as having no note in this vault — its occurrences count as missing, exactly as an unreadable note file does today — rather than forcing the operator to enumerate note-less entities. An unreadable or non-object file, a non-string value, a value that is not a relative `*.md` path — including a stemless `.md` basename or one carrying an embedded NUL, both of which are lexically `*.md` and neither of which can name a real note — a key that is not a `canon.json` entry, or the SAME key twice — `json.loads` keeps the last of two duplicate members and says nothing, so a map naming one source_form twice would otherwise aim both metrics at whichever line came second — is exit `2` (`validate_backlinks.py:763-790`) — including `--entity-note-map ""`, an unset shell variable, which is a supplied-but-empty path rather than an absent flag. The `disabled` short-circuit still returns exit `0` ahead of all of it and reads no map: a gate that will not run does not fail on an input it will not use.
+
+**The mode never blanket-passes**, and that is what the suite pins: a mapped note whose `## Mentions` region really is missing an expected segment link still yields that exact `(source_form, seg)` pair and exit `1`. The flag is spelled `--entity-note-map`, not the `--note-map` the issue proposed, because `note_map_hash` already means a per-segment *footnote* map in this plugin's cache key.
+
+### What it does not distinguish
+
+The mode reuses the reduction verbatim rather than a stricter one, and that reduction flattens every file behind an ordinary `--- <relpath> ---` line in the same line space as content — the documented design, which is what makes an added, removed or renamed file surface as a plain line mismatch. Two trees whose concatenations coincide therefore compare equal even though their file topology differs: one file containing the literal line `--- b.md ---` followed by `Body` matches the pair `a.md` (empty) plus `b.md` (`Body`). This is a property of the shared reducer, identical on the frozen-baseline path since 1.8.x, not something this release introduces — stated because the new mode is aimed at trees the renderer did not write, where the content is less predictable.
+
+### What it costs
+
+Editing `diff_rendered_output.py` moves `_render_version_hash()` — its own bytes are one of the two files that hash feeds (`diff_rendered_output.py:154`). **Every already-accepted baseline in a live project will therefore report `stale_baseline: true` on its next passing run.** That is the informational WARN only; it never gates an exit code, and no migration is required — re-accept at the next legitimate render change, as always. Neither script is in `plugin_bundle_hash` or `derivation_bundle_hash`, so no converged segment is re-translated by this release.
+
+Suite: `python3 -m pytest -q` from `plugins/literary-translator`, no selection or exclusion — **5741 passed, 3 skipped, 2 xfailed**, measured on this branch after it was rebased onto 1.31.1. **31 of those are this entry**, counted by collection against the previous release rather than by reading the diff: 9 in `diff_rendered_output.test.py` (29 vs 20) and 22 in `validate_backlinks.test.py` (85 vs 63), parametrized cases counted as the separate items the collector reports them as. All were red against the unmodified scripts beforehand except two, which pin pre-existing behaviour by design. Four of the new guards were additionally established by MUTATION, because a passing suite says nothing about a guard nothing exercises: the reducer with its `--- <relpath> ---` headers removed, the note-map presence check written as truthiness, the supplied-map branch keyed on an empty dict, and the `*.md` path check left basename-blind — each RED for its own test.
+
+Also corrected in place: `diff_rendered_output.py`'s docstring claimed a "full closed reason set" that omitted two reasons the script really emits (`profile_precondition`, `out_dir_symlink`, both reachable only on the default no-`--candidate-dir` path) and did not mention that `main()`'s defensive catch-all emits a JSON line carrying no `reason` field at all. The enumeration now matches the code, and `out_dir_symlink` — emitted but pinned by no test until now — has one per condition it covers: the resolver refuses both a `..` traversal segment and a symlinked path component under that single reason string.
+
+
 ## 1.32.0 — 2026-08-18
 
 Collision de-linking finally says what it costs, and a book can tell the renderer that two spellings are one man. Closes #588.
