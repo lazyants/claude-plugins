@@ -1426,7 +1426,7 @@ def count_surfaces(surfaces: list, consume_also: list, corpus: str, boundary: st
     # renderer's own construction (`render_obsidian.py`'s `_Linker`), not an
     # imitation of its outcome. Per-surface scanning with masking between
     # passes is NOT equivalent: it resolves an overlap in favour of the LONGER
-    # surface wherever they start at different offsets, while one leftmost-first
+    # surface whenever the LONGER one starts later, while one leftmost-first
     # scan resolves it in favour of the EARLIER one. Over "R. Nachman of
     # Tulchin" the renderer links `R. Nachman`; a longest-first sweep would
     # instead consume `Nachman of Tulchin` and report `R. Nachman` as printed

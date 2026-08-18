@@ -289,10 +289,13 @@ inventory form consumed them. Consumption is deliberate and matches the
 renderer exactly, because it IS the renderer's construction: one alternation
 over the whole inventory, sorted longest-first, scanned once, left to right.
 Scanning surface by surface and masking between passes is not equivalent — it
-resolves an overlap in favour of the LONGER surface wherever the two start at
-different offsets, where one leftmost-first scan prefers the EARLIER one. Over
+resolves an overlap in favour of the LONGER surface whenever the longer one
+starts LATER, where one leftmost-first scan prefers the EARLIER one. Over
 "R. Nachman of Tulchin" the renderer links `R. Nachman`; a longest-first sweep
 would consume `Nachman of Tulchin` and report `R. Nachman` as printed nowhere.
+Measured, and narrower than it first looks: when the longer surface starts
+earlier or at the same offset the two agree, and the same-offset case is what
+longest-first exists for.
 Longest-first still decides ties at ONE offset, which is the guarantee that
 rule actually makes. A boundary-refused span is still consumed, so `Marie` is
 not counted inside `JoAnn Marie` after `Ann Marie` was refused for its

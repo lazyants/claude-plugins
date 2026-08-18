@@ -583,6 +583,10 @@ def _renderer_links(entries: dict, corpus: str) -> set:
         ("R. Nachman of Tulchin spoke.", ["Nachman of Tulchin", "R. Nachman"]),
         # Same start offset: longest-first is the tiebreak, and both agree.
         ("R. Nachman of Tulchin spoke.", ["R. Nachman of Tulchin", "R. Nachman"]),
+        # Longer target starts EARLIER: also agreement, and pinned because the
+        # entry's claim is about the LATER case specifically -- a claim stated
+        # as "whenever they start at different offsets" would be false here.
+        ("R. Nachman of Tulchin spoke.", ["R. Nachman of Tulchin", "Tulchin"]),
         # A refused span is consumed by both, so `Marie` gets no turn.
         ("JoAnn Marie spoke.", ["Ann Marie", "Marie"]),
         # An unowned longer form still consumes; a hyphen is not alphanumeric.
