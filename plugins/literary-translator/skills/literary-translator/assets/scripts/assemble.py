@@ -158,6 +158,7 @@ RUNS_DIR = DURABLE_ROOT / "runs"
 MANIFEST_PATH = DURABLE_ROOT / "manifest.json"
 CANON_PATH = DURABLE_ROOT / "canon.json"
 CANON_SENSES_PATH = DURABLE_ROOT / "canon_senses.json"
+CANON_LINK_GROUPS_PATH = DURABLE_ROOT / "canon_link_groups.json"
 LEDGER_PATH = RUNS_DIR / "ledger.json"
 ASSEMBLED_DIR = DURABLE_ROOT / "out" / ".assembled"
 
@@ -1940,6 +1941,69 @@ def _attach_mentions(nodestream: dict, profile: dict, manifest: dict, canon: dic
     nodestream["mentions"] = aggregate["eligible_by_source_form"]
 
 
+def _attach_link_groups(nodestream: dict, canon: dict) -> None:
+    """#588: attach `nodestream["link_groups"]` -- the `{member: primary}`
+    projection of the `canon_link_groups.json` sidecar -- so
+    `dispatch_adapter`'s render_obsidian.py sees which canon forms an
+    upstream identity pass established as ONE referent, and can link their
+    shared `canonical_target_form` instead of de-linking it.
+
+    Same shape of plumbing as `_attach_mentions` above and for the same
+    reason: the adapter contract is 4 positional args, so this data rides
+    inside arg 1, attached BEFORE nodestream.json is persisted and before
+    the adapter runs.
+
+    Gated by the CALLER on `output.target == "obsidian"` only -- NOT on the
+    Mentions `enabled` flag, because collision de-linking itself is not
+    gated on it (#206/#207).
+
+    ZERO new dependency surface when there is no sidecar: the loader (and
+    with it `jsonschema`) is imported only once the file is known to be
+    there, mirroring `_attach_mentions`'s own lazy-import discipline. A
+    DANGLING SYMLINK is not "absent" -- `lexists` is what distinguishes a
+    broken sidecar the operator meant to have from no sidecar at all, and
+    the loader rejects it rather than silently skipping an identity pass
+    they believe is applied.
+
+    FAIL-CLOSED, like `_attach_mentions`: any load/validation failure
+    raises rather than rendering with the groups silently dropped, which
+    would ship a vault whose links contradict the operator's own recorded
+    decision."""
+    if not os.path.lexists(CANON_LINK_GROUPS_PATH):
+        return
+
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import canon_link_groups
+    except ImportError as exc:
+        raise AssemblePrecondition(
+            "dependency_precondition",
+            f"{CANON_LINK_GROUPS_PATH.name} is present but canon_link_groups.py "
+            f"could not be imported from {SCRIPTS_DIR}: {exc}",
+        ) from exc
+    except SystemExit as exc:
+        raise AssemblePrecondition(
+            "dependency_precondition",
+            f"{CANON_LINK_GROUPS_PATH.name} is present but canon_link_groups.py "
+            "halted during its own module-level dependency preflight -- "
+            f"{_system_exit_detail(exc)}",
+        ) from exc
+
+    entries = (canon or {}).get("entries")
+    try:
+        primary_by_source_form = canon_link_groups.load_link_groups(
+            CANON_LINK_GROUPS_PATH,
+            entries if isinstance(entries, dict) else {},
+        )
+    except canon_link_groups.CanonLinkGroupsLoadError as exc:
+        raise AssembleError(
+            f"canon_link_groups.json failed to load: {exc}",
+            reason="canon_link_groups_invalid",
+        ) from exc
+    if primary_by_source_form:
+        nodestream["link_groups"] = primary_by_source_form
+
+
 def dispatch_adapter(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     try:
         adapter = output_resolve.resolve_output_adapter(profile, DURABLE_ROOT)
@@ -2093,6 +2157,14 @@ def main() -> int:
         # touches no new dependency, byte-identical to 1.7.0.
         if _effective_mentions_enabled(profile):
             _attach_mentions(nodestream, profile, manifest, canon)
+
+        # #588: link groups gate on the TARGET alone, not on the Mentions
+        # flag -- collision de-linking, which is what a group modifies, is
+        # itself decoupled from that flag (#206/#207). Attached here, next
+        # to the mentions data and for the same reason: before persistence,
+        # before the adapter.
+        if ((profile or {}).get("output") or {}).get("target") == "obsidian":
+            _attach_link_groups(nodestream, canon)
 
         if ASSEMBLED_DIR.parent.is_symlink():
             # The vector isn't just `.assembled/` itself -- its PARENT

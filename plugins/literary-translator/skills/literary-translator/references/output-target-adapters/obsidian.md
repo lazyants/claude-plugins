@@ -235,6 +235,100 @@ occurrences discoverable at all; with the section disabled, a de-linked
 homonym has no inline link AND no `## Mentions` backlink — see the
 disabled-path limitation noted above.
 
+### What de-linking cost this render — `delink_cost` (1.30.0)
+
+De-linking is silent by construction: the vault renders, every gate passes,
+and nothing says how much of the book's naming went unlinked. In one
+delivered vault that was **1373 unlinked occurrences against 537 emitted
+links** — the book's most-named figures, silenced, with a clean bill of
+health (#588). So `render()` now returns, and stamps into the vault
+marker, a `delink_cost` block:
+
+```json
+{"delinked_targets": [{"canonical_target_form": "Moyshe-Leyb",
+                        "owners": ["משה לייב", "משה־לייב"],
+                        "unlinked_occurrences": 1373}],
+ "unlinked_occurrences_total": 1373,
+ "inline_links_emitted": 537}
+```
+
+- It rides out on `assemble.py`'s stdout as `adapter_result.delink_cost`,
+  and `validate_backlinks.py` **republishes it verbatim** from the marker
+  (exit-neutral — `warnings` stays `len(missing)`). The gate never
+  re-derives it: it short-circuits entirely when the appendix is disabled,
+  which is exactly the configuration the measured vault ran under.
+- A **non-zero total always prints one stderr `WARN`**, on every obsidian
+  render. No ratio threshold — a book whose most-named figures are silenced
+  should not need to clear a bar to be told so.
+- The counts come from inside `_Linker`, over the exact text the wikilink
+  rule is applied to — **never a re-scan of the finished markdown**, which
+  would be both over- and under-inclusive (a verse gloss is linked BEFORE
+  it is wrapped as `> *Literal: …*`, the segment title is duplicated into
+  YAML frontmatter, and the inline-verse label is protected by position).
+  Every occurrence counts, not one per block: the question is how many
+  unlinked mentions a reader actually meets. A de-linked short name nested
+  inside a longer linked one is charged to the longer name.
+- `unlinked_occurrences` and `inline_links_emitted` are **different
+  cardinalities on purpose** (occurrences vs. links; the wikilink rule
+  emits at most one link per target per block). Nothing is claimed about
+  their ratio.
+- A target with zero occurrences is still listed — the de-linked SET names
+  every canon form implicated, and its cost being zero is the useful part.
+- The marker is re-stamped WITHOUT a measurement the moment the old vault
+  is cleaned, so an interrupted render can never leave a previous render's
+  number standing over notes it no longer describes. `delink_cost: null` in
+  the gate report means "not measured" — never "measured zero".
+
+### Re-linking one referent — `canon_link_groups.json` (1.30.0)
+
+De-linking cannot tell two spellings of one man from two different men, and
+in a pointed-script corpus the first case is the normal one. A
+**link group** is how an identity call made upstream is recorded so the
+renderer can act on it. Optional sidecar at
+`{durable_root}/canon_link_groups.json`, schema
+`schemas/canon-link-groups.schema.json`:
+
+```json
+{"schema_version": 1,
+ "groups": [{"primary": "משה לייב",
+             "members": ["משה לייב", "משה־לייב"],
+             "note": "same man, with and without maqaf — adjudicated W7"}]}
+```
+
+When **every** owner of a colliding target reduces to the same group
+primary, and no owner is `sense_translated`, the shared target links to
+that primary's note instead of being de-linked. Four deliberate limits:
+
+1. **Only targets that would otherwise be de-linked move.** A single-owner
+   target is untouched, group or no group.
+2. **The matcher never widens.** The alternation is built from the same
+   `canonical_target_form` strings either way — no string becomes newly
+   matchable, no prose is newly rewritten.
+3. **A group plus an outsider still de-links**, and so does a group
+   containing a `sense_translated` owner: the anti-flood invariant (#138)
+   and the misattribution rule (#207) both outrank a routing preference.
+4. **It is not an entity layer.** `canon.json` stays a 1:1 name dictionary;
+   every member keeps its own entity note, frontmatter, and source-anchored
+   `## Mentions` appendix — which remains the authoritative, collapse-free
+   occurrence index per form.
+
+**A script never decides membership.** `note` is required and non-blank for
+exactly that reason: the file records a call, it does not make one (the
+iron rule). `assemble.py` loads it fail-closed — a malformed sidecar, a
+member that is not a byte-exact `canon['entries']` key, a `primary` outside
+its own `members`, or a form claimed by two groups all halt assembly rather
+than render a vault whose links contradict the operator's own decision. A
+**dangling symlink is not "absent"** — a broken sidecar is one the operator
+meant to have. Membership is byte-exact: never folded, never NFC-normalized.
+
+**Migration.** The sidecar sits outside all 15 cache-key fields, so adopting
+a group re-translates **nothing**. `render_obsidian.py`'s own bytes changed,
+so `render_version` moved: a vault holding an accepted
+`diff_rendered_output.py` baseline gets the advisory `stale_baseline` WARN
+(exit 0) and needs one `--accept-baseline` re-accept — and adopting a group
+changes the rendered links, so that re-accept needs
+`--accept-baseline --force-accept-baseline`.
+
 ## Category→folder catalog — presets are EXAMPLES, not an enum
 
 `category` is genuinely **open vocabulary** — `canon-entry.schema.json`

@@ -2600,6 +2600,22 @@ model) that supersedes the older "native backlinks are the occurrence index"
 stance for `output.target: obsidian` projects; see
 `references/output-target-adapters/obsidian.md`.
 
+**What collision de-linking cost this book (1.30.0, #588).** On every
+`output.target: obsidian` render — appendix on or off — a
+`canonical_target_form` owned by 2+ canon entries is de-linked, and the
+renderer now REPORTS what that cost: `adapter_result.delink_cost` on
+`assemble.py`'s stdout line, plus one stderr `WARN` whenever the total is
+non-zero. `validate_backlinks.py` republishes the same block verbatim as
+`delink_cost` (exit-neutral; `null` means "not measured", never "measured
+zero"). **Read the WARN — do not just log it.** A book whose de-linked
+occurrences dwarf its emitted links has had its most-named figures
+silenced, and every gate above will still be green. When the WARN names
+targets that are spelling variants of ONE referent, the fix is
+`canon_link_groups.json` (an identity call recorded upstream, never made by
+a script — see `references/canon-and-glossary.md`) and a re-render; adopting
+a group re-translates nothing, but it does change the rendered links, so the
+diff baseline needs `--accept-baseline --force-accept-baseline`.
+
 ## Reference docs
 
 - `references/engine-loop.md` — R1, R6

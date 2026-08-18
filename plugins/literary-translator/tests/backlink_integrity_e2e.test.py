@@ -832,5 +832,10 @@ def test_flag_off_pipeline_preserves_1_7_0_behavior_except_collisions(tmp_path):
         "unresolved_homonyms": [],
         "collisions": [],
         "inline_advisory": {"thin_coverage": []},
+        # #588: the disabled path reports `delink_cost: null` -- it never
+        # reads the vault, so it has no measurement to republish, and a
+        # zeroed block would assert "de-linking cost nothing". The renderer
+        # still prints the real number on every obsidian render.
+        "delink_cost": None,
         "warnings": 0,
     }

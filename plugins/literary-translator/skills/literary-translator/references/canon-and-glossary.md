@@ -1178,3 +1178,53 @@ decision is reviewed BEFORE it is merged, never after.
 The skeptic pass is an **opt-in, advisory-only** addition (`glossary.skeptic_pass.enabled`, default `false`): a deterministic `suspicion_scan.py` surfaces structurally-risky canon entries (over-merge participants, offline-established entries, singletons, high-dispersion names, citation-only figures, near-spelling pairs, and a globally-capped sample), then a scoped codex pass -- cloning the glossary dispatch control flow, never its identity-decision authority -- is fed bounded, whole-block windows for each flagged entity and adversarially asked to find a contradicting sentence or a genuine homonym split. Its verdict schema (`skeptic-triage.schema.json`) can express only `adverse` / `propose_split` / `propose_rescope` / `insufficient_window` -- there is deliberately no confirmation value, and no freeze/merge reader ever opens the resulting `skeptic_triage.json`. Every actual confirmation still flows through the unchanged human/codex `canon_adjudications.json` / `canon_senses.json` paths. `skeptic_report.py` is a separate, read-only advisory command that renders `skeptic_triage.json` for a human reviewer (per-entity risk context, the verdict, a quote derived fresh from the stored offsets, and evidence coverage) -- it is not a gate, it never blocks, and it runs strictly after `canon_adjudication_audit.py`, which is unchanged byte-for-byte by the skeptic pass's presence (see `tests/audit_unchanged_regression.test.py`).
 
 Two scoping limits carry through to this reporting layer. First, **verse evidence stays block-only**: `evidence_verify` (and therefore any skeptic citation) can only authenticate an offset against `manifest.blocks{}`, never `verse.store[]` -- a citation whose window is an embedded-verse node can never byte-verify, so `skeptic_ready.py` DROPS it upstream and `skeptic_report.py` never needs to (and cannot) derive a quote from verse text. Dropping the citation is not the same as coercing the record, and the difference matters for what the report renders: `adverse`/`propose_rescope` lose their single required citation and the record really does coerce to `insufficient_window`, but a `propose_split` merely loses that referent and KEEPS its verdict as long as >=2 byte-verified referents survive. `evidence_coverage` does NOT durably record that pruning: `cited` is recomputed from the referent list as it stands at each invocation, and `--validate-fragment` rewrites the fragment in place, so a second validation of an already-pruned fragment yields `cited == verified` — and the normal path validates at least twice. Do not read a `2/2` here as proof nothing was dropped. Either way every referent the report can still see is block-anchored and byte-verified, which is what makes the quote derivation safe. Second, **`all_citation` is adapter-safe**: for `source.format` values with no configured citation-block-type set (i.e. anything other than `gutenberg_epub`/`plain_text` -- any `custom` adapter), the risk class is disabled fail-safe rather than guessed from tag spelling, annotated `citation_classification_unavailable` in the worklist; this never blocks the skeptic pass itself, it only means that one risk signal is honestly reported as unavailable for that project's format.
+
+## `canon_link_groups.json` — recording that N canon forms are ONE referent (1.30.0, #588)
+
+A third optional sidecar beside `canon_senses.json`, and the same shape of
+thing: a place to record a decision `canon.json`'s 1:1 name dictionary
+cannot express, without touching a hashed field.
+
+`canon.json` maps one `source_form` to one `canonical_target_form`. Two
+spellings of one person — the same name with and without maqaf, or with
+different niqqud — are therefore **two entries sharing one target**, which
+is indistinguishable from two different people sharing one target. The
+obsidian adapter resolves that ambiguity the safe way and **de-links the
+shared target entirely** (#206/#207): a click landing on the wrong entity's
+note is worse than no link. In a pointed-script corpus the "two spellings,
+one person" case is the normal one, so the book's most-named figures lose
+every inline link they have. Measured in one delivered vault: 1373 unlinked
+occurrences against 537 emitted links, every gate green.
+
+`canon_link_groups.json` is where an identity call **made upstream** is
+recorded so the renderer can act on it:
+
+```json
+{"schema_version": 1,
+ "groups": [{"primary": "משה לייב",
+             "members": ["משה לייב", "משה־לייב"],
+             "note": "same man, with and without maqaf — adjudicated W7"}]}
+```
+
+`scripts/canon_link_groups.py` is the one runtime-validating loader
+(`load_link_groups(path, entries) -> {member: primary}`); the full renderer
+semantics — what a group does and, more importantly, the four things it
+deliberately does not do — live in
+`references/output-target-adapters/obsidian.md`.
+
+**Why this is a sidecar and not a canon field.** `cache_key.compute_used_terms_hash`
+hashes the WHOLE referenced canon ENTRY object, so adding any field to
+`canon['entries'][name]` re-translates every converged segment that
+references that name (see `hash-migration-impact.md`'s sidecar rule). A
+sibling file stays outside all 15 cache-key fields, so a finished book can
+adopt a group for **zero re-translation** — which is the entire point.
+
+**The iron rule applies unchanged.** No script decides membership. `note` is
+REQUIRED and non-blank precisely because the file records a call it does not
+make: a group with no stated reason is indistinguishable from a mistake. The
+decision itself comes from the same places every other identity decision
+does — a human, or a codex adjudication pass — never from a matcher over
+spellings. Membership is **byte-exact** against `canon['entries']` keys:
+never folded, never NFC-normalized, and a member that is not a key is a hard
+load error rather than a tolerated no-op, because a silent no-op is exactly
+the failure that would leave an operator believing their pass was applied.

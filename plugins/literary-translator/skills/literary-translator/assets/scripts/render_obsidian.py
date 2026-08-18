@@ -67,7 +67,7 @@ import shutil
 import sys
 import tempfile
 import unicodedata
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 try:
@@ -374,7 +374,190 @@ def _validate_mentions_safe_canon(entries):
         _reject_line_break_in_mentions_field(source_form, "source_form", source_form)
 
 
-def build_entity_index(entries, note_identity_by_source_form, collision_delink=False):
+def _owners_by_target(entries):
+    """`{NFC canonical_target_form: [(sort_key, source_form, basis), ...]}` --
+    every owner of every target, UNREDUCED. Order within a list follows
+    `entries` iteration order (immaterial: both the tiebreak and the delink
+    check in `_link_decision` are order-independent). Factored out of
+    `build_entity_index` (#588) so `delinked_owners_by_target` groups owners
+    by exactly the same rule instead of re-implementing it."""
+    owners_by_target = defaultdict(list)
+    for source_form, entry in (entries or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        target = entry.get("canonical_target_form")
+        if not target or not target.strip():
+            continue
+        # NFC-normalize so a canon entry stored in decomposed (NFD) form
+        # collapses onto the same target as an NFC one, and so the pattern
+        # built below matches consistently against `_Linker.link`'s own
+        # NFC-normalized scan text (block text can carry either form,
+        # spliced in from different upstream sources).
+        target = unicodedata.normalize("NFC", target)
+        key = (len(source_form), source_form)
+        # `basis` carried alongside (#240) so the sense_translated exclusion
+        # can be applied AFTER the collision tally below, not before it --
+        # see build_entity_index's own docstring.
+        owners_by_target[target].append((key, source_form, entry.get("basis")))
+    return owners_by_target
+
+
+def _link_decision(owners, collision_delink, primary_by_source_form=None):
+    """`(winner_source_form_or_None, delinked)` for ONE target's owner list.
+
+    THE one implementation of the inline-link rule, called by both
+    `build_entity_index` (which needs the winner) and
+    `delinked_owners_by_target` (which needs `delinked`), so the two can
+    never drift.
+
+    `delinked` is True only when the >=2-owner rule removed a target that
+    the tiebreak would OTHERWISE have linked -- i.e. de-linking actually
+    cost something. A target whose owners are ALL `sense_translated` is
+    dropped either way, so it is never reported as a cost. That makes this
+    flag equal, by construction, to `validate_backlinks.py`'s own
+    "present in the collision_delink=False map, absent from the True one"
+    two-call diff (#240).
+
+    `primary_by_source_form` (#588, optional, VALIDATED by the caller --
+    see `_validate_link_groups`) is the `{member: primary}` projection of
+    the `canon_link_groups.json` sidecar: an upstream-established statement
+    that N canon forms denote ONE referent. It is consulted ONLY inside the
+    de-link branch, so it can move nothing else: a single-owner target keeps
+    its own link, no string becomes newly matchable, and an absent/empty map
+    reproduces 1.29.0 behavior exactly. When every owner of a colliding
+    target reduces to the SAME group primary -- only reachable when they are
+    all members of one group -- and no owner is `sense_translated`, the
+    shared target links to that primary's note instead of being de-linked.
+    A `sense_translated` owner still suppresses the link entirely: that
+    target string is an ordinary word by construction, and the anti-flood
+    invariant (#138) outranks a group's routing preference."""
+    survivors = [
+        (key, source_form) for key, source_form, basis in owners
+        if basis != "sense_translated"
+    ]
+    if collision_delink and len(owners) >= 2:
+        identities = {
+            (primary_by_source_form or {}).get(source_form, source_form)
+            for _key, source_form, _basis in owners
+        }
+        if len(identities) == 1 and len(survivors) == len(owners):
+            return next(iter(identities)), False  # one established entity -- re-linked to its primary
+        # >=2 distinct entities (or a group plus an outsider, or a
+        # sense_translated owner): delinked entirely -- no inline link for
+        # this string at all. It COST an link only if some owner could have
+        # won the tiebreak in the first place.
+        return None, bool(survivors)
+    if not survivors:
+        return None, False  # every owner is sense_translated -- never auto-linked, drop the target entirely
+    _, winner_source_form = min(survivors)  # shortest source_form, then lexicographic, sense_translated excluded
+    return winner_source_form, False
+
+
+def delinked_owners_by_target(entries, primary_by_source_form=None):
+    """`{canonical_target_form: [source_form, ...]}` for exactly the targets
+    collision de-linking removes from the link map that the tiebreak would
+    otherwise have linked (#588) -- the population whose occurrences carry
+    no inline link in the rendered vault, and the set
+    `_Linker`'s diagnostic counter charges occurrences to.
+
+    Owners are the target's FULL owner list (sorted), including any
+    `sense_translated` owner that contributed to the collision tally
+    (#240), so the operator sees every canon form implicated in the
+    suppression, not only the ones that could have won."""
+    out = {}
+    for target, owners in _owners_by_target(entries).items():
+        _winner, delinked = _link_decision(owners, True, primary_by_source_form)
+        if delinked:
+            out[target] = sorted(source_form for _key, source_form, _basis in owners)
+    return out
+
+
+def build_diagnostic_pattern(linkable_targets, delinked_targets):
+    """The single compiled alternation `_Linker` scans for #588's cost
+    metric: every LINKABLE and every DE-LINKED target, LONGEST FIRST, each
+    alternative `re.escape`d (a `canonical_target_form` is free-form text
+    and may legally contain regex metacharacters).
+
+    The union -- rather than the de-linked targets alone -- is what makes
+    attribution correct. The wikilink rule links only the FIRST occurrence
+    of a target per block, so a linked name's later occurrences sit in the
+    prose as plain text; a de-linked short name nested inside one of them
+    ("Reb Noson" inside "Reb Noson of Nemirov") must be charged to the
+    longer name, not counted as a silenced mention of the shorter one.
+    Longest-first, non-overlapping matching gives each physical occurrence
+    exactly one owner -- the same guarantee `build_entity_index`'s own
+    pattern relies on, and with the same documented consequence for two
+    targets that OVERLAP without nesting ("AB" linked, "BC" de-linked,
+    text "ABC"): the first match wins and the second is not seen.
+
+    Returns None when there is nothing to scan for."""
+    all_targets = set(linkable_targets or ()) | set(delinked_targets or ())
+    if not all_targets:
+        return None
+    ordered = sorted(all_targets, key=lambda t: (-len(t), t))
+    return re.compile("|".join(re.escape(t) for t in ordered))
+
+
+def _validate_link_groups(primary_by_source_form, note_identity_by_source_form):
+    """Fail-closed check of the `{member: primary}` map at its CONSUMPTION
+    point, raising `RenderError("link_groups_invalid")`.
+
+    `assemble.py` loads the sidecar through `canon_link_groups.load_link_groups`,
+    which already validates canon membership -- but `render()` consumes
+    `nodestream["link_groups"]`, and the standalone CLI (or a hand-edited
+    persisted NodeStream) can hand it a map that never passed through that
+    loader. An unvalidated primary reaches
+    `note_identity_by_source_form.get(source_form, source_form)` inside
+    `build_entity_index`, whose fallback would emit a wikilink to a note
+    this render never writes -- a broken link in the delivered vault.
+
+    Two conditions, both mechanical (never an identity judgement):
+      - every key AND every value is a `source_form` this render actually
+        emits an entity note for;
+      - every value maps to ITSELF (`m[primary] == primary`), i.e. the
+        primary is a member of its own group, which is what makes the flat
+        projection a well-formed one-hop map rather than a chain.
+    Non-string keys/values and a non-mapping argument are rejected here too,
+    so a malformed persisted map surfaces as this named failure rather than
+    a TypeError from a downstream lookup.
+
+    Called BEFORE `_clean_vault_content` (see `render()`): a rejected input
+    must never cost the operator the vault that is already on disk."""
+    if primary_by_source_form is None:
+        return {}
+    if not isinstance(primary_by_source_form, dict):
+        raise RenderError(
+            "link_groups_invalid",
+            "link_groups must be an object mapping each grouped source_form "
+            f"to its group's primary source_form, got "
+            f"{type(primary_by_source_form).__name__}",
+        )
+    for member, primary in primary_by_source_form.items():
+        if not isinstance(member, str) or not isinstance(primary, str):
+            raise RenderError(
+                "link_groups_invalid",
+                f"link_groups entry {member!r} -> {primary!r} is not a "
+                "string-to-string mapping",
+            )
+        for role, value in (("member", member), ("primary", primary)):
+            if value not in note_identity_by_source_form:
+                raise RenderError(
+                    "link_groups_invalid",
+                    f"link_groups {role} {value!r} is not a canon entry this "
+                    "render emits a note for -- a group may only name "
+                    "canon.json entries{} keys, byte-exact",
+                )
+        if primary_by_source_form.get(primary) != primary:
+            raise RenderError(
+                "link_groups_invalid",
+                f"link_groups primary {primary!r} is not a member of its own "
+                "group (it must map to itself)",
+            )
+    return primary_by_source_form
+
+
+def build_entity_index(entries, note_identity_by_source_form, collision_delink=False,
+                       primary_by_source_form=None):
     """Returns (compiled_pattern, target_to_entity) for every
     canon entry carrying a non-degenerate `canonical_target_form` -- the
     substring that actually appears in TRANSLATED body text (obsidian.md's
@@ -435,6 +618,20 @@ def build_entity_index(entries, note_identity_by_source_form, collision_delink=F
     removal; the operator-facing collision diagnostic is surfaced
     independently by `validate_backlinks.py`'s own report, computed there
     from canon directly, so this function does not also return it.)
+    `primary_by_source_form` (#588, default `None` = 1.29.0 behavior
+    exactly) is the VALIDATED `{member: primary}` projection of the
+    `canon_link_groups.json` sidecar. It is consulted ONLY inside the
+    de-link branch (see `_link_decision`, which owns the rule): when every
+    owner of a colliding target belongs to ONE established group and none
+    is `sense_translated`, the shared target links to that group's primary
+    note instead of being de-linked. Nothing else moves -- a single-owner
+    target is untouched, and no string becomes newly matchable, because the
+    alternation is still built from the same `canonical_target_form` values.
+    Callers must pass a map already checked by `_validate_link_groups`;
+    an unvalidated primary would reach the
+    `note_identity_by_source_form.get(source_form, source_form)` fallback
+    below and emit a link to a note that was never written.
+
     Degenerate values (empty or whitespace-only) are skipped entirely --
     otherwise a blank/whitespace target would become a matcher that wraps
     the first space (or nothing) in every block (review round 1 finding).
@@ -467,39 +664,15 @@ def build_entity_index(entries, note_identity_by_source_form, collision_delink=F
     at a given start position, so ordering longest-first is what makes that
     guarantee hold.
     """
-    # Every owner of each normalized target, UNREDUCED -- order within a
-    # list follows `entries` iteration order (immaterial: both the
-    # tiebreak and the delink check below are order-independent).
-    owners_by_target = defaultdict(list)
-    for source_form, entry in (entries or {}).items():
-        if not isinstance(entry, dict):
-            continue
-        target = entry.get("canonical_target_form")
-        if not target or not target.strip():
-            continue
-        # NFC-normalize so a canon entry stored in decomposed (NFD) form
-        # collapses onto the same target as an NFC one, and so the pattern
-        # built below matches consistently against `_Linker.link`'s own
-        # NFC-normalized scan text (block text can carry either form,
-        # spliced in from different upstream sources).
-        target = unicodedata.normalize("NFC", target)
-        key = (len(source_form), source_form)
-        # `basis` carried alongside (#240) so the sense_translated exclusion
-        # can be applied AFTER the collision tally below, not before it --
-        # see this function's own docstring.
-        owners_by_target[target].append((key, source_form, entry.get("basis")))
+    owners_by_target = _owners_by_target(entries)
 
     by_target = {}
     for target, owners in owners_by_target.items():
-        if collision_delink and len(owners) >= 2:
-            continue  # >=2 owners of ANY basis, delinked entirely -- no inline link for this string at all
-        survivors = [
-            (key, source_form) for key, source_form, basis in owners
-            if basis != "sense_translated"
-        ]
-        if not survivors:
-            continue  # every owner is sense_translated -- never auto-linked, drop the target entirely
-        _, winner_source_form = min(survivors)  # shortest source_form, then lexicographic, sense_translated excluded
+        winner_source_form, _delinked = _link_decision(
+            owners, collision_delink, primary_by_source_form
+        )
+        if winner_source_form is None:
+            continue
         by_target[target] = winner_source_form
 
     if not by_target:
@@ -537,13 +710,36 @@ class _Linker:
         across every `link()` call this render makes) -- shown once, ever,
         the very first time a given canonical_target_form appears anywhere,
         never repeated even in a later block's own first occurrence.
+
+    It also carries #588's cost diagnostic, for the same reason: this is the
+    ONE place that sees the exact text the wikilink rule is applied to.
+    `diagnostic_pattern` (the longest-first union of linkable AND de-linked
+    targets, `build_diagnostic_pattern`) is scanned on the same
+    NFC-normalized string, with the same merged protected spans, as the
+    linking scan itself -- so `delinked_counts` is a count of occurrences the
+    linker really saw and really left unlinked, not an after-the-fact guess
+    from the rendered markdown. Scanning the FINAL note text instead would be
+    both over- and under-inclusive: `_render_verse_block` links the gloss
+    BEFORE wrapping it as `> *Literal: …*`, the segment title is duplicated
+    into YAML frontmatter, and `_render_verse_inline`'s label is protected by
+    POSITION (`extra_protected`), not by `_PROTECTED_SPAN_RE`.
+    `links_emitted` is incremented at the actual insertion site below, so it
+    counts links this render wrote -- never a `[[…]]` that was already in the
+    translated source text and merely preserved as a protected span.
     """
 
-    def __init__(self, pattern, target_to_entity, parenthetical_mode):
+    def __init__(self, pattern, target_to_entity, parenthetical_mode,
+                 diagnostic_pattern=None, delinked_targets=None):
         self.pattern = pattern
         self.target_to_entity = target_to_entity  # target -> (note_identity, source_form)
         self.parenthetical_mode = parenthetical_mode
         self.global_seen = set()
+        # #588 cost diagnostic -- purely observational: nothing below reads
+        # these back, and no linking decision depends on them.
+        self.diagnostic_pattern = diagnostic_pattern
+        self.delinked_targets = frozenset(delinked_targets or ())
+        self.delinked_counts = Counter()
+        self.links_emitted = 0
 
     def link(self, text, seen_in_block=None, extra_protected=None):
         # `extra_protected` (optional): a list of (start, end) char-offset spans
@@ -555,8 +751,19 @@ class _Linker:
         # that renderer-authored text. The label is already its final literal
         # form, so protection alone suffices -- there is nothing to restore
         # afterwards (see the LABEL PROTECTION comment block above).
-        if not text or self.pattern is None:
+        # #588: the early return must NOT skip the diagnostic scan when only
+        # the LINKABLE pattern is absent. `build_entity_index` returns
+        # `(None, {})` when nothing survives collision de-linking, which is
+        # exactly the all-collision book this metric exists for -- returning
+        # here on `self.pattern is None` would report zero for a book where
+        # every single name is suppressed.
+        if not text or (self.pattern is None and self.diagnostic_pattern is None):
             return text
+        # The NFC reassembly below is a MATCHING aid, never an output
+        # transform on a no-link path: when nothing is linkable this call
+        # must still return the caller's own bytes, exactly as the single
+        # `self.pattern is None` early return used to.
+        original_text = text
 
         # Protected spans (review round 1): never wrap a target that falls
         # inside an already-emitted [[...]], a [^N] footnote ref, or a raw
@@ -621,6 +828,25 @@ class _Linker:
         def _is_protected(start, end):
             return any(start < p_end and end > p_start for p_start, p_end in protected)
 
+        # #588 COST DIAGNOSTIC -- observational only, and deliberately BEFORE
+        # `seen_in_block` is consulted: the question is how many occurrences
+        # of a de-linked name a reader meets unlinked, so every occurrence
+        # counts, not one per block. Same `text`, same `protected` spans, same
+        # scan the linking loop below uses -- see this class's own docstring
+        # for why a post-hoc scan of the rendered markdown cannot be correct.
+        if self.diagnostic_pattern is not None and self.delinked_targets:
+            for m in self.diagnostic_pattern.finditer(text):
+                if _is_protected(m.start(), m.end()):
+                    continue
+                matched = m.group(0)
+                if matched in self.delinked_targets:
+                    self.delinked_counts[matched] += 1
+
+        if self.pattern is None:
+            # Nothing linkable this render; the diagnostic pass above still
+            # ran. Return the ORIGINAL bytes -- see `original_text`.
+            return original_text
+
         # `seen_in_block` is normally SHARED across every `link()` call made
         # while rendering one block (#105c) -- passed down from
         # `_render_block` through the verse renderers, so a name already
@@ -647,6 +873,7 @@ class _Linker:
                 piece += f" ({source_form})"
             self.global_seen.add(target)
             out.append(piece)
+            self.links_emitted += 1  # #588: counted where the link is actually inserted
             last = m.end()
         out.append(text[last:])
         return "".join(out)
@@ -1211,8 +1438,90 @@ def _is_rtl_language(code):
     return code.split("-")[0].lower() in _RTL_LANGUAGE_CODES
 
 
-def _marker_payload():
-    return {"managed_by": "literary-translator", "target": "obsidian"}
+DELINK_COST_KEY = "delink_cost"
+
+
+def _build_delink_cost(delinked_owners, linker):
+    """#588's report block: what collision de-linking cost THIS render.
+
+        {"delinked_targets": [{"canonical_target_form", "owners",
+                                "unlinked_occurrences"}, ...],
+         "unlinked_occurrences_total": int,
+         "inline_links_emitted": int}
+
+    `unlinked_occurrences` counts every occurrence of that target string in
+    the text the linker actually scanned and left unlinked -- not one per
+    block, and not a re-scan of the rendered markdown (see `_Linker`'s own
+    docstring for why the latter cannot be correct). `inline_links_emitted`
+    is what this render actually inserted. The two are DIFFERENT
+    cardinalities on purpose -- occurrences versus links, and the wikilink
+    rule emits at most one link per target per block -- so both are reported
+    under names that say which is which and nothing is claimed about their
+    ratio. Rows are sorted by cost, then by target, so the head of the list
+    is the operator's worklist.
+
+    A target with zero occurrences is still listed: the de-linked SET is
+    itself the diagnostic (it names every canon form implicated), and its
+    cost being zero is the useful, non-obvious part."""
+    counts = linker.delinked_counts
+    rows = [
+        {
+            "canonical_target_form": target,
+            "owners": owners,
+            "unlinked_occurrences": counts.get(target, 0),
+        }
+        for target, owners in delinked_owners.items()
+    ]
+    rows.sort(key=lambda row: (-row["unlinked_occurrences"], row["canonical_target_form"]))
+    return {
+        "delinked_targets": rows,
+        "unlinked_occurrences_total": sum(row["unlinked_occurrences"] for row in rows),
+        "inline_links_emitted": linker.links_emitted,
+    }
+
+
+def _warn_delink_cost(delink_cost, stream=None):
+    """One stderr WARN naming the number whenever de-linking cost this book
+    anything at all (#588). Deliberately not gated on a ratio: the issue's
+    "the de-linked population dwarfs the linked one" case is a subset of
+    "> 0", and a book whose most-named figures are silenced should not
+    depend on a threshold to be told so. The renderer warns rather than the
+    W9 gate because collision de-linking runs on EVERY obsidian render,
+    while `validate_backlinks.py` short-circuits when the `## Mentions`
+    appendix is disabled."""
+    total = delink_cost.get("unlinked_occurrences_total", 0)
+    if not total:
+        return
+    rows = delink_cost.get("delinked_targets") or []
+    top = ", ".join(
+        f"{row['canonical_target_form']!r} x{row['unlinked_occurrences']}"
+        for row in rows[:3] if row["unlinked_occurrences"]
+    )
+    print(
+        f"WARN: collision de-linking left {total} occurrence(s) of "
+        f"{len([r for r in rows if r['unlinked_occurrences']])} shared "
+        f"target(s) with no inline link "
+        f"(this render emitted {delink_cost.get('inline_links_emitted', 0)} "
+        f"inline link(s) in total). Largest: {top}. Each of these targets is "
+        "owned by >=2 canon entries; if they are spelling variants of ONE "
+        "referent, record that in canon_link_groups.json and re-render -- "
+        "see references/output-target-adapters/obsidian.md.",
+        file=stream if stream is not None else sys.stderr,
+    )
+
+
+def _marker_payload(delink_cost=None):
+    """The vault ownership marker's content. `managed_by`/`target` are the
+    identity `_is_valid_vault_marker` checks; `delink_cost` (#588) rides
+    alongside as this render's own record of what de-linking cost, which
+    `validate_backlinks.py` republishes rather than re-deriving. Its ABSENCE
+    is meaningful: a marker without it describes a vault whose render did
+    not complete (or one written by an older version), and the gate reports
+    `null` rather than a stale number."""
+    payload = {"managed_by": "literary-translator", "target": "obsidian"}
+    if delink_cost is not None:
+        payload[DELINK_COST_KEY] = delink_cost
+    return payload
 
 
 def _is_valid_vault_marker(marker_path):
@@ -1248,7 +1557,7 @@ def _is_valid_vault_marker(marker_path):
     )
 
 
-def _stamp_vault_marker(out_dir):
+def _stamp_vault_marker(out_dir, delink_cost=None):
     """Writes/refreshes the ownership marker WITHOUT ever following an
     existing symlink at the FINAL marker path (review round 3, [BLOCKER]):
     if something is already a symlink there, unlink it first (never write
@@ -1277,7 +1586,7 @@ def _stamp_vault_marker(out_dir):
     fd, tmp_name = tempfile.mkstemp(dir=str(out_dir), prefix="lt-vault-tmp-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(_marker_payload()) + "\n")
+            f.write(json.dumps(_marker_payload(delink_cost), ensure_ascii=False) + "\n")
         os.replace(tmp_name, marker_path)
     except BaseException:
         try:
@@ -1394,10 +1703,6 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
             "TARGET's own contents rather than a vault this adapter owns; "
             "point output.destination at a real directory instead",
         )
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _clean_vault_content(out_dir)  # marker-gated; raises RenderError if unmanaged -- review round 1+2
-    written = []
-
     meta = nodestream.get("meta") or {}
     is_rtl = _is_rtl_language(meta.get("target"))
 
@@ -1417,11 +1722,6 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     mentions_enabled = _effective_mentions_enabled(profile)
 
     entries = _canon_entries(canon)
-    if mentions_enabled:
-        # Fail-closed, before any note is written: no canon field may
-        # already carry the reserved marker token or an unsafe line-break
-        # (D1, codex R5/R6 -- see the function's own docstring).
-        _validate_mentions_safe_canon(entries)
     # Resolve every entity note's actual (collision-deduped) filename UP
     # FRONT, so the wikilinker below points at the SAME identity the
     # entity-note-writing loop later emits as a filename -- never the raw
@@ -1441,6 +1741,40 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
         source_form: relpath[: -len(".md")] if relpath.endswith(".md") else relpath
         for source_form, relpath in relpath_by_source_form.items()
     }
+
+    # #588: the one-entity link groups this render was handed, validated
+    # HERE -- after note resolution (so membership is checked against the
+    # identities this render will actually emit) and BEFORE
+    # `_clean_vault_content` below deletes anything. A rejected input must
+    # never cost the operator the vault that is already on disk. Read from
+    # arg 1 exactly like `nodestream["mentions"]` (assemble.py attaches both
+    # before persisting, so the adapter's 4-positional-arg contract never
+    # changes), and gated on the same `_is_obsidian_target` check as
+    # collision de-linking itself, so the dormant
+    # `obsidian`-under-`target:"custom"` CLI path stays inert.
+    primary_by_source_form = _validate_link_groups(
+        nodestream.get("link_groups") if _is_obsidian_target(profile) else None,
+        note_identity_by_source_form,
+    )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _clean_vault_content(out_dir)  # marker-gated; raises RenderError if unmanaged -- review round 1+2
+    # #588: re-stamp the ownership marker WITHOUT a measurement the moment
+    # the old vault is gone. The marker is a preserved dotfile, so a render
+    # that is killed (or fails) partway would otherwise leave the PREVIOUS
+    # render's `delink_cost` standing over notes it no longer describes --
+    # and `validate_backlinks.py` republishes that block as the vault's own
+    # number. An unmeasured marker is honest about an incomplete vault; the
+    # measured one is stamped LAST, only on success.
+    _stamp_vault_marker(out_dir)
+    written = []
+
+    if mentions_enabled:
+        # Fail-closed, before any note is written: no canon field may
+        # already carry the reserved marker token or an unsafe line-break
+        # (D1, codex R5/R6 -- see the function's own docstring).
+        _validate_mentions_safe_canon(entries)
+
     # D3 (#206/#207): collision de-linking is de-coupled from the `##
     # Mentions` appendix `enabled` flag -- a >=2-owner canonical_target_form
     # is never inline-linked on ANY real obsidian render, appendix on or
@@ -1456,8 +1790,21 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     pattern, target_to_entity = build_entity_index(
         entries, note_identity_by_source_form,
         collision_delink=_is_obsidian_target(profile),
+        primary_by_source_form=primary_by_source_form,
     )
-    linker = _Linker(pattern, target_to_entity, parenthetical_mode)
+    # #588: what de-linking actually costs this book. The owner lists come
+    # from the same `_link_decision` the index above used; the OCCURRENCE
+    # counts are gathered by `_Linker` itself, inside the one pass that sees
+    # the real matchable text.
+    delinked_owners = (
+        delinked_owners_by_target(entries, primary_by_source_form)
+        if _is_obsidian_target(profile) else {}
+    )
+    linker = _Linker(
+        pattern, target_to_entity, parenthetical_mode,
+        diagnostic_pattern=build_diagnostic_pattern(target_to_entity, delinked_owners),
+        delinked_targets=set(delinked_owners),
+    )
 
     footnote_text_by_n = {fn["n"]: fn.get("text", "") for fn in (nodestream.get("footnotes") or [])}
 
@@ -1516,15 +1863,20 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
         _write_note(out_dir, rel_path, note_text)
         written.append(rel_path)
 
+    delink_cost = _build_delink_cost(delinked_owners, linker)
+    _warn_delink_cost(delink_cost)
+
     # Stamp/refresh the ownership marker LAST, only after every note has
     # been written successfully -- the next render into this same out_dir
     # sees it and _clean_vault_content proceeds normally (review round 2).
     # Symlink-safe write (review round 3): see _stamp_vault_marker. A
     # dotfile: never part of `written` (diff_rendered_output.py's own
     # vault walk already skips any dotfile entry, same as .baseline/.assembled).
-    _stamp_vault_marker(out_dir)
+    # #588: this final stamp is also what binds the measured `delink_cost`
+    # to a COMPLETE vault -- see the unmeasured stamp right after the clean.
+    _stamp_vault_marker(out_dir, delink_cost=delink_cost)
 
-    return {"written": sorted(written), "kind": "vault"}
+    return {"written": sorted(written), "kind": "vault", "delink_cost": delink_cost}
 
 
 # ---------------------------------------------------------------------------
