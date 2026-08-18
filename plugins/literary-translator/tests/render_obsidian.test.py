@@ -2964,9 +2964,11 @@ def test_target_whose_own_edge_is_not_a_word_character_is_still_bounded(tmp_path
     """RED before #587, and the case that pins WHY the guard reads the
     adjacent characters instead of appending `\\b` to the pattern. `\\b` is
     asserted relative to the PATTERN's own edge character, so for a target
-    ending in "." it demands a WORD character next: `re.escape("R.") + r"\\b"`
-    MATCHES "R.Smith". The adjacent-character rule refuses it, and both admit
-    "R. Noson". A future rewrite to `\\b` fails here; it also fails
+    ending in "." it is wrong in BOTH directions: `re.escape("R.") + r"\\b"`
+    MATCHES "R.Smith", which this rule refuses, and does NOT match "R. Noson",
+    which this rule links -- after "R." the `\\b` position has a non-word
+    character on each side, so it never fires. A future rewrite to `\\b` fails
+    both assertions here; it also fails
     test_a_refused_span_is_consumed_so_no_shorter_target_links_inside_it,
     which is a different property -- this is the one that isolates the
     target's own edge character."""
@@ -3019,7 +3021,11 @@ def test_boundary_is_checked_at_both_edges_and_at_the_ends_of_the_text(tmp_path)
     (`end < len(text) - 1` re-admits `Teplikx`), and a target that ends the
     block text exactly (refusing `end == len(text)` suppresses a legitimate
     link). All three are single-character differences that no multi-word
-    fixture reaches."""
+    fixture reaches. The `xTeplik` case overlaps
+    test_target_preceded_by_an_alphanumeric_is_not_wrapped on purpose and does
+    not replace it: there the match is preceded-alnum MID-text with a non-alnum
+    after it, here it is preceded-alnum at END of text, where the trailing
+    branch short-circuits and only the leading check can refuse."""
     canon = make_canon({"Teplik_src": canon_entry("Teplik_src", "Teplik", category="place")})
     ns = make_nodestream([
         make_node("p1", "seg01", "xTeplik", order_index=0),

@@ -642,21 +642,25 @@ class _Linker:
             # cannot help when the longer string is ordinary prose.
             #
             # The test is `str.isalnum()` on the ADJACENT CHARACTER -- the same
-            # predicate `sanitize_filename_component`'s filename allow-list uses -- and it is
-            # deliberately alphanumeric rather than non-space: an apostrophe,
-            # quote, comma or period after a name is the common, correct case
-            # ("[[...|Reb Noson]]'s"), and only a letter or digit means the
-            # target is a fragment of a longer word. It is also script-agnostic:
-            # Hebrew, Cyrillic and Devanagari letters are all `isalnum()`, so an
-            # uncased script needs no branch of its own.
+            # predicate `sanitize_filename_component`'s filename allow-list
+            # uses -- and it is deliberately alphanumeric rather than non-space:
+            # an apostrophe, quote, comma or period after a name is the common,
+            # correct case ("[[...|Reb Noson]]'s"), and only a letter or digit
+            # means the target is a fragment of a longer word. It also needs no
+            # per-script branch: LETTERS are `isalnum()` in Hebrew and Cyrillic
+            # alike, so an uncased script behaves like a cased one. Combining
+            # MARKS are not (a Devanagari matra, a Hebrew point), so a word
+            # continued by one is still cut -- the known gap, filed as #590.
             #
             # Deliberately NOT `\b`/`\w`. `\b`'s assertion is defined relative to
-            # the PATTERN's own edge characters, so a canonical_target_form
+            # the PATTERN's own edge characters, so for a canonical_target_form
             # beginning or ending with punctuation ("R.", an apostrophised form)
-            # flips what it asserts -- `re.escape("R.") + r"\b"` matches
-            # "R.Smith", which this rule refuses, while both still admit
-            # "R. Noson". Looking only at the neighbouring character means a
-            # target's own edges can never change what the guard means.
+            # it is wrong in BOTH directions: `re.escape("R.") + r"\b"` matches
+            # "R.Smith", which this rule refuses, and does NOT match "R. Noson",
+            # which this rule links -- after "R." the `\b` position has a
+            # non-word character on each side, so it never fires. Looking only
+            # at the neighbouring character means a target's own edges can never
+            # change what the guard means.
             return not (
                 (start > 0 and text[start - 1].isalnum())
                 or (end < len(text) and text[end].isalnum())

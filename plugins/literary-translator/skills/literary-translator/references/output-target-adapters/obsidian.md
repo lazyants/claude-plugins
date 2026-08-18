@@ -121,8 +121,10 @@ inside `[[...]]`.
     `\b` in the pattern. `\b` is asserted relative to each alternative's own
     edge character, so a `canonical_target_form` beginning or ending in
     punctuation flips what it means: `R.` plus `\b` *matches* `R.Smith`,
-    which this rule refuses. It is also script-agnostic without a branch,
-    since Hebrew, Cyrillic and Devanagari letters are all `isalnum()`.
+    which this rule refuses — and, in the other direction, does *not* match
+    `R. Noson`, which this rule links. It also needs no per-script branch,
+    since LETTERS are `isalnum()` in Hebrew and Cyrillic alike; combining
+    marks are not, which is the gap below.
   - A refused span is still **consumed** (the scan is non-overlapping), so a
     different, shorter target starting inside it gets no turn: targets
     `Ann Marie` and `Marie` over the prose `JoAnn Marie` link nothing at

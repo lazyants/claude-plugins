@@ -12,10 +12,10 @@ This is not a Yiddish quirk. Every language that forms a demonym or adjective by
 
 ### The rule
 
-`render_obsidian.py:636-707`: if the character immediately before or immediately after the matched span is alphanumeric under `str.isalnum()`, the match is discarded.
+`render_obsidian.py:636-711`: if the character immediately before or immediately after the matched span is alphanumeric under `str.isalnum()`, the match is discarded.
 
 - **Alphanumeric, never non-space.** `[[…|Reb Noson]]’s` is correct and common — the book that produced this issue has 37 such spans — and so are a following comma, period, closing quote or bracket. Only a letter or a digit means the target is a fragment of a word.
-- **Applied per match, against the adjacent characters — not as a `\b` in the pattern.** `\b` is asserted relative to each alternative's *own* edge character, so a target that begins or ends in punctuation flips what it demands: `re.escape("R.") + r"\b"` **matches** `R.Smith`, which this rule refuses, while both still admit `R. Noson`. A test pins exactly that difference — a future rewrite to `\b` fails on it (and, separately, on the consumed-span test below).
+- **Applied per match, against the adjacent characters — not as a `\b` in the pattern.** `\b` is asserted relative to each alternative's *own* edge character, so a target that begins or ends in punctuation flips what it demands: `re.escape("R.") + r"\b"` is wrong in *both* directions — it **matches** `R.Smith`, which this rule refuses, and does **not** match `R. Noson`, which this rule links, because after `R.` the `\b` position has a non-word character on each side and never fires. A test pins exactly that difference — a future rewrite to `\b` fails on it (and, separately, on the consumed-span test below).
 - **Script-agnostic without a branch.** Hebrew, Cyrillic and Devanagari letters are all `isalnum()`, so an uncased script behaves like a cased one; `str.isalnum()` is also the predicate the adapter's own filename allow-list already uses.
 - **A refused match is not "seen".** It is discarded before the first-occurrence bookkeeping, so a properly bounded occurrence later in the same block still takes the block's single wikilink and its `parenthetical_originals: first_occurrence` gloss.
 

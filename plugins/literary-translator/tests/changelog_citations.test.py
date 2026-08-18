@@ -65,8 +65,8 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # the maintenance contract above: the previous entry's map went with its
 # entry. Every citation below was resolved BY CONTENT against the worktree
 # and RE-VERIFIED that each anchor appears, in order, inside its range --
-# never by carrying an offset over, not even for the files this release
-# leaves untouched (final_audit.py, cache_key.py). A uniform offset is never
+# never by carrying an offset over, not even for the file this release
+# leaves untouched (diff_rendered_output.py). A uniform offset is never
 # safe: 1.24.0's own rewrite shifted select_segments.py by +12 in one band
 # and +55 in the next, and an untouched file whose citation still happens to
 # contain its anchor text is exactly what a re-numbering produces without
@@ -87,7 +87,7 @@ CITATION_ANCHORS = {
         "re.compile",
         "for t in targets_sorted)",
     ],
-    "render_obsidian.py:636-707": [
+    "render_obsidian.py:636-711": [
         # The guard, its ONE call site, and the bookkeeping it must precede.
         # Order IS the claim here twice over: the definition precedes the call,
         # the call sits inside the match loop rather than in the pattern, and
