@@ -10,8 +10,8 @@ tracked. Each now states the decision instead.
 ### Fixed
 
 - **Shipped prose pointed at closed issues as open work (#380, #341, #577).** The tracker triage of
-  2026-08-18 closed three items as decisions rather than as work delivered, and four sentences kept
-  describing them as pending. `references/publish-targets/README.md`'s list of what the extension
+  2026-08-18 closed nine items, three of them as decisions rather than as work delivered, and four
+  sentences kept describing those three as pending. `references/publish-targets/README.md`'s list of what the extension
   contract cannot yet require cited the hardcoded provenance path as a gap awaiting a key (#380); it
   now says the record is a private audit trail for revalidation rather than a published fact about
   the document, so no configurable provenance directory ships and nothing consumes one.
@@ -29,6 +29,14 @@ tracked. Each now states the decision instead.
   decision under `### What this contract cannot yet require`, because that list is exactly where the
   key would be filed again. Verified red by mutation before it was accepted. No behaviour, no export
   and no adapter rule changed; the reference-assets suite goes 1081 → 1082 checks, all passing.
+- **Dated release copy is deliberately not swept.** Earlier entries here, and the version-tagged
+  notes in the root `README.md`, carry their own citations of issues that have since closed
+  (`#246`, `#472`, `#110` and others) — each was true when it was published, and this changelog
+  corrects forward rather than rewriting an entry in place, the one exception being the explicit
+  *Superseded* annotation the 1.14.0 entry already carries. What is corrected above is the prose a
+  reader executes or maintains today: the shipped skill reference and the test suites' own
+  comments. A later sweep will find the historical citations; they are left as written on purpose.
+
 
 ## [enduser-handbook 1.18.0] — 2026-08-18
 
