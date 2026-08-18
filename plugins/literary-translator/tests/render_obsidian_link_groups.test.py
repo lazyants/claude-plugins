@@ -466,8 +466,15 @@ def test_the_short_target_still_links_elsewhere_in_the_same_block(tmp_path):
     occurrence in the same block still links.
 
     What this pins is that the scan RESUMES past the consumed span --
-    replacing the boundary `continue` with `break` turns this test, and only
-    this test, red. It does NOT pin the one-link-per-target budget, though an
+    replacing the boundary `continue` with `break` turns this test red.
+    Measured over the WHOLE suite, that mutant takes down three tests, not
+    one: this test, `test_a_properly_bounded_occurrence_of_the_same_target_is_still_charged`
+    below, and
+    `render_obsidian.test.py::test_a_refused_match_does_not_spend_the_blocks_first_occurrence_slot`.
+    An earlier version of this docstring called it "only this test" -- false,
+    and measured with a `-k` filter that never left this module, which is how
+    a scope error becomes an exclusivity claim. It does NOT pin the
+    one-link-per-target budget, though an
     earlier version of this docstring claimed it did: `seen_in_block` is keyed
     per target, and here the consumed span's target is "John Smith" while the
     linking target is "John", so marking the refused match as seen changes
