@@ -2602,7 +2602,9 @@ stance for `output.target: obsidian` projects; see
 
 **What collision de-linking cost this book (1.30.0, #588).** On every
 `output.target: obsidian` render — appendix on or off — a
-`canonical_target_form` owned by 2+ canon entries is de-linked, and the
+`canonical_target_form` owned by 2+ canon entries is de-linked (unless an
+operator-recorded `canon_link_groups.json` group covers every one of its
+owners, below), and the
 renderer now REPORTS what that cost: `adapter_result.delink_cost` on
 `assemble.py`'s stdout line, plus one stderr `WARN` whenever the total is
 non-zero. `validate_backlinks.py` republishes the same block verbatim as

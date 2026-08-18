@@ -323,14 +323,29 @@ def test_duplicate_object_key_is_rejected_not_collapsed(tmp_path, doc, dupe, lab
     assert exc.value.offending == dupe
 
 
-def test_the_shipped_schema_file_itself_has_no_duplicate_keys(tmp_path):
-    """The guard runs over the SCHEMA document too (`_read_json` is shared),
-    so a duplicate key in the shipped schema would now block every load.
-    Nothing well-formed is newly rejected -- proven against the real file,
-    not a fixture."""
+def test_the_guard_covers_the_schema_document_too(tmp_path):
+    """`_read_json` is shared, so the SCHEMA path is guarded as well -- and
+    that must be proven by INJECTING a duplicate there, not by loading the
+    valid shipped schema: a regression to plain `json.loads` on the schema
+    read would pass a mere happy-path assertion unchanged."""
+    bad_schema = tmp_path / "dupe.schema.json"
+    bad_schema.write_text(
+        '{"type": "object", "type": "array", "additionalProperties": false}',
+        encoding="utf-8",
+    )
     path = _write(tmp_path, _doc([_group()]))
-    assert clg.load_link_groups(path, ENTRIES)   # reads DEFAULT_SCHEMA_PATH
+    with pytest.raises(clg.CanonLinkGroupsLoadError) as exc:
+        clg.load_link_groups(path, ENTRIES, schema_path=bad_schema)
+    assert "repeats the object key" in str(exc.value)
+    assert exc.value.offending == "type"
+
+
+def test_the_shipped_schema_file_still_loads_under_the_guard(tmp_path):
+    """The other direction: the real schema this plugin ships must contain
+    no duplicate key, or every load would now block."""
+    path = _write(tmp_path, _doc([_group()]))
     assert clg.DEFAULT_SCHEMA_PATH.is_file()
+    assert clg.load_link_groups(path, ENTRIES)   # reads DEFAULT_SCHEMA_PATH
 
 
 def test_a_well_formed_document_is_unaffected_by_the_guard(tmp_path):

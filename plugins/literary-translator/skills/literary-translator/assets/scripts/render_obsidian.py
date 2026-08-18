@@ -606,8 +606,13 @@ def build_entity_index(entries, note_identity_by_source_form, collision_delink=F
     AFTER that removal, so `_Linker`'s mandatory
     `target_to_entity[matched]` lookup can never `KeyError` on a delinked
     target. The invariant this establishes: on every real obsidian render,
-    a `canonical_target_form` with >=2 owners is NEVER inline-linked, ever
-    -- a misattributed inline link actively misleads (a reader clicks
+    a `canonical_target_form` with >=2 owners is not inline-linked -- with
+    exactly one exception, and it is never one this code INFERS: a
+    `primary_by_source_form` group (#588) in which EVERY owner is a member
+    and none is `sense_translated` is an identity call the operator already
+    recorded, and that target links to the group's primary. Absent such a
+    group the rule is absolute, because a misattributed inline link actively
+    misleads (a reader clicks
     through to the WRONG entity's note), which is
     strictly worse than a missing one (recoverable via the `## Mentions`
     appendix or a manual search), so ambiguity always resolves toward the
@@ -1784,8 +1789,9 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
 
     # D3 (#206/#207): collision de-linking is de-coupled from the `##
     # Mentions` appendix `enabled` flag -- a >=2-owner canonical_target_form
-    # is never inline-linked on ANY real obsidian render, appendix on or
-    # off. It still gates on `_is_obsidian_target(profile)` (the same
+    # is not inline-linked on ANY real obsidian render, appendix on or off,
+    # unless an operator-recorded link group covers every one of its owners
+    # (#588 -- see `_link_decision`). It still gates on `_is_obsidian_target(profile)` (the same
     # target check `_effective_mentions_enabled` itself starts with), so
     # the standalone CLI's dormant-`obsidian`-under-`target:"custom"` path
     # keeps the OLD tiebreak behavior, unchanged -- D3 must stay inert
