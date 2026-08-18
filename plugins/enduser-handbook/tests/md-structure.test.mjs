@@ -351,7 +351,9 @@ const INDEX_WIRING_H2 = '## Index wiring (do this on every chapter create/update
 // the H2's own body", i.e. findOwner === the H2 node.
 const BRANCH_WITNESSES = [
   'locateChapterLine(indexLines,',
-  'expectedTarget)`',
+  // [#574] Carries step 0's outcome, because the bare `expectedTarget)` half now also matches the
+  // flat branch's read-back call — and a witness matching two lines proves ownership of neither.
+  'expectedTarget)` ⇒ `{present,',
   'appears multiple times in <index_file>',
   '**Flat entry, line present**',
   '**Flat entry, line absent**',

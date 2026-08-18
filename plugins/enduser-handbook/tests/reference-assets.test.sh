@@ -2278,9 +2278,13 @@ has_in_section "obsidian-vault: step-0 idempotency check calls containerTitleMat
 has_in_section "static-md: step-0 idempotency check calls locateChapterLine, first arg indexLines" \
   "$SMD" '## Index wiring (do this on every chapter create/update)' \
   'locateChapterLine(indexLines,'
+# [#574] The second-half needle carries step 0's OUTCOME with it. The bare `expectedTarget)` half
+# stopped being unique to step 0's own call the moment the flat branch grew a read-back call
+# spelled the same way, and a witness that matches two lines pins neither — `line_of` would keep
+# resolving the earlier one while the uniqueness guard in tests/md-structure.test.mjs went red.
 has_in_section "static-md: step-0 idempotency check's locateChapterLine, second arg expectedTarget" \
   "$SMD" '## Index wiring (do this on every chapter create/update)' \
-  'expectedTarget)`'
+  'expectedTarget)` ⇒ `{present,'
 has_in_section "static-md: step-0 idempotency check calls containerTitleMatches, first arg containerTitle" \
   "$SMD" '### Grouped index wiring (`anyGroup` manifests only)' \
   'containerTitleMatches(containerTitle,'
@@ -2320,7 +2324,7 @@ L_H3_GROUPED="$(line_of '### Grouped index wiring (`anyGroup` manifests only)' "
 assert_line_before "static-md: step-0's locateChapterLine (1st half) sits before the grouped-only H3" \
   "$(line_of 'locateChapterLine(indexLines,' "$SMD")" "$L_H3_GROUPED"
 assert_line_before "static-md: step-0's locateChapterLine (2nd half, expectedTarget) sits before the grouped-only H3" \
-  "$(line_of 'expectedTarget)`' "$SMD")" "$L_H3_GROUPED"
+  "$(line_of 'expectedTarget)` ⇒ `{present,' "$SMD")" "$L_H3_GROUPED"
 assert_line_before "static-md: step-0's ambiguous-match halt sits before the grouped-only H3" \
   "$(line_of 'appears multiple times in <index_file>' "$SMD")" "$L_H3_GROUPED"
 assert_line_before "static-md: step-0's flat-entry, line-present outcome sits before the grouped-only H3" \
@@ -5267,9 +5271,9 @@ has_joined_in_section "static-md: the scan bounds a title EDIT and says so, in e
 has_joined_in_section "static-md: the scan does NOT bound a fixed target-breaking title on the flat branch" \
   "$SMD" '## Index wiring (do this on every chapter create/update)' \
   'It does NOT bound a FIXED target-breaking title on the flat branch above'
-has_joined_in_section "static-md: the unbounded flat append is named as a separate, filed defect" \
+has_joined_in_section "static-md: the flat gap's owner is named as the append branch, not this scan" \
   "$SMD" '## Index wiring (do this on every chapter create/update)' \
-  'That gap is a separate defect and is filed as one (#574)'
+  'not this scan: the row is never written, so'
 has_joined_in_section "obsidian-vault: step 0 calls the stale-row companion scan for BOTH branches" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
   'This one runs for BOTH branches below, flat and grouped, before either acts on its verdict'
@@ -5359,6 +5363,65 @@ has_joined_in_section "obsidian-vault: a link reference definition is excluded b
 has_joined_in_section "static-md: the over-report residual names the link TITLE, not only the label" \
   "$SMD" '## Index wiring (do this on every chapter create/update)' \
   'or link TITLE happens to contain destination-shaped text'
+
+echo "== #574: the flat append branch reads its own row back and refuses to write an unreadable one =="
+# The gap #349 documented and could not close: with the title held FIXED, every appended row carries
+# the link this run would write, so the companion scan skips all of them by the very test that tells
+# this run's row from a leftover. Measured against 935d9e5, both link modes: four publishes, four
+# rows, scan reports zero. What closes it is a refusal on the append branch, so the row is never
+# written; `assets/lib/chapter-paths.mjs` is unchanged and still reports nothing for such a row.
+has_joined_in_section "static-md: the flat append branch reads the composed row back first" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'Read the row back before you write it (#574)'
+has_joined_in_section "static-md: the read-back uses step 0's own helper on the ONE composed line" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'on that ONE line'
+has_joined_in_section "static-md: an unreadable row is REFUSED, never written" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'the flat index row this run would write is not recognizable to the next run'
+has_joined_in_section "obsidian-vault: the flat append branch reads the composed row back first" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'Read the row back before you write it (#574)'
+has_joined_in_section "obsidian-vault: an unreadable row is REFUSED, never written" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'the flat index row this run would write is not recognizable to the next run'
+# The wikilinks branch reaches the append through classifyChapterWiring's `absent` outcome, not
+# through the path-mode bullet, so the mapping has to carry the refusal explicitly or one whole link
+# mode silently keeps the defect.
+has_joined_in_section "obsidian-vault: the wikilinks absent-to-append mapping carries the refusal too" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'mapping carries the read-back refusal (#574) with it'
+# Two claims about what the check COSTS, each measured rather than argued, and each wrong in the
+# comfortable direction if it rots: that the refused set differs BY LINK MODE (so a reader cannot
+# carry one mode's verdict to the other), and that the wikilink option is passed for agreement with
+# step 0 rather than because this row needs it.
+has_joined_in_section "obsidian-vault: which titles are refused is measured per link mode, not predicted" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'refused in path mode and accepted in wikilinks mode'
+has_joined_in_section "obsidian-vault: the wikilink option is passed for agreement with step 0, and says so" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'reads back identically with'
+# The scan's own disclosure had to change with it: the flat gap is no longer "filed, not closed", and
+# a reader who finds the old sentence concludes the growth is still unbounded.
+hasnt_joined "static-md: the flat gap is no longer described as filed-but-open" \
+  'That gap is a separate defect and is filed as one (#574)' "$SMD"
+has_joined_in_section "static-md: the scan names the refusal, not itself, as what bounds a fixed title" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'What bounds them is the read-back refusal on the append branch itself'
+has_joined_in_section "static-md: rows already in an index from before the refusal are named after a rename" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'they stay unreported while the title stays fixed'
+# The extension contract binds a THIRD adapter to the obligation, and deliberately not to the
+# spelling: another format's step 0 is another reader, and only that reader can answer the question.
+has_joined_in_section "publish-targets README: the append branch's own obligation is to REFUSE" \
+  "$PTREADME" '## Adding a new target X' \
+  'discharge it by REFUSING rather than by recognising (#574)'
+has_joined_in_section "publish-targets README: the obligation is inherited, the shipped spelling is not" \
+  "$PTREADME" '## Adding a new target X' \
+  'the shipped spelling of it is not'
+has_joined_in_section "publish-targets README: the recognising alternative is named and declined" \
+  "$PTREADME" '## Adding a new target X' \
+  'bounds the count at one but leaves a row every later run must special-case'
 
 # [round 16] This suite's own needles are the thing it cannot check by asserting: one of them was
 # written in DOUBLE quotes around a backticked identifier, so the shell ran the identifier as a

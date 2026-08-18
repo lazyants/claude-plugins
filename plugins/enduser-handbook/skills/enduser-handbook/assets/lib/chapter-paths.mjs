@@ -1283,7 +1283,12 @@ export function findStaleChapterRows(indexLines, expectedTarget, chapterLink, op
   // edit that clears it, which is precisely what the over-report bias above is justified on never
   // producing. Under-reporting there costs a leftover that only a title ending in `[<next title>`
   // can produce, in a row shape this module never writes — the pre-existing state, and the same
-  // blind direction #574 already documents for the flat branch. That is the direction to fail in.
+  // blind direction the flat branch has (#574). That is the direction to fail in. Note what closed
+  // #574, because it is NOT a change here: the adapters now read a composed flat row back through
+  // locateChapterLine before appending it and refuse to write one this module could not find, so
+  // the rows this scan is blind to are never created. This function is unchanged by that fix and
+  // still reports nothing for them — a row already in an operator's index from before [1.18.0]
+  // stays unreported while its title stays fixed, and is named here once the title changes.
   const isOwnRow = (raw) => {
     const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
     const bullet = line.match(NESTED_BULLET_RE);

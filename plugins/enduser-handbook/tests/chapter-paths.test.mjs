@@ -6308,3 +6308,119 @@ test('#357: the twelve-fact claim in the extension contract is re-measured from 
     `publish-targets/README.md must state "${WORDS[kinds.size]} fact kinds" — manualMigrationChecklist emits ${kinds.size}`,
   );
 });
+
+// =================================================================================================
+// [#574] The FLAT branch's "line absent ⇒ append" step has no read-back guard of its own — unlike
+// the nested-list writer's [1.11.0] membership guard (see the "adapter composition flow" section
+// above), the flat branch (static-md.md / obsidian-vault.md, "Flat entry, line absent") has never
+// compared the row it is about to append against anything already on disk. A manifest `title` whose
+// text breaks its own row's link-DESTINATION parse (an unescaped ']' is the measured case) makes
+// step 0 (`locateChapterLine`) report the chapter absent on every run, so an identical row is
+// appended EVERY publish, unbounded, while the manifest never changes. The #349 companion scan
+// (`findStaleChapterRows`) is blind to those rows BY CONSTRUCTION: each one carries exactly the
+// link this run would write, which is the very test that tells this run's own row from a leftover
+// — so it can never distinguish four accumulated own-rows from one legitimate unchanged row.
+//
+// The fix (static-md.md / obsidian-vault.md, "Read the row back before you write it (#574)") is
+// pure ADAPTER PROSE, not a change to this module: compose the row, then run it through
+// `locateChapterLine([row], expectedTarget, options)` — the identical call step 0 already makes —
+// and write nothing when it does not report `present`. `chapter-paths.mjs` itself is unchanged by
+// this fix, so every property pinned below is a property of the SHIPPED module today and remains
+// true after the fix ships; the tests below never call it "the bug" for that reason. What they pin
+// is (1) the defect loop this refusal is meant to sit in front of, (2) that the refusal PREDICATE
+// itself — `locateChapterLine([row], target, opts).present` — draws the line exactly where the
+// prose claims (refusing the accumulating rows, admitting ordinary ones, per link mode), and (3)
+// that once an operator repairs a fixed target-breaking title, the #349 scan reaches every leftover
+// the loop left behind, so the halt hands back a reachable recovery.
+// =================================================================================================
+
+const FLAT_TARGET_574 = { path: 'guide/items.md', wiki: 'guide/items' };
+
+// Composes the flat TOC line exactly as static-md.md ("Flat entry, line present" — path mode) and
+// obsidian-vault.md (wikilink mode) format it: `- [<title>](<target>)` / `- [[<target>|<title>]]`.
+function flatLink574(mode, title) {
+  return mode === 'wiki' ? `[[guide/items|${title}]]` : `[${title}](guide/items.md)`;
+}
+function flatRow574(mode, title) {
+  return `- ${flatLink574(mode, title)}`;
+}
+
+for (const mode of ['path', 'wiki']) {
+  const wikilink = wikilinkForMode(mode);
+  const target = FLAT_TARGET_574[mode];
+  const breakingTitle = 'Items]v1';
+  const breakingLink = flatLink574(mode, breakingTitle);
+  const breakingRow = flatRow574(mode, breakingTitle);
+
+  test(`#574: the shipped flat "absent ⇒ append" loop leaves 4 identical rows for a fixed target-breaking title, and the #349 scan stays silent (${mode} mode)`, () => {
+    // Simulates the flat branch exactly as it ships TODAY (and continues to ship after the #574
+    // fix — that fix is a caller-side refusal placed IN FRONT of this loop, not a change to it):
+    // step 0 -> absent -> append, unconditionally, on every publish of an unchanged manifest.
+    let lines = [];
+    for (let run = 1; run <= 4; run += 1) {
+      const step0 = locateChapterLine(lines, target, { wikilink });
+      assert.equal(step0.present, false, `run ${run}: the target-breaking title must stay unresolved by step 0`);
+      lines = [...lines, breakingRow];
+    }
+    assert.equal(lines.length, 4, 'four publishes of a fixed target-breaking title append four rows');
+    // countRowsCarrying is independent of this module's own parse (see its definition above) — it
+    // is what tells "four rows, each byte-identical to the link this run would write" from "four
+    // rows that merely look similar", which is the exact distinction the #349 scan's own blindness
+    // below turns on.
+    assert.equal(countRowsCarrying(lines, breakingLink), 4, 'every appended row carries the exact link this run would write');
+
+    // The #349 companion scan cannot see any of them: each row IS this run's own row (byte-identical
+    // to the link this run would write), which is precisely the test that separates "this run's own
+    // row" from "a leftover" — never "the scan failed to notice".
+    assert.equal(
+      findStaleChapterRows(lines, target, breakingLink, { wikilink }).length,
+      0,
+      'the companion scan must stay silent while the title is fixed -- it cannot distinguish 4 own-rows from a leftover',
+    );
+  });
+}
+
+// Measured directly against the real functions (never guessed, and never assumed to agree across
+// modes — 'Items [beta]' does not: wikilink mode's target-fold makes its row resolve, path mode's
+// does not, so each cell below is its own measurement).
+const REFUSAL_TABLE_574 = [
+  { title: 'Items', path: true, wiki: true }, // ordinary title: read back cleanly in both modes
+  { title: 'Items]v1', path: false, wiki: false }, // unescaped ']': breaks destination parse in both
+  { title: 'Items [beta]', path: false, wiki: true }, // bracketed: modes genuinely disagree
+  { title: '(Notes)', path: true, wiki: true }, // parenthesised: reads back cleanly in both
+  { title: 'Items & Co: v1', path: true, wiki: true }, // '&'/':' : reads back cleanly in both
+];
+
+for (const mode of ['path', 'wiki']) {
+  const wikilink = wikilinkForMode(mode);
+  const target = FLAT_TARGET_574[mode];
+  for (const cell of REFUSAL_TABLE_574) {
+    const expected = cell[mode];
+    test(`#574: read-back refusal predicate -- locateChapterLine([row], target, opts).present === ${expected} for title ${JSON.stringify(cell.title)} (${mode} mode)`, () => {
+      const row = flatRow574(mode, cell.title);
+      const result = locateChapterLine([row], target, { wikilink });
+      assert.equal(
+        result.present,
+        expected,
+        `row ${JSON.stringify(row)} against target ${JSON.stringify(target)} (${mode} mode)`,
+      );
+    });
+  }
+}
+
+for (const mode of ['path', 'wiki']) {
+  const wikilink = wikilinkForMode(mode);
+  const target = FLAT_TARGET_574[mode];
+  const breakingRow = flatRow574(mode, 'Items]v1');
+
+  test(`#574: after the title is repaired, the #349 scan names every leftover the fixed-title loop left behind (${mode} mode)`, () => {
+    // Reproduces the same 4-row leftover state as the defect-loop test above, independently (this
+    // test must stand alone under `node --test --test-name-pattern`).
+    const lines = [breakingRow, breakingRow, breakingRow, breakingRow];
+    const cleanLink = flatLink574(mode, 'Items v2');
+    const stale = findStaleChapterRows(lines, target, cleanLink, { wikilink });
+    assert.equal(stale.length, 4, 'renaming to an ordinary title makes every leftover nameable');
+    assert.deepEqual(stale.map((r) => r.index), [0, 1, 2, 3], 'the four leftovers are exactly the four pre-existing rows, in file order');
+    assert.ok(stale.every((r) => r.line === breakingRow), 'each reported line is the raw pre-existing row, not a rewritten form');
+  });
+}
