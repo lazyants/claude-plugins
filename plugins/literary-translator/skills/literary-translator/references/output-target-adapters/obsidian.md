@@ -325,7 +325,12 @@ marker, a `delink_cost` block:
   is deliberate — a missing link is recoverable, a link on the wrong man is
   not (#207). Note that re-scanning from `m.start() + 1` after a refusal
   does **not** recover it: the nested target begins at the *same* offset as
-  the refused match, so a `+1` re-scan skips it too. Recovery would need
+  the refused match, so a `+1` re-scan skips it too. It is not harmless
+  elsewhere, either: where the nested target starts LATER than the
+  refused match it *is* reached, and reached wrongly — over `JoAnn
+  Marie`, with targets `Ann Marie` and `Marie`, a `+1` re-scan emits
+  `JoAnn [[…|Marie]]`, which is the #207 failure; `render_obsidian.test.py`
+  pins that and goes RED under the mutant. Recovery would need
   per-position fallback to the next-shorter alternative matching at that
   same offset — more machinery than a scan-position change, for a case whose
   current outcome is already the safe one.
