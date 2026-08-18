@@ -885,6 +885,10 @@ def cmd_prep(args, durable_root: Path, schema_dir: Path) -> dict:
         # later step inherits the binding for free: `--claims` reads a printed
         # surface's evidence out of it and `--build` counts against it.
         "nodestream_sha256": sha256_hex(nodestream),
+        # The SOURCE, bound the same way and for the same reason: the units
+        # below quote it, their locators point into it, and the senses evidence
+        # was verified against it -- once, here.
+        "manifest_sha256": sha256_hex(manifest),
         "units": units,
         "excluded_by_canon_declaration": excluded,
         "counts": {
@@ -946,6 +950,31 @@ def verify_nodestream(prep: dict, nodestream: dict) -> str:
             f"the assembled NodeStream has changed since --prep ran ({stated} -> {actual}); "
             f"every judgement in this chain was made against the old one -- re-run --prep, "
             f"Pass A, --claims and Pass B against the current book",
+        )
+    return actual
+
+
+def verify_manifest(prep: dict, manifest: dict) -> str:
+    """The source is an INPUT to this chain too, and it is bound like one.
+
+    `--prep` snapshots its quotes and locators into the units, and runs the
+    plugin's real evidence verifier over `canon_senses.json` against it -- once.
+    A senses-only person's one authenticated place in the book is that record,
+    and nothing re-checks it later. P5 is not a substitute: it re-reads only the
+    quotes Pass A chose to cite, so a source edited between the steps can keep
+    every cited quote intact while the evidence a person's IDENTITY rests on has
+    gone. Binding the manifest closes that: an edit anywhere in the source moves
+    this digest and the chain refuses rather than adjudicating a book that is no
+    longer the one it read.
+    """
+    stated = prep.get("manifest_sha256")
+    actual = sha256_hex(manifest)
+    if stated != actual:
+        raise RegistryError(
+            "manifest_changed",
+            f"manifest.json has changed since --prep ran ({stated} -> {actual}); "
+            f"the units, their locators and the senses evidence were all taken from the old "
+            f"source -- re-run --prep, Pass A, --claims and Pass B against the current one",
         )
     return actual
 
@@ -1327,6 +1356,7 @@ def cmd_claims(args, durable_root: Path, schema_dir: Path) -> dict:
                            "the assembled NodeStream (out/.assembled/nodestream.json)")
     prep, prep_digest = load_prep(durable_root)
     verify_nodestream(prep, nodestream)
+    verify_manifest(prep, manifest)
     verdicts = read_json(durable_root / "registry" / "registry_verdicts.json",
                          "registry/registry_verdicts.json (Pass A's output)")
 
@@ -1349,6 +1379,25 @@ def cmd_claims(args, durable_root: Path, schema_dir: Path) -> dict:
     claims_digest = sha256_hex(body)
     doc = dict(body)
     doc["claims_sha256"] = claims_digest
+
+    # Pass B's ENTIRE input, capped for the same reason --prep's is. The
+    # projection re-embeds a person's evidence payload into every one of that
+    # person's claims, so this document is a multiple of the prep -- and the
+    # multiple is not fixed: it grows with claims per person, which is exactly
+    # what a densely-related cast produces. A prep well under its own cap can
+    # therefore project a document no adjudicator will read whole, and a
+    # silently truncated Pass B is an unchecked Pass A, which is the one
+    # failure this design has no other guard against.
+    size = len(canonical_json_bytes(doc))
+    if size > args.max_claims_chars:
+        raise RegistryError(
+            "claims_too_large",
+            f"registry_claims.json would be {size} bytes, over --max-claims-chars "
+            f"{args.max_claims_chars}; lower --max-contexts-per-form/--context-chars or raise the "
+            f"cap deliberately -- Pass B reads this document whole or it is not the check it is "
+            f"relied on to be",
+            code=2,
+        )
     write_json(durable_root / "registry" / "registry_claims.json", doc)
 
     kinds = {}
@@ -1597,6 +1646,7 @@ def cmd_build(args, durable_root: Path, schema_dir: Path) -> dict:
                            "the assembled NodeStream (out/.assembled/nodestream.json)")
     prep, prep_digest = load_prep(durable_root)
     nodestream_digest = verify_nodestream(prep, nodestream)
+    manifest_digest = verify_manifest(prep, manifest)
     verdicts = read_json(durable_root / "registry" / "registry_verdicts.json",
                          "registry/registry_verdicts.json (Pass A's output)")
     claims_doc = read_json(durable_root / "registry" / "registry_claims.json",
@@ -1964,6 +2014,7 @@ def cmd_build(args, durable_root: Path, schema_dir: Path) -> dict:
         "provenance": {
             "input_sha256": prep_digest,
             "nodestream_sha256": nodestream_digest,
+            "manifest_sha256": manifest_digest,
             "verdicts_sha256": verdicts_digest,
             "claims_sha256": claims_digest,
             "assembly_currency": "not_bound",
@@ -2040,6 +2091,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="refuse to emit a prep document larger than this (default 400000). A blunt "
                         "guard against a silently huge input, not a model-capacity check -- this "
                         "plugin does not know the dispatched model's context window.")
+    p.add_argument("--max-claims-chars", type=int, default=1500000,
+                   help="refuse to emit a claims document larger than this (default 1500000). Pass B "
+                        "reads it whole; like --max-input-chars this is a blunt guard against a "
+                        "silently huge input, not a model-capacity check.")
     p.add_argument("--surface-boundary", choices=("word", "none"), default="word",
                    help="how a printed surface must be delimited in the target text. 'word' guards "
                         "with word boundaries; 'none' is plain substring matching, for a target "

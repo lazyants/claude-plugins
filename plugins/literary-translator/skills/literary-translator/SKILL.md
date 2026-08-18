@@ -2654,6 +2654,13 @@ Run it **immediately after the W9 chain above, in the same session** — its
 draft edit, but cannot detect a segment re-converged after W9 ran, which the
 emitted artifact states as `assembly_currency: "not_bound"`.
 
+The chain is bound to both inputs it reads: `--prep` hashes `manifest.json`
+and the assembled NodeStream into its own body, and `--claims`/`--build`
+refuse (`manifest_changed` / `nodestream_changed`) when either moved
+underneath. The remedy is always to re-run `--prep`, Pass A, `--claims` and
+Pass B against the current text — never to re-run only the step that failed,
+whose inputs are the stale ones.
+
 Copy `assets/templates/registry_TASK.template.md` → `${durable_root}/
 registry_TASK.md` (a W9r-time copy, NOT a Step-0a one) and fill its bracketed
 placeholders. Then three script calls with two model calls between them:

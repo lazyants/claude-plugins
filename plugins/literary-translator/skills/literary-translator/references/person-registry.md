@@ -162,6 +162,7 @@ unchecked assertion.
 | P1 | a verdict that fails `registry-verdicts.schema.json` |
 | P2 | a verdict whose `input_sha256` is not the prep on disk |
 | P2a | a NodeStream whose bytes are not the ones `--prep` read |
+| P2b | a `manifest.json` whose bytes are not the ones `--prep` read |
 | P3 | a unit claimed by nobody, or by two people; a refusal-only unit anywhere but `refusals[]` |
 | P4 | a unit the prep input does not contain |
 | P5 | a quote absent from the container its locator names; a surface containing an assembly sentinel |
@@ -183,6 +184,14 @@ cover documents rather than the corpus. So `--prep` hashes it into its own body
 VANISHES from a re-assembled book reports `not_found_in_target_text`, which a
 reader sees, but a surface that merely MOVED still counts, now against an
 affirmation given for passages Pass B was shown in a different text.
+
+**And to the SOURCE.** `manifest.json` is bound the same way, in the same body.
+`--prep` snapshots the quotes and locators into the units and runs the plugin's
+evidence verifier over `canon_senses.json` against the source — once, there. P5
+does not stand in for that: it re-reads only the quotes Pass A chose to cite, so
+a source edited between the steps can leave every cited quote intact while the
+evidence a senses-only person's identity rests on has gone, and `--build` would
+still emit the person.
 
 **B1 binds to the VERDICT, not only to the prep.** `registry_claims.json`
 carries the digest of the Pass A verdict it was projected from, inside its own
@@ -368,6 +377,11 @@ quote must stay verbatim in the JSON to remain checkable against its container.
 - **Evidence quotes are source-side.** The registry's *names* are target-side;
   its *provenance* is source-side.
 - **One project, one registry.** No cross-volume or series consolidation.
-- **The input cap is blunt.** `--max-input-chars` refuses a silently huge prep
-  document; it is not a model-capacity check, because the plugin does not know
-  the dispatched model's context window.
+- **Both input caps are blunt.** `--max-input-chars` refuses a silently huge
+  prep document and `--max-claims-chars` a silently huge claims one; neither is
+  a model-capacity check, because the plugin does not know the dispatched
+  model's context window. The second is not the first restated: the projection
+  re-embeds a person's evidence into every one of that person's claims, so the
+  ratio grows with claims per person — a prep well under its own cap can
+  project a document no adjudicator will read whole, and a truncated Pass B is
+  an unchecked Pass A.

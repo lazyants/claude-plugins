@@ -1202,3 +1202,70 @@ def test_the_bound_digest_reaches_the_artifact(prepped):
     prep = json.loads((prepped / "registry" / "registry_input.json").read_text(encoding="utf-8"))
     assert prep["nodestream_sha256"] == pr.sha256_hex(ns)
     assert fx.registry(prepped)["provenance"]["nodestream_sha256"] == prep["nodestream_sha256"]
+
+
+def _mutate_manifest(root, old: str, new: str) -> None:
+    path = root / "manifest.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    for block in doc["blocks"].values():
+        block["plain_text"] = block["plain_text"].replace(old, new)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def test_a_source_changed_after_prep_is_refused_by_claims(prepped):
+    """The units quote the source and their locators point into it. P5 re-reads
+    only the quotes Pass A cited, so it cannot stand in for a binding."""
+    _mutate_manifest(prepped, "Jean Valjean vint plus tard.", "Il vint plus tard.")
+    fx.write_verdict(prepped, fx.verdict_doc(prepped))
+    code, payload = fx.run(prepped, "--claims")
+    assert code == 1
+    assert payload["reason"] == "manifest_changed"
+
+
+def test_a_source_changed_after_adjudication_is_refused_by_build(prepped):
+    """The shape P5 cannot see: the source loses the evidence a senses-only
+    person's identity rests on, while every quote Pass A cited survives."""
+    assert _through_claims(prepped)[0] == 0
+    fx.write_adjudications(prepped)
+    _mutate_manifest(prepped, "Jean Valjean vint plus tard.", "Il vint plus tard.")
+
+    # P5 is satisfied by this manifest: the cited quote is still where its
+    # locator says. Only the digest sees that the source moved underneath.
+    manifest = json.loads((prepped / "manifest.json").read_text(encoding="utf-8"))
+    blocks = [b["plain_text"] for b in manifest["blocks"].values()]
+    assert any("Marie était la femme de Jean" in text for text in blocks)
+    assert not any("Jean Valjean" in text for text in blocks)
+
+    code, payload = fx.run(prepped, "--build")
+    assert code == 1
+    assert payload["reason"] == "manifest_changed"
+    assert not (prepped / "registry" / "person_registry.json").exists()
+
+
+def test_the_bound_source_digest_reaches_the_artifact(prepped):
+    assert _full(prepped)[0] == 0
+    manifest = json.loads((prepped / "manifest.json").read_text(encoding="utf-8"))
+    prep = json.loads((prepped / "registry" / "registry_input.json").read_text(encoding="utf-8"))
+    assert prep["manifest_sha256"] == pr.sha256_hex(manifest)
+    assert fx.registry(prepped)["provenance"]["manifest_sha256"] == prep["manifest_sha256"]
+
+
+def test_an_oversized_claims_document_is_refused_before_it_is_written(prepped):
+    """Pass B's independence is the design's only check on Pass A, and it is a
+    check only if Pass B reads the document whole. The projection re-embeds a
+    person's evidence into every one of that person's claims, so a prep well
+    under its own cap can still project one no adjudicator will read."""
+    fx.write_verdict(prepped, fx.verdict_doc(prepped))
+    code, payload = fx.run(prepped, "--claims", "--max-claims-chars", "100")
+    assert code == 2
+    assert payload["reason"] == "claims_too_large"
+    assert not (prepped / "registry" / "registry_claims.json").exists()
+
+
+def test_the_claims_cap_is_a_cap_and_not_a_refusal(prepped):
+    """Raised deliberately, the same document emits -- the guard is blunt, not
+    a model-capacity check the plugin is in no position to make."""
+    fx.write_verdict(prepped, fx.verdict_doc(prepped))
+    code, payload = fx.run(prepped, "--claims", "--max-claims-chars", "10000000")
+    assert code == 0
+    assert (prepped / "registry" / "registry_claims.json").exists()
