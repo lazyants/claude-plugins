@@ -232,12 +232,105 @@ _FOLDER_ALLOW_RE = re.compile(r"^[A-Za-z0-9 _-]+$")
 # non-ASCII source-script text (Cyrillic, etc.) BY DESIGN -- see SKILL.md's
 # English-only-identifiers rule, which governs code identifiers, not this
 # kind of data-derived filename. Still a positive allow-list (any Unicode
-# alphanumeric, str.isalnum(), plus a small curated punctuation set) rather
-# than a denylist: everything else -- including every path separator, ".",
-# control/NUL bytes -- is replaced, never merely blocked after the fact.
-# Dropping "." entirely also means a run of them (a ".." traversal segment)
-# can never survive sanitization.
-_FILENAME_EXTRA_CHARS = " _-()'"
+# alphanumeric, str.isalnum(), plus the two legs below) rather than a
+# denylist: everything else -- including every path separator, control/NUL
+# bytes, and every format character (Cf: ZWJ/ZWNJ/RLM) -- is replaced,
+# never merely blocked after the fact.
+#
+# Leg 2, by Unicode CATEGORY rather than by enumeration: every combining
+# mark. A mark is combining BY DEFINITION, so it can be neither a path
+# separator nor an extension -- admitting the category wholesale therefore
+# cannot weaken the TRAVERSAL and EXTENSION guarantees, which is exactly
+# why this leg is a category test and not a character list. It does change
+# one thing, and the claim is deliberately narrow about it: a run of marks
+# no longer collapses into a single "_", so a stem can now be far LONGER
+# than the same input produced before -- see _FILENAME_MAX_BYTES below. Before it existed, a
+# fully pointed Hebrew name became one "_" per niqqud/cantillation mark:
+# a stem no reader can type (#586, measured over a delivered vault).
+_FILENAME_MARK_CATEGORIES = ("Mn", "Mc", "Me")
+
+# Leg 3, curated and deliberately short. Characters are spelled as escapes,
+# never as literals: an RTL or combining character pasted into this line
+# would be unreviewable in a diff.
+#   "." ","    printed names ("Mrs. Adil", "Miriam, daughter of our Rebbe")
+#   U+2019     RIGHT SINGLE QUOTATION MARK -- the typographic apostrophe
+#              a printed name carries, parity with the ASCII "'" this
+#              set already admitted
+#   U+05BE     HEBREW PUNCTUATION MAQAF -- the Hebrew hyphen
+#   U+05F3     HEBREW PUNCTUATION GERESH
+#   U+05F4     HEBREW PUNCTUATION GERSHAYIM
+# The last three are letter-level orthography in Hebrew/Yiddish names, not
+# decoration. Admitting "." is what forces sanitize_filename_component's
+# normalization tail to enforce the traversal/extension properties in code
+# rather than inherit them from this set's silence -- see its docstring.
+_FILENAME_EXTRA_CHARS = " _-()'.,\u2019\u05be\u05f3\u05f4"
+
+# Byte cap on a sanitized stem. NAME_MAX is 255 on every filesystem this is
+# driven from, counted in BYTES on ext4 and in characters on APFS -- a BYTE
+# budget is therefore conservative for both. 240 leaves 15 bytes for the
+# ".md" this script appends AND for _dedupe_path's "-<n>" collision suffix,
+# which is applied AFTER this function returns.
+#
+# This cap is not decoration: an over-long stem makes _write_note raise
+# ENAMETOOLONG *after* _clean_vault_content has already emptied the managed
+# vault, so one hostile name aborts the whole render halfway. That was
+# already reachable before #586 with a long enough alphanumeric name (300
+# "A"s sanitized to a 300-character stem; measured), and #586's mark leg
+# made it reachable a second way, since a run of marks no longer collapses
+# into a single "_" (review round 1). Truncation rather than the fallback
+# name, because a long heading truncated is still a heading a reader
+# recognizes; the collisions truncation can create are exactly what
+# _dedupe_path already resolves deterministically.
+_FILENAME_MAX_BYTES = 240
+
+# Cap on CONSECUTIVE combining marks, a different limit from the byte cap
+# and not implied by it. The number defends ONE measured filesystem
+# predicate and claims nothing else: macOS refuses, with EILSEQ, to create a
+# filename carrying 32 or more marks on a single base, whatever its byte
+# length -- measured on this project's filesystem, where 31 marks writes and
+# 32 does not, while the same marks spread over separate bases are fine. 30
+# leaves a margin under that. (It is NOT Unicode's Stream-Safe Text Format
+# bound, which an earlier version of this comment cited: UAX #15 counts
+# non-starters after NFKD and treats U+034F CGJ as a break, and this loop
+# does neither.)
+#
+# Where that makes it over-catch, deliberately: measured, macOS accepts
+# "A" + 30 marks + CGJ + 30 marks, and this cap truncates it anyway, because
+# CGJ is itself Mn and counts toward the run. Under-catching is what would
+# abort a render; over-catching costs a name no orthography produces -- a
+# fully pointed Hebrew letter carries a vowel, a dagesh and a cantillation
+# mark, not thirty-one. Marks past the cap become "_" (and then collapse), so
+# a pathological run degrades to a writable name instead of aborting a render
+# that has already emptied the vault.
+_MAX_MARKS_PER_BASE = 30
+
+# Win32 reserved device basenames. A device name stays reserved when an
+# extension follows it, so "AUX.txt" and its emitted "AUX.txt.md" are both
+# device paths and neither can be created -- and the failure lands in
+# _write_note, after _clean_vault_content has emptied the managed vault.
+# Bare "CON"/"NUL"/"AUX" reached that state before #586 too; admitting "."
+# widened the class to "<device>.<anything>", which is what made this the
+# same defect as the two caps above rather than a separate wish, and why it
+# is fixed here instead of deferred (#592). The stem gets one "_" appended
+# to its device basename -- "AUX.txt" -> "AUX_.txt", "CON" -> "CON_" --
+# rather than falling back to the sha1 name, so the reader still recognises
+# the note. Enforced on every platform, not just Windows: a vault is copied
+# and synced between machines, and a name that is unwritable THERE is a
+# defect wherever it was rendered.
+# The superscripts are Microsoft's own list, not a guess: "Windows recognizes
+# the 8-bit ISO/IEC 8859-1 superscript digits U+00B9, U+00B2 and U+00B3 as
+# digits and treats them as valid parts of COM# and LPT# device names" --
+# learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file, read at
+# source. They matter here because `str.isalnum()` is True for all three, so
+# "COM\u00b9" and "COM\u00b2.txt" sail through the allow-list untouched (MR bot,
+# second round). Spelled as escapes for the same reason as
+# _FILENAME_EXTRA_CHARS: a Latin-1 character pasted into a list of ASCII
+# identifiers is easy to misread and impossible to review.
+_WIN32_RESERVED_STEMS = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{d}" for d in "123456789\u00b9\u00b2\u00b3"]
+    + [f"LPT{d}" for d in "123456789\u00b9\u00b2\u00b3"]
+)
 
 _RTL_LANGUAGE_CODES = {
     "ar", "he", "fa", "ur", "yi", "ps", "sd", "ug", "dv", "arc", "ckb",
@@ -641,9 +734,13 @@ class _Linker:
             # longest-first stops a shorter TARGET shadowing a longer one; it
             # cannot help when the longer string is ordinary prose.
             #
-            # The test is `str.isalnum()` on the ADJACENT CHARACTER -- the same
-            # predicate `sanitize_filename_component`'s filename allow-list
-            # uses -- and it is deliberately alphanumeric rather than non-space:
+            # The test is `str.isalnum()` on the ADJACENT CHARACTER -- the
+            # FIRST leg of `sanitize_filename_component`'s filename allow-list
+            # (since #586 that allow-list has two further legs, the combining-
+            # mark categories and a curated punctuation set; this boundary test
+            # deliberately keeps neither, for the reason in the next sentence
+            # and the one about marks below) -- and it is deliberately
+            # alphanumeric rather than non-space:
             # an apostrophe, quote, comma or period after a name is the common,
             # correct case ("[[...|Reb Noson]]'s"), and only a letter or digit
             # means the target is a fragment of a longer word. It also needs no
@@ -1089,17 +1186,82 @@ def sanitize_filename_component(value, fallback):
     `source_form`, or a segment's own heading text) -- unlike the strict
     ASCII category/folder allow-list (a small, curated, project-declared
     vocabulary), a name has no such constraint. Still a positive allow-list,
-    never a denylist: every character that is not `str.isalnum()` or in the
-    small curated punctuation set is replaced with "_", not merely rejected
-    after the fact via a blocklist of "dangerous" characters. "." is
-    deliberately excluded from the allowed set (not just ".."), which also
-    means a filename can never end up carrying a file extension of its own
-    -- this script always appends ".md" itself."""
+    never a denylist: every character that is not `str.isalnum()`, not a
+    combining mark (`_FILENAME_MARK_CATEGORIES`) and not in the small
+    curated punctuation set (`_FILENAME_EXTRA_CHARS`) is replaced with "_",
+    not merely rejected after the fact via a blocklist of "dangerous"
+    characters.
+
+    TWO PROPERTIES THIS FUNCTION OWNS. Until #586 both were inherited from
+    the allow-list's silence -- "." was simply excluded, so neither could
+    be violated. "." is admitted now (a printed name carries it), so the
+    normalization tail below enforces both in code instead:
+
+      (a) NO TRAVERSAL. A run of "." collapses to a single "." and "." is
+          stripped at both ends, so the returned stem can neither BE nor
+          CONTAIN a ".." segment. The leading-dot strip does a second job:
+          diff_rendered_output.py's recursive walker skips dot-entries, so
+          a dot-named note would be invisible to the render+diff gate that
+          is supposed to be watching this adapter's output.
+      (b) NO EXTENSION OF ITS OWN. A trailing ".md" -- the extension this
+          script appends itself -- has its "." turned into "_" (case
+          preserved: "x.MD" -> "x_MD"), repeatedly, because otherwise the
+          wikilink identity (the relpath minus the ONE appended ".md")
+          would name a file that does not exist: "x.md" would be written
+          as "x.md.md" and linked as "[[.../x.md]]".
+      (c) WRITABLE AT ALL. A stem is capped at _FILENAME_MAX_BYTES, a run
+          of marks at _MAX_MARKS_PER_BASE, and a Win32 device basename gets
+          a "_" (_WIN32_RESERVED_STEMS) -- because _write_note runs AFTER
+          _clean_vault_content has emptied the managed vault: a name the
+          filesystem refuses does not lose one note, it aborts the render
+          over a half-rebuilt vault. All three are the review's finding
+          rather than the issue's, and each constant records what was
+          measured. Note this property is about the WHOLE fleet of
+          filesystems a vault travels across, not the one it was rendered
+          on: the device-name rule is enforced on macOS too.
+
+    What it deliberately does NOT do, so the next reader does not mistake
+    silence for coverage: a trailing extension that is
+    NOT ".md" (".png") is left alone, since a general trailing-extension
+    rule would damage legitimate names like "J.R.R". And two source forms
+    that differ only by an invisible mark now yield two filenames a reader
+    cannot tell apart -- the price of admitting the mark categories, which
+    is what makes a pointed Hebrew name typable at all."""
     if not isinstance(value, str) or not value:
         return fallback
-    kept = "".join(ch if (ch.isalnum() or ch in _FILENAME_EXTRA_CHARS) else "_" for ch in value)
-    kept = re.sub(r"_+", "_", kept).strip("_ ")
+    out = []
+    marks_in_run = 0
+    for ch in value:
+        if unicodedata.category(ch) in _FILENAME_MARK_CATEGORIES:
+            marks_in_run += 1
+            out.append(ch if marks_in_run <= _MAX_MARKS_PER_BASE else "_")
+            continue
+        marks_in_run = 0
+        out.append(ch if (ch.isalnum() or ch in _FILENAME_EXTRA_CHARS) else "_")
+    kept = "".join(out)
+    # Capped BEFORE the tail, never after: every step below is length
+    # non-increasing (a collapse and a strip only shorten; the ".md" loop
+    # substitutes in place), so the tail's guarantees still hold on the
+    # truncated string. `errors="ignore"` drops the partial character a
+    # byte-slice can cut in half.
+    kept = kept.encode("utf-8")[:_FILENAME_MAX_BYTES].decode("utf-8", "ignore")
+    kept = re.sub(r"\.{2,}", ".", kept).strip("_ .")
+    while kept.lower().endswith(".md"):
+        kept = kept[:-3] + "_" + kept[-2:]
+    # Collapsed LAST, so the "_" the loop above just substituted for a dot
+    # cannot leave a "__" run behind it ("x_.md" -> "x__md" -> "x_md").
+    kept = re.sub(r"_+", "_", kept)
+    device, dot, extension = kept.partition(".")
+    if device.upper() in _WIN32_RESERVED_STEMS:
+        kept = f"{device}_{dot}{extension}"
     if not kept or kept in (".", ".."):
+        return fallback
+    if all(unicodedata.category(ch) in _FILENAME_MARK_CATEGORIES for ch in kept):
+        # A stem of nothing but combining marks is an INVISIBLE filename
+        # (a lone U+0301, or the U+FE0F left behind by an emoji whose base
+        # character was replaced) -- worse for the reader than the stable
+        # `entity-<sha1>`/`segment-<sha1>` fallback this replaces it with,
+        # and the same unusable-name class #586 exists to fix.
         return fallback
     return kept
 

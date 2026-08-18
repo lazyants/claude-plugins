@@ -51,6 +51,7 @@ contractually exact frontmatter field set, contract §8).
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import json
 import shutil
 import subprocess
@@ -3105,6 +3106,256 @@ def test_a_refused_span_is_consumed_so_no_shorter_target_links_inside_it(tmp_pat
     )
     assert f"The [[{ann_identity}|Ann Marie]] letter" in body, (
         f"the same target on its own boundaries must still wrap:\n{body}"
+    )
+
+
+# ===========================================================================
+# 21. #586: sanitize_filename_component -- combining marks and printed-name
+#     punctuation used to become one "_" EACH, so a fully pointed Hebrew
+#     name rendered as a stem no reader can type (measured: 177/177 entity
+#     notes of a delivered he->en vault). Every fixture below is built from
+#     chr() rather than pasted literals: a combining mark is invisible and
+#     a Hebrew letter reorders the line, so a literal here would be
+#     unreviewable in a diff and one bad paste would silently move the
+#     assertion (same reason section 19 above spells chr(0x2028)).
+# ===========================================================================
+
+# 'avneyah', fully pointed: alef+patah, bet, nun+rafe, yod, he.
+_POINTED_HEBREW = (
+    chr(0x05D0) + chr(0x05B7) + chr(0x05D1) + chr(0x05E0) + chr(0x05BF)
+    + chr(0x05D9) + chr(0x05D4)
+)
+# 'Bat-Sheva', joined by MAQAF (U+05BE), the Hebrew hyphen.
+_MAQAF_NAME = (
+    chr(0x05D1) + chr(0x05EA) + chr(0x05BE) + chr(0x05E9) + chr(0x05D1) + chr(0x05E2)
+)
+_GERESH_NAME = chr(0x05E8) + chr(0x05F3)                    # "R'" (GERESH)
+_GERSHAYIM_NAME = chr(0x05E9) + chr(0x05F4) + chr(0x05E1)   # 'Sh"as' (GERSHAYIM)
+_TYPOGRAPHIC_APOSTROPHE_NAME = "Be" + chr(0x2019) + "er Mayim Chaim"
+
+
+@pytest.mark.parametrize("source_form", [
+    _POINTED_HEBREW, _MAQAF_NAME, _GERESH_NAME, _GERSHAYIM_NAME,
+    "Mrs. Adil", "Miriam, daughter of our Rebbe", _TYPOGRAPHIC_APOSTROPHE_NAME,
+])
+def test_marks_and_printed_punctuation_survive_into_the_filename(source_form):
+    """RED before #586 for every one of these seven (measured): each mark or
+    punctuation character became its own "_"."""
+    stem = render_obsidian.sanitize_filename_component(source_form, "fallback")
+    assert stem == source_form, (
+        "a combining mark, Hebrew orthographic punctuation, or a printed "
+        f"name's own punctuation must survive: {source_form!r} -> {stem!r}"
+    )
+
+
+@pytest.mark.parametrize("hostile,expected", [
+    ("..", "fallback"),
+    (".", "fallback"),
+    ("...", "fallback"),
+    ("  ..  ", "fallback"),
+    ("../../etc/passwd", "etc_passwd"),
+    ("..\\..\\etc\\passwd", "etc_passwd"),
+    ("a..b", "a.b"),
+    (".hidden", "hidden"),
+    ("trail.", "trail"),
+    ("x.md", "x_md"),
+    ("x.MD", "x_MD"),
+    ("x.md.md", "x.md_md"),
+    # These two pin the ORDER of the normalization steps, which the cases
+    # above do not: run the ".md" neutralization BEFORE the dot strip and
+    # "x.md." comes out as "x.md" (extension property violated); run the
+    # "_" collapse before it instead and "x_.md" comes out as "x__md".
+    ("x.md.", "x_md"),
+    ("x_.md", "x_md"),
+    ("a\x00b", "a_b"),
+    (chr(0x3002) + chr(0x3002), "fallback"),   # IDEOGRAPHIC FULL STOP
+    (chr(0xFF0E) + chr(0xFF0E), "fallback"),   # FULLWIDTH FULL STOP
+    (chr(0x0301), "fallback"),                 # a lone COMBINING ACUTE
+    (chr(0x2708) + chr(0xFE0F), "fallback"),   # emoji + VARIATION SELECTOR-16
+])
+def test_admitting_the_dot_keeps_the_traversal_and_extension_properties(hostile, expected):
+    """GREEN before #586 as well as after -- it pins the two properties that
+    used to come free from excluding "." and are now enforced by
+    sanitize_filename_component's own normalization tail, so a regression in
+    either leg turns it RED. Its guard value was verified by MUTATION, not by
+    a pre-fix red: deleting the dot-run collapse, and separately the trailing-
+    ".md" neutralization, each fails this test. The exact `expected` stems are
+    pinned, not just the invariants -- an invariant-only assertion passes for
+    "x.md" -> "x.md", which is precisely the defect the property forbids."""
+    stem = render_obsidian.sanitize_filename_component(hostile, "fallback")
+    assert stem == expected, f"{hostile!r} -> {stem!r}, expected {expected!r}"
+    assert ".." not in stem, f"{hostile!r} -> {stem!r} carries a '..' segment"
+    assert stem not in (".", ".."), f"{hostile!r} -> {stem!r} IS a traversal segment"
+    assert not stem.startswith("."), f"{hostile!r} -> {stem!r} is a dot-entry"
+    assert not stem.endswith("."), f"{hostile!r} -> {stem!r} ends in '.'"
+    assert not stem.lower().endswith(".md"), (
+        f"{hostile!r} -> {stem!r} carries an extension of its own; the only "
+        "extension an emitted note may have is the '.md' render() appends"
+    )
+    assert "/" not in stem and "\\" not in stem and "\x00" not in stem, (
+        f"{hostile!r} -> {stem!r} carries a separator or NUL"
+    )
+    assert stem.partition(".")[0].upper() not in render_obsidian._WIN32_RESERVED_STEMS, (
+        f"{hostile!r} -> {stem!r} names a Win32 reserved device"
+    )
+
+
+@pytest.mark.parametrize("source_form,expected", [
+    # Reserved even with an extension after the device basename, so the
+    # emitted "AUX.txt.md" is a device path too. Before #586 the dot was
+    # replaced and "AUX_txt" was writable, so admitting "." is what widened
+    # the pre-existing bare-device hole into this shape.
+    ("AUX.txt", "AUX_.txt"),
+    ("CON", "CON_"),
+    ("NUL", "NUL_"),
+    ("COM1", "COM1_"),
+    ("lpt9.log", "lpt9_.log"),
+    ("con.foo.md", "con_.foo_md"),
+    # The ISO/IEC 8859-1 superscript digits are part of Microsoft's own
+    # reserved list ("Windows recognizes ... U+00B9, U+00B2 and U+00B3 as
+    # digits and treats them as valid parts of COM# and LPT# device names"),
+    # and `str.isalnum()` is True for all three, so before the alias entries
+    # they passed through untouched (MR bot, second round).
+    ("COM" + chr(0x00B9), "COM" + chr(0x00B9) + "_"),
+    ("COM" + chr(0x00B2) + ".txt", "COM" + chr(0x00B2) + "_.txt"),
+    ("LPT" + chr(0x00B3), "LPT" + chr(0x00B3) + "_"),
+    ("lpt" + chr(0x00B2) + ".log", "lpt" + chr(0x00B2) + "_.log"),
+    # A device name whose own dot the ".md" rule already dissolved is NOT a
+    # device path any more -- "com<sup>3</sup>.md" -> "com<sup>3</sup>_md" is
+    # a plain basename -- so it must be left as the tail produced it, and the
+    # guard must not re-fire on it.
+    ("com" + chr(0x00B3) + ".md", "com" + chr(0x00B3) + "_md"),
+    ("CON.md", "CON_md"),
+    # ...and names that merely BEGIN with a device name, or contain one as a
+    # word, are ordinary names and must be left exactly alone.
+    ("Constantine", "Constantine"),
+    ("Aux Chien", "Aux Chien"),
+    ("nulla", "nulla"),
+    ("Prince", "Prince"),
+])
+def test_a_win32_device_basename_is_neutralized_but_a_real_name_is_not(
+    source_form, expected
+):
+    """The MR bot's finding, admitted: this guard is enforced on EVERY
+    platform, not only Windows, because a vault is copied and synced between
+    machines and a name unwritable there is a defect wherever it was
+    rendered. It is the same class as the two caps -- a name the filesystem
+    refuses aborts a render that has already emptied the vault -- which is
+    why it ships here rather than as the separate #592."""
+    stem = render_obsidian.sanitize_filename_component(source_form, "fallback")
+    assert stem == expected, f"{source_form!r} -> {stem!r}, expected {expected!r}"
+    assert stem.partition(".")[0].upper() not in render_obsidian._WIN32_RESERVED_STEMS, (
+        f"{source_form!r} -> {stem!r} still names a Win32 reserved device"
+    )
+
+
+def test_the_two_properties_hold_over_an_exhaustive_hostile_alphabet():
+    """The parametrized case list above pins EXACT stems for the shapes a
+    human thought of; this one pins the two properties over every string of
+    length <= 4 drawable from an adversarial alphabet -- 30 940 inputs,
+    including the dot/separator/NUL/mark/ZWJ characters and the letters
+    "m"/"d" the trailing-".md" rule keys on. A property that only ever meets
+    hand-picked inputs is one refactor away from a hole nobody sampled."""
+    alphabet = ["a", ".", "/", "\\", "_", " ", "m", "d", "M", "D",
+                chr(0x05B7), "\x00", chr(0x200D)]
+    exercised = 0
+    asserted = 0
+    for k in (1, 2, 3, 4):
+        for combo in itertools.product(alphabet, repeat=k):
+            value = "".join(combo)
+            exercised += 1
+            stem = render_obsidian.sanitize_filename_component(value, "fallback")
+            if stem == "fallback":
+                continue
+            asserted += 1
+            assert ".." not in stem, f"{value!r} -> {stem!r}"
+            assert stem not in (".", ".."), f"{value!r} -> {stem!r}"
+            assert not stem.startswith("."), f"{value!r} -> {stem!r}"
+            assert not stem.endswith("."), f"{value!r} -> {stem!r}"
+            assert not stem.lower().endswith(".md"), f"{value!r} -> {stem!r}"
+            assert "/" not in stem and "\\" not in stem, f"{value!r} -> {stem!r}"
+            assert "\x00" not in stem, f"{value!r} -> {stem!r}"
+    # Both counts live INSIDE the assertions, so neither a loop that stopped
+    # iterating nor a sanitizer that answers `fallback` to EVERYTHING (which
+    # skips every property assertion above and would otherwise sail through
+    # a bare iteration count) can pass by printing what a passing run
+    # prints. 26 428 of the 30 940 inputs currently reach the assertions; the
+    # bound is deliberately loose, since widening the allow-list again should
+    # move that number UP, not require this line to be edited.
+    assert exercised == 13 + 13**2 + 13**3 + 13**4 == 30940, exercised
+    assert asserted > 20000, (
+        f"only {asserted} of {exercised} inputs reached the property "
+        "assertions -- the sanitizer is answering with the fallback far more "
+        "often than it should, so this test is not checking what it claims"
+    )
+
+
+@pytest.mark.parametrize("label,source_form", [
+    # Review round 1: a mark run no longer collapses into a single "_", so a
+    # stem can now be as long as its input. Both caps are exercised through
+    # render() rather than through the helper, because what they defend is
+    # the WRITE -- and _write_note runs after _clean_vault_content has
+    # already emptied the vault, so an unwritable name aborts the render
+    # over a half-rebuilt vault rather than dropping one note.
+    ("mark_run", "A" + chr(0x0301) * 253),          # macOS refuses >=32 marks/base
+    ("long_latin", "A" * 300),                       # pre-existing: NAME_MAX
+    ("long_pointed_hebrew",
+     "".join(chr(0x05D0 + i % 22) + chr(0x05B7) + chr(0x0591) for i in range(200))),
+])
+def test_a_pathological_name_still_renders_instead_of_aborting_the_vault(
+    tmp_path, label, source_form
+):
+    canon = make_canon({
+        source_form: canon_entry(source_form, f"Цель{label}", category="person"),
+    })
+    ns = make_nodestream([make_node("p1", "seg01", f"Текст про Цель{label} здесь.")])
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+
+    identity = entity_note_identity(out_dir, manifest, source_form)
+    written = out_dir / f"{identity}.md"
+    assert written.is_file(), f"{label}: {identity!r} was not written"
+    stem = identity.rsplit("/", 1)[-1]
+    assert len(f"{stem}.md".encode("utf-8")) <= 255, (
+        f"{label}: {len(stem)} chars is over the component budget"
+    )
+    run = longest = 0
+    for ch in stem:
+        if unicodedata.category(ch) in ("Mn", "Mc", "Me"):
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 0
+    assert longest <= 30, f"{label}: {longest} consecutive marks in {stem!r}"
+
+
+def test_pointed_hebrew_entity_note_is_written_under_its_unmangled_name(tmp_path):
+    """END-TO-END through render(), not the helper: #586 was measured on the
+    filenames a delivered vault actually carries, so the pin belongs on the
+    shipped path -- the written relpath AND the wikilink target that has to
+    match it."""
+    canon = make_canon({
+        _POINTED_HEBREW: canon_entry(_POINTED_HEBREW, "Авния", category="person"),
+    })
+    ns = make_nodestream([make_node("p1", "seg01", "Он позвал Авния к столу.")])
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, _POINTED_HEBREW)
+
+    assert identity == f"people/{_POINTED_HEBREW}", (
+        f"the entity note must be written under the unmangled name, got {identity!r}"
+    )
+    assert f"{identity}.md" in manifest["written"]
+    assert (out_dir / f"{identity}.md").is_file()
+
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "к столу" in t
+    )
+    assert len(body_matches) == 1
+    assert f"[[{identity}|Авния]]" in body_matches[0].read_text(encoding="utf-8"), (
+        "the wikilink target must be that same unmangled note identity"
     )
 
 
