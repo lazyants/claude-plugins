@@ -61,62 +61,23 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.30.0 (#587 -- the wikilinker's alphanumeric boundary), per
-# the maintenance contract above: the previous entry's map went with its
-# entry. Every citation below was resolved BY CONTENT against the worktree
-# and RE-VERIFIED that each anchor appears, in order, inside its range --
-# never by carrying an offset over, not even for the file this release
-# leaves untouched (diff_rendered_output.py). A uniform offset is never
-# safe: 1.24.0's own rewrite shifted select_segments.py by +12 in one band
-# and +55 in the next, and an untouched file whose citation still happens to
-# contain its anchor text is exactly what a re-numbering produces without
-# anyone re-reading it.
-CITATION_ANCHORS = {
-    # This map tracks the NEWEST changelog entry only, and is rewritten every
-    # release. 1.30.0 is #587: the inline wikilinker's alphanumeric boundary.
-    # Three citations, all about WHERE a decision sits rather than what a file
-    # says, so each carries anchors.
-    "render_obsidian.py:514-530": [
-        # The entry calls this "one alternation over every target,
-        # longest-first". Both halves of that must be in range: the ordering is
-        # the `sorted()` key, and the alternation is the compile that consumes
-        # it. Citing only the compile line left the longest-first claim
-        # pointing at a line that does not contain it.
-        "targets_sorted = sorted(",
-        "-len(t)",
-        "re.compile",
-        "for t in targets_sorted)",
-    ],
-    "render_obsidian.py:636-711": [
-        # The guard, its ONE call site, and the bookkeeping it must precede.
-        # Order IS the claim here twice over: the definition precedes the call,
-        # the call sits inside the match loop rather than in the pattern, and
-        # the refusal comes BEFORE both first-occurrence scopes. The range runs
-        # through `global_seen` for that last reason -- ending it at the `if`
-        # would leave "discarded" and "never spends the slot" pointing at code
-        # outside the citation.
-        #
-        # What these anchors do NOT catch, stated because the range now looks
-        # wide enough to imply otherwise: swapping the refusal's `continue` for
-        # `pass` preserves every token above. A bare "continue" anchor cannot
-        # fix that -- the ordered scan would simply find the next `continue`
-        # further down the loop. That is this test's documented limit (it pins
-        # where a claim points, not that the claim is still true); the
-        # behaviour itself is pinned by section 20 of render_obsidian.test.py.
-        "def _boundary_ok",
-        "text[start - 1].isalnum()",
-        "text[end].isalnum()",
-        "for m in self.pattern.finditer(text):",
-        "if not _boundary_ok(m.start(), m.end()):",
-        "seen_in_block.add(target)",
-        "self.global_seen.add(target)",
-    ],
-    "diff_rendered_output.py:106": [
-        # The render-baseline version hash the cost section names.
-        "_RENDER_VERSION_FILES",
-        "render_obsidian.py",
-    ],
-}
+# Rewritten for 1.31.0 (#586 -- the filename sanitizer's marks and
+# punctuation), per the maintenance contract above: the previous entry's map
+# went with its entry, exactly as that contract says it must. 1.30.0's three
+# citations are NOT carried forward and were not re-resolved -- 1.31.0 edits
+# render_obsidian.py above every one of them, so carrying them would be the
+# renumber-preserves-the-wrongness failure this file exists to prevent, and
+# re-resolving them would pin a historical entry to line numbers it never
+# claimed.
+#
+# 1.31.0 itself cites NO `file.ext:NNN` anywhere: it names constants and
+# functions (`_FILENAME_MAX_BYTES`, `sanitize_filename_component`) instead,
+# which is why this map is empty rather than merely short. An empty map is a
+# real state under the assertions below, not a disabled test -- an entry that
+# adds a citation without an anchor still fails `undeclared`. Deliberate: this
+# release moves lines in the file it talks about, and a line number in prose
+# rots the moment the next release edits above it.
+CITATION_ANCHORS = {}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
 # alphabetic extension are still required. Pinning a list of extensions was
