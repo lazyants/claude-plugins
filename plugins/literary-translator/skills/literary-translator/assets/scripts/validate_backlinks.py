@@ -129,6 +129,53 @@ empty too -- nothing below this point is loaded), `warnings=0`, exit 0.
     renderer's own WARN and `adapter_result.delink_cost` are the authority
     there -- see `_disabled_report`). Never routed into `warnings`/exit.
 
+## Aiming the gate at a POST-PROCESSED vault (`--entity-note-map`, #589)
+
+Both metrics below locate each entity's note by RE-DERIVING its path through
+the renderer's own naming rule (`_entity_maps` ->
+`render_obsidian._resolve_entity_notes`). That is exactly right for the vault
+`render()` wrote, and exactly wrong for one a project post-processed: rename
+the entity notes (or merge several spellings into one note per entity) and
+every expected occurrence is reported missing, though nothing is wrong with
+the vault. `--vault DIR` does not help -- it moves the ROOT, never the
+derivation, so it can only ever pass a tree the renderer itself named.
+
+`--entity-note-map FILE` supplies that derivation instead: a JSON object
+`{source_form: "<vault-relative>.md"}` that REPLACES
+`relpath_by_source_form` wholesale. `note_identity_by_source_form` is derived
+from the same mapping, so metric 1 (appendix coverage) and metric 2 (the
+inline advisory, which inverts the identity map independently) are both aimed
+at the same tree -- a map that reached only one of them would be a
+half-verified vault.
+
+  - **Many source_forms MAY share one relpath** (the merge case). Their shared
+    note identity then inverts to SEVERAL owners, and an inline link found
+    under it counts toward EVERY owner sharing it: attribution between merged
+    spellings is genuinely ambiguous, and both metric 2 and `orphaned_owners`
+    are exit-neutral, so the aggregation is disclosed here rather than
+    guessed at. Under the DEFAULT derivation this never engages --
+    `_resolve_entity_notes`/`_dedupe_path` guarantee one relpath per
+    source_form.
+  - **An absent source_form is not an error.** A canon entry the map does not
+    mention has no note in THIS vault: its expected occurrences count as
+    missing (identical to today's unreadable-note path) and it contributes no
+    identity to the inline scan. That keeps the operator from having to
+    enumerate note-less entities, and it is the honest reading.
+  - **A supplied map never suppresses a real failure.** It relocates where a
+    note is looked for, nothing else: a mapped note whose Mentions region is
+    genuinely missing an expected segment link still yields that exact
+    `(source_form, seg)` pair and exit 1.
+  - **Rejections are exit 2** (the same malformed-input contract as every
+    other input here): unreadable/non-JSON/non-object file, a non-string
+    value, a value that is not a relative POSIX `*.md` path (absolute, a `..`
+    or `.` component, empty, or backslash-bearing), or a key that is not a
+    `canon.json` entry (typo protection -- a mistyped source_form would
+    otherwise silently degrade to the absent-entry case above).
+  - The map is read only on the effective-enabled path, AFTER canon (it is
+    validated against canon's own entry keys). The disabled short-circuit
+    still loads no metric input at all, a structurally invalid map included.
+  - Independent of, and composable with, `--vault`.
+
 ## Report shape (one JSON line to stdout)
 
     { "mentions_coverage": { "status": "enabled" | "disabled",
@@ -144,7 +191,12 @@ empty too -- nothing below this point is loaded), `warnings=0`, exit 0.
           {"canonical_target_form", "owners": [...],
            "unlinked_occurrences": int}, ... ],
           "unlinked_occurrences_total": int, "inline_links_emitted": int },
-      "warnings": int }
+      "warnings": int,
+      "note_map_source": "supplied" }   # present ONLY under --entity-note-map
+
+`note_map_source` is emitted only when a map was supplied, so the default
+enabled report keeps exactly the keys it always had -- its ABSENCE is what
+says the note paths were derived from the renderer's own rule.
 
 ## Exit codes
 
@@ -165,7 +217,10 @@ empty too -- nothing below this point is loaded), `warnings=0`, exit 0.
       exit-1 traceback to a clean, reason-carrying exit 2) -- or
       `occurrence_targets.build()` itself raising.
 
-Usage: python3 validate_backlinks.py [--vault DIR]
+      -- or `--entity-note-map`'s own file being unreadable, non-JSON, or
+      structurally invalid (see that section above).
+
+Usage: python3 validate_backlinks.py [--vault DIR] [--entity-note-map FILE]
 """
 import argparse
 import json
@@ -347,7 +402,23 @@ def _fatal(msg) -> NoReturn:
     sys.exit(2)
 
 
-def _load_json(path, label):
+def _reject_duplicate_keys(pairs):
+    """`json.loads` keeps the LAST of two duplicate object members and says
+    nothing, so `{"Ivan": "a.md", "Ivan": "b.md"}` would reach a caller as a
+    well-formed one-entry map aimed at whichever line came second (#589).
+    Raising ValueError here rides the parse boundary's existing catch, so a
+    duplicate is reported as the malformed input it is rather than needing a
+    second failure path. Opt-in per call site: only inputs whose KEYS are
+    authoritative want it."""
+    seen = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise ValueError(f"duplicate key {key!r}")
+        seen.add(key)
+    return dict(pairs)
+
+
+def _load_json(path, label, object_pairs_hook=None):
     """Returns (obj, error_message_or_None) -- mirrors validate_draft.py's
     own `_load_json` / validate_assembled.py's `load_json` exactly,
     including the R8-1 lesson that `ValueError` alone (a shared parent of
@@ -356,15 +427,17 @@ def _load_json(path, label):
     if not path.is_file():
         return None, f"{label} missing: {path}"
     try:
-        return json.loads(path.read_text(encoding="utf-8")), None
+        return json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=object_pairs_hook
+        ), None
     except (OSError, ValueError) as exc:
         return None, f"{label} at {path} is not valid JSON: {exc}"
     except RecursionError as exc:
         return None, f"{label} at {path} is nested too deeply to parse: {exc}"
 
 
-def _require_json(path, label):
-    obj, err = _load_json(path, label)
+def _require_json(path, label, object_pairs_hook=None):
+    obj, err = _load_json(path, label, object_pairs_hook=object_pairs_hook)
     if err:
         _fatal(err)
     return obj
@@ -663,16 +736,81 @@ def _seg_filename_map(nodestream):
     return mapping
 
 
-def _entity_maps(canon, profile):
+def _is_safe_vault_relpath(value):
+    """A supplied note path must be a vault-RELATIVE POSIX `*.md` path (#589).
+    LEXICAL only, and deliberately so: it refuses the absolute, backslash,
+    `..`, stemless-`.md` and NUL-bearing forms, matching render_obsidian's own
+    `_is_safe_path_segment` posture for canon-derived path pieces. It does NOT resolve symlinks, so a vault
+    whose own directory is a symlink reads through it exactly as it does on
+    the derived path -- both paths reach the same `out_dir / relpath` read,
+    and Obsidian follows such a link too. Containment against symlinks was
+    never a property of this gate; a map cannot ask for anything a rendered
+    vault could not already contain."""
+    if not value.endswith(".md") or value.rsplit("/", 1)[-1] == ".md":
+        return False
+    if value.startswith("/") or "\\" in value:
+        return False
+    if "\x00" in value:
+        # A NUL cannot occur in a real pathname, so `Path.is_file()` answers
+        # False for it rather than raising -- which would make an impossible
+        # path indistinguishable from an absent note. That matters here and
+        # not in most gates: this one's exit 1 is ADVISORY and W9 continues
+        # past it, so without this the malformed input never halts anything.
+        return False
+    return all(part not in ("", ".", "..") for part in value.split("/"))
+
+
+def _load_entity_note_map(path, entries):
+    """The operator-supplied `{source_form: relpath}` mapping that REPLACES
+    the renderer-derived note resolution -- see this module's own
+    "Aiming the gate at a POST-PROCESSED vault" section. Every rejection
+    below is a clean exit 2 (malformed input), never a silently degraded
+    metric. Values MAY repeat (several spellings merged into one note);
+    keys must be canon entries, so a typo cannot masquerade as the
+    documented absent-entry case."""
+    raw = _require_json(path, "entity note map", object_pairs_hook=_reject_duplicate_keys)
+    if not isinstance(raw, dict):
+        _fatal(f"entity note map at {path} did not parse to an object")
+    resolved = {}
+    for source_form, relpath in raw.items():
+        # JSON object member names are always strings, so only the VALUE
+        # needs a type check here.
+        if not isinstance(relpath, str):
+            _fatal(
+                f"entity note map: {source_form!r} maps to {relpath!r} -- every "
+                "value must be a string"
+            )
+        if source_form not in entries:
+            _fatal(f"entity note map: {source_form!r} is not a canon.json entry")
+        if not _is_safe_vault_relpath(relpath):
+            _fatal(
+                f"entity note map: {source_form!r} maps to {relpath!r}, which is "
+                "not a vault-relative *.md path"
+            )
+        resolved[source_form] = relpath
+    return resolved
+
+
+def _entity_maps(canon, profile, supplied_note_map=None):
     """(entries, relpath_by_source_form, note_identity_by_source_form) --
     the exact canon entries dict and note-filename resolution
     render_obsidian.render() itself computes, reused directly
     (`_resolve_entity_notes`) so an entity note's expected path/identity
-    can never drift from what the renderer actually wrote it under."""
+    can never drift from what the renderer actually wrote it under.
+
+    `supplied_note_map` (#589) replaces that derivation WHOLESALE when the
+    operator passes `--entity-note-map`: both returned maps then come from
+    it, so metric 1 and metric 2 are aimed at the same post-processed tree.
+    The identity rule (strip a trailing `.md`) is unchanged either way."""
     entries = render_obsidian._canon_entries(canon)
-    output_cfg = (profile or {}).get("output") or {}
-    folders_map = ((output_cfg.get("adapter_config") or {}).get("obsidian") or {}).get("folders") or {}
-    relpath_by_source_form = render_obsidian._resolve_entity_notes(entries, folders_map)
+    if supplied_note_map is None:
+        output_cfg = (profile or {}).get("output") or {}
+        folders_map = (
+            ((output_cfg.get("adapter_config") or {}).get("obsidian") or {}).get("folders") or {}
+        )
+        relpath_by_source_form = render_obsidian._resolve_entity_notes(entries, folders_map)
+    else:
+        relpath_by_source_form = dict(supplied_note_map)
     note_identity_by_source_form = {
         sf: (relpath[: -len(".md")] if relpath.endswith(".md") else relpath)
         for sf, relpath in relpath_by_source_form.items()
@@ -750,7 +888,16 @@ def _compute_inline_advisory(aggregate, note_identity_by_source_form, seg_filena
     already uses for appendix coverage -- symmetric groundedness, no
     independent re-derivation, per
     [[feedback-verification-sharing-a-blind-spot]]."""
-    identity_to_source_form = {v: k for k, v in note_identity_by_source_form.items()}
+    # identity -> [source_form, ...]: under the renderer's own derivation this
+    # is always a 1:1 inversion (`_resolve_entity_notes`/`_dedupe_path`
+    # guarantee one relpath per source_form), so this is behaviour-preserving
+    # there. It only becomes many:1 under a supplied --entity-note-map that
+    # merges spellings into one note, where an inline link to the shared note
+    # credits EVERY owner of it -- see the module docstring on why that
+    # aggregation is disclosed rather than attributed by guesswork.
+    identity_to_source_forms = defaultdict(list)
+    for source_form, identity in note_identity_by_source_form.items():
+        identity_to_source_forms[identity].append(source_form)
     inline_counts = Counter()
     for target in seg_filename_map.values():
         text = _read_text_or_none(out_dir / f"{target}.md")
@@ -762,8 +909,7 @@ def _compute_inline_advisory(aggregate, note_identity_by_source_form, seg_filena
             # `_wikilink_targets` -- a quoted `` `[[...]]` `` or
             # `` ``[[...]]`` `` must not count toward this metric either.
             for m in _WIKILINK_RE.finditer(_strip_inline_code(ln)):
-                sf = identity_to_source_form.get(m.group(1))
-                if sf is not None:
+                for sf in identity_to_source_forms.get(m.group(1), ()):
                     inline_counts[sf] += 1
 
     eligible = aggregate.get("eligible_by_source_form") or {}
@@ -1034,6 +1180,19 @@ def build_arg_parser():
             "via output_resolve.resolve_out_dir)."
         ),
     )
+    parser.add_argument(
+        "--entity-note-map",
+        default=None,
+        metavar="FILE",
+        help=(
+            "JSON object {source_form: vault-relative *.md path} that "
+            "REPLACES the renderer-derived entity-note resolution, so both "
+            "metrics can run against a vault whose entity notes were renamed "
+            "or merged by a post-processing layer. Several source_forms may "
+            "share one note; a canon entry the map omits is treated as having "
+            "no note in this vault."
+        ),
+    )
     return parser
 
 
@@ -1120,7 +1279,18 @@ def main():
         except output_resolve.OutputResolveError as exc:
             _fatal(str(exc))
 
-    entries, relpath_by_source_form, note_identity_by_source_form = _entity_maps(canon, profile)
+    supplied_note_map = None
+    if args.entity_note_map is not None:
+        # `is not None`, never truthiness: `--entity-note-map ""` (an unset
+        # shell variable) is a SUPPLIED-but-empty path, and must reach the
+        # loader's hard error rather than silently selecting derived mode.
+        supplied_note_map = _load_entity_note_map(
+            Path(args.entity_note_map), render_obsidian._canon_entries(canon)
+        )
+
+    entries, relpath_by_source_form, note_identity_by_source_form = _entity_maps(
+        canon, profile, supplied_note_map
+    )
     seg_map = _seg_filename_map(nodestream)
 
     missing, checked_entities, coverage_by_sf = _compute_missing(
@@ -1154,6 +1324,10 @@ def main():
         "delink_cost": _delink_cost_from_vault(out_dir),
         "warnings": len(missing),
     }
+    if supplied_note_map is not None:
+        # Emitted ONLY in supplied mode, so the default enabled report keeps
+        # exactly the keys it always had; absence is what says "derived".
+        report["note_map_source"] = "supplied"
     print(json.dumps(report, ensure_ascii=False))
     sys.exit(1 if report["warnings"] > 0 else 0)
 

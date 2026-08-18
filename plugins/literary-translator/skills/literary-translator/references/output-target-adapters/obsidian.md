@@ -251,6 +251,32 @@ The advisory `validate_backlinks.py` W9 gate (non-blocking) reports coverage;
 the aggregated `output.index` person-index page + `index_scope` routing
 remain a later phase.
 
+**Checking a POST-PROCESSED vault (`--entity-note-map FILE`).** Both metrics
+locate each entity's note by re-deriving its path through the renderer's own
+naming rule, so a vault whose entity notes a downstream layer renamed — or
+merged, one note per entity rather than one per spelling — reports every
+expected occurrence missing while being perfectly correct. `--vault DIR` does
+not help: it moves the root, never the derivation. `--entity-note-map` supplies
+the derivation instead, as a JSON object `{source_form: "<vault-relative>.md"}`
+that replaces it wholesale for *both* metrics. Several source_forms may share
+one path (an inline link to the shared note then credits every owner of it — an
+exit-neutral aggregation, disclosed because attribution between merged
+spellings is genuinely ambiguous); a canon entry the map omits is treated as
+having no note in this vault, so its occurrences count as missing rather than
+raising. A map never blanket-passes: a mapped note whose `## Mentions` region
+really is missing an expected segment link still yields that pair and exit `1`.
+An unreadable/non-object file, a non-string or non-relative-`*.md` value
+(a stemless `.md` basename and an embedded NUL are both refused here — each is
+lexically `*.md` yet cannot name a real note), or a
+key that is not a `canon.json` entry — or the same key twice, since a silently
+de-duplicated map would aim both metrics at whichever line came second — is
+exit `2` — but only once the gate is
+enabled: the `disabled` short-circuit still returns exit `0` first and reads no
+map, because a gate that will not run should not fail on an input it will not
+use. On the enabled path a supplied map makes the report carry
+`"note_map_source": "supplied"`; the default report is unchanged, its absence
+meaning the paths were derived.
+
 **Collision de-linking is decoupled from the Mentions flag, but still
 gated on `output.target == "obsidian"`.** When two or more canon entries
 share one NFC-exact `canonical_target_form` (grouping is case-sensitive —
