@@ -193,14 +193,32 @@ a source edited between the steps can leave every cited quote intact while the
 evidence a senses-only person's identity rests on has gone, and `--build` would
 still emit the person.
 
-**The set of unbound inputs is enumerated, not sampled.** `--claims` and
-`--build` read exactly five files: `manifest.json` and the assembled NodeStream,
-both digest-bound above, and the chain's own three documents, each bound by its
-own digest below. `canon.json`, `runs/ledger.json`, the profile, the language
-config and `canon_senses.json` are read by `--prep` ONLY — there is no later
-step that could read a changed copy of them, which is why they are not bound and
-not a gap. Adding a read to `--claims` or `--build` adds a member to that set,
-and it needs a digest for the same reason the first two did.
+**The input boundary is enumerated by KIND, not by a count.** Two kinds of read
+cross a stage boundary, and only the first needs a digest.
+
+*External inputs.* `manifest.json` and the assembled NodeStream are read by
+`--prep` and re-read by `--claims` and `--build`, and nothing in this chain wrote
+them. Both are hashed into the prep body above, and that is the whole of this
+category: `canon.json`, `runs/ledger.json`, the profile, the language config and
+`canon_senses.json` are read by `--prep` alone, so no later step can read a
+changed copy of them.
+
+*The chain's own documents.* `registry_input.json`, `registry_verdicts.json` and
+`registry_claims.json` are each bound by the digest chain described below.
+`registry_adjudications.json` is read by `--build` only; it carries
+`claims_sha256` and `input_sha256` and is checked against both, and `--build` is
+terminal, so there is no later stage for it to disagree with. That is why it is
+not itself hashed into anything — a terminal input has no downstream to protect,
+which is a different fact from being unchecked.
+
+*Code, not state.* The three registry schemas ship under the plugin root, never
+in the durable root, and `--claims`/`--build` load them as validators rather than
+as claims; a changed schema fails the run rather than passing a wrong judgement.
+Sibling scripts are imported by `--prep` only.
+
+Adding a durable-root read to `--claims` or `--build` puts a new member in the
+first category unless it is terminal, and then it needs a digest for the same
+reason the first two did.
 
 **B1 binds to the VERDICT, not only to the prep.** `registry_claims.json`
 carries the digest of the Pass A verdict it was projected from, inside its own
