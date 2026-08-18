@@ -128,17 +128,48 @@ def atx_heading(line: str, level: int = 2) -> str | None:
     return text
 
 
+def uncommented(text: str) -> str:
+    """`text` with every `<!-- ... -->` region blanked out, newlines kept so lines still line up.
+
+    Done over the whole text rather than line by line because a comment is not a line construct:
+    it can open and close mid-line, wrap any number of lines, and reopen after closing on the same
+    one. A state machine over lines got each of those wrong in turn; a scan over the text gets them
+    for free. An unterminated `<!--` comments out the rest of the file, which is what a renderer
+    does with it too.
+    """
+    out: list[str] = []
+    position = 0
+    while True:
+        start = text.find("<!--", position)
+        if start == -1:
+            out.append(text[position:])
+            return "".join(out)
+        out.append(text[position:start])
+        end = text.find("-->", start + 4)
+        if end == -1:
+            out.append("\n" * text.count("\n", start))
+            return "".join(out)
+        out.append("\n" * text.count("\n", start, end + 3))
+        position = end + 3
+
+
 def rendered_lines(text: str) -> list[str]:
-    """The lines a Markdown renderer treats as content -- fenced code blocks dropped.
+    """The lines a Markdown renderer treats as content -- fenced code and HTML comments dropped.
 
     Scanning physical lines loses block context: a table row or a section heading shown as an
-    EXAMPLE inside a fence is not one, and counting it is a false green on the surface it fakes
-    and a false duplicate on the surface it doubles. Fences are matched by character and length,
-    so a ``` inside a ~~~ block does not end it, and a closing fence carries no info string.
+    EXAMPLE inside a fence, or a section commented out with `<!-- -->` while its row stays, is not
+    a live surface. Counting one is a false green on the surface it fakes and a false duplicate on
+    the surface it doubles. Fences are matched by character and length, so a ``` inside a ~~~ block
+    does not end it, and a closing fence carries no info string.
+
+    These two wrappers are the whole contract, and it is a contract rather than an approximation
+    of Markdown: this reads LINES. A construct that hides content some other way -- and, in the
+    other direction, a heading inside a blockquote, which GitHub does render -- is out of scope by
+    design, because the alternative is carrying a Markdown parser to check a version number.
     """
     kept: list[str] = []
     fence: tuple[str, int] | None = None
-    for line in text.splitlines():
+    for line in uncommented(text).splitlines():
         stripped = line.lstrip(" ")
         marker = FENCE_RE.match(stripped) if len(line) - len(stripped) <= 3 else None
         if fence is None:
