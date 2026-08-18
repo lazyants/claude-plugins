@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.32.1 — 2026-08-18
+
+A sentence 1.32.0 shipped about its own behaviour was false, and the behaviour it described was pinned by no test. Docs and one test; no code changes.
+
+### The false sentence
+
+1.32.0 made a de-linked target consume its matched span so nothing links inside it, and said: *"The short target still links wherever it genuinely stands alone."* It does not. With `John Smith` de-linked (two owners) and `John` surviving, the prose `John Smithson arrived.` renders with **no link at all**:
+
+- the union alternation matches `John Smith` at 0–10, longest first;
+- #587's `_boundary_ok` refuses that match, because the next character is `s`;
+- `re.finditer` is non-overlapping and has already consumed 0–10, so `John` never gets a turn — even though it stands alone by both word boundaries.
+
+Releases before 1.32.0 emitted `[[…|John]] Smithson` there. The occurrence is also not counted in `delink_cost`, which is correct under that metric's own definition: a link group could not recover it either, since the boundary guard would still refuse the match.
+
+**The behaviour is unchanged, deliberately.** A missing link is recoverable through the source-anchored `## Mentions` appendix; a link landing on the wrong man is not (#207), and `John Smithson` is plausibly not the `John` this canon means. Re-scanning from `m.start() + 1` on a boundary refusal would recover the link and was cut for the same reason #587 cut it: it also links a different entity inside a full name. What was wrong was the prose, so the prose is what changed.
+
+### Why it is worth a release rather than a note
+
+This plugin's consumer executes its documentation. An operator reading that sentence would conclude a missing link is a defect and go looking for one that is not there — and the sentence was the only description of a behaviour nothing tested. `tests/render_obsidian_link_groups.test.py` now pins both directions: the boundary-refused span loses its nested link and counts nothing, and the short target still links at its other occurrences in the same block.
+
+Found by two independent security reviews of #588, which reached it from opposite directions and both correctly refuted it as a security finding before reporting it as a documentation defect.
+
 ## 1.32.0 — 2026-08-18
 
 Collision de-linking finally says what it costs, and a book can tell the renderer that two spellings are one man. Closes #588.
@@ -28,7 +50,7 @@ Four decisions in that sentence are load-bearing, and each was a review round:
 - **The renderer reports it, not the W9 gate.** `validate_backlinks.py` short-circuits to `mentions_coverage.status: disabled` when the `## Mentions` appendix is off — which is exactly the configuration the measured vault ran under. De-linking is *decoupled* from that flag, so its cost has to be reported from somewhere that runs unconditionally.
 - **The count comes from inside `_Linker`, never from re-scanning the finished markdown.** A post-hoc scan is both over- and under-inclusive: `_render_verse_block` links a gloss BEFORE wrapping it as `> *Literal: …*`, the segment title is duplicated into YAML frontmatter, entity notes repeat every target in their own frontmatter, and the inline-verse label is protected by position rather than by regex. The linker sees the one text the wikilink rule is actually applied to.
 - **Every occurrence counts, not one per block** — the question is how many unlinked mentions a reader meets. A de-linked short name nested inside a longer linked one is charged to the longer name (the diagnostic alternation is the longest-first union of linkable *and* de-linked targets, precisely so each physical occurrence has exactly one owner).
-- **A de-linked target consumes its span, and nothing links inside it.** Linking and counting are ONE scan over the union of linkable and de-linked targets. A linking scan that knew only the *surviving* targets matched a shorter one inside a de-linked longer one: canon holding a colliding `John Smith` and a single-owner `John` rendered `[[…|John]] Smith` — a link landing on the wrong man inside the very span de-linking had just suppressed, while the cost report simultaneously called that occurrence unlinked. #587's word boundary cannot catch it, since the character after `John` is a space. This was reachable in 1.29.0 too; it is fixed here because the same scan now decides both. The short target still links wherever it genuinely stands alone.
+- **A de-linked target consumes its span, and nothing links inside it.** Linking and counting are ONE scan over the union of linkable and de-linked targets. A linking scan that knew only the *surviving* targets matched a shorter one inside a de-linked longer one: canon holding a colliding `John Smith` and a single-owner `John` rendered `[[…|John]] Smith` — a link landing on the wrong man inside the very span de-linking had just suppressed, while the cost report simultaneously called that occurrence unlinked. #587's word boundary cannot catch it, since the character after `John` is a space. This was reachable in 1.29.0 too; it is fixed here because the same scan now decides both. A consumed span never spends the block's one-link-per-target budget, so the short target still links at its other occurrences in the block — but see 1.32.1, which corrects an over-broad claim made here about that.
 - **A match #587's word-boundary guard refuses is not charged here.** The metric counts occurrences that carry no link *because of the collision*; `Teplik` inside the demonym `Tepliker` would carry no link with a single owner either, so charging it would inflate the number with occurrences a link group could never recover.
 - **`null` is not zero.** The marker is re-stamped WITHOUT a measurement the moment the old vault is cleaned, so an interrupted render cannot leave a previous render's number standing over notes it no longer describes. `delink_cost: null` in the GATE report means "not republished here", never "measured zero" — on the enabled path because no usable measurement is in the marker, and on the disabled path because the gate short-circuits before reading the vault at all. The renderer's own WARN and `adapter_result.delink_cost` are the authority there.
 

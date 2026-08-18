@@ -309,9 +309,22 @@ marker, a `delink_cost` block:
   `[[…|John]] Smith`, a link landing on the wrong man inside the very span
   de-linking had just suppressed, while the cost report called that same
   occurrence unlinked. The #587 word boundary cannot catch it (the
-  character after `John` is a space). The short target still links wherever
-  it genuinely stands alone, and a consumed span never spends the block's
-  one-link-per-target budget.
+  character after `John` is a space). A consumed span never spends the
+  block's one-link-per-target budget, so the short target still links at its
+  other occurrences in the same block.
+- **The span is consumed even when the #587 boundary guard REFUSES the
+  de-linked match**, and that costs the short target its link at exactly
+  that spot. With `John Smith` de-linked and `John` surviving, the prose
+  `John Smithson arrived.` matches `John Smith` at 0–10, `_boundary_ok`
+  refuses it (the next character is `s`), and `re.finditer` has already
+  consumed the span — so `John` gets no turn there, even though it stands
+  alone by both word boundaries. It is also not counted, which is correct
+  under this metric's own definition: a link group could not recover that
+  occurrence either, because the boundary guard would still refuse it.
+  Releases before 1.32.0 emitted `[[…|John]] Smithson` here. The direction
+  is deliberate — a missing link is recoverable, a link on the wrong man is
+  not (#207) — and re-scanning from `m.start() + 1` instead of consuming was
+  considered and cut for that reason.
 - The counts come from inside `_Linker`, over the exact text the wikilink
   rule is applied to — **never a re-scan of the finished markdown**, which
   would be both over- and under-inclusive (a verse gloss is linked BEFORE

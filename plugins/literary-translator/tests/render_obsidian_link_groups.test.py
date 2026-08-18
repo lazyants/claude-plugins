@@ -431,6 +431,50 @@ def test_the_short_target_still_links_where_it_stands_alone(tmp_path):
     assert result["delink_cost"]["inline_links_emitted"] == 1
 
 
+def test_a_boundary_refused_delinked_span_is_still_consumed(tmp_path):
+    """1.32.1. The span is consumed even when #587's `_boundary_ok` REFUSES
+    the de-linked match, and that costs the short target its link at exactly
+    that spot.
+
+    `John Smith` is de-linked and `John` survives. In `John Smithson
+    arrived.` the union matches `John Smith` at 0-10 (longest first),
+    `_boundary_ok` refuses it because the next character is `s`, and
+    `re.finditer` has already consumed the span -- so `John` never gets a
+    turn, even though it stands alone by both word boundaries. Releases
+    before 1.32.0 emitted `[[...|John]] Smithson` here.
+
+    Deliberate, and left unchanged: a missing link is recoverable via the
+    `## Mentions` appendix, a link on the wrong man is not (#207), and
+    `John Smithson` is plausibly not the `John` this canon means. 1.32.0's
+    prose claimed the opposite ("the short target still links wherever it
+    genuinely stands alone"), which is the defect 1.32.1 fixed -- so this
+    test exists to keep the corrected sentence true."""
+    ns = make_nodestream([make_node("n1", "seg01", "John Smithson arrived.")])
+    out_dir, result = render_into(tmp_path, ns, make_canon(COLLIDING_LONG_PLUS_SHORT),
+                                  make_profile())
+    text = segment_note_text(out_dir, result)
+    assert "[[" not in text, text
+    # ...and it is not CHARGED either: a link group could not recover this
+    # occurrence, because the boundary guard would still refuse the match.
+    assert result["delink_cost"]["unlinked_occurrences_total"] == 0
+    assert result["delink_cost"]["inline_links_emitted"] == 0
+
+
+def test_the_short_target_still_links_elsewhere_in_the_same_block(tmp_path):
+    """The other half of the corrected sentence: consuming a boundary-refused
+    span costs the short target its link AT THAT SPOT ONLY. A later genuine
+    occurrence in the same block still links -- the consumed span never
+    spends the block's one-link-per-target budget."""
+    ns = make_nodestream([make_node(
+        "n1", "seg01", "John Smithson met John later.")])
+    out_dir, result = render_into(tmp_path, ns, make_canon(COLLIDING_LONG_PLUS_SHORT),
+                                  make_profile())
+    text = segment_note_text(out_dir, result)
+    assert "met [[" in text and "|John]] later." in text, text
+    assert text.count("[[") == 1, text
+    assert result["delink_cost"]["unlinked_occurrences_total"] == 0
+
+
 def test_a_delinked_span_does_not_spend_the_blocks_first_occurrence_slot(tmp_path):
     """A consumed de-linked span must not mark the SHORT target as seen --
     the wikilink rule's one-link-per-block budget belongs to the target that
