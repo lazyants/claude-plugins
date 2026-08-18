@@ -2608,8 +2608,11 @@ owners, below), and the
 renderer now REPORTS what that cost: `adapter_result.delink_cost` on
 `assemble.py`'s stdout line, plus one stderr `WARN` whenever the total is
 non-zero. `validate_backlinks.py` republishes the same block verbatim as
-`delink_cost` (exit-neutral; `null` means "not measured", never "measured
-zero"). **Read the WARN — do not just log it.** A book whose de-linked
+`delink_cost` (exit-neutral). `null` there means **not republished by this
+gate** — never "measured zero": either no usable measurement in the vault
+marker, or the disabled short-circuit, which returns `null` without reading
+the vault at all. The renderer's own WARN and `adapter_result.delink_cost`
+are the authority in that case. **Read the WARN — do not just log it.** A book whose de-linked
 occurrences dwarf its emitted links has had its most-named figures
 silenced, and every gate above will still be green. When the WARN names
 targets that are spelling variants of ONE referent, the fix is

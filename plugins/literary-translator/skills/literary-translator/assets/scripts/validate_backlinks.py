@@ -119,10 +119,15 @@ empty too -- nothing below this point is loaded), `warnings=0`, exit 0.
     linker actually scans (a re-scan of the finished markdown counts
     renderer-authored wrappers and misses gloss text linked before it was
     wrapped), and reading the number out of the vault binds it to the vault
-    rather than to a prediction from current canon. `null` when the marker
-    carries no measurement (an older vault, or a render that did not
-    finish -- an interrupted render re-stamps an unmeasured marker before
-    it writes anything). Never routed into `warnings`/exit.
+    rather than to a prediction from current canon. `null` means NOT
+    REPUBLISHED HERE, never "measured zero", and has TWO causes: on this
+    enabled path, no usable measurement in the marker (an older vault, or a
+    render that did not finish -- an interrupted render re-stamps an
+    unmeasured marker before it writes anything); on the disabled
+    short-circuit, the gate returns `null` without reading the vault at
+    all, so it says nothing about whether the render measured anything (the
+    renderer's own WARN and `adapter_result.delink_cost` are the authority
+    there -- see `_disabled_report`). Never routed into `warnings`/exit.
 
 ## Report shape (one JSON line to stdout)
 

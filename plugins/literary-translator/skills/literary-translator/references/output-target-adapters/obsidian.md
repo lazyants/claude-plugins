@@ -281,8 +281,14 @@ marker, a `delink_cost` block:
   every canon form implicated, and its cost being zero is the useful part.
 - The marker is re-stamped WITHOUT a measurement the moment the old vault
   is cleaned, so an interrupted render can never leave a previous render's
-  number standing over notes it no longer describes. `delink_cost: null` in
-  the gate report means "not measured" — never "measured zero".
+  number standing over notes it no longer describes.
+- `delink_cost: null` in the GATE report means "not republished here" —
+  never "measured zero". Two different causes: on the enabled path, no
+  usable measurement in the marker (absent, unreadable, another adapter's,
+  or from a render that did not finish); on the disabled path, the gate
+  short-circuits before reading the vault at all, so `null` says nothing
+  about whether the render measured anything. The renderer's stderr WARN and
+  `adapter_result.delink_cost` are the authority in that second case.
 
 ### Re-linking one referent — `canon_link_groups.json` (1.30.0)
 
