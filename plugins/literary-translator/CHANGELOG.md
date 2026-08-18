@@ -2,7 +2,7 @@
 
 ## 1.32.1 — 2026-08-18
 
-A sentence 1.32.0 shipped about its own behaviour was false, and the behaviour it described was pinned by no test. Docs and one test; no code changes.
+A sentence 1.32.0 shipped about its own behaviour was false, and the behaviour it described was pinned by no test. Docs and two tests; no code changes.
 
 ### The false sentence
 
@@ -14,7 +14,9 @@ A sentence 1.32.0 shipped about its own behaviour was false, and the behaviour i
 
 Releases before 1.32.0 emitted `[[…|John]] Smithson` there. The occurrence is also not counted in `delink_cost`, which is correct under that metric's own definition: a link group could not recover it either, since the boundary guard would still refuse the match.
 
-**The behaviour is unchanged, deliberately.** A missing link is recoverable through the source-anchored `## Mentions` appendix; a link landing on the wrong man is not (#207), and `John Smithson` is plausibly not the `John` this canon means. Re-scanning from `m.start() + 1` on a boundary refusal would recover the link and was cut for the same reason #587 cut it: it also links a different entity inside a full name. What was wrong was the prose, so the prose is what changed.
+**The behaviour is unchanged, deliberately.** A missing link is recoverable through the source-anchored `## Mentions` appendix; a link landing on the wrong man is not (#207), and `John Smithson` is plausibly not the `John` this canon means. What was wrong was the prose, so the prose is what changed.
+
+**The obvious remedy does not work, and that is worth writing down.** Both reviewers who found this proposed re-scanning from `m.start() + 1` on a boundary refusal. It was implemented as a mutant and recovers nothing: the nested target begins at the *same* offset as the refused match (`John` and `John Smith` both start at 0), so a `+1` re-scan skips it too. Measured, not reasoned: with that remedy applied, `John Smithson arrived.` still renders unchanged and every test pinning this behaviour stays green — a mutant that alters nothing. Recovery would need per-position fallback to the next-shorter alternative that matches *at that same offset* and passes the boundary test. That is materially more machinery than a scan-position change, for a case whose current outcome is already the safe one, so it is deliberately not implemented.
 
 ### Why it is worth a release rather than a note
 
