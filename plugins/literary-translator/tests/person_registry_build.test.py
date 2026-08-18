@@ -1269,3 +1269,23 @@ def test_the_claims_cap_is_a_cap_and_not_a_refusal(prepped):
     code, payload = fx.run(prepped, "--claims", "--max-claims-chars", "10000000")
     assert code == 0
     assert (prepped / "registry" / "registry_claims.json").exists()
+
+
+def test_the_claims_cap_measures_the_bytes_pass_b_receives(prepped):
+    """The digest input is compact and SMALLER than the file. A cap measuring
+    it would pass a document that is over the limit in the only serialization
+    that exists on disk — the one the adjudicator reads."""
+    fx.write_verdict(prepped, fx.verdict_doc(prepped))
+    assert fx.run(prepped, "--claims")[0] == 0
+    path = prepped / "registry" / "registry_claims.json"
+    emitted = len(path.read_bytes())
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    compact = len(pr.canonical_json_bytes(doc))
+    assert compact < emitted
+
+    path.unlink()
+    code, payload = fx.run(prepped, "--claims", "--max-claims-chars", str(compact))
+    assert code == 2
+    assert payload["reason"] == "claims_too_large"
+    assert f"would be {emitted} bytes" in payload["error"]
+    assert not path.exists()

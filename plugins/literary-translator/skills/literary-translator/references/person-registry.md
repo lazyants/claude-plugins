@@ -384,4 +384,6 @@ quote must stay verbatim in the JSON to remain checkable against its container.
   re-embeds a person's evidence into every one of that person's claims, so the
   ratio grows with claims per person — a prep well under its own cap can
   project a document no adjudicator will read whole, and a truncated Pass B is
-  an unchecked Pass A.
+  an unchecked Pass A. Both measure the bytes that are WRITTEN and then write
+  exactly those — the compact digest serialization is smaller than the file, so
+  a guard measuring it is a guard on bytes nobody reads.

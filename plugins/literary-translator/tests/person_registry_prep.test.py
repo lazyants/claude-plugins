@@ -319,3 +319,21 @@ def test_two_occurrences_in_one_container_are_two_distinct_contexts(root):
     assert "autre ville" in block_3[1]["text"]
     assert "parla le premier" not in block_3[1]["text"]
     assert paul["contexts_total"] == len(paul["contexts"])
+
+
+def test_the_prep_cap_measures_the_bytes_the_model_receives(root):
+    """Same rule as the claims cap: the guard and the file must be the same
+    serialization, or the guard is about bytes nobody ever reads."""
+    assert fx.run(root, "--prep")[0] == 0
+    path = root / "registry" / "registry_input.json"
+    emitted = len(path.read_bytes())
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    compact = len(pr.canonical_json_bytes(doc))
+    assert compact < emitted
+
+    path.unlink()
+    code, payload = fx.run(root, "--prep", "--max-input-chars", str(compact))
+    assert code == 2
+    assert payload["reason"] == "input_too_large"
+    assert f"would be {emitted} bytes" in payload["error"]
+    assert not path.exists()

@@ -178,9 +178,24 @@ def read_json(path: Path, what: str, *, required: bool = True):
         raise RegistryError("malformed_input", f"{what} at {path} is not valid JSON: {exc}", code=2)
 
 
-def write_json(path: Path, doc) -> None:
+def emitted_json_text(doc) -> str:
+    """The exact text `write_json` writes -- which is what a model reads.
+
+    Kept separate from `canonical_json_bytes` on purpose: that one is the digest
+    input (compact, sorted) and is SMALLER than the file. A size guard that
+    measures it is measuring a serialization nobody receives, so it passes on a
+    document that is over the cap in the only form that exists on disk.
+    """
+    return json.dumps(doc, ensure_ascii=False, indent=1) + "\n"
+
+
+def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    path.write_text(text, encoding="utf-8")
+
+
+def write_json(path: Path, doc) -> None:
+    write_text(path, emitted_json_text(doc))
 
 
 # ---------------------------------------------------------------------------
@@ -904,7 +919,8 @@ def cmd_prep(args, durable_root: Path, schema_dir: Path) -> dict:
     doc = dict(body)
     doc["input_sha256"] = digest
 
-    size = len(canonical_json_bytes(doc))
+    text = emitted_json_text(doc)
+    size = len(text.encode("utf-8"))
     if size > args.max_input_chars:
         raise RegistryError(
             "input_too_large",
@@ -914,7 +930,7 @@ def cmd_prep(args, durable_root: Path, schema_dir: Path) -> dict:
             code=2,
         )
 
-    write_json(durable_root / "registry" / "registry_input.json", doc)
+    write_text(durable_root / "registry" / "registry_input.json", text)
     return {
         "success": True,
         "mode": "prep",
@@ -1388,7 +1404,8 @@ def cmd_claims(args, durable_root: Path, schema_dir: Path) -> dict:
     # therefore project a document no adjudicator will read whole, and a
     # silently truncated Pass B is an unchecked Pass A, which is the one
     # failure this design has no other guard against.
-    size = len(canonical_json_bytes(doc))
+    text = emitted_json_text(doc)
+    size = len(text.encode("utf-8"))
     if size > args.max_claims_chars:
         raise RegistryError(
             "claims_too_large",
@@ -1398,7 +1415,7 @@ def cmd_claims(args, durable_root: Path, schema_dir: Path) -> dict:
             f"relied on to be",
             code=2,
         )
-    write_json(durable_root / "registry" / "registry_claims.json", doc)
+    write_text(durable_root / "registry" / "registry_claims.json", text)
 
     kinds = {}
     for c in claims:
