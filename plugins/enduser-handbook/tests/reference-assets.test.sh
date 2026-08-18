@@ -3399,14 +3399,17 @@ done
 # When picking a needle, the useful question is which text you want to be told about if it vanishes
 # or changes — a heuristic for choosing what to pin, NOT a criterion a needle passes or fails, and
 # not a replacement for the rule the paragraph above says does not exist. In particular do not ask
-# whether it can be contradicted; the answer is always yes, for every needle. Semantic inversion by surrounding
-# context is bounded by review and by #341's structure-aware reader, never by a string in this file.
+# whether it can be contradicted; the answer is always yes, for every needle. Semantic inversion by
+# surrounding context is bounded by review alone, never by a string in this file.
 #
 # These layers still do not decide whether the prose is TRUE. Known live evasions, kept named rather
 # than implied away: a contradiction phrased without any `fenc` token, and the scanner-divergence
 # cases in has_joined_in_section's contract above — these phrase and count pins do not change which
-# prose that scanner can see. Closing the class needs a structure-aware Markdown reader, which is
-# filed as its own work (#341); a fixed-string pin is a drift detector, never a truth detector.
+# prose that scanner can see. Closing the class needs a structure-aware Markdown reader; that was
+# weighed and declined as disproportionate for a doc-pin harness (#341, closed 2026-08-18, where the
+# evidence and the two named alternatives — delimit the pinned region explicitly, or take a real
+# parser dependency — are kept for the day a pin needs block-level exactness). So the class stays
+# open by decision: a fixed-string pin is a drift detector, never a truth detector.
 has_joined_in_section \
   "static-md.md: requires the reviewed HTML-comment/fenced-block refusal phrase, through its verb" \
   "$SMD" "### Nested-list automation limits" 'HTML comment or a fenced block anywhere, a mixed or bare-CR line ending, a YAML `nav:` or `- key: value` mapping bullet, a list nested more than one level deep, and a multiline `group_title` fall outside the subset as well'
@@ -5236,6 +5239,12 @@ has_joined_in_section "publish-targets README: the fixed twelve-fact enum is nam
 has_joined_in_section "publish-targets README: a third target revalidation contract is declared prose-only" \
   "$PTREADME" '### What this contract cannot yet require' \
   'revalidation contract is prose-only'
+# The provenance path is the one limit in this list that is a DECISION rather than a pending
+# extension point. Without this pin the next reader of the list files `publish.provenance_dir` again
+# as a missing key, which is what #380 was and why it was closed.
+has_joined_in_section "publish-targets README: the hardcoded provenance path is stated as a decision, not a pending gap" \
+  "$PTREADME" '### What this contract cannot yet require' \
+  'private audit trail for revalidation, not a published fact'
 # revalidation.md's own recipe is the shipped INSTANCE of the obligation, not the obligation. Without
 # this note a third-adapter author reads a file-and-path recipe as the whole requirement.
 has_joined_in_section "revalidation: the manual recipe names itself the static/vault instance of a general obligation" \

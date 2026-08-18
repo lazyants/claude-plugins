@@ -74,7 +74,11 @@ const MODIFIERS = new Set(['declare', 'abstract', 'async', 'default']);
  *
  * That `enum` and `namespace-reexport` are reachable ONLY through a declaration/runtime shape
  * disagreement is itself worth knowing: such a pair produces no finding, because the NAMES agree in
- * both directions, and surfaces only as a census entry. Tracked in #577 with the linking work.
+ * both directions, and surfaces only as a census entry. Deliberately not tracked as separate work
+ * (#577, closed 2026-08-18): the "every function export's declared arity was actually read, none
+ * skipped" check in `tests/reference-assets.test.sh` goes red the moment one of these reaches the
+ * loop unread. That check is the tracker — the reader grows against the real declaration that made
+ * it fail, not ahead of one.
  */
 const ARITY_NOT_READ_BECAUSE = {
   // "if it declares any" is load-bearing: `export declare class Widget {}` has no `constructor`
