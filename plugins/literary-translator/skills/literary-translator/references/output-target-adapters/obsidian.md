@@ -352,9 +352,13 @@ marker, a `delink_cost` block:
   not (#207). The obvious remedy — re-scanning from `m.start() + 1` after a
   refusal — is deliberately not taken, and **the reasons live next to the
   code, not here**: the comment beside the refusal in `_Linker.link`, and the
-  docstring of the test that pins it,
-  `test_a_refused_span_is_consumed_so_no_shorter_target_links_inside_it` in
-  `render_obsidian.test.py`, which goes RED under exactly that mutant. Both
+  docstring of the test that pins it, which goes RED under exactly that
+  mutant. That test is
+  `tests/render_obsidian.test.py::test_a_refused_span_is_consumed_so_no_shorter_target_links_inside_it`
+  — given as a pytest node id because
+  `tests/render_obsidian_link_groups.test.py` holds a near-homonym,
+  `test_a_delinked_span_is_consumed_and_no_shorter_target_links_inside_it`,
+  which pins the DE-LINK consumption rather than the boundary refusal. Both
   sit where a change to the behaviour must pass. This page deliberately does
   not restate them: a third copy of a scan-order argument is a third thing to
   get wrong, and 1.32.x got it wrong twice that way.
