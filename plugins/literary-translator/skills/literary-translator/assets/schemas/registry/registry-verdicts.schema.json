@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "registry-verdicts.schema.json",
+  "title": "Person Registry — Pass A verdicts",
+  "description": "What the registry pass's FIRST LLM call returns (#550, W9r): the whole cast, consolidated. Every unit person_registry.py's --prep emitted must appear exactly once across people[].units, non_person_forms[] and refusals[] -- that coverage is checked procedurally by --build's gate P3, not here, because JSON Schema cannot compare a document against a separate input file. NO COUNT FIELD EXISTS ANYWHERE IN THIS SCHEMA, deliberately: every count in the emitted registry is recomputed from disk by --build, so there is no field a model could assert one into. (The one integer the schema does allow is locator.footnote_n, which is a container ADDRESS resolved against the manifest, not a quantity.) Nothing in this document is trusted on its own -- each person, each identity_status with its reason, each typed claim and each printed surface becomes an isolated claim in registry_claims.json and must be affirmed by the SECOND, freshly-dispatched adjudication call before it reaches the artifact. This schema lives under assets/schemas/registry/ rather than assets/schemas/ on purpose: SKILL.md's Step 0a copy pass globs assets/schemas/*.json (non-recursive) and resume_setup.py's _schemas_dir_hash globs {durable_root}/schemas/*.schema.json (non-recursive), so a registry schema placed here changes no project's input_digest.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "input_sha256", "people", "non_person_forms", "refusals"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "input_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Copied verbatim from registry_input.json's own input_sha256. --build recomputes it from the prep document on disk and refuses a mismatch, so a verdict left behind by an earlier run over a different canon can never be consumed against the current one."
+    },
+    "people": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/person" }
+    },
+    "non_person_forms": {
+      "type": "array",
+      "description": "Units judged not to denote a person. `category` is optional on a canon entry and absent on most, so person-vs-place-vs-work is a judgement made here, never read off the canon.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["unit", "kind", "reason"],
+        "properties": {
+          "unit": { "$ref": "#/$defs/unit" },
+          "kind": { "type": "string", "enum": ["place", "work", "group", "other"] },
+          "reason": { "type": "string", "pattern": "\\S" }
+        }
+      }
+    },
+    "refusals": {
+      "type": "array",
+      "description": "Units whose referent could not be settled. A refusal is the SAFE outcome and must be recorded rather than resolved by a guess -- two records for one man is untidy, one record for two men is wrong.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["unit", "reason"],
+        "properties": {
+          "unit": { "$ref": "#/$defs/unit" },
+          "reason": { "type": "string", "pattern": "\\S" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_form", "sense_id"],
+      "description": "The pass's unit of identity: a canon source_form, plus a canon_senses.json sense_id when the form is an adjudicated homonym split. sense_id is null for a canon entry and for a review_queue candidate. Never the bare spelling on its own -- one spelling can denote several people by construction in a naming system that fixes identity by patronymic or place.",
+      "properties": {
+        "source_form": { "type": "string", "pattern": "\\S" },
+        "sense_id": { "type": ["string", "null"] }
+      }
+    },
+    "locator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin"],
+      "description": "Where a quote is to be verified. Origin-aware because the three origins live in three different containers: a block's own plain_text, a verse.store[] entry's plain_text (the parent block carries only the placeholder), or a footnote definition block's plain_text.",
+      "properties": {
+        "origin": { "type": "string", "enum": ["block", "embedded_verse", "footnote"] },
+        "block": { "type": "string" },
+        "vid": { "type": "string" },
+        "footnote_n": { "type": "integer" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "origin": { "const": "block" } }, "required": ["origin"] },
+          "then": { "required": ["block"] }
+        },
+        {
+          "if": { "properties": { "origin": { "const": "embedded_verse" } }, "required": ["origin"] },
+          "then": { "required": ["vid"] }
+        },
+        {
+          "if": { "properties": { "origin": { "const": "footnote" } }, "required": ["origin"] },
+          "then": { "required": ["footnote_n"] }
+        }
+      ]
+    },
+    "evidenced_claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quote", "locator"],
+      "properties": {
+        "quote": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "A span copied VERBATIM out of the container the locator names. --build re-reads that container from manifest.json and refuses a quote that is not a substring of it. That check proves the sentence exists; whether it STATES this claim is the adjudication pass's job, never this one's."
+        },
+        "locator": { "$ref": "#/$defs/locator" }
+      }
+    },
+    "person": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "person_id",
+        "display_name",
+        "units",
+        "identity_note",
+        "identity_status",
+        "identity_status_reason",
+        "printed_surfaces",
+        "relations",
+        "places",
+        "dates"
+      ],
+      "properties": {
+        "person_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+          "description": "Unique within this document; the key relations use to point at each other. Restricted to a path-safe shape because it is echoed into the emitted registry and into PEOPLE.md."
+        },
+        "display_name": { "type": "string", "pattern": "\\S" },
+        "units": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/unit" },
+          "description": "Every unit this record claims. Two or more units is a merge -- an assertion that these forms denote one and the same person -- and one unit is still an assertion that this form denotes a person at all. Both are adjudicated by the same person claim."
+        },
+        "identity_note": { "type": "string", "pattern": "\\S" },
+        "identity_status": {
+          "type": "string",
+          "enum": ["confirmed", "contested"],
+          "description": "A fact about the IDENTITY, never about how often the person is mentioned -- mention_count is computed separately and carries that. BOTH values are adjudicated, together with identity_status_reason: \"confirmed\" asserts the identity is not contested, and \"contested\" is the safe status but its stated reason still reaches the reader -- and a reason about SCARCITY (\"only one mention\") is precisely the conflation this field exists to prevent. An unaffirmed status lands on \"contested\" with a deterministic reason; the adjudicator's own wording is kept in refuted_claims[]."
+        },
+        "identity_status_reason": { "type": "string", "pattern": "\\S" },
+        "printed_surfaces": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "\\S" },
+          "description": "Candidate target-language renderings as the book actually prints them -- strings only. A translator may inflect or decline a canonical form, so this is a judgement about the delivered text, not a copy of canonical_target_form (which --build counts anyway, for every unit, without being asked)."
+        },
+        "relations": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "evidence"],
+            "properties": {
+              "type": {
+                "type": "string",
+                "description": "A closed vocabulary. No inverse of any of these is ever derived: an importer can invert a stated edge itself, and a plugin that derived them would be manufacturing relations the book did not state.",
+                "enum": [
+                  "son_of", "daughter_of", "father_of", "mother_of",
+                  "wife_of", "husband_of", "brother_of", "sister_of",
+                  "grandson_of", "granddaughter_of", "grandfather_of", "grandmother_of",
+                  "son_in_law_of", "daughter_in_law_of", "father_in_law_of", "mother_in_law_of",
+                  "brother_in_law_of", "sister_in_law_of", "co_parent_in_law_of",
+                  "uncle_of", "aunt_of", "nephew_of", "niece_of", "cousin_of",
+                  "ancestor_of", "descendant_of", "teacher_of", "disciple_of"
+                ]
+              },
+              "to_person_id": { "type": "string" },
+              "to_unregistered": {
+                "type": "string",
+                "pattern": "\\S",
+                "description": "The other party as the prose names them, when the book states a relation to somebody outside this project's cast. A real edge, not a defect -- so it is kept rather than dropped."
+              },
+              "evidence": { "$ref": "#/$defs/evidenced_claim" }
+            },
+            "oneOf": [
+              { "required": ["to_person_id"] },
+              { "required": ["to_unregistered"] }
+            ]
+          }
+        },
+        "places": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role", "name", "evidence"],
+            "properties": {
+              "role": { "type": "string", "enum": ["of", "born_in", "died_in", "lived_in", "buried_in", "active_in"] },
+              "name": { "type": "string", "pattern": "\\S" },
+              "evidence": { "$ref": "#/$defs/evidenced_claim" }
+            }
+          }
+        },
+        "dates": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "value", "evidence"],
+            "properties": {
+              "kind": { "type": "string", "enum": ["born", "died", "other"] },
+              "value": {
+                "type": "string",
+                "pattern": "\\S",
+                "description": "As the book states it, verbatim in whatever calendar and precision it uses -- never normalized to an ISO date, which would be an interpretation the quote does not support."
+              },
+              "evidence": { "$ref": "#/$defs/evidenced_claim" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

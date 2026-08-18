@@ -61,26 +61,35 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.33.1 (the delink-cost prose correction) per the maintenance
-# contract above: 1.33.0's map -- which anchored `--baseline-dir` on the
-# render+diff gate and `--entity-note-map` on the backlink gate -- went with
-# its entry, exactly as that contract says it must. No earlier entry's
-# citations are carried forward or re-resolved: carrying them would be the
-# renumber-preserves-the-wrongness failure this file exists to prevent, and
+# Rewritten for 1.34.0 (#550 -- the opt-in person registry) per the maintenance
+# contract above: each previous entry's map went with its entry, exactly as that
+# contract says it must. The entry this map supersedes is 1.33.1's, which was
+# EMPTY -- so nothing was dropped here, and that is worth saying, because an
+# empty predecessor is exactly the case where "the previous map went with its
+# entry" is indistinguishable from having forgotten to look. No earlier entry's
+# citations are carried forward or re-resolved -- carrying them would be
+# the renumber-preserves-the-wrongness failure this file exists to prevent, and
 # re-resolving them would pin a historical entry to line numbers it never
 # claimed.
 #
-# 1.33.1 cites NO `file.ext:NNN` anywhere, which is why this map is empty
-# rather than merely short -- and here that is the subject rather than a
-# stylistic choice. The entry's whole point is that a prose restatement of a
-# scan-order argument was wrong twice, so it names the two places that own
-# that argument (the comment in `_Linker.link` and the docstring of
-# `test_a_refused_span_is_consumed_so_no_shorter_target_links_inside_it`)
-# instead of quoting them at a line number, which would be a third copy with
-# a line number attached. An empty map is a real state under the assertions
-# below, not a disabled test: an entry that adds a citation without an anchor
-# still fails `undeclared`.
-CITATION_ANCHORS = {}
+# 1.34.0 cites exactly ONE `file.ext:NNN`, and it earns it: the whole reason the
+# registry ships no `profile.yml` knob is that a profile key would edit
+# `profile.schema.json`, whose copy under `${durable_root}/schemas/` is hashed
+# into `input_digest` by a glob that is NON-RECURSIVE -- and "non-recursive" is
+# the entire argument. It is also why the three registry schemas live under
+# `assets/schemas/registry/`. A reader who cannot see that glob has to take the
+# claim on faith, so the entry points at it and this map pins both the function
+# and the glob call, in order. Everything else in the entry names functions,
+# fields and constants instead, which is why this map is short rather than long.
+# Re-resolved against this tree when the branch was rebased, not carried over:
+# the same line numbers were right in two earlier bases too, and that kind of
+# reassurance is exactly what lets a stale citation survive a rebase.
+CITATION_ANCHORS = {
+    "resume_setup.py:528-531": [
+        "def _schemas_dir_hash",
+        "schemas_dir.glob(\"*.schema.json\")",
+    ],
+}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
 # alphabetic extension are still required. Pinning a list of extensions was

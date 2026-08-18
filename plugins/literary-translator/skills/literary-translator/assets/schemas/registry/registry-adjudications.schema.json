@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "registry-adjudications.schema.json",
+  "title": "Person Registry — Pass B adjudications",
+  "description": "What the registry pass's SECOND LLM call returns (#550, W9r): one verdict per claim in registry_claims.json. This pass is dispatched FRESH and sees only its own instructions and the claims document -- never Pass A's conversation and never registry_verdicts.json -- because the failure it exists to catch is a plausible-and-wrong judgement, and a reader who already holds the narrative that produced it is not an independent check on it. Every entry echoes the claim_id it is judging: a positional list of anonymous booleans could apply an affirmation meant for a safe claim to an unsafe one, and nothing downstream would see it. --build requires an exact one-to-one join -- no missing id, no duplicate id, no id the claims document does not contain. Absence, false, and hedging are treated identically: not affirmed. Lives under assets/schemas/registry/ for the same reason as its siblings -- see registry-verdicts.schema.json's own description.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "input_sha256", "claims_sha256", "adjudications"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "input_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Copied verbatim from registry_claims.json. Binds this document to the same prep bytes Pass A judged."
+    },
+    "claims_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Copied verbatim from registry_claims.json's own claims_sha256. --build recomputes it from the claims file on disk, so an adjudication set produced against a different projection of a different verdict cannot be consumed."
+    },
+    "adjudications": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim_id", "affirmed", "reason"],
+        "properties": {
+          "claim_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "The sha256 of the claim's own canonical JSON, as registry_claims.json states it. Deterministic, so it cannot drift between the two documents."
+          },
+          "affirmed": {
+            "type": "boolean",
+            "description": "true only when the evidence in the claim itself establishes it. For a person claim that means these units denote a person, and -- when there is more than one -- the same person. For a typed claim it means the quote STATES that exact relation, place or date between those exact parties; a quote that merely mentions both is not affirmation. For a printed-surface assignment it means the book prints that string for this person. For an identity-status claim it means the identity is genuinely settled rather than merely undisputed-so-far."
+          },
+          "reason": { "type": "string", "pattern": "\\S" }
+        }
+      }
+    }
+  }
+}
