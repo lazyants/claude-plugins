@@ -128,62 +128,70 @@ def atx_heading(line: str, level: int = 2) -> str | None:
     return text
 
 
-def uncommented(text: str) -> str:
-    """`text` with every `<!-- ... -->` region blanked out, newlines kept so lines still line up.
-
-    Done over the whole text rather than line by line because a comment is not a line construct:
-    it can open and close mid-line, wrap any number of lines, and reopen after closing on the same
-    one. A state machine over lines got each of those wrong in turn; a scan over the text gets them
-    for free. An unterminated `<!--` comments out the rest of the file, which is what a renderer
-    does with it too.
-    """
-    out: list[str] = []
-    position = 0
-    while True:
-        start = text.find("<!--", position)
-        if start == -1:
-            out.append(text[position:])
-            return "".join(out)
-        out.append(text[position:start])
-        end = text.find("-->", start + 4)
-        if end == -1:
-            out.append("\n" * text.count("\n", start))
-            return "".join(out)
-        out.append("\n" * text.count("\n", start, end + 3))
-        position = end + 3
-
-
 def rendered_lines(text: str) -> list[str]:
-    """The lines a Markdown renderer treats as content -- fenced code and HTML comments dropped.
+    """The lines a Markdown renderer treats as content: fenced code and HTML comments dropped.
 
     Scanning physical lines loses block context: a table row or a section heading shown as an
     EXAMPLE inside a fence, or a section commented out with `<!-- -->` while its row stays, is not
     a live surface. Counting one is a false green on the surface it fakes and a false duplicate on
-    the surface it doubles. Fences are matched by character and length, so a ``` inside a ~~~ block
-    does not end it, and a closing fence carries no info string.
+    the surface it doubles.
 
-    These two wrappers are the whole contract, and it is a contract rather than an approximation
-    of Markdown: this reads LINES. A construct that hides content some other way -- and, in the
-    other direction, a heading inside a blockquote, which GitHub does render -- is out of scope by
+    The two are recognized in ONE pass, in document order, because they nest and the order decides
+    the answer: a literal `<!--` inside a fenced HTML example is not a comment, and a fence marker
+    inside a comment does not open a fence. Stripping comments over the whole text first -- the
+    obvious factoring, and the one written first -- gets the first of those wrong, and it fails
+    OPEN: the unreal comment swallows every live surface after it. Fences are matched by character
+    and length, so a ``` inside a ~~~ block does not end it and a closing fence carries no info
+    string; an unterminated comment runs to the end of the file, as it does in a renderer.
+
+    This is the whole contract, and it is a contract rather than an approximation of Markdown:
+    this reads LINES. A construct that hides content some other way -- and, in the other
+    direction, a heading inside a blockquote, which GitHub does render -- is out of scope by
     design, because the alternative is carrying a Markdown parser to check a version number.
     """
     kept: list[str] = []
     fence: tuple[str, int] | None = None
-    for line in uncommented(text).splitlines():
-        stripped = line.lstrip(" ")
-        marker = FENCE_RE.match(stripped) if len(line) - len(stripped) <= 3 else None
-        if fence is None:
-            if marker:
-                fence = (marker.group(0)[0], len(marker.group(0)))
+    in_comment = False
+    for line in text.splitlines():
+        if fence is not None:
+            stripped = line.lstrip(" ")
+            marker = FENCE_RE.match(stripped) if len(line) - len(stripped) <= 3 else None
+            if (
+                marker
+                and marker.group(0)[0] == fence[0]
+                and len(marker.group(0)) >= fence[1]
+                and not stripped[len(marker.group(0)):].strip()
+            ):
+                fence = None
+            continue
+
+        visible = ""
+        rest = line
+        while rest:
+            if in_comment:
+                closed = rest.find("-->")
+                if closed == -1:
+                    rest = ""
+                    break
+                rest = rest[closed + 3:]
+                in_comment = False
                 continue
-            kept.append(line)
-        elif (
-            marker
-            and marker.group(0)[0] == fence[0]
-            and len(marker.group(0)) >= fence[1]
-            and not stripped[len(marker.group(0)):].strip()
-        ):
-            fence = None
+            opened = rest.find("<!--")
+            if opened == -1:
+                visible += rest
+                break
+            visible += rest[:opened]
+            rest = rest[opened + 4:]
+            in_comment = True
+        if in_comment and not visible.strip():
+            continue
+
+        stripped = visible.lstrip(" ")
+        marker = FENCE_RE.match(stripped) if len(visible) - len(stripped) <= 3 else None
+        if marker:
+            fence = (marker.group(0)[0], len(marker.group(0)))
+            continue
+        kept.append(visible)
     return kept
 
 
