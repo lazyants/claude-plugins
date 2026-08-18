@@ -61,7 +61,8 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.31.0 (#586 -- the filename sanitizer's marks and
+# Rewritten for 1.31.1 (the NFD mark-count fix to 1.31.0's own guard) and,
+# before it, for 1.31.0 (#586 -- the filename sanitizer's marks and
 # punctuation), per the maintenance contract above: the previous entry's map
 # went with its entry, exactly as that contract says it must. 1.30.0's three
 # citations are NOT carried forward and were not re-resolved -- 1.31.0 edits
@@ -70,7 +71,7 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # re-resolving them would pin a historical entry to line numbers it never
 # claimed.
 #
-# 1.31.0 itself cites NO `file.ext:NNN` anywhere: it names constants and
+# 1.31.1, like 1.31.0 before it, cites NO `file.ext:NNN` anywhere: it names constants and
 # functions (`_FILENAME_MAX_BYTES`, `sanitize_filename_component`) instead,
 # which is why this map is empty rather than merely short. An empty map is a
 # real state under the assertions below, not a disabled test -- an entry that

@@ -3301,6 +3301,16 @@ def test_the_two_properties_hold_over_an_exhaustive_hostile_alphabet():
     ("long_latin", "A" * 300),                       # pre-existing: NAME_MAX
     ("long_pointed_hebrew",
      "".join(chr(0x05D0 + i % 22) + chr(0x05B7) + chr(0x0591) for i in range(200))),
+    # The cap counts DECOMPOSED marks, and these four are the reason. Each
+    # sails past a written-character count of 30 while decomposing to 32 or
+    # more, which is what the filesystem actually measures. Found after
+    # 1.31.0 shipped, by a security pass over its own new guard.
+    ("nfd_expanding_mark_16", "A" + chr(0x0344) * 16),   # 16 written, 32 NFD
+    ("nfd_expanding_mark_30", "A" + chr(0x0344) * 30),
+    ("nfd_expanding_mark_tibetan", "A" + chr(0x0F73) * 40),
+    # ...and a PRECOMPOSED base that carries two marks of its own into the
+    # run, so the base is not a fresh start at zero.
+    ("nfd_expanding_base", chr(0x1EBF) + chr(0x0301) * 30),
 ])
 def test_a_pathological_name_still_renders_instead_of_aborting_the_vault(
     tmp_path, label, source_form
@@ -3320,14 +3330,20 @@ def test_a_pathological_name_still_renders_instead_of_aborting_the_vault(
     assert len(f"{stem}.md".encode("utf-8")) <= 255, (
         f"{label}: {len(stem)} chars is over the component budget"
     )
+    # Counted over NFD, exactly as the filesystem does -- counting the stem
+    # as WRITTEN is the bug this parametrization exists to catch, and an
+    # as-written assertion here would pass on every one of the four cases
+    # above while the write still failed EILSEQ.
     run = longest = 0
-    for ch in stem:
+    for ch in unicodedata.normalize("NFD", stem):
         if unicodedata.category(ch) in ("Mn", "Mc", "Me"):
             run += 1
             longest = max(longest, run)
         else:
             run = 0
-    assert longest <= 30, f"{label}: {longest} consecutive marks in {stem!r}"
+    assert longest <= 30, (
+        f"{label}: {longest} consecutive marks after NFD in {stem!r}"
+    )
 
 
 def test_pointed_hebrew_entity_note_is_written_under_its_unmangled_name(tmp_path):
