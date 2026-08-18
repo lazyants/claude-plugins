@@ -67,6 +67,12 @@ folded or NFC-renormalized: ``build_entity_index`` looks the owner's own raw
 miss. A member that is not a key of ``entries`` is a hard load error rather
 than a tolerated no-op -- exactly the failure a silent miss would hide.
 
+A DUPLICATE object key is a rejection too, not a last-one-wins merge:
+``json.loads`` would collapse ``{"primary": "A", "primary": "B"}`` to ``B``
+before jsonschema ever sees it, and the strict schema cannot express a
+constraint on a key that no longer exists twice -- see
+``_reject_duplicate_keys``.
+
 Raises ``CanonLinkGroupsLoadError`` for every rejection (never
 ``sys.exit()`` -- a library function must not kill its host process; that
 pattern stays reserved for the module-level dependency guard below, a
@@ -150,13 +156,51 @@ def _exceeds_depth(obj, limit):
     return False
 
 
+class _DuplicateKey(ValueError):
+    """Internal: raised by `_reject_duplicate_keys` and re-labelled by
+    `_read_json`. A ValueError so a stray escape still lands in the same
+    `except ValueError` net as a malformed document."""
+
+
+def _reject_duplicate_keys(pairs):
+    """`json.loads` object_pairs_hook that REFUSES a repeated member name
+    instead of silently keeping the last one.
+
+    Plain `json.loads` resolves `{"primary": "A", "primary": "B"}` to
+    `{"primary": "B"}` -- and jsonschema then validates the ALREADY-COLLAPSED
+    dict, so the strict schema below can never see the duplicate. That is the
+    exact silent wrong-note routing this whole file exists to prevent: the
+    operator reads their sidecar and sees `primary: "A"`, the vault links to
+    B's note, and every gate is green. The same collapse can silently WIDEN a
+    group (a second `members` array replacing the first) or replace the whole
+    `groups` list.
+
+    So it is refused here, before schema validation, for every object in the
+    document. A duplicate key is never legitimate JSON authoring; nothing
+    well-formed is newly rejected."""
+    seen = set()
+    for key, _value in pairs:
+        if key in seen:
+            raise _DuplicateKey(key)
+        seen.add(key)
+    return dict(pairs)
+
+
 def _read_json(path, describe):
     try:
         content = path.read_bytes()
     except OSError as exc:
         raise CanonLinkGroupsLoadError(f"could not read {describe} at {path}: {exc}")
     try:
-        doc = json.loads(content.decode("utf-8"))
+        doc = json.loads(content.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
+    except _DuplicateKey as exc:
+        raise CanonLinkGroupsLoadError(
+            f"{describe} at {path} repeats the object key {exc.args[0]!r} -- "
+            "a duplicate key silently keeps only the LAST value, which would "
+            "route a link to a note the file does not visibly name; write "
+            "each key exactly once",
+            offending=exc.args[0],
+        )
     except UnicodeDecodeError as exc:
         raise CanonLinkGroupsLoadError(f"{describe} at {path} is not valid UTF-8: {exc}")
     except RecursionError as exc:

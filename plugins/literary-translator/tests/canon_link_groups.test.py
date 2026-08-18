@@ -288,5 +288,67 @@ def test_entries_must_be_a_mapping(tmp_path):
     assert "must be a mapping" in str(exc.value)
 
 
+# ---------------------------------------------------------------------------
+# Duplicate object keys -- the silent last-one-wins collapse
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("doc,dupe,label", [
+    ('{"schema_version": 1, "groups": [{"primary": "משה לייב", '
+     '"primary": "משה־לייב", "members": ["משה לייב", "משה־לייב"], '
+     '"note": "primary written twice"}]}', "primary", "primary"),
+    ('{"schema_version": 1, "groups": [], "groups": [{"primary": "משה לייב", '
+     '"members": ["משה לייב", "משה־לייב"], "note": "second groups wins"}]}',
+     "groups", "groups"),
+    ('{"schema_version": 1, "groups": [{"primary": "משה לייב", '
+     '"members": ["משה לייב"], "members": ["משה לייב", "משה־לייב"], '
+     '"note": "members widened by the second copy"}]}', "members", "members"),
+    ('{"schema_version": 1, "schema_version": 2, "groups": []}',
+     "schema_version", "schema_version"),
+])
+def test_duplicate_object_key_is_rejected_not_collapsed(tmp_path, doc, dupe, label):
+    """`json.loads` keeps only the LAST value for a repeated key, and
+    jsonschema then validates the already-collapsed dict -- so no amount of
+    `additionalProperties:false`/`required[]` strictness can see the
+    duplicate. Left alone, an operator reads `primary: "משה לייב"` in their
+    own file while the vault links to the other member's note, with every
+    gate green: exactly the silent wrong-note routing this loader exists to
+    prevent. The `groups` and `members` cases are worse still -- one replaces
+    the whole group list, the other can silently WIDEN a group past the
+    membership the operator wrote."""
+    path = tmp_path / "canon_link_groups.json"
+    path.write_text(doc, encoding="utf-8")
+    with pytest.raises(clg.CanonLinkGroupsLoadError) as exc:
+        clg.load_link_groups(path, ENTRIES)
+    assert "repeats the object key" in str(exc.value), label
+    assert exc.value.offending == dupe
+
+
+def test_the_shipped_schema_file_itself_has_no_duplicate_keys(tmp_path):
+    """The guard runs over the SCHEMA document too (`_read_json` is shared),
+    so a duplicate key in the shipped schema would now block every load.
+    Nothing well-formed is newly rejected -- proven against the real file,
+    not a fixture."""
+    path = _write(tmp_path, _doc([_group()]))
+    assert clg.load_link_groups(path, ENTRIES)   # reads DEFAULT_SCHEMA_PATH
+    assert clg.DEFAULT_SCHEMA_PATH.is_file()
+
+
+def test_a_well_formed_document_is_unaffected_by_the_guard(tmp_path):
+    """The other half of "nothing well-formed is newly rejected": repeated
+    VALUES across distinct keys, and the same key in SIBLING objects, are
+    both legal and must still load."""
+    doc = {"schema_version": 1, "groups": [
+        {"primary": "משה לייב", "members": ["משה לייב", "משה־לייב"], "note": "n"},
+    ]}
+    entries = dict(ENTRIES)
+    entries["Pyotr"] = {"canonical_target_form": "Peter"}
+    doc["groups"].append({"primary": "Peter", "members": ["Peter", "Pyotr"], "note": "n"})
+    path = _write(tmp_path, doc)
+    assert clg.load_link_groups(path, entries) == {
+        "משה לייב": "משה לייב", "משה־לייב": "משה לייב",
+        "Peter": "Peter", "Pyotr": "Peter",
+    }
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

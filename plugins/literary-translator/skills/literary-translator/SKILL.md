@@ -2612,9 +2612,13 @@ occurrences dwarf its emitted links has had its most-named figures
 silenced, and every gate above will still be green. When the WARN names
 targets that are spelling variants of ONE referent, the fix is
 `canon_link_groups.json` (an identity call recorded upstream, never made by
-a script — see `references/canon-and-glossary.md`) and a re-render; adopting
-a group re-translates nothing, but it does change the rendered links, so the
-diff baseline needs `--accept-baseline --force-accept-baseline`.
+a script — see `references/canon-and-glossary.md`) and a re-render. A group helps only when
+EVERY owner of that target is in it and none is `sense_translated` —
+otherwise the target stays de-linked by design, so read the reported
+`owners` before editing. Adopting a group re-translates nothing; when it
+takes effect it does change the rendered links, so `diff_rendered_output.py`
+MISMATCHES (exit `1`) until the baseline is deliberately re-accepted with
+`--accept-baseline --force-accept-baseline`.
 
 ## Reference docs
 

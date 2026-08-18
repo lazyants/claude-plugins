@@ -221,7 +221,12 @@ share one NFC-exact `canonical_target_form` (grouping is case-sensitive —
 `"Peter"` and `"peter"` are distinct targets, each single-owner, each
 keeps its inline link), NONE of them gets an inline link on any obsidian
 render — appendix on or off — so the inline linker never misattributes a
-shared display text to one owner's `note_identity` (#207).
+shared display text to one owner's `note_identity` (#207). Since 1.30.0
+there is exactly one exception, and it is not an inference the renderer
+makes: when **every** owner of that target is a member of one
+`canon_link_groups.json` group and none is `sense_translated`, the operator
+has already stated the owners are one referent, so the target links to that
+group's primary — see *Re-linking one referent* below.
 Previously this was gated on the same effective-Mentions predicate as the
 `## Mentions` section itself, so an `enabled: false` opt-out reintroduced
 the misattribution; now only the `## Mentions` section (and the
@@ -323,11 +328,17 @@ meant to have. Membership is byte-exact: never folded, never NFC-normalized.
 
 **Migration.** The sidecar sits outside all 15 cache-key fields, so adopting
 a group re-translates **nothing**. `render_obsidian.py`'s own bytes changed,
-so `render_version` moved: a vault holding an accepted
-`diff_rendered_output.py` baseline gets the advisory `stale_baseline` WARN
-(exit 0) and needs one `--accept-baseline` re-accept — and adopting a group
-changes the rendered links, so that re-accept needs
-`--accept-baseline --force-accept-baseline`.
+so `render_version` moved. With no sidecar the rendered markdown is
+unchanged, so `diff_rendered_output.py` still MATCHES: it prints the
+advisory `stale_baseline` WARN and exits `0`, and re-accepting is optional.
+Adopting a group changes the rendered links only when it actually takes
+effect — a group whose target has zero occurrences in the prose, or one the
+outsider/`sense_translated` rules leave de-linked anyway, produces the same
+Markdown and the diff still matches. When it does take effect the diff
+MISMATCHES (exit `1`) and a deliberate re-accept is required. Any re-accept,
+in either case, is `--accept-baseline --force-accept-baseline` —
+`--accept-baseline` alone refuses to overwrite a baseline that already
+exists.
 
 ## Category→folder catalog — presets are EXAMPLES, not an enum
 

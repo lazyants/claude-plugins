@@ -405,6 +405,12 @@ def test_warn_names_the_number_on_stderr(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "WARN: collision de-linking left 2 occurrence(s)" in err
     assert "canon_link_groups.json" in err
+    # The remedy must be QUALIFIED: a group cannot re-link a target whose
+    # owners include a sense_translated entry or an outsider, and an
+    # unconditional "record it in canon_link_groups.json" sends the operator
+    # into an edit + re-render cycle that cannot change the result.
+    assert "EVERY one of its owners" in err
+    assert "sense_translated" in err
 
 
 def test_no_warn_when_nothing_was_delinked(tmp_path, capsys):

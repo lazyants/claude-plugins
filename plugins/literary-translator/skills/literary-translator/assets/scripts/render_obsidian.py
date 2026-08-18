@@ -1485,7 +1485,11 @@ def _warn_delink_cost(delink_cost, stream=None):
     anything at all (#588). Deliberately not gated on a ratio: the issue's
     "the de-linked population dwarfs the linked one" case is a subset of
     "> 0", and a book whose most-named figures are silenced should not
-    depend on a threshold to be told so. The renderer warns rather than the
+    depend on a threshold to be told so. The remedy it names is QUALIFIED:
+    a group cannot help a target whose owners include a `sense_translated`
+    entry, or one where some owner is outside the group, so the text sends
+    the operator to the reported `owners` first rather than into an edit +
+    re-render cycle that cannot change the result. The renderer warns rather than the
     W9 gate because collision de-linking runs on EVERY obsidian render,
     while `validate_backlinks.py` short-circuits when the `## Mentions`
     appendix is disabled."""
@@ -1503,9 +1507,12 @@ def _warn_delink_cost(delink_cost, stream=None):
         f"target(s) with no inline link "
         f"(this render emitted {delink_cost.get('inline_links_emitted', 0)} "
         f"inline link(s) in total). Largest: {top}. Each of these targets is "
-        "owned by >=2 canon entries; if they are spelling variants of ONE "
-        "referent, record that in canon_link_groups.json and re-render -- "
-        "see references/output-target-adapters/obsidian.md.",
+        "owned by >=2 canon entries -- read the reported `owners` first. A "
+        "canon_link_groups.json group re-links a target only when EVERY one "
+        "of its owners is in that group and none is sense_translated; a "
+        "group plus an outsider, or any sense_translated owner, stays "
+        "de-linked by design, so grouping those would change nothing. "
+        "See references/output-target-adapters/obsidian.md.",
         file=stream if stream is not None else sys.stderr,
     )
 
