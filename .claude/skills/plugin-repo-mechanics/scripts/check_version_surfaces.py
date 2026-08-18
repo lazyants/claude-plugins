@@ -55,6 +55,10 @@ from pathlib import Path
 # state of it goes under, not an expected count.
 MIN_PLAUSIBLE_PLUGINS = 2
 
+# A CommonMark blank is a SPACE or a TAB. `str.strip()` and `str.isspace()` also accept U+00A0
+# and the other Unicode separators, and every place this file trimmed with them was a way for
+# a line to look like a heading, or a fence to look closed, when the renderer disagrees.
+#
 # ONE RULE, and every pattern in this file obeys it: nothing is ever matched against multi-line
 # text. A pattern that describes a LINE goes through `line_matches()`; a pattern that describes
 # a whole VALUE goes through `.fullmatch()`. Neither `re.MULTILINE` nor a `$` anchor appears
@@ -121,10 +125,10 @@ def atx_heading(line: str, level: int = 2) -> str | None:
         # `str.isspace()` was wrong here: it admits U+00A0 and the other Unicode separators, and
         # CommonMark admits none of them -- GitHub renders `##\u00a0Title` as literal text.
         return None
-    text = rest.strip()
+    text = rest.strip(" \t")
     closing = text.rstrip("#")  # an optional closing sequence, which CommonMark drops
-    if closing != text and (not closing or closing[-1:].isspace()):
-        text = closing.strip()
+    if closing != text and (not closing or closing[-1:] in (" ", "\t")):
+        text = closing.strip(" \t")
     return text
 
 
@@ -136,11 +140,14 @@ def rendered_lines(text: str) -> list[str]:
     on the surface it doubles. Code examples are the one construct these three files actually
     contain, so fences are worth the twenty lines.
 
-    Why nothing MORE, stated as a contract rather than left as a bug: **this reads LINES.** A
-    surface hidden some other way -- most usefully, inside an `<!-- -->` comment -- still counts as
-    present. If you comment a plugin's section out, remove or update its table row in the same
-    edit, or this check will believe the section is still there. In the other direction a heading
-    inside a blockquote, which GitHub does render, is not seen at all.
+    Why nothing MORE, stated as a contract rather than left as a bug: **this reads LINES, and
+    comments are not one of the things it reads.** A surface inside an `<!-- -->` comment still
+    counts as present, so if you comment a plugin's section out, remove or update its table row in
+    the same edit. The same cut runs the other way too and is worth knowing before you meet it: a
+    fence marker written INSIDE a comment does open a fence here, so a commented-out code example
+    can hide surfaces that follow it. Both are the same missing knowledge, and the ordinary edit
+    that produces either -- parking a section -- is one a person makes deliberately. A heading
+    inside a blockquote, which GitHub does render, is likewise not seen.
 
     That boundary is a decision, not an oversight. An earlier version tracked HTML comments too and
     then spent four review rounds on how comments and fences nest -- a literal `<!--` in a fenced
@@ -170,7 +177,7 @@ def rendered_lines(text: str) -> list[str]:
             marker
             and marker.group(0)[0] == fence[0]
             and len(marker.group(0)) >= fence[1]
-            and not info.strip()
+            and not info.strip(" \t")
         ):
             fence = None
     return kept
@@ -255,7 +262,9 @@ def collect(repo: Path, unsound: list[str]) -> dict[str, dict[str, object]]:
 
     row_matches = line_matches(ROW_RE, readme)
     heading_hits = heading_matches(HEADING_RE, readme)
-    rows = {m.group(1): (m.group(2), m.group(3).strip()) for m in row_matches}
+    # `strip(" \t")`, not `strip()`: a version cell padded with U+00A0 is a cell whose text is
+    # not the version, and saying so is more useful than silently accepting it.
+    rows = {m.group(1): (m.group(2), m.group(3).strip(" \t")) for m in row_matches}
     # The slug is computed from the heading text as MATCHED, not rebuilt from the two groups:
     # GitHub turns each literal space into its own hyphen, so a double space slugs differently.
     headings = {m.group(1): (m.group(2), m.group(0)) for m in heading_hits}
