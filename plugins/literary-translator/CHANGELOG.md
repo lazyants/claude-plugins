@@ -2,7 +2,7 @@
 
 ## 1.33.1 — 2026-08-18
 
-A sentence 1.32.0 shipped about its own behaviour was false, and the behaviour it described was pinned by no test. Docs and two tests; no code changes.
+A sentence 1.32.0 shipped about its own behaviour was false, and the behaviour it described was pinned by no test. Docs, two new tests, and this release's rewrite of `CITATION_ANCHORS`; **no runtime script bytes change** — nothing under `assets/scripts/` is in the diff.
 
 ### The false sentence
 
