@@ -112,7 +112,7 @@ inside `[[...]]`.
   `Tepliker` ("the man from Teplik") rendered as `[[…|Teplik]]er`, the word
   cut in half in the delivered book; any language that forms a demonym or
   adjective by suffixing a name reaches this (`Breslov`/`Breslover`,
-  `Rome`/`Roman`, `Tudor`/`Tudors`), as does any target that is a common
+  `Paris`/`Parisian`, `Tudor`/`Tudors`), as does any target that is a common
   short word.
   - The test is **alphanumeric, never non-space**: `[[…|Reb Noson]]’s` is
     correct and common, and so are a following comma, period or closing

@@ -642,7 +642,7 @@ class _Linker:
             # cannot help when the longer string is ordinary prose.
             #
             # The test is `str.isalnum()` on the ADJACENT CHARACTER -- the same
-            # predicate `_dedupe_path`'s filename allow-list uses -- and it is
+            # predicate `sanitize_filename_component`'s filename allow-list uses -- and it is
             # deliberately alphanumeric rather than non-space: an apostrophe,
             # quote, comma or period after a name is the common, correct case
             # ("[[...|Reb Noson]]'s"), and only a letter or digit means the

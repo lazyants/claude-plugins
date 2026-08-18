@@ -2966,8 +2966,10 @@ def test_target_whose_own_edge_is_not_a_word_character_is_still_bounded(tmp_path
     asserted relative to the PATTERN's own edge character, so for a target
     ending in "." it demands a WORD character next: `re.escape("R.") + r"\\b"`
     MATCHES "R.Smith". The adjacent-character rule refuses it, and both admit
-    "R. Noson" -- so a future rewrite to `\\b` passes every other test in this
-    section and fails only this one."""
+    "R. Noson". A future rewrite to `\\b` fails here; it also fails
+    test_a_refused_span_is_consumed_so_no_shorter_target_links_inside_it,
+    which is a different property -- this is the one that isolates the
+    target's own edge character."""
     canon = make_canon({"R_src": canon_entry("R_src", "R.")})
     ns = make_nodestream([
         make_node("p1", "seg01", "Written by R.Smith alone.", order_index=0),
@@ -3007,6 +3009,63 @@ def test_a_refused_match_does_not_spend_the_blocks_first_occurrence_slot(tmp_pat
     assert "The Tepliker rode on;" in body, f"the demonym must survive whole:\n{body}"
     assert f"later [[{identity}|Teplik]] itself appeared." in body, (
         f"the bounded occurrence must still take the block's one wikilink:\n{body}"
+    )
+
+
+def test_boundary_is_checked_at_both_edges_and_at_the_ends_of_the_text(tmp_path):
+    """Three index cases the other tests leave open, each of which survived a
+    mutant of `_boundary_ok`: a one-character prefix (`start > 1` instead of
+    `start > 0` re-admits `xTeplik`), a one-character suffix
+    (`end < len(text) - 1` re-admits `Teplikx`), and a target that ends the
+    block text exactly (refusing `end == len(text)` suppresses a legitimate
+    link). All three are single-character differences that no multi-word
+    fixture reaches."""
+    canon = make_canon({"Teplik_src": canon_entry("Teplik_src", "Teplik", category="place")})
+    ns = make_nodestream([
+        make_node("p1", "seg01", "xTeplik", order_index=0),
+        make_node("p2", "seg01", "Teplikx", order_index=1),
+        make_node("p3", "seg01", "He rode to Teplik", order_index=2),
+    ], target="en")
+    profile = make_profile(folders={"place": "places"}, target_lang="en")
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "Teplik_src")
+    body = _boundary_body(out_dir, manifest, "He rode to")
+
+    assert "xTeplik" in body, f"a one-character prefix must still refuse:\n{body}"
+    assert "Teplikx" in body, f"a one-character suffix must still refuse:\n{body}"
+    assert f"He rode to [[{identity}|Teplik]]" in body, (
+        f"a target ending the block text has no following character at all "
+        f"and must still wrap:\n{body}"
+    )
+
+
+def test_a_refused_match_does_not_spend_the_book_wide_first_occurrence(tmp_path):
+    """The block-local slot is only half the claim. Under
+    `parenthetical_originals: first_occurrence` the linker also tracks a
+    BOOK-WIDE `global_seen`, and a guard that refused the fragment but still
+    recorded it there would leave the real mention linked and silently strip
+    its original-script gloss -- passing the block-slot test above while
+    breaking the documented behaviour."""
+    canon = make_canon({"Teplik_src": canon_entry("Teplik_src", "Teplik", category="place")})
+    ns = make_nodestream([
+        make_node("p1", "seg01", "The Tepliker rode on.", order_index=0),
+        make_node("p2", "seg01", "Then Teplik itself appeared.", order_index=1),
+    ], target="en")
+    profile = make_profile(
+        folders={"place": "places"},
+        parenthetical_originals="first_occurrence",
+        target_lang="en",
+    )
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "Teplik_src")
+    body = _boundary_body(out_dir, manifest, "rode on")
+
+    assert "The Tepliker rode on." in body, f"the demonym must survive whole:\n{body}"
+    assert f"Then [[{identity}|Teplik]] (Teplik_src) itself appeared." in body, (
+        f"the refused fragment must not have consumed the book-wide first "
+        f"occurrence -- the real mention still owes its gloss:\n{body}"
     )
 
 

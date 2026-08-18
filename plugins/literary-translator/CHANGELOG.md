@@ -6,16 +6,16 @@ The inline wikilinker gains a word boundary. A `canonical_target_form` that is o
 
 ### What was wrong
 
-The matcher is one alternation over every target, longest-first (`render_obsidian.py:530`). Longest-first is a real guarantee, but it is a guarantee *about targets*: it stops a shorter target shadowing a longer one that contains it. It says nothing when the longer string is ordinary prose, and there was no boundary condition anywhere in the file — so any target that prefixes, infixes or suffixes a longer run got wrapped inside it.
+The matcher is one alternation over every target, longest-first (`render_obsidian.py:514-530`). Longest-first is a real guarantee, but it is a guarantee *about targets*: it stops a shorter target shadowing a longer one that contains it. It says nothing when the longer string is ordinary prose, and there was no boundary condition anywhere in the file — so any target that prefixes, infixes or suffixes a longer run got wrapped inside it.
 
-This is not a Yiddish quirk. Every language that forms a demonym or adjective by suffixing a place or personal name reaches it — `Breslov`/`Breslover`, `Nemirov`/`Nemirover`, `Rome`/`Roman`, `Tudor`/`Tudors` — as does any target that happens to be a common short word or the start of one.
+This is not a Yiddish quirk. Every language that forms a demonym or adjective by suffixing a place or personal name reaches it — `Breslov`/`Breslover`, `Nemirov`/`Nemirover`, `Paris`/`Parisian`, `Tudor`/`Tudors` — as does any target that happens to be a common short word or the start of one.
 
 ### The rule
 
-`render_obsidian.py:636-680`: if the character immediately before or immediately after the matched span is alphanumeric under `str.isalnum()`, the match is discarded.
+`render_obsidian.py:636-707`: if the character immediately before or immediately after the matched span is alphanumeric under `str.isalnum()`, the match is discarded.
 
 - **Alphanumeric, never non-space.** `[[…|Reb Noson]]’s` is correct and common — the book that produced this issue has 37 such spans — and so are a following comma, period, closing quote or bracket. Only a letter or a digit means the target is a fragment of a word.
-- **Applied per match, against the adjacent characters — not as a `\b` in the pattern.** `\b` is asserted relative to each alternative's *own* edge character, so a target that begins or ends in punctuation flips what it demands: `re.escape("R.") + r"\b"` **matches** `R.Smith`, which this rule refuses, while both still admit `R. Noson`. A test pins exactly that difference, so a future rewrite to `\b` fails on it and on nothing else in the section.
+- **Applied per match, against the adjacent characters — not as a `\b` in the pattern.** `\b` is asserted relative to each alternative's *own* edge character, so a target that begins or ends in punctuation flips what it demands: `re.escape("R.") + r"\b"` **matches** `R.Smith`, which this rule refuses, while both still admit `R. Noson`. A test pins exactly that difference — a future rewrite to `\b` fails on it (and, separately, on the consumed-span test below).
 - **Script-agnostic without a branch.** Hebrew, Cyrillic and Devanagari letters are all `isalnum()`, so an uncased script behaves like a cased one; `str.isalnum()` is also the predicate the adapter's own filename allow-list already uses.
 - **A refused match is not "seen".** It is discarded before the first-occurrence bookkeeping, so a properly bounded occurrence later in the same block still takes the block's single wikilink and its `parenthetical_originals: first_occurrence` gloss.
 

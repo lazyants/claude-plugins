@@ -61,9 +61,8 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.25.0 (#491/#490 -- the machinery-only stale carve-out, and
-# --from-converged admitting a moved standard rather than only a moved
-# draft), per the maintenance contract above: 1.24.0's own map went with its
+# Rewritten for 1.30.0 (#587 -- the wikilinker's alphanumeric boundary), per
+# the maintenance contract above: the previous entry's map went with its
 # entry. Every citation below was resolved BY CONTENT against the worktree
 # and RE-VERIFIED that each anchor appears, in order, inside its range --
 # never by carrying an offset over, not even for the files this release
@@ -77,22 +76,40 @@ CITATION_ANCHORS = {
     # release. 1.30.0 is #587: the inline wikilinker's alphanumeric boundary.
     # Three citations, all about WHERE a decision sits rather than what a file
     # says, so each carries anchors.
-    "render_obsidian.py:530": [
-        # The alternation the entry calls "longest-first" -- the ordering lives
-        # in `targets_sorted`, built above, and the claim is that this compile
-        # carries no boundary of its own.
+    "render_obsidian.py:514-530": [
+        # The entry calls this "one alternation over every target,
+        # longest-first". Both halves of that must be in range: the ordering is
+        # the `sorted()` key, and the alternation is the compile that consumes
+        # it. Citing only the compile line left the longest-first claim
+        # pointing at a line that does not contain it.
+        "targets_sorted = sorted(",
+        "-len(t)",
         "re.compile",
-        "targets_sorted",
+        "for t in targets_sorted)",
     ],
-    "render_obsidian.py:636-680": [
-        # The guard itself, then its ONE call site. Both ends are anchored and
-        # the order is part of the claim: the definition precedes the call, and
-        # the call must sit inside the match loop rather than in the pattern.
+    "render_obsidian.py:636-707": [
+        # The guard, its ONE call site, and the bookkeeping it must precede.
+        # Order IS the claim here twice over: the definition precedes the call,
+        # the call sits inside the match loop rather than in the pattern, and
+        # the refusal comes BEFORE both first-occurrence scopes. The range runs
+        # through `global_seen` for that last reason -- ending it at the `if`
+        # would leave "discarded" and "never spends the slot" pointing at code
+        # outside the citation.
+        #
+        # What these anchors do NOT catch, stated because the range now looks
+        # wide enough to imply otherwise: swapping the refusal's `continue` for
+        # `pass` preserves every token above. A bare "continue" anchor cannot
+        # fix that -- the ordered scan would simply find the next `continue`
+        # further down the loop. That is this test's documented limit (it pins
+        # where a claim points, not that the claim is still true); the
+        # behaviour itself is pinned by section 20 of render_obsidian.test.py.
         "def _boundary_ok",
         "text[start - 1].isalnum()",
         "text[end].isalnum()",
         "for m in self.pattern.finditer(text):",
         "if not _boundary_ok(m.start(), m.end()):",
+        "seen_in_block.add(target)",
+        "self.global_seen.add(target)",
     ],
     "diff_rendered_output.py:106": [
         # The render-baseline version hash the cost section names.
