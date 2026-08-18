@@ -2464,10 +2464,10 @@ Runs at W7 over every converged segment:
 - Reads only the canonical `draft_path(seg) = segments/{seg}.draft.json`.
 - **Excluded from every bundle hash** — not a member of `plugin_bundle_hash`
   (runs strictly after every segment is already converged, over data already
-  on disk) nor of `orchestration_bundle_hash` (whose four members are
-  `draft_ready.py`, `ledger_merge.py`, `language_smoke_report.py`, and
-  `select_segments.py` — see `references/ledger-and-resumability.md`;
-  `final_audit.py` is not one of them). Editing `final_audit.py` on its own
+  on disk) nor of `orchestration_bundle_hash` (whose members are
+  `scaffold_setup.py`'s own `ORCHESTRATION_BUNDLE_MEMBERS` tuple, restated in
+  `references/ledger-and-resumability.md`; `final_audit.py` is not one of
+  them). Editing `final_audit.py` on its own
   never flips a cache key or the resume-integrity digest via either bundle.
 - **Structural-completeness gate (`scripts/validate_assembled.py`, #202):** runs
   immediately AFTER `final_audit.py` succeeds (default scope, i.e.

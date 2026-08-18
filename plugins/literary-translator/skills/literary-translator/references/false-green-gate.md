@@ -318,7 +318,7 @@ python3 {{PLUGIN_ROOT}}/assets/scripts/validate_extraction.py \
   and 6 branch on, and where `body_ref_markers[]` is populated.
 - [`ledger-and-resumability.md`](./ledger-and-resumability.md) — the
   `draft_path(seg)`/`review_path(seg)` canonical-path invariants, and
-  `plugin_bundle_hash`'s inclusion of `validate_draft.py` as one of the ten
+  `plugin_bundle_hash`'s inclusion of `validate_draft.py` as one of the
   scripts that directly shape translate/review/validation content.
 - [`engine-loop.md`](./engine-loop.md) — where this gate sits in the
   translate → gate → review → fix loop.

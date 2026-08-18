@@ -538,7 +538,7 @@ def test_derivation_bundle_members_match_reference_doc(cache_key_module):
     )
 
 
-def test_orchestration_bundle_members_from_doc_are_disjoint_from_the_other_two(
+def test_orchestration_bundle_members_from_doc_match_the_tuple_that_owns_them(
     cache_key_module,
 ):
     """orchestration_bundle_hash's membership is owned by
@@ -557,11 +557,15 @@ def test_orchestration_bundle_members_from_doc_are_disjoint_from_the_other_two(
     list from the shipped file (#591).
 
     Disjointness is therefore no longer asserted against plugin_bundle_hash. An
-    overlap is legal; a SILENT one is not, so each overlapping member must also
-    be named in scaffold_setup.py outside the tuple literal -- i.e. explained
-    where it is declared. Derivation stays strictly disjoint: nothing has ever
-    been in both, and bootstrap_names.py/segpack.py get the regenerate-before-
-    retranslate treatment that would be incoherent shared with either."""
+    overlap is legal; an UNMENTIONED one is not, so each overlapping member must
+    also appear in scaffold_setup.py outside the tuple literal. Be precise about
+    what that buys: it catches a member added to both tuples with nothing said
+    about it anywhere, and NOT a bare `# claim_record.py` or a comment that says
+    something false -- a string check cannot judge prose. It is a "was this
+    written down at all" gate, not a "was it explained correctly" one; the
+    latter is a reviewer's job. Derivation stays strictly disjoint: nothing has
+    ever been in both, and bootstrap_names.py/segpack.py get the regenerate-
+    before-retranslate treatment that would be incoherent shared with either."""
     doc_text = _load_ledger_and_resumability_doc()
     orchestration_members = _extract_bundle_files(doc_text, "orchestration_bundle_hash")
     declared_members, scaffold_prose = _orchestration_members_and_prose()
@@ -580,9 +584,10 @@ def test_orchestration_bundle_members_from_doc_are_disjoint_from_the_other_two(
     for name in sorted(orchestration_members & plugin_members):
         assert name in scaffold_prose, (
             f"{name} is registered in BOTH orchestration_bundle_hash and "
-            "plugin_bundle_hash, but scaffold_setup.py says nothing about it "
-            "outside the tuple literal. A double registration moves two hashes "
-            "at once and must be justified where it is declared."
+            "plugin_bundle_hash, but scaffold_setup.py does not mention it "
+            "anywhere outside the tuple literal. A double registration moves "
+            "two hashes at once and must at least be written down where it is "
+            "declared."
         )
     assert not (orchestration_members & derivation_members), (
         "a script is claimed by both orchestration_bundle_hash (doc) and "

@@ -55,7 +55,7 @@ import cache_key
 
 
 # The orchestration-bundle scripts -- the tuple below is the authority on how
-# many there are. plugin_bundle_hash EXCLUDES these
+# many there are. plugin_bundle_hash excludes the orchestration-ONLY ones
 # (they carry their own orchestration_bundle_hash); cache_key.py declares no
 # shared constant for them (they are non-gating for convergence), so this
 # script pins the tuple locally. Guarded byte-for-byte by
