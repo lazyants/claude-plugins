@@ -21,7 +21,8 @@ Closes #574.
   adapters now compose the row, read that one line back through the very `locateChapterLine` call
   their own step 0 makes (with the same target and the same options), and refuse to write a row it
   cannot find, halting with the chapter's title named as the thing to change. **This is a prose
-  fix: nothing under `assets/lib/` changed.**
+  fix: no executable behaviour and no export under `assets/lib/` changed — the only edit there
+  is a comment on `findStaleChapterRows`.**
 
 ### Changed
 

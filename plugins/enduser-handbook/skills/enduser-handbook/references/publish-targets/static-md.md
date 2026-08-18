@@ -298,7 +298,7 @@ two `null` cases are not the same signal and are handled separately below:
   A row the next run cannot read back is one step 0 reports absent forever, so every publish
   appends another identical copy while the manifest never changes — measured, four publishes
   leave four rows. The companion scan below is blind to them by construction, so refusing the
-  write is the only thing that bounds them. This mirrors the nested-list writer's `unwritable`
+  the shipped refusal is what bounds them. This mirrors the nested-list writer's `unwritable`
   outcome and carries the same remedy: the check is on the row THIS run composes, never on rows
   already in the file, and it names a title the operator can change rather than an edit they
   cannot find.

@@ -369,18 +369,21 @@ the one exception to "do all of these" — see its own conditional note below.
      A row the next run cannot read back is one step 0 reports absent forever, so every
      publish appends another identical copy while the manifest never changes — measured,
      four publishes leave four rows, in both link modes. The companion scan above is blind
-     to them by construction, so refusing the write is the only thing that bounds them.
+     to them by construction, so the shipped refusal is what bounds them.
      This mirrors the nested-list writer's `unwritable` outcome and carries the same
      remedy: the check is on the row THIS run composes, never on rows already in the file,
      and it names a title the operator can change rather than an edit they cannot find.
      Which titles it refuses is a property of the link mode AND of the exact spelling,
-     and it is not summarizable by any character rule — which is the reason the
-     instruction is to run the helper rather than to restate a rule from memory.
-     Measured, in all three directions: `Items]v1` and `A [b] c` are refused in both
-     modes; `Items]` and `Items [beta]` are refused in path mode and accepted under
+     and the measured cases do not support any simple character-presence rule — which is
+     the reason the instruction is to run the helper rather than to restate a rule from
+     memory. Measured, in all three directions: `Items]v1` and `A [b] c` are refused in
+     both modes; `Items]` and `Items [beta]` are refused in path mode and accepted under
      wikilinks; and `Items \] esc` runs the other way, accepted in path mode and refused
      under wikilinks. Neither mode is uniformly the stricter one, so a verdict measured in
-     one mode says nothing about the other. Run the helper; never predict its answer.
+     one mode says nothing about the other. In that last title the backslash is ONE
+     literal character and it is load-bearing: `Items ] esc` without it is refused in both
+     modes, so a reader who drops it sees no asymmetry and concludes this paragraph is
+     wrong. Run the helper; never predict its answer.
      What the refusal does NOT depend on is the row's SHAPE: it parses the line for the
      destination, so a numbered TOC line, a table cell, an indented child and a bare link
      all read back the same as the `-` bullet this adapter emits — measured. That is the

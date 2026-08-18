@@ -6324,8 +6324,9 @@ test('#357: the twelve-fact claim in the extension contract is re-measured from 
 // The fix (static-md.md / obsidian-vault.md, "Read the row back before you write it (#574)") is
 // pure ADAPTER PROSE, not a change to this module: compose the row, then run it through
 // `locateChapterLine([row], expectedTarget, options)` — the identical call step 0 already makes —
-// and write nothing when it does not report `present`. `chapter-paths.mjs` itself is unchanged by
-// this fix, so every property pinned below is a property of the SHIPPED module today and remains
+// and write nothing when it does not report `present`. `chapter-paths.mjs` keeps its behaviour and
+// its exports under this fix (its only edit is a comment), so every property pinned below is a
+// property of the SHIPPED module today and remains
 // true after the fix ships; the tests below never call it "the bug" for that reason. What they pin
 // is (1) the defect loop this refusal is meant to sit in front of, (2) that the refusal PREDICATE
 // itself — `locateChapterLine([row], target, opts).present` — draws the line exactly where the
@@ -6385,7 +6386,7 @@ for (const mode of ['path', 'wiki']) {
 // does not, so each cell below is its own measurement).
 const REFUSAL_TABLE_574 = [
   { title: 'Items', path: true, wiki: true }, // ordinary title: read back cleanly in both modes
-  { title: 'Items]v1', path: false, wiki: false }, // unescaped ']': breaks destination parse in both
+  { title: 'Items]v1', path: false, wiki: false }, // this title breaks the parse in both; a ']' in general does NOT (see the last two rows)
   { title: 'Items [beta]', path: false, wiki: true }, // bracketed: modes genuinely disagree
   { title: '(Notes)', path: true, wiki: true }, // parenthesised: reads back cleanly in both
   { title: 'Items & Co: v1', path: true, wiki: true }, // '&'/':' : reads back cleanly in both
@@ -6396,6 +6397,9 @@ const REFUSAL_TABLE_574 = [
   // wikilinks refuses it (so path mode is not uniformly the stricter one either). Any future
   // attempt to summarize the refused set with a character rule has to survive these two.
   { title: 'Items]', path: false, wiki: true }, // a trailing ']' that wikilinks accepts
+  // ONE literal backslash, and it is load-bearing: measured, 'Items ] esc' without it is false in
+  // BOTH modes, so a reader who drops the backslash sees no asymmetry and concludes the docs are
+  // wrong. The prose sites spell it inside a code span for the same reason.
   { title: 'Items \\] esc', path: true, wiki: false }, // the reverse asymmetry: path accepts it
 ];
 

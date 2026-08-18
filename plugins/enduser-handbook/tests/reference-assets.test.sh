@@ -5369,7 +5369,8 @@ echo "== #574: the flat append branch reads its own row back and refuses to writ
 # the link this run would write, so the companion scan skips all of them by the very test that tells
 # this run's row from a leftover. Measured against 935d9e5, both link modes: four publishes, four
 # rows, scan reports zero. What closes it is a refusal on the append branch, so the row is never
-# written; `assets/lib/chapter-paths.mjs` is unchanged and still reports nothing for such a row.
+# written; `assets/lib/chapter-paths.mjs` keeps its behaviour and its exports (its only edit here
+# is a comment) and still reports nothing for such a row.
 has_joined_in_section "static-md: the flat append branch reads the composed row back first" \
   "$SMD" '## Index wiring (do this on every chapter create/update)' \
   'Read the row back before you write it (#574)'
@@ -5402,13 +5403,13 @@ has_joined_in_section "obsidian-vault: the wikilinks absent-to-append mapping ca
 # and the one-directional pin is exactly what left the false half unguarded.
 has_joined_in_section "obsidian-vault: the path-strict direction of the asymmetry is named with its titles" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
-  'are refused in path mode and accepted under'
+  '`Items]` and `Items [beta]` are refused in path mode and accepted under'
 has_joined_in_section "obsidian-vault: the wikilink-strict direction is named too, so neither mode reads as stricter" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
-  'runs the other way, accepted in path mode and refused'
+  '`Items \\] esc` runs the other way, accepted in path mode and refused'
 has_joined_in_section "obsidian-vault: no character rule is claimed to summarize the refused set" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
-  'not summarizable by any character rule'
+  'do not support any simple character-presence rule'
 # The refusal is shape-AGNOSTIC while the companion scan's own-row test is shape-SENSITIVE. Stating
 # only the first invites a reader to assume the refusal inherits the scan's row-shape caution and
 # therefore over-refuses on a numbered or table index; measured, it does not.
@@ -5435,7 +5436,17 @@ has_joined_in_section "publish-targets README: the append branch's own obligatio
   'discharge it by REFUSING rather than by recognising (#574)'
 has_joined_in_section "publish-targets README: the obligation is inherited, the shipped spelling is not" \
   "$PTREADME" '## Adding a new target X' \
-  'the shipped spelling of it is not'
+  'the file-shaped spelling of it is not'
+# [round 2] The asymmetry pins above name their titles because a title-only mutation used to leave
+# them green: the verdict phrase survived while the example it described changed under it.
+has_joined_in_section "obsidian-vault: the counterexample's backslash is named as load-bearing" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'the backslash is ONE literal character and it is load-bearing'
+# The contract must stay dischargeable by a target that has no file to read back — the README's own
+# scope admits a Confluence parent page id, and an API registration has no side-effect-free probe.
+has_joined_in_section "publish-targets README: a target with no side-effect-free read-back halts for manual wiring" \
+  "$PTREADME" '## Adding a new target X' \
+  'halt for manual wiring rather than write and hope'
 has_joined_in_section "publish-targets README: the recognising alternative is named and declined" \
   "$PTREADME" '## Adding a new target X' \
   'bounds the count at one but leaves a row every later run must special-case'
