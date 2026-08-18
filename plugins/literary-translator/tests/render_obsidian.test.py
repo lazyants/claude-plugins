@@ -51,6 +51,7 @@ contractually exact frontmatter field set, contract §8).
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import json
 import shutil
 import subprocess
@@ -2807,6 +2808,555 @@ def test_inline_verse_exotic_adjacent_to_a_real_newline_still_splits_on_the_newl
         {"rendered": "a" + chr(0x2028) + "\nb"}
     )
     assert text == "*a / b*"
+
+
+# ===========================================================================
+# 20. #587: the wikilinker's alphanumeric boundary. A canonical_target_form
+#     that is only PART of a longer written run in the prose must not be
+#     wrapped -- "Teplik" inside the Yiddish demonym "Tepliker" shipped as
+#     "[[...|Teplik]]er" into a delivered book, twice. The guard tests
+#     ALPHANUMERIC, never non-space: an apostrophe, quote, comma or period
+#     after a name is the common correct case and must keep linking.
+#
+#     Which of these were watched RED against the pre-#587 renderer, and
+#     which are regression pins that were green before and after, is stated
+#     per test -- a blanket "all red first" would be false here, and the
+#     punctuation pins have their own mutant instead (rewrite _boundary_ok to
+#     test `isspace()`/non-space and they go red).
+# ===========================================================================
+
+
+def _boundary_body(out_dir, manifest, needle):
+    """The single rendered body page containing `needle`, as text."""
+    matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: needle in t
+    )
+    assert len(matches) == 1, (
+        f"expected exactly one body page containing {needle!r}, got {len(matches)}"
+    )
+    return matches[0].read_text(encoding="utf-8")
+
+
+def test_target_that_prefixes_a_longer_word_is_not_wrapped(tmp_path):
+    """RED before #587: the shipped instance. "Tepliker" is the demonym ("the
+    man from Teplik") and is not the canon target "Teplik"; the unbounded
+    matcher wrapped the prefix and left "er" dangling outside the link."""
+    canon = make_canon({"Teplik_src": canon_entry("Teplik_src", "Teplik", category="place")})
+    ns = make_nodestream([
+        make_node("p1", "seg01", "Of R. Nesanel Tepliker, who was there."),
+    ], target="en")
+    profile = make_profile(folders={"place": "places"}, target_lang="en")
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body = _boundary_body(out_dir, manifest, "Nesanel")
+
+    assert "Nesanel Tepliker, who was there." in body, (
+        f"the prose word must survive whole, unwrapped and uncut:\n{body}"
+    )
+    assert "[[" not in body, f"no wikilink may be emitted for a fragment match:\n{body}"
+
+
+def test_target_preceded_by_an_alphanumeric_is_not_wrapped(tmp_path):
+    """RED before #587, and pinned separately from the prefix case because a
+    one-sided guard (checking only the character AFTER the match) passes that
+    one and fails this one."""
+    canon = make_canon({"Noson_src": canon_entry("Noson_src", "Noson")})
+    ns = make_nodestream([make_node("p1", "seg01", "He read the ReNoson commentary.")], target="en")
+    profile = make_profile(folders={"person": "people"}, target_lang="en")
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    body = _boundary_body(out_dir, manifest, "commentary")
+
+    assert "the ReNoson commentary." in body, f"a suffix match must not be wrapped:\n{body}"
+    assert "[[" not in body, f"no wikilink may be emitted for a fragment match:\n{body}"
+
+
+def test_target_against_punctuation_and_possessive_still_wraps(tmp_path):
+    """GREEN both before and after #587 -- a regression pin, deliberately, for
+    the half of the acceptance criteria that says what must NOT change:
+    "[[...|Reb Noson]]'s" is correct and common (37 such spans in the book
+    that produced the issue). Its mutant is the WRONG PREDICATE: make
+    `_boundary_ok` test non-space instead of alphanumeric and every assertion
+    below fails. Each variant sits in its own block, since the wikilink rule
+    wraps only the first occurrence per block."""
+    canon = make_canon({"Noson_src": canon_entry("Noson_src", "Reb Noson")})
+    ns = make_nodestream([
+        make_node("p1", "seg01", "Reb Noson’s house stood there.", order_index=0),
+        make_node("p2", "seg01", "Reb Noson, the scribe, wrote it.", order_index=1),
+        make_node("p3", "seg01", "It was said by Reb Noson.", order_index=2),
+        make_node("p4", "seg01", "They called him “Reb Noson” aloud.", order_index=3),
+        make_node("p5", "seg01", "(Reb Noson) signed it.", order_index=4),
+        make_node("p6", "seg01", "Reb Noson' with a straight quote.", order_index=5),
+    ], target="en")
+    profile = make_profile(folders={"person": "people"}, target_lang="en")
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "Noson_src")
+    body = _boundary_body(out_dir, manifest, "signed it")
+
+    link = f"[[{identity}|Reb Noson]]"
+    for expected in (
+        f"{link}’s house",
+        f"{link}, the scribe",
+        f"said by {link}.",
+        f"“{link}” aloud",
+        f"({link}) signed",
+        f"{link}' with",
+    ):
+        assert expected in body, f"expected {expected!r} in:\n{body}"
+
+
+def test_non_latin_target_that_prefixes_a_longer_word_is_not_wrapped(tmp_path):
+    """RED before #587, and the non-Latin case the issue requires. An UNCASED
+    script must behave exactly like a cased one: `str.isalnum()` is true for
+    Hebrew letters, so no script-specific branch exists or is needed. The
+    second block pins the other direction in the same script -- the bare
+    target, followed by a space, still wraps -- so a guard that simply refused
+    everything in Hebrew could not pass this test."""
+    target = "טעפליק"
+    demonym = target + "ער"
+    canon = make_canon({"Teplik_src": canon_entry("Teplik_src", target, category="place")})
+    ns = make_nodestream([
+        make_node("p1", "seg01", f"דער {demonym} איז געווען", order_index=0),
+        make_node("p2", "seg01", f"דער {target} איז געווען", order_index=1),
+    ], target="he")
+    profile = make_profile(folders={"place": "places"}, target_lang="he")
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "Teplik_src")
+    # Located by a word no target can cut, so a failure here reports the cut
+    # itself rather than "page not found".
+    body = _boundary_body(out_dir, manifest, "געווען")
+
+    assert f"[[{identity}|{target}]]ער" not in body, (
+        f"an uncased-script prefix must not be cut either:\n{body}"
+    )
+    assert demonym in body, f"the Hebrew prose word must survive whole:\n{body}"
+    assert f"דער [[{identity}|{target}]] איז" in body, (
+        f"the bare Hebrew target must still wrap:\n{body}"
+    )
+
+
+def test_cyrillic_target_inside_a_longer_word_is_not_wrapped(tmp_path):
+    """RED before #587. A second script, cased and non-Latin -- the live
+    ru-target book's own shape (the patronymic "Иванович" contains "Иван").
+    This is NOT the case that distinguishes an adjacent-character guard from
+    a `\\b` one: Python 3's `\\w` is Unicode-aware, so `\\b` would refuse this
+    too. The test that distinguishes them is the non-word-edged target
+    below."""
+    canon = make_canon({"Ivan_src": canon_entry("Ivan_src", "Иван")})
+    ns = make_nodestream([
+        make_node("p1", "seg01", "Иванович пришёл поздно.", order_index=0),
+        make_node("p2", "seg01", "Иван пришёл поздно.", order_index=1),
+    ])
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "Ivan_src")
+    body = _boundary_body(out_dir, manifest, "поздно")
+
+    assert "Иванович пришёл" in body, f"the patronymic must survive whole:\n{body}"
+    assert f"[[{identity}|Иван]] пришёл поздно." in body, (
+        f"the bare name in the next block must still wrap:\n{body}"
+    )
+
+
+def test_target_whose_own_edge_is_not_a_word_character_is_still_bounded(tmp_path):
+    """RED before #587, and the case that pins WHY the guard reads the
+    adjacent characters instead of appending `\\b` to the pattern. `\\b` is
+    asserted relative to the PATTERN's own edge character, so for a target
+    ending in "." it is wrong in BOTH directions: `re.escape("R.") + r"\\b"`
+    MATCHES "R.Smith", which this rule refuses, and does NOT match "R. Noson",
+    which this rule links -- after "R." the `\\b` position has a non-word
+    character on each side, so it never fires. A future rewrite to `\\b` fails
+    both assertions here; it also fails
+    test_a_refused_span_is_consumed_so_no_shorter_target_links_inside_it,
+    which is a different property -- this is the one that isolates the
+    target's own edge character."""
+    canon = make_canon({"R_src": canon_entry("R_src", "R.")})
+    ns = make_nodestream([
+        make_node("p1", "seg01", "Written by R.Smith alone.", order_index=0),
+        make_node("p2", "seg01", "Written by R. Noson alone.", order_index=1),
+    ], target="en")
+    profile = make_profile(folders={"person": "people"}, target_lang="en")
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "R_src")
+    body = _boundary_body(out_dir, manifest, "alone.")
+
+    assert "by R.Smith alone." in body, (
+        f"a target ending in punctuation is still only a fragment of "
+        f"'R.Smith' and must not be wrapped:\n{body}"
+    )
+    assert f"by [[{identity}|R.]] Noson alone." in body, (
+        f"the same target followed by a space must still wrap:\n{body}"
+    )
+
+
+def test_a_refused_match_does_not_spend_the_blocks_first_occurrence_slot(tmp_path):
+    """RED before #587 (the first occurrence was wrapped mid-word, so the
+    second was never reached). Pins that the refusal happens BEFORE
+    `seen_in_block.add()` -- a guard written one line lower would refuse the
+    fragment and then silently suppress the real mention as "already seen",
+    leaving the block with no wikilink at all."""
+    canon = make_canon({"Teplik_src": canon_entry("Teplik_src", "Teplik", category="place")})
+    ns = make_nodestream([
+        make_node("p1", "seg01", "The Tepliker rode on; later Teplik itself appeared."),
+    ], target="en")
+    profile = make_profile(folders={"place": "places"}, target_lang="en")
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "Teplik_src")
+    body = _boundary_body(out_dir, manifest, "rode on")
+
+    assert "The Tepliker rode on;" in body, f"the demonym must survive whole:\n{body}"
+    assert f"later [[{identity}|Teplik]] itself appeared." in body, (
+        f"the bounded occurrence must still take the block's one wikilink:\n{body}"
+    )
+
+
+def test_boundary_is_checked_at_both_edges_and_at_the_ends_of_the_text(tmp_path):
+    """Three index cases the other tests leave open, each of which survived a
+    mutant of `_boundary_ok`: a one-character prefix (`start > 1` instead of
+    `start > 0` re-admits `xTeplik`), a one-character suffix
+    (`end < len(text) - 1` re-admits `Teplikx`), and a target that ends the
+    block text exactly (refusing `end == len(text)` suppresses a legitimate
+    link). All three are single-character differences that no multi-word
+    fixture reaches. The `xTeplik` case overlaps
+    test_target_preceded_by_an_alphanumeric_is_not_wrapped on purpose and does
+    not replace it: there the match is preceded-alnum MID-text with a non-alnum
+    after it, here it is preceded-alnum at END of text, where the trailing
+    branch short-circuits and only the leading check can refuse."""
+    canon = make_canon({"Teplik_src": canon_entry("Teplik_src", "Teplik", category="place")})
+    ns = make_nodestream([
+        make_node("p1", "seg01", "xTeplik", order_index=0),
+        make_node("p2", "seg01", "Teplikx", order_index=1),
+        make_node("p3", "seg01", "He rode to Teplik", order_index=2),
+    ], target="en")
+    profile = make_profile(folders={"place": "places"}, target_lang="en")
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "Teplik_src")
+    body = _boundary_body(out_dir, manifest, "He rode to")
+
+    assert "xTeplik" in body, f"a one-character prefix must still refuse:\n{body}"
+    assert "Teplikx" in body, f"a one-character suffix must still refuse:\n{body}"
+    assert f"He rode to [[{identity}|Teplik]]" in body, (
+        f"a target ending the block text has no following character at all "
+        f"and must still wrap:\n{body}"
+    )
+
+
+def test_a_refused_match_does_not_spend_the_book_wide_first_occurrence(tmp_path):
+    """The block-local slot is only half the claim. Under
+    `parenthetical_originals: first_occurrence` the linker also tracks a
+    BOOK-WIDE `global_seen`, and a guard that refused the fragment but still
+    recorded it there would leave the real mention linked and silently strip
+    its original-script gloss -- passing the block-slot test above while
+    breaking the documented behaviour."""
+    canon = make_canon({"Teplik_src": canon_entry("Teplik_src", "Teplik", category="place")})
+    ns = make_nodestream([
+        make_node("p1", "seg01", "The Tepliker rode on.", order_index=0),
+        make_node("p2", "seg01", "Then Teplik itself appeared.", order_index=1),
+    ], target="en")
+    profile = make_profile(
+        folders={"place": "places"},
+        parenthetical_originals="first_occurrence",
+        target_lang="en",
+    )
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, "Teplik_src")
+    body = _boundary_body(out_dir, manifest, "rode on")
+
+    assert "The Tepliker rode on." in body, f"the demonym must survive whole:\n{body}"
+    assert f"Then [[{identity}|Teplik]] (Teplik_src) itself appeared." in body, (
+        f"the refused fragment must not have consumed the book-wide first "
+        f"occurrence -- the real mention still owes its gloss:\n{body}"
+    )
+
+
+def test_a_refused_span_is_consumed_so_no_shorter_target_links_inside_it(tmp_path):
+    """RED before #587 (pre-fix this emitted "Jo[[...|Ann Marie]] letter"),
+    and RED again under the rescanning variant the fix was nearly written as
+    -- which is the point of pinning it. `re`'s non-overlapping scan means a
+    refused span is still consumed, so a
+    different, shorter target starting inside it gets no turn. Re-scanning
+    from one character on would recover the odd legitimate short mention, but
+    over "JoAnn Marie" (targets "Ann Marie" and "Marie") it emits
+    "JoAnn [[...|Marie]]" -- a link to the WRONG entity, inside a full name,
+    in the delivered book. A missing link is recoverable through the
+    source-anchored `## Mentions` appendix; a wrong one is not."""
+    canon = make_canon({
+        "AnnMarie_src": canon_entry("AnnMarie_src", "Ann Marie"),
+        "Marie_src": canon_entry("Marie_src", "Marie"),
+    })
+    ns = make_nodestream([
+        make_node("p1", "seg01", "The JoAnn Marie letter is late.", order_index=0),
+        make_node("p2", "seg01", "The Ann Marie letter is late.", order_index=1),
+    ], target="en")
+    profile = make_profile(folders={"person": "people"}, target_lang="en")
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    ann_identity = entity_note_identity(out_dir, manifest, "AnnMarie_src")
+    body = _boundary_body(out_dir, manifest, "letter is late.")
+
+    assert "The JoAnn Marie letter is late." in body, (
+        f"nothing inside the refused span may be linked:\n{body}"
+    )
+    assert f"The [[{ann_identity}|Ann Marie]] letter" in body, (
+        f"the same target on its own boundaries must still wrap:\n{body}"
+    )
+
+
+# ===========================================================================
+# 21. #586: sanitize_filename_component -- combining marks and printed-name
+#     punctuation used to become one "_" EACH, so a fully pointed Hebrew
+#     name rendered as a stem no reader can type (measured: 177/177 entity
+#     notes of a delivered he->en vault). Every fixture below is built from
+#     chr() rather than pasted literals: a combining mark is invisible and
+#     a Hebrew letter reorders the line, so a literal here would be
+#     unreviewable in a diff and one bad paste would silently move the
+#     assertion (same reason section 19 above spells chr(0x2028)).
+# ===========================================================================
+
+# 'avneyah', fully pointed: alef+patah, bet, nun+rafe, yod, he.
+_POINTED_HEBREW = (
+    chr(0x05D0) + chr(0x05B7) + chr(0x05D1) + chr(0x05E0) + chr(0x05BF)
+    + chr(0x05D9) + chr(0x05D4)
+)
+# 'Bat-Sheva', joined by MAQAF (U+05BE), the Hebrew hyphen.
+_MAQAF_NAME = (
+    chr(0x05D1) + chr(0x05EA) + chr(0x05BE) + chr(0x05E9) + chr(0x05D1) + chr(0x05E2)
+)
+_GERESH_NAME = chr(0x05E8) + chr(0x05F3)                    # "R'" (GERESH)
+_GERSHAYIM_NAME = chr(0x05E9) + chr(0x05F4) + chr(0x05E1)   # 'Sh"as' (GERSHAYIM)
+_TYPOGRAPHIC_APOSTROPHE_NAME = "Be" + chr(0x2019) + "er Mayim Chaim"
+
+
+@pytest.mark.parametrize("source_form", [
+    _POINTED_HEBREW, _MAQAF_NAME, _GERESH_NAME, _GERSHAYIM_NAME,
+    "Mrs. Adil", "Miriam, daughter of our Rebbe", _TYPOGRAPHIC_APOSTROPHE_NAME,
+])
+def test_marks_and_printed_punctuation_survive_into_the_filename(source_form):
+    """RED before #586 for every one of these seven (measured): each mark or
+    punctuation character became its own "_"."""
+    stem = render_obsidian.sanitize_filename_component(source_form, "fallback")
+    assert stem == source_form, (
+        "a combining mark, Hebrew orthographic punctuation, or a printed "
+        f"name's own punctuation must survive: {source_form!r} -> {stem!r}"
+    )
+
+
+@pytest.mark.parametrize("hostile,expected", [
+    ("..", "fallback"),
+    (".", "fallback"),
+    ("...", "fallback"),
+    ("  ..  ", "fallback"),
+    ("../../etc/passwd", "etc_passwd"),
+    ("..\\..\\etc\\passwd", "etc_passwd"),
+    ("a..b", "a.b"),
+    (".hidden", "hidden"),
+    ("trail.", "trail"),
+    ("x.md", "x_md"),
+    ("x.MD", "x_MD"),
+    ("x.md.md", "x.md_md"),
+    # These two pin the ORDER of the normalization steps, which the cases
+    # above do not: run the ".md" neutralization BEFORE the dot strip and
+    # "x.md." comes out as "x.md" (extension property violated); run the
+    # "_" collapse before it instead and "x_.md" comes out as "x__md".
+    ("x.md.", "x_md"),
+    ("x_.md", "x_md"),
+    ("a\x00b", "a_b"),
+    (chr(0x3002) + chr(0x3002), "fallback"),   # IDEOGRAPHIC FULL STOP
+    (chr(0xFF0E) + chr(0xFF0E), "fallback"),   # FULLWIDTH FULL STOP
+    (chr(0x0301), "fallback"),                 # a lone COMBINING ACUTE
+    (chr(0x2708) + chr(0xFE0F), "fallback"),   # emoji + VARIATION SELECTOR-16
+])
+def test_admitting_the_dot_keeps_the_traversal_and_extension_properties(hostile, expected):
+    """GREEN before #586 as well as after -- it pins the two properties that
+    used to come free from excluding "." and are now enforced by
+    sanitize_filename_component's own normalization tail, so a regression in
+    either leg turns it RED. Its guard value was verified by MUTATION, not by
+    a pre-fix red: deleting the dot-run collapse, and separately the trailing-
+    ".md" neutralization, each fails this test. The exact `expected` stems are
+    pinned, not just the invariants -- an invariant-only assertion passes for
+    "x.md" -> "x.md", which is precisely the defect the property forbids."""
+    stem = render_obsidian.sanitize_filename_component(hostile, "fallback")
+    assert stem == expected, f"{hostile!r} -> {stem!r}, expected {expected!r}"
+    assert ".." not in stem, f"{hostile!r} -> {stem!r} carries a '..' segment"
+    assert stem not in (".", ".."), f"{hostile!r} -> {stem!r} IS a traversal segment"
+    assert not stem.startswith("."), f"{hostile!r} -> {stem!r} is a dot-entry"
+    assert not stem.endswith("."), f"{hostile!r} -> {stem!r} ends in '.'"
+    assert not stem.lower().endswith(".md"), (
+        f"{hostile!r} -> {stem!r} carries an extension of its own; the only "
+        "extension an emitted note may have is the '.md' render() appends"
+    )
+    assert "/" not in stem and "\\" not in stem and "\x00" not in stem, (
+        f"{hostile!r} -> {stem!r} carries a separator or NUL"
+    )
+    assert stem.partition(".")[0].upper() not in render_obsidian._WIN32_RESERVED_STEMS, (
+        f"{hostile!r} -> {stem!r} names a Win32 reserved device"
+    )
+
+
+@pytest.mark.parametrize("source_form,expected", [
+    # Reserved even with an extension after the device basename, so the
+    # emitted "AUX.txt.md" is a device path too. Before #586 the dot was
+    # replaced and "AUX_txt" was writable, so admitting "." is what widened
+    # the pre-existing bare-device hole into this shape.
+    ("AUX.txt", "AUX_.txt"),
+    ("CON", "CON_"),
+    ("NUL", "NUL_"),
+    ("COM1", "COM1_"),
+    ("lpt9.log", "lpt9_.log"),
+    ("con.foo.md", "con_.foo_md"),
+    # The ISO/IEC 8859-1 superscript digits are part of Microsoft's own
+    # reserved list ("Windows recognizes ... U+00B9, U+00B2 and U+00B3 as
+    # digits and treats them as valid parts of COM# and LPT# device names"),
+    # and `str.isalnum()` is True for all three, so before the alias entries
+    # they passed through untouched (MR bot, second round).
+    ("COM" + chr(0x00B9), "COM" + chr(0x00B9) + "_"),
+    ("COM" + chr(0x00B2) + ".txt", "COM" + chr(0x00B2) + "_.txt"),
+    ("LPT" + chr(0x00B3), "LPT" + chr(0x00B3) + "_"),
+    ("lpt" + chr(0x00B2) + ".log", "lpt" + chr(0x00B2) + "_.log"),
+    # A device name whose own dot the ".md" rule already dissolved is NOT a
+    # device path any more -- "com<sup>3</sup>.md" -> "com<sup>3</sup>_md" is
+    # a plain basename -- so it must be left as the tail produced it, and the
+    # guard must not re-fire on it.
+    ("com" + chr(0x00B3) + ".md", "com" + chr(0x00B3) + "_md"),
+    ("CON.md", "CON_md"),
+    # ...and names that merely BEGIN with a device name, or contain one as a
+    # word, are ordinary names and must be left exactly alone.
+    ("Constantine", "Constantine"),
+    ("Aux Chien", "Aux Chien"),
+    ("nulla", "nulla"),
+    ("Prince", "Prince"),
+])
+def test_a_win32_device_basename_is_neutralized_but_a_real_name_is_not(
+    source_form, expected
+):
+    """The MR bot's finding, admitted: this guard is enforced on EVERY
+    platform, not only Windows, because a vault is copied and synced between
+    machines and a name unwritable there is a defect wherever it was
+    rendered. It is the same class as the two caps -- a name the filesystem
+    refuses aborts a render that has already emptied the vault -- which is
+    why it ships here rather than as the separate #592."""
+    stem = render_obsidian.sanitize_filename_component(source_form, "fallback")
+    assert stem == expected, f"{source_form!r} -> {stem!r}, expected {expected!r}"
+    assert stem.partition(".")[0].upper() not in render_obsidian._WIN32_RESERVED_STEMS, (
+        f"{source_form!r} -> {stem!r} still names a Win32 reserved device"
+    )
+
+
+def test_the_two_properties_hold_over_an_exhaustive_hostile_alphabet():
+    """The parametrized case list above pins EXACT stems for the shapes a
+    human thought of; this one pins the two properties over every string of
+    length <= 4 drawable from an adversarial alphabet -- 30 940 inputs,
+    including the dot/separator/NUL/mark/ZWJ characters and the letters
+    "m"/"d" the trailing-".md" rule keys on. A property that only ever meets
+    hand-picked inputs is one refactor away from a hole nobody sampled."""
+    alphabet = ["a", ".", "/", "\\", "_", " ", "m", "d", "M", "D",
+                chr(0x05B7), "\x00", chr(0x200D)]
+    exercised = 0
+    asserted = 0
+    for k in (1, 2, 3, 4):
+        for combo in itertools.product(alphabet, repeat=k):
+            value = "".join(combo)
+            exercised += 1
+            stem = render_obsidian.sanitize_filename_component(value, "fallback")
+            if stem == "fallback":
+                continue
+            asserted += 1
+            assert ".." not in stem, f"{value!r} -> {stem!r}"
+            assert stem not in (".", ".."), f"{value!r} -> {stem!r}"
+            assert not stem.startswith("."), f"{value!r} -> {stem!r}"
+            assert not stem.endswith("."), f"{value!r} -> {stem!r}"
+            assert not stem.lower().endswith(".md"), f"{value!r} -> {stem!r}"
+            assert "/" not in stem and "\\" not in stem, f"{value!r} -> {stem!r}"
+            assert "\x00" not in stem, f"{value!r} -> {stem!r}"
+    # Both counts live INSIDE the assertions, so neither a loop that stopped
+    # iterating nor a sanitizer that answers `fallback` to EVERYTHING (which
+    # skips every property assertion above and would otherwise sail through
+    # a bare iteration count) can pass by printing what a passing run
+    # prints. 26 428 of the 30 940 inputs currently reach the assertions; the
+    # bound is deliberately loose, since widening the allow-list again should
+    # move that number UP, not require this line to be edited.
+    assert exercised == 13 + 13**2 + 13**3 + 13**4 == 30940, exercised
+    assert asserted > 20000, (
+        f"only {asserted} of {exercised} inputs reached the property "
+        "assertions -- the sanitizer is answering with the fallback far more "
+        "often than it should, so this test is not checking what it claims"
+    )
+
+
+@pytest.mark.parametrize("label,source_form", [
+    # Review round 1: a mark run no longer collapses into a single "_", so a
+    # stem can now be as long as its input. Both caps are exercised through
+    # render() rather than through the helper, because what they defend is
+    # the WRITE -- and _write_note runs after _clean_vault_content has
+    # already emptied the vault, so an unwritable name aborts the render
+    # over a half-rebuilt vault rather than dropping one note.
+    ("mark_run", "A" + chr(0x0301) * 253),          # macOS refuses >=32 marks/base
+    ("long_latin", "A" * 300),                       # pre-existing: NAME_MAX
+    ("long_pointed_hebrew",
+     "".join(chr(0x05D0 + i % 22) + chr(0x05B7) + chr(0x0591) for i in range(200))),
+])
+def test_a_pathological_name_still_renders_instead_of_aborting_the_vault(
+    tmp_path, label, source_form
+):
+    canon = make_canon({
+        source_form: canon_entry(source_form, f"Цель{label}", category="person"),
+    })
+    ns = make_nodestream([make_node("p1", "seg01", f"Текст про Цель{label} здесь.")])
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+
+    identity = entity_note_identity(out_dir, manifest, source_form)
+    written = out_dir / f"{identity}.md"
+    assert written.is_file(), f"{label}: {identity!r} was not written"
+    stem = identity.rsplit("/", 1)[-1]
+    assert len(f"{stem}.md".encode("utf-8")) <= 255, (
+        f"{label}: {len(stem)} chars is over the component budget"
+    )
+    run = longest = 0
+    for ch in stem:
+        if unicodedata.category(ch) in ("Mn", "Mc", "Me"):
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 0
+    assert longest <= 30, f"{label}: {longest} consecutive marks in {stem!r}"
+
+
+def test_pointed_hebrew_entity_note_is_written_under_its_unmangled_name(tmp_path):
+    """END-TO-END through render(), not the helper: #586 was measured on the
+    filenames a delivered vault actually carries, so the pin belongs on the
+    shipped path -- the written relpath AND the wikilink target that has to
+    match it."""
+    canon = make_canon({
+        _POINTED_HEBREW: canon_entry(_POINTED_HEBREW, "Авния", category="person"),
+    })
+    ns = make_nodestream([make_node("p1", "seg01", "Он позвал Авния к столу.")])
+    profile = make_profile(folders={"person": "people"})
+
+    out_dir, manifest = render_into(tmp_path, ns, canon, profile)
+    identity = entity_note_identity(out_dir, manifest, _POINTED_HEBREW)
+
+    assert identity == f"people/{_POINTED_HEBREW}", (
+        f"the entity note must be written under the unmangled name, got {identity!r}"
+    )
+    assert f"{identity}.md" in manifest["written"]
+    assert (out_dir / f"{identity}.md").is_file()
+
+    body_matches = find_file_with_content(
+        all_written_paths(out_dir, manifest), lambda t: "к столу" in t
+    )
+    assert len(body_matches) == 1
+    assert f"[[{identity}|Авния]]" in body_matches[0].read_text(encoding="utf-8"), (
+        "the wikilink target must be that same unmangled note identity"
+    )
 
 
 if __name__ == "__main__":

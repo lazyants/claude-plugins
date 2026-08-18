@@ -61,28 +61,23 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.25.0 (#491/#490 -- the machinery-only stale carve-out, and
-# --from-converged admitting a moved standard rather than only a moved
-# draft), per the maintenance contract above: 1.24.0's own map went with its
-# entry. Every citation below was resolved BY CONTENT against the worktree
-# and RE-VERIFIED that each anchor appears, in order, inside its range --
-# never by carrying an offset over, not even for the files this release
-# leaves untouched (final_audit.py, cache_key.py). A uniform offset is never
-# safe: 1.24.0's own rewrite shifted select_segments.py by +12 in one band
-# and +55 in the next, and an untouched file whose citation still happens to
-# contain its anchor text is exactly what a re-numbering produces without
-# anyone re-reading it.
-CITATION_ANCHORS = {
-    # This map tracks the NEWEST changelog entry only, and is rewritten every
-    # release. 1.29.0 is the docs-accuracy batch (#572): 23 sentences corrected
-    # across prose, docstrings, templates and CLI help. It names files but cites
-    # no source LINE -- deliberately, because a batch touching sixteen files at
-    # once would need sixteen anchor ranges that go stale together, and the
-    # entry's claims are about what each file now SAYS rather than about where
-    # a branch sits. An empty map is the correct state here, and the test below
-    # still enforces both halves: a citation appearing in the entry with no
-    # anchors fails, and an anchor no citation uses fails.
-}
+# Rewritten for 1.31.0 (#586 -- the filename sanitizer's marks and
+# punctuation), per the maintenance contract above: the previous entry's map
+# went with its entry, exactly as that contract says it must. 1.30.0's three
+# citations are NOT carried forward and were not re-resolved -- 1.31.0 edits
+# render_obsidian.py above every one of them, so carrying them would be the
+# renumber-preserves-the-wrongness failure this file exists to prevent, and
+# re-resolving them would pin a historical entry to line numbers it never
+# claimed.
+#
+# 1.31.0 itself cites NO `file.ext:NNN` anywhere: it names constants and
+# functions (`_FILENAME_MAX_BYTES`, `sanitize_filename_component`) instead,
+# which is why this map is empty rather than merely short. An empty map is a
+# real state under the assertions below, not a disabled test -- an entry that
+# adds a citation without an anchor still fails `undeclared`. Deliberate: this
+# release moves lines in the file it talks about, and a line number in prose
+# rots the moment the next release edits above it.
+CITATION_ANCHORS = {}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
 # alphabetic extension are still required. Pinning a list of extensions was

@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.30.0 — 2026-08-18
+## 1.32.0 — 2026-08-18
 
 Collision de-linking finally says what it costs, and a book can tell the renderer that two spellings are one man. Closes #588.
 
@@ -28,6 +28,7 @@ Four decisions in that sentence are load-bearing, and each was a review round:
 - **The renderer reports it, not the W9 gate.** `validate_backlinks.py` short-circuits to `mentions_coverage.status: disabled` when the `## Mentions` appendix is off — which is exactly the configuration the measured vault ran under. De-linking is *decoupled* from that flag, so its cost has to be reported from somewhere that runs unconditionally.
 - **The count comes from inside `_Linker`, never from re-scanning the finished markdown.** A post-hoc scan is both over- and under-inclusive: `_render_verse_block` links a gloss BEFORE wrapping it as `> *Literal: …*`, the segment title is duplicated into YAML frontmatter, entity notes repeat every target in their own frontmatter, and the inline-verse label is protected by position rather than by regex. The linker sees the one text the wikilink rule is actually applied to.
 - **Every occurrence counts, not one per block** — the question is how many unlinked mentions a reader meets. A de-linked short name nested inside a longer linked one is charged to the longer name (the diagnostic alternation is the longest-first union of linkable *and* de-linked targets, precisely so each physical occurrence has exactly one owner).
+- **A match #587's word-boundary guard refuses is not charged here.** The metric counts occurrences that carry no link *because of the collision*; `Teplik` inside the demonym `Tepliker` would carry no link with a single owner either, so charging it would inflate the number with occurrences a link group could never recover.
 - **`null` is not zero.** The marker is re-stamped WITHOUT a measurement the moment the old vault is cleaned, so an interrupted render cannot leave a previous render's number standing over notes it no longer describes. `delink_cost: null` in the GATE report means "not republished here", never "measured zero" — on the enabled path because no usable measurement is in the marker, and on the disabled path because the gate short-circuits before reading the vault at all. The renderer's own WARN and `adapter_result.delink_cost` are the authority there.
 
 `unlinked_occurrences` and `inline_links_emitted` are different cardinalities on purpose — occurrences versus links, and the wikilink rule emits at most one link per target per block. Both are reported under names that say which is which, and nothing is claimed about their ratio.
@@ -62,6 +63,88 @@ Two consumers, one authority: `render()` validates whatever map it is handed (`R
 `render_obsidian.py`'s own bytes changed, so `render_version` moved. With no sidecar the rendered markdown is unchanged, so `diff_rendered_output.py` still MATCHES — it prints the advisory `stale_baseline` WARN and exits `0`, and re-accepting is optional. **Adopting a group that takes effect changes the rendered links**, so the diff then MISMATCHES (exit `1`) and a deliberate re-accept is required. (A group whose target has no occurrences, or one the outsider/`sense_translated` rules leave de-linked anyway, changes no Markdown and still matches.) Either way the re-accept is `--accept-baseline --force-accept-baseline`: `--accept-baseline` alone refuses to overwrite a baseline that already exists. (The new schema file's own `_schemas_dir_hash` effect is the mid-run cost described above; it is not a cache-key field and never re-translates converged work.)
 
 Doing nothing is a supported outcome: with no sidecar present the loader is never imported (and neither is `jsonschema` on its behalf), no `link_groups` key is attached, and the rendered vault is byte-identical to 1.29.0's apart from the marker's new block.
+## 1.31.0 — 2026-08-18
+
+The Obsidian note filename stops mangling combining marks, and the punctuation the printed names in a real corpus actually carry — `.`, `,`, U+2019, and Hebrew's MAQAF/GERESH/GERSHAYIM. The allow-list stays curated, so a name carrying anything else (an en dash, quotation marks, an ampersand) still sanitizes to `_`. Closes #586.
+
+### What was wrong
+
+`sanitize_filename_component` kept a character only if `str.isalnum()` was true for it or it appeared in `_FILENAME_EXTRA_CHARS = " _-()'"`. `str.isalnum()` is true for a Hebrew *letter* and false for every combining mark, so niqqud, cantillation, MAQAF (U+05BE), GERESH (U+05F3) and GERSHAYIM (U+05F4) each became their own `_`, and the `_+` collapse only merged adjacent runs. Measured against the sanitizer as shipped through 1.30.0 (1.30.0's own wikilinker change did not touch this function) over a delivered he->en vault's real `canon.json`: **177 of 177** `source_form`s mangled — the book is fully pointed, so the damage was total, not marginal — and **57 of 144** distinct printed English forms, where the offenders were `.` (48), `,` (8) and `’` U+2019 (4). `Mrs. Adil` was written as `Mrs_ Adil`; a pointed name was written as a stem no reader can type, which matters because the filename — not the frontmatter title — is what Obsidian's quick switcher, file tree and graph view show.
+
+Nothing warned. The render+diff acceptance gate compares a fresh render against a blessed baseline, so a baseline frozen from the first mangled render makes the mangling the expected output forever.
+
+### The allow-list now has three legs
+
+It stays a POSITIVE allow-list — everything not admitted is still replaced with `_`, never blocked after the fact by a denylist of dangerous substrings.
+
+1. **`str.isalnum()`** — any Unicode alphanumeric, unchanged.
+2. **The combining-mark CATEGORIES `Mn`/`Mc`/`Me`.** A category test rather than an enumeration, and that is the argument for it: a combining mark is combining by definition, so it can be neither a path separator nor a file extension, and admitting the category wholesale therefore cannot weaken what the sanitizer guarantees.
+3. **A curated punctuation set**, `" _-()'"` plus `.` `,` (printed names), U+2019 RIGHT SINGLE QUOTATION MARK (parity with the ASCII apostrophe already admitted), and U+05BE MAQAF / U+05F3 GERESH / U+05F4 GERSHAYIM, which are letter-level orthography in Hebrew and Yiddish names rather than decoration. All four non-ASCII characters are spelled as `\u` escapes in the source: an RTL or combining character pasted into that line would be unreviewable in a diff.
+
+### Two properties moved from the allow-list's silence into code
+
+The old docstring defended excluding `.` on two grounds — a run of dots can never form a `..` traversal segment, and a name can never acquire an extension of its own. Admitting `.` removes both for free, so `sanitize_filename_component` now enforces them itself, and a test pins each:
+
+- **No traversal.** A run of `.` collapses to a single `.`, and `.` is stripped at both ends alongside `_` and space. The leading-dot strip does a second job: `diff_rendered_output.py`'s recursive walker skips dot-entries, so a dot-named note would be invisible to the very gate that is supposed to be watching this adapter's output.
+- **No extension of its own.** While the candidate ends in `.md` case-insensitively, that dot becomes `_` (`x.md` -> `x_md`, `x.MD` -> `x_MD`). Without it the wikilink identity — the relpath minus the ONE `.md` render() appends — would name a file that does not exist: `x.md` would be written as `x.md.md` and linked as `[[.../x.md]]`.
+
+A stem that survives as nothing but combining marks (a lone U+0301, or the U+FE0F left behind when an emoji's base character is replaced) now falls back to the deterministic `entity-<sha1>`/`segment-<sha1>` name. An invisible filename is the same unusable-name class this release exists to fix, and it is a class the widening itself introduces.
+
+### Three writability guards the reviews found, which the issue never asked for
+
+A run of marks used to collapse into a single `_`, so no input could make a stem meaningfully longer than itself. It can now, and the failure that exposes is not a bad filename — `_write_note` runs AFTER `_clean_vault_content` has emptied the managed vault, so a name the filesystem refuses aborts the render over a half-rebuilt vault rather than dropping one note. Two measured limits, both enforced before the normalization tail, and a third guard at the end of it (the device-name rule below):
+
+- **240 bytes** per stem (`_FILENAME_MAX_BYTES`), truncated on a character boundary. `NAME_MAX` is 255, counted in bytes on ext4 and in characters on APFS, so a byte budget is conservative for both; 240 also leaves room for the `.md` this script appends and for `_dedupe_path`'s `-<n>` collision suffix, and the collisions truncation creates are exactly what that function already resolves. **This half is a pre-existing bug, not a #586 regression:** 300 alphanumeric characters already sanitized to a 300-character stem and already raised `ENAMETOOLONG` before this release — measured against the parent commit — so the cap fixes that too.
+- **30 consecutive combining marks** per base (`_MAX_MARKS_PER_BASE`), the rest replaced with `_`. Measured on this project's filesystem: a filename carrying 31 marks on one base is created, 32 fails with `EILSEQ`, whatever its byte length — so the byte cap alone does not cover it, and 30 leaves a margin under it. The number defends that measured predicate and nothing else; it is deliberately NOT Unicode's Stream-Safe Text Format bound, which counts non-starters after NFKD and treats U+034F CGJ as a break, neither of which this loop does. It therefore over-catches in one direction — macOS accepts `A` + 30 marks + CGJ + 30 marks and this truncates it anyway, since CGJ is itself a mark. Under-catching would abort a render; over-catching costs a name no orthography produces, a fully pointed Hebrew letter carrying three or four marks rather than thirty-one.
+
+### What this does NOT fix, stated rather than left to be found
+
+- ~~Win32 reserved device names still pass through.~~ **Fixed here after all, on the MR bot's finding** (#592, closed by this release). A device basename stays reserved when an extension follows it, so `AUX.txt` and its emitted `AUX.txt.md` are both device paths that `_write_note` cannot create — the same half-rebuilt-vault failure the two caps above exist to prevent, and therefore the same defect rather than a separate wish. The basename now takes a `_`: `AUX.txt` → `AUX_.txt`, `CON` → `CON_`. The set is Microsoft's own list of 28 — `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, and the six ISO/IEC 8859-1 superscript aliases `COM¹` `COM²` `COM³` `LPT¹` `LPT²` `LPT³`, which the same page says Windows treats as digits in a device name, and which `str.isalnum()` admits so they used to sail straight through (the MR bot's second round). Enforced on every platform, because a vault is copied between machines. `Constantine`, `Aux Chien` and `nulla` are untouched. This release's first draft deferred it, and the deferral was wrong for a reason worth recording: the entry above had already claimed "writable at all" as a property of this function, and a property with a known hole in it is not a property.
+- **A trailing extension that is not `.md`** (`x.png` -> `x.png.md`) is not neutralized. A general trailing-extension rule over-catches legitimate names: `J.R.R` would become `J.R_R`.
+- **Two source forms differing only by an invisible mark** (U+034F COMBINING GRAPHEME JOINER, or a variation selector) now yield two filenames a reader cannot tell apart. That is the price of admitting the mark categories, and the category leg is what makes a pointed Hebrew name typable at all. Format characters (`Cf` — ZWJ/ZWNJ/RLM) are still replaced, for the same reason inverted: they are invisible, and admitting them would let two names that look identical resolve to two different files.
+
+### Cost to an existing vault, and what does not move
+
+Every note whose sanitized STEM changes is now written under a different filename — which is not the same set as "every name containing an admitted character": `.Alice`, `Alice.` and `x.md` sanitize to what they always did, so a canon full of those incurs no rename at all. The first render after upgrading therefore reports those notes as delete+create in the render+diff acceptance gate, and the blessed baseline has to be re-blessed once. The vault is a derived artifact rebuilt from the NodeStream — nothing is renamed in place — so any hand-written note elsewhere in the vault that wikilinked an OLD mangled name will break and needs re-linking. That is a one-time cost per book, paid deliberately.
+
+What does NOT move: `render_obsidian.py` is a member of neither `PLUGIN_BUNDLE_MEMBERS` (`cache_key.py`) nor `ORCHESTRATION_BUNDLE_MEMBERS` (`scaffold_setup.py`) — both tuples read, not remembered — so **no converged segment re-stales and no run identity changes**. `validate_backlinks.py` reconstructs note filenames by CALLING this same function, so its view cannot drift from the renderer's; no second edit was needed there.
+
+### Tests
+
+`tests/render_obsidian.test.py` gains a section for #586, where it previously had no test naming this function at all. **47 cases.** Seven mark/punctuation forms pinned to exact stems (all seven RED before the fix, each for the mangling reason). Nineteen hostile inputs pinning the traversal, extension and device-name properties to exact stems — an invariant-only assertion would pass for `x.md` -> `x.md`, which is exactly what the property forbids, and two of the nineteen (`x.md.`, `x_.md`) exist only to pin the ORDER of the normalization steps, which no other case can distinguish. One exhaustive property test over all 30 940 strings of length <= 4 drawable from a 13-character adversarial alphabet, with the exercised count asserted INSIDE the test so a loop that stopped running cannot pass by printing what a passing run prints. Three end-to-end `render()` tests for the pathological long/mark-heavy names, asserting the note is actually WRITTEN rather than that the string looks right. Sixteen Win32 device-basename cases: ten neutralized to exact stems (including all four superscript shapes), two whose own dot the `.md` rule already dissolved and which must therefore NOT be re-neutralized, and four ordinary names that must be left alone. One end-to-end test for a pointed Hebrew entity's written relpath and wikilink target, because #586 was measured on what a delivered vault carries, not on the helper.
+
+The property tests are green before the fix by construction, so their guard value was established by MUTATION instead — ten mutants, each RED for the right test and the right reason: dropping the dot-run collapse, the trailing-`.md` neutralization, the mark-only fallback, the byte cap, the mark-run cap, the Win32 device guard, or its superscript aliases; moving the `.md` loop before the dot strip, or the underscore collapse before the `.md` loop; and a sanitizer that answers `fallback` to everything, which the exhaustive test's second count assertion exists to kill (a bare iteration count would not: every property assertion is skipped on a fallback). Suite: `python3 -m pytest -q` from `plugins/literary-translator`, no selection or exclusion — 5708 passed, 3 skipped, 2 xfailed, measured on this branch after it was rebased onto 1.30.0. 47 of those are this entry's section 21; the parent's own total is not restated here, because it was measured before the rebase and would be a figure describing a tree this release no longer sits on.
+
+## 1.30.0 — 2026-08-18
+
+The inline wikilinker gains a word boundary. A `canonical_target_form` that is only *part* of a longer word in the translated prose is no longer wrapped — it used to be, and the delivered `ssk-he-en` volume 2 carries two instances of the result: the Yiddish demonym **Tepliker** ("the man from Teplik") rendered as `[[…|Teplik]]er`, the word cut in half around a link the reader can see. Closes #587.
+
+### What was wrong
+
+The matcher is one alternation over every target, longest-first (`render_obsidian.py:514-530`). Longest-first is a real guarantee, but it is a guarantee *about targets*: it stops a shorter target shadowing a longer one that contains it. It says nothing when the longer string is ordinary prose, and there was no boundary condition anywhere in the file — so any target that prefixes, infixes or suffixes a longer run got wrapped inside it.
+
+This is not a Yiddish quirk. Every language that forms a demonym or adjective by suffixing a place or personal name reaches it — `Breslov`/`Breslover`, `Nemirov`/`Nemirover`, `Paris`/`Parisian`, `Tudor`/`Tudors` — as does any target that happens to be a common short word or the start of one.
+
+### The rule
+
+`render_obsidian.py:636-711`: if the character immediately before or immediately after the matched span is alphanumeric under `str.isalnum()`, the match is discarded.
+
+- **Alphanumeric, never non-space.** `[[…|Reb Noson]]’s` is correct and common — the book that produced this issue has 37 such spans — and so are a following comma, period, closing quote or bracket. Only a letter or a digit means the target is a fragment of a word.
+- **Applied per match, against the adjacent characters — not as a `\b` in the pattern.** `\b` is asserted relative to each alternative's *own* edge character, so a target that begins or ends in punctuation flips what it demands: `re.escape("R.") + r"\b"` is wrong in *both* directions — it **matches** `R.Smith`, which this rule refuses, and does **not** match `R. Noson`, which this rule links, because after `R.` the `\b` position has a non-word character on each side and never fires. A test pins exactly that difference — a future rewrite to `\b` fails on it (and, separately, on the consumed-span test below).
+- **Script-agnostic without a branch.** Hebrew, Cyrillic and Devanagari letters are all `isalnum()`, so an uncased script behaves like a cased one; `str.isalnum()` is also the predicate the adapter's own filename allow-list already uses.
+- **A refused match is not "seen".** It is discarded before the first-occurrence bookkeeping, so a properly bounded occurrence later in the same block still takes the block's single wikilink and its `parenthetical_originals: first_occurrence` gloss.
+
+### One thing this deliberately does not do
+
+A refused span is still **consumed** — the scan is non-overlapping — so a different, shorter target starting inside it gets no turn of its own. Targets `Ann Marie` and `Marie` over the prose `JoAnn Marie` now link *nothing*, where re-scanning from one character on would link `Marie`. The re-scan was written, then cut: it recovers the occasional short mention, and it pays for that by linking a different entity inside a full name, in the delivered book. This renderer's stated order is that a false link is worse than a missing one — the `## Mentions` appendix is the authoritative, source-anchored occurrence index and recovers the miss; nothing recovers the wrong link. Pinned by a test that is red under the pre-fix renderer *and* under the re-scanning variant.
+
+Also still uncovered, and named rather than left to be discovered: characters that attach to a word without being alphanumeric — combining marks, ZWJ/ZWNJ, soft hyphen, the bidi marks. `target + ZWNJ + suffix` is still cut. That is filed as #590 rather than half-fixed here, because covering marks alone (they are the easy half) would have left the format characters behind and read as if the class were closed.
+
+### What it costs an existing project
+
+Nothing re-translates and nothing re-converges. `render_obsidian.py` is in none of the three hashed bundles — not `cache_key.py`'s 17 `PLUGIN_BUNDLE_MEMBERS`, not the two-member derivation tuple, not `scaffold_setup.py`'s 5 `ORCHESTRATION_BUNDLE_MEMBERS` — so no segment's cache key moves and the resume-integrity digest is unchanged.
+
+What does move is the **render baseline**. `diff_rendered_output.py:106` hashes `render_obsidian.py` into `_RENDER_VERSION_FILES`, so after a Step 0a refresh an already-accepted baseline reports `stale_baseline` as a warning, and for any book whose prose actually contained a cut the diff gate reports a real mismatch and exits 1. That is the intended signal, not a regression: review the diff, confirm the changed lines are exactly the un-cut words, and re-accept with `--accept-baseline --force-accept-baseline`. Already-delivered vaults are not repaired by installing this — they are repaired by re-rendering them.
 
 ## 1.29.0 — 2026-08-16
 

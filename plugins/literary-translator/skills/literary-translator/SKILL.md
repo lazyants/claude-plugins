@@ -2600,7 +2600,7 @@ model) that supersedes the older "native backlinks are the occurrence index"
 stance for `output.target: obsidian` projects; see
 `references/output-target-adapters/obsidian.md`.
 
-**What collision de-linking cost this book (1.30.0, #588).** On every
+**What collision de-linking cost this book (1.32.0, #588).** On every
 `output.target: obsidian` render — appendix on or off — a
 `canonical_target_form` owned by 2+ canon entries is de-linked (unless an
 operator-recorded `canon_link_groups.json` group covers every one of its

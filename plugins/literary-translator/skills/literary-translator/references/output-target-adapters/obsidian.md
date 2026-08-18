@@ -89,9 +89,11 @@ inside `[[...]]`.
   shorter one that happens to be its substring — **except** entries with
   `basis: sense_translated` (#138), which are deliberately **excluded from
   the matcher entirely**. A sense-rendering is an ordinary word by
-  construction ("Hope", "Wolf"), and this unanchored, no-word-boundary
-  matcher would otherwise wikilink every incidental occurrence of that word
-  in the prose, not just the entity's own mentions. Such an entry still gets
+  construction ("Hope", "Wolf"), and this matcher would otherwise wikilink
+  every incidental occurrence of that word in the prose, not just the
+  entity's own mentions — the boundary rule below does not help, and cannot:
+  it refuses a match that is only part of a longer word, while a
+  sense-rendering matches as a *whole* word. Such an entry still gets
   a full entity note (frontmatter, `basis` included) — only the body
   auto-linking is suppressed, erring toward the recoverable failure (a
   missing auto-link) over a false-link flood. (The pre-existing `not_a_name`
@@ -101,6 +103,40 @@ inside `[[...]]`.
   the resolved text, never entity/NLP matching); wrap only the **first
   occurrence per block** — a name repeated three times in one paragraph
   gets exactly one wikilink, not three.
+- **Refuse a match that is only part of a longer written run (#587).** If the
+  character immediately before or immediately after the matched span is
+  alphanumeric (`str.isalnum()`), the match is discarded: the target is a
+  fragment of a longer word, not a mention. Longest-first ordering does not
+  cover this — it stops a shorter *target* shadowing a longer one, and here
+  the longer string is ordinary prose. Without the rule the Yiddish demonym
+  `Tepliker` ("the man from Teplik") rendered as `[[…|Teplik]]er`, the word
+  cut in half in the delivered book; any language that forms a demonym or
+  adjective by suffixing a name reaches this (`Breslov`/`Breslover`,
+  `Paris`/`Parisian`, `Tudor`/`Tudors`), as does any target that is a common
+  short word.
+  - The test is **alphanumeric, never non-space**: `[[…|Reb Noson]]’s` is
+    correct and common, and so are a following comma, period or closing
+    quote. Only a letter or digit means the target is a fragment.
+  - It is applied **per match, against the adjacent characters** — not as a
+    `\b` in the pattern. `\b` is asserted relative to each alternative's own
+    edge character, so a `canonical_target_form` beginning or ending in
+    punctuation flips what it means: `R.` plus `\b` *matches* `R.Smith`,
+    which this rule refuses — and, in the other direction, does *not* match
+    `R. Noson`, which this rule links. It also needs no per-script branch,
+    since LETTERS are `isalnum()` in Hebrew and Cyrillic alike; combining
+    marks are not, which is the gap below.
+  - A refused span is still **consumed** (the scan is non-overlapping), so a
+    different, shorter target starting inside it gets no turn: targets
+    `Ann Marie` and `Marie` over the prose `JoAnn Marie` link nothing at
+    all, rather than linking `Marie` to a different entity inside a full
+    name. That is the deliberate direction — a missing link is recoverable
+    through the source-anchored `## Mentions` appendix, a wrong one is not.
+  - A refused match is **not** counted as seen, so it never spends the
+    block's single first-occurrence slot, nor the book-wide first occurrence
+    that `parenthetical_originals: first_occurrence` tracks.
+  - Still uncovered, deliberately: characters that attach to a word without
+    being alphanumeric — combining marks, ZWJ/ZWNJ, soft hyphen, the bidi
+    marks (#590). `target + ZWNJ + suffix` is still cut.
 - The wikilink itself: `[[<note_identity>|<canonical_target_form>]]` — link
   target/identity is `note_identity`: the same sanitized, collision-deduped,
   **folder-qualified** relpath (e.g. `People/Ivan`, minus the `.md`
@@ -221,7 +257,7 @@ share one NFC-exact `canonical_target_form` (grouping is case-sensitive —
 `"Peter"` and `"peter"` are distinct targets, each single-owner, each
 keeps its inline link), NONE of them gets an inline link on any obsidian
 render — appendix on or off — so the inline linker never misattributes a
-shared display text to one owner's `note_identity` (#207). Since 1.30.0
+shared display text to one owner's `note_identity` (#207). Since 1.32.0
 there is exactly one exception, and it is not an inference the renderer
 makes: when **every** owner of that target is a member of one
 `canon_link_groups.json` group and none is `sense_translated`, the operator
@@ -240,7 +276,7 @@ occurrences discoverable at all; with the section disabled, a de-linked
 homonym has no inline link AND no `## Mentions` backlink — see the
 disabled-path limitation noted above.
 
-### What de-linking cost this render — `delink_cost` (1.30.0)
+### What de-linking cost this render — `delink_cost` (1.32.0)
 
 De-linking is silent by construction: the vault renders, every gate passes,
 and nothing says how much of the book's naming went unlinked. In one
@@ -290,7 +326,7 @@ marker, a `delink_cost` block:
   about whether the render measured anything. The renderer's stderr WARN and
   `adapter_result.delink_cost` are the authority in that second case.
 
-### Re-linking one referent — `canon_link_groups.json` (1.30.0)
+### Re-linking one referent — `canon_link_groups.json` (1.32.0)
 
 De-linking cannot tell two spellings of one man from two different men, and
 in a pointed-script corpus the first case is the normal one. A
@@ -417,6 +453,101 @@ governs code identifiers, not this kind of data-derived filename — so the
 filename sanitizer's allowed character set is necessarily wider than
 `category`'s, while holding the same "positive allow-list, reject
 traversal/separators before any join" discipline.
+
+That set has three legs, and only the first is a plain character list:
+
+- **`str.isalnum()`** — any Unicode alphanumeric, in any script.
+- **the combining-mark CATEGORIES `Mn`/`Mc`/`Me`** — niqqud, cantillation
+  and every other script's marks. This leg is a Unicode-category test
+  rather than an enumeration on purpose: a combining mark is combining by
+  definition, so it can be neither a path separator nor an extension, and
+  admitting the category as a whole cannot weaken the guarantees below.
+  Before this leg existed, a fully pointed Hebrew name became one `_` per
+  mark — a stem no reader can type (#586).
+- **a curated punctuation set** — `space _ - ( ) '` plus `. ,` (printed
+  names such as `Mrs. Adil`, `Miriam, daughter of our Rebbe`), U+2019 RIGHT
+  SINGLE QUOTATION MARK (parity with the ASCII apostrophe already
+  admitted — a name such as "Be'er Mayim Chaim" may carry either one,
+  depending on source, and both must sanitize the same way), and U+05BE
+  HEBREW PUNCTUATION MAQAF, U+05F3 GERESH, U+05F4 GERSHAYIM — letter-level
+  orthography in Hebrew and Yiddish names, not decoration.
+
+Admitting `.` means two properties that used to come free from excluding it
+outright are now enforced explicitly, in code — plus one new guard the mark
+leg above makes necessary on its own:
+
+- a run of `.` collapses to a single `.`, and `.` is stripped at both ends
+  alongside `_`/space — so a sanitized stem can never *be* or *contain* a
+  `..` traversal segment, can never start with `.` (which would also hide
+  the note from `diff_rendered_output.py`'s recursive vault walker, which
+  skips a dot-prefixed path component at every level — a dot-named note
+  would be invisible to the render+diff acceptance gate that is supposed
+  to be watching this adapter's own output), and can never end with `.`;
+- while the candidate still ends in `.md`, case-insensitively, that `.`
+  becomes `_` (`x.md` → `x_md`, `x.MD` → `x_MD`) — `.md` is the extension
+  this adapter itself appends, so a stem already carrying one would make
+  the wikilink identity (the relpath minus the appended `.md`) name a file
+  that does not exist;
+- if every surviving character is a combining mark, the deterministic
+  fallback name is used instead of the mark-only result — a stem made
+  entirely of invisible marks is a filename no reader can even see, let
+  alone type.
+
+`tests/render_obsidian.test.py` pins all three properties above and the
+exact stems the three legs produce.
+
+Two further caps exist for a different reason — not what the name *says*,
+but whether the filesystem will accept it at all. `_write_note` runs after
+`_clean_vault_content` has already emptied the managed vault, so a name the
+kernel refuses does not lose one note: it aborts the render over a
+half-rebuilt vault. Both are applied before the normalization tail, and both
+were the review's finding rather than #586's:
+
+- **240 bytes** per stem, truncated on a character boundary. `NAME_MAX` is
+  255 — bytes on ext4, characters on APFS — so a byte budget is
+  conservative for both, and 240 leaves room for the appended `.md` and for
+  `_dedupe_path`'s `-<n>` suffix. The truncation collisions this can create
+  are exactly what `_dedupe_path` already resolves. Half of this is
+  pre-existing: 300 alphanumeric characters already produced a
+  300-character stem before the mark leg existed.
+- **30 consecutive combining marks** per base, the rest replaced with `_`.
+  Measured: macOS creates a filename with 31 marks on one base and refuses
+  32 with `EILSEQ` regardless of length, so the byte cap does not cover it;
+  30 leaves a margin under that measured threshold, and defends that
+  predicate only. It over-catches in one direction on purpose — macOS
+  accepts `A` + 30 marks + U+034F CGJ + 30 marks, and this cap truncates it
+  anyway, because CGJ is itself a mark and counts toward the run. Under-
+  catching aborts a render; over-catching costs a name no orthography
+  produces, since a fully pointed Hebrew letter carries three or four marks,
+  not thirty-one.
+
+Accepted, documented residuals:
+
+- **Format characters** (`Cf` — ZWJ/ZWNJ/RLM and friends) are deliberately
+  NOT admitted: they are invisible, so admitting them would let two names
+  that look identical to a reader resolve to two different files. The same
+  reasoning cuts the other way for a mark this sanitizer DOES admit: two
+  source forms differing only by an invisible mark outside `Cf` (e.g.
+  U+034F COMBINING GRAPHEME JOINER) now sanitize to two visually identical
+  filenames — accepted, since excluding all of `Mn`/`Mc`/`Me` to close that
+  gap would also exclude legitimate niqqud and cantillation.
+- A stem that happens to end in some OTHER recognized extension (`.png`)
+  is not neutralized — only a trailing `.md` is, since a general
+  trailing-extension rule would damage legitimate names like `J.R.R`.
+- Win32 reserved device basenames — Microsoft's own list of 28: `CON`,
+  `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9` and the six ISO/IEC
+  8859-1 superscript aliases `COM¹` `COM²` `COM³` `LPT¹` `LPT²` `LPT³`,
+  which Windows treats as digits in a device name and which `str.isalnum()`
+  admits — get
+  a `_` appended to the basename — `AUX.txt` → `AUX_.txt`, `CON` → `CON_` —
+  because a device name stays reserved when an extension follows it, so
+  both `AUX.txt` and the emitted `AUX.txt.md` are device paths. The bare
+  form was already unwritable before #586 and admitting `.` widened the
+  class, which is what makes it the same defect as the two caps rather than
+  a separate wish. Enforced on every platform, not only Windows: a vault is
+  copied and synced between machines, so a name unwritable *there* is a
+  defect wherever it was rendered. Names that merely start with or contain a
+  device word (`Constantine`, `Aux Chien`, `nulla`) are untouched.
 
 ## See also
 

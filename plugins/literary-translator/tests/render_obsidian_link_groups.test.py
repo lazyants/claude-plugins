@@ -388,6 +388,41 @@ def test_regex_metacharacters_in_a_target_are_escaped(tmp_path):
     assert result["delink_cost"]["unlinked_occurrences_total"] == 1
 
 
+def test_a_boundary_refused_match_is_not_charged_to_delinking(tmp_path):
+    """#587's word-boundary guard and #588's cost metric meet here, and the
+    metric's own DEFINITION settles it: it counts occurrences that carry no
+    link BECAUSE OF THE COLLISION. "Teplik" inside the demonym "Tepliker"
+    would carry no link even with a single owner, so charging it to
+    de-linking would inflate the number with occurrences a link group could
+    never recover -- and send the operator after a cost that is not there."""
+    entries = {
+        "טעפליק": canon_entry("טעפליק", "Teplik"),
+        "תפליק": canon_entry("תפליק", "Teplik"),   # collides -> de-linked
+    }
+    ns = make_nodestream([make_node(
+        "n1", "seg01", "A Tepliker spoke, and another Tepliker answered.")])
+    _, result = render_into(tmp_path, ns, make_canon(entries), make_profile())
+    assert result["delink_cost"]["unlinked_occurrences_total"] == 0
+    assert result["delink_cost"]["delinked_targets"] == [{
+        "canonical_target_form": "Teplik",
+        "owners": ["טעפליק", "תפליק"],
+        "unlinked_occurrences": 0,
+    }]
+
+
+def test_a_properly_bounded_occurrence_of_the_same_target_is_still_charged(tmp_path):
+    """The control for the test above: the guard must suppress the FRAGMENT
+    match only, never the metric itself."""
+    entries = {
+        "טעפליק": canon_entry("טעפליק", "Teplik"),
+        "תפליק": canon_entry("תפליק", "Teplik"),
+    }
+    ns = make_nodestream([make_node(
+        "n1", "seg01", "A Tepliker left Teplik, and Teplik remembered.")])
+    _, result = render_into(tmp_path, ns, make_canon(entries), make_profile())
+    assert result["delink_cost"]["unlinked_occurrences_total"] == 2
+
+
 def test_a_preexisting_wikilink_is_not_counted_as_emitted(tmp_path):
     """`_Linker` PRESERVES a `[[…]]` already present in the translated
     source text (it is a protected span). Counting emitted links by
