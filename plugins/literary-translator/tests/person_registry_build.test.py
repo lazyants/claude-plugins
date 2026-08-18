@@ -1157,3 +1157,48 @@ def test_a_multi_line_quote_survives_verbatim_in_json_and_collapses_in_markdown(
     text = (prepped / "registry" / "PEOPLE.md").read_text(encoding="utf-8")
     assert "“Jean, frère de Marie, chantait”" in text                            # one line
     assert "chantait”" in text and "\nchantait" not in text
+
+
+# ---------------------------------------------------------------------------
+# The delivered book is an input, and is bound like one
+# ---------------------------------------------------------------------------
+
+def _mutate_nodestream(root, old: str, new: str) -> None:
+    path = root / "out" / ".assembled" / "nodestream.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    for node in doc["nodes"]:
+        node["text"] = node["text"].replace(old, new)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def test_a_nodestream_changed_after_prep_is_refused_by_claims(prepped):
+    """`--claims` reads a printed surface's evidence out of the delivered
+    corpus. A book re-assembled between the steps would hand Pass B passages
+    from one text and have its affirmations applied to another."""
+    _mutate_nodestream(prepped, "John", "Robert")
+    fx.write_verdict(prepped, fx.verdict_doc(prepped))
+    code, payload = fx.run(prepped, "--claims")
+    assert code == 1
+    assert payload["reason"] == "nodestream_changed"
+
+
+def test_a_nodestream_changed_after_adjudication_is_refused_by_build(prepped):
+    """The dangerous shape is not a surface that VANISHES — that reports
+    `not_found_in_target_text`, which is loud. It is a surface that still
+    occurs, somewhere else, belonging to someone else, and is counted against
+    an affirmation given for the old text."""
+    assert _through_claims(prepped)[0] == 0
+    fx.write_adjudications(prepped)
+    _mutate_nodestream(prepped, "John", "Robert")
+    code, payload = fx.run(prepped, "--build")
+    assert code == 1
+    assert payload["reason"] == "nodestream_changed"
+    assert not (prepped / "registry" / "person_registry.json").exists()
+
+
+def test_the_bound_digest_reaches_the_artifact(prepped):
+    assert _full(prepped)[0] == 0
+    ns = json.loads((prepped / "out" / ".assembled" / "nodestream.json").read_text(encoding="utf-8"))
+    prep = json.loads((prepped / "registry" / "registry_input.json").read_text(encoding="utf-8"))
+    assert prep["nodestream_sha256"] == pr.sha256_hex(ns)
+    assert fx.registry(prepped)["provenance"]["nodestream_sha256"] == prep["nodestream_sha256"]

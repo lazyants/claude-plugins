@@ -881,6 +881,10 @@ def cmd_prep(args, durable_root: Path, schema_dir: Path) -> dict:
 
     body = {
         "schema_version": 1,
+        # The assembled book, bound into this document's own digest so every
+        # later step inherits the binding for free: `--claims` reads a printed
+        # surface's evidence out of it and `--build` counts against it.
+        "nodestream_sha256": sha256_hex(nodestream),
         "units": units,
         "excluded_by_canon_declaration": excluded,
         "counts": {
@@ -920,6 +924,31 @@ def cmd_prep(args, durable_root: Path, schema_dir: Path) -> dict:
 # Pre-claims gates P1-P5. Run by --claims before it emits, and re-run by
 # --build, which never assumes --claims ran over the same bytes.
 # ---------------------------------------------------------------------------
+
+def verify_nodestream(prep: dict, nodestream: dict) -> str:
+    """The assembled book is an INPUT to this chain, so it is bound like one.
+
+    `--claims` reads every `printed_surface` claim's evidence out of the
+    delivered corpus, and `--build` counts against it. Neither the prep digest
+    nor the verdict digest nor the claims digest covers those bytes, so a
+    NodeStream re-assembled or hand-edited between the steps would have Pass B's
+    affirmations -- given for passages it was shown -- applied to a different
+    book. The dangerous shape is not the obvious one (a surface that vanishes
+    reports `not_found_in_target_text`, which is loud); it is a surface that
+    still occurs, somewhere else, belonging to someone else, and is counted
+    silently.
+    """
+    stated = prep.get("nodestream_sha256")
+    actual = sha256_hex(nodestream)
+    if stated != actual:
+        raise RegistryError(
+            "nodestream_changed",
+            f"the assembled NodeStream has changed since --prep ran ({stated} -> {actual}); "
+            f"every judgement in this chain was made against the old one -- re-run --prep, "
+            f"Pass A, --claims and Pass B against the current book",
+        )
+    return actual
+
 
 def load_prep(durable_root: Path):
     doc = read_json(durable_root / "registry" / "registry_input.json", "registry/registry_input.json")
@@ -1297,6 +1326,7 @@ def cmd_claims(args, durable_root: Path, schema_dir: Path) -> dict:
     nodestream = read_json(durable_root / "out" / ".assembled" / "nodestream.json",
                            "the assembled NodeStream (out/.assembled/nodestream.json)")
     prep, prep_digest = load_prep(durable_root)
+    verify_nodestream(prep, nodestream)
     verdicts = read_json(durable_root / "registry" / "registry_verdicts.json",
                          "registry/registry_verdicts.json (Pass A's output)")
 
@@ -1566,6 +1596,7 @@ def cmd_build(args, durable_root: Path, schema_dir: Path) -> dict:
     nodestream = read_json(durable_root / "out" / ".assembled" / "nodestream.json",
                            "the assembled NodeStream (out/.assembled/nodestream.json)")
     prep, prep_digest = load_prep(durable_root)
+    nodestream_digest = verify_nodestream(prep, nodestream)
     verdicts = read_json(durable_root / "registry" / "registry_verdicts.json",
                          "registry/registry_verdicts.json (Pass A's output)")
     claims_doc = read_json(durable_root / "registry" / "registry_claims.json",
@@ -1932,6 +1963,7 @@ def cmd_build(args, durable_root: Path, schema_dir: Path) -> dict:
         "schema_version": 1,
         "provenance": {
             "input_sha256": prep_digest,
+            "nodestream_sha256": nodestream_digest,
             "verdicts_sha256": verdicts_digest,
             "claims_sha256": claims_digest,
             "assembly_currency": "not_bound",

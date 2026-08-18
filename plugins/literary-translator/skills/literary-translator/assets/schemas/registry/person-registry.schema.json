@@ -22,9 +22,10 @@
     "provenance": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["input_sha256", "verdicts_sha256", "claims_sha256", "assembly_currency", "surface_boundary"],
+      "required": ["input_sha256", "nodestream_sha256", "verdicts_sha256", "claims_sha256", "assembly_currency", "surface_boundary"],
       "properties": {
         "input_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "nodestream_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The assembled NodeStream these numbers were computed from, bound into registry_input.json's own body and re-verified by --claims and --build. Without it the delivered book is the one input the chain reads but does not pin: a re-assembly between the steps would apply Pass B's affirmations, given for passages it was shown, to a different book -- and the dangerous case is silent, since a surface that merely MOVED still counts." },
         "verdicts_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The digest of the Pass A verdict this registry was projected from. registry_claims.json carries it inside its own hashed body, and --build refuses when the verdict on disk has moved -- an affirmation is valid only for the exact claim it was shown." },
         "claims_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "assembly_currency": {

@@ -161,6 +161,7 @@ unchecked assertion.
 | --- | --- |
 | P1 | a verdict that fails `registry-verdicts.schema.json` |
 | P2 | a verdict whose `input_sha256` is not the prep on disk |
+| P2a | a NodeStream whose bytes are not the ones `--prep` read |
 | P3 | a unit claimed by nobody, or by two people; a refusal-only unit anywhere but `refusals[]` |
 | P4 | a unit the prep input does not contain |
 | P5 | a quote absent from the container its locator names; a surface containing an assembly sentinel |
@@ -172,6 +173,16 @@ unchecked assertion.
 | P6 | a duplicate `person_id`; a `to_person_id` outside Pass A's cast |
 | P7 | a line break in a field that becomes one line of `PEOPLE.md` |
 | B6 | a registry that fails `person-registry.schema.json`, before it is written |
+
+**And to the BOOK.** The delivered NodeStream is the one input this chain reads
+but nothing else pins: `--claims` takes a printed surface's evidence out of it
+and `--build` counts against it, while the prep, verdict and claims digests all
+cover documents rather than the corpus. So `--prep` hashes it into its own body
+— every later digest inherits the binding for free — and `--claims` and
+`--build` re-verify it. The failure this closes is the quiet one: a surface that
+VANISHES from a re-assembled book reports `not_found_in_target_text`, which a
+reader sees, but a surface that merely MOVED still counts, now against an
+affirmation given for passages Pass B was shown in a different text.
 
 **B1 binds to the VERDICT, not only to the prep.** `registry_claims.json`
 carries the digest of the Pass A verdict it was projected from, inside its own
