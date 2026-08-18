@@ -165,13 +165,29 @@ def rendered_lines(text: str) -> list[str]:
                 fence = None
             continue
 
-        visible = ""
         rest = line
+        if in_comment:
+            closed = rest.find("-->")
+            if closed == -1:
+                continue
+            rest = rest[closed + 3:]
+            in_comment = False
+
+        # The fence is decided BEFORE the line is scanned for comments, and on what is left of the
+        # line rather than on the whole of it. An opening fence's INFO STRING is not content, so a
+        # `<!--` in it opens nothing -- reading it as a comment leaves the state set after the
+        # fence closes and hides every live surface after that, fail-open again.
+        stripped = rest.lstrip(" ")
+        marker = FENCE_RE.match(stripped) if len(rest) - len(stripped) <= 3 else None
+        if marker:
+            fence = (marker.group(0)[0], len(marker.group(0)))
+            continue
+
+        visible = ""
         while rest:
             if in_comment:
                 closed = rest.find("-->")
                 if closed == -1:
-                    rest = ""
                     break
                 rest = rest[closed + 3:]
                 in_comment = False
@@ -184,12 +200,6 @@ def rendered_lines(text: str) -> list[str]:
             rest = rest[opened + 4:]
             in_comment = True
         if in_comment and not visible.strip():
-            continue
-
-        stripped = visible.lstrip(" ")
-        marker = FENCE_RE.match(stripped) if len(visible) - len(stripped) <= 3 else None
-        if marker:
-            fence = (marker.group(0)[0], len(marker.group(0)))
             continue
         kept.append(visible)
     return kept
