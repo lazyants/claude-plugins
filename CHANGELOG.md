@@ -39,10 +39,12 @@ Closes #574.
 
 ### Known limitations
 
-- **Which titles are refused is a property of the link mode, and the two modes genuinely differ.**
-  Measured: a `]` anywhere in the title is refused in both modes; a balanced `[beta]` is refused in
-  path mode and accepted under wikilinks. The adapters tell the reader to run the helper rather
-  than predict it.
+- **Which titles are refused is not summarizable by a character rule, and neither mode is
+  uniformly the stricter one.** Measured: `Items]v1` and `A [b] c` are refused in both modes;
+  `Items]` and `Items [beta]` are refused in path mode and accepted under wikilinks; `Items \] esc`
+  is accepted in path mode and refused under wikilinks. The adapters therefore tell the reader to
+  run the helper rather than predict it, and a verdict measured in one mode says nothing about the
+  other.
 - **Rows already in an operator's index from before this release are not retro-reported.**
   `findStaleChapterRows` still skips them while their title stays fixed, by the same construction
   as above. The refusal's halt is what leads the operator to change the title, after which every

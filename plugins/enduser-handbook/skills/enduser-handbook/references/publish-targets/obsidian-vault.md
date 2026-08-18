@@ -373,10 +373,20 @@ the one exception to "do all of these" — see its own conditional note below.
      This mirrors the nested-list writer's `unwritable` outcome and carries the same
      remedy: the check is on the row THIS run composes, never on rows already in the file,
      and it names a title the operator can change rather than an edit they cannot find.
-     Which titles it refuses is a property of the link mode, not a rule to restate from
-     memory: measured, a `]` anywhere in the title is refused in both modes, while a
-     balanced `[beta]` is refused in path mode and accepted in wikilinks mode. Run the
-     helper; never predict its answer.
+     Which titles it refuses is a property of the link mode AND of the exact spelling,
+     and it is not summarizable by any character rule — which is the reason the
+     instruction is to run the helper rather than to restate a rule from memory.
+     Measured, in all three directions: `Items]v1` and `A [b] c` are refused in both
+     modes; `Items]` and `Items [beta]` are refused in path mode and accepted under
+     wikilinks; and `Items \] esc` runs the other way, accepted in path mode and refused
+     under wikilinks. Neither mode is uniformly the stricter one, so a verdict measured in
+     one mode says nothing about the other. Run the helper; never predict its answer.
+     What the refusal does NOT depend on is the row's SHAPE: it parses the line for the
+     destination, so a numbered TOC line, a table cell, an indented child and a bare link
+     all read back the same as the `-` bullet this adapter emits — measured. That is the
+     opposite of the companion scan's own-row test above, which IS shape-sensitive by
+     design, and it is why the refusal cannot fire spuriously on an index convention this
+     adapter did not anticipate.
 
    Wikilinks mode instead runs the qualified/legacy-bare **union scan** through
    `classifyChapterWiring` (`assets/lib/chapter-paths.mjs`) — see the "Step 0" bullet

@@ -6389,6 +6389,14 @@ const REFUSAL_TABLE_574 = [
   { title: 'Items [beta]', path: false, wiki: true }, // bracketed: modes genuinely disagree
   { title: '(Notes)', path: true, wiki: true }, // parenthesised: reads back cleanly in both
   { title: 'Items & Co: v1', path: true, wiki: true }, // '&'/':' : reads back cleanly in both
+  // The two rows below exist to kill a universal, not to add coverage. The first draft of the
+  // adapter prose claimed "a `]` anywhere in the title is refused in both modes" — false in BOTH
+  // directions, and no cell above could have caught it: 'Items]' is ACCEPTED under wikilinks
+  // (a `]` that is refused elsewhere), and 'Items \\] esc' is ACCEPTED in path mode while
+  // wikilinks refuses it (so path mode is not uniformly the stricter one either). Any future
+  // attempt to summarize the refused set with a character rule has to survive these two.
+  { title: 'Items]', path: false, wiki: true }, // a trailing ']' that wikilinks accepts
+  { title: 'Items \\] esc', path: true, wiki: false }, // the reverse asymmetry: path accepts it
 ];
 
 for (const mode of ['path', 'wiki']) {

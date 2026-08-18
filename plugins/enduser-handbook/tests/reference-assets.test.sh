@@ -5395,9 +5395,26 @@ has_joined_in_section "obsidian-vault: the wikilinks absent-to-append mapping ca
 # comfortable direction if it rots: that the refused set differs BY LINK MODE (so a reader cannot
 # carry one mode's verdict to the other), and that the wikilink option is passed for agreement with
 # step 0 rather than because this row needs it.
-has_joined_in_section "obsidian-vault: which titles are refused is measured per link mode, not predicted" \
+# BOTH directions of the asymmetry are pinned, and that is the point rather than thoroughness: the
+# first draft of this prose pinned only "refused in path, accepted in wikilinks" and asserted, one
+# sentence earlier, that a `]` anywhere is refused in BOTH modes. Measured, that universal is false
+# in both directions (`Items]` reads back under wikilinks; `Items \] esc` reads back in path mode),
+# and the one-directional pin is exactly what left the false half unguarded.
+has_joined_in_section "obsidian-vault: the path-strict direction of the asymmetry is named with its titles" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
-  'refused in path mode and accepted in wikilinks mode'
+  'are refused in path mode and accepted under'
+has_joined_in_section "obsidian-vault: the wikilink-strict direction is named too, so neither mode reads as stricter" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'runs the other way, accepted in path mode and refused'
+has_joined_in_section "obsidian-vault: no character rule is claimed to summarize the refused set" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'not summarizable by any character rule'
+# The refusal is shape-AGNOSTIC while the companion scan's own-row test is shape-SENSITIVE. Stating
+# only the first invites a reader to assume the refusal inherits the scan's row-shape caution and
+# therefore over-refuses on a numbered or table index; measured, it does not.
+has_joined_in_section "obsidian-vault: the refusal does not depend on the index row's shape" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'all read back the same as the `-` bullet this adapter emits'
 has_joined_in_section "obsidian-vault: the wikilink option is passed for agreement with step 0, and says so" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
   'reads back identically with'
