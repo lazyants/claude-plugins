@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.31.2 — 2026-08-18
+
+Corrections: ten sentences that state how many scripts a hashed bundle covers or enumerate them, and the drift test that was holding one of the enumerations wrong. No runtime behaviour changes and no new instruction. Closes #591 in part — one site is deliberately left, see below.
+
+### What was wrong
+
+`ORCHESTRATION_BUNDLE_MEMBERS` gained `claim_record.py` in 1.21.0 (#438) and has held **five** scripts ever since. `PLUGIN_BUNDLE_MEMBERS` has held **seventeen** entries — fifteen scripts and two workflow templates — since 1.23.0. The prose around both went on saying four and fifteen.
+
+Some of it was decorative: a reader who takes a wrong number away can act on nothing. Four sentences were not decorative, because they **enumerate members by name** and the names were incomplete — `ledger-and-resumability.md` and `SKILL.md`'s W7 section both omitted `claim_record.py` from the orchestration bundle, and `orchestration-and-batching.md` omitted it there *and* omitted `claim_record.py` and `reject_review.py` from the plugin bundle. A reader working out what a change to any of those files re-invalidates got *no* from the reference and *yes* from the tuple. Those four are what this release exists for; the counts came along because they sit in the same sentences.
+
+Note the shape of the drift: `orchestration-and-batching.md`'s own list carried a warning to read the tuple instead, *because it had already gone stale once* — and then went stale again. A restatement with nothing testing it always loses that race, which is why the fix everywhere is a pointer rather than a corrected list.
+
+The failure mode is a wrong **expectation**, not a wrong artifact: `scaffold_setup.py` writes the correct marker whatever the doc says, and its `test_orchestration_members_pinned` holds the tuple byte-for-byte. What the reader loses is the ability to predict whether a run resumes.
+
+### The wording rule this settles on
+
+Where a count was load-bearing, it is now **a pointer to the tuple** rather than a number restated beside it — `orchestration-and-batching.md` already modelled this ("read the `PLUGIN_BUNDLE_MEMBERS` tuple for the authoritative list rather than" a copy). A number in prose has no test behind it and drifts silently the next time a member is added; the tuple cannot. The one place that still enumerates by name — the orchestration bundle's own bullet — now says which artifact wins if the two ever disagree, and says why `claim_record.py` is in both bundles.
+
+Two sentences were NOT "corrected", for opposite reasons. `SKILL.md`'s #409 upgrade note says that release added `segment_dispatch_driver.py` to a tuple of a stated size; that count was true of the release it describes, and replacing it with today's number would have made a historically accurate sentence false — the number is dropped instead. And `cache_key.py`'s "NEVER the four orchestration-only scripts" is simply **right**: five orchestration members minus the one that is also a plugin member leaves exactly four that are orchestration-*only*. The issue that prompted this release listed it as a seventh error; it was not one, and that is corrected on the issue.
+
+### The seventh site, and why it is still wrong on purpose
+
+`cache_key.py`'s own header comment says "thirteen scripts (+ two workflow templates)", which is wrong by the same drift (fifteen). It stays wrong here because **`cache_key.py` is itself a `PLUGIN_BUNDLE_MEMBERS` entry**, so `plugin_bundle_hash` is a sha1 over its bytes, comments included: fixing that word moves the hash, changes every converged segment's cache key, and forces a fresh no-resume `RUN_ID` in every existing durable root at the next Step 0a refresh.
+
+Stated precisely, because an earlier draft of this entry over-stated it: that is **not** a re-translation. `plugin_bundle_hash` is one of the three `MACHINERY_ONLY_CACHE_KEY_FIELDS` (1.25.0, #491), so the resulting `stale` carries a machinery-only reason — assembly still ships those segments, and the selector refuses to re-review them precisely because nothing about the content moved. The cost is a corpus-wide stale flag and a lost resume, which is still not a price to pay for a word.
+
+So it waits for the next release that moves that hash for a reason of its own, and is corrected in the same commit — the identical reasoning that file already applies to its own membership additions ("added in the release that already moves this hash, so it costs no reclassification beyond what that release pays anyway"). #591 stays open holding exactly that one site.
+
+### The test was the reason the doc stayed wrong
+
+`schema_literal_drift.test.py` checks each bundle's prose against the code that owns it — and for two of the three bundles it does exactly that, reading `cache_key.py`'s tuples. For the orchestration bundle it did something else: it **hard-coded the four names it expected**, and asserted the set was disjoint from `plugin_bundle_hash`. Both statements stopped being true at #438, and because the expectation was a literal in the test rather than a read of the tuple, **correcting the doc turned the test red** — which is the shape that kept the sentence wrong for nine releases. A hand-typed membership list inside a drift test does not detect drift; it freezes it.
+
+It now reads `scaffold_setup.py`'s `ORCHESTRATION_BUNDLE_MEMBERS` with `ast` (not by importing it — that file does a sibling `import cache_key`, which would tie this test's result to whether another test module loaded it first) and compares the doc against that, exactly as the two sibling tests do.
+
+Disjointness against `plugin_bundle_hash` is gone, because it is not true and was never meant to be. What replaces it is the property actually worth holding: an overlap is legal, a **silent** overlap is not — every member registered in both bundles must also be named in `scaffold_setup.py` outside the tuple literal, i.e. explained where it is declared. That justification for `claim_record.py` has been moved above the assignment so it survives a rewrite of the literal, and so a reader meets it before the names. Disjointness against `derivation_bundle_hash` stays: nothing has ever been in both, and the regenerate-before-retranslate treatment those two get would be incoherent shared with either other bundle.
+
+Both halves were watched failing: dropping `claim_record.py` from the doc goes red on membership, and deleting the justification comment goes red on the new check.
+
+### What it costs
+
+Nothing. No hashed file changed: `SKILL.md`, the references and `scaffold_setup.py` are in no bundle, so no cache key moves, no segment re-stales, and the resume-integrity digest is unchanged. Suite unchanged in count.
+
 ## 1.31.1 — 2026-08-18
 
 1.31.0's own mark-run guard failed on its own terms, and this fixes it. Found by a security pass that ran after the merge, reproduced here before anything was changed.
