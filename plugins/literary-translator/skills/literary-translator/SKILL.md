@@ -402,10 +402,11 @@ python3 {{PLUGIN_ROOT}}/assets/scripts/scaffold_setup.py --durable-root ${durabl
 ```
 
 It writes `${durable_root}/runs/.plugin_bundle_hash` (sha1 over the sorted
-concatenated bytes of the 15 `PLUGIN_BUNDLE_MEMBERS` under `scripts/` — read by
-`cache_key.py` rather than re-hashing the bundle per segment) and
-`${durable_root}/runs/.orchestration_bundle_hash` (sha1 over the four
-orchestration-only scripts — non-gating for convergence, never part of the
+concatenated bytes of every `PLUGIN_BUNDLE_MEMBERS` entry under `scripts/` — read by
+`cache_key.py` rather than re-hashing the bundle per segment; that tuple in
+`cache_key.py` is the authority on its own membership, never a count restated
+here) and `${durable_root}/runs/.orchestration_bundle_hash` (sha1 over
+`scaffold_setup.py`'s own `ORCHESTRATION_BUNDLE_MEMBERS` — non-gating for convergence, never part of the
 composite cache key, but gating for resume: folded into the resume-integrity
 digest, and also surfaced in W8's reporting). Both are written atomically
 (sibling temp file + `os.replace`) with a trailing newline; both readers
@@ -418,7 +419,7 @@ it still doesn't resolve to a real file.
 
 **#409 upgrade note — mandatory, not optional, on a RESUMED project
 (outcome 2 above):** this release added `segment_dispatch_driver.py` to
-`PLUGIN_BUNDLE_MEMBERS` (now 15 members, above), which moves
+`PLUGIN_BUNDLE_MEMBERS` (the tuple named above), which moves
 `plugin_bundle_hash` for every project on upgrade. A moved
 `plugin_bundle_hash` makes every already-converged segment's cache key
 mismatch, reclassifying it `stale` — dispatch-eligible again.
@@ -2463,10 +2464,10 @@ Runs at W7 over every converged segment:
 - Reads only the canonical `draft_path(seg) = segments/{seg}.draft.json`.
 - **Excluded from every bundle hash** — not a member of `plugin_bundle_hash`
   (runs strictly after every segment is already converged, over data already
-  on disk) nor of `orchestration_bundle_hash` (whose four members are
-  `draft_ready.py`, `ledger_merge.py`, `language_smoke_report.py`, and
-  `select_segments.py` — see `references/ledger-and-resumability.md`;
-  `final_audit.py` is not one of them). Editing `final_audit.py` on its own
+  on disk) nor of `orchestration_bundle_hash` (whose members are
+  `scaffold_setup.py`'s own `ORCHESTRATION_BUNDLE_MEMBERS` tuple, restated in
+  `references/ledger-and-resumability.md`; `final_audit.py` is not one of
+  them). Editing `final_audit.py` on its own
   never flips a cache key or the resume-integrity digest via either bundle.
 - **Structural-completeness gate (`scripts/validate_assembled.py`, #202):** runs
   immediately AFTER `final_audit.py` succeeds (default scope, i.e.
