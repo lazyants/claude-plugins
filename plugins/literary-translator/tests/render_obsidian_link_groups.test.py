@@ -463,8 +463,17 @@ def test_a_boundary_refused_delinked_span_is_still_consumed(tmp_path):
 def test_the_short_target_still_links_elsewhere_in_the_same_block(tmp_path):
     """The other half of the corrected sentence: consuming a boundary-refused
     span costs the short target its link AT THAT SPOT ONLY. A later genuine
-    occurrence in the same block still links -- the consumed span never
-    spends the block's one-link-per-target budget."""
+    occurrence in the same block still links.
+
+    What this pins is that the scan RESUMES past the consumed span --
+    replacing the boundary `continue` with `break` turns this test, and only
+    this test, red. It does NOT pin the one-link-per-target budget, though an
+    earlier version of this docstring claimed it did: `seen_in_block` is keyed
+    per target, and here the consumed span's target is "John Smith" while the
+    linking target is "John", so marking the refused match as seen changes
+    nothing measured here. That invariant belongs to
+    `render_obsidian.test.py::test_a_refused_match_does_not_spend_the_blocks_first_occurrence_slot`,
+    which the same mutant does turn red."""
     ns = make_nodestream([make_node(
         "n1", "seg01", "John Smithson met John later.")])
     out_dir, result = render_into(tmp_path, ns, make_canon(COLLIDING_LONG_PLUS_SHORT),
@@ -473,6 +482,10 @@ def test_the_short_target_still_links_elsewhere_in_the_same_block(tmp_path):
     assert "met [[" in text and "|John]] later." in text, text
     assert text.count("[[") == 1, text
     assert result["delink_cost"]["unlinked_occurrences_total"] == 0
+    # The metric must AGREE with the vault it describes -- the linker's own
+    # stated rationale, and the only positive-link test in this cluster that
+    # was not pinning it.
+    assert result["delink_cost"]["inline_links_emitted"] == 1
 
 
 def test_a_delinked_span_does_not_spend_the_blocks_first_occurrence_slot(tmp_path):
