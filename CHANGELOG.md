@@ -28,7 +28,10 @@ tracked. Each now states the decision instead.
   a plan nobody intends to carry out. One pin was added, binding the provenance sentence to its
   decision under `### What this contract cannot yet require`, because that list is exactly where the
   key would be filed again. Verified red by mutation before it was accepted. No behaviour, no export
-  and no adapter rule changed; the reference-assets suite goes 1081 → 1082 checks, all passing.
+  and no adapter rule changed; the reference-assets suite gains exactly one check and stays fully
+  green. The delta is the portable figure, not the total: the profile-schema validation assertion at
+  `tests/reference-assets.test.sh:3106` is emitted only where Ruby can load `yaml` and `json`, so an
+  environment without it counts one lower at both ends — measured, by shadowing `ruby`, not assumed.
 - **Dated release copy is deliberately not swept.** Earlier entries here, and the version-tagged
   notes in the root `README.md`, carry their own citations of issues that have since closed
   (`#246`, `#472`, `#110` and others) — each was true when it was published, and this changelog
