@@ -157,7 +157,6 @@ def _extract_bundle_hashes_section(doc_text: str) -> str:
     return doc_text[start:end]
 
 
-
 def _orchestration_members_and_prose() -> tuple[frozenset[str], str]:
     """`ORCHESTRATION_BUNDLE_MEMBERS` as scaffold_setup.py actually declares it,
     plus that file's source with the tuple literal REMOVED.
@@ -175,8 +174,15 @@ def _orchestration_members_and_prose() -> tuple[frozenset[str], str]:
     source = SCAFFOLD_SETUP_SCRIPT.read_text(encoding="utf-8")
     tree = ast.parse(source)
     for node in tree.body:
-        targets = getattr(node, "targets", [])
-        if not (isinstance(node, ast.Assign) and targets):
+        # AnnAssign as well as Assign: this file annotates its own module-level
+        # tuples, so an annotated ORCHESTRATION_BUNDLE_MEMBERS is a shape that
+        # can turn up -- and matching only Assign would fail with "no such
+        # assignment found" while the assignment sits right there.
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
             continue
         if not any(isinstance(t, ast.Name) and t.id == "ORCHESTRATION_BUNDLE_MEMBERS"
                    for t in targets):
@@ -590,8 +596,8 @@ def test_orchestration_bundle_members_from_doc_match_the_tuple_that_owns_them(
             "declared."
         )
     assert not (orchestration_members & derivation_members), (
-        "a script is claimed by both orchestration_bundle_hash (doc) and "
-        f"derivation_bundle_hash (code): {sorted(orchestration_members & derivation_members)}"
+        "a script is claimed by both orchestration_bundle_hash and "
+        f"derivation_bundle_hash: {sorted(orchestration_members & derivation_members)}"
     )
 
     for filename in orchestration_members:
