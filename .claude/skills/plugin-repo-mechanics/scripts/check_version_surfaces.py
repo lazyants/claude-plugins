@@ -25,7 +25,8 @@ version is the right one to release, and nothing about the section's body prose,
 calls surface #4's hidden fifth layer and no parser can judge.
 
 Exit: 0 every plugin agrees; 1 at least one disagreement (each named); 2 the sweep itself is
-unsound (a file missing, or so few plugins found that a clean result would be vacuous).
+unsound -- a file it needs is missing or unreadable, or so few plugins were found that a clean
+result would be vacuous.
 """
 
 from __future__ import annotations
@@ -71,11 +72,14 @@ def collect(repo: Path) -> tuple[dict[str, dict[str, object]], list[str]]:
     unsound: list[str] = []
 
     def read(rel: str) -> str | None:
-        path = repo / rel
-        if not path.is_file():
-            unsound.append(f"missing file: {rel}")
+        # One path, not two: "absent" and "there but unreadable" are the same answer to the only
+        # question this sweep asks -- it could not read a file it needs, so it must not report the
+        # tree clean. Catching the read is also what covers a required file that is not UTF-8.
+        try:
+            return (repo / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            unsound.append(f"cannot read {rel}: {exc}")
             return None
-        return path.read_text(encoding="utf-8")
 
     marketplace_raw = read(".claude-plugin/marketplace.json")
     readme = read("README.md")
@@ -90,7 +94,11 @@ def collect(repo: Path) -> tuple[dict[str, dict[str, object]], list[str]]:
 
     rows = {m.group(1): (m.group(2), m.group(3)) for m in ROW_RE.finditer(readme)}
     headings = {m.group(1): (m.group(2), m.group(0).split("##", 1)[1].strip()) for m in HEADING_RE.finditer(readme)}
-    on_disk = {p.name for p in (repo / "plugins").iterdir() if (p / ".claude-plugin" / "plugin.json").is_file()}
+    try:
+        on_disk = {p.name for p in (repo / "plugins").iterdir() if (p / ".claude-plugin" / "plugin.json").is_file()}
+    except OSError as exc:
+        unsound.append(f"cannot list plugins/: {exc}")
+        return {}, unsound
 
     # The UNION, not the marketplace list: a plugin present on disk and absent from the manifest
     # (or the README) is exactly the omission worth catching, and enumerating one source alone
@@ -98,13 +106,14 @@ def collect(repo: Path) -> tuple[dict[str, dict[str, object]], list[str]]:
     names = sorted(set(marketplace) | set(rows) | set(headings) | on_disk)
     found: dict[str, dict[str, object]] = {}
     for name in names:
-        manifest = repo / "plugins" / name / ".claude-plugin" / "plugin.json"
+        rel_manifest = f"plugins/{name}/.claude-plugin/plugin.json"
         manifest_version = None
-        if manifest.is_file():
+        manifest_raw = read(rel_manifest) if (repo / rel_manifest).exists() else None
+        if manifest_raw is not None:
             try:
-                manifest_version = json.loads(manifest.read_text(encoding="utf-8")).get("version")
-            except ValueError as exc:
-                unsound.append(f"plugins/{name}/.claude-plugin/plugin.json is not valid JSON: {exc}")
+                manifest_version = json.loads(manifest_raw).get("version")
+            except (ValueError, AttributeError) as exc:
+                unsound.append(f"{rel_manifest} is not a JSON object: {exc}")
         anchor, row_version = rows.get(name, (None, None))
         heading_version, heading_text = headings.get(name, (None, None))
         found[name] = {
