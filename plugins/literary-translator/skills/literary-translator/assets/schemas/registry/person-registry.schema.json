@@ -1,0 +1,296 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "person-registry.schema.json",
+  "title": "Person Registry",
+  "description": "The artifact W9r emits (#550): one record per person, for a book translated for genealogy rather than for the translation. Validated by person_registry.py --build BEFORE it is written, so a malformed registry never reaches disk. It carries NO timestamp, deliberately -- a re-run over unchanged inputs is byte-identical, the same property the render/diff acceptance gate relies on elsewhere in this plugin. Everything a model asserted has either been checked against disk or affirmed by the independent adjudication pass; everything that was not is in refuted_claims[] or refusals[] with its reason, never silently absent. Numbers are never a model's: mention_count comes from the production occurrence engine, printed-form counts from the assembled target text.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "provenance",
+    "people",
+    "refusals",
+    "non_person_forms",
+    "refuted_claims",
+    "shared_printed_forms",
+    "unattributed_units",
+    "excluded_by_canon_declaration",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_sha256", "nodestream_sha256", "manifest_sha256", "verdicts_sha256", "claims_sha256", "assembly_currency", "surface_boundary"],
+      "properties": {
+        "input_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "nodestream_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The assembled NodeStream these numbers were computed from, bound into registry_input.json's own body and re-verified by --claims and --build. Without it the delivered book is the one input the chain reads but does not pin: a re-assembly between the steps would apply Pass B's affirmations, given for passages it was shown, to a different book -- and the dangerous case is silent, since a surface that merely MOVED still counts." },
+        "manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The source manifest these units were taken from, bound into registry_input.json's own body and re-verified by --claims and --build. --prep snapshots the quotes and locators out of it and verifies canon_senses.json's evidence against it exactly once; P5 re-reads only the quotes Pass A cited, so without this digest a source edited between the steps can keep every cited quote while the evidence a person's identity rests on has gone." },
+        "verdicts_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The digest of the Pass A verdict this registry was projected from. registry_claims.json carries it inside its own hashed body, and --build refuses when the verdict on disk has moved -- an affirmation is valid only for the exact claim it was shown." },
+        "claims_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "assembly_currency": {
+          "const": "not_bound",
+          "description": "Stated rather than implied. --prep verifies that every manifest segment is converged, that its on-disk draft still hashes to the ledger's reviewed_draft_sha1, and that it appears in the assembled NodeStream -- which catches a partial assembly, a scope change and a post-assembly hand-edit. It does NOT catch a segment revised, re-reviewed and re-converged AFTER assembly ran: the new draft matches the new ledger and the old NodeStream still lists the segment. Binding that would mean persisting per-segment reviewed-draft hashes inside the NodeStream, i.e. editing assemble.py -- a PLUGIN_BUNDLE_MEMBER, whose bytes re-stale every converged segment of every project. Refused as disproportionate; run W9r immediately after W9 instead."
+        },
+        "surface_boundary": { "type": "string", "enum": ["word", "none"] }
+      }
+    },
+    "people": { "type": "array", "items": { "$ref": "#/$defs/person" } },
+    "refusals": {
+      "type": "array",
+      "description": "Units that reach no person record: refused by Pass A, or belonging to a person claim the adjudication pass would not affirm, or recorded by the project's own canon review_queue as unresolved.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["unit", "reason", "refused_by"],
+        "properties": {
+          "unit": { "$ref": "#/$defs/unit" },
+          "reason": { "type": "string", "pattern": "\\S" },
+          "refused_by": { "type": "string", "enum": ["pass_a", "adjudication", "canon_review_queue"] }
+        }
+      }
+    },
+    "non_person_forms": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["unit", "kind", "reason"],
+        "properties": {
+          "unit": { "$ref": "#/$defs/unit" },
+          "kind": { "type": "string", "enum": ["place", "work", "group", "other"] },
+          "reason": { "type": "string", "pattern": "\\S" }
+        }
+      }
+    },
+    "refuted_claims": {
+      "type": "array",
+      "description": "Every claim that did not survive into the artifact, kept with its reason. Two kinds: a claim the adjudication pass did not affirm, and a claim that fell with something it depended on -- a claim owned by a person whose identity was not affirmed (owner_identity_not_affirmed), or a relation whose TARGET person was not affirmed (relation_target_identity_not_affirmed), which the adjudicator may well have affirmed on its own terms. Nothing is silently deleted: a reader must be able to see what the registry declined to carry, not merely what it accepted.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim_id", "kind", "person_id", "summary", "reason"],
+        "properties": {
+          "claim_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "kind": { "type": "string", "enum": ["person", "non_person", "identity_status", "relation", "place", "date", "printed_surface"] },
+          "person_id": { "type": ["string", "null"], "description": "The person the claim belonged to, or null for a non_person classification -- which belongs to a unit, not to a person." },
+          "summary": { "type": "string", "pattern": "\\S" },
+          "reason": { "type": "string", "pattern": "\\S" }
+        }
+      }
+    },
+    "shared_printed_forms": {
+      "type": "array",
+      "description": "A printed surface more than one person claimed. It carries no count and no owner: attributing it to whichever candidate is more frequent is exactly the fabricated-person error this registry exists to avoid.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["surface", "candidates"],
+        "properties": {
+          "surface": { "type": "string", "pattern": "\\S" },
+          "candidates": { "type": "array", "minItems": 2, "items": { "type": "string" } }
+        }
+      }
+    },
+    "unattributed_units": {
+      "type": "array",
+      "description": "Units whose occurrences the plugin refuses to attribute to anyone: a fold-key collision or an adjudicated homonym split reported by the occurrence engine, or a unit the engine never indexes at all (a senses-only form, a review_queue candidate).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["unit", "reason"],
+        "properties": {
+          "unit": { "$ref": "#/$defs/unit" },
+          "reason": { "type": "string", "pattern": "\\S" }
+        }
+      }
+    },
+    "excluded_by_canon_declaration": {
+      "type": "array",
+      "description": "Canon entries the project itself declares are not identity-bearing (is_proper_name:false or basis:not_a_name). Listed rather than dropped, so the cast's denominator is visible.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_form", "reason"],
+        "properties": {
+          "source_form": { "type": "string" },
+          "canonical_target_form": { "type": ["string", "null"], "description": "Carried so the printed-name count can CONSUME this target's spans even though no person owns it: the renderer alternates over every canon entry and never branches on is_proper_name, so a declared-realia target still takes its span in the delivered text." },
+          "reason": { "type": "string", "pattern": "\\S" }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "people",
+        "refusals",
+        "non_person_forms",
+        "refuted_claims",
+        "identity_status",
+        "units_total",
+        "boundary_ambiguous_surfaces",
+        "not_found_surfaces",
+        "people_with_truncated_evidence"
+      ],
+      "properties": {
+        "people": { "type": "integer", "minimum": 0 },
+        "refusals": { "type": "integer", "minimum": 0 },
+        "non_person_forms": { "type": "integer", "minimum": 0 },
+        "refuted_claims": { "type": "integer", "minimum": 0 },
+        "identity_status": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["confirmed", "contested"],
+          "properties": {
+            "confirmed": { "type": "integer", "minimum": 0 },
+            "contested": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "units_total": { "type": "integer", "minimum": 0 },
+        "boundary_ambiguous_surfaces": { "type": "integer", "minimum": 0 },
+        "not_found_surfaces": { "type": "integer", "minimum": 0 },
+        "people_with_truncated_evidence": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "$defs": {
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_form", "sense_id"],
+      "properties": {
+        "source_form": { "type": "string", "pattern": "\\S" },
+        "sense_id": { "type": ["string", "null"] }
+      }
+    },
+    "mention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seg", "origin", "source_block"],
+      "description": "One source-anchored occurrence, straight from the production occurrence engine -- so it does not depend on how that occurrence's translated surface happens to be spelled. This is the \"reach the page\" half of the record.",
+      "properties": {
+        "seg": { "type": ["string", "null"] },
+        "origin": { "type": "string", "enum": ["block", "embedded_verse", "footnote"] },
+        "source_block": { "type": "string" },
+        "vid": { "type": "string" },
+        "footnote_n": { "type": "integer" }
+      }
+    },
+    "person": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "person_id",
+        "display_name",
+        "units",
+        "identity_note",
+        "identity_status",
+        "identity_status_reason",
+        "printed_forms",
+        "mention_count",
+        "mentions",
+        "relations",
+        "places",
+        "dates",
+        "evidence_truncated"
+      ],
+      "properties": {
+        "person_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$" },
+        "display_name": { "type": "string", "pattern": "\\S" },
+        "units": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source_form", "sense_id", "canonical_target_form", "disambiguator"],
+            "properties": {
+              "source_form": { "type": "string", "pattern": "\\S" },
+              "sense_id": { "type": ["string", "null"] },
+              "canonical_target_form": { "type": ["string", "null"] },
+              "disambiguator": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "identity_note": { "type": "string", "pattern": "\\S" },
+        "identity_status": { "type": "string", "enum": ["confirmed", "contested"] },
+        "identity_status_reason": { "type": "string", "pattern": "\\S" },
+        "printed_forms": {
+          "type": "array",
+          "description": "The target-language renderings as the book actually prints them, counted in the assembled target text by the plugin. `count` is null for every status other than \"counted\".",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["surface", "count", "status"],
+            "properties": {
+              "surface": { "type": "string", "pattern": "\\S" },
+              "count": { "type": ["integer", "null"], "minimum": 0 },
+              "status": {
+                "type": "string",
+                "enum": ["counted", "not_found_in_target_text", "boundary_ambiguous"],
+                "description": "\"boundary_ambiguous\": the surface is printed in the book but has no countable span. Two things produce that -- the word-boundary rule refused every match, or a longer inventory form consumed them (\"Marie\" inside \"JoAnn Marie\", exactly as the renderer's own non-overlapping scan consumes it). The boundary case is itself the shared signature of a no-space script (a name followed immediately by a particle) and of an unrelated longer word containing the name, and nothing in the text distinguishes them -- so it is reported with the substring count rather than counted, dropped, or guessed at. substring_count is taken from the delivered corpus, never from the residue left after consumption: \"not_found_in_target_text\" is a claim about the book, and a reader draws \"the book never prints this name\" from it."
+              },
+              "substring_count": { "type": ["integer", "null"], "minimum": 0 }
+            }
+          }
+        },
+        "mention_count": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Source-anchored occurrences across this person's attributable units. null when no unit is attributable -- an honest absence, never a zero, since zero would read as \"not in the book\"."
+        },
+        "mention_count_reason": { "type": "string" },
+        "mentions": { "type": "array", "items": { "$ref": "#/$defs/mention" } },
+        "relations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "quote", "locator"],
+            "properties": {
+              "type": { "type": "string", "pattern": "\\S" },
+              "to_person_id": { "type": "string" },
+              "to_unregistered": { "type": "string" },
+              "quote": { "type": "string", "pattern": "\\S" },
+              "locator": { "type": "object" }
+            }
+          }
+        },
+        "places": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role", "name", "quote", "locator"],
+            "properties": {
+              "role": { "type": "string", "pattern": "\\S" },
+              "name": { "type": "string", "pattern": "\\S" },
+              "quote": { "type": "string", "pattern": "\\S" },
+              "locator": { "type": "object" }
+            }
+          }
+        },
+        "dates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "value", "quote", "locator"],
+            "properties": {
+              "kind": { "type": "string", "pattern": "\\S" },
+              "value": { "type": "string", "pattern": "\\S" },
+              "quote": { "type": "string", "pattern": "\\S" },
+              "locator": { "type": "object" }
+            }
+          }
+        },
+        "evidence_truncated": {
+          "type": "boolean",
+          "description": "True when at least one of this person's units had more occurrences than --max-contexts-per-form, so both LLM passes judged it on a bounded (evenly spread) view of the book rather than on every occurrence."
+        }
+      }
+    }
+  }
+}

@@ -2634,6 +2634,76 @@ takes effect it does change the rendered links, so `diff_rendered_output.py`
 MISMATCHES (exit `1`) until the baseline is deliberately re-accepted with
 `--accept-baseline --force-accept-baseline`.
 
+**W9r Person registry — OPT-IN, and opt-in means the operator runs it**
+(1.34.0, #550). For a book translated *for genealogy* rather than for the
+translation, `scripts/person_registry.py` consolidates what the pipeline
+already produced into a person-keyed registry: one record per human being,
+every source form and alias, the target renderings **as actually printed** with
+counts taken from the assembled text, typed kinship each carrying the sentence
+it was derived from, places and dates where stated, mention locations, and an
+identity-contested flag kept separate from the mention count. It writes NEW
+artifacts under `${durable_root}/registry/` only — it reads `canon.json` and
+never writes it, it is in **none** of the three bundle tuples, and it changes
+no cache key. **There is deliberately no `profile.yml` knob**: a project that
+wants a registry runs this step, one that does not never invokes it, and a
+profile key would have moved `${durable_root}/schemas/`'s hash — hence
+`input_digest` — for every project on earth to gate a step nothing auto-runs.
+
+Run it **immediately after the W9 chain above, in the same session** — its
+`--prep` gate detects a partial assembly, a scope change and a post-assembly
+draft edit, but cannot detect a segment re-converged after W9 ran, which the
+emitted artifact states as `assembly_currency: "not_bound"`.
+
+The chain is bound to both inputs it reads: `--prep` hashes `manifest.json`
+and the assembled NodeStream into its own body, and `--claims`/`--build`
+refuse (`manifest_changed` / `nodestream_changed`) when either moved
+underneath. The remedy is always to re-run `--prep`, Pass A, `--claims` and
+Pass B against the current text — never to re-run only the step that failed,
+whose inputs are the stale ones.
+
+Copy `assets/templates/registry_TASK.template.md` → `${durable_root}/
+registry_TASK.md` (a W9r-time copy, NOT a Step-0a one) and fill its bracketed
+placeholders. Then three script calls with two model calls between them:
+
+```
+LT=<the literary-translator skill directory>   # holds assets/schemas/registry/
+python3 scripts/person_registry.py --prep   --plugin-root "$LT"
+#             ->  registry/registry_input.json
+#   Pass A -- ONE call over the whole cast, per registry_TASK.md's Pass A
+#             section  ->  registry/registry_verdicts.json
+python3 scripts/person_registry.py --claims --plugin-root "$LT"
+#             ->  registry/registry_claims.json
+#   Pass B -- a FRESH dispatch whose only semantic inputs are registry_TASK.md's
+#             Pass B section and registry_claims.json; it must NOT inherit Pass
+#             A's conversation and must not read registry_verdicts.json
+#             ->  registry/registry_adjudications.json
+python3 scripts/person_registry.py --build  --plugin-root "$LT"
+#             ->  registry/person_registry.json + registry/PEOPLE.md
+```
+
+`--plugin-root` is not optional from `${durable_root}/scripts/`: the three
+registry schemas ship under `assets/schemas/registry/` and are deliberately
+never copied into a durable root (Step 0a's copy glob and `resume_setup.py`'s
+schema hash are both non-recursive, which is exactly why they live there), so
+`--claims` and `--build` exit `2` with `schema_not_found` without it. Exit `0`
+/ `1` (a rejected verdict) / `2` (a usage or precondition failure), one JSON
+line on stdout.
+
+**Why two model calls and not one.** Deciding that two name forms denote the
+same person is interpretation, so it is a model's judgement — but a
+verbatim-quote check proves only that a sentence EXISTS, never that it says
+what the claim says. A model can cite a real sentence and attach an unrelated
+kinship claim to it, and every structural gate passes. Pass B is the only thing
+in the design that can catch that, and a merge that is plausible and wrong; its
+independence is load-bearing, which is why it is a fresh dispatch. An
+unaffirmed person claim REFUSES (every unit to `refusals[]`, no record emitted)
+rather than splitting into single-unit survivors nobody adjudicated. Both
+passes read the DELIVERED text, not only the source: every context pairs its
+source occurrence with what the book prints in that same container, and a
+printed-surface claim carries the passages where that exact string
+occurs in the assembled corpus, with the true total and a truncation flag. Full contract, the prep universe's three populations, the
+gate table and the stated non-goals: `references/person-registry.md`.
+
 ## Reference docs
 
 - `references/engine-loop.md` — R1, R6
@@ -2649,4 +2719,5 @@ MISMATCHES (exit `1`) until the baseline is deliberately re-accepted with
   assembler/NodeStream architecture
 - `references/output-target-adapters/` — `obsidian.md`, Step 0d's
   per-target rules
+- `references/person-registry.md` — W9r, the opt-in person registry
 - `references/gotchas.md` — known pitfalls
