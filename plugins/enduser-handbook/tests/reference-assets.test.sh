@@ -5437,6 +5437,17 @@ has_joined_in_section "publish-targets README: the append branch's own obligatio
 has_joined_in_section "publish-targets README: the obligation is inherited, the shipped spelling is not" \
   "$PTREADME" '## Adding a new target X' \
   'the file-shaped spelling of it is not'
+# [verification round] Both adapters state what bounds the unbounded append, and the sentence is
+# pinned in BOTH because it was edited by a find/replace on a WRAPPED line: static-md's copy came
+# out as "so refusing the / the shipped refusal is what bounds them" — a shipped, incoherent
+# sentence that no pin covered. A wrap-tolerant pin over the whole clause is what makes a remnant
+# like that fail instead of ship.
+has_joined_in_section "static-md: names the shipped refusal as what bounds the unbounded append" \
+  "$SMD" '## Index wiring (do this on every chapter create/update)' \
+  'blind to them by construction, so the shipped refusal is what bounds them'
+has_joined_in_section "obsidian-vault: names the shipped refusal as what bounds the unbounded append" \
+  "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
+  'blind to them by construction, so the shipped refusal is what bounds them'
 # [round 2] The asymmetry pins above name their titles because a title-only mutation used to leave
 # them green: the verdict phrase survived while the example it described changed under it.
 has_joined_in_section "obsidian-vault: the counterexample's backslash is named as load-bearing" \
