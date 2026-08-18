@@ -5271,9 +5271,6 @@ has_joined_in_section "static-md: the scan bounds a title EDIT and says so, in e
 has_joined_in_section "static-md: the scan does NOT bound a fixed target-breaking title on the flat branch" \
   "$SMD" '## Index wiring (do this on every chapter create/update)' \
   'It does NOT bound a FIXED target-breaking title on the flat branch above'
-has_joined_in_section "static-md: the flat gap's owner is named as the append branch, not this scan" \
-  "$SMD" '## Index wiring (do this on every chapter create/update)' \
-  'not this scan: the row is never written, so'
 has_joined_in_section "obsidian-vault: step 0 calls the stale-row companion scan for BOTH branches" \
   "$OMD" '## INDEX wiring (do all of these on every chapter create/update)' \
   'This one runs for BOTH branches below, flat and grouped, before either acts on its verdict'
@@ -5376,7 +5373,7 @@ has_joined_in_section "static-md: the flat append branch reads the composed row 
   'Read the row back before you write it (#574)'
 has_joined_in_section "static-md: the read-back uses step 0's own helper on the ONE composed line" \
   "$SMD" '## Index wiring (do this on every chapter create/update)' \
-  'on that ONE line'
+  '`locateChapterLine([row], expectedTarget)` on that ONE line'
 has_joined_in_section "static-md: an unreadable row is REFUSED, never written" \
   "$SMD" '## Index wiring (do this on every chapter create/update)' \
   'the flat index row this run would write is not recognizable to the next run'
@@ -5423,9 +5420,11 @@ has_joined_in_section "obsidian-vault: the wikilink option is passed for agreeme
 # a reader who finds the old sentence concludes the growth is still unbounded.
 hasnt_joined "static-md: the flat gap is no longer described as filed-but-open" \
   'That gap is a separate defect and is filed as one (#574)' "$SMD"
+# One pin over the WHOLE clause, not two over its halves: the owner and the consequence are one
+# claim, and two needles on one sentence drift apart the moment it is reworded.
 has_joined_in_section "static-md: the scan names the refusal, not itself, as what bounds a fixed title" \
   "$SMD" '## Index wiring (do this on every chapter create/update)' \
-  'What bounds them is the read-back refusal on the append branch itself'
+  'read-back refusal on the append branch itself (#574), not this scan: the row is never written'
 has_joined_in_section "static-md: rows already in an index from before the refusal are named after a rename" \
   "$SMD" '## Index wiring (do this on every chapter create/update)' \
   'they stay unreported while the title stays fixed'
@@ -5437,6 +5436,22 @@ has_joined_in_section "publish-targets README: the append branch's own obligatio
 has_joined_in_section "publish-targets README: the obligation is inherited, the shipped spelling is not" \
   "$PTREADME" '## Adding a new target X' \
   'the file-shaped spelling of it is not'
+# [#574] The universal this release retired, guarded at EVERY write site including the two release
+# documents — the same shape as the canvas gate above, and for the same measured reason: the first
+# draft of this claim was reintroduced into the CHANGELOG and the README by the very release notes
+# announcing it. Measured, the retired sentence is false in BOTH directions: `Items]` reads back
+# under wikilinks and `Items \] esc` reads back in path mode.
+retired_bracket_universal='a `]` anywhere in the title is refused in both modes'
+BRACKET_UNIVERSAL_SITES=(
+  "$OMD"
+  "$SMD"
+  "$PLUGIN_DIR/../../CHANGELOG.md"
+  "$PLUGIN_DIR/../../README.md"
+)
+for bracket_doc in "${BRACKET_UNIVERSAL_SITES[@]}"; do
+  hasnt_joined "#574: retired bracket universal absent from $(basename "$bracket_doc") — '$retired_bracket_universal'" \
+    "$retired_bracket_universal" "$bracket_doc"
+done
 # [verification round] Both adapters state what bounds the unbounded append, and the sentence is
 # pinned in BOTH because it was edited by a find/replace on a WRAPPED line: static-md's copy came
 # out as "so refusing the / the shipped refusal is what bounds them" — a shipped, incoherent

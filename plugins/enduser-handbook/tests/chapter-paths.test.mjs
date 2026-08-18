@@ -6340,7 +6340,10 @@ const FLAT_TARGET_574 = { path: 'guide/items.md', wiki: 'guide/items' };
 // Composes the flat TOC line exactly as static-md.md ("Flat entry, line present" — path mode) and
 // obsidian-vault.md (wikilink mode) format it: `- [<title>](<target>)` / `- [[<target>|<title>]]`.
 function flatLink574(mode, title) {
-  return mode === 'wiki' ? `[[guide/items|${title}]]` : `[${title}](guide/items.md)`;
+  // Through wikilinkForMode, not a bare `mode === 'wiki'` ternary: this file's own MEDIUM 5 finding
+  // is that a two-value ternary is correct only while there are exactly two modes, and silently
+  // runs a third against the ELSE branch's fixture. The helper throws on an unhandled key instead.
+  return wikilinkForMode(mode) ? `[[guide/items|${title}]]` : `[${title}](guide/items.md)`;
 }
 function flatRow574(mode, title) {
   return `- ${flatLink574(mode, title)}`;
@@ -6388,6 +6391,7 @@ const REFUSAL_TABLE_574 = [
   { title: 'Items', path: true, wiki: true }, // ordinary title: read back cleanly in both modes
   { title: 'Items]v1', path: false, wiki: false }, // this title breaks the parse in both; a ']' in general does NOT (see the last two rows)
   { title: 'Items [beta]', path: false, wiki: true }, // bracketed: modes genuinely disagree
+  { title: 'A [b] c', path: false, wiki: false }, // stated in three prose sites; measured here
   { title: '(Notes)', path: true, wiki: true }, // parenthesised: reads back cleanly in both
   { title: 'Items & Co: v1', path: true, wiki: true }, // '&'/':' : reads back cleanly in both
   // The two rows below exist to kill a universal, not to add coverage. The first draft of the

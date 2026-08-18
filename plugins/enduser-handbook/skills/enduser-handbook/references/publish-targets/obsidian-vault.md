@@ -365,7 +365,7 @@ the one exception to "do all of these" — see its own conditional note below.
      line — the same helper, with the same expected target and the same options this
      branch just used over the whole file, which in path mode means no `wikilink` option
      at all. If it does not report `present`, write NOTHING and halt with:
-     "Cannot wire '<slug>' into <index_file>: the flat index row this run would write is not recognizable to the next run, so nothing was written. The chapter's own title does not yield a resolvable link destination. Give the chapter a title in the manifest made only of Unicode letters and numbers, with words separated by single ASCII spaces, then re-run."
+     `Cannot wire '<slug>' into <index_file>: the flat index row this run would write is not recognizable to the next run, so nothing was written. The chapter's own title does not yield a resolvable link destination. Give the chapter a title in the manifest made only of Unicode letters and numbers, with words separated by single ASCII spaces, then re-run.`
      A row the next run cannot read back is one step 0 reports absent forever, so every
      publish appends another identical copy while the manifest never changes — measured,
      four publishes leave four rows, in both link modes. The companion scan above is blind
