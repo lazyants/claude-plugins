@@ -21,15 +21,23 @@ The section's intro paragraph and "What it covers" bullet list are easy to leave
 ## Source of truth + verification
 
 - When the surfaces disagree, `plugin.json` + `CHANGELOG` are authoritative (the bump author updates those first; `README` + `marketplace.json` are the laggards). Verify all four match before committing.
-- **Run `scripts/check_version_surfaces.py` before the commit, not after the push.** It reads the
-  WORKING TREE and asserts, per plugin, that `plugin.json`, `marketplace.json`, the README row, the
-  README heading and the anchor the row links to all say one version, and that the plugin's
-  authoritative changelog (own file if it has one, root otherwise) carries an entry for it. Exit 1
-  names each disagreement; exit 2 means the sweep itself was unsound — a missing file, or so few
-  plugins found that a clean result would be vacuous — so a run that matched nothing cannot read as
-  green. What it does NOT cover: whether the version is the right one to release, the section's
-  body prose (surface #4's hidden fifth layer, above), `metadata.version`, and anything already
-  pushed — it has no baseline and never consults `main`.
+- **Run `scripts/check_version_surfaces.py` before the commit.** Per plugin it asserts that
+  `plugin.json`, `marketplace.json`, the README row, the README heading and the anchor the row
+  links to all say one version — and, once those five agree, that the plugin's authoritative
+  changelog (its own file if it has one, the root one otherwise) carries an entry for it. A
+  surface carrying the plugin TWICE is a finding too: "keep ours" reverts a sibling's row, and
+  "keep both" leaves the stale row and section sitting above the current ones, where the parse
+  takes the last and sees nothing wrong. Exit 1 names each disagreement; exit 2 means the sweep
+  itself was unsound — a file it needs to run at all is missing, unreadable or not UTF-8, a path
+  resolves outside the checkout, or so few plugins were found that a clean result would be vacuous.
+  - **It has no baseline**, so it cannot separate the surface your change forgot from one that was
+    already wrong — that is what the next bullet's grep against `origin/main` is for. Nothing runs
+    it for you; run it before the commit, not after the push.
+  - **The changelog check waits for the five surfaces to agree** (until they do there is no single
+    version to look for), so a first run over a mismatched tree does not list all the remaining
+    work. Re-run after fixing what it named.
+  - **Not covered:** the section's body prose (the hidden layer above), `metadata.version`, a
+    marketplace entry's `source` path, and whether the version being cut is the right one.
 - **A commit message's "N surfaces synced" claim is NOT proof — grep each surface independently on `origin/main`.** Real releases have shipped with a surface silently skipped (e.g. `plugin.json`/`marketplace.json`/`README` bumped but the CHANGELOG entry never added). If you find a prior release skipped a surface, backfill that missing entry in the same commit that stacks your new bump.
 - The shared surfaces (`README.md` plugin table + `.claude-plugin/marketplace.json`) are also MERGE-CONFLICT surfaces — every plugin's PR edits them. See `merge-and-review-bot.md` for predicting and resolving the parallel-PR conflict.
 - Four surfaces + merge-to-main is the *publish*, not the *ship* — the installed copy stays stale until you refresh it. See `publishing-and-cli.md`.
