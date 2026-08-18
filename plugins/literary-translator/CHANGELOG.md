@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.33.1 — 2026-08-18
+
+A sentence 1.32.0 shipped about its own behaviour was false, and the behaviour it described was pinned by no test. Docs, two new tests, and this release's rewrite of `CITATION_ANCHORS`; **no runtime script bytes change** — nothing under `assets/scripts/` is in the diff.
+
+### The false sentence
+
+1.32.0 made a de-linked target consume its matched span so nothing links inside it, and said: *"The short target still links wherever it genuinely stands alone."* It does not. With `John Smith` de-linked (two owners) and `John` surviving, the prose `John Smithson arrived.` renders with **no link at all**:
+
+- the union alternation matches `John Smith` at 0–10, longest first;
+- #587's `_boundary_ok` refuses that match, because the next character is `s`;
+- `re.finditer` is non-overlapping and has already consumed 0–10, so `John` never gets a turn — even though it stands alone by both word boundaries.
+
+Releases before 1.32.0 emitted `[[…|John]] Smithson` there. The occurrence is also not counted in `delink_cost`, which is correct under that metric's own definition: a link group could not recover it either, since the boundary guard would still refuse the match.
+
+**The behaviour is unchanged, deliberately.** A missing link is recoverable through the source-anchored `## Mentions` appendix; a link landing on the wrong man is not (#207), and `John Smithson` is plausibly not the `John` this canon means. What was wrong was the prose, so the prose is what changed.
+
+### What this release does NOT explain, on purpose
+
+Both reviewers who found the false sentence proposed the same remedy — re-scan from `m.start() + 1` after a boundary refusal. It is not taken. **The reasons are not restated here or in `obsidian.md`, and that is the point of this release rather than an omission from it.** They already live in the two places a change to the behaviour has to pass through: the comment beside the refusal in `_Linker.link`, and the docstring of `tests/render_obsidian.test.py::test_a_refused_span_is_consumed_so_no_shorter_target_links_inside_it`, which goes RED under exactly that mutant. The node id is spelled out because `render_obsidian_link_groups.test.py` holds a near-homonym that pins a different rule.
+
+The first two attempts at a prose copy of that argument were each measured, each committed, and each false in a different way — one claimed the remedy changes nothing anywhere, the next claimed a later start position is sufficient to make it emit a wrong link. Neither survived review. A scan-order argument has enough conditions in it (relative start offset, the shorter target's own boundary test, whether it is itself de-linked, whether the block's one link is already spent) that a prose restatement is a fourth surface to keep true, sitting where nothing executes it. So there is no third copy. The code comment and the test docstring are the two, and they are checked.
+
+### Why it is worth a release rather than a note
+
+This plugin's consumer executes its documentation. An operator reading that sentence would conclude a missing link is a defect and go looking for one that is not there — and the sentence was the only description of a behaviour nothing tested. `tests/render_obsidian_link_groups.test.py` now pins both directions: the boundary-refused span loses its nested link and counts nothing, and the short target still takes its one link at a later eligible occurrence in the same block.
+
+Found by two independent security reviews of #588, which reached it from opposite directions and both correctly refuted it as a security finding before reporting it as a documentation defect.
+
+### The tally, since it is the subject
+
+Counting the original, **four** sentences in this release cycle claimed more than the code supports, and every one was an exclusivity or universality claim: *"still links wherever it genuinely stands alone"*, *"a mutant that alters nothing"*, *"where the nested target starts later it is reached"*, and a test docstring's *"turns this test, and only this test, red"* (measured: three tests, and the check that missed them was a `-k` filter that never left one module). None was a claim about what the code CAN do; all four were claims about what it cannot do or what nothing else does. Those read as cautious, so they are the ones review reaches last. The lasting fix is structural and is described above — one checked owner per argument, no prose copies — but the reading habit is worth stating too: **attack the limitation, not the capability.**
+
 ## 1.33.0 — 2026-08-18
 
 Neither output gate could judge a second tree: the render+diff gate had only one baseline slot to compare against, and the backlink gate re-derived every entity note's path however you aimed it. Each gains the one input it was missing, so a project that post-processes the rendered vault can verify what it actually ships. Closes #589.

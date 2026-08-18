@@ -61,72 +61,26 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.33.0 (#589 -- the two-tree and note-map gate inputs) per the
-# maintenance contract above: each previous entry's map went with its entry,
-# exactly as that contract says it must. 1.32.0, 1.31.2, 1.31.1 and 1.31.0
-# cited no `file.ext:NNN` at all -- they named functions, fields, files and
-# constants instead -- so there was nothing of theirs to carry forward or to
-# strand. No earlier entry's citations are carried forward or re-resolved
-# either: carrying them would be the renumber-preserves-the-wrongness failure
-# this file exists to prevent, and re-resolving them would pin a historical
-# entry to line numbers it never claimed.
+# Rewritten for 1.33.1 (the delink-cost prose correction) per the maintenance
+# contract above: 1.33.0's map -- which anchored `--baseline-dir` on the
+# render+diff gate and `--entity-note-map` on the backlink gate -- went with
+# its entry, exactly as that contract says it must. No earlier entry's
+# citations are carried forward or re-resolved: carrying them would be the
+# renumber-preserves-the-wrongness failure this file exists to prevent, and
+# re-resolving them would pin a historical entry to line numbers it never
+# claimed.
 #
-# 1.33.0 goes back to citing lines, and does so deliberately: its subject is
-# two new branches in two scripts, and a reader checking "does the code really
-# do that" wants the branch, not a function name that predates it. The map
-# below is what keeps those citations honest.
-CITATION_ANCHORS = {
-    # This map tracks the NEWEST changelog entry only, and is rewritten every
-    # release. 1.33.0 is #589: --baseline-dir on the render+diff gate, and
-    # --entity-note-map on the backlink gate.
-    "diff_rendered_output.py:505-527": [
-        # The entry claims BOTH trees go through the EXISTING reducer, that the
-        # branch never reads the frozen baseline, and that it labels its
-        # verdict. The range therefore starts at the CANDIDATE reduction, one
-        # line above the branch -- anchoring only the baseline call would have
-        # let the entry's word "both" go unchecked. Order is the claim too:
-        # the missing-directory refusal must come before the reduction, and
-        # both exits must carry the label, so the range runs through the ok
-        # return rather than stopping at the mismatch one.
-        "candidate_lines = reduce_vault(candidate_dir)",
-        "if args.baseline_dir is not None:",
-        'return emit(1, "baseline_dir_not_found"',
-        "baseline_lines = reduce_vault(args.baseline_dir)",
-        '"mode": "two_tree"',
-        'return emit(1, "mismatch", {**two_tree',
-        'return emit(0, "ok", {**two_tree',
-    ],
-    "validate_backlinks.py:763-790": [
-        # The entry names the exit-2 rejections. Each must be inside the
-        # range it is attributed to, in the order the loader applies them:
-        # parse (with duplicate KEYS refused at that same boundary rather
-        # than in a second failure path), object-shape, value type, canon
-        # membership, path safety.
-        "def _load_entity_note_map",
-        'raw = _require_json(path, "entity note map"',
-        "object_pairs_hook=_reject_duplicate_keys",
-        "if not isinstance(raw, dict):",
-        "if not isinstance(relpath, str):",
-        "is not a canon.json entry",
-        "if not _is_safe_vault_relpath(relpath):",
-        "resolved[source_form] = relpath",
-    ],
-    "validate_backlinks.py:898-913": [
-        # The merged-identity aggregation the entry discloses: identity ->
-        # LIST, and one found link crediting every owner of that identity.
-        # The append and the crediting loop are both in range because the
-        # claim is the pair, not either half.
-        "identity_to_source_forms = defaultdict(list)",
-        "identity_to_source_forms[identity].append(source_form)",
-        "for m in _WIKILINK_RE.finditer(_strip_inline_code(ln)):",
-        "inline_counts[sf] += 1",
-    ],
-    "diff_rendered_output.py:154": [
-        # The render-baseline version hash the cost section names.
-        "_RENDER_VERSION_FILES",
-        "render_obsidian.py",
-    ],
-}
+# 1.33.1 cites NO `file.ext:NNN` anywhere, which is why this map is empty
+# rather than merely short -- and here that is the subject rather than a
+# stylistic choice. The entry's whole point is that a prose restatement of a
+# scan-order argument was wrong twice, so it names the two places that own
+# that argument (the comment in `_Linker.link` and the docstring of
+# `test_a_refused_span_is_consumed_so_no_shorter_target_links_inside_it`)
+# instead of quoting them at a line number, which would be a third copy with
+# a line number attached. An empty map is a real state under the assertions
+# below, not a disabled test: an entry that adds a citation without an anchor
+# still fails `undeclared`.
+CITATION_ANCHORS = {}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
 # alphabetic extension are still required. Pinning a list of extensions was
