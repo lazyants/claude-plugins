@@ -5241,7 +5241,7 @@ has_joined_in_section "publish-targets README: a third target revalidation contr
   'revalidation contract is prose-only'
 # The provenance path is the one limit in this list that is a DECISION rather than a pending
 # extension point. Without this pin the next reader of the list files `publish.provenance_dir` again
-# as a missing key, which is what #380 was and why it was closed.
+# as a missing key — which is what #380 was.
 has_joined_in_section "publish-targets README: the hardcoded provenance path is stated as a decision, not a pending gap" \
   "$PTREADME" '### What this contract cannot yet require' \
   'private audit trail for revalidation, not a published fact'

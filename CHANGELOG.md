@@ -9,12 +9,12 @@ tracked. Each now states the decision instead.
 
 ### Fixed
 
-- **Shipped prose pointed at closed issues as open work (#380, #341, #577).** The tracker triage of
-  2026-08-18 closed nine items, three of them as decisions rather than as work delivered, and four
-  sentences kept describing those three as pending. `references/publish-targets/README.md`'s list of what the extension
-  contract cannot yet require cited the hardcoded provenance path as a gap awaiting a key (#380); it
-  now says the record is a private audit trail for revalidation rather than a published fact about
-  the document, so no configurable provenance directory ships and nothing consumes one.
+- **Shipped prose pointed at closed issues as open work (#380, #341, #577).** The 2026-08-18 tracker
+  triage closed nine items, three of them as decisions rather than as work delivered.
+  `references/publish-targets/README.md`'s list of what the extension contract cannot yet require
+  cited the hardcoded provenance path as a gap awaiting a key (#380); it now says the record is a
+  private audit trail for revalidation rather than a published fact about the document, so no
+  configurable provenance directory ships and nothing consumes one.
   `tests/reference-assets.test.sh` claimed semantic inversion by surrounding context was bounded "by
   review and by #341's structure-aware reader" — a bound that does not exist, the reader having been
   weighed and declined as disproportionate for a doc-pin harness — and called the residual class
@@ -36,7 +36,6 @@ tracked. Each now states the decision instead.
   *Superseded* annotation the 1.14.0 entry already carries. What is corrected above is the prose a
   reader executes or maintains today: the shipped skill reference and the test suites' own
   comments. A later sweep will find the historical citations; they are left as written on purpose.
-
 
 ## [enduser-handbook 1.18.0] — 2026-08-18
 
