@@ -129,79 +129,50 @@ def atx_heading(line: str, level: int = 2) -> str | None:
 
 
 def rendered_lines(text: str) -> list[str]:
-    """The lines a Markdown renderer treats as content: fenced code and HTML comments dropped.
+    """The file's lines with fenced code blocks dropped. This is the whole of the context handling.
 
-    Scanning physical lines loses block context: a table row or a section heading shown as an
-    EXAMPLE inside a fence, or a section commented out with `<!-- -->` while its row stays, is not
-    a live surface. Counting one is a false green on the surface it fakes and a false duplicate on
-    the surface it doubles.
+    Why anything at all: a table row or a section heading shown as an EXAMPLE inside a fence is not
+    a live surface, and counting one is a false green on the surface it fakes and a false duplicate
+    on the surface it doubles. Code examples are the one construct these three files actually
+    contain, so fences are worth the twenty lines.
 
-    The two are recognized in ONE pass, in document order, because they nest and the order decides
-    the answer: a literal `<!--` inside a fenced HTML example is not a comment, and a fence marker
-    inside a comment does not open a fence. Stripping comments over the whole text first -- the
-    obvious factoring, and the one written first -- gets the first of those wrong, and it fails
-    OPEN: the unreal comment swallows every live surface after it. Fences are matched by character
-    and length, so a ``` inside a ~~~ block does not end it and a closing fence carries no info
-    string; an unterminated comment runs to the end of the file, as it does in a renderer.
+    Why nothing MORE, stated as a contract rather than left as a bug: **this reads LINES.** A
+    surface hidden some other way -- most usefully, inside an `<!-- -->` comment -- still counts as
+    present. If you comment a plugin's section out, remove or update its table row in the same
+    edit, or this check will believe the section is still there. In the other direction a heading
+    inside a blockquote, which GitHub does render, is not seen at all.
 
-    This is the whole contract, and it is a contract rather than an approximation of Markdown:
-    this reads LINES. A construct that hides content some other way -- and, in the other
-    direction, a heading inside a blockquote, which GitHub does render -- is out of scope by
-    design, because the alternative is carrying a Markdown parser to check a version number.
+    That boundary is a decision, not an oversight. An earlier version tracked HTML comments too and
+    then spent four review rounds on how comments and fences nest -- a literal `<!--` in a fenced
+    example, one in an info string, one in inline code -- each an incremental step toward
+    reimplementing CommonMark, and each failing OPEN when it was wrong: a mis-parsed wrapper hides
+    every surface after it, silently. Checking a version number does not justify carrying a Markdown
+    parser, and a hand-rolled one is the worst of the three options.
+
+    Fences are matched by character and length, so a ``` inside a ~~~ block does not end it, and a
+    closing fence carries no info string. A backtick fence whose info string contains a backtick is
+    not a fence at all (CommonMark forbids it) -- the one conformance rule kept, because getting it
+    wrong drops live content.
     """
     kept: list[str] = []
     fence: tuple[str, int] | None = None
-    in_comment = False
     for line in text.splitlines():
-        if fence is not None:
-            stripped = line.lstrip(" ")
-            marker = FENCE_RE.match(stripped) if len(line) - len(stripped) <= 3 else None
-            if (
-                marker
-                and marker.group(0)[0] == fence[0]
-                and len(marker.group(0)) >= fence[1]
-                and not stripped[len(marker.group(0)):].strip()
-            ):
-                fence = None
+        stripped = line.lstrip(" ")
+        marker = FENCE_RE.match(stripped) if len(line) - len(stripped) <= 3 else None
+        info = stripped[len(marker.group(0)):] if marker else ""
+        if fence is None:
+            if marker and not (marker.group(0)[0] == "`" and "`" in info):
+                fence = (marker.group(0)[0], len(marker.group(0)))
+            else:
+                kept.append(line)  # including ```a`b, which is content, not a fence opener
             continue
-
-        rest = line
-        if in_comment:
-            closed = rest.find("-->")
-            if closed == -1:
-                continue
-            rest = rest[closed + 3:]
-            in_comment = False
-
-        # The fence is decided BEFORE the line is scanned for comments, and on what is left of the
-        # line rather than on the whole of it. An opening fence's INFO STRING is not content, so a
-        # `<!--` in it opens nothing -- reading it as a comment leaves the state set after the
-        # fence closes and hides every live surface after that, fail-open again.
-        stripped = rest.lstrip(" ")
-        marker = FENCE_RE.match(stripped) if len(rest) - len(stripped) <= 3 else None
-        if marker:
-            fence = (marker.group(0)[0], len(marker.group(0)))
-            continue
-
-        visible = ""
-        while rest:
-            if in_comment:
-                closed = rest.find("-->")
-                if closed == -1:
-                    break
-                rest = rest[closed + 3:]
-                in_comment = False
-                continue
-            opened = rest.find("<!--")
-            if opened == -1:
-                visible += rest
-                break
-            visible += rest[:opened]
-            rest = rest[opened + 4:]
-            in_comment = True
-        if in_comment and not visible.strip():
-            continue
-        kept.append(visible)
+        if (
+            marker
+            and marker.group(0)[0] == fence[0]
+            and len(marker.group(0)) >= fence[1]
+            and not info.strip()
+        ):
+            fence = None
     return kept
 
 

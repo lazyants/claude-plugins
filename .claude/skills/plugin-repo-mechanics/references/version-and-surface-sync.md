@@ -38,6 +38,11 @@ The section's intro paragraph and "What it covers" bullet list are easy to leave
     work. Re-run after fixing what it named.
   - **Not covered:** the section's body prose (the hidden layer above), `metadata.version`, a
     marketplace entry's `source` path, and whether the version being cut is the right one.
+  - **It reads LINES, and drops only fenced code blocks.** A surface hidden inside an
+    `<!-- -->` comment still counts as present, so if you comment a plugin's section out, remove
+    or update its table row in the same edit. That boundary is deliberate: the alternative is a
+    hand-rolled Markdown parser, whose every gap fails OPEN — a mis-parsed wrapper hides every
+    surface after it, silently.
 - **A commit message's "N surfaces synced" claim is NOT proof — grep each surface independently on `origin/main`.** Real releases have shipped with a surface silently skipped (e.g. `plugin.json`/`marketplace.json`/`README` bumped but the CHANGELOG entry never added). If you find a prior release skipped a surface, backfill that missing entry in the same commit that stacks your new bump.
 - The shared surfaces (`README.md` plugin table + `.claude-plugin/marketplace.json`) are also MERGE-CONFLICT surfaces — every plugin's PR edits them. See `merge-and-review-bot.md` for predicting and resolving the parallel-PR conflict.
 - Four surfaces + merge-to-main is the *publish*, not the *ship* — the installed copy stays stale until you refresh it. See `publishing-and-cli.md`.
