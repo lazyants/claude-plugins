@@ -21,6 +21,15 @@ The section's intro paragraph and "What it covers" bullet list are easy to leave
 ## Source of truth + verification
 
 - When the surfaces disagree, `plugin.json` + `CHANGELOG` are authoritative (the bump author updates those first; `README` + `marketplace.json` are the laggards). Verify all four match before committing.
+- **Run `scripts/check_version_surfaces.py` before the commit, not after the push.** It reads the
+  WORKING TREE and asserts, per plugin, that `plugin.json`, `marketplace.json`, the README row, the
+  README heading and the anchor the row links to all say one version, and that the plugin's
+  authoritative changelog (own file if it has one, root otherwise) carries an entry for it. Exit 1
+  names each disagreement; exit 2 means the sweep itself was unsound — a missing file, or so few
+  plugins found that a clean result would be vacuous — so a run that matched nothing cannot read as
+  green. What it does NOT cover: whether the version is the right one to release, the section's
+  body prose (surface #4's hidden fifth layer, above), `metadata.version`, and anything already
+  pushed — it has no baseline and never consults `main`.
 - **A commit message's "N surfaces synced" claim is NOT proof — grep each surface independently on `origin/main`.** Real releases have shipped with a surface silently skipped (e.g. `plugin.json`/`marketplace.json`/`README` bumped but the CHANGELOG entry never added). If you find a prior release skipped a surface, backfill that missing entry in the same commit that stacks your new bump.
 - The shared surfaces (`README.md` plugin table + `.claude-plugin/marketplace.json`) are also MERGE-CONFLICT surfaces — every plugin's PR edits them. See `merge-and-review-bot.md` for predicting and resolving the parallel-PR conflict.
 - Four surfaces + merge-to-main is the *publish*, not the *ship* — the installed copy stays stale until you refresh it. See `publishing-and-cli.md`.
