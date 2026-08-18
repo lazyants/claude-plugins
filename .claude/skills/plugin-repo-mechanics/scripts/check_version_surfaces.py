@@ -55,19 +55,20 @@ from pathlib import Path
 # state of it goes under, not an expected count.
 MIN_PLAUSIBLE_PLUGINS = 2
 
-# The version cell is captured whole and stripped in code: letting `\s*` and a lazy `[^|]+?`
-# negotiate the same run of spaces is ambiguous, and quadratic-to-cubic on a pathological line.
-ROW_RE = re.compile(r"^\|[ \t]*\[`([a-z0-9][a-z0-9-]*)`\]\(#([^)]+)\)[ \t]*\|([^|]*)\|", re.M)
-# What a plugin may be called. The README regexes already enforce this shape and a directory
+# Both patterns are matched against a SINGLE LINE (see `_lines`), never against the whole file
+# under re.MULTILINE, and each is anchored at the start of that line by `.match()`. That is
+# deliberate and structural: `\s` matches a newline, and so does any
+# negated class like `[^|]`, so a file-wide pattern can be satisfied by text a line below and a
+# later `.strip()` erases the evidence. Two rounds of review found two different instances of that
+# one mistake; matching per line makes the whole class unrepresentable rather than caught.
+ROW_RE = re.compile(r"\|[ \t]*\[`([a-z0-9][a-z0-9-]*)`\][ \t]*\(#([^)]+)\)[ \t]*\|([^|]*)\|")
+HEADING_RE = re.compile(r"##[ \t]+`([a-z0-9][a-z0-9-]*)`[ \t]+—[ \t]+v(\S+)[ \t]*$")
+VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+# What a plugin may be called. The README patterns already enforce this shape and a directory
 # name is a single path component by construction; marketplace.json is the one source that
 # could otherwise put "../../elsewhere" where a path component belongs. read_text's
 # containment check is the backstop that does not depend on which source a name came from.
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-# Blanks are [ \t], never \s: under re.M a `\s` still matches a NEWLINE, so `\s`-separated
-# patterns accept a "heading" broken across lines that GitHub renders as no heading at all --
-# and a heading the check believes in but the reader never sees is the false green here.
-HEADING_RE = re.compile(r"^##[ \t]+`([a-z0-9][a-z0-9-]*)`[ \t]+—[ \t]+v(\S+)[ \t]*$", re.M)
-VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 SURFACES = ("manifest", "marketplace", "row", "heading")
 COLUMN = "  "
 CELL = max(len(s) for s in SURFACES)
@@ -94,14 +95,20 @@ def read_text(repo: Path, rel: str, unsound: list[str]) -> str | None:
         return None
 
 
-def display(value: object) -> str:
-    """Every printed cell comes from a file, and a version cell or an anchor has no charset gate.
+def emit(text: str, stream: object = None) -> None:
+    """The one write in this file, and the reason there is only one.
 
-    A raw control byte reaching a terminal can redraw the report -- including a forged summary
-    line -- above the real findings that follow it. Anything not printable is shown escaped.
+    Every line printed is composed from repository text -- a version cell, an anchor, a path, a
+    DIRECTORY name -- and none of those has a charset gate. A raw control byte reaching a terminal
+    can redraw the report, and a plugin's table line prints BEFORE that plugin's findings, so
+    crafted bytes could stand a forged clean summary over the real ones. Escaping per value was
+    the first attempt and it leaked twice, at the sites nobody thought of as values; escaping at
+    the single exit cannot leak, whatever a future caller composes.
     """
-    text = str(value)
-    return text if text.isprintable() else repr(text)
+    print(
+        "".join(c if c.isprintable() else c.encode("unicode_escape").decode("ascii") for c in text),
+        file=stream if stream is not None else sys.stdout,
+    )
 
 
 def github_slug(heading_text: str) -> str:
@@ -144,19 +151,24 @@ def collect(repo: Path, unsound: list[str]) -> dict[str, dict[str, object]]:
         # (JSON null, a number, an object) used to survive as far as sorting the union and die
         # there on a TypeError -- an unclassified traceback exiting 1, the DISAGREEMENT code.
         if not isinstance(name, str) or not NAME_RE.match(name):
-            unsound.append(f"marketplace.json lists {display(name)}, which is not a plugin name")
+            unsound.append(f"marketplace.json lists {name!r}, which is not a plugin name")
             continue
         entries.append((name, entry.get("version")))
 
-    rows = {m.group(1): (m.group(2), m.group(3).strip()) for m in ROW_RE.finditer(readme)}
-    headings = {m.group(1): (m.group(2), m.group(0)[2:].strip()) for m in HEADING_RE.finditer(readme)}
+    lines = readme.splitlines()
+    row_matches = [m for m in (ROW_RE.match(line) for line in lines) if m]
+    heading_matches = [m for m in (HEADING_RE.match(line) for line in lines) if m]
+    rows = {m.group(1): (m.group(2), m.group(3).strip()) for m in row_matches}
+    # The slug is computed from the heading text as MATCHED, not rebuilt from the two groups:
+    # GitHub turns each literal space into its own hyphen, so a double space slugs differently.
+    headings = {m.group(1): (m.group(2), m.group(0)[2:].strip()) for m in heading_matches}
     marketplace = dict(entries)
     # Counted, not just mapped: each of these three parses is last-one-wins, so a duplicate left
     # behind by a "keep both sides" conflict resolution would disappear into the map.
     seen = {
         "marketplace": Counter(name for name, _ in entries),
-        "row": Counter(m.group(1) for m in ROW_RE.finditer(readme)),
-        "heading": Counter(m.group(1) for m in HEADING_RE.finditer(readme)),
+        "row": Counter(m.group(1) for m in row_matches),
+        "heading": Counter(m.group(1) for m in heading_matches),
     }
 
     try:
@@ -214,14 +226,16 @@ def judge(repo: Path, name: str, surfaces: dict[str, object], unsound: list[str]
             problems.append(f"{label} carries {value!r}, which is not an X.Y.Z version")
     distinct = {str(v) for v in versions.values()}
     if len(distinct) > 1:
-        problems.append("surfaces disagree: " + ", ".join(f"{k}={v}" for k, v in versions.items()))
+        problems.append(
+            "surfaces disagree: " + ", ".join(f"{k}={v}" for k, v in versions.items())
+        )
     if surfaces["heading_text"] is not None:
         expected = github_slug(str(surfaces["heading_text"]))
         if surfaces["anchor"] is None:
             problems.append(f"no README table row links to the section (its anchor would be #{expected})")
         elif surfaces["anchor"] != expected:
             problems.append(
-                f"table row links to #{display(surfaces['anchor'])}, but the heading slugifies to #{expected}"
+                f"table row links to #{surfaces['anchor']}, but the heading slugifies to #{expected}"
             )
     if len(distinct) == 1:
         version = distinct.pop()
@@ -247,13 +261,13 @@ def main() -> int:
 
     def give_up() -> int:
         for line in unsound:
-            print(f"UNSOUND: {line}", file=sys.stderr)
+            emit(f"UNSOUND: {line}", sys.stderr)
         return 2
 
     if unsound:
         return give_up()
     if len(found) < MIN_PLAUSIBLE_PLUGINS:
-        print(f"UNSOUND: found {len(found)} plugin(s) under {repo} -- refusing to report that clean", file=sys.stderr)
+        emit(f"UNSOUND: found {len(found)} plugin(s) under {repo} -- refusing to report that clean", sys.stderr)
         return 2
 
     width = max([len("plugin")] + [len(n) for n in found])
@@ -262,12 +276,13 @@ def main() -> int:
     for name, surfaces in found.items():
         problems = judge(repo, name, surfaces, unsound)
         failures += bool(problems)
-        cells = COLUMN.join(f"{display(surfaces[s]) if surfaces[s] else '-':{CELL}}" for s in SURFACES)
-        print(f"{name:{width}}{COLUMN}{cells}{COLUMN}{display(surfaces['anchor']) if surfaces['anchor'] else '-'}")
+        cells = COLUMN.join(f"{str(surfaces[s]) if surfaces[s] else '-':{CELL}}" for s in SURFACES)
+        emit(f"{name:{width}}{COLUMN}{cells}{COLUMN}{surfaces['anchor'] or '-'}")
         for problem in problems:
-            print(f"{'':{width}}{COLUMN}-> {problem}")
+            emit(f"{'':{width}}{COLUMN}-> {problem}")
 
-    print(f"\n{len(found)} plugin(s) checked on 5 version surfaces + changelog; {failures} disagreeing")
+    emit("")
+    emit(f"{len(found)} plugin(s) checked on 5 version surfaces + changelog; {failures} disagreeing")
     if unsound:
         return give_up()
     return 1 if failures else 0
