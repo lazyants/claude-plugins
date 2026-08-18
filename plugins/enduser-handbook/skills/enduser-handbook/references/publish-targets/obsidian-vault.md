@@ -200,11 +200,14 @@ that treats embeds as ordinary relative paths, and under Quartz's
 mode — the default most Quartz vaults run, since the `quartz create` Obsidian template
 auto-selects it. Under `shortest`, Quartz resolves a link by matching a bare file name
 or, failing that, a content-root-absolute path; a `../`-relative embed is neither, so it
-renders broken. If this vault publishes through Quartz-`shortest`, either flip that
-vault's config to `markdownLinkResolution: relative` — a per-vault tradeoff the adopter
-owns, since it can also change how bare wikilinks resolve elsewhere in the vault — or
-wait for the co-located-assets follow-up issue (#222), which keeps a grouped chapter's assets
-in the same directory as the chapter so no `../` climb is ever needed. This is documentation
+renders broken. If this vault publishes through Quartz-`shortest`, flip that vault's
+config to `markdownLinkResolution: relative` — a per-vault tradeoff the adopter owns,
+since it can also change how bare wikilinks resolve elsewhere in the vault. That flip is
+the remedy, not a stopgap: per-group asset co-location — keeping a grouped chapter's
+assets beside the chapter so no `../` climb is ever needed — was weighed and declined as
+disproportionate to this one vault configuration, since moving user files safely needs a
+staged, gated, rolled-back filesystem transaction. See #222 for the reasoning and for the
+named vault owner that would reopen it. This is documentation
 only: the existing embed-exists and under-vault gates below are unaffected by depth, so
 there is no new gate here.
 
@@ -932,9 +935,10 @@ the one exception to "do all of these" — see its own conditional note below.
 line-absent branch above. Every other non-heading index form — an MkDocs YAML `nav:` block, a
 bare path table, or any list shape outside the safe subset — stays fully manual: you halt with
 the non-heading instructions above and stop there. First-class YAML `nav:` container automation
-remains its own follow-up, #328. Path-table container automation, by contrast, is not merely
-deferred: it was decided against as not soundly automatable — see #340 for the recorded
-reasoning.
+was weighed and declined as disproportionate to the observed need — see #328 for the reasoning
+and for the real `nav:`-publishing project that would reopen it. Path-table container automation
+is declined on stronger ground still: it was decided against as not soundly automatable — see
+#340 for the recorded reasoning.
 
 ### Nested-list automation limits
 
@@ -1147,8 +1151,8 @@ label (a construct-bearing or invisible-character-bearing one — its rendered f
 its literal form, so no comparison is sound); or a **native/YAML MkDocs `nav:` configuration**,
 which gets no placement verification at all (see the safety statement above under "Non-headings
 index, no existing line") — the run completes unverified, exactly as before 1.11.0, with no
-confirmation requested. First-class YAML `nav:` container automation remains its own follow-up,
-#328.
+confirmation requested. First-class YAML `nav:` container automation was weighed and declined as
+disproportionate (#328), so this unverified state is the terminal one, not a gap awaiting work.
 
 Three disclosures the operator is owed, not proved away:
 

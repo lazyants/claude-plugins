@@ -708,9 +708,11 @@ above; a non-heading index whose shape falls inside that bounded subset (see "Ne
 automation limits" below) is wired by `wireNestedListChapter` per the line-absent branch above.
 Every other static index form — an MkDocs YAML `nav:` block, a bare path table, or any list
 shape outside the safe subset — stays **fully manual**: you halt with the non-heading
-instructions above and stop there. First-class YAML `nav:` container automation remains its own
-follow-up, #328. Path-table container automation, by contrast, is not merely deferred: it was
-decided against as not soundly automatable — see #340 for the recorded reasoning.
+instructions above and stop there. First-class YAML `nav:` container automation was weighed and
+declined as disproportionate to the observed need — see #328 for the reasoning and for the real
+`nav:`-publishing project that would reopen it. Path-table container automation is declined on
+stronger ground still: it was decided against as not soundly automatable — see #340 for the
+recorded reasoning.
 
 ### Nested-list automation limits
 
@@ -900,8 +902,9 @@ that is not a plain label (a construct-bearing or invisible-character-bearing on
 form does not equal its literal form, so no comparison is sound); or a **native/YAML MkDocs
 `nav:` configuration**, which gets no placement verification at all (see the safety statement
 above under "Grouped index wiring") — the run completes unverified, exactly as before 1.11.0,
-with no confirmation requested. First-class YAML `nav:` container automation remains its own
-follow-up, #328.
+with no confirmation requested. First-class YAML `nav:` container automation was weighed and
+declined as disproportionate (#328), so this unverified state is the terminal one, not a gap
+awaiting work.
 
 Three disclosures the operator is owed, not proved away:
 
