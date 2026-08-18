@@ -55,20 +55,25 @@ from pathlib import Path
 # state of it goes under, not an expected count.
 MIN_PLAUSIBLE_PLUGINS = 2
 
-# Both patterns are matched against a SINGLE LINE (see `_lines`), never against the whole file
-# under re.MULTILINE, and each is anchored at the start of that line by `.match()`. That is
-# deliberate and structural: `\s` matches a newline, and so does any
-# negated class like `[^|]`, so a file-wide pattern can be satisfied by text a line below and a
-# later `.strip()` erases the evidence. Two rounds of review found two different instances of that
-# one mistake; matching per line makes the whole class unrepresentable rather than caught.
+# ONE RULE, and every pattern in this file obeys it: nothing is ever matched against multi-line
+# text. A pattern that describes a LINE goes through `line_matches()`; a pattern that describes
+# a whole VALUE goes through `.fullmatch()`. Neither `re.MULTILINE` nor a `$` anchor appears
+# anywhere, because both are how a newline gets in: `\s` matches one, every negated class like
+# `[^|]` matches one, `$` matches BEFORE a trailing one, and `.match()` does not require the
+# whole string. Three review rounds each found a different spelling of that one mistake -- in
+# the heading pattern, then the row pattern, then the changelog pattern and the name gate -- so
+# the rule is stated once here and there is no per-pattern judgement left to get wrong.
 ROW_RE = re.compile(r"\|[ \t]*\[`([a-z0-9][a-z0-9-]*)`\][ \t]*\(#([^)]+)\)[ \t]*\|([^|]*)\|")
-HEADING_RE = re.compile(r"##[ \t]+`([a-z0-9][a-z0-9-]*)`[ \t]+—[ \t]+v(\S+)[ \t]*$")
-VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+# `\Z`, never `$`: on a single line they differ only in that `$` also matches before a trailing
+# newline -- the same hole as everywhere else in this file. A heading must be the WHOLE line,
+# because GitHub slugifies whatever else is on it and the anchor would then not resolve.
+HEADING_RE = re.compile(r"##[ \t]+`([a-z0-9][a-z0-9-]*)`[ \t]+—[ \t]+v(\S+)[ \t]*\Z")
+VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 # What a plugin may be called. The README patterns already enforce this shape and a directory
 # name is a single path component by construction; marketplace.json is the one source that
 # could otherwise put "../../elsewhere" where a path component belongs. read_text's
 # containment check is the backstop that does not depend on which source a name came from.
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 SURFACES = ("manifest", "marketplace", "row", "heading")
 COLUMN = "  "
 CELL = max(len(s) for s in SURFACES)
@@ -93,6 +98,11 @@ def read_text(repo: Path, rel: str, unsound: list[str]) -> str | None:
     except (OSError, UnicodeDecodeError) as exc:
         unsound.append(f"cannot read {rel}: {exc}")
         return None
+
+
+def line_matches(pattern: re.Pattern[str], text: str) -> list[re.Match[str]]:
+    """Every match this file makes against a file: pattern anchored at the start of ONE line."""
+    return [m for m in (pattern.match(line) for line in text.splitlines()) if m]
 
 
 def emit(text: str, stream: object = None) -> None:
@@ -127,9 +137,9 @@ def changelog_source(repo: Path, name: str) -> tuple[str, re.Pattern[str]]:
     """The file that owns this plugin's changelog, and the shape of an entry in it."""
     own = f"plugins/{name}/CHANGELOG.md"
     if (repo / own).is_file():
-        return own, re.compile(r"^##+\s*\[?v?([0-9]+\.[0-9]+\.[0-9]+)", re.M)
+        return own, re.compile(r"##+[ \t]*\[?v?([0-9]+\.[0-9]+\.[0-9]+)")
     return "CHANGELOG.md", re.compile(
-        r"^##+\s*\[" + re.escape(name) + r"\s+([0-9]+\.[0-9]+\.[0-9]+)\]", re.M
+        r"##+[ \t]*\[" + re.escape(name) + r"[ \t]+([0-9]+\.[0-9]+\.[0-9]+)\]"
     )
 
 
@@ -150,14 +160,13 @@ def collect(repo: Path, unsound: list[str]) -> dict[str, dict[str, object]]:
         # Typed here rather than trusted downstream: a name that is present but not a string
         # (JSON null, a number, an object) used to survive as far as sorting the union and die
         # there on a TypeError -- an unclassified traceback exiting 1, the DISAGREEMENT code.
-        if not isinstance(name, str) or not NAME_RE.match(name):
+        if not isinstance(name, str) or not NAME_RE.fullmatch(name):
             unsound.append(f"marketplace.json lists {name!r}, which is not a plugin name")
             continue
         entries.append((name, entry.get("version")))
 
-    lines = readme.splitlines()
-    row_matches = [m for m in (ROW_RE.match(line) for line in lines) if m]
-    heading_matches = [m for m in (HEADING_RE.match(line) for line in lines) if m]
+    row_matches = line_matches(ROW_RE, readme)
+    heading_matches = line_matches(HEADING_RE, readme)
     rows = {m.group(1): (m.group(2), m.group(3).strip()) for m in row_matches}
     # The slug is computed from the heading text as MATCHED, not rebuilt from the two groups:
     # GitHub turns each literal space into its own hyphen, so a double space slugs differently.
@@ -222,7 +231,7 @@ def judge(repo: Path, name: str, surfaces: dict[str, object], unsound: list[str]
             problems.append(f"no version on the {label} surface (plugin absent from it, or its shape changed)")
     versions = {label: surfaces[label] for label in SURFACES if surfaces[label] is not None}
     for label, value in versions.items():
-        if not VERSION_RE.match(str(value)):
+        if not VERSION_RE.fullmatch(str(value)):
             problems.append(f"{label} carries {value!r}, which is not an X.Y.Z version")
     distinct = {str(v) for v in versions.values()}
     if len(distinct) > 1:
@@ -244,7 +253,8 @@ def judge(repo: Path, name: str, surfaces: dict[str, object], unsound: list[str]
             problems.append(f"no changelog at {rel}")
         else:
             text = read_text(repo, rel, unsound)
-            if text is not None and version not in entry_re.findall(text):
+            entries_found = [m.group(1) for m in line_matches(entry_re, text or "")]
+            if text is not None and version not in entries_found:
                 problems.append(f"{rel} has no entry for {version}")
     return problems
 
