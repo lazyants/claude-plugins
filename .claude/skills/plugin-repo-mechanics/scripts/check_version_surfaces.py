@@ -74,6 +74,7 @@ VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 # could otherwise put "../../elsewhere" where a path component belongs. read_text's
 # containment check is the backstop that does not depend on which source a name came from.
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+FENCE_RE = re.compile(r"`{3,}|~{3,}")
 SURFACES = ("manifest", "marketplace", "row", "heading")
 COLUMN = "  "
 CELL = max(len(s) for s in SURFACES)
@@ -116,7 +117,9 @@ def atx_heading(line: str, level: int = 2) -> str | None:
     if hashes != level:
         return None
     rest = stripped[hashes:]
-    if rest and not rest[:1].isspace():
+    if rest and rest[:1] not in (" ", "\t"):
+        # `str.isspace()` was wrong here: it admits U+00A0 and the other Unicode separators, and
+        # CommonMark admits none of them -- GitHub renders `##\u00a0Title` as literal text.
         return None
     text = rest.strip()
     closing = text.rstrip("#")  # an optional closing sequence, which CommonMark drops
@@ -125,10 +128,38 @@ def atx_heading(line: str, level: int = 2) -> str | None:
     return text
 
 
+def rendered_lines(text: str) -> list[str]:
+    """The lines a Markdown renderer treats as content -- fenced code blocks dropped.
+
+    Scanning physical lines loses block context: a table row or a section heading shown as an
+    EXAMPLE inside a fence is not one, and counting it is a false green on the surface it fakes
+    and a false duplicate on the surface it doubles. Fences are matched by character and length,
+    so a ``` inside a ~~~ block does not end it, and a closing fence carries no info string.
+    """
+    kept: list[str] = []
+    fence: tuple[str, int] | None = None
+    for line in text.splitlines():
+        stripped = line.lstrip(" ")
+        marker = FENCE_RE.match(stripped) if len(line) - len(stripped) <= 3 else None
+        if fence is None:
+            if marker:
+                fence = (marker.group(0)[0], len(marker.group(0)))
+                continue
+            kept.append(line)
+        elif (
+            marker
+            and marker.group(0)[0] == fence[0]
+            and len(marker.group(0)) >= fence[1]
+            and not stripped[len(marker.group(0)):].strip()
+        ):
+            fence = None
+    return kept
+
+
 def heading_matches(pattern: re.Pattern[str], text: str) -> list[re.Match[str]]:
     """Every match against a heading: the line is parsed as one first, the pattern reads its TEXT."""
     found = []
-    for line in text.splitlines():
+    for line in rendered_lines(text):
         heading = atx_heading(line)
         if heading is not None:
             match = pattern.fullmatch(heading)
@@ -139,7 +170,7 @@ def heading_matches(pattern: re.Pattern[str], text: str) -> list[re.Match[str]]:
 
 def line_matches(pattern: re.Pattern[str], text: str) -> list[re.Match[str]]:
     """Every match this file makes against a file: pattern anchored at the start of ONE line."""
-    return [m for m in (pattern.match(line) for line in text.splitlines()) if m]
+    return [m for m in (pattern.match(line) for line in rendered_lines(text)) if m]
 
 
 def emit(text: str, stream: object = None) -> None:
