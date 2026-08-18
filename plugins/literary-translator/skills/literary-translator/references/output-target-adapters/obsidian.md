@@ -301,6 +301,17 @@ marker, a `delink_cost` block:
 - A **non-zero total always prints one stderr `WARN`**, on every obsidian
   render. No ratio threshold — a book whose most-named figures are silenced
   should not need to clear a bar to be told so.
+- **A de-linked target CONSUMES its span, and nothing links inside it.**
+  Linking and counting are one scan over the union of linkable and
+  de-linked targets, for this reason: a scan that knew only the surviving
+  targets would match a shorter one *inside* a de-linked longer one — canon
+  holding a colliding `John Smith` and a single-owner `John` rendered
+  `[[…|John]] Smith`, a link landing on the wrong man inside the very span
+  de-linking had just suppressed, while the cost report called that same
+  occurrence unlinked. The #587 word boundary cannot catch it (the
+  character after `John` is a space). The short target still links wherever
+  it genuinely stands alone, and a consumed span never spends the block's
+  one-link-per-target budget.
 - The counts come from inside `_Linker`, over the exact text the wikilink
   rule is applied to — **never a re-scan of the finished markdown**, which
   would be both over- and under-inclusive (a verse gloss is linked BEFORE

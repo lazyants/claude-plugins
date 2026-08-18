@@ -388,6 +388,63 @@ def test_regex_metacharacters_in_a_target_are_escaped(tmp_path):
     assert result["delink_cost"]["unlinked_occurrences_total"] == 1
 
 
+COLLIDING_LONG_PLUS_SHORT = {
+    "john": canon_entry("john", "John"),                     # single owner -- linkable
+    "john_smith_a": canon_entry("john_smith_a", "John Smith"),
+    "john_smith_b": canon_entry("john_smith_b", "John Smith"),   # collides -> de-linked
+}
+
+
+def test_a_delinked_span_is_consumed_and_no_shorter_target_links_inside_it(tmp_path):
+    """The reason linking and counting are ONE scan.
+
+    Collision de-linking removes "John Smith" from the LINKABLE map, so a
+    linking scan that only knows surviving targets matches "John" inside
+    it and emits `[[…|John]] Smith` -- a link landing on the wrong man,
+    inside the very span de-linking had just suppressed. #587's boundary
+    guard cannot see it: the character after "John" is a space. And the
+    cost report called that same occurrence unlinked, so the metric
+    contradicted the vault it describes.
+
+    A de-linked match now consumes its span (`finditer` is
+    non-overlapping) and emits nothing."""
+    ns = make_nodestream([make_node("n1", "seg01", "John Smith arrived.")])
+    out_dir, result = render_into(tmp_path, ns, make_canon(COLLIDING_LONG_PLUS_SHORT),
+                                  make_profile())
+    text = segment_note_text(out_dir, result)
+    assert "[[" not in text, text
+    assert result["delink_cost"]["unlinked_occurrences_total"] == 1
+    assert result["delink_cost"]["inline_links_emitted"] == 0
+
+
+def test_the_short_target_still_links_where_it_stands_alone(tmp_path):
+    """The control: consuming the de-linked span must suppress the nested
+    match only, never the short target's own genuine occurrences."""
+    ns = make_nodestream([make_node(
+        "n1", "seg01", "John Smith arrived. Later John left alone.")])
+    out_dir, result = render_into(tmp_path, ns, make_canon(COLLIDING_LONG_PLUS_SHORT),
+                                  make_profile())
+    text = segment_note_text(out_dir, result)
+    assert "|John]] left alone." in text, text
+    assert text.count("[[") == 1, text
+    assert result["delink_cost"]["unlinked_occurrences_total"] == 1
+    assert result["delink_cost"]["inline_links_emitted"] == 1
+
+
+def test_a_delinked_span_does_not_spend_the_blocks_first_occurrence_slot(tmp_path):
+    """A consumed de-linked span must not mark the SHORT target as seen --
+    the wikilink rule's one-link-per-block budget belongs to the target that
+    actually links."""
+    ns = make_nodestream([make_node(
+        "n1", "seg01", "John Smith and John and John Smith and John.")])
+    out_dir, result = render_into(tmp_path, ns, make_canon(COLLIDING_LONG_PLUS_SHORT),
+                                  make_profile())
+    text = segment_note_text(out_dir, result)
+    assert text.count("[[") == 1                      # first standalone "John" only
+    assert result["delink_cost"]["unlinked_occurrences_total"] == 2   # both "John Smith"
+    assert result["delink_cost"]["inline_links_emitted"] == 1
+
+
 def test_a_boundary_refused_match_is_not_charged_to_delinking(tmp_path):
     """#587's word-boundary guard and #588's cost metric meet here, and the
     metric's own DEFINITION settles it: it counts occurrences that carry no

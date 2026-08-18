@@ -869,13 +869,20 @@ class _Linker:
         # that renderer-authored text. The label is already its final literal
         # form, so protection alone suffices -- there is nothing to restore
         # afterwards (see the LABEL PROTECTION comment block above).
-        # #588: the early return must NOT skip the diagnostic scan when only
-        # the LINKABLE pattern is absent. `build_entity_index` returns
-        # `(None, {})` when nothing survives collision de-linking, which is
-        # exactly the all-collision book this metric exists for -- returning
-        # here on `self.pattern is None` would report zero for a book where
-        # every single name is suppressed.
-        if not text or (self.pattern is None and self.diagnostic_pattern is None):
+        # ONE scan drives both linking and #588's cost count, over the UNION
+        # of linkable and de-linked targets (`diagnostic_pattern`). Two
+        # independent scans is what the first cut did, and it was wrong in a
+        # way only a shared scan can fix -- see the loop below.
+        #
+        # The early return must NOT fire when only the LINKABLE pattern is
+        # absent: `build_entity_index` returns `(None, {})` when nothing
+        # survives collision de-linking, which is exactly the all-collision
+        # book this metric exists for, and returning here would report zero
+        # for a book where every single name is suppressed.
+        scan_pattern = (
+            self.diagnostic_pattern if self.diagnostic_pattern is not None else self.pattern
+        )
+        if not text or scan_pattern is None:
             return text
         # The NFC reassembly below is a MATCHING aid, never an output
         # transform on a no-link path: when nothing is linkable this call
@@ -983,37 +990,6 @@ class _Linker:
                 or (end < len(text) and text[end].isalnum())
             )
 
-        # #588 COST DIAGNOSTIC -- observational only, and deliberately BEFORE
-        # `seen_in_block` is consulted: the question is how many occurrences
-        # of a de-linked name a reader meets unlinked, so every occurrence
-        # counts, not one per block. Same `text`, same `protected` spans, same
-        # `_boundary_ok` and the same scan the linking loop below uses -- see
-        # this class's own docstring for why a post-hoc scan of the rendered
-        # markdown cannot be correct.
-        #
-        # The #587 boundary guard belongs here as much as it belongs to
-        # linking, and for a reason particular to what this metric MEANS: it
-        # counts occurrences that carry no link BECAUSE OF THE COLLISION. A
-        # match the boundary guard refuses -- "Teplik" inside "Tepliker" --
-        # would carry no link even if the target had a single owner, so
-        # charging it to de-linking would inflate the number with occurrences
-        # a link group could never recover, and send the operator after a
-        # cost that is not there.
-        if self.diagnostic_pattern is not None and self.delinked_targets:
-            for m in self.diagnostic_pattern.finditer(text):
-                if _is_protected(m.start(), m.end()):
-                    continue
-                if not _boundary_ok(m.start(), m.end()):
-                    continue
-                matched = m.group(0)
-                if matched in self.delinked_targets:
-                    self.delinked_counts[matched] += 1
-
-        if self.pattern is None:
-            # Nothing linkable this render; the diagnostic pass above still
-            # ran. Return the ORIGINAL bytes -- see `original_text`.
-            return original_text
-
         # `seen_in_block` is normally SHARED across every `link()` call made
         # while rendering one block (#105c) -- passed down from
         # `_render_block` through the verse renderers, so a name already
@@ -1026,7 +1002,7 @@ class _Linker:
             seen_in_block = set()
         out = []
         last = 0
-        for m in self.pattern.finditer(text):
+        for m in scan_pattern.finditer(text):
             if _is_protected(m.start(), m.end()):
                 continue  # inside a protected span -- leave untouched, don't count as "seen"
             if not _boundary_ok(m.start(), m.end()):
@@ -1048,6 +1024,37 @@ class _Linker:
                 # in the delivered book, is not.
                 continue
             target = m.group(0)
+            if target in self.delinked_targets:
+                # #588 COST, and the reason this is ONE scan. A de-linked
+                # target CONSUMES its span and emits nothing. `finditer` is
+                # non-overlapping, so a shorter SURVIVING target starting
+                # inside it gets no turn -- which is the whole point: with
+                # two independent scans, canon holding a colliding
+                # "John Smith" and a single-owner "John" rendered
+                # "[[…|John]] Smith", a link landing on the wrong man inside
+                # the very span de-linking had just suppressed, while the
+                # cost report simultaneously called that occurrence unlinked.
+                # A false link is worse than a missing one (#207) -- and a
+                # metric that contradicts the vault it describes is worse
+                # than either.
+                #
+                # Counted BEFORE `seen_in_block` is consulted: the question
+                # is how many occurrences of a de-linked name a reader meets
+                # unlinked, so every occurrence counts, not one per block.
+                # Counted AFTER `_boundary_ok`, because what this metric
+                # means is occurrences that carry no link BECAUSE OF THE
+                # COLLISION: a match the #587 boundary refuses ("Teplik"
+                # inside "Tepliker") would carry no link with a single owner
+                # either, so charging it would inflate the number with
+                # occurrences a link group could never recover.
+                self.delinked_counts[target] += 1
+                continue
+            if self.pattern is None or target not in self.target_to_entity:
+                # Nothing linkable at all this render, or a scan-pattern
+                # alternative that is in neither map (unreachable while the
+                # union is built from exactly these two sets -- defensive,
+                # so a future caller cannot turn a mismatch into a KeyError).
+                continue
             if target in seen_in_block:
                 continue
             seen_in_block.add(target)
@@ -1061,6 +1068,13 @@ class _Linker:
             self.links_emitted += 1  # #588: counted where the link is actually inserted
             last = m.end()
         out.append(text[last:])
+        if self.pattern is None:
+            # Nothing was linkable this render, so nothing was rewritten --
+            # the counting pass above still ran. Return the caller's OWN
+            # bytes rather than the NFC reassembly, exactly as the single
+            # `self.pattern is None` early return used to (see
+            # `original_text`).
+            return original_text
         return "".join(out)
 
 
