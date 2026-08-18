@@ -62,6 +62,7 @@ REFERENCES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "references"
 
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
 LEDGER_MERGE_SCRIPT = SCRIPTS_DIR / "ledger_merge.py"
+SCAFFOLD_SETUP_SCRIPT = SCRIPTS_DIR / "scaffold_setup.py"
 SELECT_SEGMENTS_SCRIPT = SCRIPTS_DIR / "select_segments.py"
 SKEPTIC_CONSTANTS_SCRIPT = SCRIPTS_DIR / "skeptic_constants.py"
 LEDGER_RECORD_BASE_SCHEMA = SCHEMAS_DIR / "ledger-record-base.schema.json"
@@ -154,6 +155,47 @@ def _extract_bundle_hashes_section(doc_text: str) -> str:
     next_header = doc_text.find("\n## ", start + len(BUNDLE_SECTION_HEADER))
     end = next_header if next_header != -1 else len(doc_text)
     return doc_text[start:end]
+
+
+def _orchestration_members_and_prose() -> tuple[frozenset[str], str]:
+    """`ORCHESTRATION_BUNDLE_MEMBERS` as scaffold_setup.py actually declares it,
+    plus that file's source with the tuple literal REMOVED.
+
+    Read with `ast` rather than imported: scaffold_setup.py does a sibling
+    `import cache_key`, which resolves only if cache_key.py is already in
+    sys.modules under that exact name -- that would make this file's result
+    depend on whether another test module happened to load it first.
+
+    The tuple-less source is returned so the caller can ask whether a member is
+    also mentioned in PROSE there. A name that appears only inside the tuple has
+    been registered silently; one that also appears outside it has been
+    explained, which is the property worth pinning for a deliberate
+    double-registration."""
+    source = SCAFFOLD_SETUP_SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in tree.body:
+        # AnnAssign as well as Assign: this file annotates its own module-level
+        # tuples, so an annotated ORCHESTRATION_BUNDLE_MEMBERS is a shape that
+        # can turn up -- and matching only Assign would fail with "no such
+        # assignment found" while the assignment sits right there.
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "ORCHESTRATION_BUNDLE_MEMBERS"
+                   for t in targets):
+            continue
+        members = frozenset(ast.literal_eval(node.value))
+        lines = source.splitlines(keepends=True)
+        without_tuple = "".join(
+            lines[: node.lineno - 1] + lines[node.end_lineno :]
+        )
+        return members, without_tuple
+    raise AssertionError(
+        f"no ORCHESTRATION_BUNDLE_MEMBERS assignment found in {SCAFFOLD_SETUP_SCRIPT}"
+    )
 
 
 def _extract_bundle_files(doc_text: str, hash_name: str) -> frozenset[str]:
@@ -502,36 +544,60 @@ def test_derivation_bundle_members_match_reference_doc(cache_key_module):
     )
 
 
-def test_orchestration_bundle_members_from_doc_are_disjoint_from_the_other_two(
+def test_orchestration_bundle_members_from_doc_match_the_tuple_that_owns_them(
     cache_key_module,
 ):
-    """orchestration_bundle_hash has no computing script of its own (it's a
-    Step 0a marker file, non-gating for convergence but gating for resume --
-    see the doc's own resume-integrity-digest wording), so its only
-    restatement sites are the reference doc's prose and each member script's
-    own self-declared docstring comment. Cross-check both against the two
-    bundles that DO have a code-level list, and confirm every named file
-    actually exists under scripts/ (catches a typo'd/renamed member)."""
+    """orchestration_bundle_hash's membership is owned by
+    `scaffold_setup.py`'s own ORCHESTRATION_BUNDLE_MEMBERS tuple -- check the
+    doc against THAT, exactly as the two tests above check their bullets
+    against cache_key.py's tuples, and confirm every named file actually
+    exists under scripts/ (catches a typo'd/renamed member).
+
+    This test used to hard-code the four members it expected and assert the
+    set was disjoint from plugin_bundle_hash. Both were wrong from #438, which
+    added `claim_record.py` to BOTH bundles deliberately -- and because the
+    literal sat here rather than being read, the wrong expectation is what held
+    the reference doc's own list wrong for nine releases: correcting the doc
+    turned this red. A hand-typed membership list in a drift test does not
+    detect drift, it freezes it, which is why the rest of this file reads every
+    list from the shipped file (#591).
+
+    Disjointness is therefore no longer asserted against plugin_bundle_hash. An
+    overlap is legal; an UNMENTIONED one is not, so each overlapping member must
+    also appear in scaffold_setup.py outside the tuple literal. Be precise about
+    what that buys: it catches a member added to both tuples with nothing said
+    about it anywhere, and NOT a bare `# claim_record.py` or a comment that says
+    something false -- a string check cannot judge prose. It is a "was this
+    written down at all" gate, not a "was it explained correctly" one; the
+    latter is a reviewer's job. Derivation stays strictly disjoint: nothing has
+    ever been in both, and bootstrap_names.py/segpack.py get the regenerate-
+    before-retranslate treatment that would be incoherent shared with either."""
     doc_text = _load_ledger_and_resumability_doc()
     orchestration_members = _extract_bundle_files(doc_text, "orchestration_bundle_hash")
+    declared_members, scaffold_prose = _orchestration_members_and_prose()
 
-    assert orchestration_members == {
-        "draft_ready.py",
-        "ledger_merge.py",
-        "language_smoke_report.py",
-        "select_segments.py",
-    }, f"unexpected orchestration_bundle_hash membership parsed from the doc: {sorted(orchestration_members)}"
+    assert orchestration_members == declared_members, (
+        "orchestration_bundle_hash membership has drifted between "
+        "scaffold_setup.py's ORCHESTRATION_BUNDLE_MEMBERS and "
+        "references/ledger-and-resumability.md:\n"
+        f"  doc only:  {sorted(orchestration_members - declared_members)}\n"
+        f"  code only: {sorted(declared_members - orchestration_members)}"
+    )
 
     plugin_members = frozenset(cache_key_module.PLUGIN_BUNDLE_MEMBERS)
     derivation_members = frozenset(cache_key_module.DERIVATION_BUNDLE_MEMBERS)
 
-    assert not (orchestration_members & plugin_members), (
-        "a script is claimed by both orchestration_bundle_hash (doc) and "
-        f"plugin_bundle_hash (code): {sorted(orchestration_members & plugin_members)}"
-    )
+    for name in sorted(orchestration_members & plugin_members):
+        assert name in scaffold_prose, (
+            f"{name} is registered in BOTH orchestration_bundle_hash and "
+            "plugin_bundle_hash, but scaffold_setup.py does not mention it "
+            "anywhere outside the tuple literal. A double registration moves "
+            "two hashes at once and must at least be written down where it is "
+            "declared."
+        )
     assert not (orchestration_members & derivation_members), (
-        "a script is claimed by both orchestration_bundle_hash (doc) and "
-        f"derivation_bundle_hash (code): {sorted(orchestration_members & derivation_members)}"
+        "a script is claimed by both orchestration_bundle_hash and "
+        f"derivation_bundle_hash: {sorted(orchestration_members & derivation_members)}"
     )
 
     for filename in orchestration_members:

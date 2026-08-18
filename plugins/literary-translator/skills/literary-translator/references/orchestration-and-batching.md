@@ -157,18 +157,14 @@ current copy every run** — never a stale generated copy reused across runs.
 template specifically, so a plugin update is never silently masked by an old
 generated script surviving in place.
 
-Bundle membership stays split exactly as follows: `plugin_bundle_hash` gates
-cache reuse and covers `validate_draft.py`, `canon_validate.py`,
-`cache_key.py`, `draft_sha1.py`, `review_artifact_check.py`,
-`ledger_update.py`, `review_ready.py`, `resume_setup.py`,
-`glossary_batch_plan.py`, `codex_job.py`, `canon_senses.py`,
-`fetch_citation.py`, and `segment_dispatch_driver.py` (#409 Step 4, the W5
-local driver), plus `mass-translate-wf.template.js` and
-`glossary-pass-wf.template.js`. Read `cache_key.py`'s own
-`PLUGIN_BUNDLE_MEMBERS` tuple for the authoritative list rather than
-trusting a restated count here — it has already drifted once (1.4.7's "ten
-scripts + two templates" went stale the moment `canon_senses.py` and
-`fetch_citation.py` joined the tuple).
+Bundle membership stays split three ways. `plugin_bundle_hash` gates cache
+reuse and covers every entry of `cache_key.py`'s own `PLUGIN_BUNDLE_MEMBERS`
+tuple — scripts plus the two workflow templates. **Read that tuple; this page
+deliberately no longer restates it.** The list used to live here and drifted
+twice: 1.4.7's "ten scripts + two templates" went stale the moment
+`canon_senses.py` and `fetch_citation.py` joined, and the replacement went
+stale again the moment `claim_record.py` (#438) and `reject_review.py` (#461)
+did. A restatement with no test behind it always loses that race.
 `review_ready.py` and `resume_setup.py` (both new in 1.2.0) are correctness-
 determining in the same sense as `review_artifact_check.py`/`ledger_update.py`
 — a bug in either could certify a stale or wrongly-scoped artifact as safe to
@@ -180,8 +176,9 @@ reason — the former shapes glossary content, the latter
 validates-before-promotes each draft/review artifact.
 `orchestration_bundle_hash` is non-gating for convergence — never part of
 the composite cache key — but gating for resume, folded into the
-resume-integrity digest (see below); it covers exactly `draft_ready.py`,
-`ledger_merge.py`, `language_smoke_report.py`, and `select_segments.py`;
+resume-integrity digest (see below); it covers exactly `scaffold_setup.py`'s
+`ORCHESTRATION_BUNDLE_MEMBERS` tuple, which is restated once, in
+`references/ledger-and-resumability.md`, and nowhere else;
 `derivation_bundle_hash`
 covers exactly `bootstrap_names.py` and `segpack.py` and is the cache-key
 field that drives the `blocked_needs_regeneration` treatment. See

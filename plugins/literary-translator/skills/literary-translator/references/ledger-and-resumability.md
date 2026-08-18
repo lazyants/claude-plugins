@@ -525,7 +525,7 @@ Exact byte-scope per field:
   correctness) plus the two workflow templates
   (`mass-translate-wf.template.js`/`glossary-pass-wf.template.js`). Never
   `bootstrap_names.py`/`segpack.py` (their own `derivation_bundle_hash`),
-  and never the four orchestration-only scripts (covered by the separate
+  and never the orchestration-only scripts (covered by the separate
   `orchestration_bundle_hash`: non-gating for convergence — never part of
   the composite cache key — but gating for resume, folded into the
   resume-integrity digest). See the exact membership list below.
@@ -624,8 +624,9 @@ membership.
   straight to `stale`.
 - **`orchestration_bundle_hash`** (global, sibling marker file
   `${durable_root}/runs/.orchestration_bundle_hash`, same computation
-  timing) — covers exactly **four scripts**: `draft_ready.py`,
-  `ledger_merge.py`, `language_smoke_report.py`, `select_segments.py`.
+  timing) — covers exactly **five scripts**: `claim_record.py`,
+  `draft_ready.py`, `ledger_merge.py`, `language_smoke_report.py`,
+  `select_segments.py`.
   **Never added to the cache-key composite, never compared against any
   segment's cache key** — non-gating for convergence, but it IS folded
   into the resume-integrity digest (see below), so it gates resume: a
@@ -637,6 +638,16 @@ membership.
   regenerate-before-retranslate treatment (`blocked_needs_regeneration`,
   see below), not either simpler bundle's flip-straight-to-stale/
   never-gates treatment.
+
+The orchestration list above is a restatement: `scaffold_setup.py`'s own
+`ORCHESTRATION_BUNDLE_MEMBERS` tuple is the authority, and its
+`test_orchestration_members_pinned` holds that tuple byte-for-byte. Read the
+tuple if the two ever disagree. Note `claim_record.py` sits in **both** it and
+`PLUGIN_BUNDLE_MEMBERS`, deliberately, since #438: it gates dispatch, which
+earns it the plugin bundle, and `select_segments.py` — an orchestration member
+that is deliberately NOT a plugin-bundle member — imports it, so its bytes must
+move this marker too. A change to that one file therefore moves **two** hashes:
+it re-stales converged segments AND forces a no-resume run.
 
 `profile_validate.py` is excluded from **all three** bundles — it is never
 copied to `durable_root` at all; it's always invoked from the plugin's own
