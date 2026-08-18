@@ -64,10 +64,10 @@ MIN_PLAUSIBLE_PLUGINS = 2
 # the heading pattern, then the row pattern, then the changelog pattern and the name gate -- so
 # the rule is stated once here and there is no per-pattern judgement left to get wrong.
 ROW_RE = re.compile(r"\|[ \t]*\[`([a-z0-9][a-z0-9-]*)`\][ \t]*\(#([^)]+)\)[ \t]*\|([^|]*)\|")
-# `\Z`, never `$`: on a single line they differ only in that `$` also matches before a trailing
-# newline -- the same hole as everywhere else in this file. A heading must be the WHOLE line,
-# because GitHub slugifies whatever else is on it and the anchor would then not resolve.
-HEADING_RE = re.compile(r"##[ \t]+`([a-z0-9][a-z0-9-]*)`[ \t]+—[ \t]+v(\S+)[ \t]*\Z")
+# The heading pattern describes the heading TEXT and is applied with `fullmatch` by
+# `heading_matches`, so trailing text cannot ride along -- GitHub slugifies whatever else is on
+# the line, and the row's anchor would then not resolve.
+HEADING_RE = re.compile(r"`([a-z0-9][a-z0-9-]*)`[ \t]+—[ \t]+v(\S+)")
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 # What a plugin may be called. The README patterns already enforce this shape and a directory
 # name is a single path component by construction; marketplace.json is the one source that
@@ -98,6 +98,43 @@ def read_text(repo: Path, rel: str, unsound: list[str]) -> str | None:
     except (OSError, UnicodeDecodeError) as exc:
         unsound.append(f"cannot read {rel}: {exc}")
         return None
+
+
+def atx_heading(line: str, level: int = 2) -> str | None:
+    """The TEXT of a CommonMark ATX heading of exactly `level`, or None if this line is not one.
+
+    Three consumers need this -- the README's plugin sections and both changelog layouts -- and
+    every hand-rolled version of it accepted something Markdown does not render as a heading:
+    `##[name 1.2.3]` (no space after the hashes is not a heading at all), and `### ...` (a real
+    heading, but not the release-entry level). A changelog entry that never rendered is exactly the
+    "entry was never written" case this check exists to catch, so it is parsed once, here.
+    """
+    stripped = line.lstrip(" ")
+    if len(line) - len(stripped) > 3:  # four spaces is an indented code block, not a heading
+        return None
+    hashes = len(stripped) - len(stripped.lstrip("#"))
+    if hashes != level:
+        return None
+    rest = stripped[hashes:]
+    if rest and not rest[:1].isspace():
+        return None
+    text = rest.strip()
+    closing = text.rstrip("#")  # an optional closing sequence, which CommonMark drops
+    if closing != text and (not closing or closing[-1:].isspace()):
+        text = closing.strip()
+    return text
+
+
+def heading_matches(pattern: re.Pattern[str], text: str) -> list[re.Match[str]]:
+    """Every match against a heading: the line is parsed as one first, the pattern reads its TEXT."""
+    found = []
+    for line in text.splitlines():
+        heading = atx_heading(line)
+        if heading is not None:
+            match = pattern.fullmatch(heading)
+            if match:
+                found.append(match)
+    return found
 
 
 def line_matches(pattern: re.Pattern[str], text: str) -> list[re.Match[str]]:
@@ -137,9 +174,9 @@ def changelog_source(repo: Path, name: str) -> tuple[str, re.Pattern[str]]:
     """The file that owns this plugin's changelog, and the shape of an entry in it."""
     own = f"plugins/{name}/CHANGELOG.md"
     if (repo / own).is_file():
-        return own, re.compile(r"##+[ \t]*\[?v?([0-9]+\.[0-9]+\.[0-9]+)")
+        return own, re.compile(r"\[?v?([0-9]+\.[0-9]+\.[0-9]+).*")
     return "CHANGELOG.md", re.compile(
-        r"##+[ \t]*\[" + re.escape(name) + r"[ \t]+([0-9]+\.[0-9]+\.[0-9]+)\]"
+        r"\[" + re.escape(name) + r"[ \t]+([0-9]+\.[0-9]+\.[0-9]+)\].*"
     )
 
 
@@ -166,18 +203,18 @@ def collect(repo: Path, unsound: list[str]) -> dict[str, dict[str, object]]:
         entries.append((name, entry.get("version")))
 
     row_matches = line_matches(ROW_RE, readme)
-    heading_matches = line_matches(HEADING_RE, readme)
+    heading_hits = heading_matches(HEADING_RE, readme)
     rows = {m.group(1): (m.group(2), m.group(3).strip()) for m in row_matches}
     # The slug is computed from the heading text as MATCHED, not rebuilt from the two groups:
     # GitHub turns each literal space into its own hyphen, so a double space slugs differently.
-    headings = {m.group(1): (m.group(2), m.group(0)[2:].strip()) for m in heading_matches}
+    headings = {m.group(1): (m.group(2), m.group(0)) for m in heading_hits}
     marketplace = dict(entries)
     # Counted, not just mapped: each of these three parses is last-one-wins, so a duplicate left
     # behind by a "keep both sides" conflict resolution would disappear into the map.
     seen = {
         "marketplace": Counter(name for name, _ in entries),
         "row": Counter(m.group(1) for m in row_matches),
-        "heading": Counter(m.group(1) for m in heading_matches),
+        "heading": Counter(m.group(1) for m in heading_hits),
     }
 
     try:
@@ -253,7 +290,7 @@ def judge(repo: Path, name: str, surfaces: dict[str, object], unsound: list[str]
             problems.append(f"no changelog at {rel}")
         else:
             text = read_text(repo, rel, unsound)
-            entries_found = [m.group(1) for m in line_matches(entry_re, text or "")]
+            entries_found = [m.group(1) for m in heading_matches(entry_re, text or "")]
             if text is not None and version not in entries_found:
                 problems.append(f"{rel} has no entry for {version}")
     return problems
