@@ -251,6 +251,32 @@ The advisory `validate_backlinks.py` W9 gate (non-blocking) reports coverage;
 the aggregated `output.index` person-index page + `index_scope` routing
 remain a later phase.
 
+**Checking a POST-PROCESSED vault (`--entity-note-map FILE`).** Both metrics
+locate each entity's note by re-deriving its path through the renderer's own
+naming rule, so a vault whose entity notes a downstream layer renamed — or
+merged, one note per entity rather than one per spelling — reports every
+expected occurrence missing while being perfectly correct. `--vault DIR` does
+not help: it moves the root, never the derivation. `--entity-note-map` supplies
+the derivation instead, as a JSON object `{source_form: "<vault-relative>.md"}`
+that replaces it wholesale for *both* metrics. Several source_forms may share
+one path (an inline link to the shared note then credits every owner of it — an
+exit-neutral aggregation, disclosed because attribution between merged
+spellings is genuinely ambiguous); a canon entry the map omits is treated as
+having no note in this vault, so its occurrences count as missing rather than
+raising. A map never blanket-passes: a mapped note whose `## Mentions` region
+really is missing an expected segment link still yields that pair and exit `1`.
+An unreadable/non-object file, a non-string or non-relative-`*.md` value
+(a stemless `.md` basename and an embedded NUL are both refused here — each is
+lexically `*.md` yet cannot name a real note), or a
+key that is not a `canon.json` entry — or the same key twice, since a silently
+de-duplicated map would aim both metrics at whichever line came second — is
+exit `2` — but only once the gate is
+enabled: the `disabled` short-circuit still returns exit `0` first and reads no
+map, because a gate that will not run should not fail on an input it will not
+use. On the enabled path a supplied map makes the report carry
+`"note_map_source": "supplied"`; the default report is unchanged, its absence
+meaning the paths were derived.
+
 **Collision de-linking is decoupled from the Mentions flag, but still
 gated on `output.target == "obsidian"`.** When two or more canon entries
 share one NFC-exact `canonical_target_form` (grouping is case-sensitive —
@@ -310,8 +336,8 @@ marker, a `delink_cost` block:
   de-linking had just suppressed, while the cost report called that same
   occurrence unlinked. The #587 word boundary cannot catch it (the
   character after `John` is a space). A consumed span never spends the
-  block's one-link-per-target budget, so the short target still links at its
-  other occurrences in the same block.
+  block's one-link-per-target budget, so the short target can still take its
+  one link at a later eligible occurrence in the same block.
 - **The span is consumed even when the #587 boundary guard REFUSES the
   de-linked match**, and that costs the short target its link at exactly
   that spot. With `John Smith` de-linked and `John` surviving, the prose
@@ -323,17 +349,15 @@ marker, a `delink_cost` block:
   occurrence either, because the boundary guard would still refuse it.
   Releases before 1.32.0 emitted `[[…|John]] Smithson` here. The direction
   is deliberate — a missing link is recoverable, a link on the wrong man is
-  not (#207). Note that re-scanning from `m.start() + 1` after a refusal
-  does **not** recover it: the nested target begins at the *same* offset as
-  the refused match, so a `+1` re-scan skips it too. It is not harmless
-  elsewhere, either: where the nested target starts LATER than the
-  refused match it *is* reached, and reached wrongly — over `JoAnn
-  Marie`, with targets `Ann Marie` and `Marie`, a `+1` re-scan emits
-  `JoAnn [[…|Marie]]`, which is the #207 failure; `render_obsidian.test.py`
-  pins that and goes RED under the mutant. Recovery would need
-  per-position fallback to the next-shorter alternative matching at that
-  same offset — more machinery than a scan-position change, for a case whose
-  current outcome is already the safe one.
+  not (#207). The obvious remedy — re-scanning from `m.start() + 1` after a
+  refusal — is deliberately not taken, and **the reasons live next to the
+  code, not here**: the comment beside the refusal in `_Linker.link`, and the
+  docstring of the test that pins it,
+  `test_a_refused_span_is_consumed_so_no_shorter_target_links_inside_it` in
+  `render_obsidian.test.py`, which goes RED under exactly that mutant. Both
+  sit where a change to the behaviour must pass. This page deliberately does
+  not restate them: a third copy of a scan-order argument is a third thing to
+  get wrong, and 1.32.x got it wrong twice that way.
 - The counts come from inside `_Linker`, over the exact text the wikilink
   rule is applied to — **never a re-scan of the finished markdown**, which
   would be both over- and under-inclusive (a verse gloss is linked BEFORE

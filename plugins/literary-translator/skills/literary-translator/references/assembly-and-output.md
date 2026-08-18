@@ -301,8 +301,9 @@ Step 0a already `mkdir -p`s its resolved parent.
 
 #### Render + diff — the acceptance gate
 
-`scripts/diff_rendered_output.py` re-renders and diffs against the last
-accepted baseline. It is a stdlib-only markdown-aware reduction (no `bs4`):
+`scripts/diff_rendered_output.py` reduces the ALREADY-rendered output and
+diffs it against the last accepted baseline -- it renders nothing itself, so a
+stale out/ is compared as it stands. It is a stdlib-only markdown-aware reduction (no `bs4`):
 normalize line endings, `rstrip()` trailing whitespace per line while
 preserving leading indentation (markdown is whitespace-significant), strip a
 trailing blank-line tail. For a vault-shaped render (many files), the
@@ -314,14 +315,33 @@ short-circuiting on the first one; `difflib` produces a readable report
 alongside the exact-equality verdict.
 
 Exit codes and a one-line JSON stdout `reason`: `0` = match (`"ok"`); `1` =
-mismatch or a guard refusal (`"mismatch"` / `"candidate_not_built"`); `2` =
-no baseline exists yet (`"no_baseline"`). `--accept-baseline` freezes the
+mismatch or a guard refusal (`"mismatch"` / `"candidate_not_built"` /
+`"baseline_dir_not_found"` / the out_dir refusals, whose reason strings
+name symlinks but also cover a `..` traversal destination); `2` = no baseline exists
+yet (`"no_baseline"`) or a profile precondition failed
+(`"profile_precondition"`). The script's own module docstring carries the full
+`reason` set, including the one JSON line that carries no `reason` at all
+(`main()`'s defensive catch-all). `--accept-baseline` freezes the
 current reduced render as the new baseline, and is itself
 overwrite-guarded — it refuses (exit 1) if a baseline already exists unless
 `--force-accept-baseline` is also passed. The baseline is stamped with a
 render-version/hash so a stale-renderer baseline is detectable. There is no
 separate item-count acceptance check anywhere in this pipeline — the
 render+diff comparison **is** the gate for rendered-content equality.
+
+**Two-tree mode (`--baseline-dir DIR`).** There is exactly one frozen baseline
+per durable root, and `--accept-baseline` overwrites it with whatever
+`--candidate-dir` names — so a project that POST-PROCESSES the rendered vault
+could only compare its result by destroying the reduction the pipeline's own
+acceptance gate depends on. `--baseline-dir A
+--candidate-dir B` reduces *both* directories with the same reducer and
+compares them positionally — the same verdict rule, two supplied inputs. It is
+read-only (no baseline is read, written, or required, so a project with no
+`out/.baseline/` at all can use it), it is mutually exclusive with
+`--accept-baseline`, it never reports `stale_baseline` (there is no stored
+render-version behind either tree), and its `ok`/`mismatch` payloads carry
+`"mode": "two_tree"` so a consumer cannot mistake one verdict for the other. A
+missing `--baseline-dir` is exit `1`, `reason: "baseline_dir_not_found"`.
 
 #### Structural-completeness gate (`scripts/validate_assembled.py`, #202)
 

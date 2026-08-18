@@ -2575,13 +2575,17 @@ this time reading `out/.assembled/nodestream.json`
 gates; exit `0` always barring an env/usage precondition.
 
 Then run `scripts/diff_rendered_output.py` as the acceptance gate: it
-re-renders and diffs against the last accepted baseline — exit `0` on an exact match, `1`
+reduces the ALREADY-rendered output (it renders nothing itself) and diffs it
+against the last accepted baseline — exit `0` on an exact match, `1`
 on a mismatch or guard refusal, `2` when no baseline exists yet
 (`--accept-baseline` freezes the current render as the new baseline). For
 rendered-content equality, the render+diff comparison IS the acceptance
 gate — there is no separate item-count check alongside it (structural
 completeness is `validate_assembled.py`'s distinct concern above, checked
-before this step ever runs).
+before this step ever runs). To compare two ALREADY-rendered trees instead —
+the check a project that post-processes the vault needs, and the only one the
+frozen baseline cannot express — pass `--baseline-dir A --candidate-dir B`:
+read-only, no baseline involved, `"mode": "two_tree"` on the verdict.
 
 Then — for `output.target: obsidian`, ON BY DEFAULT unless explicitly
 disabled (`output.adapter_config.obsidian.mentions_section.enabled: false`) —
@@ -2595,7 +2599,11 @@ ADVISORY — log the warnings and CONTINUE W9** (it never blocks assembly);
 only exit `2` (unreadable/malformed input, e.g. a missing
 `out/.assembled/nodestream.json`) halts. When the target is not obsidian, or
 the flag is explicitly disabled, it short-circuits to
-`mentions_coverage.status: disabled`, exit `0`. The `## Mentions` section is
+`mentions_coverage.status: disabled`, exit `0`. Against a vault whose entity
+notes a post-processing layer renamed or merged, pass `--entity-note-map FILE`
+(a JSON `{source_form: vault-relative *.md path}`) — without it the gate
+re-derives every note path from the renderer's own rule and reports the whole
+vault missing. The `## Mentions` section is
 a source-anchored occurrence index (mirroring the SSK `build_index.py`
 model) that supersedes the older "native backlinks are the occurrence index"
 stance for `output.target: obsidian` projects; see

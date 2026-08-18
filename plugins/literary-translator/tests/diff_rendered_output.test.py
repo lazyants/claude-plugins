@@ -640,5 +640,204 @@ def test_parent_out_dir_symlink_is_refused_before_baseline_dir_is_created(tmp_pa
     )
 
 
+# ===========================================================================
+# 11. Two-tree equivalence mode (--baseline-dir, #589): compare two
+#     ALREADY-rendered trees directly. The frozen out/.baseline/ is neither
+#     read nor written -- the mode exists precisely for a project that
+#     POST-PROCESSES the rendered vault and therefore has no accepted
+#     baseline describing what it produced.
+# ===========================================================================
+
+
+def make_tree(tmp_path, name: str, files: dict) -> Path:
+    """A bare rendered tree OUTSIDE any durable_root -- what a post-processing
+    layer hands back. Deliberately not under root/out, so a passing two-tree
+    test could never be silently reading the fixture's own candidate dir."""
+    tree = tmp_path / name
+    for relpath, content in files.items():
+        path = tree / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    return tree
+
+
+def test_two_tree_mode_matches_with_no_baseline_on_disk(tmp_path):
+    """The property the frozen-baseline mode cannot express at all: two
+    directories compared directly, with NO out/.baseline/ anywhere -- the
+    state that would otherwise be exit 2 "no_baseline"."""
+    root = make_root(tmp_path)
+    baseline_tree = make_tree(tmp_path, "baseline_tree", BASE_VAULT)
+    candidate_tree = make_tree(tmp_path, "candidate_tree", BASE_VAULT)
+
+    result = run_diff(root, "--baseline-dir", str(baseline_tree), candidate_dir=candidate_tree)
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    payload = parse_one_json_line(result)
+    assert payload["reason"] == "ok"
+    assert payload["match"] is True
+    assert payload["mode"] == "two_tree"
+    assert "stale_baseline" not in payload
+    assert not (root / "out" / ".baseline").exists(), (
+        "two-tree mode must never create the frozen baseline it does not use"
+    )
+
+
+def test_two_tree_mode_reports_mismatch_on_a_changed_line(tmp_path):
+    root = make_root(tmp_path)
+    baseline_tree = make_tree(tmp_path, "baseline_tree", BASE_VAULT)
+    changed = dict(BASE_VAULT)
+    changed["people/ivan.md"] = BASE_VAULT["people/ivan.md"].replace(
+        "Some body text", "Rewritten body text"
+    )
+    candidate_tree = make_tree(tmp_path, "candidate_tree", changed)
+
+    result = run_diff(root, "--baseline-dir", str(baseline_tree), candidate_dir=candidate_tree)
+    assert result.returncode == 1, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    payload = parse_one_json_line(result)
+    assert payload["reason"] == "mismatch"
+    assert payload["match"] is False
+    assert payload["mode"] == "two_tree"
+    assert payload["failures"] >= 1
+
+
+def test_two_tree_mode_detects_a_file_present_in_only_one_tree(tmp_path):
+    """A renamed/added/removed file surfaces as a `--- <relpath> ---` header
+    mismatch -- the same mechanism the frozen-baseline mode relies on."""
+    root = make_root(tmp_path)
+    baseline_tree = make_tree(tmp_path, "baseline_tree", BASE_VAULT)
+    extra = dict(BASE_VAULT)
+    # The extra file contributes NO reduced body lines, so the one thing
+    # the two reductions can differ by is its `--- <relpath> ---` header.
+    # A reducer that stopped emitting headers would make these two trees
+    # compare EQUAL and this test would fail -- which is the point of it.
+    extra["places/athens.md"] = ""
+    candidate_tree = make_tree(tmp_path, "candidate_tree", extra)
+
+    result = run_diff(root, "--baseline-dir", str(baseline_tree), candidate_dir=candidate_tree)
+    assert result.returncode == 1, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert parse_one_json_line(result)["reason"] == "mismatch"
+
+
+def test_two_tree_mode_missing_baseline_dir_has_its_own_reason(tmp_path):
+    """Its own reason, never `no_baseline`: exit 2 there means "accept one
+    now", which is meaningless for a directory the operator named."""
+    root = make_root(tmp_path)
+    candidate_tree = make_tree(tmp_path, "candidate_tree", BASE_VAULT)
+
+    result = run_diff(
+        root, "--baseline-dir", str(tmp_path / "no_such_tree"), candidate_dir=candidate_tree
+    )
+    assert result.returncode == 1, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert parse_one_json_line(result)["reason"] == "baseline_dir_not_found"
+
+
+def test_two_tree_mode_refuses_accept_baseline_and_leaves_the_frozen_one_intact(tmp_path):
+    """Freezing a hand-supplied tree as THE baseline would silently discard
+    the project's own. argparse refuses the combination (its usage error is
+    the one intentional non-JSON exit)."""
+    root = make_root(tmp_path)
+    reset_vault(root, BASE_VAULT)
+    assert run_diff(root, "--accept-baseline").returncode == 0
+    frozen_before = (root / "out" / ".baseline" / "reduced.txt").read_bytes()
+
+    baseline_tree = make_tree(tmp_path, "baseline_tree", CODE_BLOCK_VAULT)
+    result = run_diff(root, "--baseline-dir", str(baseline_tree), "--accept-baseline")
+    assert result.returncode == 2, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "not allowed with" in result.stderr
+    assert (root / "out" / ".baseline" / "reduced.txt").read_bytes() == frozen_before
+
+
+def test_two_tree_mode_ignores_a_disagreeing_frozen_baseline(tmp_path):
+    """A frozen baseline that matches NEITHER tree must not influence the
+    verdict, and must be left byte-identical afterwards."""
+    root = make_root(tmp_path)
+    reset_vault(root, CODE_BLOCK_VAULT)
+    assert run_diff(root, "--accept-baseline").returncode == 0
+    frozen_before = (root / "out" / ".baseline" / "reduced.txt").read_bytes()
+    meta_before = (root / "out" / ".baseline" / "meta.json").read_bytes()
+
+    baseline_tree = make_tree(tmp_path, "baseline_tree", BASE_VAULT)
+    candidate_tree = make_tree(tmp_path, "candidate_tree", BASE_VAULT)
+    result = run_diff(root, "--baseline-dir", str(baseline_tree), candidate_dir=candidate_tree)
+
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert parse_one_json_line(result)["reason"] == "ok"
+    assert (root / "out" / ".baseline" / "reduced.txt").read_bytes() == frozen_before
+    assert (root / "out" / ".baseline" / "meta.json").read_bytes() == meta_before
+
+
+def test_frozen_baseline_mode_never_carries_the_two_tree_mode_field(tmp_path):
+    """The `mode` field is the ONLY thing distinguishing a two-tree verdict
+    from a frozen-baseline one, so its absence on the default path is part of
+    that contract -- asserted on both the match and the mismatch result."""
+    root = make_root(tmp_path)
+    reset_vault(root, BASE_VAULT)
+    assert run_diff(root, "--accept-baseline").returncode == 0
+
+    match = parse_one_json_line(run_diff(root))
+    assert match["reason"] == "ok" and "mode" not in match
+
+    reset_vault(root, CODE_BLOCK_VAULT)
+    mismatch_result = run_diff(root)
+    assert mismatch_result.returncode == 1
+    mismatch = parse_one_json_line(mismatch_result)
+    assert mismatch["reason"] == "mismatch" and "mode" not in mismatch
+
+
+def _make_root_for_destination(tmp_path, destination: str) -> Path:
+    """A durable_root whose ownership marker + profile.yml are just valid
+    enough for cache_key.load_profile() to succeed, so the DEFAULT (no
+    --candidate-dir) resolution path runs and output_resolve gets to judge
+    `destination`."""
+    root = tmp_path / "durable_root"
+    scripts_dir = root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(DIFF_SRC, scripts_dir / "diff_rendered_output.py")
+    shutil.copy2(SCRIPTS_SRC_DIR / "output_resolve.py", scripts_dir / "output_resolve.py")
+    shutil.copy2(SCRIPTS_SRC_DIR / "cache_key.py", scripts_dir / "cache_key.py")
+    profile_path = root / "profile.yml"
+    profile_path.write_text(f"output:\n  destination: {destination!r}\n", encoding="utf-8")
+    (root / ".literary-translator-root.json").write_text(
+        json.dumps({"owner_profile_path": str(profile_path)}), encoding="utf-8"
+    )
+    return root
+
+
+def _run_default_path(root: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(root / "scripts" / "diff_rendered_output.py")],
+        capture_output=True, text=True, timeout=30,
+    )
+
+
+def test_out_dir_symlink_reason_covers_a_traversal_destination(tmp_path):
+    """`out_dir_symlink` (exit 1) is emitted only when this script resolves
+    the out_dir itself -- distinct from write_baseline()'s own
+    `out_dir_is_symlink`. Its name says symlink, but output_resolve raises
+    the SAME OutputResolveError for a `..` segment, and checks that FIRST,
+    so this case never reaches the symlink check at all. Both are pinned
+    (here and below) because the docstring enumerates the reason, not the
+    two distinct conditions behind it."""
+    root = _make_root_for_destination(tmp_path, "../escaped_out")
+
+    proc = _run_default_path(root)
+    assert proc.returncode == 1, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert parse_one_json_line(proc)["reason"] == "out_dir_symlink"
+
+
+def test_out_dir_symlink_reason_covers_a_real_symlinked_destination(tmp_path):
+    """The condition the reason is actually NAMED for: a real symlink as the
+    destination's own path component, with no `..` anywhere, so the
+    traversal check above cannot be what produced the refusal."""
+    external = tmp_path / "external_target"
+    external.mkdir()
+    root = _make_root_for_destination(tmp_path, "linked_out")
+    (root / "linked_out").symlink_to(external, target_is_directory=True)
+    assert (root / "linked_out").is_symlink()
+
+    proc = _run_default_path(root)
+    assert proc.returncode == 1, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert parse_one_json_line(proc)["reason"] == "out_dir_symlink"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

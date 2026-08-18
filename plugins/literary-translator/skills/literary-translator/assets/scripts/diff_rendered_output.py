@@ -59,18 +59,66 @@ requirement (references/assembly-and-output.md: "There is no separate
 item-count acceptance check anywhere in this pipeline -- the render+diff
 comparison IS the gate").
 
+## Two-tree mode (`--baseline-dir`, #589)
+
+`--baseline-dir DIR` compares `--candidate-dir` against THAT already-rendered
+tree instead of the frozen `out/.baseline/` reduction -- the same
+`reduce_vault()` on both sides, the same positional `compare()`, no new
+comparison logic. It exists because a project that POST-PROCESSES the rendered
+vault (renaming/merging notes downstream of `render()`) has no way to ask "is
+what I produced still equivalent to what the renderer wrote" WITHOUT spending
+the project's single frozen baseline slot: `--accept-baseline` does accept any
+`--candidate-dir` you point it at, but there is exactly one
+`${durable_root}/out/.baseline/`, and overwriting it with a hand-supplied tree
+destroys the reduction the pipeline's own acceptance gate compares against.
+
+The mode is READ-ONLY: no baseline is read, written, or needed -- a project
+with no `out/.baseline/` at all can use it, and one WITH a baseline still has
+it byte-identical afterwards. It is mutually exclusive with
+`--accept-baseline`, for the reason just given. `stale_baseline` never appears,
+because there is no stored render-version to compare against; the `ok`/
+`mismatch` payloads instead carry `"mode": "two_tree"`, so a consumer can never
+mistake a two-tree verdict for a frozen-baseline one.
+
+What it does NOT distinguish, because it reuses the reduction verbatim rather
+than a stricter one: `reduce_vault()` flattens every file behind an ordinary
+`--- <relpath> ---` line in the SAME line space as content (that is the
+documented design -- an added/removed/renamed file is meant to surface as a
+plain line mismatch, not a separate structural check). So two trees whose
+concatenations coincide compare equal even though their file topology differs
+-- e.g. one file containing the literal line `--- b.md ---` followed by `Body`,
+against two files `a.md` (empty) and `b.md` (`Body`). This is a property of the
+shared reducer, identical on the frozen-baseline path, not something this mode
+introduces; it is called out here because this mode is aimed at trees the
+renderer did not write.
+
 ## Exit codes + one-line JSON stdout `reason`
 
     0 = match                                   {"reason": "ok", "match": true, ...}
     1 = mismatch OR guard refusal                {"reason": "mismatch", "match": false, ...}
                                                   {"reason": "candidate_not_built", ...}
+                                                  {"reason": "baseline_dir_not_found", ...}
                                                   {"reason": "baseline_exists", ...}
                                                   {"reason": "baseline_dir_is_symlink", ...}
                                                   {"reason": "out_dir_is_symlink", ...}
+                                                  {"reason": "out_dir_symlink", ...}
     2 = no baseline exists yet (bootstrap state) {"reason": "no_baseline"}
+                                                  {"reason": "profile_precondition", ...}
 
-The full closed `reason` set is exactly {ok, mismatch, candidate_not_built,
-no_baseline, baseline_exists, baseline_dir_is_symlink, out_dir_is_symlink}.
+The full `reason` set is exactly {ok, mismatch, candidate_not_built,
+baseline_dir_not_found, no_baseline, baseline_exists, baseline_dir_is_symlink,
+out_dir_is_symlink, out_dir_symlink, profile_precondition}. Two of those are
+reached only on the DEFAULT (no `--candidate-dir`) path, where this script
+resolves the out_dir itself: `profile_precondition` (exit 2) when
+`cache_key.load_profile` halts, and `out_dir_symlink` (exit 1) when
+`output_resolve` refuses `output.destination`. Its NAME is narrower than its
+meaning: the same reason is emitted for BOTH refusals that resolver makes --
+a `..` traversal segment (checked first) and a symlinked path component --
+because the exit carries the resolver's own message rather than re-classifying
+it. Distinct from `write_baseline()`'s own `out_dir_is_symlink`, which refuses
+the symlink condition from the WRITE side. `main()`'s defensive catch-all is the one JSON
+line outside this set: it emits `{"success": false, "error": ...}` with no
+`reason` field at all.
 
 `--accept-baseline` freezes the current candidate's reduction as the new
 baseline under `${durable_root}/out/.baseline/`; overwrite-guarded --
@@ -374,7 +422,21 @@ def build_arg_parser():
             "out_dir assemble.py just rendered into)."
         ),
     )
-    parser.add_argument(
+    # Two-tree mode and baseline-freezing are mutually exclusive by
+    # construction, not by a hand-rolled check: freezing a hand-supplied
+    # --baseline-dir as THE baseline would silently discard the project's own
+    # accepted reduction. argparse's own usage error (exit 2, usage text on
+    # stderr) is the established non-JSON exit for a CLI misuse here.
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--baseline-dir", type=Path, default=None,
+        help=(
+            "Two-tree mode: compare --candidate-dir against THIS "
+            "already-rendered tree instead of the frozen out/.baseline/ "
+            "reduction. Read-only -- no baseline is read, written, or needed."
+        ),
+    )
+    mode.add_argument(
         "--accept-baseline", action="store_true",
         help="Freeze the current candidate's reduction as the new baseline.",
     )
@@ -441,6 +503,28 @@ def _run(args):
         return emit(1, "candidate_not_built", {"candidate_dir": str(candidate_dir)})
 
     candidate_lines = reduce_vault(candidate_dir)
+
+    if args.baseline_dir is not None:
+        # Two-tree mode (#589): both sides go through the SAME reduce_vault()
+        # the frozen-baseline path uses, so a post-processed tree is judged by
+        # exactly the rule that froze the baseline it is being compared to.
+        # BASELINE_LINES_PATH is never read and write_baseline() is never
+        # reached, so an absent (or disagreeing) out/.baseline/ cannot affect
+        # this verdict, and no `stale_baseline` field is emitted -- there is no
+        # stored render-version to compare against.
+        if not args.baseline_dir.is_dir():
+            return emit(1, "baseline_dir_not_found", {"baseline_dir": str(args.baseline_dir)})
+        baseline_lines = reduce_vault(args.baseline_dir)
+        failures = compare(baseline_lines, candidate_lines)
+        two_tree = {"mode": "two_tree", "baseline_dir": str(args.baseline_dir)}
+        if failures:
+            report = readable_diff(baseline_lines, candidate_lines)
+            if report:
+                print(report, file=sys.stderr)
+            for f in failures:
+                print(f"FAIL: {f}", file=sys.stderr)
+            return emit(1, "mismatch", {**two_tree, "match": False, "failures": len(failures)})
+        return emit(0, "ok", {**two_tree, "match": True, "lines": len(candidate_lines)})
 
     if args.accept_baseline:
         if baseline_exists() and not args.force_accept_baseline:

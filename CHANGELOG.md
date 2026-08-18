@@ -2,6 +2,44 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.18.1] — 2026-08-18
+
+Four sentences cited issues that had just been closed as decisions, describing them as work still
+tracked. Each now states the decision instead.
+
+### Fixed
+
+- **Shipped prose pointed at closed issues as open work (#380, #341, #577).** The 2026-08-18 tracker
+  triage closed nine items, three of them as decisions rather than as work delivered.
+  `references/publish-targets/README.md`'s list of what the extension contract cannot yet require
+  cited the hardcoded provenance path as a gap awaiting a key (#380); it now says the record is a
+  private audit trail for revalidation rather than a published fact about the document, so no
+  configurable provenance directory ships and nothing consumes one.
+  `tests/reference-assets.test.sh` claimed semantic inversion by surrounding context was bounded "by
+  review and by #341's structure-aware reader" — a bound that does not exist, the reader having been
+  weighed and declined as disproportionate for a doc-pin harness — and called the residual class
+  "filed as its own work"; it is now bounded by review alone, and the class is stated as open by
+  decision, with #341 named as where the evidence and the two alternatives are kept.
+  `tests/export-parity-lib.mjs` said the census-only case was "tracked in #577 with the linking
+  work"; the parity suite's own *every function export's declared arity was actually read, none
+  skipped* check is what goes red when one reaches the loop unread, and that check is now named as
+  the tracker. **The failure mode is silent in both directions:** a reader who follows a stale
+  citation learns only that the sentence is out of date, and a reader who does not follow it acts on
+  a plan nobody intends to carry out. One pin was added, binding the provenance sentence to its
+  decision under `### What this contract cannot yet require`, because that list is exactly where the
+  key would be filed again. Verified red by mutation before it was accepted. No behaviour, no export
+  and no adapter rule changed; the reference-assets suite gains exactly one check and stays fully
+  green. The delta is the portable figure, not the total: the profile-schema validation assertion at
+  `tests/reference-assets.test.sh:3106` is emitted only where Ruby can load `yaml` and `json`, so an
+  environment without it counts one lower at both ends — measured, by shadowing `ruby`, not assumed.
+- **Dated release copy is deliberately not swept.** Earlier entries here, and the version-tagged
+  notes in the root `README.md`, carry their own citations of issues that have since closed
+  (`#246`, `#472`, `#110` and others) — each was true when it was published, and this changelog
+  corrects forward rather than rewriting an entry in place, the one exception being the explicit
+  *Superseded* annotation the 1.14.0 entry already carries. What is corrected above is the prose a
+  reader executes or maintains today: the shipped skill reference and the test suites' own
+  comments. A later sweep will find the historical citations; they are left as written on purpose.
+
 ## [enduser-handbook 1.18.0] — 2026-08-18
 
 A flat index row is read back before it is written, so a title that cannot survive its own row's
