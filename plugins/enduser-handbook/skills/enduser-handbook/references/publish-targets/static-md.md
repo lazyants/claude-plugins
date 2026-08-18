@@ -289,7 +289,19 @@ two `null` cases are not the same signal and are handled separately below:
 - **Flat entry, line absent** ⇒ not a step-0 halt — append the flat TOC line per item 1 above,
   exactly as shipped in 1.4.1, regardless of index form. Only a GROUPED entry resolves a
   container, and that container machinery is form-restricted (a headings-form index, plus the
-  bounded nested-list subset — see "Grouped index wiring" below).
+  bounded nested-list subset — see "Grouped index wiring" below). **Read the row back before
+  you write it (#574).** Compose the TOC line exactly as you would append it, then call
+  `locateChapterLine([row], expectedTarget)` on that ONE line — the same helper, with the same
+  options, step 0 just ran over the whole file. If it does not report `present`, write NOTHING
+  and halt with:
+  `Cannot wire '<slug>' into <index_file>: the flat index row this run would write is not recognizable to the next run, so nothing was written. The chapter's own title does not yield a resolvable link destination. Give the chapter a title in the manifest made only of Unicode letters and numbers, with words separated by single ASCII spaces, then re-run.`
+  A row the next run cannot read back is one step 0 reports absent forever, so every publish
+  appends another identical copy while the manifest never changes — measured, four publishes
+  leave four rows. The companion scan below is blind to them by construction, so the shipped
+  refusal is what bounds them. This mirrors the nested-list writer's `unwritable`
+  outcome and carries the same remedy: the check is on the row THIS run composes, never on rows
+  already in the file, and it names a title the operator can change rather than an edit they
+  cannot find.
 
 **Step 0's companion scan — rows that ADDRESS this chapter without RESOLVING to it (#349).** Run
 `findStaleChapterRows(indexLines, expectedTarget, chapterLink)` (`assets/lib/chapter-paths.mjs`)
@@ -319,12 +331,18 @@ current link — goes unreported there. The alternative was halting on a numbere
 adapter had just appended and would append again, which is a false positive with no edit that clears
 it. It does NOT bound a FIXED target-breaking title on the flat
 branch above, and reading it as though it did would be the more dangerous mistake. That branch has
-no membership guard of its own — no flat analogue of the writer's `present` outcome — so step 0
-reports the chapter absent on every run and an identical row is appended each time, with the
-manifest never changing at all: measured, four publishes leave four rows. This scan is blind to them
-by construction, since each carries the link this run would write, which is the very test that tells
-this run's own row from a leftover. That gap is a separate defect and is filed as one (#574); nothing here
-closes it.
+no membership guard of its own — no flat analogue of the writer's `present` outcome — and before
+[1.18.0] step 0 reported the chapter absent on every run while an identical row was appended each
+time, with the manifest never changing at all: measured, four publishes left four rows. This scan
+is blind to every one of them by construction, since each carries the link this run would write,
+which is the very test that tells this run's own row from a leftover. What bounds them is the
+read-back refusal on the append branch itself (#574), not this scan: the row is never written, so
+there is nothing here to report. Read the two together in that order, because they cover opposite
+halves of one defect and neither covers the other's — a title EDIT leaves rows this scan names, and
+a FIXED unreadable title produces rows only the refusal prevents. An index carrying such rows from
+before [1.18.0] keeps them: they stay unreported while the title stays fixed, and the refusal's own
+halt is what leads the operator to change it — after which every one of them is named here on the
+next run, measured in both link modes.
 
 Over-reporting is the direction this scan errs in, deliberately. It requires the destination to sit
 between a link-destination opener and closer, so a longer target carrying this one as a prefix or a

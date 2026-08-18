@@ -289,7 +289,9 @@ _FILENAME_MAX_BYTES = 240
 # filename carrying 32 or more marks on a single base, whatever its byte
 # length -- measured on this project's filesystem, where 31 marks writes and
 # 32 does not, while the same marks spread over separate bases are fine. 30
-# leaves a margin under that. (It is NOT Unicode's Stream-Safe Text Format
+# leaves a margin under that. The kernel applies that limit to the name it
+# has CANONICALLY DECOMPOSED, so the loop below counts NFD marks rather
+# than written characters -- see it for the two ways those counts diverge. (It is NOT Unicode's Stream-Safe Text Format
 # bound, which an earlier version of this comment cited: UAX #15 counts
 # non-starters after NFKD and treats U+034F CGJ as a break, and this loop
 # does neither.)
@@ -1471,10 +1473,16 @@ def sanitize_filename_component(value, fallback):
           is supposed to be watching this adapter's output.
       (b) NO EXTENSION OF ITS OWN. A trailing ".md" -- the extension this
           script appends itself -- has its "." turned into "_" (case
-          preserved: "x.MD" -> "x_MD"), repeatedly, because otherwise the
-          wikilink identity (the relpath minus the ONE appended ".md")
-          would name a file that does not exist: "x.md" would be written
-          as "x.md.md" and linked as "[[.../x.md]]".
+          preserved: "x.MD" -> "x_MD"). That loop runs at most ONCE: its
+          guard needs a "." three characters from the end and its body
+          writes "_" at exactly that index, leaving a "_md" tail that
+          cannot re-match -- so only the name's OWN trailing extension is
+          neutralized ("x.md.md" -> "x.md_md"). It is spelled as a loop
+          rather than an `if` because the condition, not the count, is the
+          property. Necessary because otherwise the wikilink identity (the
+          relpath minus the ONE appended ".md") would name a file that does
+          not exist: "x.md" would be written as "x.md.md" and linked as
+          "[[.../x.md]]".
       (c) WRITABLE AT ALL. A stem is capped at _FILENAME_MAX_BYTES, a run
           of marks at _MAX_MARKS_PER_BASE, and a Win32 device basename gets
           a "_" (_WIN32_RESERVED_STEMS) -- because _write_note runs AFTER
@@ -1498,11 +1506,27 @@ def sanitize_filename_component(value, fallback):
     out = []
     marks_in_run = 0
     for ch in value:
+        # The run is counted in DECOMPOSED marks, never in written
+        # characters: the filesystem canonically decomposes a name before
+        # applying its own limit, and the two counts differ in both
+        # directions. 59 code points that are themselves Mn/Mc/Me expand to
+        # two or three marks under NFD (U+0344, U+0F73, U+0CCB...), and a
+        # precomposed BASE contributes marks of its own (U+1EBF decomposes
+        # to a letter plus two). Counting as-written let "A" + 16 x U+0344
+        # -- a run of 16 by that count, 32 after NFD -- walk straight past a
+        # cap of 30 into the EILSEQ this guard exists to prevent, which is
+        # #586's own guard failing on its own terms (found post-merge).
+        weight = sum(
+            1 for c in unicodedata.normalize("NFD", ch)
+            if unicodedata.category(c) in _FILENAME_MARK_CATEGORIES
+        )
         if unicodedata.category(ch) in _FILENAME_MARK_CATEGORIES:
-            marks_in_run += 1
+            marks_in_run += weight
             out.append(ch if marks_in_run <= _MAX_MARKS_PER_BASE else "_")
             continue
-        marks_in_run = 0
+        # A non-mark starts a fresh run -- but not necessarily at zero, since
+        # a precomposed base carries its own marks into it.
+        marks_in_run = weight
         out.append(ch if (ch.isalnum() or ch in _FILENAME_EXTRA_CHARS) else "_")
     kept = "".join(out)
     # Capped BEFORE the tail, never after: every step below is length

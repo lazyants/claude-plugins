@@ -2,6 +2,67 @@
 
 All notable changes to `lazyants/claude-plugins` are documented here, with one exception: **`literary-translator` keeps its own changelog at [`plugins/literary-translator/CHANGELOG.md`](plugins/literary-translator/CHANGELOG.md)** — its releases after 1.1.0, and its Known limitations, live there, and the `[literary-translator 1.1.0]` entry below is frozen rather than continued. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is per-plugin, not repo-wide.
 
+## [enduser-handbook 1.18.0] — 2026-08-18
+
+A flat index row is read back before it is written, so a title that cannot survive its own row's
+link parse halts the run instead of growing the index without limit.
+
+Closes #574.
+
+### Fixed
+
+- **The flat "line absent ⇒ append" branch had no read-back of its own (#574).** A manifest `title`
+  whose text keeps its own row's link destination from parsing makes step 0 (`locateChapterLine`)
+  report the chapter absent on *every* run, so the branch appends an identical row each publish
+  while the manifest never changes: measured against `935d9e5`, four publishes leave four rows, in
+  both link modes. 1.17.0's `findStaleChapterRows` cannot reach them — every appended row carries
+  the link this run would write, which is exactly the test that tells this run's own row from a
+  leftover, so widening the scan would break the unchanged-manifest case it exists to serve. Both
+  adapters now compose the row, read that one line back through the very `locateChapterLine` call
+  their own step 0 makes (with the same target and the same options), and refuse to write a row it
+  cannot find, halting with the chapter's title named as the thing to change. **This is a prose
+  fix: no executable behaviour and no export under `assets/lib/` changed — the only edit there
+  is a comment on `findStaleChapterRows`.**
+
+### Changed
+
+- **The publish-target extension contract binds the obligation, not the spelling.**
+  `references/publish-targets/README.md` previously told a third adapter's author that the shipped
+  flat branch has no membership check; it now states that refusing an unreadable row before writing
+  it is the append branch's own obligation, discharged through *that* target's step-0 reader —
+  because the property to hold is "the reader this file's next run uses can find the row this run
+  wrote", and only that reader can answer it.
+- **The alternative was named and declined, in the contract and in the adapters.** A membership
+  check that recognises the unreadable row — the flat analogue of `wireNestedListChapter`'s
+  `present` outcome, which #574 proposed — bounds the count at one but leaves a permanently
+  unreadable row in a managed file that every later run, migration and scan has to special-case.
+  Refusing is what ships.
+
+### Known limitations
+
+- **Which titles are refused is not summarizable by a character rule, and neither mode is
+  uniformly the stricter one.** Measured: `Items]v1` and `A [b] c` are refused in both modes;
+  `Items]` and `Items [beta]` are refused in path mode and accepted under wikilinks; `Items \] esc`
+  is accepted in path mode and refused under wikilinks. The adapters therefore tell the reader to
+  run the helper rather than predict it, and a verdict measured in one mode says nothing about the
+  other.
+- **Rows already in an operator's index from before this release are not retro-reported.**
+  `findStaleChapterRows` still skips them while their title stays fixed, by the same construction
+  as above. The refusal's halt is what leads the operator to change the title, after which every
+  one of those rows is named on the next run — measured in both link modes.
+
+## [enduser-handbook 1.17.0] — 2026-08-16
+
+Backfilled 2026-08-18: 1.17.0 shipped (`f6a31ff`, merged `935d9e5`) with its release notes written
+into `README.md` only, so this file's newest entry was 1.16.0 while the plugin was at 1.17.0. This
+entry records the version; the full notes stay in `README.md` under `enduser-handbook` rather than
+being duplicated here.
+
+- **The publish-target extension contract gains revalidation/W6, address derivation and a
+  completion gate** (`7a66a1d`, #357).
+- **The index rows a title edit leaves behind are named, not accumulated silently** — new export
+  `findStaleChapterRows`, called by both adapters at step 0 (`8a4c650`, #349).
+
 ## [enduser-handbook 1.16.0] — 2026-08-16
 
 What a `<canvas>` paints is photographed and unscannable, so the region that holds one is now

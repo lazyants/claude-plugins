@@ -63,7 +63,38 @@ Two consumers, one authority: `render()` validates whatever map it is handed (`R
 
 `render_obsidian.py`'s own bytes changed, so `render_version` moved. With no sidecar the rendered markdown is unchanged, so `diff_rendered_output.py` still MATCHES — it prints the advisory `stale_baseline` WARN and exits `0`, and re-accepting is optional. **Adopting a group that takes effect changes the rendered links**, so the diff then MISMATCHES (exit `1`) and a deliberate re-accept is required. A book that carried a fall-through link (a short name linked inside a de-linked longer one) will also mismatch without any group, since that link is now correctly absent. (A group whose target has no occurrences, or one the outsider/`sense_translated` rules leave de-linked anyway, changes no Markdown and still matches.) Either way the re-accept is `--accept-baseline --force-accept-baseline`: `--accept-baseline` alone refuses to overwrite a baseline that already exists. (The new schema file's own `_schemas_dir_hash` effect is the mid-run cost described above; it is not a cache-key field and never re-translates converged work.)
 
-Doing nothing is a supported outcome: with no sidecar present the loader is never imported (and neither is `jsonschema` on its behalf), no `link_groups` key is attached, and the rendered vault is byte-identical to 1.29.0's apart from the marker's new block.
+Doing nothing is a supported outcome: with no sidecar present the loader is never imported (and neither is `jsonschema` on its behalf), and no `link_groups` key is attached. The rendered Markdown is unchanged from 1.31.1's apart from the marker's new block — with the one exception named above, a book that carried a fall-through link.
+## 1.31.1 — 2026-08-18
+
+1.31.0's own mark-run guard failed on its own terms, and this fixes it. Found by a security pass that ran after the merge, reproduced here before anything was changed.
+
+### What was wrong
+
+`_MAX_MARKS_PER_BASE` counted marks **as written**. The filesystem counts them **after canonical decomposition**, and the two numbers diverge in two ways:
+
+- **59 code points that are themselves `Mn`/`Mc`/`Me` expand under NFD** — U+0344, U+0F73, U+0CCB and 56 others decompose into two or three marks each. So `"A"` + 16 × U+0344 is a run of 16 by the shipped count and **32 after NFD**, which walks straight past a cap of 30.
+- **A precomposed BASE carries marks of its own.** U+1EBF decomposes to a letter plus two marks, so it does not start a run at zero — `U+1EBF` + 30 marks is 32 after NFD.
+
+Both were measured against this project's filesystem, and the end-to-end consequence is exactly the one 1.31.0's constant claims to prevent:
+
+```
+RENDER1 raised: OSError [Errno 92] Illegal byte sequence
+vault after render1: ['001 seg01.md', 'people']    marker present: False
+RENDER2 raised: RenderError refusing to clean ...: it already contains content but no valid .literary-translator-vault.json
+```
+
+`_write_note` fails after `_clean_vault_content` has emptied the vault, and because `_stamp_vault_marker` runs LAST the vault is then left with content and **no marker** — so the next render refuses too, and the vault is wedged until it is deleted by hand. **Introduced by 1.31.0**: before it, every mark became `_` and EILSEQ was structurally unreachable.
+
+### The fix
+
+The run is counted over `unicodedata.normalize("NFD", ch)` — one weight per character, summed across the run, with a non-mark starting a fresh run at ITS OWN weight rather than at zero. Written characters are still what gets emitted; only the counting changes. Organic text is untouched: a fully pointed Hebrew name reaches an NFD run of 2, `José` of 1.
+
+Two regression cases per route (`A`+16×U+0344, `A`+30×U+0344, `A`+40×U+0F73, U+1EBF+30 marks), all driven end-to-end through `render()` so what is asserted is that the note is WRITTEN — and the property assertion in that test now counts over NFD too, since an as-written assertion passes on all four of them while the write still fails. Two mutants: reverting to as-written counting turns four RED, letting a precomposed base reset the run to zero turns one RED. Suite: `python3 -m pytest -q` from `plugins/literary-translator` — 5712 passed, 3 skipped, 2 xfailed.
+
+### Also corrected: one false word in 1.31.0's docstring
+
+It said the trailing-`.md` neutralization happens "repeatedly". It cannot happen twice — the guard needs a `.` three characters from the end and the body writes `_` at exactly that index, leaving a `_md` tail that never re-matches, which is why `x.md.md` becomes `x.md_md` and only the name's own trailing extension is neutralized. Two independent reviewers found the same word. The loop stays a loop because the condition, not the count, is the property.
+
 ## 1.31.0 — 2026-08-18
 
 The Obsidian note filename stops mangling combining marks, and the punctuation the printed names in a real corpus actually carry — `.`, `,`, U+2019, and Hebrew's MAQAF/GERESH/GERSHAYIM. The allow-list stays curated, so a name carrying anything else (an en dash, quotation marks, an ampersand) still sanitizes to `_`. Closes #586.

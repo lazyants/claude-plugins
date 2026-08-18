@@ -61,22 +61,25 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.31.0 (#586 -- the filename sanitizer's marks and
-# punctuation), per the maintenance contract above: the previous entry's map
-# went with its entry, exactly as that contract says it must. 1.30.0's three
-# citations are NOT carried forward and were not re-resolved -- 1.31.0 edits
-# render_obsidian.py above every one of them, so carrying them would be the
-# renumber-preserves-the-wrongness failure this file exists to prevent, and
-# re-resolving them would pin a historical entry to line numbers it never
-# claimed.
+# Rewritten for 1.32.0 (#588 -- the collision de-link cost report and the
+# one-referent link groups) and, before it, for 1.31.1 and 1.31.0, per the
+# maintenance contract above: each previous entry's map went with its entry,
+# exactly as that contract says it must. No earlier entry's citations are
+# carried forward or re-resolved -- 1.32.0 rewrites `_Linker.link` and
+# `build_entity_index` above where most of them pointed, so carrying them
+# would be the renumber-preserves-the-wrongness failure this file exists to
+# prevent, and re-resolving them would pin a historical entry to line numbers
+# it never claimed.
 #
-# 1.31.0 itself cites NO `file.ext:NNN` anywhere: it names constants and
-# functions (`_FILENAME_MAX_BYTES`, `sanitize_filename_component`) instead,
-# which is why this map is empty rather than merely short. An empty map is a
-# real state under the assertions below, not a disabled test -- an entry that
-# adds a citation without an anchor still fails `undeclared`. Deliberate: this
-# release moves lines in the file it talks about, and a line number in prose
-# rots the moment the next release edits above it.
+# 1.32.0, like 1.31.1 and 1.31.0 before it, cites NO `file.ext:NNN` anywhere:
+# it names functions, fields and constants (`_Linker`, `_link_decision`,
+# `delink_cost`, `canon_link_groups.json`) instead, which is why this map is
+# empty rather than merely short. An empty map is a real state under the
+# assertions below, not a disabled test -- an entry that adds a citation
+# without an anchor still fails `undeclared`. Deliberate, and this release is
+# the strongest case for it yet: it moves lines throughout the file it talks
+# about, and a line number in prose rots the moment the next release edits
+# above it.
 CITATION_ANCHORS = {}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
