@@ -375,10 +375,10 @@ def _validate_mentions_safe_canon(entries):
 
 
 def _owners_by_target(entries):
-    """`{NFC canonical_target_form: [(sort_key, source_form, basis), ...]}` --
-    every owner of every target, UNREDUCED. Order within a list follows
-    `entries` iteration order (immaterial: both the tiebreak and the delink
-    check in `_link_decision` are order-independent). Factored out of
+    """`{NFC canonical_target_form: [(source_form, basis), ...]}` -- every
+    owner of every target, UNREDUCED. Order within a list follows `entries`
+    iteration order (immaterial: both the tiebreak and the delink check in
+    `_link_decision` are order-independent). Factored out of
     `build_entity_index` (#588) so `delinked_owners_by_target` groups owners
     by exactly the same rule instead of re-implementing it."""
     owners_by_target = defaultdict(list)
@@ -394,11 +394,10 @@ def _owners_by_target(entries):
         # NFC-normalized scan text (block text can carry either form,
         # spliced in from different upstream sources).
         target = unicodedata.normalize("NFC", target)
-        key = (len(source_form), source_form)
         # `basis` carried alongside (#240) so the sense_translated exclusion
         # can be applied AFTER the collision tally below, not before it --
         # see build_entity_index's own docstring.
-        owners_by_target[target].append((key, source_form, entry.get("basis")))
+        owners_by_target[target].append((source_form, entry.get("basis")))
     return owners_by_target
 
 
@@ -431,15 +430,13 @@ def _link_decision(owners, collision_delink, primary_by_source_form=None):
     A `sense_translated` owner still suppresses the link entirely: that
     target string is an ordinary word by construction, and the anti-flood
     invariant (#138) outranks a group's routing preference."""
+    groups = primary_by_source_form or {}
     survivors = [
-        (key, source_form) for key, source_form, basis in owners
+        source_form for source_form, basis in owners
         if basis != "sense_translated"
     ]
     if collision_delink and len(owners) >= 2:
-        identities = {
-            (primary_by_source_form or {}).get(source_form, source_form)
-            for _key, source_form, _basis in owners
-        }
+        identities = {groups.get(source_form, source_form) for source_form, _basis in owners}
         if len(identities) == 1 and len(survivors) == len(owners):
             return next(iter(identities)), False  # one established entity -- re-linked to its primary
         # >=2 distinct entities (or a group plus an outsider, or a
@@ -449,8 +446,9 @@ def _link_decision(owners, collision_delink, primary_by_source_form=None):
         return None, bool(survivors)
     if not survivors:
         return None, False  # every owner is sense_translated -- never auto-linked, drop the target entirely
-    _, winner_source_form = min(survivors)  # shortest source_form, then lexicographic, sense_translated excluded
-    return winner_source_form, False
+    # The documented, fixed tiebreak: shortest source_form, then
+    # lexicographic -- sense_translated owners already excluded above.
+    return min(survivors, key=lambda sf: (len(sf), sf)), False
 
 
 def delinked_owners_by_target(entries, primary_by_source_form=None):
@@ -468,8 +466,26 @@ def delinked_owners_by_target(entries, primary_by_source_form=None):
     for target, owners in _owners_by_target(entries).items():
         _winner, delinked = _link_decision(owners, True, primary_by_source_form)
         if delinked:
-            out[target] = sorted(source_form for _key, source_form, _basis in owners)
+            out[target] = sorted(source_form for source_form, _basis in owners)
     return out
+
+
+def _longest_first_pattern(targets):
+    """The ONE way this module compiles a set of `canonical_target_form`
+    strings into a scanning alternation, shared by `build_entity_index` and
+    `build_diagnostic_pattern` so the two can never drift.
+
+    LONGEST FIRST, then lexicographic: Python's `re` alternation tries
+    alternatives in order at a given start position, so ordering longest-first
+    is what stops a shorter name shadowing a longer one that contains it as a
+    substring. Each alternative is `re.escape`d -- a `canonical_target_form` is
+    free-form text and may legally contain regex metacharacters.
+
+    Returns None when there is nothing to scan for."""
+    if not targets:
+        return None
+    ordered = sorted(targets, key=lambda t: (-len(t), t))
+    return re.compile("|".join(re.escape(t) for t in ordered))
 
 
 def build_diagnostic_pattern(linkable_targets, delinked_targets):
@@ -491,11 +507,7 @@ def build_diagnostic_pattern(linkable_targets, delinked_targets):
     text "ABC"): the first match wins and the second is not seen.
 
     Returns None when there is nothing to scan for."""
-    all_targets = set(linkable_targets or ()) | set(delinked_targets or ())
-    if not all_targets:
-        return None
-    ordered = sorted(all_targets, key=lambda t: (-len(t), t))
-    return re.compile("|".join(re.escape(t) for t in ordered))
+    return _longest_first_pattern(set(linkable_targets or ()) | set(delinked_targets or ()))
 
 
 def _validate_link_groups(primary_by_source_form, note_identity_by_source_form):
@@ -663,11 +675,10 @@ def build_entity_index(entries, note_identity_by_source_form, collision_delink=F
     there is no eligible winner at all and the target is dropped from
     `by_target` entirely (never `min()` over an empty sequence).
 
-    The compiled pattern alternates every distinct target string, LONGEST
+    The compiled pattern alternates every distinct target string LONGEST
     FIRST, so a shorter name can never shadow a longer one that contains it
-    as a substring -- Python's `re` alternation tries alternatives in order
-    at a given start position, so ordering longest-first is what makes that
-    guarantee hold.
+    as a substring -- see `_longest_first_pattern`, which owns that rule for
+    this module and for the #588 diagnostic scan alike.
     """
     owners_by_target = _owners_by_target(entries)
 
@@ -680,21 +691,17 @@ def build_entity_index(entries, note_identity_by_source_form, collision_delink=F
             continue
         by_target[target] = winner_source_form
 
-    if not by_target:
-        return None, {}
-
-    targets_sorted = sorted(by_target, key=lambda t: (-len(t), t))
-    target_to_entity = {}
-    for t in targets_sorted:
-        source_form = by_target[t]
-        note_identity = note_identity_by_source_form.get(source_form, source_form)
-        target_to_entity[t] = (note_identity, source_form)
+    target_to_entity = {
+        target: (note_identity_by_source_form.get(source_form, source_form), source_form)
+        for target, source_form in by_target.items()
+    }
     # #206: this is a conservative verbatim same-surface affordance --
     # case-sensitive, no morphology, no identity call -- never the
     # authoritative occurrence index; that is the default-on
     # source-anchored `## Mentions` appendix (see obsidian.md).
-    pattern = re.compile("|".join(re.escape(t) for t in targets_sorted))
-    return pattern, target_to_entity
+    # `_longest_first_pattern` yields None for an empty map, which is exactly
+    # the `(None, {})` an all-collision book must return.
+    return _longest_first_pattern(target_to_entity), target_to_entity
 
 
 class _Linker:
@@ -1501,15 +1508,19 @@ def _warn_delink_cost(delink_cost, stream=None):
     total = delink_cost.get("unlinked_occurrences_total", 0)
     if not total:
         return
-    rows = delink_cost.get("delinked_targets") or []
+    # Rows arrive sorted by descending cost, so the charged ones lead and
+    # `charged[:3]` is the largest three.
+    charged = [
+        row for row in (delink_cost.get("delinked_targets") or [])
+        if row["unlinked_occurrences"]
+    ]
     top = ", ".join(
         f"{row['canonical_target_form']!r} x{row['unlinked_occurrences']}"
-        for row in rows[:3] if row["unlinked_occurrences"]
+        for row in charged[:3]
     )
     print(
         f"WARN: collision de-linking left {total} occurrence(s) of "
-        f"{len([r for r in rows if r['unlinked_occurrences']])} shared "
-        f"target(s) with no inline link "
+        f"{len(charged)} shared target(s) with no inline link "
         f"(this render emitted {delink_cost.get('inline_links_emitted', 0)} "
         f"inline link(s) in total). Largest: {top}. Each of these targets is "
         "owned by >=2 canon entries -- read the reported `owners` first. A "
@@ -1732,6 +1743,11 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     # is profile-derived and not simply "the flag", so the standalone CLI's
     # `target: "custom"` path (`main()` below) can never activate D1/D4.
     mentions_enabled = _effective_mentions_enabled(profile)
+    # D3: the SAME predicate gates link-group validation, collision
+    # de-linking and the de-linked owner list below -- read once, from this
+    # call's own `profile`, so the three can never disagree about whether
+    # this render is a real obsidian one.
+    collision_delink = _is_obsidian_target(profile)
 
     entries = _canon_entries(canon)
     # Resolve every entity note's actual (collision-deduped) filename UP
@@ -1765,7 +1781,7 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     # collision de-linking itself, so the dormant
     # `obsidian`-under-`target:"custom"` CLI path stays inert.
     primary_by_source_form = _validate_link_groups(
-        nodestream.get("link_groups") if _is_obsidian_target(profile) else None,
+        nodestream.get("link_groups") if collision_delink else None,
         note_identity_by_source_form,
     )
 
@@ -1802,7 +1818,7 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     # build_entity_index's own docstring.
     pattern, target_to_entity = build_entity_index(
         entries, note_identity_by_source_form,
-        collision_delink=_is_obsidian_target(profile),
+        collision_delink=collision_delink,
         primary_by_source_form=primary_by_source_form,
     )
     # #588: what de-linking actually costs this book. The owner lists come
@@ -1811,7 +1827,7 @@ def render(nodestream: dict, canon: dict, profile: dict, out_dir: Path) -> dict:
     # the real matchable text.
     delinked_owners = (
         delinked_owners_by_target(entries, primary_by_source_form)
-        if _is_obsidian_target(profile) else {}
+        if collision_delink else {}
     )
     linker = _Linker(
         pattern, target_to_entity, parenthetical_mode,
