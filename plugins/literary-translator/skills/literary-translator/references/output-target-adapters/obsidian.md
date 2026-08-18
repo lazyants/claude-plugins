@@ -89,9 +89,11 @@ inside `[[...]]`.
   shorter one that happens to be its substring — **except** entries with
   `basis: sense_translated` (#138), which are deliberately **excluded from
   the matcher entirely**. A sense-rendering is an ordinary word by
-  construction ("Hope", "Wolf"), and this unanchored, no-word-boundary
-  matcher would otherwise wikilink every incidental occurrence of that word
-  in the prose, not just the entity's own mentions. Such an entry still gets
+  construction ("Hope", "Wolf"), and this matcher would otherwise wikilink
+  every incidental occurrence of that word in the prose, not just the
+  entity's own mentions — the boundary rule below does not help, and cannot:
+  it refuses a match that is only part of a longer word, while a
+  sense-rendering matches as a *whole* word. Such an entry still gets
   a full entity note (frontmatter, `basis` included) — only the body
   auto-linking is suppressed, erring toward the recoverable failure (a
   missing auto-link) over a false-link flood. (The pre-existing `not_a_name`
@@ -101,6 +103,40 @@ inside `[[...]]`.
   the resolved text, never entity/NLP matching); wrap only the **first
   occurrence per block** — a name repeated three times in one paragraph
   gets exactly one wikilink, not three.
+- **Refuse a match that is only part of a longer written run (#587).** If the
+  character immediately before or immediately after the matched span is
+  alphanumeric (`str.isalnum()`), the match is discarded: the target is a
+  fragment of a longer word, not a mention. Longest-first ordering does not
+  cover this — it stops a shorter *target* shadowing a longer one, and here
+  the longer string is ordinary prose. Without the rule the Yiddish demonym
+  `Tepliker` ("the man from Teplik") rendered as `[[…|Teplik]]er`, the word
+  cut in half in the delivered book; any language that forms a demonym or
+  adjective by suffixing a name reaches this (`Breslov`/`Breslover`,
+  `Paris`/`Parisian`, `Tudor`/`Tudors`), as does any target that is a common
+  short word.
+  - The test is **alphanumeric, never non-space**: `[[…|Reb Noson]]’s` is
+    correct and common, and so are a following comma, period or closing
+    quote. Only a letter or digit means the target is a fragment.
+  - It is applied **per match, against the adjacent characters** — not as a
+    `\b` in the pattern. `\b` is asserted relative to each alternative's own
+    edge character, so a `canonical_target_form` beginning or ending in
+    punctuation flips what it means: `R.` plus `\b` *matches* `R.Smith`,
+    which this rule refuses — and, in the other direction, does *not* match
+    `R. Noson`, which this rule links. It also needs no per-script branch,
+    since LETTERS are `isalnum()` in Hebrew and Cyrillic alike; combining
+    marks are not, which is the gap below.
+  - A refused span is still **consumed** (the scan is non-overlapping), so a
+    different, shorter target starting inside it gets no turn: targets
+    `Ann Marie` and `Marie` over the prose `JoAnn Marie` link nothing at
+    all, rather than linking `Marie` to a different entity inside a full
+    name. That is the deliberate direction — a missing link is recoverable
+    through the source-anchored `## Mentions` appendix, a wrong one is not.
+  - A refused match is **not** counted as seen, so it never spends the
+    block's single first-occurrence slot, nor the book-wide first occurrence
+    that `parenthetical_originals: first_occurrence` tracks.
+  - Still uncovered, deliberately: characters that attach to a word without
+    being alphanumeric — combining marks, ZWJ/ZWNJ, soft hyphen, the bidi
+    marks (#590). `target + ZWNJ + suffix` is still cut.
 - The wikilink itself: `[[<note_identity>|<canonical_target_form>]]` — link
   target/identity is `note_identity`: the same sanitized, collision-deduped,
   **folder-qualified** relpath (e.g. `People/Ivan`, minus the `.md`

@@ -442,9 +442,12 @@ def build_entity_index(entries, note_identity_by_source_form, collision_delink=F
     `basis: "sense_translated"` entries (#138) never WIN the tiebreak and
     never get an inline auto-link -- deliberately, and unlike every other
     basis. A sense-rendering is an ordinary word BY CONSTRUCTION ("Hope",
-    "Wolf"), so the unanchored, no-word-boundary alternation below would
-    otherwise wikilink every incidental occurrence of that word in the
-    prose, not just the entity's own mentions. The entity note itself is
+    "Wolf"), so the alternation below would otherwise wikilink every
+    incidental occurrence of that word in the prose, not just the entity's
+    own mentions. `_Linker.link`'s #587 boundary guard does NOT cover this
+    and never could: it refuses a match that is only part of a longer word,
+    while a sense-rendering matches as a WHOLE word -- exclusion is the only
+    thing that answers it. The entity note itself is
     still emitted and still carries its `basis` in frontmatter
     (`_render_entity_note` never branches on `basis`) -- only the body
     auto-linking is suppressed, erring toward the recoverable failure (a
@@ -465,7 +468,10 @@ def build_entity_index(entries, note_identity_by_source_form, collision_delink=F
     FIRST, so a shorter name can never shadow a longer one that contains it
     as a substring -- Python's `re` alternation tries alternatives in order
     at a given start position, so ordering longest-first is what makes that
-    guarantee hold.
+    guarantee hold. That guarantee is about targets and ONLY about targets:
+    it cannot help when the longer string is ordinary prose rather than
+    another target, which is what `_Linker.link`'s per-match boundary guard
+    (#587) is for.
     """
     # Every owner of each normalized target, UNREDUCED -- order within a
     # list follows `entries` iteration order (immaterial: both the
@@ -515,6 +521,12 @@ def build_entity_index(entries, note_identity_by_source_form, collision_delink=F
     # case-sensitive, no morphology, no identity call -- never the
     # authoritative occurrence index; that is the default-on
     # source-anchored `## Mentions` appendix (see obsidian.md).
+    #
+    # The pattern itself carries no boundary assertion, on purpose: `\b` would
+    # be defined against each alternative's own edge characters, and a target
+    # may begin or end with punctuation. The boundary is applied per MATCH, in
+    # `_Linker.link`'s `_boundary_ok` (#587), which reads the adjacent
+    # characters of the scanned text instead.
     pattern = re.compile("|".join(re.escape(t) for t in targets_sorted))
     return pattern, target_to_entity
 
@@ -621,6 +633,39 @@ class _Linker:
         def _is_protected(start, end):
             return any(start < p_end and end > p_start for p_start, p_end in protected)
 
+        def _boundary_ok(start, end):
+            # #587: refuse a match that is only PART of a longer written run --
+            # "Teplik" inside the Yiddish demonym "Tepliker", which shipped into
+            # a delivered book as "[[...|Teplik]]er", the target wrapped and the
+            # "er" left dangling outside the link. `targets_sorted` being
+            # longest-first stops a shorter TARGET shadowing a longer one; it
+            # cannot help when the longer string is ordinary prose.
+            #
+            # The test is `str.isalnum()` on the ADJACENT CHARACTER -- the same
+            # predicate `sanitize_filename_component`'s filename allow-list
+            # uses -- and it is deliberately alphanumeric rather than non-space:
+            # an apostrophe, quote, comma or period after a name is the common,
+            # correct case ("[[...|Reb Noson]]'s"), and only a letter or digit
+            # means the target is a fragment of a longer word. It also needs no
+            # per-script branch: LETTERS are `isalnum()` in Hebrew and Cyrillic
+            # alike, so an uncased script behaves like a cased one. Combining
+            # MARKS are not (a Devanagari matra, a Hebrew point), so a word
+            # continued by one is still cut -- the known gap, filed as #590.
+            #
+            # Deliberately NOT `\b`/`\w`. `\b`'s assertion is defined relative to
+            # the PATTERN's own edge characters, so for a canonical_target_form
+            # beginning or ending with punctuation ("R.", an apostrophised form)
+            # it is wrong in BOTH directions: `re.escape("R.") + r"\b"` matches
+            # "R.Smith", which this rule refuses, and does NOT match "R. Noson",
+            # which this rule links -- after "R." the `\b` position has a
+            # non-word character on each side, so it never fires. Looking only
+            # at the neighbouring character means a target's own edges can never
+            # change what the guard means.
+            return not (
+                (start > 0 and text[start - 1].isalnum())
+                or (end < len(text) and text[end].isalnum())
+            )
+
         # `seen_in_block` is normally SHARED across every `link()` call made
         # while rendering one block (#105c) -- passed down from
         # `_render_block` through the verse renderers, so a name already
@@ -636,6 +681,24 @@ class _Linker:
         for m in self.pattern.finditer(text):
             if _is_protected(m.start(), m.end()):
                 continue  # inside a protected span -- leave untouched, don't count as "seen"
+            if not _boundary_ok(m.start(), m.end()):
+                # #587. Refused BEFORE `seen_in_block` (and before
+                # `global_seen`), so a fragment match never spends the block's
+                # single first-occurrence slot -- a properly bounded occurrence
+                # later in the same block still gets its wikilink, and its
+                # first-occurrence parenthetical.
+                #
+                # `finditer` is non-overlapping, so the refused span is still
+                # consumed: a DIFFERENT, shorter target starting inside it gets
+                # no turn here. That is deliberate. Re-scanning from one
+                # character on would recover the odd legitimate short mention,
+                # but it would also link a different entity inside a full name
+                # -- targets "Ann Marie" and "Marie" over the prose "JoAnn
+                # Marie" yield "JoAnn [[...|Marie]]" under a rescan and are left
+                # untouched here. A missing link is recoverable via the
+                # source-anchored `## Mentions` appendix; a wrong one, sitting
+                # in the delivered book, is not.
+                continue
             target = m.group(0)
             if target in seen_in_block:
                 continue

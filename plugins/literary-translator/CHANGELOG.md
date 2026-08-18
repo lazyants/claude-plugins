@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.30.0 — 2026-08-18
+
+The inline wikilinker gains a word boundary. A `canonical_target_form` that is only *part* of a longer word in the translated prose is no longer wrapped — it used to be, and the delivered `ssk-he-en` volume 2 carries two instances of the result: the Yiddish demonym **Tepliker** ("the man from Teplik") rendered as `[[…|Teplik]]er`, the word cut in half around a link the reader can see. Closes #587.
+
+### What was wrong
+
+The matcher is one alternation over every target, longest-first (`render_obsidian.py:514-530`). Longest-first is a real guarantee, but it is a guarantee *about targets*: it stops a shorter target shadowing a longer one that contains it. It says nothing when the longer string is ordinary prose, and there was no boundary condition anywhere in the file — so any target that prefixes, infixes or suffixes a longer run got wrapped inside it.
+
+This is not a Yiddish quirk. Every language that forms a demonym or adjective by suffixing a place or personal name reaches it — `Breslov`/`Breslover`, `Nemirov`/`Nemirover`, `Paris`/`Parisian`, `Tudor`/`Tudors` — as does any target that happens to be a common short word or the start of one.
+
+### The rule
+
+`render_obsidian.py:636-711`: if the character immediately before or immediately after the matched span is alphanumeric under `str.isalnum()`, the match is discarded.
+
+- **Alphanumeric, never non-space.** `[[…|Reb Noson]]’s` is correct and common — the book that produced this issue has 37 such spans — and so are a following comma, period, closing quote or bracket. Only a letter or a digit means the target is a fragment of a word.
+- **Applied per match, against the adjacent characters — not as a `\b` in the pattern.** `\b` is asserted relative to each alternative's *own* edge character, so a target that begins or ends in punctuation flips what it demands: `re.escape("R.") + r"\b"` is wrong in *both* directions — it **matches** `R.Smith`, which this rule refuses, and does **not** match `R. Noson`, which this rule links, because after `R.` the `\b` position has a non-word character on each side and never fires. A test pins exactly that difference — a future rewrite to `\b` fails on it (and, separately, on the consumed-span test below).
+- **Script-agnostic without a branch.** Hebrew, Cyrillic and Devanagari letters are all `isalnum()`, so an uncased script behaves like a cased one; `str.isalnum()` is also the predicate the adapter's own filename allow-list already uses.
+- **A refused match is not "seen".** It is discarded before the first-occurrence bookkeeping, so a properly bounded occurrence later in the same block still takes the block's single wikilink and its `parenthetical_originals: first_occurrence` gloss.
+
+### One thing this deliberately does not do
+
+A refused span is still **consumed** — the scan is non-overlapping — so a different, shorter target starting inside it gets no turn of its own. Targets `Ann Marie` and `Marie` over the prose `JoAnn Marie` now link *nothing*, where re-scanning from one character on would link `Marie`. The re-scan was written, then cut: it recovers the occasional short mention, and it pays for that by linking a different entity inside a full name, in the delivered book. This renderer's stated order is that a false link is worse than a missing one — the `## Mentions` appendix is the authoritative, source-anchored occurrence index and recovers the miss; nothing recovers the wrong link. Pinned by a test that is red under the pre-fix renderer *and* under the re-scanning variant.
+
+Also still uncovered, and named rather than left to be discovered: characters that attach to a word without being alphanumeric — combining marks, ZWJ/ZWNJ, soft hyphen, the bidi marks. `target + ZWNJ + suffix` is still cut. That is filed as #590 rather than half-fixed here, because covering marks alone (they are the easy half) would have left the format characters behind and read as if the class were closed.
+
+### What it costs an existing project
+
+Nothing re-translates and nothing re-converges. `render_obsidian.py` is in none of the three hashed bundles — not `cache_key.py`'s 17 `PLUGIN_BUNDLE_MEMBERS`, not the two-member derivation tuple, not `scaffold_setup.py`'s 5 `ORCHESTRATION_BUNDLE_MEMBERS` — so no segment's cache key moves and the resume-integrity digest is unchanged.
+
+What does move is the **render baseline**. `diff_rendered_output.py:106` hashes `render_obsidian.py` into `_RENDER_VERSION_FILES`, so after a Step 0a refresh an already-accepted baseline reports `stale_baseline` as a warning, and for any book whose prose actually contained a cut the diff gate reports a real mismatch and exits 1. That is the intended signal, not a regression: review the diff, confirm the changed lines are exactly the un-cut words, and re-accept with `--accept-baseline --force-accept-baseline`. Already-delivered vaults are not repaired by installing this — they are repaired by re-rendering them.
+
 ## 1.29.0 — 2026-08-16
 
 The docs-accuracy batch: 23 named sentences that were wrong, missing, or promised what the code does not do — 21 applied whole, 2 in part, and the parts left out are named under *What it does not do* below. Closes #572, and with it the 23 issues folded into it — #200, #229, #266, #281, #371, #401, #434, #435, #440, #447, #456, #468, #496, #509, #511, #513, #519, #521, #522, #523, #531, #540, #542.
