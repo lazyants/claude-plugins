@@ -40,7 +40,7 @@ Both halves were watched failing: dropping `claim_record.py` from the doc goes r
 
 ### What it costs
 
-Nothing. No hashed file changed: `SKILL.md`, the references and `scaffold_setup.py` are in no bundle, so no cache key moves, no segment re-stales, and the resume-integrity digest is unchanged. Suite unchanged in count.
+Nothing. No hashed file changed: `SKILL.md`, the references and `scaffold_setup.py` are in no bundle, so no cache key moves, no segment re-stales, and the resume-integrity digest is unchanged. Suite 5712 — the same count as 1.31.1, since this release rewrites an existing test rather than adding one.
 
 ## 1.31.1 — 2026-08-18
 
