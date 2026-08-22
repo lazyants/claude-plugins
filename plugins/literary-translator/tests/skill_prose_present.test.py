@@ -48,6 +48,14 @@ SKILL_MD = PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md"
 OPERATING_CONSTELLATION = (
     PLUGIN_ROOT / "skills" / "literary-translator" / "references" / "operating-constellation.md"
 )
+# #538: this file's third source. resume_setup.py's MODULE DOCSTRING carries
+# the operator-facing statement of what `resume: true` does and does not
+# assert; SKILL.md carries the same statement where the claim recipe is. Two
+# sources, two assertions -- a single needle in SKILL.md would leave the
+# docstring half deletable with nothing red.
+RESUME_SETUP_PY = (
+    PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts" / "resume_setup.py"
+)
 
 assert SKILL_MD.is_file(), f"expected {SKILL_MD} to exist"
 
@@ -183,6 +191,30 @@ def test_plugin_root_412_redirect_substitution_present():
     assert "as a new top-level `plugin_root` field (deliberately NOT inside" in text
     # The omission consequence stated plainly, never as merely "the default".
     assert "not a neutral default: it leaves the pre-#412" in text
+
+
+def test_skill_states_what_resume_true_asserts_and_does_not():
+    # #538/#544. Each fragment sits fully on one line as of this writing,
+    # verified with grep (SKILL.md:2177 and :2183) -- never by eye, see this
+    # file's own docstring's hard-wrap warning.
+    text = _skill_text()
+    # The claim itself: digest identity, not evidence of work.
+    assert "asserts digest identity and NOT that any work exists" in text
+    # And the consequence an operator meets in practice -- a refused claim
+    # run's own leftover run directory winning the next resume. A needle on
+    # the heading alone would prove a label survived while the explanation
+    # under it had been deleted.
+    assert "- **A claim run whose Step 1 is REFUSED leaves its `runs/<RUN_ID>/` and" in text
+
+
+def test_resume_setup_docstring_states_what_resume_true_asserts_and_does_not():
+    # The same two statements, in the script an operator runs directly on the
+    # claim path (SKILL.md's step 1). Fragments verified on one line each at
+    # resume_setup.py:168 and :178.
+    assert RESUME_SETUP_PY.is_file(), f"expected {RESUME_SETUP_PY} to exist"
+    text = RESUME_SETUP_PY.read_text(encoding="utf-8")
+    assert "asserts DIGEST IDENTITY and nothing else" in text
+    assert "matches that directory and legitimately reports `resume: true` over a" in text
 
 
 def test_operating_constellation_reference_exists_and_has_review_orchestration_content():

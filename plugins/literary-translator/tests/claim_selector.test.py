@@ -4295,3 +4295,144 @@ def test_an_unorderable_own_claimed_at_refuses_and_names_THIS_runs_record(tmp_pa
     assert "dispatch_token" not in draft_after, (
         "a refused recovery must not stamp the draft anyway"
     )
+
+
+# ---------------------------------------------------------------------------
+# 22. #538 -- a dispatch REFUSED on policy must not have mutated the tree.
+#
+# The three refusals below all fire AFTER the #438 claim block's own
+# admission pass. Until 1.36.0 they also fired after its durable WRITES: the
+# claim record at runs/<RUN_ID>/.claimed.<seg>, and the draft's own
+# dispatch_token re-stamped to <RUN_ID>:<seg>. A refusal whose entire purpose
+# is "this dispatch must not happen" therefore left the tree carrying a claim
+# for a run that did nothing -- and, because ledger_update.py requires a
+# draft's own token to equal expected_draft_token(run_token, seg) on the
+# convergence write, it arranged for a LATER round to translate, review and
+# come back clean, then fail to record the result.
+#
+# Each test here asserts THREE things, and the order matters: the specific
+# fatal fired (a fixture that reaches an EARLIER gate would satisfy the other
+# two vacuously -- an admission refusal never writes anything either), the
+# claim record is absent, and the claimed draft's dispatch_token is exactly
+# the bytes it carried before the invocation.
+# ---------------------------------------------------------------------------
+
+# A run id with real dispatch evidence in this project and no
+# runs/<id>/input.digest -- the #409 Step 3 "skipped the gate" population.
+UNGATED_RUN_ID = "20260805T000000Z"
+
+
+def _write_unrelated_draft(root, seg, dispatch_token):
+    """A draft nothing in `segs` names, carrying a chosen dispatch_token.
+
+    scan_dispatching_run_ids() walks segments/*.draft.json project-wide and
+    does not consult manifest.json, so this is how a fixture supplies Step 3
+    evidence WITHOUT putting it on the claimed draft. That separation is the
+    whole point: an unsafe or ungated token on the CLAIMED draft is refused
+    by evaluate_claim_admission() (S3) before any write, so it would prove
+    nothing about what a refusal AFTER the writes leaves behind.
+    """
+    (root / "segments" / f"{seg}.draft.json").write_text(
+        json.dumps({"seg": seg, "dispatch_token": dispatch_token}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _assert_claim_left_no_trace(root, seg, expected_token):
+    marker = root / "runs" / RUN_ID / f".claimed.{seg}"
+    assert not marker.exists(), (
+        f"a refused dispatch must leave NO durable claim record, found {marker}"
+    )
+    draft_after = json.loads((root / "segments" / f"{seg}.draft.json").read_text(encoding="utf-8"))
+    assert draft_after.get("dispatch_token") == expected_token, (
+        f"a refused dispatch must leave the draft's own dispatch_token untouched -- "
+        f"re-stamping it to this run makes the NEXT round's convergence write fail "
+        f"(ledger_update.py's expected_draft_token check). Expected {expected_token!r}, "
+        f"got {draft_after.get('dispatch_token')!r}"
+    )
+
+
+def test_previously_converged_refusal_leaves_no_claim_record_and_no_restamped_draft(tmp_path):
+    """The claimed id is CLEARED by D5.2, so it cannot raise this refusal
+    itself -- an UNCLAIMED previously-converged sibling is what makes the
+    gate fire while the claim is admitted."""
+    root = make_durable_root(tmp_path)
+    fixture_keys = {}
+
+    claimed_seg = "seg22"
+    build_from_converged_segment(root, claimed_seg, fixture_keys)
+    token_before = f"{SOURCE_RUN_ID}:{claimed_seg}"
+
+    sibling_seg = "seg26"
+    sibling_key = make_cache_key(sibling_seg)
+    fixture_keys[sibling_seg] = sibling_key
+    sibling_draft = clean_draft(sibling_seg)
+    sibling_sha1 = draft_content_sha1_of(sibling_draft)
+    sibling_draft["dispatch_token"] = f"{SOURCE_RUN_ID}:{sibling_seg}"
+    write_segpack(root, sibling_seg, clean_segpack(sibling_seg))
+    write_draft_doc(root, sibling_seg, sibling_draft)
+    write_fragment(
+        root, sibling_seg,
+        converged_fragment(
+            with_field(sibling_key, "style_contract_hash", "style_contract_hash-OLD"),
+            sibling_sha1,
+        ),
+    )
+    mark_ever_converged(root, sibling_seg)
+
+    write_manifest(root, [claimed_seg, sibling_seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    proc = run_select(root, "--from-converged", claimed_seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert "previously CONVERGED segment(s) would" in out["error"], (
+        f"fixture must reach the previously_converged refusal, not an earlier gate: {out['error']}"
+    )
+    _assert_claim_left_no_trace(root, claimed_seg, token_before)
+
+
+def test_unsafe_run_id_refusal_leaves_no_claim_record_and_no_restamped_draft(tmp_path):
+    root = make_durable_root(tmp_path)
+    fixture_keys = {}
+
+    claimed_seg = "seg22"
+    build_from_converged_segment(root, claimed_seg, fixture_keys)
+    token_before = f"{SOURCE_RUN_ID}:{claimed_seg}"
+
+    _write_unrelated_draft(root, "seg91", "../escape:seg91")
+
+    write_manifest(root, [claimed_seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    proc = run_select(root, "--from-converged", claimed_seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert "do not match the safe RUN_ID shape" in out["error"], (
+        f"fixture must reach the unsafe_run_ids refusal, not an earlier gate: {out['error']}"
+    )
+    _assert_claim_left_no_trace(root, claimed_seg, token_before)
+
+
+def test_runs_missing_digest_refusal_leaves_no_claim_record_and_no_restamped_draft(tmp_path):
+    root = make_durable_root(tmp_path)
+    fixture_keys = {}
+
+    claimed_seg = "seg22"
+    build_from_converged_segment(root, claimed_seg, fixture_keys)
+    token_before = f"{SOURCE_RUN_ID}:{claimed_seg}"
+
+    # UNGATED_RUN_ID deliberately gets no runs/<id>/ directory at all.
+    _write_unrelated_draft(root, "seg92", f"{UNGATED_RUN_ID}:seg92")
+
+    write_manifest(root, [claimed_seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    proc = run_select(root, "--from-converged", claimed_seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert "without the resume-integrity gate having run for them" in out["error"], (
+        f"fixture must reach the runs_missing_digest refusal, not an earlier gate: {out['error']}"
+    )
+    assert UNGATED_RUN_ID in out["runs_missing_digest"], out["runs_missing_digest"]
+    _assert_claim_left_no_trace(root, claimed_seg, token_before)

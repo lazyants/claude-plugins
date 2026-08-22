@@ -2206,6 +2206,28 @@ typed for what is actually a `false` case sails straight through the one
 check meant to catch it. There is no way to make this self-verifying; the
 operator relaying the value correctly IS the safeguard.
 
+**`resume: true` asserts digest identity and NOT that any work exists under
+that run (1.36.0, #538/#544).** It means one thing: the matched candidate's
+recorded `input.digest` equals the digest this invocation just computed. It
+says nothing about that run having dispatched anything. Two consequences an
+operator has to hold alongside it:
+
+- **A claim run whose Step 1 is REFUSED leaves its `runs/<RUN_ID>/` and
+  `input.digest` behind.** As of 1.36.0 such a refusal performs no durable
+  write of its own — no claim record, no re-stamped `dispatch_token` — but
+  `resume_setup.py` had already created that directory before Step 1 ever
+  ran. The next invocation computing the same digest therefore matches it
+  and legitimately reports `resume: true` over a run that dispatched
+  nothing. That is the gate working as specified; it is not evidence of
+  work, and it is not a fault to repair by hand.
+- **What a segment's work actually belongs to is its own draft
+  `dispatch_token`**, in `segments/<seg>.draft.json`, read directly. It is
+  optional at the schema level and records only the most recent dispatch, so
+  its absence proves nothing. `select_segments.py`'s `dispatching_run_ids`
+  and `run_id_evidence` report which run ids this project holds evidence for
+  and of what kind — never a per-segment ownership map, which no single
+  field anywhere provides.
+
 **The three admission profiles — never a fourth.** An earlier, ARTIFACT-ONLY
 attempt at a third profile (`--from-incomplete`, for stalled/interrupted
 work) was designed and then deliberately DELETED from this feature: no

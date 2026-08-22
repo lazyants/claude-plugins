@@ -4430,9 +4430,19 @@ def run(args, dirs: dict) -> dict:
     # (a successful --from-converged claim clears THAT gate for exactly its
     # own successfully-admitted ids -- D5.2).
     claims_payload: dict = {}
+    # #538: hoisted to run() scope because ADMISSION and the durable WRITE no
+    # longer sit together. Admission happens here; the write happens after the
+    # three policy refusals, and the publication block reads this to know what
+    # it is publishing. Stays {} when no claim was requested, which is what
+    # makes that later block's `if admitted:` guard correct for every caller.
+    admitted: dict = {}
+    # Bound here, not inside the branch below, for the same reason: the
+    # publication block that consumes it is no longer lexically inside it.
+    # `claim_record` is NOT hoisted alongside it -- every remaining use is in
+    # that block, so it is imported there instead of being carried across as a
+    # possibly-None name nothing between the two sites can use.
+    run_id = args.run_id
     if claim_requests:
-        claim_record = _import_claim_record()
-        run_id = args.run_id
         if run_id is None:
             fatal(
                 "a claim (--from-converged/--from-cap/--from-stalled) was requested but "
@@ -4599,7 +4609,6 @@ def run(args, dirs: dict) -> dict:
         # D2: all ids validated in ONE PASS, every failure reported together
         # -- three sequential fatals would cost an operator three round
         # trips to learn three problems.
-        admitted: dict = {}
         failures: dict = {}
         for seg, profile in sorted(claim_requests.items()):
             # #455: an id whose lease could not be taken is refused WITHOUT
@@ -4635,6 +4644,282 @@ def run(args, dirs: dict) -> dict:
                 claim_failures=failures,
             )
 
+        # #538: the durable writes for these admitted ids do NOT happen here.
+        # They are performed by the claim-publication block near the end of
+        # run(), strictly AFTER the three POLICY refusals below
+        # (previously_converged, unsafe_run_ids, runs_missing_digest). Before
+        # that move, a dispatch those gates REFUSED had already written a claim
+        # record and re-stamped every admitted draft's dispatch_token to this
+        # run -- and since ledger_update.py requires a draft's own token to
+        # equal expected_draft_token(run_token, seg) on the convergence write,
+        # the refusal did not merely waste an invocation: it arranged for the
+        # NEXT round to translate, review and come back clean, and then fail to
+        # record the result. ADMISSION stays here because D5.2 immediately
+        # below has to know which ids were admitted; only the writing moved.
+
+
+        # D5.2: a SENTINEL-BEARING claim clears previously_converged for
+        # EXACTLY its own SUCCESSFULLY-ADMITTED ids -- never the merely
+        # requested ones. A claim that failed any gate above already fataled
+        # the whole invocation, so by construction every key in `admitted`
+        # here passed every S-gate, its profile condition, and D6.
+        #
+        # #538: reads `admitted` rather than `claims_payload`, which is empty
+        # at this point -- the durable writes that fill it now run after the
+        # refusals below. The two key sets are the same on every invocation
+        # that RETURNS: the publication block appends to `write_failures` and
+        # skips any id it does not record, and its own fatal fires whenever
+        # that list is non-empty, so an id in `admitted` but absent from
+        # `claims_payload` can only exist on a path that returns nothing at
+        # all. Reading `admitted` also states the real precondition: what
+        # clears this gate is passing the S-gates, and the write is a
+        # consequence of that, not a second condition on it.
+        #
+        # #455: BOTH sentinel-bearing profiles clear, not just
+        # --from-converged. previously_converged is built from sentinel state
+        # ALONE for every requested seg (see its own loop above), and
+        # --from-stalled REQUIRES the sentinel to be PRESENT, so every id it
+        # admits lands in that list. Left uncleared, the unconditional fatal
+        # immediately below would fire on this invocation's own successful
+        # admission -- and D5.3 above rejects the --allow-retranslate-converged
+        # escape outright, so a from-stalled claim would have had no route at
+        # all. The rationale is the one already written here for
+        # --from-converged and it transfers unchanged: a claim authorizes
+        # RE-REVIEW, never re-translation, so the refusal this clearing lifts
+        # ("these would be TRANSLATED again") was never about these ids.
+        # #537: --from-cap clears too, and it used to be excluded here on the
+        # same false premise D5.3 above carried -- that its population has no
+        # sentinel and so never reaches previously_converged. A
+        # converged-then-staled-then-capped unit reaches it every time, because
+        # previously_converged is built from sentinel state ALONE. Left
+        # uncleared, the unconditional fatal immediately below would fire on
+        # this invocation's OWN successful admission -- the #455 failure, one
+        # profile later. The rationale already written here for the other two
+        # transfers unchanged: a claim authorizes RE-REVIEW, never
+        # re-translation, so the refusal this clearing lifts ("these would be
+        # TRANSLATED again") was never about these ids either.
+        cleared = {
+            seg
+            for seg in admitted
+            if claim_requests.get(seg)
+            in (
+                CLAIM_PROFILE_FROM_CONVERGED,
+                CLAIM_PROFILE_FROM_STALLED,
+                CLAIM_PROFILE_FROM_CAP,
+            )
+        }
+        previously_converged = [seg for seg in previously_converged if seg not in cleared]
+
+    if previously_converged and not args.allow_retranslate_converged:
+        detail = []
+        for seg in previously_converged:
+            mismatched = classification.get(seg, {}).get("mismatched_fields") or []
+            detail.append(f"{seg} (diverged: {', '.join(mismatched) or 'none recorded'})")
+
+        # #409: the flag authorizes ONE thing and costs TWO. Everything above
+        # is about converged work; but the same cache-key move that made those
+        # segments stale also moves resume_setup.py's input_digest (the digest
+        # domain is built FROM the per-segment cache keys), which mints a fresh
+        # RUN_ID, which orphans the dispatch_token on every not-yet-converged
+        # draft in this same selection -- so those retranslate too, discarding
+        # any fix an operator applied by hand. Measured on a live project: 21
+        # converged authorized, 21 in_progress silently lost, the unmentioned
+        # half exactly the size of the half being asked about.
+        #
+        # Stated WITH its condition rather than as a certainty. The second loss
+        # follows only if this dispatch actually mints a fresh RUN_ID, which it
+        # will whenever a cache-key field moved -- the usual case here, since
+        # that is what made these segments stale -- but NOT when the flag is
+        # passed for an unrelated reason against an unchanged bundle. A warning
+        # that overstates is one operators learn to skip past.
+        not_yet_converged = [seg for seg in segs if seg not in set(previously_converged)]
+        second_loss = ""
+        if not_yet_converged:
+            second_loss = (
+                f" BEFORE AUTHORIZING, THE SECOND NUMBER: this selection also "
+                f"holds {len(not_yet_converged)} not-yet-converged segment(s) "
+                f"({', '.join(not_yet_converged)}). If this dispatch also mints "
+                f"a fresh RUN_ID -- which it will whenever a cache-key field has "
+                f"moved, the same cause that made the segments above stale -- "
+                f"their existing drafts are orphaned by the new dispatch token "
+                f"and they retranslate from scratch as well, discarding any fix "
+                f"already applied by hand. This flag does not ask about those, "
+                f"and nothing else will."
+            )
+
+        fatal(
+            f"{len(previously_converged)} previously CONVERGED segment(s) would "
+            f"be translated again: {'; '.join(detail)}. Refusing. A converged "
+            f"segment becomes dispatch-eligible as soon as any cache-key field "
+            f"moves (a plugin upgrade moves plugin_bundle_hash for every "
+            f"segment at once), so this would discard finished work without "
+            f"anyone asking for it. Pass --allow-retranslate-converged to "
+            f"authorize exactly this dispatch, or --classify-only if you only "
+            f"need the classification and will not translate." + second_loss,
+            classification=classification,
+            counts=counts,
+            ids_by_category=ids_by_category,
+            previously_converged=previously_converged,
+            # Machine-readable counterpart to `second_loss` above, so a caller
+            # (and its test) can assert the exact set rather than grep prose.
+            not_yet_converged=not_yet_converged,
+            # Always [] on this path -- a non-empty set refused above -- but
+            # carried anyway so every failure shape has the same key set, the
+            # same reason unsafe_run_ids is repeated across the shapes below.
+            # A consumer that must branch on the key's presence is a consumer
+            # that will get it wrong on the shape nobody thought to test.
+            ambiguous_sentinels=ambiguous_sentinels,
+        )
+
+    # ---- #409 Step 3 refusal fatals -----------------------------------------
+    # `evidence`/`dispatch_scan`/`workflow_run_ids`/`unsafe_run_ids`/
+    # `safe_evidence`/`runs_acknowledged_pre_gate`/`runs_missing_digest` are
+    # all computed EARLIER now (see "#409 Step 3: evidence scan" above,
+    # snapshotted strictly before the #438 claim block) -- #438 fix, see that
+    # comment for why. Only the two refusal fatals stay at this original
+    # position; they are ambivalent to WHEN their inputs were computed
+    # (nothing here writes anything the scan would see), so keeping them here
+    # preserves this gate's existing relative precedence against
+    # previously_converged/ambiguous_sentinels exactly as before #438.
+    #
+    # #538 makes that parenthesis structural instead of incidental: the claim
+    # block above no longer writes anything at all, and the writes it used to
+    # perform now run BELOW these fatals. So "nothing between the snapshot and
+    # these refusals writes" is no longer a property to be preserved by care
+    # when editing this region -- there is nothing here that could write.
+    #
+    # DO NOT re-scan here, or anywhere else downstream of the snapshot above.
+    # `evidence` is a fixed value from the tree as this invocation FOUND it,
+    # not a live query -- that is what makes "refuses against its own
+    # writes" structurally inexpressible. A "helpful" refresh of `evidence`
+    # /`dispatch_scan`/`runs_missing_digest` here would silently reintroduce
+    # the exact self-refusal this snapshot exists to close -- pinned by
+    # tests/claim_selector.test.py's own
+    # test_step3_admits_a_fresh_claim_that_rewrites_its_own_evidence
+    # (section 13): a real claim, rewrite wired in, under --run-resume
+    # false, that MUST succeed.
+    #
+    # An unsafe run id must neither silently vanish (that would reintroduce
+    # exactly the "gate passes when it should refuse" failure #409 Step 3
+    # exists to close -- a traversing id that happens to resolve onto some
+    # unrelated existing input.digest would otherwise read as gated) nor
+    # point the operator at a remedy that cannot work. This gets its OWN
+    # refusal rather than folding into `runs_missing_digest` below, because
+    # backfill_resume_gate_ack.py validates the IDENTICAL shape (its own
+    # validate_run_id(), matched to this one on purpose) and would refuse
+    # these same id(s) too -- recommending it here, the way the
+    # runs_missing_digest refusal recommends it below, would send the
+    # operator into a dead end: refuse -> --apply -> refuse again, through
+    # neither script. Gated on `authorizes_dispatch`, the same as
+    # runs_missing_digest below, so --classify-only stays a pure read
+    # (final_audit.py's completeness gate calls it and must never start
+    # refusing) while still reporting `unsafe_run_ids` on the success path
+    # for that caller to see. The message names the one remedy that DOES
+    # exist: fix or remove the offending artifact by hand.
+    if unsafe_run_ids and authorizes_dispatch:
+        detail = "; ".join(
+            f"{run_id!r} ({problem}) [evidence: {'+'.join(evidence[run_id])}]"
+            for run_id, problem in sorted(unsafe_run_ids.items())
+        )
+        fatal(
+            f"{len(unsafe_run_ids)} RUN_ID(s) found in this project's own "
+            f"evidence (a draft's dispatch_token, or a runs/workflows/ "
+            f"directory name) do not match the safe RUN_ID shape "
+            f"resume_setup.py itself only ever generates: {detail}. Refusing "
+            f"-- a run id this malformed is never turned into a "
+            f"runs/<RUN_ID>/ filesystem lookup, because one containing '..' "
+            f"could escape the durable root and one starting with '/' would "
+            f"discard runs_dir entirely (Path('runs') / '/etc' == "
+            f"Path('/etc')). This is NOT the same as a run that merely "
+            f"predates the gate: backfill_resume_gate_ack.py validates the "
+            f"identical shape and would refuse these same id(s) too, so "
+            f"running it here would not help. There is no automated remedy "
+            f"-- find and fix (or remove) the offending "
+            f"segments/<seg>.draft.json's dispatch_token, or the "
+            f"runs/workflows/<RUN_ID>/ directory, by hand, then rerun.",
+            classification=classification,
+            counts=counts,
+            ids_by_category=ids_by_category,
+            unsafe_run_ids=unsafe_run_ids,
+            # Computed over `safe_evidence` only (never over an unsafe id --
+            # no path was built for one), but included here so this failure
+            # shape carries the same key set as the runs_missing_digest one
+            # below, and as the success path.
+            runs_missing_digest=runs_missing_digest,
+            runs_acknowledged_pre_gate=runs_acknowledged_pre_gate,
+            run_id_evidence={k: evidence[k] for k in sorted(evidence)},
+            dispatching_run_ids=sorted(dispatch_scan["by_run_id"]),
+            workflow_run_ids=workflow_run_ids,
+            drafts_scanned=dispatch_scan["drafts_scanned"],
+        )
+
+    if runs_missing_digest and authorizes_dispatch:
+        detail = "; ".join(
+            f"{run_id} ({len(dispatch_scan['by_run_id'].get(run_id, []))} draft(s), "
+            f"evidence: {'+'.join(evidence[run_id])})"
+            for run_id in runs_missing_digest
+        )
+        fatal(
+            # Audit-accuracy fix: this used to say every listed id
+            # "dispatched work" unconditionally. A workflow_dir-only id
+            # proves INSTANTIATION, never dispatch (scan_workflow_run_ids()'s
+            # own docstring documents "instantiated and dispatched nothing"
+            # as a legitimate shape) -- so the summary now names both
+            # possibilities and leaves WHICH applies to each id to the
+            # per-id `detail` above, which already carries its own draft
+            # count and evidence tag.
+            f"{len(runs_missing_digest)} prior RUN_ID(s) show evidence of "
+            f"having dispatched work and/or had a Workflow template "
+            f"instantiated in this project without the resume-integrity "
+            f"gate having run for them: {detail}. "
+            f"Refusing. resume_setup.py writes runs/<RUN_ID>/input.digest "
+            f"before any dispatch, and these run ids have no digest -- so "
+            f"whatever each one actually did in this project was never "
+            f"checked against the inputs it consumed, and no later run can "
+            f"safely resume it. There is deliberately NO flag to wave this "
+            f"through: run "
+            f"backfill_resume_gate_ack.py --apply to record, per run id, that "
+            f"these predate the gate (it never fabricates an input.digest -- "
+            f"an honest acknowledgement of a gap, not a forged proof). A run "
+            f"id acknowledged there stops blocking; a NEWLY skipped run has a "
+            f"new id and is refused again.",
+            classification=classification,
+            counts=counts,
+            ids_by_category=ids_by_category,
+            runs_missing_digest=runs_missing_digest,
+            # The same provenance the success path reports. An operator
+            # triaging a refusal needs to know WHICH half fired for each run
+            # id -- and a refusal that reported less than the success path
+            # would make the failing case the harder one to diagnose.
+            run_id_evidence={k: evidence[k] for k in sorted(evidence)},
+            dispatching_run_ids=sorted(dispatch_scan["by_run_id"]),
+            workflow_run_ids=workflow_run_ids,
+            drafts_scanned=dispatch_scan["drafts_scanned"],
+            # Empty here by construction -- a non-empty unsafe_run_ids would
+            # already have fataled above, before this check ever runs. Kept
+            # in the payload anyway so every failure shape carries the same
+            # key set.
+            unsafe_run_ids=unsafe_run_ids,
+        )
+
+    # ---- #538: claim publication, after every policy refusal ---------------
+    # The durable half of the #438 claim -- the claim record and the draft's
+    # own dispatch_token rewrite -- is performed HERE, once every refusal
+    # above has declined to fire, and not at the admission site where it used
+    # to live. The property this position buys is structural rather than
+    # careful: a dispatch refused on policy CANNOT have mutated the tree,
+    # because there is no longer any code path from a durable write back to
+    # one of those refusals. D1a's own ordering is untouched -- record first,
+    # token second, both inside this same single invocation.
+    #
+    # The write-failure fatal at the end of this block travels WITH the loop
+    # and must never be separated from it: split apart, they would leave a
+    # path that returns success over a claim whose record or token write
+    # failed. That refusal is a different class from the three above -- an
+    # I/O fault, not a policy decision -- and it keeps its pre-existing
+    # behaviour, including the partial-write residual it has always had.
+    if admitted:
+        claim_record = _import_claim_record()
         # Every requested id passed -- write the durable claim record for
         # each (claim_record.py's own three-state predicate; NEVER
         # Path.exists()). AMBIGUOUS reads (an unreadable existing record)
@@ -4776,234 +5061,6 @@ def run(args, dirs: dict) -> dict:
                 counts=counts,
                 ids_by_category=ids_by_category,
             )
-
-        # D5.2: a SENTINEL-BEARING claim clears previously_converged for
-        # EXACTLY its own SUCCESSFULLY-ADMITTED-AND-RECORDED ids -- never
-        # the merely requested ones. A claim that failed any gate above
-        # already fataled the whole invocation, so by construction every
-        # key in claims_payload here passed every S-gate, its profile
-        # condition, and D6.
-        #
-        # #455: BOTH sentinel-bearing profiles clear, not just
-        # --from-converged. previously_converged is built from sentinel state
-        # ALONE for every requested seg (see its own loop above), and
-        # --from-stalled REQUIRES the sentinel to be PRESENT, so every id it
-        # admits lands in that list. Left uncleared, the unconditional fatal
-        # immediately below would fire on this invocation's own successful
-        # admission -- and D5.3 above rejects the --allow-retranslate-converged
-        # escape outright, so a from-stalled claim would have had no route at
-        # all. The rationale is the one already written here for
-        # --from-converged and it transfers unchanged: a claim authorizes
-        # RE-REVIEW, never re-translation, so the refusal this clearing lifts
-        # ("these would be TRANSLATED again") was never about these ids.
-        # #537: --from-cap clears too, and it used to be excluded here on the
-        # same false premise D5.3 above carried -- that its population has no
-        # sentinel and so never reaches previously_converged. A
-        # converged-then-staled-then-capped unit reaches it every time, because
-        # previously_converged is built from sentinel state ALONE. Left
-        # uncleared, the unconditional fatal immediately below would fire on
-        # this invocation's OWN successful admission -- the #455 failure, one
-        # profile later. The rationale already written here for the other two
-        # transfers unchanged: a claim authorizes RE-REVIEW, never
-        # re-translation, so the refusal this clearing lifts ("these would be
-        # TRANSLATED again") was never about these ids either.
-        cleared = {
-            seg
-            for seg in claims_payload
-            if claim_requests.get(seg)
-            in (
-                CLAIM_PROFILE_FROM_CONVERGED,
-                CLAIM_PROFILE_FROM_STALLED,
-                CLAIM_PROFILE_FROM_CAP,
-            )
-        }
-        previously_converged = [seg for seg in previously_converged if seg not in cleared]
-
-    if previously_converged and not args.allow_retranslate_converged:
-        detail = []
-        for seg in previously_converged:
-            mismatched = classification.get(seg, {}).get("mismatched_fields") or []
-            detail.append(f"{seg} (diverged: {', '.join(mismatched) or 'none recorded'})")
-
-        # #409: the flag authorizes ONE thing and costs TWO. Everything above
-        # is about converged work; but the same cache-key move that made those
-        # segments stale also moves resume_setup.py's input_digest (the digest
-        # domain is built FROM the per-segment cache keys), which mints a fresh
-        # RUN_ID, which orphans the dispatch_token on every not-yet-converged
-        # draft in this same selection -- so those retranslate too, discarding
-        # any fix an operator applied by hand. Measured on a live project: 21
-        # converged authorized, 21 in_progress silently lost, the unmentioned
-        # half exactly the size of the half being asked about.
-        #
-        # Stated WITH its condition rather than as a certainty. The second loss
-        # follows only if this dispatch actually mints a fresh RUN_ID, which it
-        # will whenever a cache-key field moved -- the usual case here, since
-        # that is what made these segments stale -- but NOT when the flag is
-        # passed for an unrelated reason against an unchanged bundle. A warning
-        # that overstates is one operators learn to skip past.
-        not_yet_converged = [seg for seg in segs if seg not in set(previously_converged)]
-        second_loss = ""
-        if not_yet_converged:
-            second_loss = (
-                f" BEFORE AUTHORIZING, THE SECOND NUMBER: this selection also "
-                f"holds {len(not_yet_converged)} not-yet-converged segment(s) "
-                f"({', '.join(not_yet_converged)}). If this dispatch also mints "
-                f"a fresh RUN_ID -- which it will whenever a cache-key field has "
-                f"moved, the same cause that made the segments above stale -- "
-                f"their existing drafts are orphaned by the new dispatch token "
-                f"and they retranslate from scratch as well, discarding any fix "
-                f"already applied by hand. This flag does not ask about those, "
-                f"and nothing else will."
-            )
-
-        fatal(
-            f"{len(previously_converged)} previously CONVERGED segment(s) would "
-            f"be translated again: {'; '.join(detail)}. Refusing. A converged "
-            f"segment becomes dispatch-eligible as soon as any cache-key field "
-            f"moves (a plugin upgrade moves plugin_bundle_hash for every "
-            f"segment at once), so this would discard finished work without "
-            f"anyone asking for it. Pass --allow-retranslate-converged to "
-            f"authorize exactly this dispatch, or --classify-only if you only "
-            f"need the classification and will not translate." + second_loss,
-            classification=classification,
-            counts=counts,
-            ids_by_category=ids_by_category,
-            previously_converged=previously_converged,
-            # Machine-readable counterpart to `second_loss` above, so a caller
-            # (and its test) can assert the exact set rather than grep prose.
-            not_yet_converged=not_yet_converged,
-            # Always [] on this path -- a non-empty set refused above -- but
-            # carried anyway so every failure shape has the same key set, the
-            # same reason unsafe_run_ids is repeated across the shapes below.
-            # A consumer that must branch on the key's presence is a consumer
-            # that will get it wrong on the shape nobody thought to test.
-            ambiguous_sentinels=ambiguous_sentinels,
-        )
-
-    # ---- #409 Step 3 refusal fatals -----------------------------------------
-    # `evidence`/`dispatch_scan`/`workflow_run_ids`/`unsafe_run_ids`/
-    # `safe_evidence`/`runs_acknowledged_pre_gate`/`runs_missing_digest` are
-    # all computed EARLIER now (see "#409 Step 3: evidence scan" above,
-    # snapshotted strictly before the #438 claim block) -- #438 fix, see that
-    # comment for why. Only the two refusal fatals stay at this original
-    # position; they are ambivalent to WHEN their inputs were computed
-    # (nothing here writes anything the scan would see), so keeping them here
-    # preserves this gate's existing relative precedence against
-    # previously_converged/ambiguous_sentinels exactly as before #438.
-    #
-    # DO NOT re-scan here, or anywhere else downstream of the snapshot above.
-    # `evidence` is a fixed value from the tree as this invocation FOUND it,
-    # not a live query -- that is what makes "refuses against its own
-    # writes" structurally inexpressible. A "helpful" refresh of `evidence`
-    # /`dispatch_scan`/`runs_missing_digest` here would silently reintroduce
-    # the exact self-refusal this snapshot exists to close -- pinned by
-    # tests/claim_selector.test.py's own
-    # test_step3_admits_a_fresh_claim_that_rewrites_its_own_evidence
-    # (section 13): a real claim, rewrite wired in, under --run-resume
-    # false, that MUST succeed.
-    #
-    # An unsafe run id must neither silently vanish (that would reintroduce
-    # exactly the "gate passes when it should refuse" failure #409 Step 3
-    # exists to close -- a traversing id that happens to resolve onto some
-    # unrelated existing input.digest would otherwise read as gated) nor
-    # point the operator at a remedy that cannot work. This gets its OWN
-    # refusal rather than folding into `runs_missing_digest` below, because
-    # backfill_resume_gate_ack.py validates the IDENTICAL shape (its own
-    # validate_run_id(), matched to this one on purpose) and would refuse
-    # these same id(s) too -- recommending it here, the way the
-    # runs_missing_digest refusal recommends it below, would send the
-    # operator into a dead end: refuse -> --apply -> refuse again, through
-    # neither script. Gated on `authorizes_dispatch`, the same as
-    # runs_missing_digest below, so --classify-only stays a pure read
-    # (final_audit.py's completeness gate calls it and must never start
-    # refusing) while still reporting `unsafe_run_ids` on the success path
-    # for that caller to see. The message names the one remedy that DOES
-    # exist: fix or remove the offending artifact by hand.
-    if unsafe_run_ids and authorizes_dispatch:
-        detail = "; ".join(
-            f"{run_id!r} ({problem}) [evidence: {'+'.join(evidence[run_id])}]"
-            for run_id, problem in sorted(unsafe_run_ids.items())
-        )
-        fatal(
-            f"{len(unsafe_run_ids)} RUN_ID(s) found in this project's own "
-            f"evidence (a draft's dispatch_token, or a runs/workflows/ "
-            f"directory name) do not match the safe RUN_ID shape "
-            f"resume_setup.py itself only ever generates: {detail}. Refusing "
-            f"-- a run id this malformed is never turned into a "
-            f"runs/<RUN_ID>/ filesystem lookup, because one containing '..' "
-            f"could escape the durable root and one starting with '/' would "
-            f"discard runs_dir entirely (Path('runs') / '/etc' == "
-            f"Path('/etc')). This is NOT the same as a run that merely "
-            f"predates the gate: backfill_resume_gate_ack.py validates the "
-            f"identical shape and would refuse these same id(s) too, so "
-            f"running it here would not help. There is no automated remedy "
-            f"-- find and fix (or remove) the offending "
-            f"segments/<seg>.draft.json's dispatch_token, or the "
-            f"runs/workflows/<RUN_ID>/ directory, by hand, then rerun.",
-            classification=classification,
-            counts=counts,
-            ids_by_category=ids_by_category,
-            unsafe_run_ids=unsafe_run_ids,
-            # Computed over `safe_evidence` only (never over an unsafe id --
-            # no path was built for one), but included here so this failure
-            # shape carries the same key set as the runs_missing_digest one
-            # below, and as the success path.
-            runs_missing_digest=runs_missing_digest,
-            runs_acknowledged_pre_gate=runs_acknowledged_pre_gate,
-            run_id_evidence={k: evidence[k] for k in sorted(evidence)},
-            dispatching_run_ids=sorted(dispatch_scan["by_run_id"]),
-            workflow_run_ids=workflow_run_ids,
-            drafts_scanned=dispatch_scan["drafts_scanned"],
-        )
-
-    if runs_missing_digest and authorizes_dispatch:
-        detail = "; ".join(
-            f"{run_id} ({len(dispatch_scan['by_run_id'].get(run_id, []))} draft(s), "
-            f"evidence: {'+'.join(evidence[run_id])})"
-            for run_id in runs_missing_digest
-        )
-        fatal(
-            # Audit-accuracy fix: this used to say every listed id
-            # "dispatched work" unconditionally. A workflow_dir-only id
-            # proves INSTANTIATION, never dispatch (scan_workflow_run_ids()'s
-            # own docstring documents "instantiated and dispatched nothing"
-            # as a legitimate shape) -- so the summary now names both
-            # possibilities and leaves WHICH applies to each id to the
-            # per-id `detail` above, which already carries its own draft
-            # count and evidence tag.
-            f"{len(runs_missing_digest)} prior RUN_ID(s) show evidence of "
-            f"having dispatched work and/or had a Workflow template "
-            f"instantiated in this project without the resume-integrity "
-            f"gate having run for them: {detail}. "
-            f"Refusing. resume_setup.py writes runs/<RUN_ID>/input.digest "
-            f"before any dispatch, and these run ids have no digest -- so "
-            f"whatever each one actually did in this project was never "
-            f"checked against the inputs it consumed, and no later run can "
-            f"safely resume it. There is deliberately NO flag to wave this "
-            f"through: run "
-            f"backfill_resume_gate_ack.py --apply to record, per run id, that "
-            f"these predate the gate (it never fabricates an input.digest -- "
-            f"an honest acknowledgement of a gap, not a forged proof). A run "
-            f"id acknowledged there stops blocking; a NEWLY skipped run has a "
-            f"new id and is refused again.",
-            classification=classification,
-            counts=counts,
-            ids_by_category=ids_by_category,
-            runs_missing_digest=runs_missing_digest,
-            # The same provenance the success path reports. An operator
-            # triaging a refusal needs to know WHICH half fired for each run
-            # id -- and a refusal that reported less than the success path
-            # would make the failing case the harder one to diagnose.
-            run_id_evidence={k: evidence[k] for k in sorted(evidence)},
-            dispatching_run_ids=sorted(dispatch_scan["by_run_id"]),
-            workflow_run_ids=workflow_run_ids,
-            drafts_scanned=dispatch_scan["drafts_scanned"],
-            # Empty here by construction -- a non-empty unsafe_run_ids would
-            # already have fataled above, before this check ever runs. Kept
-            # in the payload anyway so every failure shape carries the same
-            # key set.
-            unsafe_run_ids=unsafe_run_ids,
-        )
 
     return {
         "success": True,
