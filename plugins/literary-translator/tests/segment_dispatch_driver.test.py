@@ -6317,6 +6317,12 @@ _FIX_APPLY_OR_REFUSE = "Apply an entry you can substantiate; refuse one you cann
 # a fixer sent there would refuse or apply without evidence.
 _FIX_VERSE_EVIDENCE = "the segpack's verses[] carries placement only and no verse source text at all"
 _FIX_SUGGEST_UNTRUSTED = "never apply a suggest that violates the style contract"
+# The book-scoped branch, pinned after the review bot caught it establishing only
+# that a rule HAS book scope. Scope is not the fact: the fixer must reach outside
+# this segment for the occurrence the rule actually turns on, or refuse. Without
+# this clause the branch dead-ends -- the fixer can neither substantiate nor
+# refute -- which is the same silence the reviewer already had.
+_FIX_BOOK_SCOPED_FACT = "Knowing the SCOPE is not yet the FACT"
 # The half that keeps this release OUT of #527's territory: a refusal is a
 # report, never a record. Writing one into the draft would change draft_sha1
 # and hand the fixer, unaudited, the advance that reject_review.py exists to
@@ -6348,6 +6354,7 @@ _FIX_FRAGMENTS = (
     _FIX_APPLY_OR_REFUSE,
     _FIX_VERSE_EVIDENCE,
     _FIX_SUGGEST_UNTRUSTED,
+    _FIX_BOOK_SCOPED_FACT,
     _FIX_NO_RECORD,
     _FIX_SENTINEL_GUARD,
     _FIX_ALL_REFUSED_NO_REWRITE,
