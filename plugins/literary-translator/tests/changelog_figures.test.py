@@ -144,22 +144,27 @@ def _test_function_count(filename):
     )
 
 
-# Rewritten for 1.37.0 (#532), per the maintenance contract above.
+# Rewritten for 1.38.0 (#529), per the maintenance contract above.
 #
-# One row, because 1.37.0 states exactly one figure this tree can answer: the
-# member count of the bundle tuple whose flip the entry prices. Its other counts
-# are deliberately NOT rows. The pinned-clause and pinned-absent counts are
-# spelled out as words ("nine", "the two removed orders"), and this file's
-# tokenizer only sees numerals -- the accepted residual its docstring names,
-# not an oversight. The 7-false-findings-across-10-filings measurement is a
-# CORPUS figure from two operator-owned durable roots that are not in this
-# repository and are not reachable from any check here; declaring one would mean
-# hardcoding its answer, which passes every assertion below while proving
-# nothing (`lambda: 7`).
+# One row, and BYTE-IDENTICAL to the row 1.37.0 (#532) declared -- which is
+# exactly the case this contract is easiest to skip, and the reason it is a
+# contract rather than an assertion: both releases price their own migration
+# against the same bundle tuple, so an unrotated declaration set stays green
+# while describing a different entry. Measured on this very release: it had
+# already carried a 1.35.0 comment through one rename unread. Re-declared
+# deliberately rather than left standing.
 #
-# `_test_function_count` is kept although 1.37.0 cites no suite size: it is the
-# general deriver for that class of figure, and 1.36.0's own row used it one
-# release ago.
+# 1.38.0's other numbers are not rows. Its two measured incidents are
+# per-segment events in operator-owned durable roots that are not in this
+# repository (`SSK` he/yi->en `seg35`, `historiettes` fr->ru `seg18`), and no
+# check here can reach them; the mutation counts behind its test claims are
+# events in a review session, not state in the tree. Declaring either would mean
+# hardcoding the answer, which passes every assertion below while proving
+# nothing (`lambda: 2`) -- the accepted residual this file's docstring names.
+#
+# `_test_function_count` is kept although 1.38.0 cites no suite size: it is the
+# general deriver for that class of figure, and 1.36.0's own row used it two
+# releases ago.
 FIGURES = [
     Figure(
         "17 `PLUGIN_BUNDLE_MEMBERS`",

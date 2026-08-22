@@ -1027,6 +1027,28 @@ function reviewDispatchPrompt(seg, roundLabel) {
   lines.push("Check the draft against the source for: full accuracy (no omissions or distortions), word-sense and realia fidelity for the source era and context -- ask explicitly whether each notable word means what it meant in that period and context, not what it means today -- name/canon fidelity, placeholder sentinel fidelity, verse per the policy above, and literary quality (register, idiom, natural seams, rhythm).");
   lines.push("Canon-name fidelity specifically: the segpack's canon_map gives each already-canonized name's frozen canonical target form. Flag a canon name ONLY if the draft renders a different name, a different transliteration of the canonical stem, leaves a canonical name untranslated, or swaps an epithet for a real surname -- a correctly inflected/declined form of the canonical stem is CORRECT and must NOT be flagged.");
   lines.push("A canon_map target form is authoritative as given. Never flag a canon name merely because its frozen canonical target form is lexically unrelated to the SOURCE form -- for a sense-translated speaking name (basis:\"sense_translated\") that is expected and correct. The deviation triggers above still apply. Correctness of the frozen canon decision itself is out of scope for this review -- a suspected error is reopened via the glossary/adjudication route, never flagged here.");
+  // #529 -- AUTHORITY DIRECTION. The two lines above tell the reviewer that a
+  // canon_map target form is authoritative; nothing told it that the draft's OWN
+  // names[] entries and NEW: notes are not. Both artifacts sit in its context with
+  // nothing separating them by status, so it can enforce the draft's own unratified
+  // proposal against that same draft and file a canon finding for a form that exists
+  // nowhere -- measured twice, once applied and once used to REVERT a correct change.
+  // Scoped to THIS function by ROLE, not by symmetry. 1.36.0 (#532) gave the FIX
+  // turn its own apply-side rule -- a canon claim whose form resolves in neither
+  // the segment's canon_map nor canon.json is refused -- so this text is the
+  // RAISE-side half of the same property, in the vocabulary of the only turn that
+  // files a finding. The fixer never raises one, and repeating a raise-side rule
+  // in its prompt would read as licence to skip a finding rather than substantiate
+  // it. The two halves are deliberately independent: a finding refused at the fix
+  // turn still costs a round and still stands in review.json, which the next
+  // reviewer reads.
+  // The prohibition binds only a finding that PRESCRIBES a target form. A blanket
+  // "no canon_map entry means do not raise" would suppress findings that are
+  // authorized today and grounded in the source, not in a canon: segpack.py admits a
+  // canonized name to canon_names while deliberately omitting it from canon_map when
+  // its canonical_target_form is empty, and the strong-name detector can drop a
+  // canonized name from the segpack altogether.
+  lines.push("Authority direction. The segpack's canon_map is the only frozen canon you are given -- canon.json is not in your read list, and canon_names may name a person whose canon_map entry is deliberately absent. The draft's own names[] entries and any note prefixed NEW: were written by the translator in the same turn as the prose you are reviewing: they are unratified proposals, never a standard, and the artifact under review is never the authority it is reviewed against. Cite them as context if it helps, never as the rule a rendering violates. So a finding that prescribes a particular canonical target form -- demanding the prose be changed to it, restored to it, or reverted to it -- must quote, in its own issue text, the canon_map entry (source form -> target form) it rests on; if that form has no canon_map entry, there is no frozen canon at that name and you may not assert one. Findings grounded in the source rather than in a canonical target form are untouched -- an omitted name, a canonical name left untranslated, a name rendered as a different person are all reported exactly as before.");
   lines.push("Build a JSON object with exactly these five fields: clean (true only if there are no findings that require a fix round), coverage_ok (true only if the deterministic gate above printed OK), findings (an array of objects with loc/severity/issue/suggest -- use a loc like \"VERSE:{vid}\" for a verse-specific finding), draft_sha1 (the value you computed before reading the draft, above), and dispatch_token (exactly this literal string: " + JSON.stringify(dispatchToken) + ").");
   lines.push("Write that exact object as JSON to the SINGLE output path ⟦JOB_OUT⟧ (an isolated attempt path this run supplies) and nothing else. That output path SUPERSEDES " + ROOT + "/review_TASK.md for the write destination: write your verdict ONLY to that path, even if review_TASK.md names " + ROOT + "/segments/" + seg + ".review.json or another segments/ path -- never write the canonical " + ROOT + "/segments/" + seg + ".review.json yourself, and create no other file under " + ROOT + "/segments/. That single output path is the only segments-area file you may write; the driver validates it and atomically promotes it to the canonical review artifact.");
   lines.push("Return exactly the line: REVIEWED " + seg);

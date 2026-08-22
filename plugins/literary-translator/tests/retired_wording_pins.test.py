@@ -97,6 +97,7 @@ REPO_ROOT = PLUGIN_ROOT.parents[1]
 ASSETS = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 
 SKEPTIC_TEMPLATE = ASSETS / "templates" / "skeptic-pass-wf.template.js"
+REVIEW_TASK_TEMPLATE = ASSETS / "templates" / "review_TASK.template.md"
 GLOSSARY_TEMPLATE = ASSETS / "templates" / "glossary-pass-wf.template.js"
 SKEPTIC_SETUP = ASSETS / "scripts" / "skeptic_setup.py"
 SKEPTIC_TRIAGE_SCHEMA = ASSETS / "schemas" / "skeptic-triage.schema.json"
@@ -178,7 +179,16 @@ BASELINE_RELEASE = "4343994b9de4f6fe979e6e5af711ed9ab11c4381"
 # squash and not rebase.
 BASELINE_FIX_ROUND = "c33d1d8a68348f1edf2b4fdeee5f3874bbb17083"
 
-PIN_BASELINES = (BASELINE_RELEASE, BASELINE_FIX_ROUND)
+# The 1.35.0 release commit, and the baseline for 1.38.0 (#529)'s single row.
+# It carries none of BASELINE_FIX_ROUND's fragility: it is already on main as the
+# tip of a merged PR, so no merge method chosen for THIS branch can move it out of
+# main's ancestry. A row retired by 1.38.0 needs it because the sentence that row
+# pins was introduced long before BASELINE_RELEASE and still stood at 1.35.0 --
+# either older baseline would satisfy presence-before, and the nearer one states
+# what was actually true immediately before the edit.
+BASELINE_1_35_0 = "c6feef8e7b6eea1526f52db1cc1184b634fca3a8"
+
+PIN_BASELINES = (BASELINE_RELEASE, BASELINE_FIX_ROUND, BASELINE_1_35_0)
 
 
 def normalize(text: str) -> str:
@@ -498,6 +508,19 @@ RETIRED = [
         "the claim that evidence_coverage durably records partial coverage. It "
         "does not: --validate-fragment rewrites the fragment in place and the "
         "second validation recomputes cited from the already-pruned list",
+    ),
+    # -- 1.38.0 (#529): review_TASK.template.md ------------------------
+    (
+        BASELINE_1_35_0, REVIEW_TASK_TEMPLATE,
+        "Any `new_names` were resolved and flagged `NEW:` in the draft's own `notes`.",
+        "The draft's own `names[]` entries and any `NEW:`-prefixed note are the "
+        "translator's unratified proposals", 1,
+        "the draft's own NEW: proposals stated as a bare FACT, inside the bullet "
+        "whose next sentence makes a canon_map form authoritative. Nothing said "
+        "the proposals were not also authoritative, so the reviewer could enforce "
+        "the draft's own unratified proposal against that same draft -- measured "
+        "twice, once applied to correct prose and once used to justify reverting a "
+        "correct change. The successor says it is never a standard",
     ),
 ]
 
