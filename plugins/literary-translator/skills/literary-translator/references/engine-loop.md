@@ -204,9 +204,10 @@ steps below:
      left without a meaning"* is a claim it cannot check — and one that survives
      round after round, because each round's fix moves the meaning somewhere the
      next round also cannot see. `reviewDispatchPrompt` therefore states where a
-     verse's `literal_gloss` lands in the shipped Obsidian output
-     (`render_obsidian.py`'s `_render_verse_block` puts it beneath the verse block,
-     `_render_verse_inline` beside an embedded one) and forbids asserting
+     verse's `literal_gloss` lands in the shipped Obsidian output — it becomes the
+     verse body itself when it is the only rendering (`literal_only`), and sits
+     beneath the verse block (`_render_verse_block`) or inline beside an embedded
+     verse (`_render_verse_inline`) when it accompanies `rendered` — and forbids asserting
      non-delivery **from the draft alone** for a verse whose own `literal_gloss`
      supplies the meaning. A verse whose gloss does NOT supply it is reported
      normally — that finding stays raiseable. Scoped to the reviewer: the same text

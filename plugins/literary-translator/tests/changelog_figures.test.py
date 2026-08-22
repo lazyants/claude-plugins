@@ -107,20 +107,6 @@ _TOKEN = re.compile(r"\d+(?: \d{3})*(?:\.\d+)?")
 Figure = namedtuple("Figure", "phrase value derive")
 
 
-def _release_entry_count():
-    """Release entries in this changelog -- the count its own headings make."""
-    return len(_VERSION_HEADING.findall(CHANGELOG.read_text(encoding="utf-8")))
-
-
-def _test_module_count():
-    """Test modules under `tests/`, by this project's own `*.test.py` pattern --
-    not a hand-kept list. RECURSIVE, because `python_files` in `pytest.ini` is a
-    BASENAME pattern: pytest would collect `tests/unit/x.test.py` while a
-    top-level glob silently would not, and a derivation that quietly disagrees
-    with the authority it cites is the failure this file warns about."""
-    return len(list((PLUGIN_ROOT / "tests").rglob("*.test.py")))
-
-
 def _tuple_len(filename, name):
     """Length of a module-level tuple in a SHIPPED script, read by AST rather
     than imported. Importing would execute the module and bind this test to

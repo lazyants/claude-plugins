@@ -6183,7 +6183,15 @@ _DELIVERY_PROHIBITION = (
     "may not assert -- from the draft alone -- that the reader is left without a meaning"
 )
 _DELIVERY_CARVEBACK = "does NOT supply that meaning is unaffected"
-_DELIVERY_FRAGMENTS = (_DELIVERY_PROHIBITION, _DELIVERY_CARVEBACK)
+# The POSITIVE half, pinned separately because it is the half that can go quietly
+# false: the first shipped wording said the gloss sits "beneath its own block, or
+# inline beside an embedded verse" FULL STOP, which is wrong under literal_only --
+# `_render_verse_block`/`_render_verse_inline` label the gloss only when `rendered`
+# is also non-empty (`body = rendered or gloss` otherwise), so a sole gloss IS the
+# verse body and carries no label. A prompt that misdescribes the artifact is the
+# same defect class #546 is about, one level down.
+_DELIVERY_SOLE_GLOSS = "as the verse body itself when it is the only rendering"
+_DELIVERY_FRAGMENTS = (_DELIVERY_PROHIBITION, _DELIVERY_CARVEBACK, _DELIVERY_SOLE_GLOSS)
 
 VERSE_POLICY_REFERENCE_DOC = (
     PLUGIN_ROOT / "skills" / "literary-translator" / "references" / "verse-policy.md"
