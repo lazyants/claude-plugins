@@ -438,8 +438,11 @@ deterministically, never on an LLM's own say-so.
 
 **1.3.6 (#132 option b):** `fixPrompt(seg, round, revObj)` no longer splices
 `revObj` into its own prompt as the findings source — it instructs the
-fixer to READ `review_path(seg)` itself and apply every entry in its
-on-disk `findings[]` array. `review_ready.py` already token-validated this
+fixer to READ `review_path(seg)` itself and work through its on-disk
+`findings[]` array. (Since #532 the fixer applies an entry it can
+substantiate against the source and refuses one it cannot, without
+recording the refusal in the draft; the disk read this section is about is
+unchanged by that.) `review_ready.py` already token-validated this
 exact file fresh THIS round before the fix call was ever dispatched. In the
 SUPPORTED single-orchestrator obedient model the review for `<seg>` round R is
 written once by its own detached `codex_job.py --kind review` driver — not

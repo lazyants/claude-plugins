@@ -6275,5 +6275,166 @@ def test_verse_policy_reference_doc_does_not_carry_the_delivery_rule():
         )
 
 
+# ===========================================================================
+# #532 -- the fixer may REFUSE a finding it cannot substantiate, asserted on
+# the PROMPT OUTPUT.
+#
+# The shipped prompt ordered "Apply every entry in its findings[] array, in
+# full, to the draft", and nothing anywhere let the fix turn question a
+# finding. Measured on two live books in one day: 7 distinct false findings
+# across 10 filings, three of which would have DAMAGED correct text. The
+# structural gates around this step (token freshness, dispatch_token binding,
+# schema shape, loc authenticity) each check an ADDRESS; not one of them reads
+# what the edit says.
+#
+# WHY OUTPUT-LEVEL, NOT SOURCE-LEVEL -- the same reasoning #546's block above
+# states: a substring check against the template's function BODY passes on a
+# sentence sitting in a comment or after `return`, without it ever reaching a
+# fixer. These drive the REAL builders through call_template_functions().
+#
+# WHY THESE FRAGMENTS. Each carries a clause that is load-bearing on its own,
+# and none of them is a heading or a label: a marker would stay green while
+# the rule under it was deleted. The negative half matters as much as the
+# positive one -- the two orders and the old reply contract this release removes
+# are pinned ABSENT, so
+# re-adding either (the likeliest regression, since both read as ordinary
+# emphasis) goes red rather than coexisting with the new text.
+# ===========================================================================
+
+# The two orders that must be GONE. Both are quoted verbatim from the shipped
+# 1.35.0 text, so a revert of either is caught rather than merely diluted.
+_FIX_REMOVED_ORDERS = (
+    "Apply every entry in its findings[] array, in full, to the draft.",
+    "carefully apply every finding from",
+)
+
+# What fixPrompt's output must carry.
+_FIX_RECOMMENDATIONS = "are the reviewer's RECOMMENDATIONS, not orders"
+_FIX_APPLY_OR_REFUSE = "Apply an entry you can substantiate; refuse one you cannot."
+# The evidence anchor most likely to be dropped as "obvious", and the one that
+# is actually false if dropped: a verse accuracy claim CANNOT be checked from
+# the segpack, whose verses[] carries placement only (segpack.schema.json), so
+# a fixer sent there would refuse or apply without evidence.
+_FIX_VERSE_EVIDENCE = "the segpack's verses[] carries placement only and no verse source text at all"
+_FIX_SUGGEST_UNTRUSTED = "never apply a suggest that violates the style contract"
+# The book-scoped branch, pinned after the review bot caught it establishing only
+# that a rule HAS book scope. Scope is not the fact: the fixer must reach outside
+# this segment for the occurrence the rule actually turns on, or refuse. Without
+# this clause the branch dead-ends -- the fixer can neither substantiate nor
+# refute -- which is the same silence the reviewer already had.
+_FIX_BOOK_SCOPED_FACT = "Knowing the SCOPE is not yet the FACT"
+# The half that keeps this release OUT of #527's territory: a refusal is a
+# report, never a record. Writing one into the draft would change draft_sha1
+# and hand the fixer, unaudited, the advance that reject_review.py exists to
+# record.
+_FIX_NO_RECORD = "Record nothing in the draft to mark a refusal"
+# runRound matches DRAFT_MISSING by CONTAINMENT (the documented #228 reversal),
+# so a refusal report that quotes the sentinel terminates the run as a failed
+# fix call. Without this clause the refusal path is a live foot-gun.
+_FIX_SENTINEL_GUARD = "do not put the sentinel DRAFT_MISSING followed by this segment's id"
+
+# The two tail clauses that make a refusal EXECUTABLE rather than merely
+# permitted. Without the first, "refuse everything" and "rewrite the draft with
+# your fixes" contradict each other and invite a pointless -- possibly damaging
+# -- rewrite; without the second, the reply contract still says "Return exactly
+# the line", which forbids the refusal report the rest of the prompt asks for.
+# Reverting just these two lines leaves every other assertion here green, which
+# is why they are pinned separately.
+_FIX_ALL_REFUSED_NO_REWRITE = (
+    "If you substantiated nothing and refused every finding, leave that file exactly as you found it."
+)
+_FIX_REFUSAL_REPORT_PLACEMENT = "Put any refusal report on the lines above that line"
+# The final-line rule itself, RENDERED: without this the placement clause alone
+# could survive a rewrite that deleted the FIXED line it is placing a report
+# relative to, leaving every assertion here green and the sentence dangling.
+_FIX_REPLY_FINAL_LINE = "End your reply with the line: FIXED seg01 r1"
+
+_FIX_FRAGMENTS = (
+    _FIX_RECOMMENDATIONS,
+    _FIX_APPLY_OR_REFUSE,
+    _FIX_VERSE_EVIDENCE,
+    _FIX_SUGGEST_UNTRUSTED,
+    _FIX_BOOK_SCOPED_FACT,
+    _FIX_NO_RECORD,
+    _FIX_SENTINEL_GUARD,
+    _FIX_ALL_REFUSED_NO_REWRITE,
+    _FIX_REFUSAL_REPORT_PLACEMENT,
+    _FIX_REPLY_FINAL_LINE,
+)
+
+# The reply contract this release REPLACES: "Return exactly the line: FIXED ..."
+# forbade the refusal report, so a revert to it is pinned absent too.
+_FIX_REMOVED_REPLY_CONTRACT = "Return exactly the line: FIXED"
+
+
+# What must not leak into the other two prompts. The translator has no findings
+# to refuse and the reviewer authors them, so either would read as licence to
+# skip its own job; the no-record clause names a channel neither of them uses.
+_FIX_LEAK_FRAGMENTS = (
+    _FIX_APPLY_OR_REFUSE,
+    _FIX_SUGGEST_UNTRUSTED,
+    _FIX_NO_RECORD,
+)
+
+
+def test_fix_prompt_lets_the_fixer_refuse_and_no_longer_orders_apply_every(tmp_path):
+    """#532. The fix turn's own text is the only place a false finding can be
+    stopped before it reaches the draft: everything else between "the model
+    decided" and "the text changed" is deterministic and reads addresses, not
+    claims."""
+    dirs = DRIVER.resolve_dirs(None)
+    subst = _fixture_template_subst(tmp_path, "20260101T000000Z")
+
+    out = DRIVER.call_template_functions(
+        dirs, subst,
+        [
+            {"key": "fix", "fn": "fixPrompt", "args": ["seg01", 1, {"findings": []}]},
+            {"key": "translate", "fn": "translatePrompt", "args": ["seg01"]},
+            {"key": "review", "fn": "reviewDispatchPrompt", "args": ["seg01", "1"]},
+        ],
+    )
+
+    assert _FIX_REMOVED_REPLY_CONTRACT not in out["fix"], (
+        "fixPrompt's OUTPUT still tells the fixer to return EXACTLY the FIXED "
+        "line (#532) -- that contract leaves a refusal report nowhere to go"
+    )
+    for order in _FIX_REMOVED_ORDERS:
+        assert order not in out["fix"], (
+            f"fixPrompt's OUTPUT still carries the unconditional order {order!r} "
+            f"(#532) -- the fixer must apply what it can substantiate and refuse "
+            f"the rest"
+        )
+    for fragment in _FIX_FRAGMENTS:
+        assert fragment in out["fix"], (
+            f"fixPrompt's OUTPUT must carry {fragment!r} (#532) -- not merely the "
+            f"template's source text"
+        )
+    for fragment in _FIX_LEAK_FRAGMENTS:
+        assert fragment not in out["translate"], (
+            f"translatePrompt's output must NOT carry {fragment!r} (#532): the "
+            f"translator has no findings, so it reads as licence to skip its own work"
+        )
+        assert fragment not in out["review"], (
+            f"reviewDispatchPrompt's output must NOT carry {fragment!r} (#532): the "
+            f"reviewer AUTHORS the findings, so it reads as licence not to raise one"
+        )
+
+
+def test_fix_prompt_still_carries_the_draft_missing_sentinel_and_rewrite_order(tmp_path):
+    """#532 non-regression control. The refusal branch sits beside two clauses
+    that ARE parsed or load-bearing downstream -- runRound scans callFix's
+    return for DRAFT_MISSING, and the draft rewrite is the step's whole point.
+    Adding a way to write nothing must not weaken either."""
+    dirs = DRIVER.resolve_dirs(None)
+    subst = _fixture_template_subst(tmp_path, "20260101T000000Z")
+    out = DRIVER.call_template_functions(
+        dirs, subst,
+        [{"key": "fix", "fn": "fixPrompt", "args": ["seg01", 1, {"findings": []}]}],
+    )
+    assert "return exactly the line DRAFT_MISSING seg01" in out["fix"]
+    assert "do not translate it yourself" in out["fix"]
+    assert ".draft.json with your fixes." in out["fix"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

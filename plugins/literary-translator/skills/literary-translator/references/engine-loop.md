@@ -67,7 +67,9 @@ path that KEEPS the direct `codex:codex-rescue` call — it is out of #198's sco
   BOTH accuracy (omissions, distortions, canon/name fidelity, placeholder
   fidelity, word-sense/realia) AND literary quality (register, idiom, seams,
   rhythm) in ONE pass — never two separate reviewers.
-- **Claude (the orchestrating session) ONLY applies fixes.** The exact call shape
+- **Claude (the orchestrating session) ONLY applies fixes — or refuses one it cannot
+  substantiate (#532).** It never originates translated content and never grades its own
+  output; refusing a reviewer's finding is neither of those. The exact call shape
   that mechanically enforces this, pinned down once and referenced everywhere
   else this step is mentioned:
 
@@ -102,8 +104,9 @@ path that KEEPS the direct `codex:codex-rescue` call — it is out of #198's sco
   `--expected-file` content), but **1.3.6 (#132 option b)**: the fix agent's
   prompt no longer splices `revObj`'s findings into its own text at all — it
   instead instructs the agent to READ the canonical
-  `review_path(seg) = segments/{seg}.review.json` from disk itself and apply
-  every entry in its on-disk `findings[]` array. `review_ready.py` already
+  `review_path(seg) = segments/{seg}.review.json` from disk itself and work
+  through its on-disk `findings[]` array — since #532, applying an entry it can
+  substantiate against the source and refusing one it cannot. `review_ready.py` already
   token-validated this exact file fresh THIS round before the fix call was
   ever dispatched. In the SUPPORTED single-orchestrator obedient model the
   review for `<seg>` round R is written once by its own detached

@@ -75,8 +75,9 @@ translate+gloss job ends up quietly provisioning apparatus it will never use.
    `codex_job.py` driver (1.4.7) rather than the old `codex:codex-rescue`
    forwarder; every shipped template enforces this and no profile knob swaps
    either role to a different engine. Claude (the orchestrating session)
-   **only** applies fixes, orchestrates, and verifies — it never originates a
-   translation or grades its own output. **codex-translate → deterministic
+   **only** applies fixes (or refuses a finding it cannot substantiate — #532),
+   orchestrates, and verifies; it never originates a translation or grades its
+   own output. **codex-translate → deterministic
    gate → codex-review → Claude-fix, looped to convergence, IS the v1
    default** — not a menu of interchangeable options. Confirm the user has
    Codex CLI access before scaffolding proceeds; v1 has no
@@ -1885,8 +1886,11 @@ class. The class survives it for two measured reasons:
 1. **The fix turn is a write-capable deputy.** On a non-clean, non-final
    review inside the fix-round budget, `runRound()` calls `callFix()`, which
    dispatches a PLAIN Claude agent (`agent()` with no `agentType` — not
-   `codex_job.py`, so not sandboxed) and instructs it to apply, in full,
-   every entry of a review whose `issue`/`suggest` text codex itself authored.
+   `codex_job.py`, so not sandboxed) and hands it a review whose
+   `issue`/`suggest` text codex itself authored. Since #532 that turn applies an
+   entry only where it can substantiate the claim against the source and refuses
+   the rest, so it is a reader of that free text rather than an executor of it —
+   but it is still a write-capable agent taking untrusted prose as input.
    `REVIEW_SCHEMA` constrains a finding's SHAPE (`loc`/`severity`/`issue`/
    `suggest`, strings, no extra keys); beyond that the only content check is
    that `loc` contains a colon (`AUTHENTIC_LOC_RE`) — `issue` and `suggest`
@@ -2036,7 +2040,10 @@ opener pins nothing — set the reasoning effort of the turn you dispatch
 yourself, to the same `engine.effort` value the line names.
 
 **When the finding is WRONG (#461) — rejecting a verdict instead of
-applying it.** The fix turn above assumes the finding is actionable. A
+applying it.** Since #532 the fix turn refuses a finding it cannot substantiate
+and leaves the text alone — but a refusal is a REPORT, not a record: it changes
+no file, and this script remains the only way to say durably that a verdict does
+not bind. A
 review can be schema-valid, carry an authentic `loc`, pass the
 `fabricated_loc` gate, and still be FALSE about the source — verified on a
 live segment whose sole finding claimed a Hebrew string that occurs zero
