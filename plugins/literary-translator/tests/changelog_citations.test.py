@@ -68,16 +68,24 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # renumber-preserves-the-wrongness failure this file exists to prevent, and
 # re-resolving it would pin a shipped entry to line numbers it never claimed.
 #
-# 1.34.1 cites NO `file.ext:NNN` at all, so this map is empty. That is a real
-# state and not a forgotten rotation: the entry is prose about two documentation
-# sites, and every source claim in it names a function, a constant or a field
-# instead of a line -- `assemble.py`'s machinery-only carve-out and the
-# `style_contract_hash` that sits outside it, `scaffold_validate.py`'s W1 gate,
-# `style_bible.template.md`'s section E-traps. A reader greps those; none of
-# them can drift the way a line number does, which is the only failure this
-# file detects. 1.33.1's map was empty for the same reason, so the precedent is
-# the entry BEFORE the one this supersedes -- worth saying, because an empty map
-# is exactly the case where a correct rotation and a skipped one look identical.
+# 1.34.2 (#580) cites NO `file.ext:NNN`, so this map is empty. The entry names
+# `cache_key.py` and both changelog test modules, but every source claim it
+# makes is about what a file now HOLDS -- a tuple's length, a module count, a
+# heading count -- and the sibling `changelog_figures.test.py` re-derives each
+# of those directly. A line citation would pin WHERE a thing lives, which none
+# of those sentences asserts.
+#
+# Said precisely, because the distinction is the whole point of these two files:
+# the entry's REMAINING claims -- what the new test's contract is, which files
+# it changes, what the anchor state is -- are behavioural, and are guarded by
+# review and by nothing mechanical. Neither test covers them.
+#
+# An empty map is exactly the case where a correct rotation and a SKIPPED one
+# look identical, so the precedent matters: 1.34.1 (#547) and 1.33.1 were empty
+# for their own reasons too. What forced this particular rewrite was the test
+# below going red when 1.34.2 landed -- both halves still bite against an empty
+# map, since a citation with no anchors fails and an anchor no citation uses
+# fails.
 CITATION_ANCHORS = {}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an

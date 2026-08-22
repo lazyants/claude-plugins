@@ -1,0 +1,202 @@
+"""Every measured figure DECLARED for the newest CHANGELOG entry is re-derived
+from the tree, so a later edit in the same release cannot leave it stale.
+
+WHY THIS EXISTS. A release note here states measured costs -- how many members a
+bundle tuple has, how many files moved, how many entries this changelog holds.
+Each is correct when written. An edit made later *in the same release* then moves
+the thing it measured, and nothing recomputes it: the entry ships a figure that
+was true at the moment of writing and false at the moment of merge, with no red
+anywhere. 1.29.0 hit this five times in one release, and every instance was
+caught by a reviewer reading the prose rather than by any check.
+
+WHY IT IS THIS SMALL, stated because the obvious bigger version was deliberately
+cut. The first design also swept every digit in the entry and demanded that each
+one be declared or exempted, backed by a per-release model call to catch the
+spelled-out figures a regex cannot see. The measurement that killed it: of the
+six figures in shipped entries that can be re-derived today -- PLUGIN_BUNDLE_MEMBERS
+(17), ORCHESTRATION_BUNDLE_MEMBERS (5), PRODUCER_CODE_CLOSURE (5),
+CACHE_KEY_FIELD_ORDER (15), select_segments.CACHE_KEY_FIELDS (15), and 1.34.0's
+"88 new tests" -- ALL SIX ARE CORRECT. Nothing wrong has reached a reader through
+this surface. A sweep would have added a six-to-thirty-four-row declaration set
+plus a model call to every release, permanently, to guard a defect with a measured
+ship rate of zero. So what is here is the half that closes the failure the issue
+actually names, and nothing else.
+
+WHAT THIS DOES NOT CATCH, stated plainly because a check that oversells itself is
+the same defect class it exists to remove.
+
+- An UNDECLARED figure is not checked at all, and the author who mis-measures is
+  the one least likely to declare it. There is no completeness half. This is the
+  accepted residual, not an oversight.
+- A derivation that hardcodes its own answer (`lambda: 17`) passes every assertion
+  below. Nothing mechanical can see that. The guard is the maintenance rule at the
+  bottom of this docstring: every row is watched failing, by mutating the TREE, not
+  by mutating the row.
+- Historical entries are not covered, by the same contract the citation test keeps
+  (`tests/changelog_citations.test.py`) and for the same reason: an entry records
+  what a past release measured.
+- The entry slicer is fence-unaware. A `## <semver>` line inside a fenced block
+  would end the slice early. Measured on the current file: 60 release headings,
+  ZERO inside a fence. When it does happen the result is usually RED (a declared
+  phrase falls below the fake heading and goes missing) -- but not always: if every
+  declaration sits ABOVE the fake heading, or a duplicate of a phrase sits below
+  it, the truncated slice can still satisfy the exactly-once rule and pass GREEN.
+  Accepted rather than guarded: the input is this repo's own changelog, written by
+  the maintainer, and the frequency is zero.
+
+HOW A ROW IS WRITTEN.
+
+`phrase` is the SMALLEST UNIQUE SLICE of the entry that contains the figure --
+never the whole sentence. Two reasons, and both bite in practice. It must contain
+exactly ONE numeric token, because a phrase spanning several numbers would satisfy
+every check here while only one of its numbers was ever verified. And it must
+occur exactly once, because bare numerals repeat freely inside a single entry --
+which is why the key is a phrase and never the numeral itself.
+
+`derive` MUST CALL THE AUTHORITATIVE IMPLEMENTATION, never a lookalike. Measured
+while this test was being written: counting `def test_` by AST gives 78 for the two
+`person_registry` modules where pytest collects 88, because parametrized cases
+count as they run. A re-implementation is not a verification -- it is a second
+chance to make the same mistake, and it fails in the direction that looks right.
+
+MAINTENANCE CONTRACT. This tracks the NEWEST entry only, since that is the one
+under active edit, and it is rewritten every release -- exactly like
+`CITATION_ANCHORS`. When a new version entry lands, the previous entry's rows go
+with it. Emptying `FIGURES` retires this check silently; that is a review
+responsibility, not something asserted here.
+"""
+
+import ast
+import re
+from collections import namedtuple
+from decimal import Decimal
+from pathlib import Path
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
+SCRIPTS = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
+
+# `## 1.34.1 - 2026-08-22`: the version, then anything (this repo appends a
+# release date). Requiring end-of-line after the version would match no real
+# heading in the file.
+_VERSION_HEADING = re.compile(r"^## (\d+\.\d+\.\d+)\b.*$", re.M)
+
+# A numeric token as this changelog writes one. Digit grouping here is an ASCII
+# space (`20 137`), verified by byte scan -- not NBSP, not a thin space -- so a
+# grouped number must be ONE token rather than two. The decimal tail is not
+# decoration: the newest entry at the time of writing carried `3.4x`, and a
+# grammar that cannot express a real measured figure pushes the maintainer toward
+# not declaring it, which is the only failure mode this file has no answer for.
+_TOKEN = re.compile(r"\d+(?: \d{3})*(?:\.\d+)?")
+
+# phrase -> the value the prose asserts -> how to re-derive it from the tree.
+Figure = namedtuple("Figure", "phrase value derive")
+
+
+def _release_entry_count():
+    """Release entries in this changelog -- the count its own headings make."""
+    return len(_VERSION_HEADING.findall(CHANGELOG.read_text(encoding="utf-8")))
+
+
+def _test_module_count():
+    """Test modules under `tests/`, by this project's own `*.test.py` glob --
+    the same pattern `pytest.ini` collects on, not a hand-kept list."""
+    return len(list((PLUGIN_ROOT / "tests").glob("*.test.py")))
+
+
+def _tuple_len(filename, name):
+    """Length of a module-level tuple in a SHIPPED script, read by AST rather
+    than imported. Importing would execute the module and bind this test to
+    whatever else it does at import time; a literal read cannot."""
+    tree = ast.parse((SCRIPTS / filename).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            getattr(target, "id", "") == name for target in node.targets
+        ):
+            return len(ast.literal_eval(node.value))
+    raise AssertionError(
+        f"{name} is no longer a module-level assignment in {filename} -- the "
+        f"derivation behind a changelog figure has lost its subject"
+    )
+
+
+# Rewritten for 1.34.1 (#580), per the maintenance contract above. Two of these
+# three are moved BY this release: writing either before making the change is
+# precisely the failure this file exists to catch, and it is caught here.
+FIGURES = [
+    Figure("61 release entries", 61, _release_entry_count),
+    Figure("162 test modules", 162, _test_module_count),
+    Figure(
+        "17 `PLUGIN_BUNDLE_MEMBERS`",
+        17,
+        lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
+    ),
+]
+
+
+def _newest_entry():
+    """(version, text) of the first `## <semver>` section -- the release being
+    edited. The heading must be a version: matching any `## <token>` would let a
+    prose heading masquerade as the newest entry."""
+    text = CHANGELOG.read_text(encoding="utf-8")
+    heads = list(_VERSION_HEADING.finditer(text))
+    assert heads, "CHANGELOG has no `## <major.minor.patch>` heading"
+    first = heads[0]
+    end = heads[1].start() if len(heads) > 1 else len(text)
+    return first.group(1), text[first.start() : end]
+
+
+def test_every_declared_figure_is_still_what_the_tree_says():
+    version, entry = _newest_entry()
+
+    stale = []
+    for figure in FIGURES:
+        if not callable(figure.derive):
+            stale.append(f"{figure.phrase!r} declares a derivation that is not callable")
+            continue
+
+        found = entry.count(figure.phrase)
+        if found != 1:
+            stale.append(
+                f"{figure.phrase!r} occurs {found} times in {version} -- a figure "
+                f"is declared by the smallest slice of prose that is UNIQUE, so "
+                f"zero means the sentence was reworded or dropped and this row "
+                f"rotted with it, and two means the row cannot say which "
+                f"occurrence it covers"
+            )
+            continue
+
+        tokens = _TOKEN.findall(figure.phrase)
+        if len(tokens) != 1:
+            stale.append(
+                f"{figure.phrase!r} contains {len(tokens)} numeric tokens "
+                f"({tokens}) -- a phrase spanning several numbers would pass "
+                f"every check here while only one of them was ever verified. "
+                f"Narrow the phrase to the one figure this row declares"
+            )
+            continue
+
+        quoted = Decimal(tokens[0].replace(" ", ""))
+        declared = Decimal(str(figure.value))
+        if quoted != declared:
+            stale.append(
+                f"{figure.phrase!r} states {quoted} but this row declares "
+                f"{declared} -- the prose and the declaration disagree"
+            )
+            continue
+
+        derived = Decimal(str(figure.derive()))
+        if derived != declared:
+            stale.append(
+                f"{figure.phrase!r} states {declared}, but the tree now says "
+                f"{derived}"
+            )
+
+    assert not stale, (
+        f"measured figures in the {version} entry no longer match the tree:\n  "
+        + "\n  ".join(stale)
+        + "\n\nRe-derive each from the tree and correct the PROSE -- never the "
+        "other way round. A figure that moved after it was written is exactly "
+        "what this checks: the entry is edited until merge, and the thing it "
+        "measures moves with it."
+    )
