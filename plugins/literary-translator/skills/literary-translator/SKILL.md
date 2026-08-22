@@ -2080,21 +2080,46 @@ python3 {durable_root}/scripts/reject_review.py SEG \
 trusted `claim_record.py` sibling is loaded from, and `{durable_root}/scripts/`
 is a Step-0a copy other passes in this pipeline hold write access over.
 
-The record lands at `segments/<seg>.review_rejected.json`, and the next
-driver invocation dispatches a FRESH review round for that segment instead
-of `needs_fix`. **It never yields a re-translation and never writes the
-draft** — a rejection buys another look, never permission to overwrite. It
-also does not survive the review it names: the record is bound to that
-verdict's token AND its digest, so a genuinely different verdict on the
-next round is judged on its own merits.
+The record lands at `segments/<seg>.review_rejected.json`. **It never
+yields a re-translation and never writes the draft** — a rejection is never
+permission to overwrite. What the next driver invocation does with it
+depends on the round:
+
+- **At a numbered round** it dispatches a FRESH review at the next label
+  instead of `needs_fix`.
+- **At the mandatory `final` round (#527)** it TERMINATES the unit as
+  **converged**, on your `--reason`, provided two things the record itself
+  cannot assert: the draft has not moved since the verdict you rejected,
+  and that verdict's own `coverage_ok` is `true`. If the draft moved, or
+  coverage was reported incomplete, you get the fresh `final` review
+  instead — that is the fall-through, not a failure.
+
+The `final` behaviour changed because the old one could not work: it bought
+exactly one re-review, and a reviewer re-reading the SAME unchanged input
+re-derives the same false finding, so the unit capped anyway. Two reviews
+of one misleading input are one observation, not two.
+
+**So a `final` rejection is a terminal decision, and it is whole-verdict.**
+Reject only a verdict whose findings are ALL unfounded: rejecting a mixed
+verdict now converges the segment over its genuine findings instead of
+merely costing a review round. If any finding is real, fix the draft.
+
+The record does not survive the review it names: it is bound to that
+verdict's token AND its digest, so a genuinely different verdict is judged
+on its own merits.
+
+The convergence is visible on disk as such — the ledger fragment carries a
+`note` naming this record and quoting your reason, because the `review.json`
+beside it still says `clean: false`.
 
 `--reason` is required, non-empty, and durable — it is the entire audit
 trail, and the one thing a later reviewer has to go on. Re-running the
 identical command is safe: an unspent record is left exactly as it is
 (`already_recorded: true`), and one the driver has already consumed is
-renewed (`renewed: true`), which is how a repeat of the same false verdict
-at the absorbing `final` round is rejected a second time. A DIFFERENT
-`--reason` for the same verdict refuses rather than overwriting the first.
+renewed (`renewed: true`) — the route that still needs at `final`, since
+#527, is a verdict the driver sent back for a fresh review anyway. A
+DIFFERENT `--reason` for the same verdict refuses rather than overwriting
+the first.
 
 **Claiming a segment for re-review (#438) — re-reviewing a hand-edited
 draft WITHOUT re-translating it.** A converged or capped segment's draft is
@@ -2255,9 +2280,10 @@ reclassified into another one:
   round; it only lengthens the ladder for units that have not capped yet.
   The two routes back are the ones documented above, and which one applies
   turns on whether the verdict or the draft was wrong: `reject_review.py`
-  when the stored finding is false (one fresh review at `final` per
-  rejected verdict), or a hand-edit of the draft followed by this flag
-  plus `--only-segs` when the finding was right.
+  when the stored finding is false (at `final`, over an unmoved draft whose
+  verdict reported `coverage_ok`, that CONVERGES the unit — #527; otherwise
+  one fresh review at `final`), or a hand-edit of the draft followed by this
+  flag plus `--only-segs` when the finding was right.
 - **`--from-stalled SEG1[,SEG2,...]`** — for a segment stalled with
   genuinely incomplete bookkeeping: previously converged, then left
   `in_progress` with no `reviewed_draft_sha1` and a review that no longer
@@ -2404,8 +2430,10 @@ fabricated model finding, never against that operator.
 re-trigger it.** Once `--from-stalled` dispatches a fresh review and that
 review is promoted, the review is current. If the driver then dies before
 the convergence write, or the fresh verdict is rejected via
-`reject_review.py` without touching the draft, the unit returns to
-`in_progress` + sentinel + no `reviewed_draft_sha1` with a now-current
+`reject_review.py` without touching the draft and the driver sends it back
+for one more review rather than converging it (#527: at `final` a rejection
+over an unmoved, `coverage_ok` verdict converges instead), the unit returns
+to `in_progress` + sentinel + no `reviewed_draft_sha1` with a now-current
 review — and a standing staleness gate would wrongly refuse re-entry into
 the loop this profile just opened. Continuation is authenticated the same
 way `--from-converged`'s dirty-review continuation is, above: against a

@@ -5,6 +5,14 @@ returns needs_fix whenever draft_matches_review, so an UNCHANGED draft
 (nothing real to fix) can never advance to the next review round -- it
 renders a fix prompt for a segment with nothing to fix, forever.
 
+#527 extended what the same record reaches, and the tests for it live here
+too: at the mandatory `final` round a rejection no longer buys one more
+review of the same unchanged draft (a second opinion over one misleading
+input is one observation, not two) -- it TERMINATES the unit as converged
+on the operator's attested reason, gated on the draft not having moved and
+on the verdict's own coverage_ok. So this file now covers a rejection that
+ends in a durable convergence write, not only one that advances a round.
+
 This file covers the two new components that close it:
 
   * reject_review.py -- the sole writer of
@@ -2185,32 +2193,30 @@ def test_a_symlink_at_the_record_path_authorizes_nothing_even_pointing_at_a_vali
 # where nothing but rule 8 can stop it repeating.
 # ---------------------------------------------------------------------------
 
-def test_a_final_round_rejection_reopens_the_cap_and_is_consumable_exactly_once(tmp_path):
-    """The two halves of the "final" branch, in the order they are reached.
+def test_a_final_round_rejection_converges_the_unit_on_the_operators_attestation(tmp_path):
+    """#527: what a `final` rejection buys, after the thing it used to buy
+    turned out not to work.
 
-    HALF ONE -- it is consumed at all. Every path out of that branch (the
-    uncomputable-sha1 fatal, cap_reached, the #432 reopen) returns before
-    the numbered-round _rejection_matches() call site further down is ever
-    evaluated, so a rejection filed against a final-round review was once
-    written, reported as SUCCESS by reject_review.py, and then never looked
-    at. The final round is also where an unfounded verdict does the MOST
-    damage: cap_reached writes the terminal {"status": "non_converged",
-    "reason": "cap"} fragment that select_segments.py's own
-    HUMAN_ESCALATION_STATUSES excludes from every default selection.
+    It used to buy EXACTLY ONE re-review, and the segment capped anyway
+    whenever the replacement verdict came back non-clean. That is a second
+    opinion, and a second opinion is the one remedy this case cannot use: both
+    reviewers read the SAME unchanged input, so where the INPUT is what
+    misleads them the same false finding is re-derived every round and the
+    unit can never converge -- nothing to apply, and a cap at the end of it.
 
-    HALF TWO -- it is consumed ONCE. "final" is absorbing, so the re-review
-    is dispatched at the SAME label and review_dispatch_token() mints a
-    byte-IDENTICAL token; a reviewer that independently reaches the same
-    verdict over the same unchanged draft produces a byte-identical digest
-    too. Rules 5 and 6 -- the only two facts the pre-#461 matcher compared
-    -- therefore cannot tell the rejected review from its replacement, and
-    this branch would re-spend a real codex job every invocation forever on
-    one operator decision. Rule 8 is the fact that cannot repeat.
+    So a matching, unspent record over an unmoved draft now TERMINATES the
+    unit as converged. The baseline below is the whole point: with no record
+    on disk this exact state caps, terminally.
 
-    The replacement is written as the SAME BYTES on purpose (asserted, not
-    assumed): a replacement that differed would be refused by rule 6 and
-    would prove nothing about rule 8. Its mtime is stamped forward in
-    explicit nanoseconds rather than slept for."""
+    THE RECORD TRAVELS WHOLE, and that is asserted rather than assumed: the
+    operator's own `reason` reaches the ledger note through this field, and a
+    bool would have lost it.
+
+    NOT SPENT, unlike every other consumption in this file: rule 8 spends a
+    record when review.json is rewritten, and nothing rewrites it on this
+    path any more. Re-deriving returns the IDENTICAL action -- a fixed point,
+    not a repeated codex spend. It lapses when the draft moves, which is the
+    next test."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     _dna_write_draft(root, driver_mod)
@@ -2242,38 +2248,310 @@ def test_a_final_round_rejection_reopens_the_cap_and_is_consumable_exactly_once(
         f"reject_review.py must accept a final-round rejection, got rc="
         f"{result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+    record = json.loads(_rejection_json_path(root).read_text(encoding="utf-8"))
 
+    action = driver_mod.derive_next_action("seg01", ctx)
+    assert action == {
+        "action": "converged_by_rejection", "round_label": "final", "rejection": record,
+        "reviewed_sha1": draft_sha1,
+        "reviewed_token": review["dispatch_token"],
+        "reviewed_digest": driver_mod._review_verdict_digest(review),
+    }, "a final-round rejection over an unmoved draft must converge the unit"
+    assert action["rejection"]["reason"] == (
+        "verified: the claimed source string occurs zero times"
+    ), "the operator's own reason must reach the caller -- it is what the ledger note carries"
+
+    assert driver_mod.derive_next_action("seg01", ctx) == action, (
+        "nothing rewrites review.json on this path, so the record is not spent and "
+        "the action is a fixed point -- re-driving the segment re-derives the same "
+        "convergence rather than costing another codex job"
+    )
+
+
+def test_a_final_round_rejection_lapses_the_moment_the_draft_moves(tmp_path):
+    """The scoping half of #527: the attestation is about THESE bytes.
+
+    An operator rejected a verdict over the draft that verdict was written
+    against. If the draft then moves -- a hand edit, a fix applied out of band
+    -- the judgement no longer describes what is on disk, so it must not
+    terminate anything. The fall-through is today's behaviour, unchanged: one
+    fresh `final` review, with reopen_capped so the terminal fragment is made
+    recoverable before the dispatch is spent.
+
+    The record is NOT stale here (its token and digest still name the review
+    on disk, and it is still newer than it) -- so a green here can only come
+    from the draft comparison, which is the thing under test."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    draft = _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    findings = [{"loc": "p1:1", "severity": "major", "issue": "unfounded", "suggest": "n/a"}]
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=draft_sha1, findings=findings)
+
+    read = print_verdict_digest_in(root, "seg01")
+    printed = json.loads(read.stdout.strip())
+    result = run_reject_review_in(
+        root, "seg01", reason="verified unfounded against the source",
+        round_label=printed["round_label"], expect_token=printed["dispatch_token"],
+        expect_digest=printed["verdict_digest"],
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert driver_mod.derive_next_action("seg01", ctx)["action"] == "converged_by_rejection", (
+        "CONTROL: over the unmoved draft this record converges, so the refusal below "
+        "can only come from the edit"
+    )
+
+    moved = dict(draft, blocks={"p1": "hola de nuevo"})
+    (root / "segments" / "seg01.draft.json").write_text(
+        json.dumps(moved, ensure_ascii=False), encoding="utf-8")
+    assert driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts") != draft_sha1
+
+    assert driver_mod._rejection_matches("seg01", root / "segments",
+                                          json.loads(_review_json_path(root).read_text(encoding="utf-8"))), (
+        "the record itself must still be live, or this test proves nothing about the draft"
+    )
     assert driver_mod.derive_next_action("seg01", ctx) == {
         "action": "review", "round_label": "final", "reopen_capped": True,
         "cause": "rejected_findings",
-    }, "a final-round rejection must reopen the cap for a fresh final review"
+    }, "a rejection over a draft that has since moved must fall back to a fresh review"
 
-    # The replacement review: byte-identical content, promoted after the
-    # record. Only its mtime differs from what the operator rejected.
-    review_path = _review_json_path(root)
-    before = review_path.read_bytes()
-    record_mtime_ns = _rejection_json_path(root).stat().st_mtime_ns
-    review_path.write_bytes(before)
-    os.utime(review_path, ns=(record_mtime_ns + 1_000_000, record_mtime_ns + 1_000_000))
-    assert review_path.read_bytes() == before, (
-        "the replacement must be byte-identical, or rule 6 refuses it and rule 8 "
-        "is never reached"
-    )
-    assert json.loads(review_path.read_text(encoding="utf-8")) == review
 
-    assert driver_mod._rejection_matches("seg01", root / "segments", review) is False, (
-        "the rejection is SPENT once the review it names has been rewritten -- "
-        "identical bytes or not, rule 8 is the only fact here that cannot repeat"
+def test_a_final_round_rejection_never_converges_an_incomplete_coverage_verdict(tmp_path):
+    """The conjunct an operator's attestation cannot supply.
+
+    reject_review.py gates on `clean` ALONE, deliberately -- its own condition
+    1 says coverage being incomplete is "a different fact from findings being
+    unfounded", and the operator is only ever asked to judge whether a FINDING
+    is real. So this branch is reachable with coverage_ok False, and
+    converging there would mark a segment done over a review that
+    affirmatively reports dropped blocks/footnotes/verses
+    (review.schema.json's own description of the field). A fresh review is the
+    right answer to that verdict, and it is what falls through.
+
+    Two roots rather than one mutated review: rewriting `coverage_ok` in place
+    would change the verdict digest and the record would stop matching for
+    rule 6 reasons, so the refusal would be green for the wrong reason. Each
+    root runs the REAL reject_review.py over its own verdict; the only
+    difference between them is the field under test."""
+    def _drive(name, coverage_ok):
+        root = phase2_project(tmp_path, n=1, name=name)
+        driver_mod, ctx = _dna_setup(root)
+        _dna_write_draft(root, driver_mod)
+        draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+        _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=coverage_ok,
+                           draft_sha1=draft_sha1,
+                           findings=[{"loc": "p1:1", "severity": "major",
+                                      "issue": "unfounded", "suggest": "n/a"}])
+        printed = json.loads(print_verdict_digest_in(root, "seg01").stdout.strip())
+        result = run_reject_review_in(
+            root, "seg01", reason="verified unfounded against the source",
+            round_label=printed["round_label"], expect_token=printed["dispatch_token"],
+            expect_digest=printed["verdict_digest"],
+        )
+        assert result.returncode == 0, (
+            f"reject_review.py gates on clean alone, so it must accept this "
+            f"rejection whatever coverage_ok says: {result.stdout}{result.stderr}"
+        )
+        return driver_mod.derive_next_action("seg01", ctx)
+
+    assert _drive("root_coverage_ok", True)["action"] == "converged_by_rejection", (
+        "CONTROL: with coverage_ok true the identical flow converges"
     )
-    assert driver_mod.derive_next_action("seg01", ctx) == {
-        "action": "cap_reached", "findings": findings, "reviewed_sha1": draft_sha1,
-        "reviewed_token": review["dispatch_token"],
-        "reviewed_digest": driver_mod._review_verdict_digest(review),
-    }, "one operator decision buys exactly one re-review, then the cap stands"
+    assert _drive("root_coverage_incomplete", False) == {
+        "action": "review", "round_label": "final", "reopen_capped": True,
+        "cause": "rejected_findings",
+    }, "a coverage_ok:false verdict must never be terminated by a findings-only attestation"
+
+
+def test_process_segment_converges_a_final_rejection_and_spends_no_codex_job(tmp_path):
+    """What the convergence COSTS and what it leaves on disk, measured at the
+    only layer that actually spends anything and actually writes.
+
+    ZERO dispatches is the headline: the whole defect #527 names is that the
+    old path spent a real codex job re-asking a question whose answer could
+    not change. Counted from the fake codex_job.py's own argv log.
+
+    The ledger fragment is asserted in full shape because it is what an
+    operator and every later selector read: `converged`, the final round's
+    `rounds`, the `reviewed_draft_sha1` ledger_update.py binds itself, and --
+    the #527 addition -- a `note` carrying the operator's own reason. Without
+    that note this fragment is indistinguishable from a reviewer's clean
+    convergence, while the review.json sitting beside it still says
+    clean:false: the pair would read as corruption."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_before = (root / "segments" / "seg01.draft.json").read_bytes()
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=draft_sha1,
+                       findings=[{"loc": "p1:1", "severity": "major",
+                                  "issue": "the source reads a phrase absent from the block",
+                                  "suggest": "n/a"}])
+    printed = json.loads(print_verdict_digest_in(root, "seg01").stdout.strip())
+    reason = "verified against the source: the block is stored in visual order"
+    result = run_reject_review_in(
+        root, "seg01", reason=reason, round_label=printed["round_label"],
+        expect_token=printed["dispatch_token"], expect_digest=printed["verdict_digest"],
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _dna_dispatch_log(root) == [], "nothing has been dispatched before this call"
+
+    outcome = driver_mod.process_segment("seg01", ctx)
+
+    assert _dna_dispatch_log(root) == [], (
+        "an operator-attested convergence must spend NO codex job at all -- the "
+        "re-review it replaces is the cost #527 exists to stop paying"
+    )
+    assert outcome == {"seg": "seg01", "converged": True, "outcome": "converged",
+                       "cause": "rejected_findings"}, outcome
+    assert (root / "segments" / "seg01.draft.json").read_bytes() == draft_before, (
+        "the draft an operator attested is correct must not be rewritten"
+    )
+
+    fragment = json.loads((root / "runs" / "ledger.d" / "seg01.json").read_text(encoding="utf-8"))
+    assert fragment["status"] == "converged"
+    assert fragment["rounds"] == _FIXTURE_TRANSLATE_CFG["max_fix_rounds"] + 1, (
+        f"the mandatory final round is max_fix_rounds + 1, got {fragment['rounds']}"
+    )
+    assert fragment["reviewed_draft_sha1"] == draft_sha1
+    note = fragment.get("note") or ""
+    assert reason in note, (
+        f"the operator's own reason is the entire audit trail for this "
+        f"convergence and must survive into the ledger: {fragment!r}"
+    )
+    assert "seg01.review_rejected.json" in note, (
+        f"the note must name where the whole attestation lives, not only quote "
+        f"part of it: {note!r}"
+    )
+    assert (root / "segments" / ".ever_converged.seg01").is_file(), (
+        "ledger_update.py raises the durable sentinel on every convergence it "
+        "records, and this one is no exception"
+    )
+
+
+def test_a_crash_between_the_sentinel_and_the_fragment_still_converges_on_the_retry(tmp_path):
+    """The two-file convergence write's crash residue, and why it is not a
+    dead end on THIS route.
+
+    ledger_update.py raises `.ever_converged.{seg}` BEFORE it replaces the
+    ledger fragment, so a process killed in between leaves the sentinel beside
+    the old terminal fragment -- here, the very cap the operator was looking
+    at. Nothing on this route reads the ledger (derive_next_action() derives
+    from the draft, the review and the record, all three untouched by the
+    crash), and the sentinel gates re-TRANSLATION, which an attested
+    convergence never reaches. So the identical invocation re-derives the
+    identical action and finishes the write.
+
+    Simulated by its END STATE rather than by killing a process mid-write: the
+    sentinel present, the cap fragment still on disk. That is exactly what the
+    crash leaves, and it is what the retry has to cope with."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=draft_sha1,
+                       findings=[{"loc": "p1:1", "severity": "major",
+                                  "issue": "unfounded", "suggest": "n/a"}])
+    printed = json.loads(print_verdict_digest_in(root, "seg01").stdout.strip())
+    result = run_reject_review_in(
+        root, "seg01", reason="verified unfounded against the source",
+        round_label=printed["round_label"], expect_token=printed["dispatch_token"],
+        expect_digest=printed["verdict_digest"],
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    fragment_dir = root / "runs" / "ledger.d"
+    fragment_dir.mkdir(parents=True, exist_ok=True)
+    (fragment_dir / "seg01.json").write_text(json.dumps(
+        {"timestamp": "2026-01-01T00:00:00Z", "status": "non_converged", "reason": "cap"},
+        ensure_ascii=False), encoding="utf-8")
+    (root / "segments" / ".ever_converged.seg01").write_text("", encoding="utf-8")
+
+    outcome = driver_mod.process_segment("seg01", ctx)
+
+    assert outcome["outcome"] == "converged", outcome
+    fragment = json.loads((fragment_dir / "seg01.json").read_text(encoding="utf-8"))
+    assert fragment["status"] == "converged", (
+        f"the retry must replace the terminal cap wholesale, got {fragment}"
+    )
+    assert "reason" not in fragment, (
+        "ledger_update.py is a full replace, never a merge -- reason: cap must be GONE"
+    )
+
+
+def test_the_terminal_binding_check_serves_the_convergence_write_under_its_own_name(tmp_path):
+    """The pre-write binding check #527 reuses, and the one thing the reuse
+    had to get right.
+
+    The helper is the cap fork's, generalized: derive_next_action() decides
+    from the verdict it parsed, process_segment() commits in a LATER step, and
+    nothing in this driver owns review.json in between. An operator-attested
+    convergence is the more durable of the two terminal writes -- it raises
+    the `.ever_converged` sentinel -- so it goes through the same check.
+
+    Driven directly rather than through process_segment(), deliberately and
+    with the limit stated: the substitution this refuses happens BETWEEN
+    derive and write inside one call, so no test that drives the whole call
+    can stage it. What is pinned here is the contract the handler depends on
+    -- the check refuses a swapped verdict carrying identical provenance, and
+    its message names the write it was called for rather than the cap it was
+    born for. A `what` that never reached the messages would leave a
+    convergence failure reported as a cap failure."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    rejected = _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                                  draft_sha1=draft_sha1,
+                                  findings=[{"loc": "p1:1", "severity": "major",
+                                             "issue": "unfounded", "suggest": "n/a"}])
+    action = {
+        "action": "converged_by_rejection", "round_label": "final", "rejection": {},
+        "reviewed_sha1": draft_sha1,
+        "reviewed_token": rejected["dispatch_token"],
+        "reviewed_digest": driver_mod._review_verdict_digest(rejected),
+    }
+    assert driver_mod._terminal_write_still_binds_what_was_reviewed(
+        "seg01", ctx, action, what="convergence") is None, (
+        "CONTROL: while the attested verdict is the one on disk, the check must pass"
+    )
+
+    # V2: same provenance -- same dispatch_token (a pure function of run, seg
+    # and round label) over the same unread draft -- and a different verdict.
+    _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                       draft_sha1=draft_sha1,
+                       findings=[{"loc": "p1:1", "severity": "major",
+                                  "issue": "a DIFFERENT finding nobody attested",
+                                  "suggest": "n/a"}])
+    refusal = driver_mod._terminal_write_still_binds_what_was_reviewed(
+        "seg01", ctx, action, what="convergence")
+    assert refusal is not None, (
+        "a verdict swapped for another carrying identical provenance must refuse "
+        "-- the digest is the only fact that separates them"
+    )
+    assert "convergence decision" in refusal and "convergence write" in refusal, (
+        f"the refusal must name the write it was called for: {refusal!r}"
+    )
+    assert "cap" not in refusal, (
+        f"reporting a convergence failure as a cap failure is the exact confusion "
+        f"the `what` parameter exists to prevent: {refusal!r}"
+    )
+    assert "cap decision" in driver_mod._terminal_write_still_binds_what_was_reviewed(
+        "seg01", ctx, action), "and the default is still the cap fork's own wording"
 
 
 def test_a_spent_rejection_is_renewed_by_the_identical_command_instead_of_dead_ending(tmp_path):
     """THE OPERATOR'S SECOND DECISION, at the label where it is unavoidable.
+
+    #527 narrowed the route into this state without removing it: a `final`
+    rejection over an unmoved draft with coverage_ok now converges the unit,
+    so what still gets here is a rejection the driver sent back for a fresh
+    review anyway -- the draft moved, or the verdict reported incomplete
+    coverage -- plus the replacement that review promoted. The producer-side
+    mechanics under test are unchanged, and are what this test is about.
 
     "final" is absorbing, so a replacement review is dispatched at the SAME
     label and review_dispatch_token() mints a byte-IDENTICAL token; a reviewer

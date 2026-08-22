@@ -3037,7 +3037,7 @@ def test_derive_next_action_cap_reached_when_final_round_not_clean(tmp_path):
                                 draft_sha1=draft_sha1, findings=findings)
     # reviewed_sha1/reviewed_token/reviewed_digest ride along so
     # process_segment() can bind the terminal cap WRITE to the review this
-    # verdict was derived from -- see _cap_still_binds_what_was_reviewed()
+    # verdict was derived from -- see _terminal_write_still_binds_what_was_reviewed()
     # and the race tests below.
     #
     # The digest is recomputed HERE from the review dict this test wrote,
