@@ -364,7 +364,10 @@ and atomically promotes it.
    `translate-timeout`, `review-timeout`, `review-null`,
    `review-artifact-mismatch`, `review-fabricated-loc` (1.3.6/#133 — a
    schema-valid, artifact-matched verdict whose finding carries a bare,
-   colonless infra-sentinel `loc` instead of a real content location),
+   colonless `loc` instead of a colon-delimited content location. The check
+   is a SHAPE test, not a proof of fabrication: it never resolves the loc
+   against the draft, so this reason names what the loc looked like, never
+   what the reviewer knew),
    `fix-call-failed` (1.3.6/#131 facet A — the fix call came back falsy/
    `DRAFT_MISSING` but the `draftPresentAndValid` probe confirmed the draft
    is present-and-valid, or the probe call itself failed inconclusively;

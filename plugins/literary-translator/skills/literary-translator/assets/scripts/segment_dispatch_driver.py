@@ -3734,7 +3734,11 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
     # structurally-valid review (review_ready.py has nothing to reject,
     # codex_job.py promotes it normally) whose finding content is
     # semantically empty -- e.g. loc: "TASK" instead of a real
-    # block_id/FN:n/VERSE:vid reference. Reading review.json directly with
+    # block_id/FN:n/VERSE:vid/NOTE:n reference. What the ported gate tests is
+    # the SHAPE of that loc (colon-delimited vs bare token), never whether it
+    # resolves against the draft -- see the template's own comment above
+    # AUTHENTIC_LOC_RE, and #539 for what the gap cost while notes[] had no
+    # conforming spelling. Reading review.json directly with
     # no LLM in this driver's OWN read path closes ARTIFACT AUTHENTICITY
     # (tampering, forgery, an agent misreporting what it read) -- that is
     # why this driver never needs an equivalent of the template's own

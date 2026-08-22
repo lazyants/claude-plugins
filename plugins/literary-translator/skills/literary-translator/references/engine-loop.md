@@ -220,7 +220,7 @@ steps below:
      that drops the gloss, this reviewer no longer raises the loss; it could never
      verify that surface from the draft, and that failure belongs to the
      render/diff gate and the operator.
-   - **Authority direction** (1.39.0, #529): the reviewer is told a `canon_map`
+   - **Authority direction** (1.40.0, #529): the reviewer is told a `canon_map`
      target form is authoritative, and was never told that the draft's OWN
      `names[]` entries and `NEW:`-prefixed notes are not. Both sit in its context
      with nothing separating them by status, so it could enforce the draft's own

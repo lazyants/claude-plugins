@@ -68,7 +68,7 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # renumber-preserves-the-wrongness failure this file exists to prevent, and
 # re-resolving it would pin a shipped entry to line numbers it never claimed.
 #
-# 1.39.0 (#529) cites NO `file.ext:NNN`, so this map is empty -- its documented
+# 1.40.0 (#529) cites NO `file.ext:NNN`, so this map is empty -- its documented
 # per-release state, not a lapse. The entry names `segpack.py`, `cache_key.py`,
 # `resume_setup.py`, `draft.schema.json` and `call_template_functions()`, but
 # every claim about them is BEHAVIOURAL -- which name a builder omits from
@@ -83,7 +83,7 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # would pin WHERE a thing lives, which none of those sentences asserts.
 #
 # An empty map is exactly the case where a correct rotation and a SKIPPED one
-# look identical -- and 1.39.0 is the instance that proves it: the previous
+# look identical -- and 1.40.0 is the instance that proves it: the previous
 # release's declaration was ALSO empty, so nothing here went red when this entry
 # landed, and only a reviewer reading the comment caught that it still described
 # 1.35.0. The precedent runs further back for their own reasons (1.34.1 (#547)

@@ -179,10 +179,10 @@ BASELINE_RELEASE = "4343994b9de4f6fe979e6e5af711ed9ab11c4381"
 # squash and not rebase.
 BASELINE_FIX_ROUND = "c33d1d8a68348f1edf2b4fdeee5f3874bbb17083"
 
-# The 1.35.0 release commit, and the baseline for 1.39.0 (#529)'s single row.
+# The 1.35.0 release commit, and the baseline for 1.40.0 (#529)'s single row.
 # It carries none of BASELINE_FIX_ROUND's fragility: it is already on main as the
 # tip of a merged PR, so no merge method chosen for THIS branch can move it out of
-# main's ancestry. A row retired by 1.39.0 needs it because the sentence that row
+# main's ancestry. A row retired by 1.40.0 needs it because the sentence that row
 # pins was introduced long before BASELINE_RELEASE and still stood at 1.35.0 --
 # either older baseline would satisfy presence-before, and the nearer one states
 # what was actually true immediately before the edit.
@@ -509,7 +509,7 @@ RETIRED = [
         "does not: --validate-fragment rewrites the fragment in place and the "
         "second validation recomputes cited from the already-pruned list",
     ),
-    # -- 1.39.0 (#529): review_TASK.template.md ------------------------
+    # -- 1.40.0 (#529): review_TASK.template.md ------------------------
     (
         BASELINE_1_35_0, REVIEW_TASK_TEMPLATE,
         "Any `new_names` were resolved and flagged `NEW:` in the draft's own `notes`.",

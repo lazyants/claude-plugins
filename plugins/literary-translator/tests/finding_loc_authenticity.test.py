@@ -13,7 +13,8 @@ infra sentinel (TASK/PROCESS/SYSTEM/RUN) rather than any real content
 location. A genuine loc is ALWAYS a colon-delimited structural reference
 (a block id like "PARA:seg01:0001" or the shorter "HEAD:seg01" some
 adapters emit -- block type is deliberately NOT a fixed enum, see
-manifest.schema.json -- or "FN:n", or "VERSE:vid"), so the gate leans on
+manifest.schema.json -- or "FN:n", or "VERSE:vid", or -- #539 -- "NOTE:n"
+for the draft's own notes[] entry at 0-based index n), so the gate leans on
 the ":" shape alone: colon-shaped locs are accepted (whatever the prefix),
 bare colonless tokens are rejected. Residual false-block (a healthy
 reviewer emitting a colonless holistic loc like "overall") stays
@@ -129,6 +130,8 @@ def test_authentic_loc_re_extracted_and_nonempty(authentic_loc_re):
         "HEAD:seg01",  # the shorter block-id shape some adapters emit
         "FN:3",
         "VERSE:vid",
+        "NOTE:14",  # #539: the draft's notes[] entry at 0-based index 14
+        "NOTE:0",  # the first note -- 0-based, unlike FN:n's footnote NUMBER
         "QUOTE:seg02:0007",
         "custom_adapter_block_type:seg09:0002",  # block type is NOT a fixed enum
     ],
@@ -137,7 +140,23 @@ def test_real_colon_form_locs_are_authentic(authentic_loc_re, loc):
     assert authentic_loc_re.match(loc), f"{loc!r} is a genuine colon-shape loc and must be accepted"
 
 
-@pytest.mark.parametrize("sentinel", ["TASK", "PROCESS", "SYSTEM", "RUN"])
+@pytest.mark.parametrize(
+    "sentinel",
+    [
+        "TASK",
+        "PROCESS",
+        "SYSTEM",
+        "RUN",
+        # #539: the three ad-hoc spellings live reviewers actually invented for a
+        # notes[] finding before NOTE:n existed. Each is colonless, so each forfeited
+        # its whole review. They stay REJECTED after #539 -- the fix gives the
+        # reviewer a conforming spelling, it does not widen the gate to admit these.
+        "NOTES",
+        "notes",
+        "notes[14]",
+        "NOTE",
+    ],
+)
 def test_bare_infra_sentinels_are_rejected(authentic_loc_re, sentinel):
     assert not authentic_loc_re.match(sentinel), (
         f"{sentinel!r} is a bare, colonless infra sentinel and must be rejected"
@@ -212,6 +231,7 @@ def test_end_to_end_bare_sentinels_route_to_fabricated_loc_and_are_recoverable(t
         "HEAD:seg01",
         "FN:3",
         "VERSE:vid",
+        "NOTE:14",
         "custom_adapter_block_type:seg09:0002",
     ],
 )
