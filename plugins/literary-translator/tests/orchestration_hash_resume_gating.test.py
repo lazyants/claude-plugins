@@ -97,19 +97,32 @@ def orchestration_bundle_members() -> tuple:
     import ast
 
     tree = ast.parse(SCAFFOLD_SETUP_SCRIPT.read_text(encoding="utf-8"))
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
+    # EVERY binding of the name anywhere in the module, not the first one:
+    # reading the first assignment and stopping would let a later rebind or
+    # `+=` drop select_segments.py out of the tuple the shipped module
+    # actually holds while this fixture kept returning the original literal
+    # and the assertions below kept passing. ast.walk rather than tree.body
+    # so a binding inside a function or a conditional counts too.
+    bindings = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AugAssign))
+        and any(
             isinstance(t, ast.Name) and t.id == "ORCHESTRATION_BUNDLE_MEMBERS"
-            for t in node.targets
-        ):
-            assert isinstance(node.value, ast.Tuple), (
-                "ORCHESTRATION_BUNDLE_MEMBERS is no longer a tuple literal"
-            )
-            return tuple(ast.literal_eval(node.value))
-    raise AssertionError(
-        "ORCHESTRATION_BUNDLE_MEMBERS is no longer a module-level assignment in "
-        "scaffold_setup.py -- the authority behind this split has lost its subject"
+            for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        )
+    ]
+    assert len(bindings) == 1, (
+        f"ORCHESTRATION_BUNDLE_MEMBERS is bound {len(bindings)} times in "
+        f"scaffold_setup.py -- reading a literal is only equivalent to reading "
+        f"the shipped value while there is exactly one binding. Read the "
+        f"effective value instead of relaxing this."
     )
+    node = bindings[0]
+    assert isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple), (
+        "ORCHESTRATION_BUNDLE_MEMBERS is no longer a plain tuple literal"
+    )
+    return tuple(ast.literal_eval(node.value))
 
 
 # ===========================================================================
