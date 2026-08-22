@@ -98,11 +98,35 @@ def test_w5_codex_job_driver_and_companion_resolution_present():
 
 
 def test_plugin_root_defined_at_step_0_present():
-    # "denotes the plugin's install" sits fully on one line as of this
-    # writing ("Throughout this skill, `{{PLUGIN_ROOT}}` denotes the
-    # plugin's install" / "directory -- ..."), just before the token's
-    # first use in the Step 0 command block.
-    assert "denotes the plugin's install" in _skill_text()
+    # #582: the Step 0 definition is pinned POSITIVELY on the value the
+    # consumers actually resolve -- this skill's own directory, which is
+    # where assets/ lives. It used to read "denotes the plugin's install
+    # directory ... ${CLAUDE_PLUGIN_ROOT}", which names a directory with no
+    # assets/ under it: every `--plugin-root` consumer appends
+    # assets/scripts|schemas|templates, so codex_job.py exits 2 on it.
+    # The wording needle is the real Step-0 pin: the path spelling below also
+    # occurs at the #412 substitution paragraph, so it does not localize here.
+    text = _skill_text()
+    assert "denotes this skill's own directory" in text
+    assert "${CLAUDE_PLUGIN_ROOT}/skills/literary-translator" in text
+    assert "denotes the plugin's install" not in text
+
+
+def test_plugin_root_definition_matches_the_shipped_layout():
+    # #582: the prose pin above can only catch a reverted SENTENCE. This
+    # catches the thing the sentence is about -- that the directory the
+    # definition names is really the one holding assets/scripts/. It goes
+    # red if the skill directory is renamed or moved without the definition
+    # following, which is how the original defect ("${CLAUDE_PLUGIN_ROOT}",
+    # one level too high) shipped and stayed shipped.
+    skill_dir = PLUGIN_ROOT / "skills" / "literary-translator"
+    assert (skill_dir / "assets" / "scripts").is_dir(), (
+        f"assets/scripts/ is not under {skill_dir}"
+    )
+    assert not (PLUGIN_ROOT / "assets").exists(), (
+        "the PLUGIN root now has an assets/ too -- the Step 0 definition and "
+        "every --plugin-root consumer need re-deciding, not just this test"
+    )
 
 
 def test_f3_adjudication_fence_sentence_present():

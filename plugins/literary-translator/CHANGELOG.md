@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.34.3 — 2026-08-22
+
+
+**`{{PLUGIN_ROOT}}` named a directory that does not exist, and #582's question gets a written answer instead of a command rewrite.** Two corrections to shipped prose, no behaviour change and no script edited — `plugin_bundle_hash` does not move and no project re-translates or re-resumes.
+
+### The token was defined one directory too high
+
+Step 0 defined `{{PLUGIN_ROOT}}` as "the plugin's install directory — under Claude Code, the `${CLAUDE_PLUGIN_ROOT}` environment variable", and every command then wrote `{{PLUGIN_ROOT}}/assets/scripts/...`. An installed plugin has no `assets/` at its root: the scripts live at `skills/literary-translator/assets/scripts/`. So the four commands documented against the plugin path named a directory that is not there, and — the load-bearing half — an orchestrating session substituting `${CLAUDE_PLUGIN_ROOT}` into the W5 template made `codex_job.py` exit 2 ("does not resolve to a directory containing assets/scripts/"). The documented way to enable #412's own mitigation could not be followed as written. Every consumer that resolves a plugin resource does so by appending `assets/scripts/`, `assets/schemas/` or `assets/templates/` (`backfill_resume_gate_ack.py` accepts the flag for uniformity and resolves nothing with it); the skill already said so itself in W9r (`LT=<the literary-translator skill directory>`), and the sibling enduser-handbook plugin uses the same `${CLAUDE_PLUGIN_ROOT}/skills/<name>/assets/` shape.
+
+Pinned two ways, because a prose needle only catches a reverted sentence: the definition text is asserted positively (and the old wording asserted absent), and a second test asserts the thing the sentence is *about* — that the directory it names really is the one holding `assets/scripts/`, and that the plugin root has not grown an `assets/` of its own. Both were watched failing before being kept.
+
+### #582 — the entry point stays in the durable tree, and here is why
+
+The W5-and-later operator commands run their scripts from `${durable_root}/scripts/`, which the pipeline's own passes can write to; the Step 0 / W2 / W3 commands already run from the plugin tree. `--plugin-root` (LT-409, #412) moved *sibling checker* resolution out of that tree; it never moved the entry point. #582 asked whether that asymmetry is intentional and said that if it is, the fix is a paragraph rather than a command change. It is, and this is the paragraph — recorded in `SKILL.md` beside the `--plugin-root` argument so the next reviewer does not re-derive it.
+
+Rewriting the commands was evaluated first. Relocating an individual entry point is genuine defence in depth — it prevents direct execution of that command's tampered durable copy — but it is not the answer to #582's question, because it does not close the class:
+
+- **The fix turn is a write-capable deputy.** On a non-clean, non-final review inside the fix-round budget, `runRound()` calls `callFix()`, which dispatches a plain Claude agent — `agent()` with no `agentType`, so nothing sandboxes it — and instructs it to apply, in full, every entry of a review whose `issue`/`suggest` text codex authored. `REVIEW_SCHEMA` constrains a finding's shape; beyond that the only content check is that `loc` contains a colon, leaving `issue`/`suggest` unconstrained prose. That turn is told to rewrite the draft, but it is neither forbidden nor prevented from writing elsewhere. An untrusted party's free text reaching a write-capable agent is a surface that neither sandboxing codex nor relocating an entry point narrows.
+- **A per-command rewrite does not converge.** The invocations are not a closed set — this file, `references/`, the three `*_TASK.template.md` prompts and the three workflow templates' own command builders — and any future dispatch adds one. Three successive review passes over the same change each found more of them.
+
+So the guarantee is stated narrowly rather than broadly: `--plugin-root` bypasses a tampered *sibling checker* by executing the trusted plugin copy — it does not detect or report the tampering, and it does not make a tampered *entry point* impossible; and `plugin_bundle_hash` does not catch one either, since `cache_key.py` reads the Step-0a marker and never re-hashes the copies. The `--plugin-root` paragraphs that implied otherwise now say what the flag does not buy. Closing the class properly means constraining the fix turn's write surface, which is tracked separately.
+
 ## 1.34.2 — 2026-08-22
 
 A measured figure stated in a release entry is now re-derived from the tree on every test run. Closes #580.

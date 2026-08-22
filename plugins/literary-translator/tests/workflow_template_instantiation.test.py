@@ -436,7 +436,14 @@ def test_mass_translate_template_plugin_root_substitutes_a_real_pinned_path():
     truthy. Deliberately includes a space and a non-ASCII character (both
     legitimate in a real install path) so the json.dumps escaping is
     actually exercised, mirroring FIXTURE_COMPANION_PATH's own reasoning."""
-    pinned_plugin_root = "/Users/José García/.claude/plugins/literary-translator"
+    # #582: the pinned value carries the `skills/literary-translator` tail a
+    # real plugin_root has. `{{PLUGIN_ROOT}}` is this SKILL's directory, not
+    # ${CLAUDE_PLUGIN_ROOT} -- consumers append assets/scripts|schemas|
+    # templates to it, and the plugin root has no assets/ under it.
+    pinned_plugin_root = (
+        "/Users/José García/.claude/plugins/literary-translator"
+        "/skills/literary-translator"
+    )
     out = instantiate_mass_translate(
         durable_root=FIXTURE_DURABLE_ROOT,
         run_id=FIXTURE_RUN_ID,
