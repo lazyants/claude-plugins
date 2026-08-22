@@ -7,6 +7,7 @@ Three ways a shared-cwd team's on-disk/report state misleads if read carelessly:
 - [A status field can hide a partial fan-out application](#a-status-field-can-hide-a-partial-fan-out-application)
 - [Duplicate agents on one work-unit in a shared cwd](#duplicate-agents-on-one-work-unit-in-a-shared-cwd)
 - [Resolving which name a SendMessage reaches](#resolving-which-name-a-sendmessage-reaches)
+- [A peer session's silence is its turn having ended, not a subagent stall](#a-peer-sessions-silence-is-its-turn-having-ended-not-a-subagent-stall)
 
 ## Don't correct a teammate off a stale read
 
@@ -123,3 +124,13 @@ Corollary worth keeping: a peer given the wrong project's state is a GOOD detect
 **What DOES work for a session identifying ITSELF (as opposed to a prose question):** matching your own `sessionId` against the registry files directly — e.g. to establish "am I the only live session in this cwd", grep `~/.claude*/sessions/*.json` for your own `sessionId` rather than asking in words. *(Confirmed 2026-08-22: this is how a session established it was the only live one in its project.)* This is a different mechanism from the two that fail above — it reads the registry, it does not ask the session to self-report — so it is not a counterexample to either "does not work" case, just a third technique the earlier note didn't test.
 
 A probe still works if worded as "which dataset/root are you on" (not "what is your name") — the reply arrives wrapped as `<cross-session-message from="…">` and the harness stamps the sender's name on it, so the peer never has to know its own name. But the registry answers it read-only, with no message injected into a session that may be mid-write.
+
+## A peer session's silence is its turn having ended, not a subagent stall
+
+This is different from a spawned subagent, and the difference decides what to do. A peer Claude session (`SendMessage` over a socket, e.g. `ListAgents`-discovered cross-session peers, not `Agent(name=…)`-spawned teammates) runs turn by turn: it finishes, reports, and **stops until someone sends it a message.** Its silence carries no information about being stuck, and no amount of watching will end it.
+
+Measured 2026-08-13: a peer went quiet for 65 minutes after a commit. This was read as it being stuck at a permission prompt "blocking its whole turn," and reported to the user as such. Wrong on both counts — the denial had returned instantly as an ordinary error, blocking one command and nothing else; the peer had finished its parcel, committed, reported, and ended its turn. It was idle *between* turns. The follow-up message is what restarted it.
+
+**How to apply.** Treat a peer as something you DRIVE, not something you monitor. If a peer has outstanding work and goes quiet, the correct action is to send it a message — not to diagnose why it stopped, and above all not to report a diagnosis of the stall to the user. Say "it has not reported since X" (observed) rather than "it is stuck on Y" (inferred). And when a peer says "starting now" and then goes silent, that is the ordinary shape of a turn ending, not evidence that the work began.
+
+Corollary for monitoring: a session doing hand edits or reading produces no journal writes and no processes, so every automatic signal reads it as stopped. Silence-based watchdogs on a peer are noise generators; the only reliable status is to ask the source directly, never to build a proxy for it.
