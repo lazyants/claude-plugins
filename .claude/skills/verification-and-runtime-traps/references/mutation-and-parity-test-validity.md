@@ -74,3 +74,48 @@ composed behaviour and the direct-construction path contradicted it.
 The tell that this class is in play: the other module's function grew keyword arguments with
 defaults chosen for backward compatibility. Those defaults are precisely the old semantics, so every
 hand-built collaborator freezes there.
+
+## A hand-typed membership list inside a drift test freezes the drift it exists to catch
+
+This is a THIRD shape, distinct from both self-derived-expected and the self-satisfying anti-masking
+gate above: neither of those reaches it. Self-derived-expected is a fixture whose expected value is
+produced by the code under test; the anti-masking gate is a substring-presence check that is
+vacuously true. Here the test's own body embeds a **static, hand-typed copy** of the thing it is
+supposed to be diffing against a live source — so the test's sense of "drift" is inverted: making the
+real artifact CORRECT is what turns the check RED, not what turns it GREEN.
+
+Measured (`literary-translator` #591, PR #593): `schema_literal_drift.test.py` checked two of three
+bundles against the tuples that actually own them, and hard-coded the third as a literal membership
+list. A wrong sentence in shipped docs survived **nine releases** because the one test that could
+have caught it would have gone RED the moment someone corrected the doc to match the hard-coded list,
+not the other way around — nobody reads a new RED as "the doc just got fixed."
+
+**Fix:** read the owning tuple (`scaffold_setup.py`'s) via `ast`, not by re-typing its members and not
+by importing the module — an `import` ties the result to test-module load order via its sibling
+`import cache_key`, reintroducing an ordering dependency for no reason. `ast`-parsing the source file
+gets the live tuple without executing it.
+
+**Apply:** when a "drift" test's expected side is anything other than a live read of the artifact that
+owns the fact (a parsed tuple, a parsed schema, a parsed enum), ask which direction wrong-to-right
+moves the test — if fixing the artifact can turn the test red, the test is pinning the artifact's
+CURRENT state, not detecting its drift from truth.
+
+## An exhaustive/whole-set assertion catches what per-item assertions miss — and needs its own count check
+
+**A whole-key-set assertion caught a textually clean merge that every per-key assertion missed.**
+Measured (`literary-translator` #588/#589, PR #599, LT 1.32.0→1.33.0): a rebase merged
+`validate_backlinks.py` and its test file without conflict, then the suite went red —
+`test_default_enabled_report_keeps_exactly_its_documented_keys` asserts the WHOLE key set of the
+default-enabled report, and #588 had added `delink_cost` to that report without updating the
+enumeration. Every per-key assertion in the same file stayed green; only the whole-set assertion
+caught the drift. Worth keeping that shape for any report a gate emits: pair per-key checks with one
+assertion of the complete key/shape set.
+
+**An exhaustive sweep needs a COUNT assertion as well as its property assertions.** Measured
+(`literary-translator` #586, PR #594): a 30 940-string sweep over a 13-char adversarial alphabet
+caught eleven real mutants — except an always-`fallback` mutant, which passed the sweep because every
+property assertion is *skipped* on the fallback path, and nothing was asserting how many cases had
+actually been exercised. The iteration-count assertion and the per-case property assertion catch
+DIFFERENT mutants — a mutant that silently short-circuits every case onto a no-op path is invisible to
+property assertions alone, because there is nothing left for them to check. Add a `assert cases_run ==
+expected_total` (or equivalent) beside the property loop, not instead of it.

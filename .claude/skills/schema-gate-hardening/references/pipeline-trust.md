@@ -1,6 +1,6 @@
 # Trust & isolation primitives in an agentic pipeline
 
-Four traps when a gate/check has to hold up against a semi-trusted (prompt-injectable) agent that shares the pipeline's filesystem, when a marker must isolate one span of text from a later matching pass, or when the state a check verifies is supplied by its own caller.
+Six traps when a gate/check has to hold up against a semi-trusted (prompt-injectable) agent that shares the pipeline's filesystem, when a marker must isolate one span of text from a later matching pass, when the state a check verifies is supplied by its own caller, when a staged pipeline hashes its own artifacts but not everything it reads, or when a re-check's scope is inherited from an earlier step's own selection rather than re-derived from the source.
 
 ## 1. Where the root-of-trust lives (co-located = defeated)
 
@@ -119,3 +119,33 @@ Three things this lens gets wrong when applied half-way:
   no caller** — which in practice is almost none of them. Assert what the decisions, the durable
   output and the returned value USED, not a read count — a count assertion on a path that halts early passes
   for the wrong reason, and on a path that completes it fails on a benign read.
+
+## 5. When a pipeline hashes its own artifacts, enumerate what it reads that is not one of them
+
+A staged pipeline bound by digests (`--prep` → Pass A → `--claims` → Pass B → `--build`, the
+literary-translator person registry, #550) can look complete because every DOCUMENT it produces is
+hashed — prep, verdict, claims — while an INPUT a later step re-reads is not one of those documents
+and so was never pinned. The reviewer found the same shape twice, one input apart: first the
+assembled NodeStream (`nodestream_sha256`), then `manifest.json` (`manifest_sha256`). Both times the
+reasoning that missed it was "the documents are hashed" — true, and irrelevant, because the unhashed
+thing was never a document the pipeline itself produced.
+
+**The census to run:** for every step, list what it reads that it does not also hash, and pin that
+too. Grepping the code for existing `hashlib`/`sha256` calls only finds what was already pinned; the
+miss is always in a read call that never got one. Source: `project-lt-550-pr602.md`.
+
+## 6. A re-check restricted to what an earlier step CHOSE is not a source check
+
+`P5` looks like a source check: it re-reads every quote Pass A cited and asserts nothing moved. It is
+not one, because it re-reads only the quotes Pass A CHOSE to cite — that set is a decision made by an
+earlier, now-superseded step, not the source itself. A source edited between the two passes can leave
+every cited quote byte-identical (so P5 stays green) while the evidence a person's identity actually
+rested on is gone, and `--build` still emits that person.
+
+The regression that pins this asserts the cited quote **survives** the mutation — i.e. it proves the
+DIGEST caught the edit, not that P5 did. A refusal test that mutated everything indiscriminately would
+have passed against the pre-fix code too, because it can't distinguish "P5 caught it" from "the digest
+caught it and P5 never got the chance." When a re-check inherits its scope from an earlier step's
+selection, ask what happens when the underlying source changes OUTSIDE that selection — a genuine
+source check has to re-derive its own scope from the source, not from a prior step's cited subset.
+Source: `project-lt-550-pr602.md`.

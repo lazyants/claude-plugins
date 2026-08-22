@@ -74,6 +74,29 @@ not ((start > 0 and text[start - 1].isalnum()) or (end < len(text) and text[end]
 
 **Cost of the miss:** the false half of the original rationale ("both forms still admit `R. Noson`") shipped in three copies before it was caught — a code comment, a test docstring, and a release note — and was caught by a closing review pass, not by any test, because the test SUITE pinned the true (correct) behaviour all along; the false claim lived only in prose describing it. See `project-lt-587-pr593` in this repo's session memory for the shipped fix.
 
+## 2026-08-18 hit (literary-translator #586, PR #594 → PR #597) — a mark-counting cap measured the wrong layer, and a "writable at all" claim had a known hole
+
+Two more lessons from the same release day, both from `sanitize_filename_component` (the LT filename sanitizer, #586/#592). Source: `project-lt-586-pr594.md` (1.31.0 shipped PR #594, then 1.31.1 shipped PR #597 fixing 1.31.0's own new guard).
+
+**Part 1 — a guard written against a measured filesystem refusal must count what the filesystem counts.** `_MAX_MARKS_PER_BASE` counted combining marks AS WRITTEN in the source string; the kernel's EILSEQ refusal counts marks AFTER canonical (NFD) decomposition. The two diverge two ways:
+- 59 code points in categories Mn/Mc/Me EXPAND into multiple marks under NFD (e.g. U+0344, U+0F73, U+0CCB…).
+- A precomposed BASE letter can itself already carry marks: U+1EBF decomposes to a letter plus 2 combining marks.
+
+So `"A" + 16×U+0344` is a run of 16 marks by the shipped as-written count, but 32 after NFD — past a cap of 30, into the exact EILSEQ the constant's own comment claimed to prevent. One-line form: **"I measured the threshold and then counted a different quantity."** This generalizes past marks-counting specifically: any cap measured against a filesystem, kernel, or protocol must count the units THAT LAYER counts, after whatever normalization it applies — not the units visible in source.
+
+Measured platform facts behind the cap (macOS, this filesystem):
+- **31 marks writes, 32 fails with EILSEQ — regardless of byte length** (a byte-length cap does not cover this failure mode at all).
+- **macOS accepts `A` + 30 marks + CGJ (COMBINING GRAPHEME JOINER) + 30 marks** — so a raw-mark cap of 30 OVER-catches that shape: it refuses a string the filesystem actually accepts.
+- UAX #15's Stream-Safe Text Format bound counts **NFKD non-starters**, not raw marks, and treats CGJ as a break point. The cap's rationale was first written by citing Stream-Safe directly — that citation was wrong (a third, still-different quantity) and had to be replaced by the MEASURED filesystem predicate (31 writes / 32 EILSEQs), not by a corrected Unicode-spec derivation.
+- The pathological test fixtures for this cap shared the SAME blind spot as the bug: both used U+0301, which does NOT expand under NFD, so the tests passed for exactly the reason the guard was wrong. The fix moved the property assertion itself to count post-NFD, not just fixed the cap constant — an as-written assertion is green on all four new test cases while the underlying write still fails.
+
+**Part 2 — "a property with a known hole is not a property."** This half is a release-claim discipline rule, not a Unicode fact — flagged here because the case that forced it is Unicode-specific. The same release had accepted 28 Win32 reserved device basenames (CON, PRN, AUX, NUL, COM1-9, LPT1-9) as a known, disclosed tradeoff (deferred, filed as #592) — until a reviewer pointed out the release had ALREADY claimed "writable at all" as one of the sanitizer's own stated properties. Once a property is claimed, a known-admitted class of counterexamples stops being an acceptable tradeoff and becomes a bug in the claim: check what your own release prose already asserts before accepting a gap as a tradeoff, because the tradeoff may already contradict a sentence you shipped.
+
+Supporting facts, Unicode-specific:
+- `str.isalnum()` admits six ISO-8859-1 SUPERSCRIPT alias basenames that are not plain ASCII: `COM¹`, `COM²`, `COM³`, `LPT¹`, `LPT²`, `LPT³` (superscript 1/2/3 = U+00B9/U+00B2/U+00B3) — Windows treats these as equivalent to the ASCII device names.
+- The device-name reservation SURVIVES an extension (`COM1.txt` is still reserved).
+- Microsoft's own documentation example is itself wrong: it lists `com³.md` as a reserved-name collision, but this codebase's `.md`-suffix rule dissolves that trailing superscript-3/dot pairing FIRST, so `com³_md` (post-sanitize) is not actually a device path — two test cases pin that the sanitizer must NOT re-fire on that shape.
+
 ## Related
 
 The 2026-07-14 hit arose inside a plan section that was itself a red-before-green regression-test example for a different Unicode-splitting bug (#98) — a case of the bug-under-test's subject matter contaminating the prose describing it. When authoring any red-before-green test whose SUBJECT is a Unicode-boundary bug, expect the same contamination risk in the surrounding prose, not just the test body.

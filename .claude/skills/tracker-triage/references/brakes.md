@@ -2,6 +2,14 @@
 
 A triage pass runs with a hostile prior, and a hostile prior is comfortable: closing is cheap, quiet, and looks like diligence. These brakes exist because nothing downstream catches a wrong `close`.
 
+## Sweep for unlabelled issues before you scope the population
+
+A `plugin:` label is not exhaustive, and a query that filters by it silently drops whatever never got labelled — before triage ever sees those issues, so no test in this skill can rescue them. Measured 2026-08-16 (`literary-translator`): three issues (`#549`, `#550`, `#551`) carried no `plugin:` label, so `gh issue list --label plugin:literary-translator` missed all three, across two consecutive sweeps including the 2026-08-14 importance triage. Always sweep for unlabelled issues too, before counting or triaging anything:
+
+```
+gh issue list --state open --json number,title,labels --jq '.[]|select((.labels|map(.name)|map(select(startswith("plugin:")))|length)==0)'
+```
+
 ## Count before you conclude
 
 "The tracker is inflated" is a hypothesis. The finding is the tally.
@@ -9,6 +17,8 @@ A triage pass runs with a hostile prior, and a hostile prior is comfortable: clo
 Produce, before the ruling: total issues, count per disposition, and the count of distinct **functions** blamed. The last one is the number that exposes spelling enumeration — a backlog whose issue count far exceeds its function count is duplicated, and a backlog where they are close is not.
 
 Report the tally with the ruling, and report the inverse count too: how many survived. A ruling that gives only the close rate reads as a purge.
+
+Measured 2026-08-16 (`literary-translator`, 160 issues): **158 distinct blamed functions for 160 issues** — issue count and function count essentially equal, so this backlog was demonstrably *not* inflated by input-spelling enumeration (the mechanism in [provenance-reads.md](provenance-reads.md)'s manufacturing-mechanisms table). That is a real batch landing on the "close" side of this section's own test, not a target to expect: a different backlog can still show far more issues than functions, and this count does not license skipping the check on one.
 
 ## A hostile prior is not a quota
 
@@ -53,9 +63,15 @@ Do not propose a remedy.
 
 Forbidding the remedy is deliberate: a refuter that proposes a fix argues for the issue's importance instead of its reachability, which is the question.
 
+Measured 2026-08-16 (`literary-translator`, 160 issues): the refutation pass broke **17 of 36** proposed closes (11 `REFUTED`, 6 `REFUTED-STALE`) — an independent agent per close, briefed to refute and forbidden from proposing a remedy. Several refutations were mutation-measured, not argued. This is the single highest-yield step in the skill; a triage without it would have closed 17 live defects quietly.
+
+The same discipline applies on the fold side: brief a second opinion to refute a proposed duplicate group, not to review it, before closing anyone into a survivor. Same batch: the fold adjudicator refused **4 of 11** proposed groups.
+
 ## Fix the body before you act on it
 
 A `premise-stale` correction lands before any disposition. An implementer reads the issue, not your triage — an issue scheduled with a false premise sends them the wrong way, and an issue closed on a premise nobody corrected gets refiled with the same error.
+
+Measured 2026-08-16 (`literary-translator`): **73 of 156** issue bodies were measurably wrong about current source — mostly drifted line numbers, but several load-bearing claims among them. This is not a rare edge case to spot-check for; expect roughly half of any backlog's bodies to need a correction before you act on them.
 
 ## Record what you did not do
 
@@ -80,6 +96,10 @@ Then classify each hit — the disposition differs by surface, and a uniform swe
 - **Dated release copy** (`CHANGELOG.md` entries, the root `README.md`'s version-tagged notes) → leave it. Each was true when published; corrections go **forward**, never as a retroactive rewrite of a past entry — annotate in place only in the extreme case (one prior release carries a `> Superseded on the last sentence.` blockquote; that is the only precedent for touching one). A present-tense sweep over a changelog turns up many of these; rewriting them is history-editing, not a fix.
 
 Measured 2026-08-18 (`enduser-handbook`): a triage closed nine issues, and four sentences in already-shipped files still described three of them as tracked, filed, or bounding (`#380` in the publish-target extension contract, `#341` twice in a test-suite file, `#577` in a library file) — the close comment on `#380` had even promised the pointer would be reworded in the next release, and that release shipped without it. Say which line you drew, in the release entry itself, or the next sweep re-files the historical hits as new work.
+
+## Scrub author-local paths before posting
+
+An agent handed an absolute repo root cites it verbatim in what it writes — `/Users/moi/...`, not a relative path — and a triage posts a verdict, a refutation, or a fold comment for every issue it touches, so the leak compounds fast. Measured 2026-08-16 (`literary-translator`): an author-local absolute path leaked into 15 posted comments and into `#572`. Strip it before posting. (`skill:plugin-repo-mechanics` covers this scrub only for publishing a plugin, not for posting a tracker comment — this is the triage-side instance.)
 
 ## Assert the survivors before you write
 

@@ -1,6 +1,6 @@
 ---
 name: literary-translator-run
-description: Driving a real book through the literary-translator plugin as an operator, especially Hebrew, Yiddish, Arabic or another uncased/non-Latin script — onboarding a source language preset (he.local.json), hand-scaffolding Step 0a (durable_root, bundle-hash markers, profile.yml), EPUB-wrapping a plain-text/OCR/PDF source, marker-snapped segmentation, structure attestation, clearing a W3 zero-candidate name canon, driving W5 translate and W3a glossary dispatch by hand, depositing into the Obsidian book-vault, and auditing an LLM-built canon or translation via a blind-adjudicated convergence loop.
+description: Driving a real book through the literary-translator plugin as an operator, especially Hebrew, Yiddish, Arabic or another uncased/non-Latin script — onboarding a source language preset (he.local.json), hand-scaffolding Step 0a (durable_root, bundle-hash markers, profile.yml), checking the ownership/adoption gate on an existing `durable_root`, checking sentinel coverage on a live book without re-materializing its ledger, EPUB-wrapping a plain-text/OCR/PDF source, marker-snapped segmentation, structure attestation, clearing a W3 zero-candidate name canon, driving W5 translate and W3a glossary dispatch by hand, depositing into the Obsidian book-vault, and auditing an LLM-built canon or translation via a blind-adjudicated convergence loop.
 ---
 
 # Driving a real book through the literary-translator plugin
@@ -9,7 +9,7 @@ Operating the plugin on a real book by hand (not the automated `mass-translate-w
 
 ## End-to-end phase order
 
-1. **Scaffold Step 0a + write the profile** — no scaffold script ships; hand-build the `durable_root` and its bundle-hash markers, point the profile at the right language preset (authoring one ONLY for a language with none shipped — `he.json` ships), then validate the profile. → `references/step0a-scaffold-and-profile.md`
+1. **Scaffold Step 0a + write the profile** — no scaffold script ships; hand-build the `durable_root` and its bundle-hash markers, point the profile at the right language preset (authoring one ONLY for a language with none shipped — `he.json` ships), then validate the profile. Same reference also covers checking a `durable_root`'s ownership/adoption gate and, for a live book already in progress, checking its sentinel coverage without writing to it. → `references/step0a-scaffold-and-profile.md`
 2. **Prepare the source** — the `plain_text`/`custom` adapters are unimplemented, so extract clean text and wrap it as a minimal `gutenberg_epub`, then place chapter markers for segmentation. → `references/source-prep.md`
 3. **Onboard the uncased language + pass W3** — name detection finds zero candidates on non-cased scripts; use the shipped `he.json` (override via `he.local.json`, never by editing it) and clear the zero-candidate smoke + canon-init. → `references/uncased-script-and-w3.md`
 4. **Drive translation dispatch by hand** — prove the dispatch actually works with a throwaway smoke test first, then dispatch each segment with a blocking `codex-companion.mjs task --write` (`codex:codex-rescue` backgrounds and never yields a draft), transcribing the Workflow's own prompt builders verbatim. → `references/manual-translation-drive.md`

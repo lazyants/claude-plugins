@@ -10,7 +10,7 @@ For every admitted serious finding:
 2. **Prove reachability.** Show the fixture or probe reaches the target decision and not an earlier guard, crash, alias, or different call ordinal. Prefer a trace, diagnostic, counter, or effect carrying identity from the real input.
 3. **Show discrimination when constructible.** For a behavioral finding, the demonstrated case should fail before and pass after. An omission or prose defect may instead use direct artifact evidence, but still prove the claimed current state. An unchanged behavioral result is inconclusive.
 4. **Cover the domain.** Test dominant real inputs, boundaries, legitimate variants, malformed or hostile variants inside the threat model, and the opposite over-correction direction—not only the ticket example.
-5. **Compare failure modes.** Reject a fix that replaces a visible, recoverable failure with silent loss, false success, corruption, or a permanent wedge.
+5. **Compare failure modes.** Reject a fix that replaces a visible, recoverable failure with silent loss, false success, corruption, or a permanent wedge. When two candidate fixes trade different failure currencies — one recoverable but visible, the other silent but rarer — a gain in one currency and a loss in another is not automatically a wash; check which currency the artifact's own comments or design already say it prefers before picking one.
 6. **Run the authoritative path.** Use the real implementation and entrypoint. A reimplementation of the expected behavior is not verification.
 
 The same standard applies when refuting or downgrading a reviewer finding. Failure to reproduce proves only the topology that was actually built.
@@ -43,7 +43,7 @@ A rebuild or simpler mechanism inherits every behavior the old one supplied, inc
 Fix the operative text, not its history.
 
 - Replace the contradicted requirement in place. A correction added beside the old instruction leaves two valid-looking requirements.
-- Search the claim across the whole artifact using its distinctive identifiers; a finding normally cites only one restatement.
+- Search the claim across the whole artifact using its distinctive identifiers; a finding normally cites only one restatement. The same premise is usually re-worded at each site, so also search for the ASSUMPTION itself — what has to be true for the code to be correct — not only its exact phrasing; a fix counted as two sites can turn out to be three once the third is found by reading the surrounding code rather than grepping the diff.
 - After deleting a feature or requirement, classify every remaining mention as current rule, rationale, or unmistakable history.
 - Keep the active artifact current-state only. Review chronology and superseded alternatives belong in the session, commit, or a separate audit record.
 - When a reference gains a new case, update the router in the same change so the case can be selected. When shortening a router, preserve the selection concepts rather than merely moving words into a body that loads only after selection.
@@ -56,6 +56,7 @@ Fix the operative text, not its history.
 - **Coarse failure class:** assert the diagnostic and subject, not merely `ok: false`; an earlier guard or crash can produce the same class.
 - **Call/existence proxy:** assert content and provenance that only the real operation could produce.
 - **Coverage by reasoning:** a rule counts as covered only when a discriminating negative control was executed.
+- **Proven-in-production patch:** a patch that already shipped and worked is still an untrusted draft. Verify its success or disclosure line prints only after every later branch that can still refuse has run, not inside an earlier branch that a sibling check can still veto.
 
 ## Completion check
 

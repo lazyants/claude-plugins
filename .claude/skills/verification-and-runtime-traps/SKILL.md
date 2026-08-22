@@ -1,6 +1,6 @@
 ---
 name: verification-and-runtime-traps
-description: "Use when writing or trusting tests/verification and a GREEN result could be masking a real defect — a suite that passes in isolation but fails in the full run, a test that hand-builds a fixture instead of driving the actual SHIPPED artifact (template/seed/scaffold/default config), a fix whose correctness hinges on a DEFAULT flag/mode, a durable-root plugin's resume/idempotency and preflight gating, or running `node --test`. Also covers whether a mutation-testing RED or GREEN is actually valid, a parity/differential test that hand-builds the OTHER module's collaborator, and pytest-specific traps in literary-translator (running from the repo root, `-O`, an absolute suite total). Reach for it before banking any 'tests pass' signal on these shapes."
+description: "Use when writing or trusting tests/verification and a GREEN result could be masking a real defect — a suite that passes in isolation but fails in the full run, a test that hand-builds a fixture instead of driving the actual SHIPPED artifact (template/seed/scaffold/default config), a fix whose correctness hinges on a DEFAULT flag/mode, a durable-root plugin's resume/idempotency and preflight gating, or running `node --test`. Also covers whether a mutation-testing RED or GREEN is actually valid, a parity/differential test that hand-builds the OTHER module's collaborator, a hand-typed membership list inside a drift test that freezes what it should detect, a whole-set assertion catching what per-item assertions miss, an exhaustive sweep needing a count assertion alongside its property assertions, the wrong exception type escaping a catch/pinned-body contract, and pytest-specific traps in literary-translator (running from the repo root, `-O`, an absolute suite total). Reach for it before banking any 'tests pass' signal on these shapes."
 ---
 
 The unifying failure: a green, well-covered suite proves nothing about the real defect because the **tested path diverges from the real path** — the fixture isn't the shipped file, the isolated run isn't the full run, the flagged invocation isn't the default one, and the dev runtime isn't the target runtime (a Homebrew bash on the dev box vs `/bin/bash` 3.2, a 3.13 dev interpreter vs a 3.10 floor, a raw `mkdtemp` string vs its symlink-resolved real path). Verify the property on the REAL artifact / REAL run / REAL default / REAL target runtime before trusting green.
@@ -217,3 +217,14 @@ third: an absolute suite total in release copy (`N passed, M skipped`) is a fact
 that ran it — `skipif` gates shift both counts on a leaner host — while a `--collect-only` delta is
 host-independent, verified true here because the plugin has no `conftest.py`/`collect_ignore`/
 `importorskip` at module scope. Full detail and the exact commands → `references/pytest-collection-and-environment-traps.md`.
+
+## 12. The wrong exception type escapes a catch, a pin, or a parametrize
+
+A `try`/`except` (or a shared-body pinning test) written for one exception type can be silently
+bypassed when the real code path raises a *different* type — a byte-identical body pinned across N
+modules by `inspect.getsource` behaves differently per module when a sibling lacks an import the body
+needs (`os.lstat` raising `NameError`, not `OSError`, in a module missing `import os`); a swallow
+written for one error class misses a sibling call that raises another (a manifest-extraction repair
+catching `AssembleError` while a non-dict manifest's `.get()` raises `AttributeError`), and the
+covering parametrize varied the field's VALUE without ever varying its TYPE. Full detail, both
+measured cases and the fix for each → `references/exception-type-and-import-traps.md`.
