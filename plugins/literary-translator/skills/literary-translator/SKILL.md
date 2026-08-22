@@ -2630,6 +2630,23 @@ Runs at W7 over every converged segment:
   `references/ledger-and-resumability.md`; `final_audit.py` is not one of
   them). Editing `final_audit.py` on its own
   never flips a cache key or the resume-integrity digest via either bundle.
+- **Verbatim-reproduction census (`scripts/verbatim_census.py`, 1.42.0, #502)
+  — OPERATOR-RUN, never dispatched.** Nothing else in this plugin compares
+  source text a draft REPRODUCES (a quoted phrase, a name in its original
+  script) against the segpack it came from: `validate_draft.py` compares key
+  sets and placeholders, `validate_conservation.py` is opt-in and
+  word-multiset. Measured on a real Hebrew book, 206 of 4040 reproduced runs
+  differed in LETTERS with every gate green. Run it by hand over converged
+  segments — `python3 {durable_root}/scripts/verbatim_census.py SEG [SEG ...]`
+  — and READ the queue it prints on stdout. **It never corrects and never
+  gates**: exit 0 whenever the census ran, however long the queue, and there
+  is no output-file flag; on the population that was read word by word there
+  were more cases where the DRAFT was right and the SOURCE was corrupt than
+  the reverse, so applying a "correction" mechanically damages text more often
+  than it repairs it. Hebrew only; it exits 2 rather than printing an empty
+  census when a block carries no `plain_text` or the source holds no Hebrew.
+  The class shown per row is a LIKELIHOOD rank, not a severity — read the
+  whole queue. See `references/false-green-gate.md`.
 - **Structural-completeness gate (`scripts/validate_assembled.py`, #202):** runs
   immediately AFTER `final_audit.py` succeeds (default scope, i.e.
   `output.v1_scope: segment_drafts_and_audit`), over the converged drafts +

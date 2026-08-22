@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.42.0 — 2026-08-22
+
+**Nothing compared the source text a draft quotes back to the source it came from.** `validate_draft.py` validates a draft against its canonical segpack, but over KEY SETS plus placeholder and anchor rules; `validate_conservation.py` is a different, opt-in gate and is word-multiset by design. So a Hebrew phrase quoted inside an English draft could lose a letter, a diacritic or a whole character while every gate stayed green. Measured on a real book (`ssk-he-en` vol.2, 42 drafts): 4040 reproduced Hebrew runs, 3003 byte-identical, 831 differing only in pointing, 206 differing in LETTERS, across 40 of 42 segments. Adds `scripts/verbatim_census.py`. Closes #502.
+
+### It reports. It does not correct, and it does not gate.
+
+That is the measured conclusion, not caution. An alignment built exactly as the issue first proposed offered 140 corrections, of which roughly half would have damaged the text; on the population that was then read word by word there were MORE cases where the draft was right and the SOURCE was corrupt than cases where the draft was wrong. Where a source is a hand-wrapped or visually-reordered EPUB the source is systematically the damaged side, and no deterministic comparison can tell "the draft corrupted the quotation" from "the draft repaired a corrupted source" — that distinction requires reading what the words mean. So the output is a reading queue, and the script writes nothing at all: there is no output-file flag, because an operator-supplied path plus the house atomic-write idiom would let one typo replace a draft with census JSON.
+
+### Nothing is filtered out; the class is a rank
+
+Every Hebrew run in the draft that is not byte-identical to a source run of its own unit is listed. The class only decides what is read first: `letter_diff` and `no_source_run` (tier 1), `prefix_attached` (tier 2 — the source run minus exactly one leading ה/ו/ב/ל/כ/מ/ש, the letters that orthographically fuse onto the next word; any OTHER dropped leading letter is a letter difference and stays in tier 1), `fold_equal` (tier 3, marks and/or connector variants), `verbatim_other_unit` (tier 4, a relocated quotation). Earlier drafts of this feature SUPPRESSED tiers 2–4; each suppression hides a real defect, and two were constructed against the tree: `שֵׁם` ("name") and `שָׁם` ("there") fold to the same key, and source `שלום` versus draft `לום` is a genuine dropped leading letter that satisfies the prefix rule exactly. **The tier is a likelihood heuristic, not a consequence ordering** — a tier-3 word swap can be worse than a tier-1 orthographic slip — and the payload says so in `tier_is_likelihood_only`. Read the whole queue.
+
+The neighbourhood screen the issue first proposed is deliberately absent: measured on the same corpus, "this block contains a corruption signature" was true for 112 of 112 items, so it removed everything and distinguished nothing.
+
+### What it reuses rather than redefines
+
+`fold_match_key()` — the plugin's one #238/#241 mark-and-connector match key — is what decides `fold_equal`, so no fourth fold enters the tree. It is compared alongside a connector-FAMILY signature, because that key splits on the Hebrew connectors and their ASCII twins and joins with a space, which erases which family was used: `אב־גד` and `אב׳גד` share the key `אב גד`, and a punctuation-family change is a real difference. `prefix_attached` is likewise structural over folded units — same unit count, same family signature, identical later units — since on the space-joined scalar a compound letter-plus-family change (`אב־גד` → `ב׳גד`) reads as an innocent one-letter head.
+
+### Two refusals, so a hollow zero can never pass as a clean census
+
+`plain_text` is the field the comparison names, and a block carrying only `source_html` is schema-valid; `validate_draft._block_source_text()`'s fallback would compare Hebrew against markup. Rather than scan markup or report an empty census, the script exits 2 naming those units. A run of segments whose SOURCE contains no Hebrew at all is refused the same way — the census is Hebrew-only and can say nothing about such a project.
+
+### Exit codes, deliberately not the usual convention
+
+`0` when the census ran — a non-empty queue is not a failure — and `2` for usage, environment or malformed artifact. There is no data-dependent `1`: both artifacts pass `check_draft_structure()` and `validate_segpack()` before anything walks them, and `validate_segpack()` is additionally wrapped because it is not total over JSON values (a `canon_names` member that is itself a list raises `TypeError` out of its own set construction — reproduced, filed separately, not repaired here). A bare `Exception` is deliberately not caught: that would relabel a programmer bug as a handled environment error. Nothing in the plugin dispatches this script, so its non-gating rests on non-wiring, not on the exit number.
+
+### Known limitations
+
+- **Hebrew only.** A generalized version needs a curated letter table per script, and a category filter proves category purity, never Script membership — a broad Greek range silently admits COPTIC CAPITAL LETTER SHEI. Four unverified tables serving zero measured demand were cut. A second script is one range tuple plus its expected-set test.
+- **Verse entries are not scanned.** Verse values are mode-shaped objects and a declared literal gloss is a rendering, not a quotation. Disclosed in the payload's own `scanned_fields`.
+- **A connector variant next to U+05EF–U+05F2 falls to `letter_diff`.** The reused match key's ASCII-twin split recognises U+05D0–U+05EA only, so `װ-ב` versus `װ־ב` is reported as a letter difference rather than a connector variant. Left as is rather than widened: that split is the canon matcher's own contract, shared with `language_smoke_report.py` under a drift guard, and the population is **0 of 4064 runs** in the live book measured here.
+- **`nearest_source_run` is advisory and labelled so.** In field use it pointed at the wrong word four times while the prose reasoning named the right pair. Distance is computed over folded forms, so it measures letter difference rather than pointing noise.
+- **"Byte-identical occurrence" is read as occurrence AS A RUN**, not as a bare substring. A substring test would count a draft run that dropped its first letter as present, which is exactly the defect the census exists to find.
+
+### What it costs
+
+Nothing re-translates. `verbatim_census.py` is not a `PLUGIN_BUNDLE_MEMBERS` entry and not an orchestration member, so neither `plugin_bundle_hash` nor `orchestration_bundle_hash` moves, no converged segment goes stale, and no resume identity changes. Step 0a copies the new script into a durable root at the next re-scaffold. `tests/verbatim_census.test.py` adds 41 test functions.
 ## 1.41.0 — 2026-08-22
 **R9 says a style-contract edit applies FORWARD and owes no back-sweep; the gates said the book cannot ship until every flipped unit is reviewed again. Only the second one was enforced.** Editing `style_bible.md` between the `STYLE_CONTRACT` markers moves `style_contract_hash`, a GLOBAL cache-key field, so every already-converged segment flips to `stale` at once. `style_contract_hash` sits outside the machinery-only carve-out, so W7's whole-project completeness gate refused (`project_complete: false`, exit 3) and W9's assembly refused after it (`project_incomplete`, exit 2). R9 governed whether you must re-verify; the gates governed whether you can ship, and a two-sentence bible addition therefore cost a full re-review of the corpus. On the fr→ru book at the time of the report: 58 of 81 segments converged, 22 stale, 1 non-converged, with two correct bible additions queued and unaffordable. Closes #533 (and #508, folded into it).
 

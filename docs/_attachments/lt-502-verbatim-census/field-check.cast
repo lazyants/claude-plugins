@@ -1,0 +1,9 @@
+{"version":3,"term":{"cols":80,"rows":24},"timestamp":1787428672,"command":"/tmp/field.sh","env":{"SHELL":"/bin/zsh"}}
+[0.029, "o", "== #502 verbatim census: field check over the live he->en book ==\r\n"]
+[0.003, "o", "drafts: 42\r\n"]
+[0.422, "o", "exit=0\r\n"]
+[0.018, "o", "script: hebrew | unicode: 16.0.0 | fields: ['blocks', 'footnotes']\r\ntotals: {\"runs\": 4064, \"verbatim\": 3041, \"letter_diff\": 121, \"no_source_run\": 0, \"prefix_attached\": 60, \"fold_equal\": 829, \"verbatim_other_unit\": 13, \"queued\": 1023}\r\n\r\npublished on the issue : 4040 runs / 3003 verbatim / 831 pointing-only / 206 letter-level (64 of them prefix)\r\n"]
+[0.000, "o", "this implementation    : 4064 runs / 3041 verbatim / 829 fold_equal / 121 letter_diff / 60 prefix / 13 other-unit\r\nqueued == runs - verbatim: 1023 -- nothing is filtered out\r\n\r\ntop of the reading queue:\r\n  tier 1 letter_diff d=1  גְּרֶׁעסְּטְּן  <- nearest רֶׁעסְּטְּן (advisory)\r\n"]
+[0.000, "o", "  tier 1 letter_diff d=1  עֶׁסִין  <- nearest עֶׁסִי (advisory)\r\n  tier 1 letter_diff d=1  גִיט  <- nearest מִיט (advisory)\r\n"]
+[0.002, "o", "== exit 0 with 1023 queued rows: a queue is not a failure. Nothing was written. ==\r\n"]
+[0.001, "x", "0"]
