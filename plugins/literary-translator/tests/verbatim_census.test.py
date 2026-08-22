@@ -28,6 +28,7 @@ tokenizer/classifier tests -- never a reimplementation of either.
 """
 import hashlib
 import importlib.util
+import os
 import json
 import shutil
 import subprocess
@@ -134,14 +135,19 @@ def run_census(root, *segs, expect_exit=0):
     return json.loads(proc.stdout)
 
 
-def one_seg(tmp_path, src_text, draft_text, seg="seg01", bid="PARA:0001"):
+def blocks_census(tmp_path, src_blocks, draft_blocks, expect_exit=0, **segpack_kw):
+    """A segpack and a draft over the same block ids, run as a subprocess.
+    Each caller keeps its own fixture data; only the scaffolding is shared."""
+    seg = "seg01"
+    root = write_root(tmp_path, seg,
+                      make_segpack(seg, src_blocks, **segpack_kw),
+                      make_draft(seg, draft_blocks))
+    return run_census(root, seg, expect_exit=expect_exit)
+
+
+def one_seg(tmp_path, src_text, draft_text, bid="PARA:0001"):
     """The common single-block fixture: one source block, one draft block."""
-    root = write_root(
-        tmp_path, seg,
-        make_segpack(seg, [(bid, src_text)]),
-        make_draft(seg, [(bid, draft_text)]),
-    )
-    return run_census(root, seg)
+    return blocks_census(tmp_path, [(bid, src_text)], [(bid, draft_text)])
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +246,12 @@ def test_an_undeclared_bracketed_span_is_source_prose_and_is_NOT_masked():
 
 
 def test_a_declared_verse_placeholder_IS_masked():
-    assert VC.hebrew_runs(VC.mask_placeholders("⟦POEM_1⟧", {"⟦POEM_1⟧"})) == []
+    # The span must carry Hebrew, or this passes with masking replaced by the
+    # identity function: `⟦POEM_1⟧` has no Hebrew, so hebrew_runs() returns []
+    # either way and the assertion pins nothing. Paired with the negative
+    # directly above, which is the same span left UNdeclared.
+    assert VC.hebrew_runs(VC.mask_placeholders("⟦אבגד⟧", {"⟦אבגד⟧"})) == []
+    assert VC.hebrew_runs(VC.mask_placeholders("⟦אבגד⟧", set())) == ["אבגד"]
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +495,25 @@ def test_duplicate_occurrences_are_each_listed(tmp_path):
     assert payload["totals"]["queued"] == 2
 
 
+def test_a_declared_verse_placeholder_is_masked_end_to_end(tmp_path):
+    """The segpack.verses[] -> _placeholder_strings() -> mask_placeholders()
+    wire, which the unit tests above exercise only with a hand-built set. The
+    declared placeholder carries HEBREW on purpose: with an ASCII one the
+    assertion would hold whether or not masking ran."""
+    verse = {"vid": "V1", "placeholder": "⟦אבגד⟧", "parent_block": "B1",
+             "mount": "block", "n_line": 0}
+    payload = blocks_census(
+        tmp_path,
+        [("B1", "⟦אבגד⟧ קרש")],
+        {"B1": "⟦אבגד⟧ קרשת"},
+        verses=[verse],
+    )
+    runs = [r["run"] for r in payload["queue"]]
+    assert "אבגד" not in runs, payload["queue"]
+    assert payload["totals"]["runs"] == 1, payload["totals"]
+    assert runs == ["קרשת"], payload["queue"]
+
+
 def test_footnotes_are_scanned_against_their_own_source_text(tmp_path):
     seg = "seg01"
     root = write_root(
@@ -605,7 +635,6 @@ def test_a_stdout_that_cannot_encode_hebrew_exits_2_not_1(tmp_path):
     raises UnicodeEncodeError; outside the handled region that surfaced as
     exit 1 -- the one status this script promises never to use for an
     environment failure."""
-    import os
     seg = "seg01"
     root = write_root(
         tmp_path, seg,

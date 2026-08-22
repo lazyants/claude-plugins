@@ -262,21 +262,19 @@ def hebrew_runs(text):
     return runs
 
 
-def connector_signature(run):
+def _connector_signature(run):
     """The ordered tuple of connector FAMILIES in `run` -- the axis
     fold_match_key() erases."""
     return tuple(CONNECTOR_FAMILY[ch] for ch in run if ch in CONNECTOR_FAMILY)
 
 
-def levenshtein(a, b):
+def _levenshtein(a, b):
     """Unicode-codepoint Levenshtein. Computed over fold_match_key() values,
     so a distance measures LETTER difference rather than pointing noise -- the
     ordering inside tier 1 is meant to put the likeliest letter defects
     first."""
     if a == b:
         return 0
-    if not a:
-        return len(b)
     prev = list(range(len(b) + 1))
     for i, ca in enumerate(a, 1):
         cur = [i]
@@ -294,7 +292,7 @@ def _is_prefix_attached(run, source_run):
     one-letter head, although the raw text changed both a letter and the
     connector family. Requiring the same unit count, the same connector-family
     signature and identical later units rejects that."""
-    if connector_signature(run) != connector_signature(source_run):
+    if _connector_signature(run) != _connector_signature(source_run):
         return False
     units, src_units = fold_match_key(run).split(" "), fold_match_key(source_run).split(" ")
     if len(units) != len(src_units) or units[1:] != src_units[1:]:
@@ -309,7 +307,7 @@ def _fold_equal(run, source_run):
     so the family signature is compared too."""
     return (
         fold_match_key(run) == fold_match_key(source_run)
-        and connector_signature(run) == connector_signature(source_run)
+        and _connector_signature(run) == _connector_signature(source_run)
     )
 
 
@@ -330,34 +328,47 @@ TIER = {
     "fold_equal": 3,
     "verbatim_other_unit": 4,
 }
+# Every per-class counter the payload carries, in payload order. One tuple,
+# because `totals` and each segment's own counts must agree by construction.
+COUNT_KEYS = ("runs", "verbatim", *TIER)
 
 
-def classify(run, own_source_runs, other_unit_runs):
-    """(class, nearest_source_run, distance). `distance` is None only for
-    `no_source_run`; every other queued class carries the distance to the
+def classify(run, own_source_runs, segment_source_runs):
+    """(class, nearest_source_run, distance).
+
+    `distance` and `nearest_source_run` are None whenever this unit's own
+    source carries NO Hebrew run to measure against -- which is the
+    `no_source_run` class, and ALSO a `verbatim_other_unit` run in such a
+    unit (an English heading or epigraph quoting Hebrew that belongs to a
+    sibling block). Every other queued class carries the distance to the
     nearest run of its OWN unit, so tier 1's ordering is meaningful and the
-    other tiers are still sortable."""
+    remaining tiers stay sortable."""
     if run in own_source_runs:
         return "verbatim", None, 0
-    nearest, best = None, None
     folded_run = fold_match_key(run)
-    for idx, src in enumerate(own_source_runs):
-        d = levenshtein(folded_run, fold_match_key(src))
+    if own_source_runs:
         # Deterministic tie-break: lowest distance, then earliest occurrence
         # in the source text. `idx` is already unique per candidate, so the
         # order is total and nothing downstream can depend on set or dict
         # iteration.
-        key = (d, idx)
-        if best is None or key < best:
-            nearest, best = src, key
-    distance = best[0] if best else None
+        distance, idx = min(
+            (_levenshtein(folded_run, fold_match_key(src)), idx)
+            for idx, src in enumerate(own_source_runs)
+        )
+        nearest = own_source_runs[idx]
+    else:
+        nearest, distance = None, None
     for src in own_source_runs:
         if _is_prefix_attached(run, src):
             return "prefix_attached", nearest, distance
     for src in own_source_runs:
         if _fold_equal(run, src):
             return "fold_equal", nearest, distance
-    if run in other_unit_runs:
+    # A SEGMENT-WIDE set is correct here only because the ladder's first
+    # branch already returned every own-unit hit: by this line the run is
+    # known absent from `own_source_runs`, so a match can only be another
+    # unit's. Moving this test earlier would silently reclassify.
+    if run in segment_source_runs:
         return "verbatim_other_unit", nearest, distance
     if not own_source_runs:
         return "no_source_run", None, None
@@ -417,9 +428,13 @@ def _source_units(seg, src):
     units, missing, seen = {}, [], set()
     for b in src.get("blocks") or []:
         if not isinstance(b, dict) or not b.get("id"):
+            # Belt-and-braces: validate_segpack() already refuses this shape.
             raise CensusError(f"segpack {seg}: a block carries no usable id")
         bid = b["id"]
         if bid in seen:
+            # This one is NOT redundant: neither validate_segpack() nor
+            # check_draft_structure() checks for duplicate block ids, and a
+            # duplicate would silently give one label two source texts.
             raise CensusError(f"segpack {seg}: duplicate block id {bid!r}")
         seen.add(bid)
         label = f"blocks:{bid}"
@@ -444,8 +459,6 @@ def _draft_units(draft):
 
 def census(segs, segments_dir):
     """The census payload. Raises CensusError for every refusal."""
-    totals = {k: 0 for k in ("runs", "verbatim", *TIER)}
-    totals["queued"] = 0
     per_segment, queue, missing_all, source_runs_total = {}, [], [], 0
 
     for seg in segs:
@@ -460,7 +473,8 @@ def census(segs, segments_dir):
             for label, text in src_units.items()
         }
         source_runs_total += sum(len(r) for r in src_runs_by_unit.values())
-        seg_counts = {k: 0 for k in ("runs", "verbatim", *TIER)}
+        segment_runs = {r for runs in src_runs_by_unit.values() for r in runs}
+        seg_counts = {k: 0 for k in COUNT_KEYS}
 
         for label in sorted(drafted):
             if label not in src_units:
@@ -469,21 +483,12 @@ def census(segs, segments_dir):
                 # not comparable, and saying so beats inventing a comparison.
                 continue
             own = src_runs_by_unit.get(label, [])
-            others = {
-                r
-                for other, runs in src_runs_by_unit.items()
-                if other != label
-                for r in runs
-            }
             for run in hebrew_runs(mask_placeholders(drafted[label], placeholders)):
                 seg_counts["runs"] += 1
-                totals["runs"] += 1
-                klass, nearest, distance = classify(run, own, others)
+                klass, nearest, distance = classify(run, own, segment_runs)
                 seg_counts[klass] += 1
-                totals[klass] += 1
                 if klass == "verbatim":
                     continue
-                totals["queued"] += 1
                 queue.append({
                     "seg": seg,
                     "unit": label,
@@ -507,6 +512,12 @@ def census(segs, segments_dir):
             "no Hebrew found in the source of any requested segment -- this "
             "census is Hebrew-only, so it can say nothing about this project"
         )
+
+    # Derived, never accumulated in parallel: "totals is the sum of
+    # per_segment" and "queued is the length of the queue" are then true by
+    # construction rather than by three increments staying correct.
+    totals = {k: sum(c[k] for c in per_segment.values()) for k in COUNT_KEYS}
+    totals["queued"] = len(queue)
 
     queue.sort(key=lambda r: (
         r["tier"],
