@@ -2207,13 +2207,13 @@ check meant to catch it. There is no way to make this self-verifying; the
 operator relaying the value correctly IS the safeguard.
 
 **`resume: true` asserts digest identity and NOT that any work exists under
-that run (1.37.0, #538/#544).** It means one thing: the matched candidate's
+that run (1.38.0, #538/#544).** It means one thing: the matched candidate's
 recorded `input.digest` equals the digest this invocation just computed. It
 says nothing about that run having dispatched anything. Two consequences an
 operator has to hold alongside it:
 
 - **A claim run whose Step 1 is REFUSED leaves its `runs/<RUN_ID>/` and
-  `input.digest` behind.** As of 1.37.0 a refusal ON POLICY —
+  `input.digest` behind.** As of 1.38.0 a refusal ON POLICY —
   `previously_converged`, an unsafe prior RUN_ID, a prior run with no
   resume-integrity digest — performs no durable write of its own: no claim
   record, no re-stamped `dispatch_token`. (A refusal because a claim WRITE

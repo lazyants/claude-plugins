@@ -140,7 +140,7 @@ def test_orchestration_bundle_hash_never_a_cache_key_field(cache_key_module):
 # "nothing re-translates" sentence rests on, and it is not something a reader
 # can tell by looking at the file: select_segments.py and resume_setup.py sit
 # on opposite sides of it despite being the two halves of one W5 preflight,
-# invoked one after the other on every claim run. 1.37.0's first draft claimed
+# invoked one after the other on every claim run. 1.38.0's first draft claimed
 # the orchestration-only cost for BOTH, and a docstring-sized edit to
 # resume_setup.py would therefore have moved plugin_bundle_hash and re-staled
 # every converged segment in every project -- a whole-book retranslation, paid

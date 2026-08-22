@@ -4301,7 +4301,7 @@ def test_an_unorderable_own_claimed_at_refuses_and_names_THIS_runs_record(tmp_pa
 # 22. #538 -- a dispatch REFUSED on policy must not have mutated the tree.
 #
 # The three refusals below all fire AFTER the #438 claim block's own
-# admission pass. Until 1.37.0 they also fired after its durable WRITES: the
+# admission pass. Until 1.38.0 they also fired after its durable WRITES: the
 # claim record at runs/<RUN_ID>/.claimed.<seg>, and the draft's own
 # dispatch_token re-stamped to <RUN_ID>:<seg>. A refusal whose entire purpose
 # is "this dispatch must not happen" therefore left the tree carrying a claim
