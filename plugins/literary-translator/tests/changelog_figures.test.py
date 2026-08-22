@@ -144,35 +144,30 @@ def _test_function_count(filename):
     )
 
 
-# Rewritten for 1.45.0 (#488), per the maintenance contract above. 1.42.0's row
-# (#502) retires with its entry; `_tuple_len` comes back into use here after
-# several releases idle, which is why both helpers are kept when unused.
+# Rewritten for 1.46.0 (#489), per the maintenance contract above. 1.45.0's two
+# rows retire with its entry. `_tuple_len` and `_files_defining` are kept though
+# unused here, exactly as earlier entries kept the helper this one uses.
 #
-# Two rows, because 1.45.0 states exactly two tree-derivable figures: how many
-# test functions the file covering the change holds, and the size of the script
-# tuple whose hash this release admits it moves. The entry's remaining numbers
-# are of three kinds, none declarable. The suite totals (6094 -> 6143) are a
-# whole-run measurement this file cannot take without running the suite from
-# inside it (6094 -> 6143 passing, the delta being this release's own 49
-# collected tests). The corpus figures -- `Notre-Dame` split three ways across seg17 /
-# seg27 / seg49, 3884 candidate names, a longest of 62 characters, zero past the
-# cap, and the 81-unit book the refused prompt-contract bump would have re-reviewed
-# -- come from an operator-owned durable root that is not in this repository and
-# is not reachable from any check here; declaring one would mean hardcoding its
-# answer, which passes every assertion below while proving nothing
-# (`lambda: 3884`). And the schema/member counts quoted in prose ("one of the
-# three project-local schemas", "the 2 scripts") are named constants the suite
-# already drives, except the one declared below.
+# ONE row, because 1.46.0 states exactly one figure this tree can answer: the
+# size of the suite it adds. Everything else that entry counts is measured
+# somewhere this repository cannot reach, and declaring any of it would mean
+# hardcoding the answer inside the lambda (`lambda: 921`) -- which passes every
+# assertion below while proving nothing:
+#
+#   * 921 hits, 476 of 1212 units, 41 of 42 units and the 267 sof-pasuq
+#     occurrences are measurements of an operator-owned durable root and of
+#     external logical-order corpora, neither in this repository;
+#   * 46 762 RTL tokens is the same, summed across five fetched corpora;
+#   * 1415 codepoints newly admitted is a property of the Unicode database the
+#     INTERPRETER ships, not of this tree -- it moves with the Python build, so
+#     pinning it here would fail on a runner with a different Unicode version;
+#   * 777 and 677 are quoted from the ISSUE, describing a measurement made
+#     against a source EPUB rather than against this tree.
 FIGURES = [
     Figure(
-        "adds 45 test functions",
-        45,
-        lambda: _test_function_count("segpack_split_names_delivery.test.py"),
-    ),
-    Figure(
-        "one of the 2 scripts `compute_derivation_bundle_hash()` hashes",
-        2,
-        lambda: _tuple_len("cache_key.py", "DERIVATION_BUNDLE_MEMBERS"),
+        "27 new tests",
+        27,
+        lambda: _test_function_count("visual_order_advisory.test.py"),
     ),
 ]
 

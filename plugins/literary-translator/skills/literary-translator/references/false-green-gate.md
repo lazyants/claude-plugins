@@ -338,6 +338,76 @@ deliberately OUTSIDE the six checks rather than becoming a seventh:
 Because it joins no hashed bundle, adding it moved neither `plugin_bundle_hash`
 nor `orchestration_bundle_hash`: no converged segment went stale.
 
+## The visual-order advisory (`visual_order_scan`, 1.46.0, #489)
+
+The same gate also carries one REPORT-ONLY scan, printed as a `WARN
+visual_order_scan:` line on stderr and named in the final status line as
+`(N ADVISORY)`. **It is not a check.** It never touches `derivable_ok` or
+`region_ok`, so it can neither refuse an ingestion nor rescue a failing one, and
+it is deliberately kept out of `run_derivable_checks()`'s results so no existing
+check tuple or exit-code contract moves.
+
+**What it is for.** A source EPUB converted from a PDF can carry RTL text in
+VISUAL order. Extraction is byte-faithful — measured byte-identical against the
+raw EPUB, and `segpack.py` is a pass-through by construction — so the mangling
+is upstream and correct to preserve. But no deterministic gate in this pipeline
+can see it: token counts, digests, schema validation and `validate_draft` never
+read what a fragment MEANS. The victims are the LLM turns. On a live book this
+produced both false reviewer findings against correct drafts and one
+mistranslation, with subject and object swapped, that reached a converged draft
+a full review round had already called clean. That is the gap this advisory
+exists to make audible — it is the one class this document's gates cannot cover
+by construction.
+
+**What it detects, named honestly.** It is a *leading-terminal-punctuation
+screen*: a token whose first character is terminal punctuation followed —
+across any combining marks or bidi format controls — by an RTL letter. Logical
+order cannot produce that, because a stop or comma is stored AFTER the word it
+ends. It therefore detects visual-order *handling*, **not** word *reordering*,
+even though reordering is what actually tears tokens.
+
+Three false-negative classes, stated rather than implied away:
+
+- an **unpunctuated** reversed run, which carries no signature at all;
+- word **reordering** generally, for the same reason;
+- any mangling whose punctuation is **not adjacent** to an RTL letter.
+
+Do not "improve" this by swapping in a reversal-scoring detector. Two were
+MEASURED against the known positive control and both returned clean: whole-block
+reversal scoring and tail-window reversal scoring. A clean sweep from either
+would have read as *no visual-order input found* — a false all-clear, which is
+the exact failure this document exists to prevent.
+
+**Measured behaviour, both directions.** On the positive control book: 921 hits
+across 476 of 1212 RTL-bearing text units, 41 of 42 units flagged (the miss is a
+front-matter unit whose RTL content is a single block), and both named control
+blocks hit. Against known logical-order corpora — Hebrew pointed with 267
+sof-pasuq occurrences and unpointed, Arabic, Persian, Urdu — **0 hits in 46 762
+RTL tokens**. The ellipsis is excluded from the terminal set because a
+sentence-initial elision is legitimate logical order; it contributed zero of the
+921 hits, so the exclusion costs nothing measured.
+
+**Scan population.** `blocks[*].plain_text` **plus** `verse.store[*].plain_text`
+where `mount == "embedded"`. An embedded verse's text is lifted OUT of its
+carrier block and replaced by a `⟦VERSE_…⟧` placeholder, so a blocks-only scan
+would be blind to it; a standalone verse (`mount: "block"`) is already a
+`blocks[]` entry and is not scanned twice. Those are the extractor's only
+independent source-text stores.
+
+**Evidence is codepoints, never glyphs.** Sampled tokens and histogram keys are
+emitted `\uXXXX` / `U+XXXX`. A bidi-reordering terminal renders a corrupted RTL
+token identically to an intact one — a finding on this very book was filed and
+then retracted for exactly that reason — so evidence meant to be ADJUDICATED
+cannot be rendered text.
+
+**The verdict is not the scan's.** The WARN routes an operator to an
+adjudication turn that reads the sampled units against the source and decides;
+on a positive, the condition is recorded in the project's own `style_bible.md`
+under `### E-traps`, which is the one artifact the translate, review and fix
+turns all read. SKILL.md's W2 section carries the procedure and the clause, and
+states the `style_contract_hash` cost of pasting it.
+
+
 ## See also
 
 - [`verse-policy.md`](./verse-policy.md) — the full six-mode
