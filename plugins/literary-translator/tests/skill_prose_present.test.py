@@ -185,6 +185,25 @@ def test_plugin_root_412_redirect_substitution_present():
     assert "not a neutral default: it leaves the pre-#412" in text
 
 
+def test_skill_states_what_resume_true_asserts_and_does_not():
+    # #538/#544. SKILL.md is the ONLY home for this statement, deliberately:
+    # resume_setup.py -- where a reader might expect its own docstring to say
+    # it -- is a PLUGIN_BUNDLE_MEMBERS member, so editing a single comment
+    # byte there moves plugin_bundle_hash and re-stales every converged
+    # segment in every project. A docstring is not worth a book.
+    #
+    # Each fragment sits fully on one line as of this writing, verified with
+    # grep -- never by eye, see this file's own docstring's hard-wrap warning.
+    text = _skill_text()
+    # The claim itself: digest identity, not evidence of work.
+    assert "asserts digest identity and NOT that any work exists" in text
+    # And the consequence an operator meets in practice -- a refused claim
+    # run's own leftover run directory winning the next resume. A needle on
+    # the heading alone would prove a label survived while the explanation
+    # under it had been deleted.
+    assert "- **A claim run whose Step 1 is REFUSED leaves its `runs/<RUN_ID>/` and" in text
+
+
 def test_operating_constellation_reference_exists_and_has_review_orchestration_content():
     assert OPERATING_CONSTELLATION.is_file(), f"expected {OPERATING_CONSTELLATION} to exist"
     text = OPERATING_CONSTELLATION.read_text(encoding="utf-8")

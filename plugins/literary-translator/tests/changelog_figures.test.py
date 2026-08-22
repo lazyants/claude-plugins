@@ -144,22 +144,23 @@ def _test_function_count(filename):
     )
 
 
-# Rewritten for 1.37.0 (#532), per the maintenance contract above.
+# Rewritten for 1.38.0 (#538), per the maintenance contract above.
 #
-# One row, because 1.37.0 states exactly one figure this tree can answer: the
-# member count of the bundle tuple whose flip the entry prices. Its other counts
-# are deliberately NOT rows. The pinned-clause and pinned-absent counts are
-# spelled out as words ("nine", "the two removed orders"), and this file's
-# tokenizer only sees numerals -- the accepted residual its docstring names,
-# not an oversight. The 7-false-findings-across-10-filings measurement is a
-# CORPUS figure from two operator-owned durable roots that are not in this
-# repository and are not reachable from any check here; declaring one would mean
-# hardcoding its answer, which passes every assertion below while proving
-# nothing (`lambda: 7`).
+# One row again, and it happens to be the SAME derivation 1.35.0 declared --
+# not a row left un-rewritten. 1.38.0 prices its own migration on the opposite
+# side of that membership: `select_segments.py` is an orchestration member and
+# NOT one of the 17, which is what makes "no converged segment re-stales" true
+# -- a narrower claim than the one this entry's own second draft made. The row
+# is kept deliberately rather than emptied: an empty FIGURES list passes every
+# assertion below while checking nothing, so a release with no tree-derivable
+# figure must state one rather than declare none.
 #
-# `_test_function_count` is kept although 1.37.0 cites no suite size: it is the
-# general deriver for that class of figure, and 1.36.0's own row used it one
-# release ago.
+# The entry's other number -- 66 stamped drafts -- is a CORPUS measurement from
+# an operator-owned durable root that is not in this repository and is not
+# reachable from any check here. It is the accepted residual this file's
+# docstring names, not an oversight: declaring it would mean hardcoding an
+# answer, which passes every assertion below while proving nothing
+# (`lambda: 66`).
 FIGURES = [
     Figure(
         "17 `PLUGIN_BUNDLE_MEMBERS`",
@@ -167,6 +168,7 @@ FIGURES = [
         lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
     ),
 ]
+
 
 def _newest_entry():
     """(version, text) of the first `## <semver>` section -- the release being
