@@ -12,6 +12,7 @@ Lenses for reviewing a gate's soundness and choosing its shape. See the spine in
 7. What does this assertion actually PROVE? — the strength ladder, satisfiability, witness completeness
 8. Cross-gate exception drift — a decision recorded only in prose re-surfaces as a false regression
 9. Destructive filesystem gate — preserved-dotfile symlink-survival vectors in a clean-then-rebuild step
+10. The polarity tell — recognizing you enumerated the wrong side of a membership test
 
 ---
 
@@ -174,3 +175,19 @@ A "clean the managed output dir before a deterministic rebuild" step (so stale f
 **Root-of-trust boundary + audit the whole class in ONE sweep.** Stop the walk at the trusted root (the tool's own install dir) — don't guard at or above it; guard the trusted root's immediate child with `.parent.is_symlink()`, **NOT a realpath-containment check** (realpath over-rejects a LEGITIMATELY symlinked install — root a symlink, real subdir underneath — while `.is_symlink()` on the child rejects only a planted redirect). The moment you find ONE such hole, grep EVERY writer of the class across ALL scripts (`mkdir`/`mkstemp`/`open`-for-write/`write_text`/`os.replace` under the managed root) and walk each target's FULL ancestor chain — the identical bug recurs one tree-level up (leaf marker → its write-temp → sibling snapshot dirs → the shared parent) and across every sibling writer, and an adversarial reviewer surfaces only ONE per round.
 
 **False-RED tail — don't over-reject legitimate OS symlinks.** For a genuinely OUT-OF-root absolute destination, checking EVERY component false-rejects real OS symlinks (`/var`, `/tmp` are symlinks on macOS — including pytest's own tmpdirs), and there's no reliable way to distinguish a benign OS symlink from a planted redirect OUTSIDE the managed root. Keep leaf+immediate-parent for the out-of-root case and DOCUMENT the boundary in code + the PR thread; the realistic threat (a symlink planted in a cloned project tree) is necessarily IN-root and fully closed. General adjudication lesson: when two reviewers disagree on a security finding, weigh the proposed fix's OWN regressions — the "stricter" fix (check every component) is not automatically right when it breaks legitimate usage. Twin of the root-of-trust *value*-location lens in `references/pipeline-trust.md`; cousin of the dangling-symlink read guard (`os.path.lexists`+`is_file`) in `references/json-schema-and-json.md` §3(a).
+
+## 10. The polarity tell — recognizing you enumerated the wrong side of a membership test
+
+Applies to every allowlist-vs-denylist choice above (§1, §5, `SKILL.md` §1), including internal
+control-flow gates over your own function's returned union, not only untrusted-input gates.
+
+Before writing a membership test, ask which side of it is closed by something other than your own
+imagination — a grammar, a schema, an enum, a protocol. Enumerate THAT side; if neither side is
+closed, say so in the code and pick the side whose failure is loud (Strictness Bias, `SKILL.md` §2).
+The two lists look interchangeable while you are writing them — the difference only shows up on an
+input neither you nor the reviewer imagined, which is exactly the input the gate exists for.
+
+**The tell that you got it backwards:** the set is named after the thing you are trying to CATCH
+(`DECLARATION_HEADS`, `DANGEROUS_VERBS`, `BLOCKED_PATHS`) rather than after the thing you are trying
+to PERMIT. Also: adding a case to it in response to a review finding, twice — a set that keeps
+growing one exception at a time is enumerating the wrong side.

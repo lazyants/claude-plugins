@@ -65,6 +65,34 @@ CONSTRUCTED, instead of asking for it by id, renders staleness and absence ident
 damage was not a wrong number in a log — it was a wrong state read that became a decision input the
 user acted on ([[feedback-askuserquestion-cost-model]]).
 
+### The installed label answers "which version", not "which bytes"
+
+`claude plugin update` copies the marketplace clone's CURRENT bytes at update time and files them
+under whatever version the manifest then advertises — it does not reconstruct the tree that version
+was originally cut from. So `claude plugin list` / `installed_plugins.json` correctly answering
+"1.14.0" does not mean the installed content matches what 1.14.0 shipped: an unbumped `plugins/`
+merge that landed after your last update, followed later by a version bump that finally moves the
+label, ships that unbumped merge's content silently bundled under the new label.
+
+Measured 2026-08-16: an installed copy labelled `1.14.0` had `publish-targets/obsidian-vault.md` at
+1248 lines — byte-identical to `origin/main` including a commit (`386b64e`) that merged AFTER the
+1.14.0 release — while the real 1.14.0 tree (`45d693e`) had 1107 lines.
+
+Two consequences, and the second is easy to get backwards:
+
+- An unbumped edit is permanent for anyone already installed and up to date — `plugin update`
+  returns `up_to_date` and copies zero bytes (see `version-and-surface-sync.md`'s unbumped-edit
+  rule), so the stale label sticks until a LATER bump moves the version.
+- **But that later bump DOES repair it** — once the advertised version differs, `plugin update`
+  proceeds and copies then-current bytes under the new label, so an install that updates forward
+  after the bump gets correct content AND a correct label together. Do not tell an already-stale
+  user they must reinstall from scratch — a normal forward update is sufficient once the next bump
+  ships.
+
+Practical rule: to know what an installed copy actually CONTAINS, diff the file against the
+intended source tree — never infer content from the version label, even the correct, freshly-verified
+one.
+
 ## Switching a marketplace SOURCE (directory ↔ github) — EDIT the registry, never `marketplace remove`
 
 All four profiles' `lazyants` marketplace is `source: github` (`lazyants/claude-plugins`) as of 2026-07-23. `.claude` USED to be `source: directory` pointed at the local primary checkout, which made it recurringly LAG: a remote squash-merge leaves local `main` behind `origin/main`, so a directory-source `plugin update` ships the OLD working-tree version until you fast-forward the primary first (tell: "one profile a different version than its siblings"). Switching it to github fixed the lag; the trade-off is `.claude` no longer serves uncommitted local plugin edits (repoint it back to `directory` if local-dev serving is ever wanted).

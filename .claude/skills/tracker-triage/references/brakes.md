@@ -66,6 +66,21 @@ Two more that cost nothing and are easy to skip:
 - Never close A into B and B into A. Pick one survivor per group, explicitly.
 - Never close an issue a shipped doc cites by number. The citation is live; closing orphans it. Park with a note. A *completed-fix marker* in shipped code — a comment explaining why a guard is shaped the way it is — is not that citation and does not block the close.
 
+## Grep the citing files BEFORE the close, not after
+
+A close has a blast radius in the repo: it silently falsifies every shipped sentence that still describes the issue as tracked, filed, or pending, and nothing in the tracker or the suite notices — a citation is prose, and the issue state lives on another host. Run this **before** closing, not as a follow-up:
+
+```
+grep -rnE "#<N>([^0-9]|$)" plugins/<plugin>/{skills,tests,commands,.claude-plugin}
+```
+
+Then classify each hit — the disposition differs by surface, and a uniform sweep over the results is wrong:
+
+- **Live instruction prose** (`skills/**/references/*.md`, read and executed by a model) and **maintainer-facing comments** (test-suite prose that says where work is filed) → must state the decision. This is the class the "never close a cited issue" rule above protects.
+- **Dated release copy** (`CHANGELOG.md` entries, the root `README.md`'s version-tagged notes) → leave it. Each was true when published; corrections go **forward**, never as a retroactive rewrite of a past entry — annotate in place only in the extreme case (one prior release carries a `> Superseded on the last sentence.` blockquote; that is the only precedent for touching one). A present-tense sweep over a changelog turns up many of these; rewriting them is history-editing, not a fix.
+
+Measured 2026-08-18 (`enduser-handbook`): a triage closed nine issues, and four sentences in already-shipped files still described three of them as tracked, filed, or bounding (`#380` in the publish-target extension contract, `#341` twice in a test-suite file, `#577` in a library file) — the close comment on `#380` had even promised the pointer would be reworded in the next release, and that release shipped without it. Say which line you drew, in the release entry itself, or the next sweep re-files the historical hits as new work.
+
 ## Assert the survivors before you write
 
 **Never close A into B when B is closing too.** The mutual case is easy to see. The transitive one is not, and it is what a multi-pass triage actually produces: a batch pass gives B `doc-is-the-fix` while a fold pass names B the survivor of A, and each pass is right about the question it was asked. Nothing in either pass looks at the other.

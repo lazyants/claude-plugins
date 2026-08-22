@@ -7,6 +7,7 @@ Core rule, restated: **squash-merge can ship stale content — verify from `orig
 - Squash ships stale content — verify origin
 - Predict a parallel-PR conflict read-only with `git merge-tree`
 - Resolve a parallel-PR conflict on the shared surfaces
+- A version number is a contended resource — re-check immediately before push
 - Stacked PRs: deleting the parent's branch CLOSES the child
 - Stale-base branch → rebase onto a MOVED main
 - `gh pr merge --delete-branch` local error ≠ merge failure
@@ -34,6 +35,20 @@ Two independent PRs off the same `main` that each bump their own plugin both tou
 When a sibling plugin merged between your branch-point and your merge (`mergeable: CONFLICTING / DIRTY`): `git fetch origin main` → `git merge origin/main` into your branch → resolve by keeping BOTH plugins' rows/entries at their correct versions/anchors (theirs for the sibling, yours for your plugin) → re-run the suite → push. Then:
 
 - Right after the resolving push, `gh pr view` often still shows `CONFLICTING` (GitHub recomputes mergeability async). Confirm locally with `git merge-base --is-ancestor origin/main HEAD` (true = no real conflict) and poll `gh pr view --json mergeable` until it flips to `MERGEABLE`. An `UNSTABLE` state is normal (the review-bot check is advisory). Merge only then.
+
+**"Keep both" can silently revert a SIBLING's row, not just yours.** `README.md` and `marketplace.json` carry one row per plugin, and when two plugins release the same day git can hand you ONE conflict hunk holding BOTH rows. Resolving by keeping "ours" wholesale reverts the *other* plugin's bump — measured 2026-08-18: an enduser-handbook README table-row resolution reverted that row to `1.17.0` while the SAME file's own `## \`enduser-handbook\` — v1.18.0` section heading, which had merged cleanly elsewhere in the file, still said `1.18.0`. The mismatch is invisible in the hunk itself — a reverted row reads as a perfectly plausible line on its own.
+
+- **The check, one command:** `git diff origin/main -- README.md | grep '^[-+]' | grep -v '^[-+][-+][-+]'` (or `git diff <base> HEAD -- README.md` against your actual merge base). Every remaining line must be YOUR plugin's; anything else is a sibling row/heading you just reverted. Do the same for `marketplace.json`: parse it and print `name → version` per plugin, compare against `origin/main`'s, rather than reading the hunk.
+- **Better than hand-resolving:** rebuild the conflicted file from `git show origin/main:<file>` and re-apply only your own lines, so "everything else matches main" is true by construction instead of by post-hoc inspection.
+- `scripts/check_version_surfaces.py` (added 2026-08-18, `467367b` — see `version-and-surface-sync.md`) asserts per-plugin agreement across `plugin.json`, `marketplace.json`, the README row, heading and anchor, plus the changelog entry. It has **no baseline against `origin/main`**, so it cannot distinguish a surface your merge just clobbered from one that was already correct — the diff-against-origin check above is still required, it does not replace it. Run the script on the MERGE commit too, not only before your own bump: a conflict resolution can revert a sibling's row exactly as easily as a bump can skip a surface, and the script reads whichever tree is in front of it either way.
+
+## A version number is a contended resource — re-check immediately before push
+
+Several sessions can cut releases of the SAME plugin concurrently in this repo, so a version number has no lock. Measured in one day: literary-translator went `1.30.0` → `1.34.0` across four sessions, and every number was free at the moment it was claimed.
+
+- **The check that actually works:** `git show origin/main:plugins/<plugin>/.claude-plugin/plugin.json` immediately before `git push` — after a fresh `git fetch`, not at renumber time. The renumber-time check is the one that fails: the gap between renumbering and pushing is exactly where a sibling merges and takes the number. A peer session's "take 1.33.0, it's free" is a snapshot too, and may already be stale by the time it reaches you.
+- Cost of catching this late is one rebuild, not a bad merge — but only if the check runs before the push, not after.
+- **Rebuilding beats rebasing when several of your OWN commits each touch the release surfaces** (`plugin.json`, `marketplace.json`, README row/anchor/heading, `CHANGELOG`): a stale-based branch with N such commits conflicts N times under `git rebase`. Instead: `git branch -f backup/<x> HEAD` → `git checkout -B <branch> origin/main` → `git checkout backup/<x> -- <only your own NEW files>` → re-apply the shared-file edits programmatically (not via conflict markers). Verify with the diff-against-origin check above before pushing.
 
 ## Stacked PRs: deleting the parent's branch CLOSES the child
 

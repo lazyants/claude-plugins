@@ -35,4 +35,6 @@ Re-running until it passes and reporting the green is the failure mode this guar
 alone cannot distinguish a real regression from a transient one, and the name is gone by then.
 
 Related: the absolute PASS/FAIL total is environment-dependent (the `esbuild`-gated check adds 0 or 1
-assertion) — see the "Review discipline" section of SKILL.md before quoting a total in release copy.
+assertion), and a plugin-subtree `git archive` test bed separately carries 17 permanent repo-root-reaching
+failures — see the "Review discipline" section of SKILL.md before quoting a total in release copy or a
+mutation-review report.

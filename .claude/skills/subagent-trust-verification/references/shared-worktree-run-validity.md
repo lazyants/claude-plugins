@@ -12,6 +12,7 @@ negotiate for silence; make the run prove its own validity.
 - [The four shapes](#the-four-shapes)
 - [Scheduling quiet does NOT work](#scheduling-quiet-does-not-work)
 - [Make the measurement prove its own validity](#make-the-measurement-prove-its-own-validity)
+- [A reviewer's read is a run too — freeze the tree for its duration](#a-reviewers-read-is-a-run-too--freeze-the-tree-for-its-duration)
 - [Reading a contaminated run correctly](#reading-a-contaminated-run-correctly)
 
 ## Why the false signal looks like the strongest evidence
@@ -164,6 +165,18 @@ restores exactly the failure this file exists to prevent.
 
 **Have teammates verify only their OWN files during the work**, and reserve the full pass for one
 self-validated run after everyone stops.
+
+## A reviewer's read is a run too — freeze the tree for its duration
+
+A reviewer dispatched against a worktree reads files over MINUTES, not atomically. Amending, rebasing, or restoring a file in that tree mid-run makes its verdict a mix of pre- and post-edit content — and the mix is invisible in the report, which reads exactly like a clean pass over one tree.
+
+**Why this is worth guarding: the failure is silent in the direction that matters.** A reviewer that reads the OLD text of the file you just fixed reports a finding you already closed (cheap, you notice). A reviewer that reads the NEW text against OLD surrounding claims reports nothing (expensive, you ship it).
+
+- **Pin the exact commit SHA in the review brief**, not "the branch" or "the diff". That is what lets the reviewer DETECT drift instead of silently absorbing it — a reviewer told `88c6cfd` can notice the tree is now `5473859` and refuse to relay, which is the outcome you want.
+- Freeze the tree for the run's duration and say so when you unblock the reviewer. Batch every fix from the round instead of applying them as they arrive.
+- If you must keep working, dispatch the reviewer against a `git worktree add --detach <sha>` copy so your edits cannot reach it.
+- A reviewer that reports "I killed the run because the tree moved under it" did the right thing — re-dispatch it; never ask it to salvage a partial read.
+- Applies to a mutation-test harness too: restoring a file after each mutation churns mtimes and content in a tree something else may be reading.
 
 ## Reading a contaminated run correctly
 

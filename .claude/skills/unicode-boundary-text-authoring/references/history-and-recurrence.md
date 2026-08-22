@@ -53,6 +53,27 @@ Hardened prescription on top of the above:
 - After ANY scrub, verify with an independent signal: re-grep a known phrase + `wc -c` (size should change by ~N×5 bytes for N replacements, not by tens of KB) — the "remaining: 0" self-report of the scrub can lie about the wrong thing having been replaced.
 - The trap also fires in EDIT-TOOL strings and AGENT PROMPTS (two more hits in this same session): writing the escape spelling inside an `Edit` old_string/new_string or a teammate brief injects literals again. For file edits that must contain these spellings, go through python-with-`chr()` heredocs exclusively; for prompts, spell the code points in words ("backslash-u-2-0-2-8").
 
+## 2026-08-18 hit (literary-translator #587, PR #593) — `\b` fails on a punctuation-edged pattern, in BOTH directions
+
+A different sense of "boundary" from the rest of this file: not an invisible/control character, but the regex assertion `\b`, appended to a pattern built from `re.escape(name + ".")` to detect a name mention. `\b` is asserted against the *pattern's own* edge character, not against "the text has a word break here":
+
+```python
+re.compile(re.escape("R.") + r"\b").search("R.Smith")             # MATCHES  -- wrong, mid-word
+re.compile(re.escape("R.") + r"\b").search("Written by R. Noson")  # None     -- wrong, the real mention
+```
+
+After `R.` the next character is a space: `.` and ` ` are both non-word, so there is no boundary there and the pattern never fires — while `R.Smith` has `.` followed by `S`, a word char, which IS a boundary, so it wrongly matches mid-word. **No test built from clean-edged Latin names caught either error**, because the bug requires the pattern's own edge to be punctuation; ordinary alphabetic-edged fixtures pass regardless of which form (`\b` or the adjacent-character check) is used.
+
+Fix: replace `\b` with an explicit adjacent-character check, independent of the pattern's own edges:
+
+```python
+not ((start > 0 and text[start - 1].isalnum()) or (end < len(text) and text[end].isalnum()))
+```
+
+`str.isalnum()` beats `\w` twice over: `\w` counts `_`, and `isalnum()` is script-agnostic with no branch needed (Hebrew, Cyrillic, Devanagari letters are all `isalnum()`). Neither covers combining marks (category `M*`) or format characters (category `Cf` — ZWJ/ZWNJ, soft hyphen, RLM/LRM); marks always attach backwards so refusing on them is safe, but bidi marks legitimately sit *beside* a name in RTL prose, so refusing there would be a false refusal — the two halves need separate decisions.
+
+**Cost of the miss:** the false half of the original rationale ("both forms still admit `R. Noson`") shipped in three copies before it was caught — a code comment, a test docstring, and a release note — and was caught by a closing review pass, not by any test, because the test SUITE pinned the true (correct) behaviour all along; the false claim lived only in prose describing it. See `project-lt-587-pr593` in this repo's session memory for the shipped fix.
+
 ## Related
 
 The 2026-07-14 hit arose inside a plan section that was itself a red-before-green regression-test example for a different Unicode-splitting bug (#98) — a case of the bug-under-test's subject matter contaminating the prose describing it. When authoring any red-before-green test whose SUBJECT is a Unicode-boundary bug, expect the same contamination risk in the surrounding prose, not just the test body.

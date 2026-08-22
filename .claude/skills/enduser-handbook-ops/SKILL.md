@@ -1,6 +1,6 @@
 ---
 name: enduser-handbook-ops
-description: Working ON the enduser-handbook plugin — modifying its skill, publish-target/adapter-filename resolution, link-emission canons (wikilinks/index rows), adding or removing a profile.yml key, grep assertions and enumeration sweeps over its hard-wrapped docs (`has` vs `has_in_section`, "must-now-fail" self-tests, reference-assets.test.sh portability), chapter-paths delimiter tests, citation-audit-lib.mjs regex, profile-schema-evaluator.mjs `in` vs `Object.hasOwn`, tracing what a gate/backstop really catches, a halt-driven manual recipe completion check, or its capture-safety PII audit.
+description: Working ON the enduser-handbook plugin — modifying its skill, publish-target/adapter-filename resolution, link-emission canons (wikilinks/index rows), adding or removing a profile.yml key, grep assertions and enumeration sweeps over its hard-wrapped docs (`has` vs `has_in_section`, `hasnt_joined` vs `hasnt_joined_code`, "must-now-fail" self-tests, reference-assets.test.sh portability, a subtree `git archive` test bed's absolute counts), chapter-paths delimiter tests or partitioning a multi-issue backlog around chapter-paths.mjs, citation-audit-lib.mjs regex, a stale `file:NNN` code citation in these docs, profile-schema-evaluator.mjs `in` vs `Object.hasOwn`, tracing what a gate/backstop really catches, a halt-driven manual recipe completion check, or its capture-safety PII audit.
 ---
 
 The `enduser-handbook` plugin is a **contract-dense reference-doc skill**: the same rule is stated in several `references/*.md` files plus `SKILL.md`, the docs are hard-wrapped, and the runtime steps (`Step 0b`, `W5`) must agree with the prose. Recurring traps, the review discipline that catches them, and a technique for designing convergence checks on manual-work recipes.
@@ -11,6 +11,7 @@ Read the reference file that matches the task:
 - **`references/reference-assets-suite-output.md`** — read when capturing or reading a `reference-assets.test.sh` run: `bad()` prints each failing check's NAME to stderr, while stdout carries the ~700 passing `ok` lines AND the `TOTAL:` summary — which is why a bare `tail` (even with `2>&1`) shows the count but loses the failing check's name.
 - **`references/skill-parameterization.md`** — read when adding, renaming or removing a profile key: the every-key-needs-a-consumer audit and the two dead-key examples it came from (the general per-project-parameterization mechanism lives in `plugin-repo-mechanics`).
 - **`references/manual-work-convergence-facts.md`** — read when designing or reviewing a completion check for a halt-driven manual-work recipe (see §12).
+- **`references/file-citation-renumbering.md`** — read before "fixing" a stale `file.ext:NNN` code citation anywhere in these docs, or before trusting a scan that reports which citations are still correct.
 
 ## 1. Publish-target adapter resolution drifts across ~5 surfaces
 
@@ -54,6 +55,27 @@ into THREE spaces and a single-spaced needle still misses. Joining without colla
 very false-negative this is meant to prevent (caught by review 2026-07-20, in this advice itself).
 Alternatively match a short fragment guaranteed to sit on one physical line. Reserve single-line needles for gates you
 control the wording of; use wrap-tolerant matching whenever you are reading someone else's prose.
+
+**`hasnt_joined` is wrap-tolerant for MARKDOWN only — it is green by construction against a code
+comment.** `count_joined_fixed` (the engine behind `hasnt_joined`/`has_joined_in_section`) only
+collapses whitespace; it does not strip a leading comment marker. Inside a `.ts`/`.mjs` comment block
+the *next* line's own marker joins straight into the text, so a JSDoc wrap yields `all of which load
+a * document of their own` and a `//` wrap yields `once the // deny step clears it` — a needle that
+straddles that wrap matches nothing, and the assertion passes even though the forbidden text is
+plainly present. Measured on `capture-guard-policy.mjs`: reintroducing a retired sentence on one
+physical line was CAUGHT by `hasnt_joined`, the same sentence split across a `//` wrap was MISSED,
+and split across a JSDoc wrap was also MISSED. Use `hasnt_joined_code` / `count_joined_code_fixed`
+(strips a leading comment marker before joining) for any `.ts`/`.mjs`/`.sh` target; for a `.md`
+target plain `hasnt_joined` is fine, or keep the needle on one physical line and use the line-based
+helpers.
+
+**A self-scanning `hasnt` pin is unimplementable, not merely awkward.** A pin that greps
+`reference-assets.test.sh` itself for a forbidden phrase finds the phrase inside its own needle
+argument, so it can never go green — this is not a wrap bug, it is the pin quoting itself. Hit twice
+in one round: once as an ordinary pin, once as a self-test that used `$0` as its own fixture instead
+of a separate file. Both shapes are a live instance of "a pin that is green on arrival proves
+nothing" — write the pin, then deliberately reintroduce the forbidden text and confirm it goes red,
+across every wrap shape (plain line, `//` wrap, JSDoc wrap) the target file actually uses.
 
 **Sweep discipline that holds:** run **several** short, wrap-surviving needles case-insensitively over the WHOLE repo, e.g.
 ```
@@ -177,6 +199,8 @@ The actual fix required abandoning the single-regex-retried-everywhere approach 
 
 General lesson: after fixing a catastrophic-backtracking finding, **re-benchmark at scale** (not just re-run the original repro at the size that made it obviously hang) — "no longer exponential" and "linear" are different claims, and a reviewer that already found one perf bug in a matcher is likely to look harder at the fix, not less.
 
+(This library's own citations are "above"/"below" direction claims against quoted section headings — a different citation shape from the `file.ext:NNN` code citations scattered through these docs; see `references/file-citation-renumbering.md` for the traps in fixing those.)
+
 ## 12. Designing the completion/convergence check for a halt-driven manual-work recipe
 
 When automation for a step is descoped in favor of "halt + manual recipe + re-run", the **completion VERIFICATION of that manual work becomes the new complexity sink** — it concentrates almost every subsequent review finding. This needs its own fact-soundness taxonomy, halt-as-record discipline, and loop-exit rule; see `references/manual-work-convergence-facts.md` before designing or reviewing any such check (originated in the 1.5.0 group-axis release, #19, codex rounds 6–15).
@@ -193,8 +217,50 @@ When automation for a step is descoped in favor of "halt + manual recipe + re-ru
 
 Found by the `lazy-ants-reviewer` bot on PR #318 *after* codex rounds came back clean — the second of the two P1s that bot caught in a single session (the other is §5), and a further data point for the review-discipline note below.
 
+## 14. `chapter-paths.mjs` + its two adapter docs are this plugin's un-splittable hub — a multi-issue backlog does not partition evenly
+
+Measured 2026-08-16 by scouting all 14 then-open enduser-handbook issues for **where the fix lands**
+(not where the symbol merely appears): `skills/enduser-handbook/assets/lib/chapter-paths.mjs` +
+`tests/chapter-paths.test.mjs` + `references/publish-targets/{README,static-md,obsidian-vault}.md`
+were edited by #222, #224, #328, #338, #349, #357, #380, #479; #341 joined through
+`tests/md-structure.test.mjs`↔#479, #420 through `tests/skill-call-signatures.test.mjs`↔#224/#380,
+#68 through `capture.example.spec.ts`↔#222. Strict file-disjointness collapsed 12 of the 14 into ONE
+component — this plugin's un-splittable owner. (Counts are a snapshot of that date's backlog, not a
+durable issue list; re-scout before relying on the specific numbers.)
+
+Two files are touched by essentially every issue and must be treated as coordination surfaces, not
+coupling edges, or the file graph degenerates: **`tests/reference-assets.test.sh`** (all 14 issues in
+that scout — thousands of lines of grep pins) and `assets/profile.schema.json`. Rule for parallel
+lanes touching either: append pins in your own block, never reflow or re-sort the file.
+
+Only issues with no landing-file overlap with the hub are genuinely free-standing (4 of the 14 in
+that scout). A split across parallel lanes therefore schedules a SUBSET of free-standing issues per
+lane and leaves the hub component to one serialized owner — balancing lanes by issue count alone is
+impossible here, and pretending otherwise produces colliding branches.
+
+**Why:** the partition is forced by shared FILES, and here the file graph is a star, not a
+partitionable set — "how do I split N issues K ways" has no answer until the hub is found.
+
+**How to apply:** before splitting any enduser-handbook backlog across parallel lanes or teammates,
+scout each issue's *landing files* first (not its symptom description) and check `chapter-paths.mjs`
+/ its adapter docs membership; if two candidate lanes both touch it, they are one lane. See
+skill:parallel-work-partitioning for the general technique this is an instance of.
+
 ## Review discipline for this contract-dense plugin
 
 - **The `lazy-ants-reviewer` (ped-ant) GitHub bot is a real cross-file/runtime-contract net, not a rubber stamp.** It has caught runtime-path contract bugs (e.g. the `W5` publish miss) that BOTH a multi-round codex plan review AND a codex working-tree review missed, because a single-tree review can't see cross-file/runtime inconsistency. After codex says CLEAN, still expect the bot to find them. Workflow: push, then reply to and resolve its thread via GraphQL (`addPullRequestReviewThreadReply` then `resolveReviewThread`), and let it re-review — it posts **"Result: no findings"** when clean; its status check stays **UNSTABLE regardless**, which is normal for this repo.
 - **One "no findings" — even from two independent reviewers — is NOT convergence on a contract-dense reference doc.** After both the ped-ant bot said "no findings" AND an earlier codex pass was clean, a FRESH exhaustive codex pass on the *same committed tree* has surfaced several more real contract bugs (e.g. a glossary relative-link that double-prefixed `../` onto an already-relative `<glossary-rel>`, over-climbing one segment and contradicting the file's own worked example). Keep running fresh adversarial passes against the CURRENT tree until one comes back clean **before merging**. The same held for a same-file gap, not just cross-file: see #5 above (`has` vs `has_in_section`), caught by the bot after two clean codex rounds.
 - **`reference-assets.test.sh`'s absolute PASS/FAIL total is environment-dependent — state deltas in CHANGELOG entries, not absolute counts.** The suite's optional `esbuild`-gated TypeScript check (the `command -v esbuild` / `npx --no-install esbuild --version` block — grep for it, the line number drifts) adds 0 or 1 assertion depending on whether a LOCAL `esbuild` binary or a cached `npx --no-install esbuild` resolves — this differs between a normal dev shell and the bot's/codex's sandboxed environment, producing a consistent ±1 total at every measurement point while the delta between before/after stays identical. Verified 2026-07-23: a CHANGELOG entry stating "486 → 490 assertions" was accurate locally but the bot's sandbox measured "485 → 489" and flagged the mismatch as a documentation bug. Write release notes as `+N assertions` (the portable fact), not `X → Y` absolute totals (environment-fragile) — same principle the plan's own "baseline assertion count is not a stable invariant" note already established for planning, now confirmed to bite release-note prose too.
+- **A different mechanism reaches the same conclusion: a plugin-subtree `git archive` test bed carries 17 permanent failures that look like mutation fallout.** `git archive <sha> plugins/enduser-handbook` gives a clean isolated copy to mutate for review — but 17 assertions in `reference-assets.test.sh` reach UP past the plugin root to the repo-root `CHANGELOG.md` and `README.md` (the #565 canvas carve-out universals, the 1.11.0/1.16.0 entry pins, the #574 bracket universals). In a subtree-only bed they fail `(file not found: CHANGELOG.md)` whether or not anything was mutated. Measured 2026-08-18:
+  ```
+  base archive, unmutated: 1064/1081, 17 failed
+  head archive, unmutated: 1065/1082, 17 failed
+  head archive, mutated:   1064/1082, 18 failed   <- delta is +1, the pin
+  ```
+  A reviewer reporting "the mutation produced 18 failures" is true as an absolute and reads as
+  collateral damage from the mutation, when 17 of the 18 are the bed. **Quote the DELTA against the
+  same bed, never the absolute**, or extract the whole repo (`git archive HEAD` from the root, or a
+  detached worktree) so the 17 do not exist — the full-tree run is 1082/1082. This is the same shape
+  as the esbuild-gated total above, one level up: the harness's rootdir decides which assertions can
+  even run, and a bed that silently loses some prints a number that is arithmetically right and
+  semantically wrong.
