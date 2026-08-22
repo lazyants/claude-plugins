@@ -70,3 +70,25 @@ extra or stale file there is real drift and must `fail`. Note that an extra/stal
 `scripts/` provably CANNOT move `plugin_bundle_hash` — `PLUGIN_BUNDLE_MEMBERS` is a literal
 fixed-name allowlist — so an upstream-deleted module can keep sitting in `scripts/`, stay
 importable, and never show up as a hash mismatch; only an explicit extra-file check catches it.
+
+## The durable copy is the executable, not the plugin cache
+
+A literary-translator project executes `${durable_root}/scripts/*.py` — Step 0a (above) is what
+copies the plugin's `assets/scripts/` into that directory. **Between a plugin upgrade and the next
+Step 0a, a root runs the OLD code**, no matter what the marketplace, the profile cache, or
+`plugin list` says.
+
+Measured 2026-08-09 on `ssk-he-en/vol2/run` right after 1.21.0 shipped and all four profiles were
+refreshed and content-verified:
+
+    durable scripts/select_segments.py  sha1 7064cf59…  --from-converged: 0   (== the 1.19.0 cache copy)
+    cache 1.21.0 select_segments.py     sha1 58499622…  --from-converged: 26
+    durable scripts/claim_record.py     ABSENT          (a member BOTH bundles now require)
+
+**When answering "can this project do X" for anything plugin-shipped, resolve and hash the file
+the project would actually execute (`${durable_root}/scripts/<name>.py`) and grep IT for the
+capability.** Never the plugin cache, and never the version string — a root can sit several
+releases behind the installed plugin indefinitely, which is a supported state, not a fault.
+
+"1.21.0 is installed" and "the new profile is available to project P" are different claims — the
+first is about profiles, the second is per-root and requires re-running Step 0a.

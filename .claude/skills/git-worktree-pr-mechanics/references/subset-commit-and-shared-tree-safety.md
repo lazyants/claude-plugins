@@ -68,6 +68,27 @@ Branches/stashes/the working tree are repo-global, not per-teammate. A teammate'
 - Prefer a **scratchpad copy of the diff** (or `git stash push -- <path>` then `apply`, never a bare `pop`) over any full-file revert as the first move when experimenting.
 - Recovery when it happens: a pre-saved patch + `git apply`, or `git stash apply <sha>` + drop (never bare `pop`) — but this only works because the teammate self-checked `git status`/`git diff` immediately after.
 
+## `git status` cannot see INTO an untracked file — verifying a teammate's edit needs content, not the file list
+
+Verified 2026-08-10 (literary-translator 1.22.0, PR #466). A `code-simplifier` teammate was told it could apply provably behaviour-preserving edits. When it went idle, `git status --porcelain` showed the same entries as before dispatch with no new files, which read as "nothing was edited" — wrongly. It had rewritten a helper inside `tests/claim_forces_review_only.test.py`, untracked (`??`) both before and after its edit. Porcelain reports untracked files by NAME only, with no content comparison, so a full rewrite and an untouched file print the identical line.
+
+**"The file set is unchanged, therefore nothing was edited" is valid only for TRACKED files.** Any new-file work — a brand-new test file is the normal shape of new-feature work — sits exactly in this blind spot.
+
+- To ask whether an agent edited an untracked file, compare CONTENT: hash it before dispatch, or `diff` it against a saved copy — never infer from the porcelain file list. `git status` answers "which files exist and which tracked ones differ", not "what changed".
+- Same trap proving "comments only": comparing the AST (`ast.dump()`, docstrings stripped — comments are already invisible to `ast`, so one comparison covers both) against `HEAD` folds in the branch's own unrelated uncommitted work and reports a difference for BOTH files even when the agent changed nothing. Build the baseline by reconstructing the pre-edit state instead: `git archive <base> | tar -x -C <tmp>` then `git apply` the snapshot diff taken before dispatch — that isolates the agent's edits from your own in-flight work. Assert the reconstruction actually DIFFERS from the current file first, or the comparison passes vacuously.
+- When a teammate's claim and your inspection disagree, suspect your inspection method before the teammate.
+
+## An agent's scratch copy lands in YOUR branch unless the brief names a path outside it
+
+Measured 2026-08-18 (enduser-handbook #574, session `461aeba5`): a codex verification agent, asked to verify against a pristine tree, created `.codex-verify-<sha>/` — a full **497-file copy of the repo** — INSIDE the worktree at `…/claude-plugins-wt/eh-574`. A later `git add -A` swept it into the commit: **508 files, +293k lines**, where the real change was 11 files / +377. Nothing gated it — two independent closing review agents did flag it, but only on the pre-fix commit, i.e. after it had already been committed. Caught by reading `git diff --stat` before opening the PR; recovery was cheap because it was caught pre-PR: reset the commit, re-stage the two intended files by name, recommit.
+
+An agent asked to verify something against a pristine tree will make itself one, and the working directory it inherits is *your worktree*. Nothing in a default brief tells it that directory is a branch someone is about to commit.
+
+- **Name the scratch path in the brief, AT DISPATCH.** Point the agent at the session's scratchpad, not the worktree. If the job genuinely needs a pristine tree, tell it to `git worktree add --detach` *under the scratchpad* — never a copy inside the branch's own checkout.
+- **Stage by name. Never `git add -A` on a tree an agent has touched** — this is the concrete cost of skipping the `git add -A` avoidance above.
+- **Read `git diff --stat` before every PR** and require the file count to match your intent. A file count two orders of magnitude off is the only cheap tell.
+- **Do not delete another session's working directory on your own judgement** — ask its owner whether the job still needs it, then delete.
+
 ## The `cp -i` alias makes a "restore the backup" command silently no-op
 
 This shell aliases `cp` to `cp -i`. `cp backup.py real.py` (intending a plain overwrite) silently prints `overwrite … ? (y/n [n])` and does NOT overwrite. Passing `-f` (`cp -f backup.py real.py`) does **not** override the alias-injected `-i` either. The command returns exit 0, so "no error = it worked" leaves the file in the WRONG state with no signal.
