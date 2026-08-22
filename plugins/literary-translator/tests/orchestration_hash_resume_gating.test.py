@@ -50,6 +50,12 @@ SCRIPTS_DIR = ASSETS_DIR / "scripts"
 REFERENCES_DIR = SKILL_DIR / "references"
 
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
+# #538: the two bundle memberships live in DIFFERENT files -- cache_key.py
+# owns PLUGIN_BUNDLE_MEMBERS, scaffold_setup.py owns
+# ORCHESTRATION_BUNDLE_MEMBERS -- so checking one side says nothing about
+# the other, and no single file can be read to learn which price a script's
+# edit carries.
+SCAFFOLD_SETUP_SCRIPT = SCRIPTS_DIR / "scaffold_setup.py"
 RESUME_SETUP_SCRIPT = SCRIPTS_DIR / "resume_setup.py"
 DRAFT_READY_SCRIPT = SCRIPTS_DIR / "draft_ready.py"
 REVIEW_READY_SCRIPT = SCRIPTS_DIR / "review_ready.py"
@@ -81,6 +87,44 @@ def cache_key_module() -> types.ModuleType:
     return _load_module("cache_key_under_test_orch_resume_gating", CACHE_KEY_SCRIPT)
 
 
+@pytest.fixture(scope="module")
+def orchestration_bundle_members() -> tuple:
+    """scaffold_setup.py's ORCHESTRATION_BUNDLE_MEMBERS, read from the SOURCE
+    rather than imported: that module imports cache_key at module scope, which
+    is not importable from here, and this test needs the literal it declares
+    and nothing else. The node must BE a tuple -- a string of the right length
+    would otherwise answer membership questions character by character."""
+    import ast
+
+    tree = ast.parse(SCAFFOLD_SETUP_SCRIPT.read_text(encoding="utf-8"))
+    # EVERY binding of the name anywhere in the module, not the first one:
+    # reading the first assignment and stopping would let a later rebind or
+    # `+=` drop select_segments.py out of the tuple the shipped module
+    # actually holds while this fixture kept returning the original literal
+    # and the assertions below kept passing. ast.walk rather than tree.body
+    # so a binding inside a function or a conditional counts too.
+    bindings = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Assign, ast.AugAssign))
+        and any(
+            isinstance(t, ast.Name) and t.id == "ORCHESTRATION_BUNDLE_MEMBERS"
+            for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        )
+    ]
+    assert len(bindings) == 1, (
+        f"ORCHESTRATION_BUNDLE_MEMBERS is bound {len(bindings)} times in "
+        f"scaffold_setup.py -- reading a literal is only equivalent to reading "
+        f"the shipped value while there is exactly one binding. Read the "
+        f"effective value instead of relaxing this."
+    )
+    node = bindings[0]
+    assert isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple), (
+        "ORCHESTRATION_BUNDLE_MEMBERS is no longer a plain tuple literal"
+    )
+    return tuple(ast.literal_eval(node.value))
+
+
 # ===========================================================================
 # 1. CODE TRUTH -- documents the invariant (already true pre-fix)
 # ===========================================================================
@@ -90,6 +134,35 @@ def test_orchestration_bundle_hash_never_a_cache_key_field(cache_key_module):
     """Never gates convergence: not one of the 15 composite cache_key
     fields."""
     assert "orchestration_bundle_hash" not in cache_key_module.CACHE_KEY_FIELD_ORDER
+
+
+# #538. Which SIDE of this split a script sits on is what a release entry's
+# "nothing re-translates" sentence rests on, and it is not something a reader
+# can tell by looking at the file: select_segments.py and resume_setup.py sit
+# on opposite sides of it despite being the two halves of one W5 preflight,
+# invoked one after the other on every claim run. 1.38.0's first draft claimed
+# the orchestration-only cost for BOTH, and a docstring-sized edit to
+# resume_setup.py would therefore have moved plugin_bundle_hash and re-staled
+# every converged segment in every project -- a whole-book retranslation, paid
+# for a comment. Pinned here, on both sides, so the claim is checked rather
+# than restated.
+def test_select_segments_is_orchestration_only_never_a_plugin_bundle_member(
+    cache_key_module, orchestration_bundle_members
+):
+    assert "select_segments.py" not in cache_key_module.PLUGIN_BUNDLE_MEMBERS, (
+        "a release that changes select_segments.py prices itself as moving "
+        "orchestration_bundle_hash ONLY -- if this script joins the plugin "
+        "bundle, that price is wrong and every converged segment re-stales"
+    )
+    assert "select_segments.py" in orchestration_bundle_members
+
+
+def test_resume_setup_is_a_plugin_bundle_member_and_so_is_never_free_to_edit(cache_key_module):
+    assert "resume_setup.py" in cache_key_module.PLUGIN_BUNDLE_MEMBERS, (
+        "the bundle hashes this file's RAW BYTES, so no edit to it -- comment, "
+        "docstring or code -- is free; a release that touches it pays a full "
+        "re-stale of every converged segment and must say so"
+    )
 
 
 # A stub cache_key.py -- resume_setup.py shells out to the real one via

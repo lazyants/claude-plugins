@@ -144,27 +144,26 @@ def _test_function_count(filename):
     )
 
 
-# Rewritten for 1.38.0 (#529), per the maintenance contract above.
+# Rewritten for 1.39.0 (#529), per the maintenance contract above.
 #
-# One row, and BYTE-IDENTICAL to the row 1.37.0 (#532) declared -- which is
+# One row, and the SAME derivation the last two entries declared -- which is
 # exactly the case this contract is easiest to skip, and the reason it is a
-# contract rather than an assertion: both releases price their own migration
-# against the same bundle tuple, so an unrotated declaration set stays green
-# while describing a different entry. Measured on this very release: it had
-# already carried a 1.35.0 comment through one rename unread. Re-declared
-# deliberately rather than left standing.
+# contract rather than an assertion: 1.38.0 (#538) priced its migration on the
+# NOT-a-member side of this tuple and 1.39.0 prices its own on the member side,
+# so an unrotated declaration stays green while describing a different entry
+# entirely. Measured on this release: it carried a 1.35.0 comment through one
+# rename unread, then a 1.36.0 one through a second. Re-declared deliberately.
 #
-# 1.38.0's other numbers are not rows. Its two measured incidents are
-# per-segment events in operator-owned durable roots that are not in this
-# repository (`SSK` he/yi->en `seg35`, `historiettes` fr->ru `seg18`), and no
-# check here can reach them; the mutation counts behind its test claims are
-# events in a review session, not state in the tree. Declaring either would mean
-# hardcoding the answer, which passes every assertion below while proving
-# nothing (`lambda: 2`) -- the accepted residual this file's docstring names.
+# 1.39.0's other numbers are not rows. Its two measured incidents are per-segment
+# events in operator-owned durable roots that are not in this repository (`SSK`
+# he/yi->en `seg35`, `historiettes` fr->ru `seg18`) and no check here can reach
+# them; the mutation counts behind its test claims are events in a review
+# session, not state in the tree. Declaring either would mean hardcoding the
+# answer, which passes every assertion below while proving nothing
+# (`lambda: 2`) -- the accepted residual this file's docstring names.
 #
-# `_test_function_count` is kept although 1.38.0 cites no suite size: it is the
-# general deriver for that class of figure, and 1.36.0's own row used it two
-# releases ago.
+# `_test_function_count` is kept although 1.39.0 cites no suite size: it is the
+# general deriver for that class of figure.
 FIGURES = [
     Figure(
         "17 `PLUGIN_BUNDLE_MEMBERS`",
@@ -172,6 +171,7 @@ FIGURES = [
         lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
     ),
 ]
+
 
 def _newest_entry():
     """(version, text) of the first `## <semver>` section -- the release being
