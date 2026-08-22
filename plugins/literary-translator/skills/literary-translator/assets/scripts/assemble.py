@@ -376,6 +376,44 @@ SAFE_STALE_CARVEOUT_FIELDS = frozenset(
     {"plugin_bundle_hash", "schema_hash", "derivation_bundle_hash"}
 )
 
+# ---------------------------------------------------------------------------
+# #533: the SECOND, opt-in acceptance path -- deliberately NOT a member of the
+# allowlist above. That set means "can never change what the prose should
+# say", which is FALSE for the style contract: a contract edit CAN change what
+# the prose should say, and a REVERSED rule actively demanded the wrong choice
+# in every segment converged under it. One global style_contract_hash
+# (cache_key.py:180, GLOBAL_CACHE_KEY_FIELDS at :199) cannot tell an addition
+# from a reversal, so this population is admitted only when the operator
+# DECLARES it, per project, and every admitted segment is named. Widening the
+# allowlist instead would also silently move final_audit.py's own
+# project_complete arithmetic and select_segments.py's D6 semantics, which
+# read the same field list for different questions.
+# ---------------------------------------------------------------------------
+
+CONTRACT_ONLY_STALE_FIELD = "style_contract_hash"
+
+
+def admit_contract_only_stale(profile: dict) -> bool:
+    """Reads profile.yml's `validation.admit_contract_only_stale` (#533).
+
+    True for a LITERAL `True` and nothing else. An absent `validation` block,
+    a non-dict one, an absent key, `false`, `null`, the STRING "true" and the
+    integer 1 all read as False -- `is True` rather than truthiness precisely
+    so `1` (which compares equal to True) cannot become consent. Fail-closed:
+    forgetting the declaration refuses, exactly as before this field existed.
+
+    Restated in final_audit.py and validate_assembled.py rather than imported
+    -- house convention for this plugin's self-contained scripts, pinned by
+    tests/contract_stale_admission.test.py's own three-copy drift assertion.
+    validate_conservation.py is the one script that does NOT restate it: it
+    already imports validate_assembled as `va` for the rebind population
+    itself, so a fourth copy there would drift against the very function
+    whose argument it computes."""
+    validation = (profile or {}).get("validation")
+    if not isinstance(validation, dict):
+        return False
+    return validation.get("admit_contract_only_stale") is True
+
 
 # ---------------------------------------------------------------------------
 # The shared #409 ever-converged sentinel predicate. This block is an EXACT
@@ -565,7 +603,9 @@ def ever_converged_path(seg):
     return SEGMENTS_DIR / f".ever_converged.{seg}"
 
 
-def _stale_carveout_refusal_reason(seg: str, record: dict) -> "str | None":
+def _stale_carveout_refusal_reason(
+    seg: str, record: dict, admit_contract_only: bool = False
+) -> "str | None":
     """Returns None when `record` (a runs/ledger.json entry already known to
     have status=="stale") qualifies for the #491 machinery-only carve-out --
     i.e. is to be treated exactly like status=="converged" by every check
@@ -578,8 +618,21 @@ def _stale_carveout_refusal_reason(seg: str, record: dict) -> "str | None":
     original #491 patch -- see below):
       1. `stale_mismatched_fields` is present and a non-empty list.
       2. Every member of that list is a `str`.
-      3. Every one of its members is in SAFE_STALE_CARVEOUT_FIELDS.
+      3. Every one of its members is in SAFE_STALE_CARVEOUT_FIELDS -- OR
+         (#533, only when `admit_contract_only` is True) the members outside
+         that set are exactly `{style_contract_hash}`.
       4. The `.ever_converged.<seg>` sentinel is not SENTINEL_ABSENT.
+
+    Condition 3's #533 arm is a SEPARATE acceptance path, not a widening of
+    the allowlist: it is reached only by an explicit per-project declaration
+    (`validation.admit_contract_only_stale`), it is tested as a SET so that
+    a hand-edited `["style_contract_hash", "style_contract_hash"]` -- which
+    ledger.schema.json permits, having minItems but no uniqueItems -- reaches
+    the same verdict here as in final_audit.py's own count, and conditions 1,
+    2 and 4 still apply unchanged. The draft-unchanged half of the #533
+    predicate is NOT restated here: load_converged_segments() already
+    recomputes every accepted record's draft sha1 against its own
+    reviewed_draft_sha1, FATALLY, a few lines below.
 
     Condition 2 exists because a hand-edited or corrupted runs/ledger.json
     (this script never schema-validates the ledger it reads) can carry a
@@ -625,7 +678,9 @@ def _stale_carveout_refusal_reason(seg: str, record: dict) -> "str | None":
             f"machinery-only; re-review required"
         )
     unsafe = sorted(f for f in mismatched if f not in SAFE_STALE_CARVEOUT_FIELDS)
-    if unsafe:
+    if unsafe and not (
+        admit_contract_only and set(unsafe) == {CONTRACT_ONLY_STALE_FIELD}
+    ):
         return (
             f"segment {seg!r} is stale because of a content-affecting "
             f"cache-key field ({', '.join(unsafe)}) -- the machinery-only "
@@ -635,9 +690,19 @@ def _stale_carveout_refusal_reason(seg: str, record: dict) -> "str | None":
         )
     state, _detail = classify_ever_converged_sentinel(ever_converged_path(seg))
     if state == SENTINEL_ABSENT:
+        # The characterisation has to match which arm of condition 3 let this
+        # record through: calling style_contract_hash "machinery-only" would
+        # be a false statement in this script's own refusal text, and the
+        # #533 arm is exactly the case where it is not.
+        moved_kind = (
+            "the only field outside the machinery-only set is "
+            f"{CONTRACT_ONLY_STALE_FIELD}"
+            if unsafe
+            else "every moved field is machinery-only"
+        )
         return (
-            f"segment {seg!r} is stale, and every moved field is "
-            f"machinery-only ({', '.join(sorted(mismatched))}), but its "
+            f"segment {seg!r} is stale, and {moved_kind} "
+            f"({', '.join(sorted(mismatched))}), but its "
             f".ever_converged sentinel is absent -- cannot confirm it ever "
             f"converged; re-review required"
         )
@@ -783,8 +848,17 @@ def _manifest_segment_ids_or_empty(manifest: dict) -> "set[str]":
 # ---------------------------------------------------------------------------
 
 
-def load_converged_segments(ledger: dict, manifest_seg_ids: "set[str]") -> "tuple[dict, dict]":
-    """Returns `(converged, refusals)`.
+def load_converged_segments(
+    ledger: dict, manifest_seg_ids: "set[str]", admit_contract_only: bool = False
+) -> "tuple[dict, dict, list]":
+    """Returns `(converged, refusals, contract_admitted)`.
+
+    `contract_admitted` (#533) is the sorted list of segment ids that reached
+    `converged` through the OPT-IN contract-only acceptance path and could not
+    have reached it any other way -- i.e. what this run is shipping without a
+    review against the current style contract. Always empty when
+    `admit_contract_only` is False. It is a LIST, not a count, because the
+    operator act being recorded is "these segments", not "this many".
 
     `converged` is {seg: record} for every runs/ledger.json segments{} entry
     that is EITHER status=="converged" OR status=="stale", carved out by the
@@ -838,9 +912,11 @@ def load_converged_segments(ledger: dict, manifest_seg_ids: "set[str]") -> "tupl
 
     converged = {}
     refusals = {}
+    contract_admitted = []
     for seg, record in segments.items():
         if not isinstance(record, dict):
             continue
+        via_contract = False
         status = record.get("status")
         if status == "stale":
             if seg not in manifest_seg_ids:
@@ -862,13 +938,34 @@ def load_converged_segments(ledger: dict, manifest_seg_ids: "set[str]") -> "tupl
                 # book does not contain in assert_project_complete()'s own
                 # diagnostics).
                 continue
-            reason = _stale_carveout_refusal_reason(seg, record)
+            reason = _stale_carveout_refusal_reason(seg, record, admit_contract_only)
             if reason is not None:
                 refusals[seg] = reason
                 continue
             # Carved out AND required by the current manifest -- falls
             # through to the shared checks below, exactly like
             # status=="converged".
+            #
+            # #533: note WHICH acceptance path this record took, so the run
+            # can name what it is shipping unjudged against the current
+            # contract. Re-derived from the record rather than returned by the
+            # refusal function, so the two can never disagree about a record
+            # the function already accepted: a record is contract-admitted
+            # exactly when a field outside the machinery-only allowlist moved
+            # -- which, past a `reason is None`, can only be
+            # style_contract_hash under the opt-in.
+            #
+            # NOTED here, recorded only once the shared checks below have
+            # actually accepted it. Those checks are fatal here (a sha1
+            # mismatch aborts the whole run rather than skipping the segment),
+            # so today this ordering changes nothing an operator can observe;
+            # it is written this way so the list cannot start naming a record
+            # the run rejected if that ever stops being fatal. Its sibling in
+            # validate_assembled.py needs the same ordering for real: there,
+            # a failed rebind is a per-segment defect, not an abort.
+            via_contract = admit_contract_only and not set(
+                record["stale_mismatched_fields"]
+            ).issubset(SAFE_STALE_CARVEOUT_FIELDS)
         elif status != "converged":
             continue
         expected_sha1 = record.get("reviewed_draft_sha1")
@@ -900,7 +997,9 @@ def load_converged_segments(ledger: dict, manifest_seg_ids: "set[str]") -> "tupl
                 f"re-review (or restore the reviewed draft) before assembling"
             )
         converged[seg] = record
-    return converged, refusals
+        if via_contract:
+            contract_admitted.append(seg)
+    return converged, refusals, sorted(contract_admitted)
 
 
 def assert_project_complete(manifest: dict, converged: dict, refusals: dict) -> None:
@@ -2132,7 +2231,10 @@ def main() -> int:
         # no_converged_segments precondition right after this) have to
         # keep winning first, exactly as they did before #491 round 2.
         manifest_seg_ids = _manifest_segment_ids_or_empty(manifest)
-        converged, refusals = load_converged_segments(ledger, manifest_seg_ids)
+        contract_admission = admit_contract_only_stale(profile)
+        converged, refusals, contract_admitted = load_converged_segments(
+            ledger, manifest_seg_ids, contract_admission
+        )
         if not converged and not refusals:
             raise AssemblePrecondition(
                 "no_converged_segments",
@@ -2141,6 +2243,28 @@ def main() -> int:
             )
 
         assert_project_complete(manifest, converged, refusals)
+
+        if contract_admitted:
+            # #533. Printed HERE -- after the completeness gate has passed and
+            # before a single byte of the book is built -- because this is the
+            # one line that says what the operator's declaration actually
+            # bought on THIS run. Never printed when the declaration is absent
+            # or nothing qualified: a gate that announces itself on every run
+            # trains the reader to skip it.
+            print(
+                f"\nCONTRACT-ONLY STALE ADMITTED ({len(contract_admitted)}) -- "
+                f"profile.yml declares validation.admit_contract_only_stale, so "
+                f"these segments are being assembled although the style contract "
+                f"moved after they converged. Their drafts are unchanged since "
+                f"review (verified against reviewed_draft_sha1 below) and their "
+                f".ever_converged sentinels are intact: what they have NOT had is "
+                f"a review against the CURRENT contract. If the contract edit "
+                f"REVERSED a rule rather than adding one, re-review them instead "
+                f"of shipping this run.",
+                file=sys.stderr,
+            )
+            for seg in contract_admitted:
+                print(f"  ~ {seg}", file=sys.stderr)
 
         canon = {"entries": {}, "review_queue": []}
         if CANON_PATH.is_file():
@@ -2233,6 +2357,12 @@ def main() -> int:
         "anchor_map_path": str(anchor_map_path),
         "adapter_result": adapter_result,
     }
+    if contract_admitted:
+        # #533. Present only when the declaration is on AND something actually
+        # qualified, so an undeclared run's stdout keys are unchanged and a
+        # consumer cannot read an empty list as "we checked and there were
+        # none" on a run where nothing was ever checked.
+        result["contract_stale_admitted"] = contract_admitted
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

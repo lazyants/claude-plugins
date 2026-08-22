@@ -400,7 +400,18 @@ Exact byte-scope per field:
   strictly between the markers, never the markers themselves. Fails loudly
   (fatal, named) if: the begin marker is missing; the end marker is
   missing; either marker appears more than once; the end marker precedes
-  the begin marker.
+  the begin marker. Being GLOBAL, one edit inside the span flips every
+  already-converged segment to `stale` at once. `style_contract_hash` is NOT
+  in the machinery-only carve-out and never will be — that set means "can
+  never change what the prose should say", which a contract can. Instead,
+  `profile.yml`'s `validation.admit_contract_only_stale: true` (#533) opens a
+  second, separately named acceptance path in `final_audit.py`'s
+  `project_complete` and `assemble.py`'s assembly gate for a flipped unit
+  whose `.ever_converged` sentinel is not absent, whose draft still matches
+  its `reviewed_draft_sha1`, and whose every other moved field is
+  machinery-only. Nothing is rewritten and no hash is stamped: the record
+  still reads `stale`, and both gates list the admitted segment ids. Undeclared
+  — or declared `false` — both gates refuse exactly as they did before.
 - **`used_terms_hash`** (per-segment) — sha1 of the `canon.json` entries
   actually referenced by this segment's own `canon_names[]` **or**
   `new_names[]` list (from its segpack) that currently exist in

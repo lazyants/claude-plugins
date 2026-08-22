@@ -316,6 +316,26 @@ validation:
     # validate_draft.py reads THIS field rather than a hardcoded literal -- a target-language-
     # appropriate marker a translator agent uses/leaves behind for "not yet translated," which the false-green
     # gate scans for verbatim.
+  admit_contract_only_stale: false
+    # OPT-IN, default false (#533). Editing style_bible.md between the STYLE_CONTRACT markers moves
+    # style_contract_hash, which flips EVERY already-converged segment to `stale` -- and both the W7
+    # completeness gate and W9 assembly then refuse to ship until each flipped unit converges again.
+    # R9 says such an edit applies FORWARD and owes no back-sweep; this field is how the tooling is
+    # allowed to agree with it. Set to true and a flipped unit is admitted ONLY when all of: its
+    # `.ever_converged` sentinel is not absent; its on-disk draft still matches the recorded
+    # reviewed_draft_sha1 (so no prose changed, only the standard); and every other moved cache-key
+    # field is machinery-only (plugin bytes, schema shape, derivation-bundle bytes). Any other moved
+    # field -- the source text, the prompts, canon terms, engine or extraction config -- still refuses,
+    # naming itself.
+    # What it does NOT do: it never rewrites a ledger record and never stamps a hash. The record keeps
+    # saying `stale`, and every admitted segment is named on stderr and in each gate's structured
+    # stdout, so "these N units shipped without being judged against the current contract" is written
+    # down. And it cannot tell an ADDITION from a REVERSAL: a rule you REVERSED actively demanded the
+    # wrong choice in the segments already converged under it, and one global style_contract_hash
+    # cannot distinguish the two cases. After a reversal, re-review rather than declaring this.
+    # Keep the value stable from W7 through delivery -- final_audit.py, assemble.py,
+    # validate_assembled.py and validate_conservation.py all read this same field, and toggling it
+    # between those steps is the one way to make them disagree about the same book.
 
 output:
   v1_scope: segment_drafts_and_audit

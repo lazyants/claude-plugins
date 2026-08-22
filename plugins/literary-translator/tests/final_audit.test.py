@@ -177,8 +177,17 @@ DEFAULT_STOPWORDS = ["de", "la", "le", "et", "un", "une", "des", "du", "les", "d
 # ---------------------------------------------------------------------------
 
 
-def default_profile(particle_config="fr_test.json", verse_mode="full_rhymed_plus_literal"):
-    return {
+def default_profile(
+    particle_config="fr_test.json",
+    verse_mode="full_rhymed_plus_literal",
+    admit_contract_only_stale=None,
+):
+    """`admit_contract_only_stale=None` OMITS the #533 key entirely -- the
+    shape every existing project has -- while True/False write it
+    explicitly. The three shapes must stay distinguishable: absent and
+    explicitly-false have to behave identically, and a fixture that could
+    only express one of them could not prove it."""
+    profile = {
         "project": {"pipeline_version": "v1"},
         "engine": {"effort": "high", "max_fix_rounds": 4, "batch_agent_cap": 1000},
         "source": {
@@ -198,6 +207,9 @@ def default_profile(particle_config="fr_test.json", verse_mode="full_rhymed_plus
         "footnotes": {"apparatus_policy": "translate_all"},
         "validation": {"untranslated_sentinel": "[TODO-UNTRANSLATED]"},
     }
+    if admit_contract_only_stale is not None:
+        profile["validation"]["admit_contract_only_stale"] = admit_contract_only_stale
+    return profile
 
 
 def make_durable_root(
@@ -207,6 +219,7 @@ def make_durable_root(
     verse_mode="full_rhymed_plus_literal",
     stopwords=None,
     canon=None,
+    admit_contract_only_stale=None,
 ) -> Path:
     """Build a COMPLETE, internally-consistent durable_root: real copies of
     every script final_audit.py touches, real schemas/ (ledger_merge.py
@@ -227,7 +240,13 @@ def make_durable_root(
     (scripts_dir / "segpack.py").write_bytes(b"# segpack.py fixture placeholder\n")
 
     (root / "profile.yml").write_text(
-        yaml.safe_dump(default_profile(verse_mode=verse_mode), sort_keys=False),
+        yaml.safe_dump(
+            default_profile(
+                verse_mode=verse_mode,
+                admit_contract_only_stale=admit_contract_only_stale,
+            ),
+            sort_keys=False,
+        ),
         encoding="utf-8",
     )
     (root / ".literary-translator-root.json").write_text(
@@ -1293,6 +1312,152 @@ def test_completeness_gate_stale_among_converged_exits_3(tmp_path):
     )
     assert summary["project_complete"] is False
     assert summary["completeness_counts"]["stale"] == 1
+
+
+# ===========================================================================
+# #533 -- the contract-only stale admission, END TO END through this script's
+# CLI. The predicate itself, the arithmetic, the reader and the cross-gate
+# parity live in tests/contract_stale_admission.test.py; what is pinned HERE
+# is the wiring only this harness can reach: a REAL style_contract_hash drift
+# classified by a REAL select_segments.py run, the exit code, the emitted
+# summary (schema-validated), and the stderr disclosure.
+# ===========================================================================
+
+
+def _run_contract_stale_book(tmp_path, admit, label):
+    """Shared body for the two undeclared shapes below. Written as a helper
+    rather than a parametrize because this file imports pytest locally, in
+    the one function that needs it, and has no module-level import to hang a
+    marker off."""
+    root = make_durable_root(
+        tmp_path, seg_ids=("seg01", "seg02"), admit_contract_only_stale=admit
+    )
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    corrupt_cache_key_field(root, "seg02", "style_contract_hash")
+    mark_ever_converged(root, "seg02")
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 3, (
+        f"[{label}] an undeclared contract-stale unit must still block the "
+        f"whole-project gate:\n{result.stderr}"
+    )
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["hard_failures"] == 0, result.stderr
+    assert summary["project_complete"] is False
+    assert summary["completeness_counts"]["stale"] == 1
+    assert summary["stale_previously_converged"] == 0, (
+        f"[{label}] style_contract_hash must never reach the #409 "
+        f"machinery-only carve-out: {summary!r}"
+    )
+    assert "stale_contract_admitted" not in summary, (
+        f"[{label}] an undeclared run must not emit the #533 key at all: {summary!r}"
+    )
+    assert "CONTRACT-ONLY STALE ADMITTED" not in result.stderr
+
+
+def test_contract_only_stale_still_blocks_when_declaration_absent(tmp_path):
+    """The refusal this feature exists to make optional -- and which must stay
+    the default for every project that has not opted in."""
+    _run_contract_stale_book(tmp_path, None, "absent")
+
+
+def test_contract_only_stale_still_blocks_when_declaration_is_false(tmp_path):
+    """Explicitly false must behave exactly like absent. An implementation
+    keying on the KEY's presence rather than its VALUE would pass the absent
+    case above and fail here -- which is the only reason both exist."""
+    _run_contract_stale_book(tmp_path, False, "explicit-false")
+
+
+def test_declared_contract_only_stale_completes_and_is_named(tmp_path):
+    """The whole point: a book whose ONLY remaining incompleteness is a
+    contract edit becomes shippable, and says by name which units are
+    shipping unjudged against the current contract.
+
+    Mutation: subtract the count but omit the summary key -> the naming
+    assertions go red while the exit code still passes."""
+    root = make_durable_root(
+        tmp_path, seg_ids=("seg01", "seg02"), admit_contract_only_stale=True
+    )
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    corrupt_cache_key_field(root, "seg02", "style_contract_hash")
+    mark_ever_converged(root, "seg02")
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0, (
+        f"a declared contract-only stale unit must not block the gate:\n{result.stderr}"
+    )
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["project_complete"] is True
+    assert summary["completeness_counts"]["stale"] == 1, (
+        f"the RAW stale count must stay visible -- the admission subtracts "
+        f"from the VERDICT, never from the operator's view of the book: {summary!r}"
+    )
+    assert summary["stale_contract_admitted"] == ["seg02"], summary
+    assert summary["stale_previously_converged"] == 0, summary
+    assert "CONTRACT-ONLY STALE ADMITTED (1)" in result.stderr, result.stderr
+    assert "  ~ seg02" in result.stderr, result.stderr
+
+
+def test_declared_admission_does_not_cover_a_sentinel_less_unit(tmp_path):
+    """Same book, same declaration, no sentinel: the unit cannot be shown to
+    have converged at all, so it still blocks."""
+    root = make_durable_root(
+        tmp_path, seg_ids=("seg01", "seg02"), admit_contract_only_stale=True
+    )
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    corrupt_cache_key_field(root, "seg02", "style_contract_hash")
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 3, result.stderr
+    summary = parse_summary(result)
+    assert summary["project_complete"] is False
+    assert "stale_contract_admitted" not in summary, summary
+
+
+def test_declared_admission_does_not_cover_another_content_field(tmp_path):
+    """A prompt_hash drift alongside the contract move is a genuinely
+    different book: the declaration says "only the standard moved", and here
+    something else did."""
+    root = make_durable_root(
+        tmp_path, seg_ids=("seg01", "seg02"), admit_contract_only_stale=True
+    )
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
+    corrupt_cache_key_field(root, "seg02", "style_contract_hash")
+    corrupt_cache_key_field(root, "seg02", "prompt_hash")
+    mark_ever_converged(root, "seg02")
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 3, result.stderr
+    summary = parse_summary(result)
+    assert summary["project_complete"] is False
+    assert "stale_contract_admitted" not in summary, summary
+
+
+def test_declared_admission_with_nothing_to_admit_emits_nothing_new(tmp_path):
+    """A fully converged, declared project must look exactly like a fully
+    converged undeclared one -- an emitted empty list would be a claim about
+    a check that had nothing to check."""
+    root = make_durable_root(tmp_path, seg_ids=("seg01",), admit_contract_only_stale=True)
+    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+
+    result = run_final_audit(root)
+
+    assert result.returncode == 0, result.stderr
+    summary = parse_summary(result)
+    assert_schema_valid(summary)
+    assert summary["project_complete"] is True
+    assert "stale_contract_admitted" not in summary, summary
+    assert "CONTRACT-ONLY STALE ADMITTED" not in result.stderr
 
 
 def test_completeness_gate_blocked_needs_regeneration_among_converged_exits_3(tmp_path):

@@ -242,6 +242,33 @@ SAFE_STALE_CARVEOUT_FIELDS = frozenset(
     {"plugin_bundle_hash", "schema_hash", "derivation_bundle_hash"}
 )
 
+# #533's second, opt-in acceptance path -- deliberately NOT added to the set
+# above, whose meaning ("can never change what the prose should say") is false
+# for the style contract. See final_audit.collect_stale_contract_admitted()
+# for the authoritative predicate; this file restates the field-list half of
+# it, exactly as it already restates the field-list half of the #491 one.
+CONTRACT_ONLY_STALE_FIELD = "style_contract_hash"
+
+
+def admit_contract_only_stale(profile):
+    """Reads profile.yml's `validation.admit_contract_only_stale` (#533).
+
+    True for a LITERAL `True` and nothing else -- an absent or non-dict
+    `validation` block, an absent key, `false`, `null`, the string "true" and
+    the integer 1 all read as False. `is True` rather than truthiness, so `1`
+    (which compares equal to True) cannot become consent. Fail-closed.
+
+    Byte-identical to assemble.py's and final_audit.py's own copies, restated
+    rather than imported per this plugin's self-contained script convention
+    and pinned against them by tests/contract_stale_admission.test.py.
+    validate_conservation.py deliberately does NOT hold a fourth copy: it
+    already imports this module as `va` for the rebind population itself, so
+    it calls THIS function."""
+    validation = (profile or {}).get("validation")
+    if not isinstance(validation, dict):
+        return False
+    return validation.get("admit_contract_only_stale") is True
+
 
 class _MalformedArtifact(Exception):
     """THE INVARIANT this exception enforces: every input that determines
@@ -752,7 +779,9 @@ def _rebind_or_flag_stale(seg, record, stale_segs):
     return draft
 
 
-def _stale_qualifies_for_carveout(record: dict) -> bool:
+def _stale_qualifies_for_carveout(
+    record: dict, admit_contract_only: bool = False
+) -> bool:
     """True iff `record` (a runs/ledger.json segments{} entry already known
     to have status=="stale") qualifies for the #491 machinery-only carve-out
     -- i.e. is to be treated exactly like status=="converged" by
@@ -821,16 +850,45 @@ def _stale_qualifies_for_carveout(record: dict) -> bool:
     above already gives, at the cost of a SIXTH byte-identical copy of a
     predicate the #409 program already restates five times and enforces
     byte-for-byte (tests/select_segments.test.py's
-    test_exactly_these_five_scripts_participate_in_the_sentinel_contract)."""
+    test_exactly_these_five_scripts_participate_in_the_sentinel_contract).
+
+    #533 EXTENDS BOTH HALVES OF THAT ASYMMETRY, deliberately and with the same
+    reasoning. When `admit_contract_only` is set, this gate admits a record
+    whose only non-machinery moved field is style_contract_hash -- and it does
+    NOT check the sentinel for that population either. Reason 2 above carries
+    over unchanged: final_audit.py's own collect_stale_contract_admitted()
+    requires the SAME non-ABSENT sentinel on exactly this population, one gate
+    earlier, so a sentinel-less contract-stale segment cannot reach here
+    through the normal W1-W9 wiring. Reason 1 carries over too: admitting it
+    here grants no capability a plain `converged` record did not already have,
+    and reaching it costs strictly more. The residual window -- a sentinel that
+    vanishes BETWEEN final_audit.py and this gate -- is the identical window
+    the #491 machinery-only population has accepted since 1.25.0; closing it
+    for one population and not the other would be worse than either. Closing
+    it for both means making this file a SIXTH sentinel participant, which
+    tests/select_segments.test.py's own census refuses by construction: the
+    participant COUNT is written into that test's name so growing it is a
+    deliberate rename, and it has already caught exactly this shape once for
+    real (#491/#490 adding assemble.py)."""
     mismatched = record.get("stale_mismatched_fields")
     if not isinstance(mismatched, list) or not mismatched:
         return False
     if not all(isinstance(f, str) for f in mismatched):
         return False
-    return all(f in SAFE_STALE_CARVEOUT_FIELDS for f in mismatched)
+    allowed = SAFE_STALE_CARVEOUT_FIELDS
+    if admit_contract_only:
+        # #533's second acceptance path, opened only by the project's own
+        # declaration. Set membership, matching assemble.py's own gate, so a
+        # hand-edited `["style_contract_hash", "style_contract_hash"]` --
+        # schema-valid, ledger.schema.json having minItems but no uniqueItems
+        # -- cannot be admitted by one gate and refused by another.
+        allowed = allowed | {CONTRACT_ONLY_STALE_FIELD}
+    return all(f in allowed for f in mismatched)
 
 
-def collect_reviewed_draft_rebind(ledger_segments, manifest_seg_ids):
+def collect_reviewed_draft_rebind(
+    ledger_segments, manifest_seg_ids, admit_contract_only=False
+):
     """Rebind-checks EVERY converged segment in `ledger_segments`, PLUS
     every #491 machinery-only carved-out stale segment (see
     _stale_qualifies_for_carveout() above) that the CURRENT manifest still
@@ -844,7 +902,11 @@ def collect_reviewed_draft_rebind(ledger_segments, manifest_seg_ids):
     even though it declares no heading at all and the coverage invariant
     would otherwise never look at it (BLOCKER 1) -- and #491 must not
     narrow that guarantee back down for a carved-out stale segment. Returns
-    (trusted_drafts: {seg: draft dict}, stale_segs: set) -- `trusted_drafts`
+    (trusted_drafts: {seg: draft dict}, stale_segs: set, contract_admitted:
+    sorted list) -- `contract_admitted` (#533) names the segments admitted
+    ONLY by the opt-in contract-only path, so this gate can say what it is
+    trusting on the operator's declaration rather than on a review; always
+    empty when `admit_contract_only` is False. `trusted_drafts`
     holds only segments that passed the rebind; any other segment (never
     converged, "stale" but not carve-out-eligible, or a carved-out stale
     segment the current manifest no longer requires -- see
@@ -894,6 +956,7 @@ def collect_reviewed_draft_rebind(ledger_segments, manifest_seg_ids):
     fatal here, never silently scoped away."""
     trusted_drafts = {}
     stale_segs = set()
+    contract_admitted = []
     for seg, record in ledger_segments.items():
         # SECURITY (path-traversal): this seg key becomes draft_path(seg) =
         # SEGMENTS_DIR / f"{seg}.draft.json" (via _rebind_or_flag_stale
@@ -924,7 +987,12 @@ def collect_reviewed_draft_rebind(ledger_segments, manifest_seg_ids):
                 f"not one of {sorted(LEDGER_STATUS_ENUM)} (ledger.schema.json) "
                 f"-- cannot classify its convergence state"
             )
-        if status == "stale" and _stale_qualifies_for_carveout(record) and seg in manifest_seg_ids:
+        via_contract = False
+        if (
+            status == "stale"
+            and _stale_qualifies_for_carveout(record, admit_contract_only)
+            and seg in manifest_seg_ids
+        ):
             # #491 -- falls through to the SAME rebind treatment as
             # status=="converged". See _stale_qualifies_for_carveout's own
             # docstring for exactly which of assemble.py's four carve-out
@@ -933,7 +1001,23 @@ def collect_reviewed_draft_rebind(ledger_segments, manifest_seg_ids):
             # restated here); see this function's own `manifest_seg_ids`
             # paragraph for why the #491 R2 membership test scopes this
             # branch and only this branch.
-            pass
+            # #533: note WHICH acceptance path let this record through, so
+            # this gate can NAME what it ends up trusting on the operator's
+            # declaration rather than on a review. Re-derived from the record
+            # (a field outside the machinery-only allowlist moved) rather than
+            # returned by the predicate, so the two cannot disagree about a
+            # record the predicate already accepted.
+            #
+            # NOTED here, REPORTED below only if the rebind then passes. A
+            # record that takes this branch and FAILS the reviewed-SHA rebind
+            # is not admitted by this gate at all -- it is reported as a
+            # stale_review_since_audit defect -- and listing it as admitted
+            # would make one gate's own output contradict itself: named as
+            # trusted in `contract_stale_admitted`, named as a HARD defect two
+            # lines above it.
+            via_contract = admit_contract_only and not set(
+                record["stale_mismatched_fields"]
+            ).issubset(SAFE_STALE_CARVEOUT_FIELDS)
         elif status != "converged":
             # A stale entry that doesn't qualify for the carve-out, and a
             # carved-out stale entry the manifest no longer requires, land
@@ -947,7 +1031,9 @@ def collect_reviewed_draft_rebind(ledger_segments, manifest_seg_ids):
         draft = _rebind_or_flag_stale(seg, record, stale_segs)
         if draft is not None:
             trusted_drafts[seg] = draft
-    return trusted_drafts, stale_segs
+            if via_contract:
+                contract_admitted.append(seg)
+    return trusted_drafts, stale_segs, sorted(contract_admitted)
 
 
 def collect_default_output_markers(source_counter, trusted_drafts):
@@ -1239,6 +1325,11 @@ def main():
     # treats as "nothing to check on this side".
     trusted_drafts = None
     nodestream = None
+    # #533: bound here rather than only inside the default-scope branch --
+    # `assembled_book` scope never consults the ledger at all (it reads the
+    # assembled NodeStream), so there is no admission for it to report, and
+    # an unbound name would be a NameError at the report below.
+    contract_admitted = []
     # codex R4: `_validate_manifest_shape()` -- the SINGLE, up-front,
     # gate-scoped shape validator -- runs FIRST, before any collector, so
     # every collector below can TRUST every element shape it reads (see
@@ -1294,8 +1385,10 @@ def main():
             # to segments the CURRENT manifest still requires -- see that
             # function's own `manifest_seg_ids` docstring paragraph for why
             # a retained, out-of-manifest ledger entry must not reach it.
-            trusted_drafts, stale_segs = collect_reviewed_draft_rebind(
-                ledger_segments, collect_manifest_seg_ids(manifest_segments)
+            trusted_drafts, stale_segs, contract_admitted = collect_reviewed_draft_rebind(
+                ledger_segments,
+                collect_manifest_seg_ids(manifest_segments),
+                admit_contract_only_stale(profile),
             )
             output_counter = collect_default_output_markers(source_counter, trusted_drafts)
         else:
@@ -1340,9 +1433,30 @@ def main():
     print(f"\nWARN ({len(warnings)}):", file=sys.stderr)
     for w in warnings:
         print(f"  • [{w['seg']}/{w['block_id']}] {w['kind']} (type={w['raw_type']!r})", file=sys.stderr)
+    if contract_admitted:
+        # #533. This gate trusts these drafts because the operator declared
+        # them shippable, not because a reviewer read them against the current
+        # contract -- so it says so, by name, rather than letting a fourth
+        # gate consume the exception silently.
+        print(
+            f"\nCONTRACT-ONLY STALE ADMITTED ({len(contract_admitted)}) -- "
+            f"profile.yml declares validation.admit_contract_only_stale, so "
+            f"these segments are rebind-checked and counted here although the "
+            f"style contract moved after they converged. Their drafts are "
+            f"unchanged since review; what they have NOT had is a review "
+            f"against the CURRENT contract.",
+            file=sys.stderr,
+        )
+        for seg in contract_admitted:
+            print(f"  ~ {seg}", file=sys.stderr)
 
     # --- structured stdout: exactly one JSON line ---------------------------
-    print(json.dumps({"defects": defects, "warnings": warnings}, ensure_ascii=False))
+    payload = {"defects": defects, "warnings": warnings}
+    if contract_admitted:
+        # Omitted, never emitted empty: a run that never checked must not be
+        # readable as a run that checked and found none.
+        payload["contract_stale_admitted"] = contract_admitted
+    print(json.dumps(payload, ensure_ascii=False))
 
     sys.exit(1 if defects else 0)
 

@@ -1121,8 +1121,16 @@ def test_snapshot_level_gate_parity_with_final_audit(tmp_path):
         # never the round-2 manifest-membership scoping (that has its own
         # dedicated tests below), so it must never accidentally exercise
         # the new skip branch.
-        converged, refusals = assemble_mod.load_converged_segments(
+        # Three values since #533; this helper drives the #491 machinery-only
+        # path only, so the third (contract-admitted) list is always empty
+        # here -- asserted rather than discarded, so a #533 regression that
+        # widened THIS path would surface in the #491 suite too.
+        converged, refusals, contract_admitted = assemble_mod.load_converged_segments(
             {"segments": {"seg01": record}}, {"seg01"}
+        )
+        assert contract_admitted == [], (
+            "the #491 machinery-only carve-out must never route a record "
+            f"through #533's opt-in path (got {contract_admitted!r})"
         )
         assert ("seg01" in converged) != ("seg01" in refusals), "must be exactly one of the two"
         return "seg01" in converged
@@ -1526,7 +1534,9 @@ def test_out_of_manifest_carved_out_stale_records_are_skipped_with_no_refusal(tm
     }
     for label, seg99_record in rows.items():
         ledger = {"segments": {"seg01": seg01_record, "seg99": seg99_record}}
-        converged, refusals = assemble_mod.load_converged_segments(ledger, manifest_ids)
+        converged, refusals, _contract_admitted = assemble_mod.load_converged_segments(
+            ledger, manifest_ids
+        )
         assert "seg99" not in converged, (
             f"{label}: an out-of-manifest carved-out stale record must "
             f"never be silently accepted into `converged`"

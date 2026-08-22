@@ -1243,6 +1243,96 @@ def count_stale_previously_converged(classification, sentinel_states=None):
     return n
 
 
+# ---------------------------------------------------------------------------
+# #533: the SECOND, opt-in subtraction. style_contract_hash is deliberately
+# NOT added to SAFE_STALE_CARVEOUT_FIELDS above -- that set means "can never
+# change what the prose should say", which is false for the style contract,
+# and it is read for two other questions besides this one (assemble.py's
+# assembly gate and select_segments.py's D6 report). Instead this is a
+# separately named acceptance path, reached only when the project's own
+# profile.yml declares it, and it names every segment it admits rather than
+# counting them.
+# ---------------------------------------------------------------------------
+
+CONTRACT_ONLY_STALE_FIELD = "style_contract_hash"
+
+
+def admit_contract_only_stale(profile):
+    """Reads profile.yml's `validation.admit_contract_only_stale` (#533).
+
+    True for a LITERAL `True` and nothing else -- an absent or non-dict
+    `validation` block, an absent key, `false`, `null`, the string "true" and
+    the integer 1 all read as False. `is True` rather than truthiness, so `1`
+    (which compares equal to True) cannot become consent. Fail-closed:
+    forgetting the declaration refuses, exactly as before this field existed.
+
+    Byte-identical to assemble.py's and validate_assembled.py's own copies --
+    restated rather than imported, per this plugin's self-contained script
+    convention, and pinned against them by
+    tests/contract_stale_admission.test.py."""
+    validation = (profile or {}).get("validation")
+    if not isinstance(validation, dict):
+        return False
+    return validation.get("admit_contract_only_stale") is True
+
+
+def collect_stale_contract_admitted(classification, sentinel_states):
+    """The sorted list of 'stale' segments admitted by #533's opt-in path:
+    already-converged units whose ONLY non-machinery cache-key movement is
+    style_contract_hash.
+
+    A LIST, not a count, because what is being recorded is an operator act --
+    "these segments shipped without being judged against the current
+    contract" -- and a number cannot be checked against the book later.
+
+    Every condition is the fail-safe direction, each independently sufficient
+    to keep a segment OUT (so it keeps blocking project_complete exactly as
+    before):
+      - `stale_reason` is anything other than exactly `['cache_key_mismatch']`
+        -- in particular 'draft_sha1_mismatch', which is how this function
+        enforces "the draft has not changed since the review that converged
+        it" without recomputing a single sha1: select_segments.py puts that
+        reason there precisely when the on-disk draft no longer matches its
+        own reviewed_draft_sha1;
+      - `mismatched_fields` is empty, not a list, or has a non-string member;
+      - style_contract_hash is NOT among the moved fields (that record belongs
+        to the #409 machinery-only count, or to neither);
+      - some OTHER moved field is outside SAFE_STALE_CARVEOUT_FIELDS -- the
+        source text, the prompts, canon terms, engine/extraction config, or
+        an unrecognised future field, which is outside by construction;
+      - the `.ever_converged` sentinel is ABSENT.
+
+    Membership is tested as a SET, so a hand-edited runs/ledger.json carrying
+    `["style_contract_hash", "style_contract_hash"]` -- which
+    ledger.schema.json permits, having minItems but no uniqueItems -- reaches
+    the same verdict here as in assemble.py's own gate. Two gates disagreeing
+    about one record is the failure mode this whole feature has to avoid.
+
+    AMBIGUOUS carves out exactly like PRESENT, and only a clean ENOENT does
+    not -- identical to count_stale_previously_converged() above, for the
+    identical reason (see its comment: refusing is the destructive branch
+    here, and unrecoverably so)."""
+    allowed = SAFE_STALE_CARVEOUT_FIELDS | {CONTRACT_ONLY_STALE_FIELD}
+    admitted = []
+    for seg, entry in classification.items():
+        if not isinstance(entry, dict) or entry.get("category") != "stale":
+            continue
+        if entry.get("stale_reason") != ["cache_key_mismatch"]:
+            continue
+        mismatched = entry.get("mismatched_fields")
+        if not isinstance(mismatched, list) or not mismatched:
+            continue
+        if not all(isinstance(f, str) for f in mismatched):
+            continue
+        moved = set(mismatched)
+        if CONTRACT_ONLY_STALE_FIELD not in moved or not moved.issubset(allowed):
+            continue
+        state, _detail = sentinel_states[seg]
+        if state != SENTINEL_ABSENT:
+            admitted.append(seg)
+    return sorted(admitted)
+
+
 def scan_sentinel_states(classification):
     """One authoritative read of every classified segment's `.ever_converged`
     entry, as `{seg: (state, detail)}`.
@@ -1273,9 +1363,16 @@ def collect_ambiguous_sentinels(classification, sentinel_states=None):
     (see its comment) but it would otherwise make a broken sentinel path
     completely invisible, and the operator is the only one who can repair it.
     Reported on stderr rather than in the JSON summary because
-    final-audit-summary.schema.json is `additionalProperties: false` and its
-    bytes feed schema_hash -- a diagnostic is not worth staling every converged
-    segment in every project to add a field.
+    final-audit-summary.schema.json is `additionalProperties: false`, so a new
+    field means editing it, and its bytes are hashed by resume_setup.py's
+    `_schemas_dir_hash()` (which globs EVERY schemas/*.schema.json) -- a
+    diagnostic is not worth moving a project's resume identity to add a field.
+    NOT schema_hash, which an earlier version of this paragraph claimed:
+    `cache_key.compute_schema_hash()` hashes only the project-local
+    draft/review/segpack schemas, so editing this one stales no converged
+    segment at all. The cost is real but smaller than it was written to be --
+    an interrupted run restarting at the project's next Step 0a re-scaffold,
+    never a re-translation.
 
     Scans EVERY classified segment, not only the carve-out candidates: a
     broken sentinel on a reusable or converged segment is the same latent
@@ -1330,7 +1427,9 @@ def build_frontback_coverage(classification_by_seg):
 # Project completeness -- #409 Step 2 carve-out applied.
 # ---------------------------------------------------------------------------
 
-def compute_project_complete(completeness_counts, stale_previously_converged):
+def compute_project_complete(
+    completeness_counts, stale_previously_converged, stale_contract_admitted=0
+):
     """Pure, unit-testable without a durable root -- mirrors
     completeness_exit_code()'s own pattern. True iff every non-'stale'
     completeness category is 0 AND every 'stale' segment is accounted for
@@ -1340,11 +1439,24 @@ def compute_project_complete(completeness_counts, stale_previously_converged):
     count_stale_previously_converged()'s own docstring and this module's
     docstring ("#409 Step 2 carve-out") for why a 'stale' segment without
     the sentinel must still block completeness exactly as before (the
-    fail-safe direction)."""
+    fail-safe direction).
+
+    `stale_contract_admitted` (#533) is the SECOND subtraction: the number of
+    'stale' segments the operator has explicitly declared shippable because
+    only the style contract moved beneath them. It defaults to 0, so every
+    existing caller -- and every project that has not declared it -- gets
+    exactly the arithmetic above. The two subtracted populations are disjoint
+    by construction: the #409 one requires every moved field to be inside
+    SAFE_STALE_CARVEOUT_FIELDS, the #533 one requires style_contract_hash to
+    be among the moved fields, and that field is not in that set."""
     non_stale_clear = all(
         v == 0 for cat, v in completeness_counts.items() if cat != "stale"
     )
-    stale_blocking = completeness_counts.get("stale", 0) - stale_previously_converged
+    stale_blocking = (
+        completeness_counts.get("stale", 0)
+        - stale_previously_converged
+        - stale_contract_admitted
+    )
     return non_stale_clear and stale_blocking == 0
 
 
@@ -1468,11 +1580,28 @@ def main():
         classification_by_seg, sentinel_states
     )
 
+    # #533: read the declaration HERE, where it is used, rather than reusing
+    # either of the two profile reads this run already performs. Deliberate:
+    # hard_check_coverage() loads the profile for its own ProfileConfig and
+    # the foreign-remainder WARN block loads it again inside a try that
+    # downgrades a failure to a skipped check -- borrowing that one would make
+    # a stopwords problem silently cancel the operator's declaration and block
+    # a shippable book. A malformed profile/ownership marker cannot reach this
+    # line: hard_check_coverage()'s own unguarded load, far above, raises on it
+    # first, exactly as it does today.
+    stale_contract_admitted = (
+        collect_stale_contract_admitted(classification_by_seg, sentinel_states)
+        if admit_contract_only_stale(vd.load_profile())
+        else []
+    )
+
     # Rollup invariant, enforced procedurally: project_complete is true if
     # and only if every one of completeness_counts' non-'stale' four values
     # is 0 AND completeness_counts['stale'] - stale_previously_converged == 0
     # (i.e. every 'stale' segment is carved out by the sentinel).
-    project_complete = compute_project_complete(completeness_counts, stale_previously_converged)
+    project_complete = compute_project_complete(
+        completeness_counts, stale_previously_converged, len(stale_contract_admitted)
+    )
 
     frontback_coverage = build_frontback_coverage(classification_by_seg)
 
@@ -1487,6 +1616,12 @@ def main():
         "frontback_coverage": frontback_coverage,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if stale_contract_admitted:
+        # #533. Present only when the declaration is on AND something actually
+        # qualified, so an undeclared project's summary keys are unchanged and
+        # an empty list can never be read as "we checked, there were none" on
+        # a run where nothing was ever checked.
+        summary["stale_contract_admitted"] = stale_contract_admitted
 
     # --- human-readable report, to stderr -----------------------------------
     print("=" * 70, file=sys.stderr)
@@ -1509,6 +1644,24 @@ def main():
         + f", stale_previously_converged={stale_previously_converged}",
         file=sys.stderr,
     )
+    if stale_contract_admitted:
+        # Directly under the completeness verdict, and above the ambiguous
+        # sentinels, for the same reason that block sits there: the verdict
+        # printed one line up is true only because the operator declared these
+        # units shippable, and whoever reads COMPLETE needs both facts in one
+        # glance.
+        print(
+            f"\nCONTRACT-ONLY STALE ADMITTED ({len(stale_contract_admitted)}) -- "
+            f"profile.yml declares validation.admit_contract_only_stale, so these "
+            f"segments do not block the verdict above although the style contract "
+            f"moved after they converged. Their drafts are unchanged since review "
+            f"and their .ever_converged sentinels are intact; what they have NOT "
+            f"had is a review against the CURRENT contract. If the contract edit "
+            f"REVERSED a rule rather than adding one, re-review them instead.",
+            file=sys.stderr,
+        )
+        for seg in stale_contract_admitted:
+            print(f"  ~ {seg}", file=sys.stderr)
     if ambiguous_sentinels:
         # Printed right under the completeness verdict on purpose: this is the
         # one place where the number above rests on a sentinel nobody could

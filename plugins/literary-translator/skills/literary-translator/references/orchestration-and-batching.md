@@ -118,8 +118,13 @@ is the orchestration-level summary of what each stage hands to the next):
 - **W7 Final audit** — `scripts/final_audit.py`'s hard checks plus WARN-only
   advisory checks over every converged segment, plus a whole-project
   completeness gate (one final `select_segments.py` invocation with no
-  `--only-segs` restriction). `project_complete: true` only when every
-  `manifest.json` segment classifies `reusable`; the frontback coverage report
+  `--only-segs` restriction). `project_complete: true` when every
+  `manifest.json` segment classifies `reusable`, MINUS two named carve-outs
+  for segments that already converged and only look stale: the #491
+  machinery-only one (`stale_previously_converged`, always on) and, when
+  `profile.yml` declares `validation.admit_contract_only_stale`, #533's
+  contract-only one (`stale_contract_admitted`, which names its segments).
+  Every other `stale` segment blocks exactly as before; the frontback coverage report
   is advisory only, and this frontback-through-segment-loop treatment is new
   plugin hardening, not source-proven.
 - **W8 Deliver** — report convergence stats, list any `blocked` or

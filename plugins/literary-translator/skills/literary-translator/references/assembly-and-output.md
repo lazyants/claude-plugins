@@ -64,9 +64,21 @@ human review; they are never auto-fixed by guessing.
 `completeness_counts` uses exactly `not_started`, `recoverable`, `stale`,
 `blocked_needs_regeneration`, and `human_escalation`. `human_escalation` is the
 category for materialized `blocked` or `non_converged` statuses.
-`project_complete == (every one of completeness_counts' five values == 0)`,
-which means every `manifest.json` segment, including translate-decision
-`FRONTBACK:{id}` units, classifies `reusable`.
+`project_complete == (every one of completeness_counts' four non-'stale'
+values == 0 AND completeness_counts.stale - stale_previously_converged -
+len(stale_contract_admitted) == 0)`. In the plain case that means every
+`manifest.json` segment, including translate-decision `FRONTBACK:{id}` units,
+classifies `reusable`; the two subtractions are the named carve-outs for
+segments that DID converge and only look stale afterwards. The first
+(`stale_previously_converged`, #409/#491, always on) covers a machinery-only
+cache-key move. The second (`stale_contract_admitted`, #533) covers a
+`style_contract_hash` move and exists only when `profile.yml` declares
+`validation.admit_contract_only_stale`; it is a list of segment ids, omitted
+from the summary entirely when the declaration is absent or nothing qualified.
+The two populations are disjoint by construction — the first requires EVERY
+moved field to be machinery-only, the second requires `style_contract_hash`
+to be among them, and that field is not machinery-only.
+`completeness_counts.stale` itself stays the RAW count either way.
 
 **#208 — completeness fail-closed gate.** `final_audit.py`'s exit code is no
 longer purely a function of `hard_failures`. It now exits
@@ -147,14 +159,26 @@ in `manifest.json`.
    is the single whole-book reading-order axis — `spine[]`'s raw native file
    order and any per-segment-local `segpack.blocks[].order_index` are both
    red herrings, never the stitch key.
-2. **Gate on the ledger, per segment:** only a segment whose materialized
-   `runs/ledger.json` status is `converged`, AND whose on-disk draft sha1
-   still matches that fragment's `reviewed_draft_sha1`, is assembled — the
-   same guard `final_audit.py`'s hard check 2 already uses, so a hand-edit
-   the reviewer never saw can't silently ship inside an assembled book
-   either. The whole run is additionally gated on W7's
-   `final-audit-summary.project_complete: true` (see Path 1 above) before
-   assembly starts at all.
+2. **Gate on the ledger, per segment:** a segment is assembled when its
+   materialized `runs/ledger.json` status is `converged` — or `stale` under
+   one of the two named carve-outs below — AND its on-disk draft sha1 still
+   matches that fragment's `reviewed_draft_sha1`. That sha1 comparison is the
+   same guard `final_audit.py`'s hard check 2 uses, it is FATAL rather than a
+   silent skip, and neither carve-out relaxes it: a hand-edit the reviewer
+   never saw can't silently ship inside an assembled book either. The two
+   carve-outs mirror W7's own, so the two gates never disagree about a
+   record — (a) **machinery-only** (#491, always on): every field in
+   `stale_mismatched_fields` is in `{plugin_bundle_hash, schema_hash,
+   derivation_bundle_hash}` and the `.ever_converged.<seg>` sentinel is not
+   absent; (b) **contract-only** (#533, only when `profile.yml` declares
+   `validation.admit_contract_only_stale: true`): the same sentinel condition,
+   plus `style_contract_hash` among the moved fields and every other moved
+   field machinery-only. Units admitted by (b) are listed in `assemble.py`'s
+   own `contract_stale_admitted` stdout key and named on stderr — they ship
+   without having been judged against the current style contract, which is a
+   decision the operator made, not one the tool inferred. The whole run is
+   additionally gated on W7's `final-audit-summary.project_complete: true`
+   (see Path 1 above) before assembly starts at all.
 3. For each block: translated text comes from `segments/{seg}.draft.json`;
    its manifest type and `source_html` presence decide `medium`
    (`html`|`plain`). A block whose `type` is `HEAD`, **or is listed in the

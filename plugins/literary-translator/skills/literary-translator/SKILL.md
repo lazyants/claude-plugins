@@ -779,17 +779,30 @@ here, follow the linked doc:
   The mechanical `converged → stale` flip that follows the edit is a
   bookkeeping consequence of `style_contract_hash` being a cache-key field
   (`references/ledger-and-resumability.md`), not evidence that any prose needs
-  rechecking. The one real constraint is TIMING, not content: segments that
-  converge AFTER the edit carry the new hash and are unaffected, so make
-  contract edits while the loop is still running — an edit landing after the
-  last segment converges re-stales the corpus and blocks W9 assembly, buying
-  nothing but a re-run for the stamp. The move is in the BYTES, not in the
-  number of edits: corrections landed together before the loop resumes cost
-  one flip for all of them, while the same corrections interleaved with
-  reconvergence cost a flip each. So hold pending contract corrections and
-  land them in one edit at a batch boundary — the shipped
-  `style_bible.template.md` says this under section E-traps; it holds for
-  the whole marked span.
+  rechecking. **Since 1.40.0 the tooling can be told to agree** — set
+  `validation.admit_contract_only_stale: true` in `profile.yml` and both the W7
+  completeness gate and W9 assembly admit a flipped unit whose `.ever_converged`
+  sentinel is intact, whose draft still matches its `reviewed_draft_sha1`, and
+  whose only non-machinery moved field is `style_contract_hash`. Nothing is
+  rewritten and no hash is stamped: the ledger record still says `stale`, and
+  every admitted segment is named on stderr and in each gate's structured
+  stdout, so shipping them is a recorded act (`#533`). **The declaration is
+  wrong after a REVERSAL, and the tooling cannot tell:** a rule you reversed
+  actively demanded the wrong choice in the segments converged under it, one
+  global `style_contract_hash` cannot distinguish that from an addition, and
+  that is exactly why this is an operator decision rather than a default.
+  Undeclared — or declared `false` — every gate behaves as it always did.
+  The timing constraint is narrower than it was written here: it is NOT that
+  the block only bites "after the last segment converges". **Every** unit that
+  converged before the edit is flipped and blocked, whenever the edit lands;
+  what timing buys is only that segments converging AFTER it carry the new hash
+  and are never flipped at all. So making contract edits early still costs
+  least. The move is in the BYTES, not in the number of edits: corrections
+  landed together before the loop resumes cost one flip for all of them, while
+  the same corrections interleaved with reconvergence cost a flip each. So hold
+  pending contract corrections and land them in one edit at a batch boundary —
+  the shipped `style_bible.template.md` says this under section E-traps; it
+  holds for the whole marked span.
 - **R10 — A previous volume is not an input. A new volume takes from exactly
   three places, and the finished book beside it is none of them.** When a series
   gets its next volume, a completed durable root is usually sitting in the same
@@ -1131,9 +1144,18 @@ byte-scope, and `scaffold_validate.py` now enforces exactly one of each, in
 order. That byte-scope is also the price list: every later edit inside the
 markers moves `style_contract_hash`, and the next stale-check flips every
 still-converged segment to `stale`. **R9** gives the policy -- no back-sweep
-is owed -- but not the whole price: a moved `style_contract_hash` sits
-outside `assemble.py`'s machinery-only carve-out, so W9 refuses each flipped
-unit until it converges again (`#533`).
+is owed -- and since **1.40.0** the tooling can be told the same thing. A moved
+`style_contract_hash` still sits outside the machinery-only carve-out (that set
+means "can never change what the prose should say", which is false for a
+contract), so undeclared, W7's completeness gate and W9's assembly refuse each
+flipped unit until it converges again. Setting
+`validation.admit_contract_only_stale: true` in `profile.yml` opens a second,
+separately named acceptance path in both gates for a flipped unit whose
+`.ever_converged` sentinel is intact, whose draft still matches its
+`reviewed_draft_sha1`, and whose only non-machinery moved field is that one:
+it is admitted and NAMED, its ledger record untouched. The declaration is the
+wrong answer after a rule REVERSAL, and no hash can detect that for you
+(`#533`).
 
 **The pre-merge citation review** gates whether a batch counts as ready at
 all. Under `research_mode: live`, every `basis:"established"` item's `source`
@@ -2269,6 +2291,11 @@ reclassified into another one:
   - **Draft unchanged** — current sha1 still matches `reviewed_draft_sha1`.
     Requires a usable stored `cache_key` dict, a computable current key, and
     at least one moved field OUTSIDE `MACHINERY_ONLY_CACHE_KEY_FIELDS`.
+    `style_contract_hash` is one such field, deliberately and still — so a
+    contract-only stale unit stays re-reviewable through this profile even on
+    a project that declares `validation.admit_contract_only_stale` (`#533`).
+    The declaration says the gates MAY ship it unjudged; it never says the
+    operator may not ask for the judgement.
     Anything missing refuses, fail-closed, naming which part was missing. A
     unit whose ONLY moved fields are machinery-only (`plugin_bundle_hash`,
     `schema_hash`, `derivation_bundle_hash`) is refused here too, saying
@@ -2682,7 +2709,15 @@ mirror `mass-translate-wf.template.js`'s agent machinery. Gated on W7's
 `final-audit-summary.project_complete: true` — the whole-project
 completeness gate, not merely "this batch converged" — assembling a book
 from a project that is not yet fully converged is refused, never silently
-attempted over a partial set.
+attempted over a partial set. Because that ONE verdict gates the whole step,
+both gates must agree about every unit: `assemble.py` re-derives the same two
+carve-outs (the #491 machinery-only one and, when
+`validation.admit_contract_only_stale` is declared, #533's contract-only one)
+from the same merged ledger rather than trusting the summary. When either
+admits a unit, both name it — `stale_contract_admitted` in W7's summary,
+`contract_stale_admitted` in `assemble.py`'s, and a stderr block in each.
+Keep the declaration stable across the whole W7→W9 chain; toggling it between
+steps is the one way to make the two gates disagree about the same book.
 
 Run `scripts/assemble.py`, which reconstructs the whole-book reading order
 from `manifest.json` + every converged segment's draft + `ledger.json`'s
