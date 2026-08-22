@@ -145,25 +145,24 @@ def _tuple_len(filename, name):
     )
 
 
-# Rewritten for 1.34.2 (#580), per the maintenance contract above. Two of these
-# three are moved BY this release: writing either before making the change is
-# precisely the failure this file exists to catch, and it is caught here.
+# Rewritten for 1.34.3 (#582), per the maintenance contract above: the previous
+# entry's rows go with the previous entry. 1.34.2's three rows ("62 release
+# entries", "162 test modules", "17 `PLUGIN_BUNDLE_MEMBERS`") were retired here.
 #
-# The entry count is 62 rather than 61 because a sibling release (1.34.1, #547)
-# landed on main while this branch was in review. Nothing about this branch
-# changed; the tree moved under a figure already written, a rebase brought it in,
-# and this row went red naming both numbers. Left recorded because it is the
-# first time this check caught the defect it was written for, and it caught it
-# on its own release.
-FIGURES = [
-    Figure("62 release entries", 62, _release_entry_count),
-    Figure("162 test modules", 162, _test_module_count),
-    Figure(
-        "17 `PLUGIN_BUNDLE_MEMBERS`",
-        17,
-        lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
-    ),
-]
+# EMPTY ON PURPOSE, DISCLOSED RATHER THAN SILENT -- which is the one thing the
+# contract above asks of a release that empties it. The 1.34.3 entry is prose
+# only: it corrects the `{{PLUGIN_ROOT}}` definition and records the #582
+# decision, and states no quantity derived from the tree. There is nothing here
+# to re-derive, and inventing a figure so this list stays non-empty would be
+# writing prose for a test to read rather than for a reader.
+#
+# Worth knowing for the next release, since 1.34.2 shipped one day before this
+# one and could not have seen it: these rows track the NEWEST entry, so the act
+# of adding any newer entry turns every row red at once. That is this list being
+# rewritten on schedule, not a regression in the tree -- but it does mean the
+# check goes red in the middle of an unrelated release, and the fix is always to
+# rewrite the rows for the new entry, never to edit the old entry's prose.
+FIGURES = []
 
 
 def _newest_entry():
