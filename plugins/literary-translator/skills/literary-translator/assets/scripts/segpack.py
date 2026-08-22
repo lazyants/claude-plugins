@@ -7,18 +7,36 @@ segment: its blocks in reading order (with sentinel placeholders intact), the
 footnote definitions it references (branching on footnotes.apparatus_policy),
 the verses it contains (parented to this segment's own blocks, or embedded in
 one of its referenced footnotes), the distinct proper-noun candidates found in
-it, and the canon.json split of those candidates into locked (canon_names) vs
-unresolved (new_names) forms. Deterministic; no LLM.
+it, and the three-way split of those candidates into locked (canon_names),
+adjudicated-homonym (split_names) and unresolved (new_names) forms.
+Deterministic; no LLM.
+
+CONTRACT with canon_senses.json (#488). A source form that denotes two or more
+distinct referents cannot be canonized as one bare canon.json entry -- the
+sidecar is the only sanctioned answer, and canon_validate.py refuses to
+recollapse a split into a bare entry. Before this script consumed the sidecar,
+such a form therefore fell through the `entry is None` branch below into
+new_names and reached the translator as an UNRESOLVED new name: the wrong
+constraint was gone and the right one never arrived. The sidecar is read here
+through canon_senses.load_senses -- never a private partial reader -- and each
+split form is delivered in its own `split_names` block. No per-sense target
+form is emitted, because none exists: canon-senses.schema.json's sense object
+is additionalProperties:false over sense_id/disambiguator/index_scope/evidence,
+so a consumer picks a sense by its disambiguator and there is no frozen canon
+to quote at that name.
 
 Output shape: ${durable_root}/segments/segpack_{seg}.json -- matches
 segpack.schema.json exactly. Every output is walked through a hand-rolled,
-dependency-free structural self-check against that same shape (no jsonschema
-import -- matching the real historiettes-t3 project's own segpack.py /
-validate_draft.py, which import only json/os/re/sys) before being written to
-disk. A missing OR invalid segpack for any candidate segment is a FATAL W3a
+structural self-check against that same shape (validate_segpack() below walks
+the parsed dict itself rather than calling jsonschema, matching the real
+historiettes-t3 project's own segpack.py / validate_draft.py) before being
+written to disk. Note that this script is no longer stdlib-only: canon_senses
+brings jsonschema in transitively, which is what validates the sidecar at load
+time. A missing OR invalid segpack for any candidate segment is a FATAL W3a
 preflight error -- this script's own exit code enforces that: any assembly or
 validation failure aborts with a non-zero exit, naming every offending
-segment, never a partial/best-effort write.
+segment, never a partial/best-effort write. A malformed sidecar is fatal on
+the same terms; it is never downgraded to "this project has no splits".
 
 Self-anchoring: this script is always installed at ${durable_root}/scripts/
 segpack.py by Step 0a, so its own durable_root is exactly
@@ -73,6 +91,13 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 DURABLE_ROOT = SCRIPT_DIR.parent
 
+# Sibling of manifest.json/canon.json, self-anchored the same way and never
+# cwd-relative. THE canonical default every consumer of canon_senses.json
+# computes identically (canon_validate.py's recollapse guard,
+# canon_adjudication_audit.py, glossary_batch_plan.py, and this script's
+# split_names delivery): DURABLE_ROOT / "canon_senses.json".
+DEFAULT_SENSES_PATH = DURABLE_ROOT / "canon_senses.json"
+
 try:
     from bootstrap_names import load_language_config, extract_candidates, _strip_capped_marker
 except ImportError as exc:
@@ -84,6 +109,19 @@ except ImportError as exc:
         "load_language_config / extract_candidates / _strip_capped_marker, the "
         "shared name-candidate extraction primitives segpack.py reuses per "
         "segment. Re-run Step 0a, or verify the plugin install is not corrupted."
+    )
+
+try:
+    from canon_senses import CanonSensesLoadError, is_split, load_senses, senses_for
+except ImportError as exc:
+    sys.exit(
+        f"segpack.py: cannot import canon_senses.py from {SCRIPT_DIR} ({exc}).\n"
+        "canon_senses.py must be installed alongside segpack.py under "
+        "${durable_root}/scripts/ -- Step 0a copies it with every other "
+        "assets/scripts/*.py. It is the ONE runtime-validating reader of "
+        "canon_senses.json, and segpack.py needs it to deliver an adjudicated "
+        "homonym split to the translate/review consumer (#488). Re-run Step 0a, "
+        "or verify the plugin install is not corrupted."
     )
 
 # Canonical segment-id safety contract. A seg id is either an ordinary body
@@ -190,8 +228,17 @@ def _verse_line_count(v):
 # ---------------------------------------------------------------------------
 _TOP_LEVEL_KEYS = {
     "seg", "title", "kind", "word_count", "blocks", "footnotes",
-    "verses", "names", "canon_names", "new_names", "canon_map", "generation_hashes",
+    "verses", "names", "canon_names", "new_names", "canon_map", "split_names",
+    "generation_hashes",
 }
+# The sense object segpack.schema.json's split_names carries -- deliberately a
+# STRICT SUBSET of canon-senses.schema.json's own sense: evidence offsets and
+# their sha256 exist for evidence_verify.py, not for a consumer choosing which
+# referent a passage means, and copying them would bloat every segpack.
+_SENSE_KEYS = {"sense_id", "disambiguator", "index_scope"}
+# Mirrors canon-senses.schema.json's index_scope enum exactly; a segpack sense
+# is a projection of a sidecar sense, so its domain can never be wider.
+_INDEX_SCOPES = ("narrative", "allusion", "citation")
 _BLOCK_KEYS = {"id", "order_index", "source_html", "plain_text", "body_ref_markers"}
 _FOOTNOTE_KEYS = {"n", "source_text"}
 _VERSE_KEYS = {"vid", "placeholder", "parent_block", "mount", "n_line"}
@@ -241,10 +288,18 @@ def _def_blocks_for(fn_ns, fn_entries_by_n):
     return out
 
 
-def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy):
+def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy, senses=None):
     """Assemble one segpack dict for seg_id. Raises SegpackError on any
     structural problem in the SOURCE data (missing segment/block/hash field);
-    the caller separately runs validate_segpack() on the RESULT before writing."""
+    the caller separately runs validate_segpack() on the RESULT before writing.
+
+    `senses` is the SensesResult from canon_senses.load_senses, or None for
+    the explicit no-sidecar state. None is never a fallback for a sidecar that
+    failed to load: main() below exits FATAL on CanonSensesLoadError rather
+    than passing None, because degrading a malformed sidecar to "no splits"
+    would silently reproduce the exact defect #488 closes -- and would do it
+    on a green run. `split_names` is emitted either way (possibly empty), so
+    the output shape does not depend on whether the project has a sidecar."""
     blocks_by_id = manifest.get("blocks", {})
     seg = next((s for s in manifest.get("segments", []) if s.get("seg") == seg_id), None)
     if seg is None:
@@ -469,17 +524,52 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy):
         key=lambda name: (-name_stats[name]["freq"], name),
     )
 
-    # ---- canon injection: split into locked (canon_names) vs unresolved (new_names),
+    # ---- canon injection: three-way split into locked (canon_names),
+    #      adjudicated homonym (split_names) and unresolved (new_names),
     #      plus canon_map (source_form -> frozen canonical_target_form) for every
     #      canonized name that carries a non-empty target form (#130: the frozen
     #      target form must actually reach the translate/review prompts, not just
     #      the canon_names source-form list). A canon entry with an empty/missing
     #      canonical_target_form is validly omitted from canon_map (canon_names
-    #      is still the source of truth for "is this name canonized"). ----
+    #      is still the source of truth for "is this name canonized").
+    #
+    #      The split test runs BEFORE the canon lookup (#488), not merely before
+    #      the `entry is None` fall-through. Today a bare canon entry cannot
+    #      coexist with a split -- canon_validate.py refuses to create one, and
+    #      the mandatory pre-W3a audit halts on any that predates the sidecar as
+    #      a `collapsed_split` -- so in every VALID post-audit state the order is
+    #      unobservable. It is written this way so the exclusion does not silently
+    #      depend on another script's guard still firing: if both representations
+    #      ever met here, the adjudicated one wins and the segment never claims a
+    #      frozen canon for a name that has two referents.
+    #
+    #      LOOKUP IDENTITY, and its one known blind spot: both `is_split` and
+    #      `canon_entries.get` are keyed on `name` exactly as extract_candidates
+    #      emitted it. For a candidate over bootstrap_names' character cap that
+    #      string carries a truncation marker, so it matches neither the sidecar
+    #      key nor the canon key -- a capped split form still lands in new_names.
+    #      That blindness is pre-existing, shared identically by the canon lookup
+    #      on the next line, and tracked with the rest of the capped-identity
+    #      class (#383, tests/capped_name_occurrence_lookup.test.py); teaching
+    #      only the sidecar lookup to match a capped representation would make it
+    #      strictly more capable than the canon lookup beside it. Pinned as a
+    #      characterization in tests/segpack_split_names_delivery.test.py. ----
     canon_entries = canon.get("entries", {})
     canon_names, new_names = [], []
     canon_map = {}
+    split_names = {}
     for name in strong_names:
+        if senses is not None and is_split(senses, name):
+            sense_entry = senses_for(senses, name)
+            split_names[name] = [
+                {
+                    "sense_id": s["sense_id"],
+                    "disambiguator": s["disambiguator"],
+                    "index_scope": s["index_scope"],
+                }
+                for s in sense_entry["senses"]
+            ]
+            continue
         entry = canon_entries.get(name)
         if entry is None:
             new_names.append(name)
@@ -514,6 +604,7 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy):
         "canon_names": canon_names,
         "new_names": new_names,
         "canon_map": canon_map,
+        "split_names": split_names,
         "generation_hashes": generation_hashes,
     }
 
@@ -642,6 +733,94 @@ def validate_segpack(pack, seg_id=None):
             if not isinstance(v, str) or not v:
                 errors.append(f"segpack {label}: canon_map[{k!r}] must be a non-empty string")
 
+    # split_names: source_form -> the sidecar's senses for that form (#488).
+    # Every key must be a non-empty string that is one of `names` and is in
+    # NEITHER canon_names NOR new_names -- a form is exactly one of canonized,
+    # split, or unresolved, and a form appearing in two of those lists is a
+    # producer bug that would give the consumer contradictory instructions.
+    #
+    # `disambiguator` is checked as a STRING, deliberately NOT as a non-empty
+    # string: canon-senses.schema.json constrains only `sense_id` with
+    # `"pattern": "\\S"`, so an empty disambiguator is a loadable sidecar
+    # value. Requiring non-empty here would invent a stricter domain than the
+    # contract this field is a projection of, and would turn a valid sidecar
+    # into a FATAL W3a preflight failure with no way to satisfy both files.
+    sn = pack.get("split_names")
+    if not isinstance(sn, dict):
+        errors.append(f"segpack {label}: 'split_names' must be an object")
+    else:
+        names_val = pack.get("names")
+        names_set = set(names_val) if isinstance(names_val, list) else None
+        # source_form -> the field name(s) that already claim it. One mapping
+        # rather than a membership set plus a rescan: the disjointness test and
+        # the "which other list" the error names are the same lookup.
+        claimed = {}
+        for field in ("canon_names", "new_names"):
+            val = pack.get(field)
+            if isinstance(val, list):
+                for x in val:
+                    if isinstance(x, str):
+                        claimed.setdefault(x, set()).add(field)
+        for k, senses_list in sn.items():
+            if not isinstance(k, str) or not k:
+                errors.append(f"segpack {label}: 'split_names' has a non-string/empty key {k!r}")
+                continue
+            if names_set is not None and k not in names_set:
+                errors.append(f"segpack {label}: 'split_names' key {k!r} is not in 'names'")
+            other = claimed.get(k)
+            if other:
+                errors.append(
+                    f"segpack {label}: 'split_names' key {k!r} must not also appear in "
+                    f"{sorted(other)} -- an adjudicated split is neither canonized nor unresolved"
+                )
+            if not isinstance(senses_list, list):
+                errors.append(f"segpack {label}: split_names[{k!r}] must be an array")
+                continue
+            if len(senses_list) < 2:
+                errors.append(
+                    f"segpack {label}: split_names[{k!r}] must carry at least 2 senses "
+                    f"(a split is >=2 senses), got {len(senses_list)}"
+                )
+            seen_ids = set()
+            for i, s in enumerate(senses_list):
+                if not isinstance(s, dict):
+                    errors.append(f"segpack {label}: split_names[{k!r}][{i}] is not an object")
+                    continue
+                extra_s = s.keys() - _SENSE_KEYS
+                if extra_s:
+                    errors.append(
+                        f"segpack {label}: split_names[{k!r}][{i}] has unexpected "
+                        f"field(s) {sorted(extra_s)}"
+                    )
+                missing_s = _SENSE_KEYS - s.keys()
+                if missing_s:
+                    errors.append(
+                        f"segpack {label}: split_names[{k!r}][{i}] is missing required "
+                        f"field(s) {sorted(missing_s)}"
+                    )
+                    continue
+                sid = s["sense_id"]
+                if not isinstance(sid, str) or not sid.strip():
+                    errors.append(
+                        f"segpack {label}: split_names[{k!r}][{i}] 'sense_id' must be a "
+                        f"non-blank string"
+                    )
+                elif sid in seen_ids:
+                    errors.append(
+                        f"segpack {label}: split_names[{k!r}] has a duplicate 'sense_id' {sid!r}"
+                    )
+                else:
+                    seen_ids.add(sid)
+                if not isinstance(s["disambiguator"], str):
+                    errors.append(
+                        f"segpack {label}: split_names[{k!r}][{i}] 'disambiguator' must be a string"
+                    )
+                if s["index_scope"] not in _INDEX_SCOPES:
+                    errors.append(
+                        f"segpack {label}: split_names[{k!r}][{i}] 'index_scope' must be one of "
+                        f"{list(_INDEX_SCOPES)}, got {s['index_scope']!r}"
+                    )
+
     gh = pack.get("generation_hashes")
     if not isinstance(gh, dict):
         errors.append(f"segpack {label}: 'generation_hashes' must be an object")
@@ -714,6 +893,19 @@ def main(argv=None):
     except SegpackError as exc:
         sys.exit(f"FATAL: {exc}")
 
+    # The homonym-split sidecar (#488). `allow_absent=True` because a project
+    # with no adjudicated homonym legitimately has no canon_senses.json at all
+    # -- that is the ordinary state, not a preflight failure. Everything else
+    # load_senses can object to (a schema violation, a non-regular path, a
+    # duplicate sense_id, a non-NFC or normalize_form-colliding key) is FATAL
+    # here: a segpack built from a sidecar that could not be trusted would
+    # deliver a split as an unresolved new name on a GREEN run, which is
+    # exactly the failure this field exists to remove.
+    try:
+        senses = load_senses(DEFAULT_SENSES_PATH, allow_absent=True)
+    except CanonSensesLoadError as exc:
+        sys.exit(f"FATAL: {exc}")
+
     try:
         lang_config = load_language_config(args.particle_config, languages_dir)
     except Exception as exc:
@@ -744,7 +936,9 @@ def main(argv=None):
             failures[seg_id] = [seg_error]
             continue
         try:
-            pack = build_pack(seg_id, manifest, canon, lang_config, args.apparatus_policy)
+            pack = build_pack(
+                seg_id, manifest, canon, lang_config, args.apparatus_policy, senses
+            )
         except SegpackError as exc:
             failures[seg_id] = [str(exc)]
             continue
@@ -762,7 +956,10 @@ def main(argv=None):
             f"  kind={pack['kind']} words={pack['word_count']} blocks={len(pack['blocks'])} "
             f"footnotes={len(pack['footnotes'])} verses={len(pack['verses'])} names={len(pack['names'])}"
         )
-        print(f"  canon_names={len(pack['canon_names'])} new_names={len(pack['new_names'])}")
+        print(
+            f"  canon_names={len(pack['canon_names'])} new_names={len(pack['new_names'])} "
+            f"split_names={len(pack['split_names'])}"
+        )
         print(f"  -> {out_path}")
 
     if failures:

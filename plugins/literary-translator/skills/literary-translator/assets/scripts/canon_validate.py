@@ -1709,7 +1709,18 @@ def _matching_senses_entry(senses: "SensesResult", source_form) -> "dict | None"
     once by `load_senses`, same field `is_split` itself reads); falls back
     to the original O(n) per-call linear scan only when `senses` was
     constructed directly without an index -- both paths return the exact
-    same entry."""
+    same entry.
+
+    #488 added `canon_senses.senses_for`, which computes exactly this, and
+    this function was DELIBERATELY not re-pointed at it. The lookup here is
+    normalized through THIS module's own `normalize_form` binding, and
+    `tests/canon_validate_recollapse.test.py:289-301` pins the indexed
+    fast path by monkeypatching that binding and asserting exactly one
+    call; delegating would move the call inside canon_senses, silently
+    reduce that count to zero, and force a passing performance test to be
+    rewritten for a refactor #488 does not need. The shared comparator is
+    still the single source of truth -- what is duplicated is four lines of
+    dict lookup, not the normalizer or the split predicate."""
     target = normalize_form(source_form) if isinstance(source_form, str) else source_form
     if senses.normalized_index is not None:
         return senses.normalized_index.get(target)

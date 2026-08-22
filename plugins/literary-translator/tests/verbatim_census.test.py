@@ -91,6 +91,7 @@ def make_segpack(seg, blocks, footnotes=(), verses=()):
         "canon_names": [],
         "new_names": [],
         "canon_map": {},
+        "split_names": {},
         "generation_hashes": {
             "source_extraction_hash": "0" * 8,
             "source_input_hash": "0" * 8,

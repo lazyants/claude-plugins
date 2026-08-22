@@ -539,6 +539,7 @@ def _pack_with_one_verse(verse_overrides=None):
         "canon_names": [],
         "new_names": [],
         "canon_map": {},
+        "split_names": {},
         "generation_hashes": {
             "source_extraction_hash": "a" * 40,
             "source_input_hash": "b" * 40,

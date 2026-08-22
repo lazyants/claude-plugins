@@ -59,6 +59,18 @@ and re-read it whenever it changes.
   rendering (see `style_bible.md`'s naming-convention section) and record
   your choice in `notes` as `NEW: ...` so a later glossary pass can review
   and canonize it.
+- `split_names{}` -- source forms adjudicated as **homonym splits**: one
+  spelling that denotes two or more genuinely different referents (a
+  cathedral and the Virgin it is named for; a place and a person). Each
+  entry lists its senses with a `disambiguator` describing that referent.
+  Decide **per occurrence** which sense the passage carries, and render
+  accordingly. There is deliberately **no frozen target form** for a split
+  name -- it is not in `canon_map` and never will be, because one frozen
+  form is exactly what a homonym cannot have -- so record your rendering in
+  `notes` as `NEW: ...` the way you would for a new name, naming the sense
+  you chose. A split name is **not** an uncanonized name that nobody has
+  got to yet: the adjudication already happened, and the disambiguators are
+  its result.
 
 ## Placeholder sentinels -- INVIOLABLE
 

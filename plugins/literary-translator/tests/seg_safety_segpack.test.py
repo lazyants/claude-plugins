@@ -58,11 +58,17 @@ ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 SCRIPTS_DIR = ASSETS_DIR / "scripts"
 SEGPACK_SCRIPT = SCRIPTS_DIR / "segpack.py"
 BOOTSTRAP_NAMES_SCRIPT = SCRIPTS_DIR / "bootstrap_names.py"
+# segpack.py imports canon_senses.py for its split_names delivery (#488),
+# so a durable-root scaffold that omits it no longer reaches the guard
+# these tests exercise -- it exits at import instead. Step 0a copies this
+# script into every real root alongside the other two.
+CANON_SENSES_SCRIPT = SCRIPTS_DIR / "canon_senses.py"
 MANIFEST_SCHEMA_PATH = ASSETS_DIR / "schemas" / "manifest.schema.json"
 SEGPACK_SCHEMA_PATH = ASSETS_DIR / "schemas" / "segpack.schema.json"
 
 assert SEGPACK_SCRIPT.is_file(), f"segpack.py not found at {SEGPACK_SCRIPT}"
 assert BOOTSTRAP_NAMES_SCRIPT.is_file(), f"bootstrap_names.py not found at {BOOTSTRAP_NAMES_SCRIPT}"
+assert CANON_SENSES_SCRIPT.is_file(), f"canon_senses.py not found at {CANON_SENSES_SCRIPT}"
 assert MANIFEST_SCHEMA_PATH.is_file(), f"manifest.schema.json not found at {MANIFEST_SCHEMA_PATH}"
 assert SEGPACK_SCHEMA_PATH.is_file(), f"segpack.schema.json not found at {SEGPACK_SCHEMA_PATH}"
 
@@ -191,6 +197,7 @@ def _well_formed_pack(seg: str) -> dict:
         "canon_names": [],
         "new_names": [],
         "canon_map": {},
+        "split_names": {},
         "generation_hashes": {
             "source_extraction_hash": "a" * 40,
             "source_input_hash": "b" * 40,
@@ -239,6 +246,7 @@ def make_segpack_root(tmp_path) -> Path:
     scripts_dir.mkdir(parents=True)
     shutil.copy2(SEGPACK_SCRIPT, scripts_dir / "segpack.py")
     shutil.copy2(BOOTSTRAP_NAMES_SCRIPT, scripts_dir / "bootstrap_names.py")
+    shutil.copy2(CANON_SENSES_SCRIPT, scripts_dir / "canon_senses.py")
     return root
 
 
@@ -396,6 +404,7 @@ def make_all_mode_root(tmp_path, unsafe_seg: str) -> Path:
     scripts_dir.mkdir(parents=True)
     shutil.copy2(SEGPACK_SCRIPT, scripts_dir / "segpack.py")
     shutil.copy2(BOOTSTRAP_NAMES_SCRIPT, scripts_dir / "bootstrap_names.py")
+    shutil.copy2(CANON_SENSES_SCRIPT, scripts_dir / "canon_senses.py")
 
     languages_dir = root / "languages"
     languages_dir.mkdir()

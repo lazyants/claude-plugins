@@ -1,0 +1,954 @@
+"""tests/segpack_split_names_delivery.test.py -- issue #488: a homonym split
+adjudicated in canon_senses.json must reach the translate/review consumer.
+
+`canon_senses.json` is this plugin's ONLY sanctioned answer to a source form
+that denotes two or more distinct referents. The split is authorable,
+schema-validated (`canon-senses.schema.json`), procedurally checked
+(`canon_senses.load_senses`), evidence-verifiable (`evidence_verify.
+verify_senses`) and hashed into the skeptic-side tamper stamps -- but before
+this fix `segpack.py` read the sidecar ZERO times, so the one artifact the
+translator and reviewer actually open never mentioned it.
+
+The observable consequence, measured on the live `historiettes-fr-ru/tome1`
+before the fix: `Notre-Dame` (split three ways -- the cathedral, the island,
+the Virgin) appeared in `new_names` in seg17, seg27 and seg49, and in neither
+`canon_names` nor `canon_map`. And it could not appear in `canon_names`: a
+split source form is refused a bare `canon.json` entry as a `recollapse`
+(`canon_validate.py`'s merge guard), and any bare entry that predates the
+split is halted as a `collapsed_split` by the mandatory pre-W3a audit. So the
+`entry is None` fall-through in `build_pack()`'s canon-injection loop caught
+every split form and filed it as an unresolved NEW name -- the exact opposite
+of "adjudicated".
+
+This suite locks down:
+  1. `build_pack()` emits `split_names` (source_form -> the sidecar's senses,
+     each as sense_id/disambiguator/index_scope) for a split form found in
+     the segment.
+  2. THE NEGATIVE CONTROL the issue names: that same form appears in NEITHER
+     `new_names` NOR `canon_names` NOR `canon_map` -- while still appearing in
+     `names`, because it IS a candidate the extractor found. Removing the
+     wrong constraint is only half the fix; the pre-fix behaviour would pass
+     any test that merely checked the wrong mapping was absent.
+  3. `validate_segpack()` enforces `split_names`' shape, and its domain is
+     exactly what `canon-senses.schema.json` accepts -- notably a
+     `disambiguator` must be a STRING, not a non-empty string, because the
+     sidecar schema constrains only `sense_id` with `"pattern": "\\S"`. A
+     stricter downstream domain would halt W3a on a sidecar the frozen source
+     contract accepts.
+  4. `main()` really passes the loaded sidecar (the `senses=None` default
+     cannot silently reappear on the production path), and a MALFORMED
+     sidecar is FATAL rather than a silent "no splits".
+  5. The four prompt sites that tell a consumer what the field means.
+  6. `used_terms_hash` IS invalidation-load-bearing for `split_names`: it moves
+     when a form becomes split and when a disambiguator is re-glossed, and is
+     byte-identical to a pre-#488 segpack's when there is no split at all.
+  7. Characterization, not a fix: a candidate long enough to be CAPPED by
+     `bootstrap_names._capped_candidate_name` does not match its own full
+     sidecar key -- exactly as it already fails to match its own `canon.json`
+     key on the very next line. Pinned so the shared limitation is a recorded
+     decision rather than an accident.
+
+Loads the real, shipped `segpack.py` via importlib (mirrors tests/
+segpack_verse_mount.test.py's own `_load_module` helper -- segpack.py's
+`from bootstrap_names import ...` only resolves via sys.path[0] under a real
+`python3 segpack.py` invocation, so its own scripts/ directory must be
+inserted onto sys.path around the in-process load).
+"""
+import importlib.util
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+SKILL_ROOT = PLUGIN_ROOT / "skills" / "literary-translator"
+ASSETS_DIR = SKILL_ROOT / "assets"
+SCRIPTS_DIR = ASSETS_DIR / "scripts"
+SCHEMAS_DIR = ASSETS_DIR / "schemas"
+TEMPLATES_DIR = ASSETS_DIR / "templates"
+LANGUAGES_DIR = ASSETS_DIR / "languages"
+SEGPACK_SCRIPT = SCRIPTS_DIR / "segpack.py"
+CANON_SENSES_SCRIPT = SCRIPTS_DIR / "canon_senses.py"
+BOOTSTRAP_NAMES_SCRIPT = SCRIPTS_DIR / "bootstrap_names.py"
+CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
+SEGPACK_SCHEMA = SCHEMAS_DIR / "segpack.schema.json"
+CANON_SENSES_SCHEMA = SCHEMAS_DIR / "canon-senses.schema.json"
+TRANSLATE_TASK_TEMPLATE = TEMPLATES_DIR / "translate_TASK.template.md"
+REVIEW_TASK_TEMPLATE = TEMPLATES_DIR / "review_TASK.template.md"
+MASS_TRANSLATE_TEMPLATE = TEMPLATES_DIR / "mass-translate-wf.template.js"
+STYLE_BIBLE_TEMPLATE = TEMPLATES_DIR / "style_bible.template.md"
+
+for _required in (
+    SEGPACK_SCRIPT, CANON_SENSES_SCRIPT, BOOTSTRAP_NAMES_SCRIPT, CACHE_KEY_SCRIPT,
+    SEGPACK_SCHEMA, CANON_SENSES_SCHEMA, TRANSLATE_TASK_TEMPLATE, REVIEW_TASK_TEMPLATE,
+    MASS_TRANSLATE_TEMPLATE, STYLE_BIBLE_TEMPLATE, LANGUAGES_DIR / "fr.json",
+):
+    assert _required.is_file(), f"expected shipped file at {_required}"
+
+
+def _load_module(name: str, path: Path, extra_sys_path: Path):
+    """Mirrors segpack_verse_mount.test.py's own loader exactly (see that
+    file's docstring for why the sys.path dance is needed)."""
+    sys.path.insert(0, str(extra_sys_path))
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None, f"could not load spec for {path}"
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(str(extra_sys_path))
+
+
+SEGPACK_MODULE = _load_module("segpack_split_names_under_test", SEGPACK_SCRIPT, SCRIPTS_DIR)
+CANON_SENSES_MODULE = _load_module(
+    "canon_senses_for_split_names_test", CANON_SENSES_SCRIPT, SCRIPTS_DIR
+)
+BOOTSTRAP_MODULE = _load_module(
+    "bootstrap_names_for_split_names_test", BOOTSTRAP_NAMES_SCRIPT, SCRIPTS_DIR
+)
+CACHE_KEY_MODULE = _load_module(
+    "cache_key_for_split_names_test", CACHE_KEY_SCRIPT, SCRIPTS_DIR
+)
+
+# Real shipped particle config -- build_pack()'s name-scanning pass needs a
+# genuinely valid LanguageConfig (never hand-rolled JSON here).
+LANG_CONFIG = SEGPACK_MODULE.load_language_config("fr.json", LANGUAGES_DIR)
+
+SPLIT_FORM = "Notre-Dame"
+PLAIN_FORM = "Cosette Fantine"
+
+
+# ---------------------------------------------------------------------------
+# Fixtures. The sidecar is always written to disk and read back through the
+# REAL canon_senses.load_senses -- never a hand-built SensesResult, so this
+# suite cannot pass against a shape the shipped loader would reject.
+# ---------------------------------------------------------------------------
+
+
+def _base_generation_hashes():
+    return {"source_extraction_hash": "a" * 40, "source_input_hash": "b" * 40}
+
+
+def _canon_generation_hashes():
+    return {"particle_config_hash": "c" * 40, "derivation_bundle_hash": "d" * 40}
+
+
+def _evidence(block, seg):
+    """The MINIMAL VERIFIABLE SET canon-senses.schema.json requires. The
+    sha256 is never checked by load_senses (that is evidence_verify.py's job),
+    so a well-formed placeholder digest is the honest fixture here."""
+    return {
+        "block": block,
+        "seg": seg,
+        "char_start": 0,
+        "char_end": len(SPLIT_FORM),
+        "context_start": 0,
+        "context_end": 64,
+        "sha256": "0" * 64,
+    }
+
+
+def _senses_doc(source_form=SPLIT_FORM, disambiguators=("the cathedral", "the Virgin")):
+    return {
+        "schema_version": 1,
+        "entries_by_source_form": {
+            source_form: {
+                "senses": [
+                    {
+                        "sense_id": "cathedral",
+                        "disambiguator": disambiguators[0],
+                        "index_scope": "narrative",
+                        "evidence": _evidence("PARA:seg01:0001", "seg01"),
+                    },
+                    {
+                        "sense_id": "virgin",
+                        "disambiguator": disambiguators[1],
+                        "index_scope": "allusion",
+                        "evidence": _evidence("PARA:seg01:0002", "seg01"),
+                    },
+                ]
+            }
+        },
+    }
+
+
+def _write_senses(tmp_path, doc):
+    path = tmp_path / "canon_senses.json"
+    path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _load_senses(tmp_path, doc=None):
+    path = _write_senses(tmp_path, doc if doc is not None else _senses_doc())
+    return CANON_SENSES_MODULE.load_senses(
+        path, allow_absent=False, schema_path=CANON_SENSES_SCHEMA
+    )
+
+
+def _manifest_with_split_and_plain_name():
+    """`Notre-Dame` is single-token, so it is promoted into strong_names only
+    via the MID-SENTENCE signal -- it is placed mid-sentence deliberately.
+    `Cosette Fantine` is multiword and needs no such placement. Both are
+    checked against the REAL fr.json extractor by the vacuity guard below,
+    never assumed."""
+    return {
+        "segments": [
+            {
+                "seg": "seg01",
+                "title_text": "Chapter One",
+                "kind": "body",
+                "word_count": 20,
+                "block_ids": ["p1"],
+            }
+        ],
+        "blocks": {
+            "p1": {
+                "id": "p1",
+                "order_index": 0,
+                "plain_text": (
+                    "Il entra dans Notre-Dame le matin. "
+                    "Cosette Fantine jouait non loin de Notre-Dame."
+                ),
+            },
+        },
+        "footnotes": [],
+        "verse": {"store": []},
+        "generation_hashes": _base_generation_hashes(),
+    }
+
+
+def _canon_without_the_split_form():
+    """A split source_form has no bare canon.json entry -- the merge guard
+    refuses to create one (recollapse) and the pre-W3a audit halts on any that
+    predates the split. `Cosette Fantine` is likewise uncanonized, so it stays
+    the suite's live proof that new_names still works."""
+    return {"entries": {}, "generation_hashes": _canon_generation_hashes()}
+
+
+def _build(tmp_path, manifest=None, canon=None, senses_doc=None):
+    return SEGPACK_MODULE.build_pack(
+        "seg01",
+        manifest if manifest is not None else _manifest_with_split_and_plain_name(),
+        canon if canon is not None else _canon_without_the_split_form(),
+        LANG_CONFIG,
+        "omit_apparatus",
+        _load_senses(tmp_path, senses_doc),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1. Vacuity guard. If the extractor stops finding these candidates, every
+#    assertion below becomes trivially true -- so prove they are found FIRST.
+# ---------------------------------------------------------------------------
+
+
+def test_fixture_actually_yields_both_candidate_names(tmp_path):
+    pack = _build(tmp_path)
+    assert SPLIT_FORM in pack["names"], (
+        f"fixture no longer yields {SPLIT_FORM!r} as a candidate -- every other "
+        f"assertion in this suite would pass vacuously. names={pack['names']}"
+    )
+    assert PLAIN_FORM in pack["names"], pack["names"]
+
+
+# ---------------------------------------------------------------------------
+# 2. build_pack() -- split_names delivery, and the negative control.
+# ---------------------------------------------------------------------------
+
+
+def test_build_pack_delivers_the_split_with_its_senses(tmp_path):
+    pack = _build(tmp_path)
+    assert pack["split_names"] == {
+        SPLIT_FORM: [
+            {
+                "sense_id": "cathedral",
+                "disambiguator": "the cathedral",
+                "index_scope": "narrative",
+            },
+            {
+                "sense_id": "virgin",
+                "disambiguator": "the Virgin",
+                "index_scope": "allusion",
+            },
+        ]
+    }, pack["split_names"]
+
+
+def test_build_pack_preserves_sidecar_sense_order(tmp_path):
+    """The sidecar's senses[] order is the operator's own ordering; it is
+    carried through verbatim rather than sorted, so the disambiguators a
+    consumer reads appear in the order they were adjudicated."""
+    pack = _build(tmp_path)
+    assert [s["sense_id"] for s in pack["split_names"][SPLIT_FORM]] == ["cathedral", "virgin"]
+
+
+def test_build_pack_keeps_the_split_form_out_of_new_names(tmp_path):
+    """THE negative control #488 names. Before the fix this was the ONLY
+    place the split form could land."""
+    pack = _build(tmp_path)
+    assert SPLIT_FORM not in pack["new_names"], (
+        f"{SPLIT_FORM!r} is an adjudicated homonym split, not an unresolved "
+        f"new name; new_names={pack['new_names']}"
+    )
+    assert PLAIN_FORM in pack["new_names"], (
+        f"a genuinely uncanonized name must still reach new_names -- otherwise "
+        f"this suite would pass on a build_pack() that emptied it. "
+        f"new_names={pack['new_names']}"
+    )
+
+
+def test_build_pack_keeps_the_split_form_out_of_canon_names_and_canon_map(tmp_path):
+    pack = _build(tmp_path)
+    assert SPLIT_FORM not in pack["canon_names"], pack["canon_names"]
+    assert SPLIT_FORM not in pack["canon_map"], pack["canon_map"]
+
+
+def test_build_pack_split_form_still_appears_in_names(tmp_path):
+    """`names` is the extractor's candidate list, not a canon verdict -- a
+    split form is still a candidate that was found in this segment."""
+    pack = _build(tmp_path)
+    assert SPLIT_FORM in pack["names"], pack["names"]
+
+
+def test_build_pack_split_names_keys_are_disjoint_from_the_other_two_lists(tmp_path):
+    pack = _build(tmp_path)
+    assert set(pack["split_names"]) & set(pack["canon_names"]) == set()
+    assert set(pack["split_names"]) & set(pack["new_names"]) == set()
+    assert set(pack["split_names"]) <= set(pack["names"])
+
+
+def test_build_pack_matches_the_split_form_through_normalize_form(tmp_path):
+    """The sidecar key is compared via canon_senses.normalize_form (NFC +
+    casefold + whitespace collapse), never by raw equality -- a sidecar
+    spelled with a different case must still be recognised."""
+    doc = _senses_doc(source_form="notre-dame")
+    pack = _build(tmp_path, senses_doc=doc)
+    assert SPLIT_FORM in pack["split_names"], pack["split_names"]
+    assert SPLIT_FORM not in pack["new_names"], pack["new_names"]
+
+
+def test_build_pack_with_an_empty_sidecar_changes_nothing(tmp_path):
+    doc = {"schema_version": 1, "entries_by_source_form": {}}
+    pack = _build(tmp_path, senses_doc=doc)
+    assert pack["split_names"] == {}
+    assert SPLIT_FORM in pack["new_names"], pack["new_names"]
+
+
+def test_build_pack_without_a_sidecar_argument_reproduces_the_old_shape():
+    """`senses=None` is the explicit no-sidecar state, and must still emit the
+    field (always present, possibly empty) rather than omitting it."""
+    pack = SEGPACK_MODULE.build_pack(
+        "seg01",
+        _manifest_with_split_and_plain_name(),
+        _canon_without_the_split_form(),
+        LANG_CONFIG,
+        "omit_apparatus",
+    )
+    assert pack["split_names"] == {}
+    assert SPLIT_FORM in pack["new_names"], pack["new_names"]
+
+
+def test_build_pack_accepts_an_empty_disambiguator(tmp_path):
+    """canon-senses.schema.json constrains `disambiguator` to `"type":
+    "string"` only -- `sense_id` is the field carrying `"pattern": "\\S"`.
+    An empty disambiguator is therefore a loadable sidecar value, and segpack
+    must not invent a stricter domain than the contract it consumes."""
+    doc = _senses_doc(disambiguators=("", "the Virgin"))
+    pack = _build(tmp_path, senses_doc=doc)
+    assert pack["split_names"][SPLIT_FORM][0]["disambiguator"] == ""
+    assert SEGPACK_MODULE.validate_segpack(pack, "seg01") == []
+
+
+# ---------------------------------------------------------------------------
+# 3. validate_segpack() -- split_names shape enforcement.
+# ---------------------------------------------------------------------------
+
+
+def _pack_with_split_names(split_names=None, names=None, canon_names=(), new_names=()):
+    if split_names is None:
+        split_names = {
+            SPLIT_FORM: [
+                {"sense_id": "cathedral", "disambiguator": "the cathedral",
+                 "index_scope": "narrative"},
+                {"sense_id": "virgin", "disambiguator": "the Virgin",
+                 "index_scope": "allusion"},
+            ]
+        }
+    if names is None:
+        names = sorted(set(split_names) | set(canon_names) | set(new_names))
+    return {
+        "seg": "seg01",
+        "title": "Chapter One",
+        "kind": "body",
+        "word_count": 4,
+        "blocks": [],
+        "footnotes": [],
+        "verses": [],
+        "names": list(names),
+        "canon_names": list(canon_names),
+        "new_names": list(new_names),
+        "canon_map": {},
+        "split_names": split_names,
+        "generation_hashes": {
+            "source_extraction_hash": "a" * 40,
+            "source_input_hash": "b" * 40,
+            "particle_config_hash": "c" * 40,
+            "derivation_bundle_hash": "d" * 40,
+        },
+    }
+
+
+def test_validate_segpack_accepts_well_formed_split_names():
+    assert SEGPACK_MODULE.validate_segpack(_pack_with_split_names()) == []
+
+
+def test_validate_segpack_accepts_empty_split_names():
+    assert SEGPACK_MODULE.validate_segpack(_pack_with_split_names(split_names={})) == []
+
+
+def test_validate_segpack_rejects_missing_split_names_field():
+    pack = _pack_with_split_names()
+    del pack["split_names"]
+    errors = SEGPACK_MODULE.validate_segpack(pack)
+    assert any("missing required top-level field" in e and "split_names" in e for e in errors), errors
+
+
+def test_validate_segpack_rejects_non_dict_split_names():
+    errors = SEGPACK_MODULE.validate_segpack(_pack_with_split_names(split_names=[]))
+    assert any("'split_names' must be an object" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("bad_key", ["", 7])
+def test_validate_segpack_rejects_bad_split_names_key(bad_key):
+    pack = _pack_with_split_names(
+        split_names={bad_key: [
+            {"sense_id": "a", "disambiguator": "x", "index_scope": "narrative"},
+            {"sense_id": "b", "disambiguator": "y", "index_scope": "narrative"},
+        ]},
+        names=[SPLIT_FORM],
+    )
+    errors = SEGPACK_MODULE.validate_segpack(pack)
+    assert any("'split_names' has a non-string/empty key" in e for e in errors), errors
+
+
+def test_validate_segpack_rejects_split_names_key_not_in_names():
+    pack = _pack_with_split_names(names=["Someone Else"])
+    errors = SEGPACK_MODULE.validate_segpack(pack)
+    assert any("is not in 'names'" in e for e in errors), errors
+
+
+@pytest.mark.parametrize(
+    "field, other_lists",
+    [
+        ("new_names", "['new_names']"),
+        ("canon_names", "['canon_names']"),
+        ("both", "['canon_names', 'new_names']"),
+    ],
+)
+def test_validate_segpack_rejects_split_names_key_claimed_by_another_list(field, other_lists):
+    """The error must NAME the colliding list, not merely report a collision:
+    that name is the whole diagnostic value when a producer files one form in
+    two places, and nothing else pins it."""
+    kwargs = {"names": [SPLIT_FORM]}
+    if field in ("new_names", "both"):
+        kwargs["new_names"] = (SPLIT_FORM,)
+    if field in ("canon_names", "both"):
+        kwargs["canon_names"] = (SPLIT_FORM,)
+    errors = SEGPACK_MODULE.validate_segpack(_pack_with_split_names(**kwargs))
+    assert any(
+        f"'split_names' key {SPLIT_FORM!r} must not also appear in {other_lists}" in e
+        for e in errors
+    ), errors
+
+
+def test_validate_segpack_collision_check_ignores_a_non_string_list_member():
+    """A non-string entry alongside the form must not swallow the collision --
+    the claimed-by map is built by skipping non-strings, and skipping the whole
+    LIST instead would silently admit the shape this rule exists to refuse."""
+    pack = _pack_with_split_names(names=[SPLIT_FORM])
+    pack["new_names"] = [SPLIT_FORM, 7]
+    errors = SEGPACK_MODULE.validate_segpack(pack)
+    assert any("must not also appear in ['new_names']" in e for e in errors), errors
+
+
+def test_validate_segpack_rejects_fewer_than_two_senses():
+    """A split is >=2 senses -- canon-senses.schema.json enforces `minItems:
+    2` on the source, and a one-sense segpack entry means something dropped a
+    sense between the loader and here."""
+    pack = _pack_with_split_names(split_names={
+        SPLIT_FORM: [{"sense_id": "a", "disambiguator": "x", "index_scope": "narrative"}]
+    })
+    errors = SEGPACK_MODULE.validate_segpack(pack)
+    assert any("at least 2 senses" in e for e in errors), errors
+
+
+def test_validate_segpack_rejects_non_list_sense_value():
+    pack = _pack_with_split_names(split_names={SPLIT_FORM: {"sense_id": "a"}})
+    errors = SEGPACK_MODULE.validate_segpack(pack)
+    assert any("must be an array" in e and "split_names" in e for e in errors), errors
+
+
+def test_validate_segpack_rejects_empty_sense_id():
+    pack = _pack_with_split_names(split_names={
+        SPLIT_FORM: [
+            {"sense_id": "", "disambiguator": "x", "index_scope": "narrative"},
+            {"sense_id": "b", "disambiguator": "y", "index_scope": "narrative"},
+        ]
+    })
+    errors = SEGPACK_MODULE.validate_segpack(pack)
+    assert any("'sense_id'" in e for e in errors), errors
+
+
+def test_validate_segpack_rejects_duplicate_sense_id():
+    pack = _pack_with_split_names(split_names={
+        SPLIT_FORM: [
+            {"sense_id": "same", "disambiguator": "x", "index_scope": "narrative"},
+            {"sense_id": "same", "disambiguator": "y", "index_scope": "narrative"},
+        ]
+    })
+    errors = SEGPACK_MODULE.validate_segpack(pack)
+    assert any("duplicate 'sense_id'" in e for e in errors), errors
+
+
+def test_validate_segpack_rejects_non_string_disambiguator():
+    pack = _pack_with_split_names(split_names={
+        SPLIT_FORM: [
+            {"sense_id": "a", "disambiguator": None, "index_scope": "narrative"},
+            {"sense_id": "b", "disambiguator": "y", "index_scope": "narrative"},
+        ]
+    })
+    errors = SEGPACK_MODULE.validate_segpack(pack)
+    assert any("'disambiguator'" in e for e in errors), errors
+
+
+def test_validate_segpack_rejects_unknown_index_scope():
+    pack = _pack_with_split_names(split_names={
+        SPLIT_FORM: [
+            {"sense_id": "a", "disambiguator": "x", "index_scope": "invented"},
+            {"sense_id": "b", "disambiguator": "y", "index_scope": "narrative"},
+        ]
+    })
+    errors = SEGPACK_MODULE.validate_segpack(pack)
+    assert any("'index_scope'" in e for e in errors), errors
+
+
+def test_validate_segpack_rejects_extra_sense_field():
+    pack = _pack_with_split_names(split_names={
+        SPLIT_FORM: [
+            {"sense_id": "a", "disambiguator": "x", "index_scope": "narrative",
+             "evidence": {}},
+            {"sense_id": "b", "disambiguator": "y", "index_scope": "narrative"},
+        ]
+    })
+    errors = SEGPACK_MODULE.validate_segpack(pack)
+    assert any("unexpected field" in e for e in errors), errors
+
+
+# ---------------------------------------------------------------------------
+# 4. Schema / hand-rolled-validator parity.
+# ---------------------------------------------------------------------------
+
+
+def test_schema_declares_split_names_required():
+    schema = json.loads(SEGPACK_SCHEMA.read_text(encoding="utf-8"))
+    assert "split_names" in schema["properties"], sorted(schema["properties"])
+    assert "split_names" in schema["required"], schema["required"]
+
+
+def test_schema_required_matches_the_hand_rolled_top_level_key_set():
+    schema = json.loads(SEGPACK_SCHEMA.read_text(encoding="utf-8"))
+    assert set(schema["required"]) == set(SEGPACK_MODULE._TOP_LEVEL_KEYS)
+    assert set(schema["properties"]) == set(SEGPACK_MODULE._TOP_LEVEL_KEYS)
+
+
+def test_schema_sense_object_does_not_admit_a_target_form():
+    """No per-sense target form exists anywhere in the sidecar contract, so
+    the segpack must not invent one -- a reviewer choosing a sense does it by
+    disambiguator, and there is no frozen canon to quote."""
+    schema = json.loads(SEGPACK_SCHEMA.read_text(encoding="utf-8"))
+    sense = schema["properties"]["split_names"]["additionalProperties"]["items"]
+    assert sense["additionalProperties"] is False
+    assert set(sense["required"]) == {"sense_id", "disambiguator", "index_scope"}
+    assert "canonical_target_form" not in sense["properties"]
+
+
+def test_schema_sense_index_scope_enum_matches_the_sidecar_contract():
+    segpack_schema = json.loads(SEGPACK_SCHEMA.read_text(encoding="utf-8"))
+    senses_schema = json.loads(CANON_SENSES_SCHEMA.read_text(encoding="utf-8"))
+    theirs = (
+        senses_schema["properties"]["entries_by_source_form"]["additionalProperties"]
+        ["properties"]["senses"]["items"]["properties"]["index_scope"]["enum"]
+    )
+    mine = (
+        segpack_schema["properties"]["split_names"]["additionalProperties"]
+        ["items"]["properties"]["index_scope"]["enum"]
+    )
+    assert mine == theirs, (mine, theirs)
+
+
+def test_schema_sense_disambiguator_is_not_stricter_than_the_sidecar():
+    """The one place a downstream domain could halt a valid project: the
+    sidecar accepts EVERY string as a disambiguator (`canon-senses.schema.json`
+    gives it `type: string` and nothing else), so this projection must too.
+
+    Asserted as EXACT EQUALITY after dropping `description`, not as the absence
+    of `minLength`/`pattern`. An absence list only forbids the tightening
+    keywords someone thought of: `maxLength: 0`, `enum: [""]` and `const: ""`
+    each make every ordinary non-empty disambiguator unrepresentable while
+    leaving a two-keyword absence check green."""
+    schema = json.loads(SEGPACK_SCHEMA.read_text(encoding="utf-8"))
+    disambiguator = dict(
+        schema["properties"]["split_names"]["additionalProperties"]
+        ["items"]["properties"]["disambiguator"]
+    )
+    disambiguator.pop("description", None)
+    assert disambiguator == {"type": "string"}, (
+        "the segpack projection of `disambiguator` must carry NO constraint "
+        f"beyond `type: string`; got {disambiguator}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 5. main() -- the production path really loads the sidecar, and a malformed
+#    one is FATAL rather than a silent "no splits".
+# ---------------------------------------------------------------------------
+
+
+def _scaffold_durable_root(tmp_path, senses_bytes):
+    """A minimal ${durable_root} of the shape Step 0a produces: segpack.py is
+    self-anchored at ${durable_root}/scripts/, so the whole run has to happen
+    against a real directory layout, never an in-process call."""
+    root = tmp_path / "root"
+    (root / "scripts").mkdir(parents=True)
+    (root / "schemas").mkdir()
+    (root / "languages").mkdir()
+    for script in (SEGPACK_SCRIPT, BOOTSTRAP_NAMES_SCRIPT, CANON_SENSES_SCRIPT):
+        shutil.copy2(script, root / "scripts" / script.name)
+    shutil.copy2(CANON_SENSES_SCHEMA, root / "schemas" / CANON_SENSES_SCHEMA.name)
+    shutil.copy2(LANGUAGES_DIR / "fr.json", root / "languages" / "fr.json")
+    (root / "manifest.json").write_text(
+        json.dumps(_manifest_with_split_and_plain_name(), ensure_ascii=False), encoding="utf-8"
+    )
+    (root / "canon.json").write_text(
+        json.dumps(_canon_without_the_split_form(), ensure_ascii=False), encoding="utf-8"
+    )
+    if senses_bytes is not None:
+        (root / "canon_senses.json").write_bytes(senses_bytes)
+    return root
+
+
+def _run_segpack(root):
+    return subprocess.run(
+        [sys.executable, str(root / "scripts" / "segpack.py"), "seg01",
+         "--particle-config", "fr.json", "--apparatus-policy", "omit_apparatus"],
+        capture_output=True, text=True,
+    )
+
+
+def test_main_passes_the_sidecar_to_build_pack(tmp_path):
+    """Guards the one way the `senses=None` default could silently reappear
+    in production: main() forgetting to load and pass it."""
+    root = _scaffold_durable_root(
+        tmp_path, json.dumps(_senses_doc(), ensure_ascii=False).encode("utf-8")
+    )
+    proc = _run_segpack(root)
+    assert proc.returncode == 0, proc.stderr
+    pack = json.loads((root / "segments" / "segpack_seg01.json").read_text(encoding="utf-8"))
+    assert SPLIT_FORM in pack["split_names"], pack["split_names"]
+    assert SPLIT_FORM not in pack["new_names"], pack["new_names"]
+
+
+def test_main_without_a_sidecar_is_not_an_error(tmp_path):
+    """An absent canon_senses.json is the ordinary state of a project with no
+    adjudicated homonym -- it must not be a preflight failure."""
+    root = _scaffold_durable_root(tmp_path, None)
+    proc = _run_segpack(root)
+    assert proc.returncode == 0, proc.stderr
+    pack = json.loads((root / "segments" / "segpack_seg01.json").read_text(encoding="utf-8"))
+    assert pack["split_names"] == {}
+    assert SPLIT_FORM in pack["new_names"], pack["new_names"]
+
+
+def test_main_treats_a_malformed_sidecar_as_fatal(tmp_path):
+    """A schema-invalid sidecar must HALT, never degrade to "no splits" -- the
+    degraded path would ship the exact defect #488 exists to close, silently
+    and green."""
+    root = _scaffold_durable_root(tmp_path, b'{"schema_version": 1}')
+    proc = _run_segpack(root)
+    assert proc.returncode != 0, proc.stdout
+    assert "canon_senses" in (proc.stderr + proc.stdout)
+    assert not (root / "segments" / "segpack_seg01.json").exists()
+
+
+def test_main_treats_an_unreadable_sidecar_as_fatal(tmp_path):
+    """A directory where the sidecar belongs is a BLOCK in load_senses
+    regardless of allow_absent -- it must not read as "absent"."""
+    root = _scaffold_durable_root(tmp_path, None)
+    (root / "canon_senses.json").mkdir()
+    proc = _run_segpack(root)
+    assert proc.returncode != 0, proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# 6. used_terms_hash IS invalidation-load-bearing for split_names (#488).
+#
+#    A homonym split is the one naming decision reaching the translator from
+#    OUTSIDE canon.json, so the canon projection cannot see it. If it did not
+#    participate here, adding a split -- or editing a disambiguator afterwards
+#    -- would change what the translator is told while every per-segment key
+#    stayed put, and the only fields that DO move on a plugin upgrade are the
+#    machinery-only carve-out, whose meaning is "can never change what the
+#    prose should say". These are RED-before-green: each was watched failing
+#    against the unmodified compute_used_terms_hash.
+# ---------------------------------------------------------------------------
+
+
+def _canon_root(tmp_path):
+    root = tmp_path / "canonroot"
+    root.mkdir()
+    (root / "canon.json").write_text(
+        json.dumps(_canon_without_the_split_form(), ensure_ascii=False), encoding="utf-8"
+    )
+    return root
+
+
+def _senses_block(disambiguator="the cathedral"):
+    return [
+        {"sense_id": "cathedral", "disambiguator": disambiguator, "index_scope": "narrative"},
+        {"sense_id": "virgin", "disambiguator": "the Virgin", "index_scope": "allusion"},
+    ]
+
+
+def test_used_terms_hash_moves_when_a_form_becomes_split(tmp_path):
+    """The #488 case itself: a form the translator was told was an unresolved
+    NEW name is now delivered as an adjudicated split. That is a different
+    instruction, so the segment must be reclassified."""
+    root = _canon_root(tmp_path)
+    before = _pack_with_split_names(
+        split_names={}, new_names=(SPLIT_FORM, PLAIN_FORM), names=[SPLIT_FORM, PLAIN_FORM]
+    )
+    after = _pack_with_split_names(
+        split_names={SPLIT_FORM: _senses_block()},
+        new_names=(PLAIN_FORM,), names=[SPLIT_FORM, PLAIN_FORM],
+    )
+    assert CACHE_KEY_MODULE.compute_used_terms_hash(root, before) != \
+        CACHE_KEY_MODULE.compute_used_terms_hash(root, after)
+
+
+def test_used_terms_hash_moves_when_a_disambiguator_is_edited(tmp_path):
+    """The sidecar is not hashed anywhere in the segment cache key, so an
+    operator re-glossing a sense after convergence would otherwise be
+    invisible to every gate."""
+    root = _canon_root(tmp_path)
+    a = _pack_with_split_names(split_names={SPLIT_FORM: _senses_block("the cathedral")},
+                               names=[SPLIT_FORM])
+    b = _pack_with_split_names(split_names={SPLIT_FORM: _senses_block("the island")},
+                               names=[SPLIT_FORM])
+    assert CACHE_KEY_MODULE.compute_used_terms_hash(root, a) != \
+        CACHE_KEY_MODULE.compute_used_terms_hash(root, b)
+
+
+def _historical_used_terms_hash(root, pack):
+    """The PRE-#488 algorithm, restated here independently of the shipped
+    function: sha1 over the canonical JSON of the canon entries this segment's
+    canon_names/new_names actually reference.
+
+    Restated rather than imported on purpose. Comparing two calls of the
+    CURRENT function to each other proves only that it is self-consistent --
+    an unconditional two-key wrapper would hash both an empty and an absent
+    `split_names` identically and keep such a test green while every no-split
+    segment in every project silently moved. The guarantee being defended is
+    equality with the OLD digest, so the old digest has to be computed by
+    something that cannot drift with the new code."""
+    canon = json.loads((root / "canon.json").read_text(encoding="utf-8"))
+    entries = canon.get("entries", {})
+    names = sorted(set(pack.get("canon_names", [])) | set(pack.get("new_names", [])))
+    referenced = {name: entries[name] for name in names if name in entries}
+    return CACHE_KEY_MODULE.sha1_hex(CACHE_KEY_MODULE.canonical_json_bytes(referenced))
+
+
+@pytest.mark.parametrize("shape", ["empty_field", "absent_field"])
+def test_used_terms_hash_equals_the_historical_digest_when_there_is_no_split(tmp_path, shape):
+    """The compatibility half, and the whole reason this costs almost nothing:
+    with no split the payload keeps its historical SHAPE, so a project with no
+    adjudicated homonym sees no movement from this change at all -- and
+    `used_terms_hash` is NOT in the machinery-only carve-out, so any movement
+    here would mean a whole-corpus re-review rather than an admitted stale.
+
+    Both shapes are checked: `split_names: {}` as this release emits it, and no
+    `split_names` key at all, which is what a segpack written before #488 and
+    still on disk looks like."""
+    root = _canon_root(tmp_path)
+    pack = _pack_with_split_names(
+        split_names={}, new_names=(PLAIN_FORM,), names=[PLAIN_FORM]
+    )
+    if shape == "absent_field":
+        pack = {k: v for k, v in pack.items() if k != "split_names"}
+    assert CACHE_KEY_MODULE.compute_used_terms_hash(root, pack) == \
+        _historical_used_terms_hash(root, pack)
+
+
+# ---------------------------------------------------------------------------
+# 7. CHARACTERIZATION, not a fix: a CAPPED candidate matches neither its
+#    sidecar key nor its canon key.
+#
+#    `_capped_candidate_name` replaces an over-long candidate with a prefix
+#    plus a digest marker, and that marker-bearing string is the identity
+#    every lookup in build_pack()'s canon-injection loop uses -- the sidecar
+#    lookup added by #488 and the pre-existing `canon_entries.get(name)`
+#    alike. Neither can reconstruct the truncated suffix. Teaching only the
+#    sidecar lookup to match a capped representation would make it strictly
+#    more capable than the canon lookup beside it, which is the half-fix
+#    shape #383 already records; so the shared blindness is pinned here as a
+#    decision rather than left to be rediscovered. Measured population at the
+#    time of writing: 0 of 3884 candidate names in the live tome1 corpus
+#    exceed the cap (longest: 62 characters).
+# ---------------------------------------------------------------------------
+
+
+def test_a_capped_candidate_does_not_match_its_full_sidecar_key(tmp_path):
+    # Letters only -- the extractor's tokenizer drops digits, so a
+    # digit-suffixed fixture would collapse into one repeated word and the
+    # emitted candidate would not be the string this test thinks it is.
+    long_form = " ".join(
+        "Beaumont" + chr(ord("a") + i // 26) + chr(ord("a") + i % 26) for i in range(40)
+    )
+    capped = BOOTSTRAP_MODULE._capped_candidate_name(long_form)
+    assert capped != long_form, (
+        "fixture no longer exceeds the candidate-name cap, so this "
+        "characterization would pass vacuously"
+    )
+
+    manifest = _manifest_with_split_and_plain_name()
+    manifest["blocks"]["p1"]["plain_text"] = f"Il rencontra {long_form} le matin."
+
+    doc = _senses_doc(source_form=long_form)
+    pack = _build(tmp_path, manifest=manifest, senses_doc=doc)
+
+    assert capped in pack["names"], (
+        "fixture must reach build_pack as the CAPPED emitted string -- "
+        f"got {pack['names']}"
+    )
+    assert capped not in pack["split_names"], pack["split_names"]
+    assert capped in pack["new_names"], pack["new_names"]
+    assert SEGPACK_MODULE.validate_segpack(pack, "seg01") == []
+
+
+# ---------------------------------------------------------------------------
+# 8. Prompt-contract prose: the four sites that tell a consumer what the
+#    field means. A field nothing explains is not delivered.
+# ---------------------------------------------------------------------------
+
+
+def _section(text, marker, end_marker="\nfunction "):
+    """The slice of `text` starting at `marker` and ending at the next
+    `end_marker` -- so a clause asserted below has to live in THAT builder or
+    THAT bullet, not merely somewhere in the file."""
+    assert marker in text, f"{marker!r} not found"
+    return text.split(marker, 1)[1].split(end_marker, 1)[0]
+
+
+def _assert_clauses(where, haystack, clauses):
+    """Every clause must be present. Asserting the token `split_names` alone is
+    not enough: deleting the operative prohibitions while leaving the field
+    NAME in place would keep a presence-only test green, and the prohibitions
+    ARE the contract -- 'this is not an uncanonized name' and 'you may not
+    prescribe a canonical form here' are what stop a consumer undoing the
+    adjudication this release exists to deliver."""
+    missing = [c for c in clauses if c not in haystack]
+    assert not missing, (
+        f"{where} must still carry these load-bearing clauses verbatim, and is "
+        f"missing {missing}. Reword them here and in the source together -- but "
+        f"do not drop the obligation itself."
+    )
+
+
+def test_translate_task_template_explains_split_names():
+    text = TRANSLATE_TASK_TEMPLATE.read_text(encoding="utf-8")
+    bullet = _section(text, "- `split_names{}`", "\n\n")
+    _assert_clauses(
+        "translate_TASK.template.md's split_names bullet", bullet,
+        [
+            "disambiguator",
+            "no frozen target form",
+            "not** an uncanonized name",
+            "the adjudication already happened",
+        ],
+    )
+
+
+def test_review_task_template_explains_split_names():
+    text = REVIEW_TASK_TEMPLATE.read_text(encoding="utf-8")
+    bullet = _section(text, "- `split_names` --", "\n- ")
+    _assert_clauses(
+        "review_TASK.template.md's split_names bullet", bullet,
+        [
+            "disambiguator",
+            "no frozen canon",
+            "do **not** flag it as an uncanonized name",
+            "do **not** prescribe a canonical target form",
+            "wrong sense",
+        ],
+    )
+
+
+def test_live_translate_prompt_explains_split_names():
+    """The one-time task files are copied ONCE, but this prompt is generated
+    fresh on every W5 run -- so an existing project's translator learns about
+    split_names here or nowhere."""
+    text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
+    _assert_clauses(
+        "translatePrompt()", _section(text, "function translatePrompt("),
+        [
+            "split_names",
+            "HOMONYM SPLIT",
+            "disambiguator",
+            "no frozen target form",
+            "neither canon_map nor new_names",
+            "decide per occurrence",
+        ],
+    )
+
+
+def test_live_review_prompt_explains_split_names():
+    text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
+    _assert_clauses(
+        "reviewDispatchPrompt()", _section(text, "function reviewDispatchPrompt("),
+        [
+            "split_names",
+            "HOMONYM SPLITS",
+            "BY DESIGN",
+            "you may not prescribe a canonical target form at a split name",
+            "must not report it as an uncanonized or new name",
+            "WRONG SENSE",
+        ],
+    )
+
+
+def test_live_fix_prompt_explains_split_names():
+    text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
+    _assert_clauses(
+        "fixPrompt()", _section(text, "function fixPrompt("),
+        [
+            "split_names",
+            "HOMONYM SPLIT",
+            "it is not a canon claim and must not be refused as one",
+            "prescribes a canonical target form at a split name IS still refused",
+        ],
+    )
+
+
+def test_style_bible_template_lists_split_names():
+    text = STYLE_BIBLE_TEMPLATE.read_text(encoding="utf-8")
+    assert "split_names" in text, (
+        "style_bible.template.md enumerates what segpack.py injects into "
+        "every segment; that list is now incomplete without split_names"
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))

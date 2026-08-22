@@ -134,6 +134,36 @@
       "additionalProperties": { "type": "string" },
       "description": "Source_form -> frozen canonical_target_form, for every name in canon_names whose canon.json entry carries a non-empty canonical_target_form (a canon entry with an empty/missing target form is validly omitted here). This is what actually delivers the frozen canon to the translate/review prompts (#130) -- canon_names alone is only the source-form membership list. Always present (possibly {}). Keys are a subset of canon_names, not necessarily equal."
     },
+    "split_names": {
+      "type": "object",
+      "description": "Source_form -> the canon_senses.json senses adjudicated for that form, for every candidate in this segment whose source_form is a homonym split (#488). Always present (possibly {}); a project with no canon_senses.json sidecar has {} here. Keys are a subset of names, and appear in NEITHER canon_names NOR new_names -- a form is exactly one of canonized, split, or unresolved. A split source_form is refused a bare canon.json entry (canon_validate.py's recollapse guard; the mandatory pre-W3a audit halts on any bare entry that predates the split), so before this field existed such a form fell through segpack.py's canon lookup and reached the translator as an unresolved NEW name: the wrong constraint removed and the right one never delivered. NO frozen target form is carried, because none exists in the sidecar contract -- canon-senses.schema.json's sense object is additionalProperties:false over sense_id/disambiguator/index_scope/evidence. A translator picks the sense the passage carries by its disambiguator and records the rendering as a NEW: note, exactly as for a new name; a reviewer may argue the wrong sense was chosen but may never prescribe a canonical target form at a split name, there being no frozen canon there to quote. Evidence offsets and their sha256 are deliberately NOT projected here: they exist for evidence_verify.py, not for choosing a referent. Invalidation-load-bearing, exactly as new_names is: used_terms_hash's per-segment computation includes split_names, because a split is the one naming decision reaching the translator from OUTSIDE canon.json (it is absent from entries{} by construction), so adding a split or editing a sense's disambiguator afterwards would otherwise change what the translator is told while every per-segment key stayed put. When split_names is empty the hashed payload keeps its historical shape, so a project with no adjudicated homonym sees no movement. Produced by segpack.py reading the sidecar through canon_senses.load_senses -- for a source.format: custom project the co-designed custom extractor produces manifest.json and the shared segpack.py builds this field from it, exactly as it does for a built-in gutenberg_epub or plain_text scope.",
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 2,
+        "description": "A split is >=2 senses, carried in the sidecar's own adjudication order (never re-sorted).",
+        "items": {
+          "type": "object",
+          "required": ["sense_id", "disambiguator", "index_scope"],
+          "additionalProperties": false,
+          "properties": {
+            "sense_id": {
+              "type": "string",
+              "pattern": "\\S",
+              "description": "The sidecar sense's own id, unique within this source_form's senses[]. Copied verbatim from canon_senses.json."
+            },
+            "disambiguator": {
+              "type": "string",
+              "description": "Human-readable label distinguishing this sense from its siblings -- the only thing a consumer chooses by. Constrained to \"string\" and deliberately NOT to a non-empty string: canon-senses.schema.json constrains only sense_id with a non-blank pattern, so an empty disambiguator is a loadable sidecar value, and a stricter domain here would make a valid sidecar unbuildable."
+            },
+            "index_scope": {
+              "type": "string",
+              "enum": ["narrative", "allusion", "citation"],
+              "description": "Copied verbatim from the sidecar sense; this enum mirrors canon-senses.schema.json's own and can never be wider."
+            }
+          }
+        }
+      }
+    },
     "generation_hashes": {
       "type": "object",
       "description": "Copied DIRECTLY from manifest.json's (source_extraction_hash, source_input_hash) and canon.json's (particle_config_hash, derivation_bundle_hash) current recorded values at segpack-generation time -- NEVER independently recomputed by this schema, segpack.py, or any consumer. Transitively proves the whole upstream extraction/derivation chain was current when this segpack was built; the derivation-state gate (select_segments.py) compares these recorded values against CURRENT values to distinguish an ordinary stale reclassification from blocked_needs_regeneration.",
@@ -176,6 +206,7 @@
     "canon_names",
     "new_names",
     "canon_map",
+    "split_names",
     "generation_hashes"
   ],
   "additionalProperties": false
