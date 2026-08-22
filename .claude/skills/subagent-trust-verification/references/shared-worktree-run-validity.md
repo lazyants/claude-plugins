@@ -12,6 +12,7 @@ negotiate for silence; make the run prove its own validity.
 - [The four shapes](#the-four-shapes)
 - [Scheduling quiet does NOT work](#scheduling-quiet-does-not-work)
 - [Make the measurement prove its own validity](#make-the-measurement-prove-its-own-validity)
+- [A reviewer's read is a run too — freeze the tree for its duration](#a-reviewers-read-is-a-run-too--freeze-the-tree-for-its-duration)
 - [Reading a contaminated run correctly](#reading-a-contaminated-run-correctly)
 
 ## Why the false signal looks like the strongest evidence
@@ -147,7 +148,7 @@ the real fixture `003 Chapter Two.md` into **three** non-existent paths (`./003`
 
 **Assert a file-count floor.** Count the records inside the snapshot and refuse an implausibly small
 one (`[ "$N" -lt 200 ] && exit 3`); a count you only remember to eyeball is one you forget on the run
-that needed it — same failure shape as [[gotcha-zsh-no-word-splitting]]. Count NUL records, not
+that needed it — same failure shape as zsh not word-splitting an unquoted `$VAR`. Count NUL records, not
 lines: a path containing a NEWLINE is one record but two lines, and a path containing a SPACE is one
 record that `xargs` splits into several ARGUMENTS — exactly the `003 Chapter Two.md` → three
 non-existent paths failure above.
@@ -165,6 +166,18 @@ restores exactly the failure this file exists to prevent.
 **Have teammates verify only their OWN files during the work**, and reserve the full pass for one
 self-validated run after everyone stops.
 
+## A reviewer's read is a run too — freeze the tree for its duration
+
+A reviewer dispatched against a worktree reads files over MINUTES, not atomically. Amending, rebasing, or restoring a file in that tree mid-run makes its verdict a mix of pre- and post-edit content — and the mix is invisible in the report, which reads exactly like a clean pass over one tree.
+
+**Why this is worth guarding: the failure is silent in the direction that matters.** A reviewer that reads the OLD text of the file you just fixed reports a finding you already closed (cheap, you notice). A reviewer that reads the NEW text against OLD surrounding claims reports nothing (expensive, you ship it).
+
+- **Pin the exact commit SHA in the review brief**, not "the branch" or "the diff". That is what lets the reviewer DETECT drift instead of silently absorbing it — a reviewer told `88c6cfd` can notice the tree is now `5473859` and refuse to relay, which is the outcome you want.
+- Freeze the tree for the run's duration and say so when you unblock the reviewer. Batch every fix from the round instead of applying them as they arrive.
+- If you must keep working, dispatch the reviewer against a `git worktree add --detach <sha>` copy so your edits cannot reach it.
+- A reviewer that reports "I killed the run because the tree moved under it" did the right thing — re-dispatch it; never ask it to salvage a partial read.
+- Applies to a mutation-test harness too: restoring a file after each mutation churns mtimes and content in a tree something else may be reading.
+
 ## Reading a contaminated run correctly
 
 **Announce BEFORE mutation-testing in a shared worktree** — don't merely avoid the same file. The cost
@@ -176,7 +189,7 @@ anything that reads the shared filesystem while a mutant is live elsewhere in it
 
 **Mutation-test in an isolated/detached worktree** (its own `git worktree add`, not the team's shared
 one) whenever teammates are concurrently active — the same "worktree isolation" principle as
-[[gotcha-bash-tool-cwd-persists]] and the standing "always use an isolated working copy" rule,
+the Bash tool's cwd not being stable across builds, and the standing "always use an isolated working copy" rule,
 extended from "don't edit the same file" to "don't even READ the tree while someone else's scoped
 mutation is on disk."
 

@@ -8,9 +8,11 @@ When several `/goal-la`-style sessions fan out across worktrees, each computes "
 - The version-string auto-merge trap (same plugin, same N)
 - Cross-plugin race (peer bumps a *different* plugin)
 - The reconciliation mechanic (stash → rebase → apply → stack → bump → verify)
+- A resolved conflict hunk can end mid-statement
 - Layering CHANGELOG/README entries; peer structural refactors
 - Shared-main-tree contamination recovery
 - A race that lands after your PR is already open
+- Ask a peer to hold its MERGE, not its pushes
 - Completing the merge
 
 ## Detect a sibling before you finalize a bump
@@ -49,6 +51,22 @@ Worked cleanly repeatedly:
 6. Re-run the FULL clean-venv suite on the merged/rebased COMBINED tree (not just your own files) — it should show BOTH clusters' gate counts combined, proving the merge didn't shadow either side's assertions.
 7. Verify nothing was silently dropped: `git diff --cached --name-only` shows only your intended files, and a tree-hash comparison (`git rev-parse <mergecommit>^{tree}`) against the pre-push state. Then `git push --force-with-lease`.
 
+## A resolved conflict hunk can end mid-statement
+
+A conflict on a shared TEST file (not a version surface) is textually clean but can be semantically
+broken in a way that reads fine on inspection. Verified 2026-08-14: two releases each appended a
+`# 20.` section to the same test file; the rebase merged them (yours renumbered to `# 21.`), but the
+conflict hunk boundary landed MID-STATEMENT, so the single shared closing `)` silently closed the
+WRONG assert. Nothing about the resolved file looked wrong — no conflict markers left behind, no
+syntax error, both `# 20.`/`# 21.` sections present.
+
+**The defence is reading the resolved hunk as CODE, not as a diff.** A diff view shows you that both
+sides' lines are present; it does not show you which statement a shared trailing paren, brace, or
+bracket now belongs to. After resolving any conflict where the hunk boundary falls inside a
+multi-line statement (not just a value-per-line file like CHANGELOG/README), re-read the resolved
+block as a program — trace each opening delimiter to its own closing one — before trusting a green
+suite to have exercised it correctly.
+
 ## Layering CHANGELOG/README entries; peer structural refactors
 
 - CHANGELOG: stack your new version's entry ABOVE the newer already-merged entry (never below/overwriting it) via a small Python script with an `assert count >= N` guard before every string replacement (a plain `sed`/Edit risks silently matching zero times).
@@ -81,6 +99,20 @@ Note: `/security-review`'s automatic git-status extraction reads the MAIN dir an
 ## A race that lands after your PR is already open
 
 A race can land AFTER your PR is open and bot-reviewed (not just pre-commit/pre-PR): amend your fix into the single commit → `git rebase origin/main` → resolve to house style → re-run the COMBINED suite → `git push --force-with-lease`. GitHub flips the PR to `CONFLICTING`/`DIRTY` until the rebase, then back to `MERGEABLE`/`CLEAN`.
+
+## Ask a peer to hold its MERGE, not its pushes
+
+Root `README.md` and `.claude-plugin/marketplace.json` are surfaces every plugin release touches, so
+two concurrent releases collide there — and each peer merge to `main` while your PR is open
+invalidates the bot's standing approval and forces a fresh rebase + re-review cycle. Verified
+2026-08-18: a sibling plugin shipped three versions during one PR's review window, forcing two
+rebases before a coordination move broke the loop.
+
+**A peer's pushes to its own branch cannot affect your SHA — only its MERGE can.** Asking a peer to
+hold its pushes does nothing for you; asking it to hold its merge stops the race outright. Get this
+backwards and you keep paying for a rebase cycle that a single message would have prevented — the
+peer correction that fixed this cost two messages (ask it to hold, ping it once your PR is merged),
+cheaper than a third bot review cycle.
 
 ## Completing the merge
 

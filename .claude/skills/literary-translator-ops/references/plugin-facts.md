@@ -3,6 +3,7 @@
 Table of contents:
 - Canon data model (the load-bearing facts)
 - Advisory quick-facts (how the plugin actually works)
+- Sentinel-write, hashing-duplication and ledger-write facts
 - The proper-noun extractor exists in TWO copies
 - THE IRON RULE
 - Script house style
@@ -52,6 +53,34 @@ Table of contents:
   explicit opt-in). Since canon has no entity model, cross-volume name consistency = SEED from the
   prior tome's `canon.json` (shape `{version, n, n_proper, n_established, review_queue, entries,
   canon_hash}`), NOT "fresh".
+
+## Sentinel-write, hashing-duplication and ledger-write facts
+
+- **`mark_ever_converged()`'s final shape** — each element of it replaced a defect found across seven
+  codex review rounds, so a future "cleanup" that drops any one re-opens that defect: stage the
+  write → `fsync` it → publish via `os.link()`, **never** `rename`, and never unlink the public
+  sentinel name; open **ONE** `O_DIRECTORY` descriptor **before** the census and create staging
+  relative to it; the mode `0o644 & ~umask` is read **once per run**, not per file.
+- **`draft_content_sha1()` has SEVEN production copies** — six inline, plus `validate_assembled.py`,
+  which alone delegates to `_canonical_draft_projection_sha1()` instead of inlining it — and the six
+  inline copies drift **as a group**: touching one without the other five is a partial fix, the same
+  shape as the `mentions_cfg` triple-duplication above.
+- **`.resume_gate_ack` is still checked with `.exists()`**, which fails toward MORE refusal (blocks a
+  resume it shouldn't) — the comfortable failure direction, which is exactly why nobody has noticed
+  it yet.
+- **A live project can hold decoy ledger-shaped trees that a root-discovery glob will find.** The
+  `ssk-he-en/vol2` project holds four (`smoke/*`, `archive/*`) plus one empty scaffolded `slice`, so
+  any glob discovering `runs/ledger.json`-shaped paths under that root returns **five** candidates,
+  not one real ledger.
+- **Segment ids can be colon-bearing and still reach real filenames.** Both live books carry them:
+  tome1 has 15, vol2 has 2. A `validate_seg` change or a new path-building helper must be exercised
+  against a colon-bearing id, not assumed safe because the schema doesn't forbid it.
+- **`ledger_update.py`'s `enrich_converged_fields()` calls `emit_failure()` at its
+  `if not mark_ever_converged(...)` guard and REFUSES the `converged` fragment when the
+  sentinel write fails.** This is what makes a one-off sentinel backfill (the kind shipped from
+  1.18.0) genuinely one-off rather than something the next run silently re-needs. The recurring wrong
+  re-derivation is reading "non-fatal by design" as describing the *caller's* behavior — it describes
+  only `mark_ever_converged()`'s own return value; the ledger-update caller still hard-refuses on it.
 
 ## The proper-noun extractor exists in TWO independent copies
 

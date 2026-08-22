@@ -1,6 +1,6 @@
 ---
 name: literary-translator-ops
-description: Engineering conventions for working ON the literary-translator plugin (in the claude-plugins repo at plugins/literary-translator) — use when modifying its Python scripts or JSON schemas, adding or widening a field on a candidate row / skeptic assignment / any structure a workflow template consumes, editing canon.json or reasoning about its 1:1 name-dictionary data model, changing any hashed file and needing the re-translation / resume / render-baseline migration cost, moving or renaming a `durable_root` (its absolute path is hashed, so relocating invalidates every converged segment), enriching canon without triggering mass re-translation, matching the script/test/docs house style, or porting or adjusting the canon_adjudication_audit gate.
+description: Engineering conventions for working ON the literary-translator plugin (in the claude-plugins repo at plugins/literary-translator) — use when modifying its Python scripts or JSON schemas, adding or widening a field on a candidate row / skeptic assignment / any structure a workflow template consumes, editing canon.json or reasoning about its 1:1 name-dictionary data model, changing any hashed file and needing the re-translation / resume / render-baseline migration cost, moving or renaming a `durable_root` (its absolute path is hashed, so relocating invalidates every converged segment), enriching canon without triggering mass re-translation, matching the script/test/docs house style, porting or adjusting the canon_adjudication_audit gate, or touching `mark_ever_converged()`, any of the `draft_content_sha1()` copies, or `ledger_update.py`'s sentinel-write refusal path.
 ---
 
 # literary-translator plugin — engineering conventions
@@ -42,8 +42,10 @@ that mode needs genuinely relative links.
 
 - **references/plugin-facts.md** — read before writing or editing any script, schema, or test: the
   `canon.json` data model, the iron rule, the script house style (self-anchored paths, one-JSON-line
-  stdout, exit 0/1/2), the pytest test conventions and subprocess pattern, and the docs/registration
-  surfaces to touch when adding a script.
+  stdout, exit 0/1/2), the pytest test conventions and subprocess pattern, the docs/registration
+  surfaces to touch when adding a script, and the sentinel-write/hashing-duplication/ledger-refusal
+  facts (`mark_ever_converged()`'s seven-round final shape, the seven `draft_content_sha1()` copies,
+  `ledger_update.py`'s hard refusal, in `enrich_converged_fields()`, on a failed sentinel write).
 - **references/hash-migration-impact.md** — read before editing ANY schema or script, before
   editing `canon.json` content, **and before MOVING, renaming, or re-homing a `durable_root`:
   `source_input_hash` covers the source's absolute PATH, not only its bytes, so a relocation

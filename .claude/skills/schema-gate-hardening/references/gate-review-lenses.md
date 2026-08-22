@@ -4,7 +4,7 @@ Lenses for reviewing a gate's soundness and choosing its shape. See the spine in
 
 ## Contents
 1. Over-catch — an over-broad free-text gate (pattern AND scope)
-2. Under-catch — four concrete false-GREEN mechanisms + two structural shapes + the re-run-your-own-output meta rule
+2. Under-catch — four concrete false-GREEN mechanisms + two structural shapes + an errno-blind fail-closed probe + the re-run-your-own-output meta rule
 3. Structural-equivalence / staleness → dumb canonical-JSON equality
 4. LLM-output vs an exact-string registry — typographic false-REDs
 5. Untrusted identifier → path / shell — allowlist, `fullmatch`, calibrate
@@ -12,6 +12,7 @@ Lenses for reviewing a gate's soundness and choosing its shape. See the spine in
 7. What does this assertion actually PROVE? — the strength ladder, satisfiability, witness completeness
 8. Cross-gate exception drift — a decision recorded only in prose re-surfaces as a false regression
 9. Destructive filesystem gate — preserved-dotfile symlink-survival vectors in a clean-then-rebuild step
+10. The polarity tell — recognizing you enumerated the wrong side of a membership test
 
 ---
 
@@ -39,6 +40,10 @@ Two further under-catch shapes, both structural rather than a coding slip — no
 
 5. **The self-referential gate — `expected` derived through the code under test (spine §8).** A coverage gate computed its expected occurrence set by calling `occurrence_targets.build(...)`, the very function whose matching it was meant to certify (`validate_backlinks.py:623-625`). Any name the matcher fails to find is absent from BOTH sides, so `expected == actual`, `warnings: 0`, exit 0 — on every input, forever. The gate cannot fail on the defect class it exists to catch. This survived a full plan→codex→review→ship cycle because every reviewer checked whether the gate was *correct*, never where its expectation *came from*. **Ask the provenance question explicitly, and never cite such a gate as evidence its own subject works** — the check has to be an independent oracle (a committed expected fixture, a second implementation, or human eyes).
 6. **An empty-result sentinel read as an affirmative (spine §9).** `glossary_batch_plan.py` prints `{"no_new_candidates": true}` for *both* "every candidate is already in canon" and "my extractor matched nothing at all"; the consumer (`SKILL.md`'s SKIP branch) assumes the benign reading and skips the step. On an uncased script where the candidate matcher was structurally dead, that skipped the sole writer of `canon.json` and the run FATALed two steps later with an error naming neither cause. **Zero is not a result — it is the absence of one.** Either emit distinguishable states at the source (`nothing_to_do` vs `detector_found_nothing`), or make the consumer prove non-vacuity (assert the detector actually ran and saw candidate-shaped input) before treating empty as success.
+
+A further concrete case, back in coding-slip territory:
+
+7. **A fail-closed `OSError` probe that failed OPEN by being errno-blind.** `_independent_lock_attempt()` mapped EVERY `OSError` raised by `flock` to "another process holds the lease" — so an injected `ENOLCK` (a filesystem that cannot lock AT ALL) read as proof of contention, when it proves nothing about contention. Only `EAGAIN`/`EWOULDBLOCK` (and `EACCES`, for the lock file's `open()`) actually mean "someone else holds it." `EACCES` was independently challenged as not proving contention and REFUTED with platform docs: the `open()` happens before the `flock()` call, so an open-time `EACCES` is already caught as its own failure earlier — the challenge does not remove it from the contention set. **A `try/except OSError: return True` wrapped around a syscall that raises for many unrelated reasons is a false-GREEN generator disguised as fail-closed design** — enumerate the errno set that actually means what you are mapping it to, not the exception TYPE. Source: `project-lt-455-pr487.md`.
 
 ## 3. Structural-equivalence / staleness → dumb canonical-JSON equality
 
@@ -89,6 +94,7 @@ Patterns from generalizing a nested-discovery scan (footnotes/verses nested insi
 - **Whack-a-mole reason-code RELABEL is not a fix (review lens).** The first skip-exemption fixed `orphan_footnote_def` but the SAME topology then died with `orphan_verse`. Resolving error A by moving the same input's failure to error B is zero progress. Before declaring a fix done, **enumerate the full failure set for the topology the fix targets**, not just the one error code the ticket named.
 - **Referenced-only-not-rendered + SPLIT return channel.** An item can be marked "referenced" (satisfying orphan/bijection checks) without appearing in output — correct when its sole reference site is itself stripped/invisible. Load-bearing: keep it OUT of any channel that would surface it (a nested-discovered footnote number reaches `seg_referenced_ns` but NEVER a node's `fnrefs`, which would re-emit a dangling `[^n]:`). Give the scan helper a SEPARATE return slot so referenced-only discoveries physically cannot ride the renderable path.
 - **A flat loop CAN be the fixed point — no second worklist needed** when the exemption predicate reads only immutable state (order-independent, derived from immutable manifest ground truth): the existing full-set iteration is already the fixed point. Adding a worklist there is over-engineering. (The DISCOVERY side genuinely needs the worklist because it grows the frontier; the distinction is whether the set being iterated is fixed or growing.)
+- **Same exemption-logic shape from a different gate, not nested-discovery-specific — two populations with opposite safe failure modes need deliberately ASYMMETRIC predicates, not a better single one.** `findStaleChapterRows`'s hard-halt scan (enduser-handbook #357/#349) took five admitted findings across four review rounds, every one inside its EXEMPTION logic — the branch deciding "this row is fine, do not name it." What ended the loop was not a better single predicate but a split: **exact comparison** on the `-`/`*`/`+` bullet the writer itself emits (sound against a nested-bracket attack, and it agrees with `wireNestedListChapter`'s own membership guard) for the population where the writer controls the form and a false ACCEPT is the danger; **containment** everywhere else (silent rather than halting on an index form the scan does not recognise) for the population where an unknown form is expected and a false HALT is the danger — because a wrong exemption here is a HARD HALT the operator sometimes cannot even clear (deleting a wrongly-named row gets it re-appended on the next publish, which re-halts). Ask which failure mode each population can safely absorb before hunting for one predicate to cover both. Source: `project-eh-357-349-pr583.md`.
 
 ---
 
@@ -174,3 +180,19 @@ A "clean the managed output dir before a deterministic rebuild" step (so stale f
 **Root-of-trust boundary + audit the whole class in ONE sweep.** Stop the walk at the trusted root (the tool's own install dir) — don't guard at or above it; guard the trusted root's immediate child with `.parent.is_symlink()`, **NOT a realpath-containment check** (realpath over-rejects a LEGITIMATELY symlinked install — root a symlink, real subdir underneath — while `.is_symlink()` on the child rejects only a planted redirect). The moment you find ONE such hole, grep EVERY writer of the class across ALL scripts (`mkdir`/`mkstemp`/`open`-for-write/`write_text`/`os.replace` under the managed root) and walk each target's FULL ancestor chain — the identical bug recurs one tree-level up (leaf marker → its write-temp → sibling snapshot dirs → the shared parent) and across every sibling writer, and an adversarial reviewer surfaces only ONE per round.
 
 **False-RED tail — don't over-reject legitimate OS symlinks.** For a genuinely OUT-OF-root absolute destination, checking EVERY component false-rejects real OS symlinks (`/var`, `/tmp` are symlinks on macOS — including pytest's own tmpdirs), and there's no reliable way to distinguish a benign OS symlink from a planted redirect OUTSIDE the managed root. Keep leaf+immediate-parent for the out-of-root case and DOCUMENT the boundary in code + the PR thread; the realistic threat (a symlink planted in a cloned project tree) is necessarily IN-root and fully closed. General adjudication lesson: when two reviewers disagree on a security finding, weigh the proposed fix's OWN regressions — the "stricter" fix (check every component) is not automatically right when it breaks legitimate usage. Twin of the root-of-trust *value*-location lens in `references/pipeline-trust.md`; cousin of the dangling-symlink read guard (`os.path.lexists`+`is_file`) in `references/json-schema-and-json.md` §3(a).
+
+## 10. The polarity tell — recognizing you enumerated the wrong side of a membership test
+
+Applies to every allowlist-vs-denylist choice above (§1, §5, `SKILL.md` §1), including internal
+control-flow gates over your own function's returned union, not only untrusted-input gates.
+
+Before writing a membership test, ask which side of it is closed by something other than your own
+imagination — a grammar, a schema, an enum, a protocol. Enumerate THAT side; if neither side is
+closed, say so in the code and pick the side whose failure is loud (Strictness Bias, `SKILL.md` §2).
+The two lists look interchangeable while you are writing them — the difference only shows up on an
+input neither you nor the reviewer imagined, which is exactly the input the gate exists for.
+
+**The tell that you got it backwards:** the set is named after the thing you are trying to CATCH
+(`DECLARATION_HEADS`, `DANGEROUS_VERBS`, `BLOCKED_PATHS`) rather than after the thing you are trying
+to PERMIT. Also: adding a case to it in response to a review finding, twice — a set that keeps
+growing one exception at a time is enumerating the wrong side.

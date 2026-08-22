@@ -35,4 +35,22 @@ Re-running until it passes and reporting the green is the failure mode this guar
 alone cannot distinguish a real regression from a transient one, and the name is gone by then.
 
 Related: the absolute PASS/FAIL total is environment-dependent (the `esbuild`-gated check adds 0 or 1
-assertion) — see the "Review discipline" section of SKILL.md before quoting a total in release copy.
+assertion), and a plugin-subtree `git archive` test bed separately carries 17 permanent repo-root-reaching
+failures — see the "Review discipline" section of SKILL.md before quoting a total in release copy or a
+mutation-review report.
+
+## Reconcile a suite-count delta by DIFFING the two check-name sets, never by arithmetic
+
+`#420`/`#339` (PR #575) shipped a PR body that carried a false measured claim for several review
+rounds — "origin/main also reads 958/958, delta zero" — because nothing re-measured it once the delta
+*sounded* reconciled. Both numbers in that claim were wrong; the actual baseline was 955/955 and the
+branch measured 959/959.
+
+Arithmetic on two totals cannot tell you whether a delta is real or is two unrelated changes that
+happen to cancel. **Diff the two runs' check-NAME sets instead** (`bash reference-assets.test.sh` names
+each check as it runs) — that is what actually resolved this delta: −6 retired needles (the old
+VALUE-side per-name pins), +3 restored needles (the type-only pins under new names — see
+`references/declaration-parity-facts.md`), +5 census pins, +2 `node --test` entries, net +4 on a base
+of 955 landing at 959. A bare "959 vs 955, delta 4, looks right" check would have passed even if the
+composition were completely different from the actual −6/+3/+5/+2 breakdown — the set diff is the only
+way to confirm the delta is made of the SPECIFIC changes the PR claims, not just the right count.

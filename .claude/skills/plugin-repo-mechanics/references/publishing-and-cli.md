@@ -8,6 +8,17 @@ The **generalized** config-dir architecture — the per-profile plugin-store mod
 
 The four synced surfaces + merge-to-main is the *publish*, not the *ship*. The INSTALLED plugin stays stale until you pull the marketplace cache and update the plugin — always do this last step. **Post-2026-07-21 this is PER-PROFILE** (stores are independent now): run it for each profile you want the update in, e.g. `CLAUDE_CONFIG_DIR=/Users/moi/.claude-bm claude plugin marketplace update lazyants` (for the app), then update the plugin from the `lazyants` marketplace; repeat with `CLAUDE_CONFIG_DIR=/Users/moi/.claude` (and `.claude2`/`.claude3`) for the CLI profiles you actually use. (Note: `lazyants` is the GitHub marketplace name — distinct from the `lazy-ants` directory marketplace.) The exact two-command form, the marketplace-qualified update id, and the restart caveat are in the next section.
 
+### `plugin update` defaults to `--scope user` and reports THAT scope's result — a false green over a stale local install
+
+`claude plugin update <id>` takes `-s/--scope {user,project,local,managed}` and **defaults to `user`**. A second install of the same plugin at `local` scope is invisible to the default invocation, and — this is the trap — the command still prints a cheerful success line describing the USER-scope entry. Run from the local install's own project directory it answers `✔ literary-translator is already at the latest version (1.26.0).` while that project's own copy sits at 1.23.0. **The failure prints exactly what success prints**, so a per-profile refresh loop can report four green updates and leave two stale installs behind.
+
+Two consequences:
+
+- **Enumerate scopes before believing a refresh is complete.** `claude plugin list` shows each entry with its own `Scope:` line, and a plugin installed twice appears twice — that duplicate is the only visible tell in the CLI output.
+- **Verify from the registry, not the command.** `<profile>/plugins/installed_plugins.json` → `plugins["<name>@<marketplace>"]` is a LIST, one object per scope, each with its own `scope`, `version`, `installPath` and (for `local`) `projectPath`. Read the version from there after updating. This is the same rule as the section below — never from a `plugins/cache/` path glob — one level up: never from the update command's own success line either.
+
+Fix form, once a local-scope entry is found: `cd <projectPath> && CLAUDE_CONFIG_DIR=<profile> claude plugin update <name>@<marketplace> --scope local`. The `cd` alone is NOT enough; without `--scope local` it silently re-reports the user scope.
+
 ## Read an installed version with `claude plugin list` — NEVER from a `plugins/cache/` path
 
 `<profile>/plugins/cache/<marketplace>/<plugin>/` holds **one subdirectory per version ever
@@ -53,6 +64,34 @@ This is the plugin-cache instance of the standing global rule: locating an artif
 CONSTRUCTED, instead of asking for it by id, renders staleness and absence identically to fact. The
 damage was not a wrong number in a log — it was a wrong state read that became a decision input the
 user acted on ([[feedback-askuserquestion-cost-model]]).
+
+### The installed label answers "which version", not "which bytes"
+
+`claude plugin update` copies the marketplace clone's CURRENT bytes at update time and files them
+under whatever version the manifest then advertises — it does not reconstruct the tree that version
+was originally cut from. So `claude plugin list` / `installed_plugins.json` correctly answering
+"1.14.0" does not mean the installed content matches what 1.14.0 shipped: an unbumped `plugins/`
+merge that landed after your last update, followed later by a version bump that finally moves the
+label, ships that unbumped merge's content silently bundled under the new label.
+
+Measured 2026-08-16: an installed copy labelled `1.14.0` had `publish-targets/obsidian-vault.md` at
+1248 lines — byte-identical to `origin/main` including a commit (`386b64e`) that merged AFTER the
+1.14.0 release — while the real 1.14.0 tree (`45d693e`) had 1107 lines.
+
+Two consequences, and the second is easy to get backwards:
+
+- An unbumped edit is permanent for anyone already installed and up to date — `plugin update`
+  returns `up_to_date` and copies zero bytes (see `version-and-surface-sync.md`'s unbumped-edit
+  rule), so the stale label sticks until a LATER bump moves the version.
+- **But that later bump DOES repair it** — once the advertised version differs, `plugin update`
+  proceeds and copies then-current bytes under the new label, so an install that updates forward
+  after the bump gets correct content AND a correct label together. Do not tell an already-stale
+  user they must reinstall from scratch — a normal forward update is sufficient once the next bump
+  ships.
+
+Practical rule: to know what an installed copy actually CONTAINS, diff the file against the
+intended source tree — never infer content from the version label, even the correct, freshly-verified
+one.
 
 ## Switching a marketplace SOURCE (directory ↔ github) — EDIT the registry, never `marketplace remove`
 

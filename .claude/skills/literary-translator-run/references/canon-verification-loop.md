@@ -221,6 +221,31 @@ and **W5's reviewer cannot be the backstop** — its prompt explicitly puts "cor
 decision itself" out of scope and routes suspicion back to the glossary/adjudication route. So a `live` run
 needs a real pre-merge citation review, or it ships uninspected citations permanently.
 
+## Scratchpad output is not durable — copy round artifacts out immediately
+
+Every session gets a scratchpad under
+`/private/tmp/claude-501/<project-slug>/<session-id>/scratchpad/`. It is session-scoped and does
+**not** survive — anything written there and not copied out is gone when the session ends. This
+loop produces exactly the kind of file that goes missing: a round's `canon.rN.json` or
+`canon.final.json` is a **result**, not an intermediate, the moment it exists.
+
+**Cost, 2026-07-27:** 472 files lost, including `canon.final.json` and `canon.r6.json` for the SSK
+vol.2 name canon — outputs of long, expensive adjudication rounds that had to be reasoned around
+afterwards rather than reproduced.
+
+**Reflex: the moment a round's output becomes a result — a canon, a report, an evidence bundle, a
+measurement table — copy it into the run directory (the durable_root's own tree) in the same turn
+that produced it.** Do not defer the copy to an end-of-loop cleanup step; the session can end
+without one. The system prompt's "prefer the scratchpad over /tmp" guidance is about keeping the
+user's project clean, not about persistence — both are equally temporary.
+
+**The second, quieter failure: a durable document that CITES a scratchpad artifact.** A plan or
+report in the run folder saying "the verdict is in `codex-438-r2.out` beside this file" is broken the
+moment that file is still only in the scratchpad — the sentence reads true, resolves in the
+author's head, and only breaks when someone else (a reviewer, a re-review round) follows it. The
+moment any durable file references a scratchpad path, the referenced file must move before the
+reference ships. Cheap check: `ls` the run folder against the paths its own documents cite.
+
 ## Mechanics
 
 Same detached-codex fan-out as the model bakeoff: `codex-companion.mjs task --background --model

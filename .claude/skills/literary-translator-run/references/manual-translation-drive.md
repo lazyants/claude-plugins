@@ -36,6 +36,60 @@ The only deliberate deviations from the builders:
 - they hardcode `Effort: high.` in the dispatch prompt → override to `xhigh.` per the translation-effort rule. (This prompt-level effort is a DIFFERENT knob from the profile's const `engine.effort`, which stays `high`. Note the actual SSK run dispatched at Sol@high. No tier is validated as a winner — for what the model×effort evidence does and does not support, see `skill:codex-runtime-driving` → `references/model-effort-bakeoff.md`, the single home for that question; the standing rule for translation dispatch is xhigh.)
 - substitute `PY` → the venv python.
 
+## Re-reviewing an already-translated segment — no shipped review-only path
+
+Re-reviewing a book already translated (e.g. after a hand-correction) is a routine operator need
+with no shipped path. `mass-translate-wf.template.js` ends in `pipeline(SEGS, translateStage,
+reviewFixLoop)`, and `translateStage` (cite it by name; it moves) is UNCONDITIONAL — it does not consult
+`derive_next_action()`, the ledger, or whether a draft already exists; it dispatches
+`codex_job.py --kind translate` and returns. Feeding it segments whose drafts were hand-corrected
+**overwrites that work**. `glossary-pass` and `skeptic-pass` contain no review stage at all.
+
+**The sanctioned substitute is the template's own builders, transcribed verbatim (never
+re-authored) — per the rule above:**
+- `reviewDispatchPrompt(seg, roundLabel)` — the ENTIRE function body, from its `function` line to
+  its closing brace, including the trailing `⟦JOB_OUT⟧` write-destination line and the final
+  `Return exactly the line: REVIEWED` line. Do not cite or cut by line number: the ranges shift, and
+  a range that stops early yields a prompt with no write destination and no return line.
+- `reviewDrivePrompt(seg, roundLabel)` — likewise the entire function body, the exact
+  `codex_job.py --kind review` launch.
+- Acceptance gate: `review_ready.py --expect-token`.
+
+`codex_job.py` supplies the isolated `JOB_OUT` and atomically promotes it to the canonical
+`<seg>.review.json`, so no part of the artifact contract is re-implemented. Sturdier than hand
+transcription: cut the builder out by brace balance and assert the slice still contains its
+contract lines (`validate_draft.py`, `draft_sha1.py`, `DRAFT_TOKEN_MISMATCH`, `canon_map`,
+`⟦JOB_OUT⟧`, `REVIEWED`) — a template shift then fails loudly instead of rendering a weakened
+prompt.
+
+### Three traps, the first silent
+
+1. **A fresh `RUN_ID` yields ZERO verdicts and no error.** `mass-translate-wf.template.js`'s `reviewDispatchPrompt()` — its `DRAFT_TOKEN_MISMATCH`
+   instruction — makes the
+   reviewer compare the DRAFT's own `dispatch_token` against the literal `RUN_ID + ":" + seg`; on
+   mismatch it returns `DRAFT_TOKEN_MISMATCH` and **writes nothing at all**. Read `RUN_ID` out of
+   the drafts themselves, per segment (do not assume one per book), and take `roundLabel` as the
+   successor of the label in the existing `<seg>.review.json` — never reuse it.
+2. **Back up before the first dispatch.** Promotion is `os.replace()` with no backup and no
+   post-confirm (`codex_job.py:48`), so every existing `<seg>.review.json` is destroyed on first
+   write. Copy them out first — but do NOT delete the originals, since the round label is read
+   from them and `derive_next_action()` consults them.
+3. **`--effort` here is the PROJECT's, not a tier I am choosing.** The template threads
+   `engine.effort` from `profile.yml` (both live books: `xhigh`). Dropping the flag puts a weaker
+   reviewer on the round that confirms a stronger one's. No conflict with the standing "never pass
+   a tier override" rule, which governs tiers *I* assign to codex-rescue.
+
+### `draft_sha1.py` cannot see formatting — use it to tell content from noise
+
+It parses the draft, drops `dispatch_token`, re-serializes with sorted keys and compact
+separators, and hashes THAT. So a mismatch against `reviewed_draft_sha1` is a **content** change,
+always; re-serialization, key reordering and a missing trailing newline leave it fixed. Two
+independent records carry the hash — the ledger entry and the `*.review.json` artifact — so they
+cross-check.
+
+**mtime does not.** A later campaign, or a `cp -f` restore, overwrites the mark of an earlier one,
+so mtime clustering measures the LAST write and never the volume of edits.
+
 ## The bypass generalizes beyond W5 — glossary/W3a batch dispatch too
 
 The `agent(..., {agentType:'codex:codex-rescue'})`-anchors-writes-to-the-session-repo trap and the `task --write --cwd <durable_root>` bypass are not specific to translate/W5 — the SAME fix applies to the glossary Workflow's batch dispatch (W3a), which has the same sandbox problem when its `durable_root` sits in a sibling dir outside the session repo.
