@@ -143,33 +143,22 @@ def _test_function_count(filename):
         if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
     )
 
-
-# Rewritten for 1.46.0 (#489), per the maintenance contract above. 1.45.0's two
-# rows retire with its entry. `_tuple_len` and `_files_defining` are kept though
-# unused here, exactly as earlier entries kept the helper this one uses.
+# Rewritten for 1.49.0 (#458), per the maintenance contract above. The
+# previous entry's rows go with it, exactly as that contract says.
 #
-# ONE row, because 1.46.0 states exactly one figure this tree can answer: the
-# size of the suite it adds. Everything else that entry counts is measured
-# somewhere this repository cannot reach, and declaring any of it would mean
-# hardcoding the answer inside the lambda (`lambda: 921`) -- which passes every
-# assertion below while proving nothing:
+# EMPTY, deliberately. The 1.49.0 entry states no figure this tree can answer.
+# Its only numerals are exit codes (1 and 2), which are not re-derivable counts
+# of anything, and its cost paragraph argues from SET MEMBERSHIP --
+# segment_dispatch_driver.py is in PLUGIN_BUNDLE_MEMBERS, plugin_bundle_hash is
+# not in PER_SEGMENT_FIELDS -- which the sibling changelog_citations.test.py
+# pins by anchoring those citations to the strings that must appear at them.
+# Declaring a count this entry does not make would mean inventing one to keep
+# the list non-empty, which passes every assertion below while proving nothing.
 #
-#   * 921 hits, 476 of 1212 units, 41 of 42 units and the 267 sof-pasuq
-#     occurrences are measurements of an operator-owned durable root and of
-#     external logical-order corpora, neither in this repository;
-#   * 46 762 RTL tokens is the same, summed across five fetched corpora;
-#   * 1415 codepoints newly admitted is a property of the Unicode database the
-#     INTERPRETER ships, not of this tree -- it moves with the Python build, so
-#     pinning it here would fail on a runner with a different Unicode version;
-#   * 777 and 677 are quoted from the ISSUE, describing a measurement made
-#     against a source EPUB rather than against this tree.
-FIGURES = [
-    Figure(
-        "27 new tests",
-        27,
-        lambda: _test_function_count("visual_order_advisory.test.py"),
-    ),
-]
+# Emptying retires this check until the next entry that states a figure. That
+# is a REVIEW responsibility, not an assertion here: nothing goes red if a
+# future release states a count and forgets to declare it.
+FIGURES = []
 
 
 def _newest_entry():

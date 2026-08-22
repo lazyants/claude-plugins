@@ -91,7 +91,20 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # citation with no anchors fails and an anchor no citation uses fails -- but
 # neither half fires on a stale COMMENT, which is why the rewrite is a
 # maintenance contract rather than an assertion.
-CITATION_ANCHORS = {}
+CITATION_ANCHORS = {
+    # 1.44.0 (#458). The entry's "What it costs" section is the only place it
+    # cites source, and every citation there is load-bearing: each one is a
+    # link in the argument that this release re-stales converged work at the
+    # next Step 0a refresh. An operator reads that section to decide whether
+    # to refresh a live book, so a citation that drifts here misprices a
+    # decision about a whole corpus, not a docstring.
+    "cache_key.py:156": ["segment_dispatch_driver.py"],
+    "cache_key.py:193": ["plugin_bundle_hash"],
+    "cache_key.py:196-198": ["PER_SEGMENT_FIELDS", "input_sha1"],
+    "cache_key.py:563-569": [
+        "compute_plugin_bundle_hash", ".plugin_bundle_hash", "read_bytes",
+    ],
+}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
 # alphabetic extension are still required. Pinning a list of extensions was
