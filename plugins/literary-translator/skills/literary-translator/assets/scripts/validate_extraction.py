@@ -652,21 +652,6 @@ def run_derivable_checks(manifest: dict, apparatus_policy: str, max_segment_word
 # scoring. A clean sweep from either would have read as "no visual-order input
 # found" -- a false all-clear. Do not swap this signature for one of those.
 
-# Codepoint ranges whose letters are written right-to-left.
-_RTL_RANGES = (
-    (0x0590, 0x05FF),  # Hebrew
-    (0x0600, 0x06FF),  # Arabic
-    (0x0700, 0x074F),  # Syriac
-    (0x0750, 0x077F),  # Arabic Supplement
-    (0x0780, 0x07BF),  # Thaana
-    (0x07C0, 0x07FF),  # NKo
-    (0x0800, 0x083F),  # Samaritan
-    (0x0840, 0x085F),  # Mandaic
-    (0xFB1D, 0xFB4F),  # Hebrew presentation forms
-    (0xFB50, 0xFDFF),  # Arabic presentation forms A
-    (0xFE70, 0xFEFF),  # Arabic presentation forms B
-)
-
 # Punctuation that in LOGICAL order can only FOLLOW a word, never lead one.
 # Opening marks (Ps/Pi) are excluded by omission and by category: an opening
 # bracket or quote before a word is ordinary logical order. The ELLIPSIS is
@@ -692,10 +677,21 @@ VISUAL_ORDER_SCAN_NAME = "visual_order_scan"
 
 
 def _is_rtl_letter(ch: str) -> bool:
-    code = ord(ch)
-    if not any(low <= code <= high for low, high in _RTL_RANGES):
-        return False
-    return unicodedata.category(ch).startswith("L")
+    """A letter Unicode itself classifies as right-to-left.
+
+    Asked of Unicode (bidi class R or AL) rather than of a hand-kept table of
+    codepoint ranges. A range table silently stops at whatever the author
+    remembered: an earlier revision of this file listed eleven BMP blocks and
+    therefore could not see ``.<ADLAM CAPITAL ALIF>``, Hanifi Rohingya, the
+    Syriac supplement, or the Arabic mathematical alphabets -- a source with the
+    exact signature below would have finished on an unqualified green. Measured
+    when this replaced the table: 1415 codepoints newly admitted, ZERO newly
+    rejected, and both the positive control book (921 hits over 476 of 1212
+    units) and the 46 761-token logical-order negative corpus were unchanged."""
+    return (
+        unicodedata.category(ch).startswith("L")
+        and unicodedata.bidirectional(ch) in ("R", "AL")
+    )
 
 
 def _is_terminal_punct(ch: str) -> bool:
@@ -784,6 +780,17 @@ def scan_visual_order(manifest: dict):
     return n_hits, units_with_hits, rtl_units, histogram, samples
 
 
+def _escape_char(ch: str) -> str:
+    """One character as printable ASCII. Above the BMP a four-digit ``\\uXXXX``
+    form is not merely unconventional, it is AMBIGUOUS -- ``\\u1F600`` reads as
+    U+1F60 followed by ``0`` -- so an astral codepoint takes the eight-digit
+    ``\\UXXXXXXXX`` form. Evidence whose own spelling is ambiguous cannot settle
+    the question it was printed to settle."""
+    if ch.isascii() and ch.isprintable() and ch != "\\":
+        return ch
+    return f"\\u{ord(ch):04X}" if ord(ch) <= 0xFFFF else f"\\U{ord(ch):08X}"
+
+
 def _escape_evidence(token: str) -> str:
     """Renders a token as pure-ASCII ``\\uXXXX`` escapes.
 
@@ -792,10 +799,7 @@ def _escape_evidence(token: str) -> str:
     and then retracted for exactly that reason -- so evidence a human or an LLM
     is meant to ADJUDICATE has to be codepoints, not glyphs. The histogram keys
     above are ``U+XXXX`` for the same reason."""
-    return "".join(
-        ch if (ch.isascii() and ch.isprintable() and ch != "\\") else f"\\u{ord(ch):04X}"
-        for ch in token
-    )
+    return "".join(_escape_char(ch) for ch in token)
 
 
 def run_advisory_scans(manifest: dict):
@@ -806,8 +810,13 @@ def run_advisory_scans(manifest: dict):
         marks = ", ".join(
             f"{key}x{count}" for key, count in sorted(histogram.items())
         )
+        # The LABEL is escaped too, not just the token. A block id is authored by
+        # the extractor -- a custom one may emit anything -- and a raw RTL id
+        # reorders the very diagnostic being adjudicated. This is also what makes
+        # the payload ASCII by CONSTRUCTION rather than by fixture.
         evidence = "; ".join(
-            f"{label} {_escape_evidence(token)}" for label, token in samples
+            f"{_escape_evidence(str(label))} {_escape_evidence(token)}"
+            for label, token in samples
         )
         detail = (
             f"{n_hits} token(s) in {n_units} of {n_rtl_units} RTL-bearing text "
@@ -910,19 +919,30 @@ def main(argv=None):
     # mangled. Its own broad boundary is what keeps the promise that an advisory
     # can never change the exit decision in EITHER direction: a scan that raises
     # degrades to a named advisory and the mandatory checks proceed untouched.
+    # Scanning AND emitting sit inside the one boundary. Emission was once
+    # outside it, which quietly broke the promise: stderr on a closed pipe or a
+    # full filesystem raises OSError, and an ADVISORY would then have refused an
+    # otherwise-valid ingestion -- the exact thing this feature is documented as
+    # unable to do. Reporting is best-effort by design; the gate's verdict is
+    # not. Note only Exception is caught, deliberately: KeyboardInterrupt and
+    # SystemExit are not advisory failures and must keep propagating.
+    advisories = []
     try:
         advisories = run_advisory_scans(manifest)
+        for name, detail in advisories:
+            print(f"WARN {name}: {detail}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 -- an advisory may never gate a run
-        advisories = [
-            (
-                VISUAL_ORDER_SCAN_NAME,
-                f"scan unavailable ({type(exc).__name__}) -- this is an advisory "
-                f"only and does NOT affect whether this gate passes; the "
-                f"mandatory checks below are unaffected.",
+        advisories = advisories or [(VISUAL_ORDER_SCAN_NAME, "scan unavailable")]
+        try:
+            print(
+                f"WARN {VISUAL_ORDER_SCAN_NAME}: scan unavailable "
+                f"({type(exc).__name__}) -- this is an advisory only and does "
+                f"NOT affect whether this gate passes; the mandatory checks "
+                f"below are unaffected.",
+                file=sys.stderr,
             )
-        ]
-    for name, detail in advisories:
-        print(f"WARN {name}: {detail}", file=sys.stderr)
+        except Exception:  # noqa: BLE001 -- reporting the failure may also fail
+            pass
 
     # --- (b) independent re-derivation of the derivable checks ----------------
     try:

@@ -76,6 +76,7 @@ RLM = "\u200F"                                  # RIGHT-TO-LEFT MARK (category C
 WALAKIN = "\u0648\u0644\u0643\u0646"          # Arabic "walakin"
 ARABIC_FULL_STOP = "\u06D4"
 ELLIPSIS = "\u2026"
+ADLAM_ALIF = "\U0001E900"                      # ADLAM CAPITAL LETTER ALIF (astral, bidi R)
 
 
 # ---------------------------------------------------------------------------
@@ -292,11 +293,54 @@ def test_schema_valid_but_underivable_manifest_still_warns(tmp_path, monkeypatch
     assert "Traceback" not in captured.err
 
 
+def test_astral_rtl_letter_is_seen():
+    # An earlier revision asked a hand-kept table of BMP ranges instead of
+    # Unicode, so Adlam, Hanifi Rohingya and the Syriac supplement carried the
+    # full signature and still finished on an unqualified green.
+    token = f".{ADLAM_ALIF}"
+    assert ve._leading_terminal_punct_hits(token) == [token]
+
+
+def test_astral_codepoints_escape_unambiguously():
+    # A four-digit form would render this as "\\u1E900", which reads as U+1E90
+    # followed by "0" -- evidence whose spelling is ambiguous cannot settle the
+    # question it was printed to settle.
+    assert ve._escape_evidence(ADLAM_ALIF) == "\\U0001E900"
+
+
+def test_a_non_ascii_block_id_cannot_reach_the_payload_raw():
+    # The label is extractor-authored and a custom extractor may emit anything.
+    # A raw RTL id would reorder the very diagnostic being adjudicated -- and it
+    # would do so while every other assertion here still passed.
+    m = _manifest_with(blocks={f"PARA:{SHALOM}:0001": {"plain_text": f".{TOV}"}})
+    (_, detail), = ve.run_advisory_scans(m)
+    assert detail.isascii(), "a non-ASCII block id reached the advisory payload raw"
+    assert "\\u05E9" in detail, "the label should appear, escaped rather than dropped"
+
+
+def test_a_raising_scan_still_cannot_rescue_a_failing_manifest(tmp_path, monkeypatch, capsys):
+    # The no-rescue half of the report-only contract, in the failure mode. The
+    # clean-manifest version below would be satisfied by a handler that prints
+    # "scan unavailable" and then exits 0 -- which would rescue EVERY failing
+    # manifest.
+    def _boom(_manifest):
+        raise RuntimeError("synthetic scan failure")
+
+    monkeypatch.setattr(_sib.ve, "run_advisory_scans", _boom)
+    m = _baseline_manifest()
+    m["spine"] = list(reversed(m["spine"]))
+    code = _run_gate(tmp_path, monkeypatch, m)
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "scan unavailable" in captured.err
+    assert "OK -- post-extraction gate passed" not in captured.out
+
+
 def test_a_raising_scan_degrades_to_an_advisory_and_never_gates(tmp_path, monkeypatch, capsys):
     def _boom(_manifest):  # noqa: ARG001
         raise RuntimeError("synthetic scan failure")
 
-    monkeypatch.setattr(ve, "run_advisory_scans", _boom)
+    monkeypatch.setattr(_sib.ve, "run_advisory_scans", _boom)
     code = _run_gate(tmp_path, monkeypatch, _baseline_manifest())
     captured = capsys.readouterr()
     assert code == 0, "a broken advisory must never refuse an otherwise clean gate"
