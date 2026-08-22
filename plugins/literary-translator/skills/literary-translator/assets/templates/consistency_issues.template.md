@@ -41,9 +41,15 @@ as genuinely ambiguous," record that decision explicitly too, rather than silent
 
 Record one thing more, in the same entry: **where the decision now lives** -- a structured owner (name the
 surface: `profile.yml`, the segpack, a task template), `canon.json` (and which segments' segpacks were
-regenerated), section G of `style_bible.md`, the marked style contract, or nothing, because it binds nothing
-enforceable. An item that names none of these, having been promoted nowhere, is a decision the reviewer
-cannot see, and the next round will raise it again with a perfectly good justification.
+regenerated), section G of `style_bible.md`, or the marked style contract. Those four are W6's outcomes and
+W6 carries the discriminator for each.
+
+There is one legitimate fifth answer, and it is the "leave it as genuinely ambiguous" decision above:
+**nothing**, because the item deliberately fixes no rule. Write it that way, with the reason -- it is a
+terminal classification, not an unfinished one. Accept what it costs, though: nothing enforceable reaches
+the reviewer, so a later round may raise the same span again and be right to. An item with the field left
+BLANK is the different case: a decision that simply was not promoted, invisible to the reviewer with no one
+having chosen that.
 
 Typical sources for an item: a direct READ of this batch's converged drafts, in `manifest.json`'s
 `segments[]` order, for narrative voice, for how each recurring character is rendered, and for recurring
