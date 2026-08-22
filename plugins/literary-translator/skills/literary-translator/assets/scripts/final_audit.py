@@ -1266,10 +1266,19 @@ def admit_contract_only_stale(profile):
     (which compares equal to True) cannot become consent. Fail-closed:
     forgetting the declaration refuses, exactly as before this field existed.
 
-    Byte-identical to assemble.py's and validate_assembled.py's own copies --
-    restated rather than imported, per this plugin's self-contained script
-    convention, and pinned against them by
-    tests/contract_stale_admission.test.py."""
+    Restated in final_audit.py and validate_assembled.py rather than imported,
+    and NOT hoisted into validate_draft.py -- which all three already import
+    as `vd`, and which already owns load_profile(), so it is the obvious home.
+    It is the wrong one: `validate_draft.py` is the first member of
+    cache_key.py's PLUGIN_BUNDLE_MEMBERS and these four gate scripts are not
+    members at all, so hosting the reader there would move
+    plugin_bundle_hash for every project -- mass-invalidating every converged
+    segment, which is the exact cost #533 exists to relieve. select_segments.py
+    holds the fourth SAFE_STALE_CARVEOUT_FIELDS copy and does not import `vd`
+    either, for the same reason. The three copies are behaviourally identical
+    (the signature and this docstring differ) and are driven over one shared
+    table by tests/contract_stale_admission.test.py, which pins behaviour, not
+    source identity."""
     validation = (profile or {}).get("validation")
     if not isinstance(validation, dict):
         return False

@@ -402,13 +402,19 @@ def admit_contract_only_stale(profile: dict) -> bool:
     so `1` (which compares equal to True) cannot become consent. Fail-closed:
     forgetting the declaration refuses, exactly as before this field existed.
 
-    Restated in final_audit.py and validate_assembled.py rather than imported
-    -- house convention for this plugin's self-contained scripts, pinned by
-    tests/contract_stale_admission.test.py's own three-copy drift assertion.
-    validate_conservation.py is the one script that does NOT restate it: it
-    already imports validate_assembled as `va` for the rebind population
-    itself, so a fourth copy there would drift against the very function
-    whose argument it computes."""
+    Restated in final_audit.py and validate_assembled.py rather than imported,
+    and NOT hoisted into validate_draft.py -- which all three already import
+    as `vd`, and which already owns load_profile(), so it is the obvious home.
+    It is the wrong one: `validate_draft.py` is the first member of
+    cache_key.py's PLUGIN_BUNDLE_MEMBERS and these four gate scripts are not
+    members at all, so hosting the reader there would move
+    plugin_bundle_hash for every project -- mass-invalidating every converged
+    segment, which is the exact cost #533 exists to relieve. select_segments.py
+    holds the fourth SAFE_STALE_CARVEOUT_FIELDS copy and does not import `vd`
+    either, for the same reason. The three copies are behaviourally identical
+    (the signature and this docstring differ) and are driven over one shared
+    table by tests/contract_stale_admission.test.py, which pins behaviour, not
+    source identity."""
     validation = (profile or {}).get("validation")
     if not isinstance(validation, dict):
         return False
@@ -678,9 +684,11 @@ def _stale_carveout_refusal_reason(
             f"machinery-only; re-review required"
         )
     unsafe = sorted(f for f in mismatched if f not in SAFE_STALE_CARVEOUT_FIELDS)
-    if unsafe and not (
-        admit_contract_only and set(unsafe) == {CONTRACT_ONLY_STALE_FIELD}
-    ):
+    # Named once and reused by the sentinel-absent refusal below, which needs
+    # the same answer to characterise the move truthfully. Two independent
+    # spellings of one condition are two things that can drift apart.
+    contract_only = admit_contract_only and set(unsafe) == {CONTRACT_ONLY_STALE_FIELD}
+    if unsafe and not contract_only:
         return (
             f"segment {seg!r} is stale because of a content-affecting "
             f"cache-key field ({', '.join(unsafe)}) -- the machinery-only "
@@ -697,7 +705,7 @@ def _stale_carveout_refusal_reason(
         moved_kind = (
             "the only field outside the machinery-only set is "
             f"{CONTRACT_ONLY_STALE_FIELD}"
-            if unsafe
+            if contract_only
             else "every moved field is machinery-only"
         )
         return (
@@ -955,14 +963,10 @@ def load_converged_segments(
             # -- which, past a `reason is None`, can only be
             # style_contract_hash under the opt-in.
             #
-            # NOTED here, recorded only once the shared checks below have
-            # actually accepted it. Those checks are fatal here (a sha1
-            # mismatch aborts the whole run rather than skipping the segment),
-            # so today this ordering changes nothing an operator can observe;
-            # it is written this way so the list cannot start naming a record
-            # the run rejected if that ever stops being fatal. Its sibling in
-            # validate_assembled.py needs the same ordering for real: there,
-            # a failed rebind is a per-segment defect, not an abort.
+            # NOTED here, recorded only once the shared checks below accept
+            # it. Here that ordering is invisible (those checks abort the run
+            # rather than skip the segment); validate_assembled.py's sibling
+            # is where it is load-bearing, and says why.
             via_contract = admit_contract_only and not set(
                 record["stale_mismatched_fields"]
             ).issubset(SAFE_STALE_CARVEOUT_FIELDS)
@@ -2256,7 +2260,7 @@ def main() -> int:
                 f"profile.yml declares validation.admit_contract_only_stale, so "
                 f"these segments are being assembled although the style contract "
                 f"moved after they converged. Their drafts are unchanged since "
-                f"review (verified against reviewed_draft_sha1 below) and their "
+                f"review (already verified against reviewed_draft_sha1) and their "
                 f".ever_converged sentinels are not ABSENT -- an unreadable or dangling "
                 f"one carves out like a present one. What they have NOT had is "
                 f"a review against the CURRENT contract. If the contract edit "

@@ -38,6 +38,7 @@ are otherwise unchanged.
 """
 import hashlib
 import importlib.util
+import itertools
 import json
 import shutil
 import subprocess
@@ -816,8 +817,6 @@ def test_the_two_subtracted_populations_are_disjoint():
     involved, asserting that no shape is counted twice and that the two
     together never exceed the raw stale count."""
     fa = load_real_final_audit()
-    import itertools
-
     all_fields = list(MACHINERY_FIELDS) + [CONTRACT_FIELD]
     for r in range(1, len(all_fields) + 1):
         for combo in itertools.combinations(all_fields, r):
@@ -1041,12 +1040,16 @@ def heading_bearing_contract_stale_root(tmp_path, admit=None) -> Path:
 # ===========================================================================
 
 
-def test_validate_assembled_hard_fails_a_contract_stale_heading_when_undeclared(tmp_path):
+@pytest.mark.parametrize("admit,label", [(None, "absent"), (False, "explicit-false")])
+def test_validate_assembled_hard_fails_a_contract_stale_heading_when_undeclared(
+    tmp_path, admit, label
+):
     """Today this path is unreachable -- W7 refuses the book one gate earlier
     -- which is exactly why it has to be pinned before W7 starts admitting:
     the moment the completeness gate passes such a book, THIS gate is what it
-    meets next."""
-    root = heading_bearing_contract_stale_root(tmp_path, admit=None)
+    meets next. An explicit `false` must reach the identical outcome, defect
+    list included, or "default-off" is only true of the absent case."""
+    root = heading_bearing_contract_stale_root(tmp_path, admit)
 
     result = run_validate_assembled(root)
     assert result.returncode == 1, (
@@ -1073,16 +1076,6 @@ def test_validate_assembled_accepts_and_names_a_declared_contract_stale_heading(
     assert payload["contract_stale_admitted"] == ["seg01"], payload
     assert "CONTRACT-ONLY STALE ADMITTED (1)" in result.stderr, result.stderr
     assert "  ~ seg01" in result.stderr, result.stderr
-
-
-def test_validate_assembled_explicit_false_behaves_exactly_like_absent(tmp_path):
-    root = heading_bearing_contract_stale_root(tmp_path, admit=False)
-    result = run_validate_assembled(root)
-    assert result.returncode == 1, (
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
-    payload = json.loads(result.stdout.strip())
-    assert "contract_stale_admitted" not in payload, payload
 
 
 def test_validate_assembled_still_flags_a_declared_units_hand_edit(tmp_path):
@@ -1115,7 +1108,13 @@ def test_validate_assembled_still_flags_a_declared_units_hand_edit(tmp_path):
 
 
 # ===========================================================================
-# 13. The conservation lane's population follows validate_assembled's.
+# 13. The shared helper both default-scope gates get their population from.
+#
+#     Unit level, and deliberately not a validate_conservation.py test -- it
+#     never loads that script. Section 14 below drives the real conservation
+#     CLI over the same three declarations; this one pins the helper's own
+#     3-tuple contract, so a population regression names the helper rather
+#     than only reddening a CLI two layers up.
 # ===========================================================================
 
 

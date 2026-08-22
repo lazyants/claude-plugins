@@ -1324,18 +1324,27 @@ def test_completeness_gate_stale_among_converged_exits_3(tmp_path):
 # ===========================================================================
 
 
-def _run_contract_stale_book(tmp_path, admit, label):
-    """Shared body for the two undeclared shapes below. Written as a helper
-    rather than a parametrize because this file imports pytest locally, in
-    the one function that needs it, and has no module-level import to hang a
-    marker off."""
+def _contract_stale_root(tmp_path, admit, sentinel=True):
+    """A two-segment book whose seg02 went stale on style_contract_hash alone.
+    Only the setup is shared -- what each case VARIES (the declaration, the
+    sentinel, an extra moved field) stays visible at its own call site."""
     root = make_durable_root(
         tmp_path, seg_ids=("seg01", "seg02"), admit_contract_only_stale=admit
     )
     add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
     add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
     corrupt_cache_key_field(root, "seg02", "style_contract_hash")
-    mark_ever_converged(root, "seg02")
+    if sentinel:
+        mark_ever_converged(root, "seg02")
+    return root
+
+
+def _run_contract_stale_book(tmp_path, admit, label):
+    """Shared body for the two undeclared shapes below. Written as a helper
+    rather than a parametrize because this file imports pytest locally, in
+    the one function that needs it, and has no module-level import to hang a
+    marker off."""
+    root = _contract_stale_root(tmp_path, admit)
 
     result = run_final_audit(root)
 
@@ -1378,13 +1387,7 @@ def test_declared_contract_only_stale_completes_and_is_named(tmp_path):
 
     Mutation: subtract the count but omit the summary key -> the naming
     assertions go red while the exit code still passes."""
-    root = make_durable_root(
-        tmp_path, seg_ids=("seg01", "seg02"), admit_contract_only_stale=True
-    )
-    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
-    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
-    corrupt_cache_key_field(root, "seg02", "style_contract_hash")
-    mark_ever_converged(root, "seg02")
+    root = _contract_stale_root(tmp_path, True)
 
     result = run_final_audit(root)
 
@@ -1407,12 +1410,7 @@ def test_declared_contract_only_stale_completes_and_is_named(tmp_path):
 def test_declared_admission_does_not_cover_a_sentinel_less_unit(tmp_path):
     """Same book, same declaration, no sentinel: the unit cannot be shown to
     have converged at all, so it still blocks."""
-    root = make_durable_root(
-        tmp_path, seg_ids=("seg01", "seg02"), admit_contract_only_stale=True
-    )
-    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
-    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
-    corrupt_cache_key_field(root, "seg02", "style_contract_hash")
+    root = _contract_stale_root(tmp_path, True, sentinel=False)
 
     result = run_final_audit(root)
 
@@ -1426,14 +1424,8 @@ def test_declared_admission_does_not_cover_another_content_field(tmp_path):
     """A prompt_hash drift alongside the contract move is a genuinely
     different book: the declaration says "only the standard moved", and here
     something else did."""
-    root = make_durable_root(
-        tmp_path, seg_ids=("seg01", "seg02"), admit_contract_only_stale=True
-    )
-    add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
-    add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
-    corrupt_cache_key_field(root, "seg02", "style_contract_hash")
+    root = _contract_stale_root(tmp_path, True)
     corrupt_cache_key_field(root, "seg02", "prompt_hash")
-    mark_ever_converged(root, "seg02")
 
     result = run_final_audit(root)
 

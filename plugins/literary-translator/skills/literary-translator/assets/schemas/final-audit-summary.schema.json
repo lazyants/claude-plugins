@@ -27,7 +27,7 @@
     },
     "project_complete": {
       "type": "boolean",
-      "description": "Rollup invariant (procedurally enforced by final_audit.py's compute_project_complete(), see this schema's own top-level description): project_complete == true if and only if every one of completeness_counts' four non-'stale' values equals 0 AND completeness_counts.stale - stale_previously_converged - len(stale_contract_admitted, absent == 0) equals 0."
+      "description": "Rollup invariant (procedurally enforced by final_audit.py's compute_project_complete(), see this schema's own top-level description): project_complete == true if and only if every one of completeness_counts' four non-'stale' values equals 0 AND completeness_counts.stale - stale_previously_converged - len(stale_contract_admitted) equals 0, counting an absent stale_contract_admitted as 0."
     },
     "completeness_counts": {
       "type": "object",
