@@ -75,7 +75,8 @@ Table of contents:
 - **Segment ids can be colon-bearing and still reach real filenames.** Both live books carry them:
   tome1 has 15, vol2 has 2. A `validate_seg` change or a new path-building helper must be exercised
   against a colon-bearing id, not assumed safe because the schema doesn't forbid it.
-- **`ledger_update.py:819` calls `emit_failure()` and REFUSES the `converged` fragment when the
+- **`ledger_update.py`'s `enrich_converged_fields()` calls `emit_failure()` at its
+  `if not mark_ever_converged(...)` guard and REFUSES the `converged` fragment when the
   sentinel write fails.** This is what makes a one-off sentinel backfill (the kind shipped from
   1.18.0) genuinely one-off rather than something the next run silently re-needs. The recurring wrong
   re-derivation is reading "non-fatal by design" as describing the *caller's* behavior — it describes

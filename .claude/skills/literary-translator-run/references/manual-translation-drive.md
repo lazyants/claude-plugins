@@ -62,7 +62,8 @@ prompt.
 
 ### Three traps, the first silent
 
-1. **A fresh `RUN_ID` yields ZERO verdicts and no error.** `reviewDispatchPrompt:1008` makes the
+1. **A fresh `RUN_ID` yields ZERO verdicts and no error.** `mass-translate-wf.template.js`'s `reviewDispatchPrompt()` — its `DRAFT_TOKEN_MISMATCH`
+   instruction — makes the
    reviewer compare the DRAFT's own `dispatch_token` against the literal `RUN_ID + ":" + seg`; on
    mismatch it returns `DRAFT_TOKEN_MISMATCH` and **writes nothing at all**. Read `RUN_ID` out of
    the drafts themselves, per segment (do not assume one per book), and take `roundLabel` as the

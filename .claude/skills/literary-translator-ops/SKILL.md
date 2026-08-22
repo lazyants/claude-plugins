@@ -45,7 +45,7 @@ that mode needs genuinely relative links.
   stdout, exit 0/1/2), the pytest test conventions and subprocess pattern, the docs/registration
   surfaces to touch when adding a script, and the sentinel-write/hashing-duplication/ledger-refusal
   facts (`mark_ever_converged()`'s seven-round final shape, the seven `draft_content_sha1()` copies,
-  `ledger_update.py:819`'s hard refusal on a failed sentinel write).
+  `ledger_update.py`'s hard refusal, in `enrich_converged_fields()`, on a failed sentinel write).
 - **references/hash-migration-impact.md** — read before editing ANY schema or script, before
   editing `canon.json` content, **and before MOVING, renaming, or re-homing a `durable_root`:
   `source_input_hash` covers the source's absolute PATH, not only its bytes, so a relocation
