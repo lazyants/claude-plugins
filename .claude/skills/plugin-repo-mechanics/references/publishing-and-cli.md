@@ -8,6 +8,17 @@ The **generalized** config-dir architecture — the per-profile plugin-store mod
 
 The four synced surfaces + merge-to-main is the *publish*, not the *ship*. The INSTALLED plugin stays stale until you pull the marketplace cache and update the plugin — always do this last step. **Post-2026-07-21 this is PER-PROFILE** (stores are independent now): run it for each profile you want the update in, e.g. `CLAUDE_CONFIG_DIR=/Users/moi/.claude-bm claude plugin marketplace update lazyants` (for the app), then update the plugin from the `lazyants` marketplace; repeat with `CLAUDE_CONFIG_DIR=/Users/moi/.claude` (and `.claude2`/`.claude3`) for the CLI profiles you actually use. (Note: `lazyants` is the GitHub marketplace name — distinct from the `lazy-ants` directory marketplace.) The exact two-command form, the marketplace-qualified update id, and the restart caveat are in the next section.
 
+### `plugin update` defaults to `--scope user` and reports THAT scope's result — a false green over a stale local install
+
+`claude plugin update <id>` takes `-s/--scope {user,project,local,managed}` and **defaults to `user`**. A second install of the same plugin at `local` scope is invisible to the default invocation, and — this is the trap — the command still prints a cheerful success line describing the USER-scope entry. Run from the local install's own project directory it answers `✔ literary-translator is already at the latest version (1.26.0).` while that project's own copy sits at 1.23.0. **The failure prints exactly what success prints**, so a per-profile refresh loop can report four green updates and leave two stale installs behind.
+
+Two consequences:
+
+- **Enumerate scopes before believing a refresh is complete.** `claude plugin list` shows each entry with its own `Scope:` line, and a plugin installed twice appears twice — that duplicate is the only visible tell in the CLI output.
+- **Verify from the registry, not the command.** `<profile>/plugins/installed_plugins.json` → `plugins["<name>@<marketplace>"]` is a LIST, one object per scope, each with its own `scope`, `version`, `installPath` and (for `local`) `projectPath`. Read the version from there after updating. This is the same rule as the section below — never from a `plugins/cache/` path glob — one level up: never from the update command's own success line either.
+
+Fix form, once a local-scope entry is found: `cd <projectPath> && CLAUDE_CONFIG_DIR=<profile> claude plugin update <name>@<marketplace> --scope local`. The `cd` alone is NOT enough; without `--scope local` it silently re-reports the user scope.
+
 ## Read an installed version with `claude plugin list` — NEVER from a `plugins/cache/` path
 
 `<profile>/plugins/cache/<marketplace>/<plugin>/` holds **one subdirectory per version ever
