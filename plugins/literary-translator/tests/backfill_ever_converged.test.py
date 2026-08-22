@@ -38,6 +38,7 @@ with the same small fixture script `ledger_merge.test.py`/
 `select_segments.test.py` use.
 """
 import importlib.util
+import io
 import json
 import contextlib
 import os
@@ -828,6 +829,378 @@ def test_both_writers_refuse_a_non_regular_entry_at_the_sentinel_path(tmp_path):
         assert call_mark(backfill, seg, dir_b) == "already_present"
 
 
+# ---------------------------------------------------------------------------
+# [R2/R3 fold, RAW #8] ledger_update.py's OWN mark_ever_converged() must now
+# fsync what it publishes -- the durability backfill_ever_converged.py has
+# had since 1.20.0 (three sites: :636, :850, :1395) and this writer never
+# had. These three drive the REAL ledger_update.py module directly (the same
+# _load_module() this section already uses above), never a rebuilt fixture,
+# so a fix that only touches the shipped file is what each one pins.
+# ---------------------------------------------------------------------------
+
+def test_mark_ever_converged_fsyncs_the_sentinel_and_the_segments_directory(tmp_path):
+    """Both halves of the fold's durability contract, pinned in one call:
+    the sentinel FILE itself must be fsynced (fsync on a file commits its
+    contents, not the directory link that makes it findable) and the
+    segments/ DIRECTORY must be fsynced too, so the link survives a crash.
+    RED by construction against unfixed code -- measured zero os.fsync
+    calls anywhere in ledger_update.py's mark_ever_converged() -- so
+    neither inode is ever seen.
+
+    Identifies each descriptor by WHAT IT REFERS TO (dev, inode), never by
+    call order or count -- the file's own counting_fsync technique at
+    :1678-1691 -- so an fsync the fix adds in either order still gets
+    caught, and an unrelated fsync elsewhere in the process cannot make
+    this pass vacuously."""
+    writer = _load_module(LEDGER_UPDATE_SRC, "ledger_update_fsync_positive")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segFsyncPositive"
+
+    real_fsync = writer.os.fsync
+    writer.os.fsync, synced_ids = _fsync_recording_synced_ids(real_fsync)
+    try:
+        ok = writer.mark_ever_converged(seg, segments_dir)
+    finally:
+        writer.os.fsync = real_fsync
+
+    assert ok is True, "precondition: the fresh-create path must succeed"
+
+    sentinel_path = writer.ever_converged_path(seg, segments_dir)
+    sentinel_id = (os.stat(sentinel_path).st_dev, os.stat(sentinel_path).st_ino)
+    dir_id = (os.stat(segments_dir).st_dev, os.stat(segments_dir).st_ino)
+
+    assert sentinel_id in synced_ids, (
+        "mark_ever_converged() must fsync the sentinel FILE it just wrote, "
+        "not only the converged FRAGMENT it backs (that fsync lives in "
+        "write_fragment_atomically(), a different file)"
+    )
+    assert dir_id in synced_ids, (
+        "mark_ever_converged() must fsync the segments/ DIRECTORY too, so "
+        "the sentinel's own directory entry -- not merely its contents -- "
+        "survives a crash"
+    )
+
+
+def test_the_directory_fsync_follows_the_directory_that_got_the_sentinel_not_the_name(tmp_path):
+    """A rename of segments/ DURING the call must not redirect the directory
+    fsync onto whatever now answers to that name.
+
+    MR review reproduced the defect this pins: an earlier revision of
+    _sync_published_sentinel() resolved `parent` by NAME after the file sync,
+    so renaming segments/ aside and moving a replacement into its place
+    between the two syncs made the second sync land on the REPLACEMENT while
+    the directory that actually received the sentinel was never synced --
+    reported as success. The caller then records convergence while the
+    dispatch gate reads the sentinel as absent and permits retranslation.
+
+    The assertion is about IDENTITY, not about refusing the rename. Syncing
+    the directory that got the create is the CORRECT answer, not merely the
+    safe one: that is where the sentinel is, so that is the entry whose
+    durability the caller is promising. Pinning a dir-fd before the file
+    sync makes both syncs describe one directory by (st_dev, st_ino) rather
+    than by a name another process can rebind.
+
+    Interleaves at the only point that matters -- the FIRST fsync, which is
+    the sentinel file -- so the rename lands strictly between the two
+    syncs, exactly as the review's reproduction did."""
+    writer = _load_module(LEDGER_UPDATE_SRC, "ledger_update_dir_rename_race")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segDirRenameRace"
+
+    displaced = tmp_path / "segments.displaced"
+    replacement = tmp_path / "segments.replacement"
+    replacement.mkdir()
+
+    original_id = (os.stat(segments_dir).st_dev, os.stat(segments_dir).st_ino)
+    replacement_id = (os.stat(replacement).st_dev, os.stat(replacement).st_ino)
+    assert original_id != replacement_id, (
+        "precondition: the two directories must be distinguishable by inode, "
+        "or this test cannot tell which one was synced"
+    )
+
+    real_fsync = writer.os.fsync
+    synced_ids = []
+    swapped = []
+
+    def fsync_then_swap(fd):
+        st = os.fstat(fd)
+        synced_ids.append((st.st_dev, st.st_ino))
+        result = real_fsync(fd)
+        if not swapped:
+            # Strictly between the two syncs: segments/ is moved aside and a
+            # different directory takes its name.
+            os.rename(segments_dir, displaced)
+            os.rename(replacement, segments_dir)
+            swapped.append(True)
+        return result
+
+    writer.os.fsync = fsync_then_swap
+    try:
+        ok = writer.mark_ever_converged(seg, segments_dir)
+    finally:
+        writer.os.fsync = real_fsync
+
+    assert swapped, (
+        "precondition: the rename never fired, so this test proved nothing -- "
+        "mark_ever_converged() must reach at least one fsync"
+    )
+    assert ok is False, (
+        "CONTRACT, corrected by an MR round: durable is not the same as "
+        "FINDABLE. The sentinel really was written and synced into the "
+        "directory that received it, but that directory is no longer what "
+        "segments/ resolves to, so the dispatch gate reads ABSENT and the "
+        "segment is unprotected at the canonical path. Returning True here "
+        "would let the caller record convergence over exactly that state -- "
+        "which is the retranslation this sentinel exists to prevent. An "
+        "earlier revision of this test asserted True and was wrong."
+    )
+    assert (displaced / f".ever_converged.{seg}").is_file(), (
+        "precondition: the sentinel must have landed in the directory that "
+        "was later renamed aside, or the race being pinned did not happen"
+    )
+    assert original_id in synced_ids, (
+        "the directory fsync must follow the directory that RECEIVED the "
+        "sentinel, held by descriptor -- resolving the parent by name after "
+        "the file sync lets a rename redirect it, which is the reproduced "
+        "defect this pins"
+    )
+    assert replacement_id not in synced_ids, (
+        "the directory that merely inherited the NAME was synced -- so the "
+        "entry the caller just promised to make durable was not, and "
+        "mark_ever_converged() reported success anyway"
+    )
+
+
+def test_a_directory_swap_before_the_syncs_cannot_redirect_either_of_them(tmp_path):
+    """The SECOND reproduction an MR review landed on the same defect class,
+    and the reason the fix became a pin rather than a third narrowing.
+
+    The first round moved the parent open ahead of the file sync; review
+    then showed the descriptor was still acquired AFTER the pathname-based
+    O_CREAT|O_EXCL, so a swap of segments/ before the syncs still redirected
+    both -- reported as success while the sentinel and directory actually
+    current at segments/ went unsynced. Narrowing the window twice did not
+    close it, because the window WAS the pathname resolution. segments/ is
+    now resolved exactly once, before the entry is touched, and every later
+    operation is relative to that descriptor.
+
+    This interleaves at os.write(), i.e. after the create and strictly
+    before both fsyncs, and swaps in a replacement directory that already
+    holds a same-named regular sentinel -- the review's own construction,
+    which defeats any check that merely asks "is a regular file present at
+    this path". Identity is the only thing that separates them.
+
+    Two-sided: it asserts the ORIGINAL directory and the sentinel this call
+    created were synced, AND that neither of the replacement's inodes was.
+    An implementation that reopens by name passes the first pair of
+    assertions on the decoys and fails the second."""
+    writer = _load_module(LEDGER_UPDATE_SRC, "ledger_update_predir_swap")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segPreDirSwap"
+
+    displaced = tmp_path / "segments.displaced"
+    replacement = tmp_path / "segments.replacement"
+    replacement.mkdir()
+    # The decoy carries a same-named REGULAR sentinel, so only identity
+    # distinguishes it from the real one.
+    (replacement / f".ever_converged.{seg}").write_text("converged\n", encoding="utf-8")
+
+    original_dir_id = (os.stat(segments_dir).st_dev, os.stat(segments_dir).st_ino)
+    decoy_dir_id = (os.stat(replacement).st_dev, os.stat(replacement).st_ino)
+    decoy_file_id = (
+        os.stat(replacement / f".ever_converged.{seg}").st_dev,
+        os.stat(replacement / f".ever_converged.{seg}").st_ino,
+    )
+    assert original_dir_id != decoy_dir_id, (
+        "precondition: the two directories must differ by inode, or this "
+        "test cannot tell which one was synced"
+    )
+
+    real_write = writer.os.write
+    real_fsync = writer.os.fsync
+    synced_ids = []
+    swapped = []
+
+    def write_then_swap(fd, data):
+        result = real_write(fd, data)
+        if not swapped:
+            # After the create, strictly before either fsync.
+            os.rename(segments_dir, displaced)
+            os.rename(replacement, segments_dir)
+            swapped.append(True)
+        return result
+
+    def recording_fsync(fd):
+        st = os.fstat(fd)
+        synced_ids.append((st.st_dev, st.st_ino))
+        return real_fsync(fd)
+
+    captured_stderr = io.StringIO()
+    real_stderr = writer.sys.stderr
+    writer.os.write = write_then_swap
+    writer.os.fsync = recording_fsync
+    writer.sys.stderr = captured_stderr
+    try:
+        ok = writer.mark_ever_converged(seg, segments_dir)
+    finally:
+        writer.os.write = real_write
+        writer.os.fsync = real_fsync
+        writer.sys.stderr = real_stderr
+
+    assert swapped, (
+        "precondition: the swap never fired, so this test proved nothing"
+    )
+    assert ok is False, (
+        "same corrected contract as the sibling test above: the pin makes "
+        "both syncs land on the directory that received the sentinel, but "
+        "the canonical path now names the decoy, so convergence must be "
+        "REFUSED rather than recorded over a segment the dispatch gate will "
+        "read as unprotected"
+    )
+
+    created = displaced / f".ever_converged.{seg}"
+    assert created.is_file(), (
+        "precondition: the sentinel this call created must be in the "
+        "directory that was renamed aside, or the race did not happen"
+    )
+    created_id = (os.stat(created).st_dev, os.stat(created).st_ino)
+
+    assert created_id in synced_ids, (
+        "the file fsync must land on the sentinel THIS call created, held by "
+        "descriptor -- reopening it by name after a directory swap syncs the "
+        "decoy instead"
+    )
+    assert original_dir_id in synced_ids, (
+        "the directory fsync must land on the directory that RECEIVED the "
+        "sentinel, held by descriptor pinned before the create"
+    )
+    assert decoy_file_id not in synced_ids, (
+        "the decoy sentinel that merely inherited the NAME was synced, so "
+        "the entry this call actually created was left undurable while "
+        "mark_ever_converged() reported success"
+    )
+    assert decoy_dir_id not in synced_ids, (
+        "the decoy directory that merely inherited the NAME was synced -- "
+        "the reproduced defect, one narrowing later"
+    )
+
+    # The displacement remedy is a DIFFERENT message from the OS-error one,
+    # because an operator acts on it differently: re-running cannot settle a
+    # replaced directory. Asserted so the string is reachable rather than
+    # dead prose, and so a future edit cannot silently route this arm into
+    # the generic "retry once the OS problem is fixed" advice.
+    stderr_lower = captured_stderr.getvalue().lower()
+    assert "was replaced during this call" in stderr_lower, (
+        "the refusal must say the directory was displaced, not merely that "
+        "something failed"
+    )
+    assert "put the intended directory back" in stderr_lower, (
+        "the operator needs the remedy for a REPLACED directory, which is "
+        "not the retry advice every other failure arm gives"
+    )
+
+
+def test_a_directory_fsync_failure_makes_mark_ever_converged_return_false(tmp_path):
+    """Mirrors backfill_ever_converged.py's own
+    test_a_directory_fsync_failure_keeps_the_sentinels_and_still_fails_the_run
+    (:1605) for the OTHER writer of this artifact. FAIL-CLOSED is the
+    deliberate contract decision the plan states: unlike
+    write_fragment_atomically()'s best-effort directory sync (`except
+    OSError: pass`), a segments/ directory-fsync failure here must refuse
+    convergence rather than report success over a directory entry that was
+    never made durable -- claim_record.py:565-577 argues the split
+    explicitly, for exactly this asymmetry (a crash can lose the entry
+    while the fragment it backs survives).
+
+    Asserts the NEGATIVE outcome the fix produces, not merely "some fsync
+    happened" -- a test that only checked call count would pass on
+    unfixed code too, since unfixed code also returns non-True... except it
+    doesn't: unfixed code returns True unconditionally, which is exactly
+    what this pins against."""
+    writer = _load_module(LEDGER_UPDATE_SRC, "ledger_update_dir_fsync_fail")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segDirFsyncFail"
+
+    real_fsync = writer.os.fsync
+    writer.os.fsync = _fsync_failing_only_on_a_directory(real_fsync)
+    try:
+        ok = writer.mark_ever_converged(seg, segments_dir)
+    finally:
+        writer.os.fsync = real_fsync
+
+    assert ok is False, (
+        "a segments/ directory fsync failure must fail mark_ever_converged() "
+        "closed, not report convergence over an undurable directory entry"
+    )
+    sentinel_path = writer.ever_converged_path(seg, segments_dir)
+    assert sentinel_path.is_file(), (
+        "the sentinel must NOT be removed on a directory-sync failure: the "
+        "create already published the name, so another reader may already "
+        "be relying on it -- same reasoning as the sibling writer's own "
+        "directory-fsync-failure test"
+    )
+    assert sentinel_path.read_bytes() == b"converged\n"
+
+
+def test_a_failed_sentinel_sync_does_not_launder_into_true_on_retry(tmp_path):
+    """THE laundering test codex round 2's admitted MAJOR demanded (see the
+    plan's [R3] section). `mark_ever_converged()`'s `O_CREAT|O_EXCL` hits
+    FileExistsError on a retry, classifies the entry SENTINEL_PRESENT, and
+    the already-present branch must NOT return True having synced nothing --
+    that would record convergence over a sentinel whose directory entry was
+    never made durable, laundering the first call's failed sync into a green
+    result. Exactly the shape backfill_ever_converged.py:603-623 already
+    documents and tests at :1644-1709 for its own retry path.
+
+    RED against a fix that syncs only the fresh-create branch: the second
+    call below would return True at the FileExistsError shortcut without
+    ever touching os.fsync again."""
+    writer = _load_module(LEDGER_UPDATE_SRC, "ledger_update_launder")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segLaunder"
+
+    real_fsync = writer.os.fsync
+    writer.os.fsync = _fsync_failing_only_on_a_directory(real_fsync)
+    try:
+        first = writer.mark_ever_converged(seg, segments_dir)
+        assert first is False, (
+            "precondition: the first call must fail on the directory sync"
+        )
+        second = writer.mark_ever_converged(seg, segments_dir)
+        assert second is False, (
+            "the retry hits FileExistsError, classifies SENTINEL_PRESENT, "
+            "and must not launder the first call's failed sync into True "
+            "through the already-present shortcut"
+        )
+    finally:
+        writer.os.fsync = real_fsync
+
+    sentinel_path = writer.ever_converged_path(seg, segments_dir)
+    sentinel_id = (os.stat(sentinel_path).st_dev, os.stat(sentinel_path).st_ino)
+    dir_id = (os.stat(segments_dir).st_dev, os.stat(segments_dir).st_ino)
+
+    writer.os.fsync, synced_ids = _fsync_recording_synced_ids(real_fsync)
+    try:
+        third = writer.mark_ever_converged(seg, segments_dir)
+    finally:
+        writer.os.fsync = real_fsync
+
+    assert third is True, (
+        "once the directory fsync actually works, the already-present path "
+        "must succeed -- this call is what finally makes the entry durable"
+    )
+    assert sentinel_id in synced_ids and dir_id in synced_ids, (
+        "the third call must actually SYNC, not merely return True -- a "
+        "green retry that skips the work is invisible from the return "
+        "value alone, which is the whole laundering shape this test pins"
+    )
+
+
 def test_a_dangling_symlink_is_bucketed_ambiguous_never_missing(tmp_path):
     """CLI level. Pre-fix, `.exists()` followed the dangling link and put the
     segment in `missing_sentinels`; --apply then called the writer, whose
@@ -1589,6 +1962,23 @@ def _apply_run(backfill, root):
         ["--durable-root", str(root), "--apply"]
     )
     return backfill.run(args, backfill.resolve_dirs(str(root), None))
+
+
+def _fsync_recording_synced_ids(real_fsync):
+    """A pass-through os.fsync that records WHICH entries were synced, by
+    (st_dev, st_ino) rather than by path -- the same identity-not-name test
+    the assertions using it make. Returns (fsync, synced_ids); the set is
+    live, so read it after the call under test. Sibling of
+    _fsync_failing_only_on_a_directory() below, and factored out for the
+    same reason: two tests were carrying byte-identical copies of it."""
+    synced_ids = set()
+
+    def recording(fd):
+        st = os.fstat(fd)
+        synced_ids.add((st.st_dev, st.st_ino))
+        return real_fsync(fd)
+
+    return recording, synced_ids
 
 
 def _fsync_failing_only_on_a_directory(real_fsync):

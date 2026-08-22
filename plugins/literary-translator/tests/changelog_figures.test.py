@@ -143,22 +143,26 @@ def _test_function_count(filename):
         if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
     )
 
-# Rewritten for 1.49.0 (#458), per the maintenance contract above. The
-# previous entry's rows go with it, exactly as that contract says.
+# Rewritten for 1.50.0 (#441), per the maintenance contract above.
 #
-# EMPTY, deliberately. The 1.49.0 entry states no figure this tree can answer.
-# Its only numerals are exit codes (1 and 2), which are not re-derivable counts
-# of anything, and its cost paragraph argues from SET MEMBERSHIP --
-# segment_dispatch_driver.py is in PLUGIN_BUNDLE_MEMBERS, plugin_bundle_hash is
-# not in PER_SEGMENT_FIELDS -- which the sibling changelog_citations.test.py
-# pins by anchoring those citations to the strings that must appear at them.
-# Declaring a count this entry does not make would mean inventing one to keep
-# the list non-empty, which passes every assertion below while proving nothing.
+# One row, because 1.50.0 states exactly one figure this tree can answer: the
+# size of the plugin bundle tuple, which is what makes the entry's cost claim
+# true -- both edited scripts are members, so the bundle hash moves.
+# The previous entry's rows retire with it; whichever helper this rotation
+# leaves idle is kept, because the next entry usually needs it back.
 #
-# Emptying retires this check until the next entry that states a figure. That
-# is a REVIEW responsibility, not an assertion here: nothing goes red if a
-# future release states a count and forgets to declare it.
-FIGURES = []
+# The entry's other numerals are not tree state: `2026-08-07` is the audit's
+# date, `1.20.0` / `1.50.0` are versions, and the verdict tally over #441's
+# eleven findings is a reading result recorded on the issue, not something any
+# check here can re-derive. Declaring one of those would mean hardcoding its
+# answer, which passes every assertion below while proving nothing.
+FIGURES = [
+    Figure(
+        "among the 17 `PLUGIN_BUNDLE_MEMBERS`",
+        17,
+        lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
+    ),
+]
 
 
 def _newest_entry():
