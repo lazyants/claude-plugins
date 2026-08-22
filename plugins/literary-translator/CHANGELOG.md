@@ -32,7 +32,7 @@ Three GLOBAL cache-key fields move, and the moved set is exactly the machinery-o
 
 Both the sidecar lookup and the `canon.json` lookup beside it are keyed on the candidate string exactly as `extract_candidates()` emitted it. For a candidate past `bootstrap_names`' character cap that string carries a truncation marker, so it matches neither key and a capped split form still lands in `new_names`. The blindness is pre-existing and shared identically by the canon lookup; teaching only the sidecar lookup to match a capped representation would make it strictly more capable than its neighbour, which is the half-fix shape #383 already records. Measured population at the time of writing: of 3884 candidate names in the live fr→ru corpus, zero exceed the cap (the longest is 62 characters). Characterized by test, and a comment at the call site names the shared class.
 
-Suite 6094 → 6137 passing; `tests/segpack_split_names_delivery.test.py` adds 42 test functions. Five existing suites gained the new required field in their hand-built segpack fixtures, and `seg_safety_segpack.test.py`'s durable-root scaffolds now copy `canon_senses.py` the way Step 0a really does.
+Suite 6094 → 6138 passing; `tests/segpack_split_names_delivery.test.py` adds 43 test functions. Five existing suites gained the new required field in their hand-built segpack fixtures, and `seg_safety_segpack.test.py`'s durable-root scaffolds now copy `canon_senses.py` the way Step 0a really does.
 
 ## 1.42.0 — 2026-08-22
 

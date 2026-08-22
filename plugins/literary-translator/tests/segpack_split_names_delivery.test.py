@@ -569,17 +569,24 @@ def test_schema_sense_index_scope_enum_matches_the_sidecar_contract():
 
 def test_schema_sense_disambiguator_is_not_stricter_than_the_sidecar():
     """The one place a downstream domain could halt a valid project: the
-    sidecar accepts an empty disambiguator, so this schema must too."""
+    sidecar accepts EVERY string as a disambiguator (`canon-senses.schema.json`
+    gives it `type: string` and nothing else), so this projection must too.
+
+    Asserted as EXACT EQUALITY after dropping `description`, not as the absence
+    of `minLength`/`pattern`. An absence list only forbids the tightening
+    keywords someone thought of: `maxLength: 0`, `enum: [""]` and `const: ""`
+    each make every ordinary non-empty disambiguator unrepresentable while
+    leaving a two-keyword absence check green."""
     schema = json.loads(SEGPACK_SCHEMA.read_text(encoding="utf-8"))
-    disambiguator = (
+    disambiguator = dict(
         schema["properties"]["split_names"]["additionalProperties"]
         ["items"]["properties"]["disambiguator"]
     )
-    assert disambiguator == {"type": "string"} or (
-        disambiguator.get("type") == "string"
-        and "minLength" not in disambiguator
-        and "pattern" not in disambiguator
-    ), disambiguator
+    disambiguator.pop("description", None)
+    assert disambiguator == {"type": "string"}, (
+        "the segpack projection of `disambiguator` must carry NO constraint "
+        f"beyond `type: string`; got {disambiguator}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -745,23 +752,56 @@ def test_a_capped_candidate_does_not_match_its_full_sidecar_key(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _section(text, marker, end_marker="\nfunction "):
+    """The slice of `text` starting at `marker` and ending at the next
+    `end_marker` -- so a clause asserted below has to live in THAT builder or
+    THAT bullet, not merely somewhere in the file."""
+    assert marker in text, f"{marker!r} not found"
+    return text.split(marker, 1)[1].split(end_marker, 1)[0]
+
+
+def _assert_clauses(where, haystack, clauses):
+    """Every clause must be present. Asserting the token `split_names` alone is
+    not enough: deleting the operative prohibitions while leaving the field
+    NAME in place would keep a presence-only test green, and the prohibitions
+    ARE the contract -- 'this is not an uncanonized name' and 'you may not
+    prescribe a canonical form here' are what stop a consumer undoing the
+    adjudication this release exists to deliver."""
+    missing = [c for c in clauses if c not in haystack]
+    assert not missing, (
+        f"{where} must still carry these load-bearing clauses verbatim, and is "
+        f"missing {missing}. Reword them here and in the source together -- but "
+        f"do not drop the obligation itself."
+    )
+
+
 def test_translate_task_template_explains_split_names():
     text = TRANSLATE_TASK_TEMPLATE.read_text(encoding="utf-8")
-    assert "split_names" in text, (
-        "translate_TASK.template.md must tell the translator what a "
-        "split_names entry is -- otherwise the field arrives unexplained"
+    bullet = _section(text, "- `split_names{}`", "\n\n")
+    _assert_clauses(
+        "translate_TASK.template.md's split_names bullet", bullet,
+        [
+            "disambiguator",
+            "no frozen target form",
+            "not** an uncanonized name",
+            "the adjudication already happened",
+        ],
     )
-    assert "disambiguator" in text
 
 
 def test_review_task_template_explains_split_names():
     text = REVIEW_TASK_TEMPLATE.read_text(encoding="utf-8")
-    assert "split_names" in text, (
-        "review_TASK.template.md must tell the reviewer that a split_names "
-        "form carries no frozen canon, so it is neither an uncanonized name "
-        "nor a form whose canonical target may be prescribed"
+    bullet = _section(text, "- `split_names` --", "\n- ")
+    _assert_clauses(
+        "review_TASK.template.md's split_names bullet", bullet,
+        [
+            "disambiguator",
+            "no frozen canon",
+            "do **not** flag it as an uncanonized name",
+            "do **not** prescribe a canonical target form",
+            "wrong sense",
+        ],
     )
-    assert "disambiguator" in text
 
 
 def test_live_translate_prompt_explains_split_names():
@@ -769,22 +809,45 @@ def test_live_translate_prompt_explains_split_names():
     fresh on every W5 run -- so an existing project's translator learns about
     split_names here or nowhere."""
     text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
-    translate_prompt = text.split("function translatePrompt(")[1].split("\nfunction ")[0]
-    assert "split_names" in translate_prompt, (
-        "translatePrompt() enumerates the segpack fields the translator must "
-        "act on; split_names must be among them"
+    _assert_clauses(
+        "translatePrompt()", _section(text, "function translatePrompt("),
+        [
+            "split_names",
+            "HOMONYM SPLIT",
+            "disambiguator",
+            "no frozen target form",
+            "neither canon_map nor new_names",
+            "decide per occurrence",
+        ],
     )
 
 
-def test_live_review_and_fix_prompts_explain_split_names():
+def test_live_review_prompt_explains_split_names():
     text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
-    for fn in ("reviewDispatchPrompt(", "fixPrompt("):
-        body = text.split("function " + fn)[1].split("\nfunction ")[0]
-        assert "split_names" in body, (
-            f"{fn}) tells the agent that a form resolving in neither canon_map "
-            f"nor canon.json is not canon -- which is exactly what a split "
-            f"form does, so the split case must be named there"
-        )
+    _assert_clauses(
+        "reviewDispatchPrompt()", _section(text, "function reviewDispatchPrompt("),
+        [
+            "split_names",
+            "HOMONYM SPLITS",
+            "BY DESIGN",
+            "you may not prescribe a canonical target form at a split name",
+            "must not report it as an uncanonized or new name",
+            "WRONG SENSE",
+        ],
+    )
+
+
+def test_live_fix_prompt_explains_split_names():
+    text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
+    _assert_clauses(
+        "fixPrompt()", _section(text, "function fixPrompt("),
+        [
+            "split_names",
+            "HOMONYM SPLIT",
+            "it is not a canon claim and must not be refused as one",
+            "prescribes a canonical target form at a split name IS still refused",
+        ],
+    )
 
 
 def test_style_bible_template_lists_split_names():
