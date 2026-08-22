@@ -1014,10 +1014,11 @@ function reviewDispatchPrompt(seg, roundLabel) {
   // #546 -- DELIVERY vs STORAGE. The reviewer is handed the draft's fields and
   // never the page the assembler builds from them, so "the reader is left with
   // nothing" is a claim it cannot check and cannot be argued out of: each round's
-  // fix moves the meaning somewhere the next round also cannot see. Measured on
-  // historiettes-fr-ru/tome1 V073: six rounds, seven renderings, alternating
-  // between that objection and "the strophic form is broken". Scoped to THIS
-  // function on purpose -- the same text in translatePrompt/fixPrompt would read
+  // fix moves the meaning somewhere the next round also cannot see, and the loop
+  // alternates between two objections that cannot both be satisfied in one line.
+  // (The measured incident behind it is in the 1.35.0 CHANGELOG entry, which is
+  // where a number belongs -- it goes stale, and it is not actionable here.)
+  // Scoped to THIS function on purpose -- the same text in translatePrompt/fixPrompt would read
   // as permission to skimp on `rendered` because the gloss carries the meaning,
   // which is the opposite defect. The positive half is scoped to the shipped
   // Obsidian renderer (render_obsidian.py's _render_verse_block/_render_verse_inline);

@@ -205,7 +205,8 @@ steps below:
      round after round, because each round's fix moves the meaning somewhere the
      next round also cannot see. `reviewDispatchPrompt` therefore states where a
      verse's `literal_gloss` lands in the shipped Obsidian output — it becomes the
-     verse body itself when it is the only rendering (`literal_only`), and sits
+     verse body itself when it is the only rendering (the renderer keys on
+     emptiness, not on mode: `body = rendered or gloss`), and sits
      beneath the verse block (`_render_verse_block`) or inline beside an embedded
      verse (`_render_verse_inline`) when it accompanies `rendered` — and forbids asserting
      non-delivery **from the draft alone** for a verse whose own `literal_gloss`

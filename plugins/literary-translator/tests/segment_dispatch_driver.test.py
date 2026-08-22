@@ -6184,14 +6184,23 @@ _DELIVERY_PROHIBITION = (
 )
 _DELIVERY_CARVEBACK = "does NOT supply that meaning is unaffected"
 # The POSITIVE half, pinned separately because it is the half that can go quietly
-# false: the first shipped wording said the gloss sits "beneath its own block, or
-# inline beside an embedded verse" FULL STOP, which is wrong under literal_only --
-# `_render_verse_block`/`_render_verse_inline` label the gloss only when `rendered`
-# is also non-empty (`body = rendered or gloss` otherwise), so a sole gloss IS the
-# verse body and carries no label. A prompt that misdescribes the artifact is the
-# same defect class #546 is about, one level down.
+# false: the first draft of this wording said the gloss sits "beneath its own
+# block, or inline beside an embedded verse" FULL STOP, which is wrong wherever a
+# verse has a gloss and no rendering -- `_render_verse_block`/`_render_verse_inline`
+# label the gloss only when `rendered` is also non-empty (`body = rendered or gloss`
+# otherwise), so a sole gloss IS the verse body and carries no label. A prompt that
+# misdescribes the artifact is the same defect class #546 is about, one level down.
 _DELIVERY_SOLE_GLOSS = "as the verse body itself when it is the only rendering"
+
+# What reviewDispatchPrompt's output must carry: both halves of the rule.
 _DELIVERY_FRAGMENTS = (_DELIVERY_PROHIBITION, _DELIVERY_CARVEBACK, _DELIVERY_SOLE_GLOSS)
+
+# What must NOT appear outside it. The positive half is deliberately absent here:
+# it merely DESCRIBES the renderer, so a mode instruction or a doc may state it
+# truthfully without licensing a skimped `rendered` -- pinning it in the negative
+# direction would go red on a correct edit, and a whole-sentence leak still trips
+# the prohibition. Only the two halves that carry the mirror-image risk belong.
+_DELIVERY_LEAK_FRAGMENTS = (_DELIVERY_PROHIBITION, _DELIVERY_CARVEBACK)
 
 VERSE_POLICY_REFERENCE_DOC = (
     PLUGIN_ROOT / "skills" / "literary-translator" / "references" / "verse-policy.md"
@@ -6203,10 +6212,13 @@ def test_review_dispatch_prompt_states_delivery_and_translate_fix_do_not(tmp_pat
     neither the translator's nor the fixer's: told that the gloss carries the
     meaning, a translator has an argument for skimping on `rendered`, which is
     this defect's mirror image."""
-    root = phase2_project(tmp_path, n=1)
-    driver_mod = _load_fixture_driver(root)
-    dirs = driver_mod.resolve_dirs(None)
-    subst = _fixture_template_subst(root, "20260101T000000Z")
+    # DRIVER, not a fixture copy: `call_template_functions()` reads exactly one
+    # key out of `dirs` -- the template path -- so scaffolding a durable root here
+    # would only put a copy2() of the shipped template in front of an assertion
+    # about the shipped template. `tmp_path` still supplies a real directory for
+    # the prompt's own ROOT string.
+    dirs = DRIVER.resolve_dirs(None)
+    subst = _fixture_template_subst(tmp_path, "20260101T000000Z")
 
     out = DRIVER.call_template_functions(
         dirs, subst,
@@ -6222,6 +6234,7 @@ def test_review_dispatch_prompt_states_delivery_and_translate_fix_do_not(tmp_pat
             f"reviewDispatchPrompt's OUTPUT must carry the #546 delivery rule "
             f"({fragment!r}) -- not merely the template's source text"
         )
+    for fragment in _DELIVERY_LEAK_FRAGMENTS:
         assert fragment not in out["translate"], (
             f"translatePrompt's output must NOT carry {fragment!r} (#546): it "
             f"reads as licence to skimp on `rendered` because the gloss delivers"
@@ -6236,7 +6249,7 @@ def test_no_verse_policy_instruction_text_carries_the_delivery_rule():
     into the shared verse-policy instruction text. All six modes, since the
     resolved text is what gets spliced into all three prompts."""
     for mode, text in DRIVER._VERSE_POLICY_INSTRUCTIONS.items():
-        for fragment in _DELIVERY_FRAGMENTS:
+        for fragment in _DELIVERY_LEAK_FRAGMENTS:
             assert fragment not in text, (
                 f"verse_policy.mode={mode!r}'s instruction text carries {fragment!r} "
                 f"(#546) -- that text is spliced into translatePrompt and fixPrompt "
@@ -6254,7 +6267,7 @@ def test_verse_policy_reference_doc_does_not_carry_the_delivery_rule():
     changes), while this fails CLOSED anywhere in the file."""
     assert VERSE_POLICY_REFERENCE_DOC.is_file(), VERSE_POLICY_REFERENCE_DOC
     doc = VERSE_POLICY_REFERENCE_DOC.read_text(encoding="utf-8")
-    for fragment in _DELIVERY_FRAGMENTS:
+    for fragment in _DELIVERY_LEAK_FRAGMENTS:
         assert fragment not in doc, (
             f"{VERSE_POLICY_REFERENCE_DOC.name} carries {fragment!r} (#546) -- the "
             f"manual workflow path resolves its instruction text from this table, "

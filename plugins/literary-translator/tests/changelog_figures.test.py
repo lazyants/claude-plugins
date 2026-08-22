@@ -135,8 +135,8 @@ def _tuple_len(filename, name):
 #
 # One row, because 1.35.0 states exactly one tree-derivable figure: the bundle
 # membership that prices its own migration. The entry's other numbers are
-# CORPUS measurements — 107 archived reviews, 313 findings, 44 verse-scoped,
-# zero of this shape — taken from two operator-owned durable roots that are not
+# CORPUS measurements -- 107 archived reviews, 313 findings, 44 verse-scoped,
+# zero of this shape -- taken from two operator-owned durable roots that are not
 # in this repository and are not reachable from any check here. They are the
 # accepted residual this file's docstring names, not an oversight: declaring
 # them would mean hardcoding an answer, which passes every assertion below while
