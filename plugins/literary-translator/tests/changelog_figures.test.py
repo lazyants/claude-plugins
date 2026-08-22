@@ -145,11 +145,18 @@ def _tuple_len(filename, name):
     )
 
 
-# Rewritten for 1.34.1 (#580), per the maintenance contract above. Two of these
+# Rewritten for 1.34.2 (#580), per the maintenance contract above. Two of these
 # three are moved BY this release: writing either before making the change is
 # precisely the failure this file exists to catch, and it is caught here.
+#
+# The entry count is 62 rather than 61 because a sibling release (1.34.1, #547)
+# landed on main while this branch was in review. Nothing about this branch
+# changed; the tree moved under a figure already written, a rebase brought it in,
+# and this row went red naming both numbers. Left recorded because it is the
+# first time this check caught the defect it was written for, and it caught it
+# on its own release.
 FIGURES = [
-    Figure("61 release entries", 61, _release_entry_count),
+    Figure("62 release entries", 62, _release_entry_count),
     Figure("162 test modules", 162, _test_module_count),
     Figure(
         "17 `PLUGIN_BUNDLE_MEMBERS`",
