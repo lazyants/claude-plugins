@@ -73,8 +73,9 @@ Design confirmation, UPDATED for 1.3.6 (#132 option b): `fixPrompt` is now
 DELIBERATELY a review_path(seg) reader (it was NOT, pre-1.3.6 -- see
 references/engine-loop.md's R1 for the full history of both the round-60
 in-memory design and this round's reversal of it) -- it instructs the
-agent to READ review_path(seg) and apply every entry in its on-disk
-findings[] array, rather than working from the in-memory `revObj` its own
+agent to READ review_path(seg) and work through its on-disk findings[]
+array (applying what it can substantiate, refusing the rest -- #532),
+rather than working from the in-memory `revObj` its own
 3rd argument still carries (that argument is kept for other consumers --
 the convergence decision and the review-artifact gate's own
 `--expected-file` -- but fixPrompt's own prompt text no longer splices its
@@ -1007,8 +1008,8 @@ def test_mass_translate_wf_fix_prompt_reads_canonical_review_path(tmp_path):
     round, revObj) is now DELIBERATELY one of review_path(seg)'s readers
     (a reversal of the round-60 in-memory design -- see
     references/engine-loop.md's R1 for the full history). It instructs the
-    agent to READ review_path(seg) and apply every entry in its on-disk
-    findings[] array, closing the gap where a read-agent transcription slip
+    agent to READ review_path(seg) and work through its on-disk findings[]
+    array, closing the gap where a read-agent transcription slip
     in issue/suggest text (while loc/severity still matched) could reach
     the fixer via an in-memory copy that review_artifact_check.py's
     narrowed #132 compare no longer binds byte-for-byte. `revObj` (the 3rd
@@ -1050,7 +1051,7 @@ def test_mass_translate_wf_fix_prompt_reads_canonical_review_path(tmp_path):
         f"substring 'Read {expected_review}' not found in:\n{fix_text}"
     )
     assert "findings[]" in fix_text or "findings[" in fix_text, (
-        "fixPrompt must instruct applying the on-disk findings[] array"
+        "fixPrompt must instruct working through the on-disk findings[] array"
     )
 
     stale_negation = f"do not re-read {expected_review} for findings"

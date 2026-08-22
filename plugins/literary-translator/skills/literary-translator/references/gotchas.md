@@ -202,7 +202,8 @@ documented departure from the real reference script's byte-exact
 arguments thinking it's a drift error.
 
 Why: since 1.3.6 (#132 option b) `fixPrompt` READS `review_path(seg)` from disk
-itself and applies every entry in its on-disk `findings[]` array. `revObj` (the
+itself and works through its on-disk `findings[]` array — applying an entry it
+can substantiate against the source and refusing one it cannot (#532). `revObj` (the
 3rd argument) is kept for other consumers — the convergence decision and the
 review-artifact gate's own `--expected-file` — but its findings are no longer
 spliced into the fix prompt's text at all, so a transcription slip in the CONSUME

@@ -343,7 +343,9 @@ and atomically promotes it.
      `agent(fixPrompt(seg, round, revObj), { effort: EFFORT })` — no
      `agentType` field, keeping it on plain Claude. Since 1.3.6/#132 option b
      `fixPrompt` instructs the fixer to READ `review_path(seg)` back off disk
-     and apply its on-disk `findings[]` array; `revObj` (the same
+     and work through its on-disk `findings[]` array — applying what it can
+     substantiate against the source and refusing what it cannot (#532);
+     `revObj` (the same
      schema-validated object `readReviewPrompt` returned this round, still in
      memory) remains its third argument for the convergence decision and the
      review-artifact gate's `--expected-file`, but is no longer the findings

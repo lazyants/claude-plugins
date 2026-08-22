@@ -112,8 +112,8 @@ trusting it — the pattern is the part meant to outlive any one generation.
   `references/ledger-and-resumability.md`). (The glossary pass is
   the one codex work-call still made directly as `codex:codex-rescue`, the role
   R7 requires to be schema-validated — `references/workflow-schema-validation.md`.)
-  Fixer (Claude, no `agentType`, R1) = Sonnet 5, applying findings only, never
-  originating new translated content.
+  Fixer (Claude, no `agentType`, R1) = Sonnet 5, applying — or refusing (#532) —
+  findings only, never originating new translated content.
 
 Model names, generations, and tool config defaults all change fast — a name
 or default pinned here today is stale by the time this project reruns next
