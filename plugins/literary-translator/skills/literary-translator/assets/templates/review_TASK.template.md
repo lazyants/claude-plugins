@@ -87,8 +87,14 @@ written and refuse to record a stale convergence.
   grammar requires -- a correctly inflected form of the canonical stem is
   CORRECT and must NOT be flagged. Flag a canon name ONLY for: a different
   name, a different transliteration of the stem, an untranslated canonical
-  name, or an epithet swapped in for a real surname. Any `new_names` were
-  resolved and flagged `NEW:` in the draft's own `notes`.
+  name, or an epithet swapped in for a real surname. **The draft's own
+  `names[]` entries and any `NEW:`-prefixed note are the translator's
+  unratified proposals, written in the same turn as the prose you are
+  reviewing -- never a standard.** A finding that prescribes a particular
+  canonical target form -- change to it, restore it, revert to it -- must
+  quote the `canon_map` entry it rests on; a form with no `canon_map`
+  entry has no frozen canon and you may not assert one. Findings grounded
+  in the source rather than in a canonical target form are untouched.
 - A `canon_map` target form is authoritative as given. **Never flag a
   canon name merely because its frozen canonical target form is lexically
   unrelated to the source form** -- for a sense-translated speaking name

@@ -6207,20 +6207,22 @@ VERSE_POLICY_REFERENCE_DOC = (
 )
 
 
-def test_review_dispatch_prompt_states_delivery_and_translate_fix_do_not(tmp_path):
-    """#546. The delivery rule reaches the REVIEWER's actual task text, and
-    neither the translator's nor the fixer's: told that the gloss carries the
-    meaning, a translator has an argument for skimping on `rendered`, which is
-    this defect's mirror image."""
-    # DRIVER, not a fixture copy: `call_template_functions()` reads exactly one
-    # key out of `dirs` -- the template path -- so scaffolding a durable root here
-    # would only put a copy2() of the shipped template in front of an assertion
-    # about the shipped template. `tmp_path` still supplies a real directory for
-    # the prompt's own ROOT string.
+def _review_translate_fix_prompts(tmp_path):
+    """The three prompts a leak check compares, built by the REAL builders.
+
+    DRIVER, not a fixture copy: `call_template_functions()` reads exactly one key
+    out of `dirs` -- the template path -- so scaffolding a durable root here would
+    only put a copy2() of the shipped template in front of an assertion about the
+    shipped template. `tmp_path` still supplies a real directory for the prompt's
+    own ROOT string.
+
+    A plain function and never a cached fixture: `_fixture_template_subst` bakes
+    `tmp_path` into the prompt's ROOT, so a shared cached value would leak one
+    test's temp directory into another's assertions and would collapse two
+    independent node invocations into one."""
     dirs = DRIVER.resolve_dirs(None)
     subst = _fixture_template_subst(tmp_path, "20260101T000000Z")
-
-    out = DRIVER.call_template_functions(
+    return DRIVER.call_template_functions(
         dirs, subst,
         [
             {"key": "review", "fn": "reviewDispatchPrompt", "args": ["seg01", "1"]},
@@ -6228,6 +6230,35 @@ def test_review_dispatch_prompt_states_delivery_and_translate_fix_do_not(tmp_pat
             {"key": "fix", "fn": "fixPrompt", "args": ["seg01", 1, {"findings": []}]},
         ],
     )
+
+
+def _assert_verse_policy_sweep_has_a_denominator():
+    """The instruction map covers exactly the modes `profile.schema.json` declares.
+
+    Run FIRST by every sweep over that map: an emptied or shrunken map turns each
+    of them into a zero-iteration loop, which prints exactly what a passing sweep
+    prints. Asserted against the schema that DEFINES the modes rather than a
+    hand-typed count, and kept in this module rather than delegated to a parity
+    test elsewhere -- a guard in another file does not protect these sweeps under
+    `-k` or a single-file invocation."""
+    schema = json.loads(
+        (ASSETS_DIR / "schemas" / "profile.schema.json").read_text(encoding="utf-8")
+    )
+    declared = set(schema["properties"]["verse_policy"]["properties"]["mode"]["enum"])
+    assert declared, "profile.schema.json declares no verse_policy.mode values"
+    assert set(DRIVER._VERSE_POLICY_INSTRUCTIONS) == declared, (
+        "the driver's verse-policy instruction map no longer covers exactly the "
+        "modes profile.schema.json declares -- a mode missing from the map is a "
+        "mode every sweep over it silently never checks"
+    )
+
+
+def test_review_dispatch_prompt_states_delivery_and_translate_fix_do_not(tmp_path):
+    """#546. The delivery rule reaches the REVIEWER's actual task text, and
+    neither the translator's nor the fixer's: told that the gloss carries the
+    meaning, a translator has an argument for skimping on `rendered`, which is
+    this defect's mirror image."""
+    out = _review_translate_fix_prompts(tmp_path)
 
     for fragment in _DELIVERY_FRAGMENTS:
         assert fragment in out["review"], (
@@ -6248,6 +6279,7 @@ def test_no_verse_policy_instruction_text_carries_the_delivery_rule():
     """#546. The one way the rule could reach translate/fix is by being moved
     into the shared verse-policy instruction text. All six modes, since the
     resolved text is what gets spliced into all three prompts."""
+    _assert_verse_policy_sweep_has_a_denominator()
     for mode, text in DRIVER._VERSE_POLICY_INSTRUCTIONS.items():
         for fragment in _DELIVERY_LEAK_FRAGMENTS:
             assert fragment not in text, (
@@ -6434,6 +6466,204 @@ def test_fix_prompt_still_carries_the_draft_missing_sentinel_and_rewrite_order(t
     assert "return exactly the line DRAFT_MISSING seg01" in out["fix"]
     assert "do not translate it yourself" in out["fix"]
     assert ".draft.json with your fixes." in out["fix"]
+
+
+# ===========================================================================
+# #529 -- the AUTHORITY DIRECTION rule, asserted on the PROMPT OUTPUT.
+#
+# The reviewer is told a canon_map target form is authoritative and was never
+# told that the draft's OWN names[]/NEW: entries are not, so it could enforce
+# the draft's own unratified proposal against that same draft.
+#
+# OUTPUT-LEVEL, for the reason the #546 block above states: a check against the
+# template's function BODY passes on a sentence sitting in a comment or after
+# `return`, without it ever reaching a reviewer.
+#
+# WHICH FRAGMENTS, AND WHY EACH ONE. Every fragment below carries a clause that
+# closes part of the defect, so deleting that clause goes red:
+#   - the provenance negative is the half that reclassifies names[]/NEW:;
+#   - the requirement fragment spans the QUALIFIER, both directions, the modal and
+#     the entry that must be quoted, as one span. Every clause in it is
+#     load-bearing and each was watched failing: weakening "must quote" to
+#     "should quote", dropping the revert direction (the half the second measured
+#     incident used), and -- the one a shorter fragment missed -- deleting "a
+#     finding that prescribes a particular canonical target form", which silently
+#     widens the rule into the blanket "no canon_map entry means do not raise"
+#     that would suppress an untranslated-canonical-name finding. It is one span
+#     rather than a separate bilateral sentence on purpose: a second sentence
+#     repeating the point would be red on a harmless simplification while the
+#     contract still stood -- decorative, not load-bearing;
+#   - the prohibition is what makes an unresolvable claim unraiseable;
+#   - the carve-back is the half that keeps a source-grounded finding raiseable.
+#     Without it the rule suppresses findings that are authorized today:
+#     segpack.py admits a canonized name to canon_names while omitting it from
+#     canon_map when its canonical_target_form is empty.
+# ===========================================================================
+
+_AUTHORITY_PROVENANCE = "unratified proposals, never a standard"
+_AUTHORITY_REQUIREMENT = (
+    "a finding that prescribes a particular canonical target form -- demanding the "
+    "prose be changed to it, restored to it, or reverted to it -- must quote, in its "
+    "own issue text, the canon_map entry"
+)
+_AUTHORITY_PROHIBITION = "there is no frozen canon at that name and you may not assert one"
+_AUTHORITY_CARVEBACK = (
+    "grounded in the source rather than in a canonical target form are untouched"
+)
+
+_AUTHORITY_FRAGMENTS = (
+    _AUTHORITY_PROVENANCE,
+    _AUTHORITY_REQUIREMENT,
+    _AUTHORITY_PROHIBITION,
+    _AUTHORITY_CARVEBACK,
+)
+
+# What must not reach the other two prompts. Only the reviewer-specific ACTION
+# clauses: they speak about raising a FINDING, which neither the translator nor
+# the fixer does. The provenance sentence is deliberately absent from this set --
+# it merely states where names[]/NEW: came from, which a future clarification may
+# say truthfully anywhere, and pinning it in the negative direction would go red
+# on a correct edit.
+_AUTHORITY_LEAK_FRAGMENTS = (_AUTHORITY_REQUIREMENT, _AUTHORITY_PROHIBITION)
+
+# ASSETS_DIR, not TEMPLATES_SRC_DIR: that name is bound twice in this module, to
+# the same value today, so binding here would silently redirect on a divergence.
+REVIEW_TASK_TEMPLATE = ASSETS_DIR / "templates" / "review_TASK.template.md"
+
+# The bullet the rule must live in, and the bullet that follows it. Both are
+# asserted present: a slice whose boundaries have been reworded away would
+# otherwise be empty, and every containment check over an empty slice is
+# vacuous.
+_NAMES_BULLET_OPENER = "- Names/dates/titles:"
+_CANON_BULLET_OPENER = "- A `canon_map` target form is authoritative"
+
+
+def _squash(text):
+    """Whitespace-insensitive view. This template is hard-wrapped, so every
+    fragment below spans a line break and a run of leading indent; matching the
+    raw bytes would pin the WRAP POINT rather than the sentence, and a reflow
+    that changes nothing would go red."""
+    return " ".join(text.split())
+
+
+def test_review_dispatch_prompt_states_the_canon_authority_direction(tmp_path):
+    """#529. The authority-direction rule reaches the REVIEWER's actual task
+    text, and neither the translator's nor the fixer's. The fix turn has its OWN
+    apply-side canon rule since 1.37.0 (#532); this is the raise-side half, in the
+    vocabulary of the only turn that files a finding."""
+    # DRIVER, not a fixture copy, for the reason the #546 block states:
+    # call_template_functions() reads only the template path out of `dirs`.
+    dirs = DRIVER.resolve_dirs(None)
+    subst = _fixture_template_subst(tmp_path, "20260101T000000Z")
+
+    out = DRIVER.call_template_functions(
+        dirs, subst,
+        [
+            {"key": "review", "fn": "reviewDispatchPrompt", "args": ["seg01", "1"]},
+            {"key": "translate", "fn": "translatePrompt", "args": ["seg01"]},
+            {"key": "fix", "fn": "fixPrompt", "args": ["seg01", 1, {"findings": []}]},
+        ],
+    )
+
+    for fragment in _AUTHORITY_FRAGMENTS:
+        assert fragment in out["review"], (
+            f"reviewDispatchPrompt's OUTPUT must carry the #529 authority-direction "
+            f"rule ({fragment!r}) -- not merely the template's source text"
+        )
+    for fragment in _AUTHORITY_LEAK_FRAGMENTS:
+        assert fragment not in out["translate"], (
+            f"translatePrompt's output must NOT carry {fragment!r} (#529): it is a "
+            f"rule about admitting a review FINDING, which the translator never files"
+        )
+        assert fragment not in out["fix"], (
+            f"fixPrompt's output must NOT carry {fragment!r} (#529): the fix turn "
+            f"never RAISES a finding, and it has its own apply-side canon rule from "
+            f"#532 -- raise-side wording there reads as licence to skip a finding "
+            f"rather than substantiate it"
+        )
+
+
+def test_no_verse_policy_instruction_text_carries_the_authority_rule():
+    """#529. The one way the rule could reach translate/fix is by being moved
+    into the shared verse-policy instruction text, which is spliced into all
+    three prompts. Every mode, since the resolved text is what gets spliced."""
+    # The sweep's own denominator, asserted against the schema that DEFINES the
+    # modes rather than against a hand-typed number: an empty or shrunken map
+    # makes every assertion below a zero-iteration loop, which prints exactly
+    # what a passing sweep prints.
+    schema = json.loads(
+        (
+            PLUGIN_ROOT
+            / "skills"
+            / "literary-translator"
+            / "assets"
+            / "schemas"
+            / "profile.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    declared_modes = set(schema["properties"]["verse_policy"]["properties"]["mode"]["enum"])
+    assert declared_modes, "profile.schema.json declares no verse_policy.mode values"
+    assert set(DRIVER._VERSE_POLICY_INSTRUCTIONS) == declared_modes, (
+        "the driver's verse-policy instruction map no longer covers exactly the "
+        "modes profile.schema.json declares -- a mode missing from the map is a "
+        "mode this sweep silently never checks"
+    )
+    for mode, text in DRIVER._VERSE_POLICY_INSTRUCTIONS.items():
+        for fragment in _AUTHORITY_LEAK_FRAGMENTS:
+            assert fragment not in text, (
+                f"verse_policy.mode={mode!r}'s instruction text carries {fragment!r} "
+                f"(#529) -- that text is spliced into translatePrompt and fixPrompt "
+                f"too, so the rule would leak into both"
+            )
+
+
+def test_review_task_template_bullet_states_the_names_negative():
+    """#529. The narrative template says it too, IN the names/dates/titles
+    bullet. Bounded to that bullet on purpose: this file opens with a ~40-line
+    HTML comment, and a whole-file substring check would pass on the rule
+    written into that comment while the operative sentence still read as
+    authority. A boundary slice rather than a Markdown parse -- a hand-rolled
+    parser fails OPEN, silently matching nothing when the shape changes.
+
+    The other half -- that the SUPERSEDED sentence is gone -- is a row in
+    `tests/retired_wording_pins.test.py`, which owns that contract and asserts it
+    in both directions: an absence check alone is green forever if its needle
+    never matched anything, and that module derives its needle from the baseline
+    programmatically rather than from a hand-typed copy."""
+    assert REVIEW_TASK_TEMPLATE.is_file(), REVIEW_TASK_TEMPLATE
+    raw = REVIEW_TASK_TEMPLATE.read_text(encoding="utf-8")
+
+    start = raw.find(_NAMES_BULLET_OPENER)
+    assert start != -1, (
+        f"{REVIEW_TASK_TEMPLATE.name} no longer contains {_NAMES_BULLET_OPENER!r} -- "
+        f"the #529 rule's own bullet was renamed, so this test can no longer say "
+        f"where the rule must live"
+    )
+    end = raw.find(_CANON_BULLET_OPENER, start)
+    assert end != -1, (
+        f"{REVIEW_TASK_TEMPLATE.name} no longer contains {_CANON_BULLET_OPENER!r} "
+        f"after {_NAMES_BULLET_OPENER!r} -- without that closing boundary the slice "
+        f"below would run to end of file and every check on it would be vacuous"
+    )
+    bullet = _squash(raw[start:end])
+
+    for fragment in (
+        "`names[]` entries and any `NEW:`-prefixed note are the translator's "
+        "unratified proposals",
+        "A finding that prescribes a particular canonical target form -- change to "
+        "it, restore it, revert to it -- must quote the `canon_map` entry it rests on",
+        "has no frozen canon and you may not assert one",
+        # Byte-identical to _AUTHORITY_CARVEBACK by coincidence of wording, and
+        # deliberately restated rather than referenced: these are two
+        # independently editable artifacts, so a reflow of either would otherwise
+        # report as a regression in the other -- and a lockstep weakening of both
+        # would pass two checks that are supposed to be independent.
+        "grounded in the source rather than in a canonical target form are untouched",
+    ):
+        assert fragment in bullet, (
+            f"{REVIEW_TASK_TEMPLATE.name}'s names/dates/titles bullet must carry "
+            f"{fragment!r} (#529)"
+        )
 
 
 if __name__ == "__main__":

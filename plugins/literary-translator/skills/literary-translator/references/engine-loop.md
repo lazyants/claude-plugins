@@ -220,6 +220,32 @@ steps below:
      that drops the gloss, this reviewer no longer raises the loss; it could never
      verify that surface from the draft, and that failure belongs to the
      render/diff gate and the operator.
+   - **Authority direction** (1.40.0, #529): the reviewer is told a `canon_map`
+     target form is authoritative, and was never told that the draft's OWN
+     `names[]` entries and `NEW:`-prefixed notes are not. Both sit in its context
+     with nothing separating them by status, so it could enforce the draft's own
+     unratified proposal against that same draft and file a canon finding for a
+     form present in neither `canon_map` nor `canon.json` — measured twice, once
+     applied to correct prose and once used to justify REVERTING a correct change.
+     `reviewDispatchPrompt` now states that the segpack's `canon_map` is the only
+     frozen canon the reviewer is given, that `names[]`/`NEW:` are the translator's
+     unratified proposals citable as context but never as the violated standard,
+     and that a finding **prescribing** a canonical target form — change to it,
+     restore it, revert to it — must quote the `canon_map` entry it rests on. The
+     prohibition is on prescribing an unresolvable form AS FROZEN CANON, not on
+     canon-adjacent findings as a class: `segpack.py` admits a canonized name to `canon_names`
+     while omitting it from `canon_map` when its `canonical_target_form` is empty,
+     and the strong-name detector can drop a canonized name from the segpack
+     entirely, so an omitted name, an untranslated canonical name and a wrong
+     identity stay raiseable exactly as before. Scoped to the reviewer by ROLE:
+     1.37.0 (#532) gave the FIX turn its own apply-side rule — a canon claim whose
+     form resolves in neither the segment's `canon_map` nor `canon.json` is refused —
+     and this is the RAISE-side half of the same property, in the vocabulary of the
+     only turn that files a finding. The two halves are independent on purpose: a
+     finding refused at the fix turn still costs a round and still stands in
+     `review.json`, where the next reviewer reads it. Not detected, and stated rather than implied: a
+     reviewer that simply omits the quote it was told to give — nothing mechanical
+     reads finding prose (#517).
    - **Timeout and shared-retry handling** (1.2.0): `reviewWaitPrompt`
      exhausting its bound exits as `blocked review-timeout` — a genuine
      failure to even get a dispatched review to complete. **1.16.1 (#348):**

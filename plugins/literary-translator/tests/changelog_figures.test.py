@@ -144,21 +144,27 @@ def _test_function_count(filename):
     )
 
 
-# Rewritten for 1.39.0 (#539), per the maintenance contract above.
+# Rewritten for 1.40.0 (#529), per the maintenance contract above.
 #
-# One row, because 1.39.0 states exactly one figure this tree can answer: how
-# many members plugin_bundle_hash's allowlist tuple holds, which the entry cites
-# when pricing what the release costs. Everything else the entry counts is a
-# CORPUS measurement taken outside this repository -- eleven
-# review-fabricated-loc blockings over eight segments in 1363 codex dispatches,
-# read out of two live books' driver journals. Nothing here can re-derive those,
-# so declaring one would mean hardcoding its answer (`lambda: 11`), which passes
-# every assertion below while proving nothing.
+# One row, and the SAME derivation the last three entries declared -- which is
+# exactly the case this contract is easiest to skip, and the reason it is a
+# contract rather than an assertion: 1.38.0 (#538) priced its migration on the
+# NOT-a-member side of this tuple, 1.39.0 (#539) on the member side, and 1.40.0
+# on the member side again, so an unrotated declaration stays green while
+# describing a different entry entirely. Measured on this release: it carried a
+# stale comment through THREE renumbers, each caught by a reviewer rather than
+# by anything here. Re-declared deliberately.
 #
-# The row below was watched failing by removing a member from the TUPLE, not by
-# editing the row. `_test_function_count` is kept although 1.39.0 cites no suite
-# size: it is the general deriver for that class of figure, and 1.36.0's own row
-# used it two releases ago.
+# 1.40.0's other numbers are not rows. Its two measured incidents are per-segment
+# events in operator-owned durable roots that are not in this repository (`SSK`
+# he/yi->en `seg35`, `historiettes` fr->ru `seg18`) and no check here can reach
+# them; the mutation counts behind its test claims are events in a review
+# session, not state in the tree. Declaring either would mean hardcoding the
+# answer, which passes every assertion below while proving nothing
+# (`lambda: 2`) -- the accepted residual this file's docstring names.
+#
+# `_test_function_count` is kept although 1.40.0 cites no suite size: it is the
+# general deriver for that class of figure.
 FIGURES = [
     Figure(
         "17 `PLUGIN_BUNDLE_MEMBERS`",

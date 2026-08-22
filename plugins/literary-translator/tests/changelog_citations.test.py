@@ -68,33 +68,29 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # renumber-preserves-the-wrongness failure this file exists to prevent, and
 # re-resolving it would pin a shipped entry to line numbers it never claimed.
 #
-# 1.35.0 (#546) cites NO `file.ext:NNN`, so this map is empty -- its documented
-# per-release state, not a lapse. The entry names `validate_draft.py`,
-# `assemble.py`, `cache_key.py` and `call_template_functions()`, but every claim
-# about them is BEHAVIOURAL -- what a mode rejects, what an adapter's return is
-# not checked for, which prompt the rule is pushed into -- and a behavioural
-# claim is pinned by a test that exercises it, not by a line number. Only ONE of
-# those three is so pinned: `segment_dispatch_driver.test.py`'s three new
-# regressions cover the prompt-scoping claim and nothing else -- they never
-# touch `validate_draft.py`'s mode rejection or `assemble.py`'s unchecked
-# adapter return, which are guarded by review alone, exactly as the paragraph
-# below says. The one figure the entry states about those files is a count
-# (`17 PLUGIN_BUNDLE_MEMBERS`), pinned by re-derivation in the sibling
-# `changelog_figures.test.py`; the entry's corpus measurements are that file's
-# own declared residual. A line citation would pin WHERE a thing lives, which
-# none of those sentences asserts.
-#
-# Said precisely, because the distinction is the whole point of these two files:
-# the entry's REMAINING claims -- what the new test's contract is, which files
-# it changes, what the anchor state is -- are behavioural, and are guarded by
-# review and by nothing mechanical. Neither test covers them.
+# 1.40.0 (#529) cites NO `file.ext:NNN`, so this map is empty -- its documented
+# per-release state, not a lapse. The entry names `segpack.py`, `cache_key.py`,
+# `resume_setup.py`, `draft.schema.json` and `call_template_functions()`, but
+# every claim about them is BEHAVIOURAL -- which name a builder omits from
+# `canon_map` and why, what a marker move does to a resume identity, when a
+# template is copied -- and a behavioural claim is pinned by a test that
+# exercises it, not by a line number. Only the prompt-scoping claim is so
+# pinned, by `segment_dispatch_driver.test.py`'s three new regressions; the
+# migration-cost and copy-once claims are guarded by review alone, which is
+# exactly what the entry's own cost paragraph is. The one figure the entry
+# states about those files is a count (`17 PLUGIN_BUNDLE_MEMBERS`), pinned by
+# re-derivation in the sibling `changelog_figures.test.py`. A line citation
+# would pin WHERE a thing lives, which none of those sentences asserts.
 #
 # An empty map is exactly the case where a correct rotation and a SKIPPED one
-# look identical, so the precedent matters: 1.34.1 (#547) and 1.33.1 were empty
-# for their own reasons too. What forced this particular rewrite was the test
-# below going red when 1.34.2 landed -- both halves still bite against an empty
-# map, since a citation with no anchors fails and an anchor no citation uses
-# fails.
+# look identical -- and 1.40.0 is the instance that proves it: the previous
+# release's declaration was ALSO empty, so nothing here went red when this entry
+# landed, and only a reviewer reading the comment caught that it still described
+# 1.35.0. The precedent runs further back for their own reasons (1.34.1 (#547)
+# and 1.33.1 were empty too). Both halves still bite against an empty map -- a
+# citation with no anchors fails and an anchor no citation uses fails -- but
+# neither half fires on a stale COMMENT, which is why the rewrite is a
+# maintenance contract rather than an assertion.
 CITATION_ANCHORS = {}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
