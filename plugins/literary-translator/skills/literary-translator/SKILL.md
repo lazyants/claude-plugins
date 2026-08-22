@@ -102,8 +102,11 @@ under Claude Code, `${CLAUDE_PLUGIN_ROOT}/skills/literary-translator`, the
 directory that holds `assets/`. It is **not** `${CLAUDE_PLUGIN_ROOT}` itself:
 an installed plugin has no `assets/` at its root, so every
 `{{PLUGIN_ROOT}}/assets/...` path below — and every `--plugin-root` value,
-which each consumer resolves by appending `assets/scripts/`, `assets/schemas/`
-or `assets/templates/` — would name a directory that does not exist. W9r's own
+which each consumer that resolves a plugin resource does by appending
+`assets/scripts/`, `assets/schemas/` or `assets/templates/` — would name a
+directory that does not exist. (`backfill_resume_gate_ack.py` is the one
+exception: it accepts `--plugin-root` for flag uniformity and provenance
+reporting, and resolves nothing with it.) W9r's own
 `LT=<the literary-translator skill directory>` (Step W9r) is the same value.
 
 Implemented by `scripts/profile_validate.py`, invoked as:
@@ -1843,9 +1846,9 @@ commit-gate chain this sets up for translate/review to enforce per segment.
 skill's own directory, the SAME value this skill's own
 `{{PLUGIN_ROOT}}` placeholder already resolves to throughout this document
 (Step 0: `${CLAUDE_PLUGIN_ROOT}/skills/literary-translator`), reused here,
-never redefined — NOT `${CLAUDE_PLUGIN_ROOT}` itself, which has no
-`assets/` under it and makes `codex_job.py` exit 2 with "does not resolve to
-a directory containing assets/scripts/". Unlike
+never redefined — NOT `${CLAUDE_PLUGIN_ROOT}` itself, which makes
+`codex_job.py` exit 2 with "does not resolve to a directory containing
+assets/scripts/". Unlike
 this skill's OTHER `{{PLUGIN_ROOT}}` occurrences — plain prose the reader
 substitutes on the fly when typing an example command (Step 0, W2, W3) —
 THIS one is a literal Workflow-template token: it must be written into the
@@ -1868,23 +1871,27 @@ scripts sitting in `${durable_root}/scripts/` would validate its own bad
 output, and nothing downstream would catch it. Always substitute it.
 
 **#582 — why the ENTRY POINT stays `${durable_root}/scripts/`, and what
-`--plugin-root` does and does not buy.** Every documented command below runs
-its script from the durable copy, which the same passes can write to. That
-asymmetry is deliberate and this paragraph is the reason, recorded so it is
-not re-raised per review: **`--plugin-root` protects the CHECKER a script
-shells out to; nothing here protects the ENTRY POINT, and nothing can, at
-this layer.** Moving every documented command to `{{PLUGIN_ROOT}}` was
-evaluated and rejected — not because it is expensive, but because it does
-not close the class. The class survives it for two measured reasons:
+`--plugin-root` does and does not buy.** The W5-and-later commands below run
+their scripts from the durable copy, which the same passes can write to (the
+Step 0 / W2 / W3 commands already run from `{{PLUGIN_ROOT}}`). That asymmetry
+is deliberate and this paragraph is the reason, recorded so it is not
+re-raised per review: **`--plugin-root` moves only the CHECKER a script shells
+out to; nothing here moves the ENTRY POINT.** Relocating individual entry
+points to `{{PLUGIN_ROOT}}` is real defence in depth — it prevents direct
+execution of a tampered durable copy of that one command — but it was
+evaluated and not adopted as the answer here, because it does not close the
+class. The class survives it for two measured reasons:
 
-1. **The fix turn is a write-capable deputy.** On any non-clean review
-   `runRound()` calls `callFix()`, which dispatches a PLAIN Claude agent
-   (`agent()` with no `agentType` — not `codex_job.py`, so not sandboxed) and
-   instructs it to apply, in full, every entry of a review whose
-   `issue`/`suggest` text codex itself authored; the only structural check on
-   a finding is that its `loc` contains a colon (`AUTHENTIC_LOC_RE`). That
-   turn is *told* to rewrite only `segments/<seg>.draft.json`, but the
-   instruction is prose and nothing constrains what it may write. So the
+1. **The fix turn is a write-capable deputy.** On a non-clean, non-final
+   review inside the fix-round budget, `runRound()` calls `callFix()`, which
+   dispatches a PLAIN Claude agent (`agent()` with no `agentType` — not
+   `codex_job.py`, so not sandboxed) and instructs it to apply, in full,
+   every entry of a review whose `issue`/`suggest` text codex itself authored.
+   `REVIEW_SCHEMA` constrains a finding's SHAPE (`loc`/`severity`/`issue`/
+   `suggest`, strings, no extra keys); beyond that the only content check is
+   that `loc` contains a colon (`AUTHENTIC_LOC_RE`) — `issue` and `suggest`
+   are unconstrained prose. That turn is told to rewrite the draft, but it is
+   neither forbidden nor technically prevented from writing elsewhere. So the
    surface that decides where a fix lands is an untrusted party's free text
    reaching a write-capable agent — a surface that sandboxing codex does not
    reach and that relocating an entry point does not narrow.
@@ -1895,14 +1902,18 @@ not close the class. The class survives it for two measured reasons:
    that depends on every call site being spelled correctly is trust that
    silently lapses the first time one is not.
 
-So the honest statement of today's guarantee is narrow: `--plugin-root` makes
-a tampered *sibling checker* detectable; it does not make a tampered
-*entry point* impossible, and `plugin_bundle_hash` does not detect one either
-(`cache_key.py` reads the Step-0a marker, it never re-hashes the copies).
-What actually bounds this risk is that the durable root holds one project's
-data and is not shared, and that the deliverable is read by a human before it
-ships. Closing it properly means constraining the fix turn's write surface —
-tracked separately, and out of scope for a documentation change.
+Note what `--plugin-root` actually does, since it is easy to overstate: it
+BYPASSES a possibly-tampered durable sibling by executing the trusted plugin
+copy instead. It does not detect, report, or repair the tampering — a poisoned
+durable checker simply sits there unexecuted. `plugin_bundle_hash` does not
+detect one either (`cache_key.py` reads the Step-0a marker; it never re-hashes
+the copies).
+
+The durable root holding one project's data, and a human reading the
+deliverable, limit the expected blast radius of the DELIVERABLE — they do not
+bound the fix turn's filesystem write reach, and nothing here does. Closing
+that properly means constraining that turn's write surface: tracked
+separately, and out of scope for a documentation change.
 
 **Optional dispatch path — `segment_dispatch_driver.py` (#409).** Everything
 above (`mass-translate-wf.template.js` instantiation, `pipeline()`, the
@@ -1975,9 +1986,8 @@ cache-key change. `select_segments.py` forwards both roots for this reason;
 `tests/ledger_merge.test.py` pins both directions, the detection with the flag
 and the false green without it. **What the flag does NOT buy:** the entry
 point you type here is itself the durable copy, so a tampered
-`ledger_merge.py` never consults the trusted checker at all. Passing
-`--plugin-root` narrows the exposure to the checker; it does not remove it.
-See the #582 paragraph above for why that asymmetry stands.
+`ledger_merge.py` never consults the trusted checker at all. See the #582
+paragraph above for why that asymmetry stands.
 
 Do NOT reach for `--expected-from-manifest`/`--expected-segs` here, and never
 add `--run-token` to them. Either expected-segment flag turns on the

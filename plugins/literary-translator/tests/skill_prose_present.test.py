@@ -104,7 +104,8 @@ def test_plugin_root_defined_at_step_0_present():
     # directory ... ${CLAUDE_PLUGIN_ROOT}", which names a directory with no
     # assets/ under it: every `--plugin-root` consumer appends
     # assets/scripts|schemas|templates, so codex_job.py exits 2 on it.
-    # Both halves are pinned so neither can drift back alone.
+    # The wording needle is the real Step-0 pin: the path spelling below also
+    # occurs at the #412 substitution paragraph, so it does not localize here.
     text = _skill_text()
     assert "denotes this skill's own directory" in text
     assert "${CLAUDE_PLUGIN_ROOT}/skills/literary-translator" in text
@@ -126,7 +127,6 @@ def test_plugin_root_definition_matches_the_shipped_layout():
         "the PLUGIN root now has an assets/ too -- the Step 0 definition and "
         "every --plugin-root consumer need re-deciding, not just this test"
     )
-    assert f"skills/{skill_dir.name}" in _skill_text()
 
 
 def test_f3_adjudication_fence_sentence_present():
