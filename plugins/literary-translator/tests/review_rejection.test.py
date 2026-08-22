@@ -2543,6 +2543,98 @@ def test_the_terminal_binding_check_serves_the_convergence_write_under_its_own_n
         "seg01", ctx, action), "and the default is still the cap fork's own wording"
 
 
+def test_the_convergence_handler_refuses_and_writes_nothing_when_the_binding_check_fails(tmp_path):
+    """That the handler CALLS the binding check, which the direct test above
+    cannot show.
+
+    Deleting the call, dropping `what="convergence"`, or ignoring the refusal
+    leaves every other test in this file green: the helper returns None on the
+    happy path, so its absence is invisible there. The substitution it guards
+    against happens inside one process_segment() call, between the derivation
+    and the write, so it cannot be staged from outside -- which is exactly why
+    the seam is faked HERE and only here: derive_next_action() is replaced for
+    one call by one that reports a digest no review on disk carries. Everything
+    downstream of it is the real handler.
+
+    NOTHING WRITTEN is half the assertion. A terminal write that refuses must
+    leave the ledger untouched, so whatever fragment is on disk (very likely
+    the cap the operator was looking at) stays the durable record and the next
+    invocation re-derives from what is actually there."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    review = _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
+                                draft_sha1=draft_sha1,
+                                findings=[{"loc": "p1:1", "severity": "major",
+                                           "issue": "unfounded", "suggest": "n/a"}])
+    record = _dna_write_rejection(
+        root, "seg01", dispatch_token=review["dispatch_token"],
+        verdict_digest=driver_mod._review_verdict_digest(review), round_label="final",
+    )
+    assert driver_mod.derive_next_action("seg01", ctx)["action"] == "converged_by_rejection", (
+        "CONTROL: the real derivation converges here, so the refusal below comes "
+        "from the substituted digest and not from the fixture"
+    )
+
+    real = driver_mod.derive_next_action
+    driver_mod.derive_next_action = lambda seg, ctx_: {
+        "action": "converged_by_rejection", "round_label": "final", "rejection": record,
+        "reviewed_sha1": draft_sha1,
+        "reviewed_token": review["dispatch_token"],
+        "reviewed_digest": "0" * 64,
+    }
+    try:
+        outcome = driver_mod.process_segment("seg01", ctx)
+    finally:
+        driver_mod.derive_next_action = real
+
+    assert outcome["outcome"] == "failed", outcome
+    assert outcome["reason"] == "converge-write-review-moved", (
+        f"the convergence write has its own refusal reason -- reporting it as the "
+        f"cap's would send an operator to the wrong branch: {outcome!r}"
+    )
+    assert "convergence" in (outcome.get("detail") or ""), (
+        f"the detail must name the write it refused: {outcome.get('detail')!r}"
+    )
+    assert not (root / "runs" / "ledger.d" / "seg01.json").exists(), (
+        "a refused terminal write must write NOTHING -- not a converged fragment, "
+        "and not a partial one"
+    )
+    assert not (root / "segments" / ".ever_converged.seg01").exists(), (
+        "and no sentinel: it is raised inside the convergence write this refused"
+    )
+    assert _dna_dispatch_log(root) == [], "nothing may be dispatched on a refusal either"
+
+
+def test_the_convergence_note_collapses_whitespace_and_bounds_the_operators_reason(tmp_path):
+    """The note is a single JSON string other tools render whole, and the reason
+    inside it is free text an operator typed -- reject_review.py requires only
+    that it be non-empty, so nothing upstream bounds its length or forbids
+    newlines. Both normalizations are asserted at their boundary rather than in
+    the middle: 300 characters passes through untouched, 301 truncates, and the
+    truncation is visible rather than silent."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, _ = _dna_setup(root)
+
+    multiline = driver_mod._rejection_convergence_note(
+        "seg01", {"reason": "verified\n  against   the source:\n\nthe phrase is absent",
+                   "rejected_at": "2026-01-01T00:00:00Z"})
+    assert "\n" not in multiline, f"a note carrying newlines is not one string: {multiline!r}"
+    assert "verified against the source: the phrase is absent" in multiline, multiline
+
+    budget = driver_mod.REJECTION_NOTE_REASON_BUDGET
+    exact = driver_mod._rejection_convergence_note(
+        "seg01", {"reason": "a" * budget, "rejected_at": "2026-01-01T00:00:00Z"})
+    assert "a" * budget in exact and "..." not in exact, (
+        "a reason exactly at the budget is not over it and must survive whole"
+    )
+    over = driver_mod._rejection_convergence_note(
+        "seg01", {"reason": "a" * (budget + 1), "rejected_at": "2026-01-01T00:00:00Z"})
+    assert "a" * budget not in over, "one character over the budget must truncate"
+    assert "..." in over, "and the truncation must be visible, not silent"
+
+
 def test_a_spent_rejection_is_renewed_by_the_identical_command_instead_of_dead_ending(tmp_path):
     """THE OPERATOR'S SECOND DECISION, at the label where it is unavoidable.
 

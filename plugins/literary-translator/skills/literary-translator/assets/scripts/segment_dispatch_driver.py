@@ -4501,6 +4501,17 @@ def _rejection_record(seg: str, segments_dir: Path, review_obj: dict) -> "dict |
     disk has not been rewritten since -- which is the same thing rules 5+6
     are trying to say, made true again after a token can repeat.
 
+    #527 NARROWS THAT rather than contradicting it, and the distinction
+    matters because this is a REPLAY rule. Consumption is still once per
+    review; what changed is that the `final` outcome no longer PRODUCES a
+    replacement review, so nothing rewrites review.json and nothing spends
+    the record. It then keeps matching -- but every re-derivation reaches
+    the identical terminal convergence over the identical unchanged draft,
+    so what it authorizes repeatedly is one already-recorded fact, not a
+    repeated action, and it stops the moment the draft moves. What rule 8
+    exists to prevent -- one operator decision buying unbounded codex spend
+    -- is not reachable through that door.
+
     Compared with `>` and not `>=` (st_mtime_ns, the same primitive
     _translate_redispatched_since() already uses for "did this driver act
     after that file was written"): a tie refuses, so a coarse-granularity
@@ -4538,8 +4549,9 @@ def _rejection_record(seg: str, segments_dir: Path, review_obj: dict) -> "dict |
     reopen_capped un-escalation that precedes it. Both are recoverable --
     the re-review re-reads the CURRENT draft, and the segment re-derives
     from whatever is actually on disk -- and neither can reach draft bytes:
-    every outcome of a consumed rejection is action "review", never
-    "translate", and a review does not write the draft. The closed
+    every outcome of a consumed rejection is action "review" or (since #527,
+    at `final` only) a convergence write, never "translate", and neither a
+    review nor a ledger write touches the draft. The closed
     direction, far likelier, costs the operator one re-run of
     reject_review.py. Neither failure destroys work. That is the whole
     reason a clock is an acceptable instrument HERE, and would not be for
@@ -5311,8 +5323,9 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 if not rec.get("success"):
                     return {"seg": seg, "converged": False, "outcome": "failed",
                             "reason": "ledger-write-failed", "detail": rec.get("error")}
-                # `cause` travels so run()'s summary and the driver's own JSON
-                # report can tell this convergence from a reviewer's clean one
+                # `cause` travels so run()'s own per-segment `results` (never
+                # its `summary`, whose converged bucket carries segment IDs
+                # alone) can tell this convergence from a reviewer's clean one
                 # without re-reading the ledger. The outcome field itself stays
                 # "converged" -- run()'s totality check partitions on THAT, and
                 # a new bucket would drop these segments out of every summary.

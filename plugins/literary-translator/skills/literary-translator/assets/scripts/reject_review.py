@@ -1285,12 +1285,13 @@ def main():
             # the route to that state without removing it: a `final` rejection
             # over an unmoved draft with coverage_ok now converges the unit
             # instead of buying a replacement review, so what still reaches
-            # here is a rejection the consumer sent back for a fresh review
-            # anyway -- the draft moved, or the verdict reported incomplete
-            # coverage -- and the replacement it promoted. Spending turns on
-            # the two files' mtimes, never on the draft, so a moved draft
-            # preserves this branch only once that replacement actually
-            # lands. Without the
+            # here is the incomplete-coverage case: the consumer sent that
+            # verdict back for a fresh review, the review came back over the
+            # SAME draft with the same verdict, and the operator is rejecting
+            # it again. The moved-draft fall-through does NOT arrive here --
+            # its replacement review carries a different draft_sha1, so the
+            # whole-review digest differs and this branch is never entered;
+            # that is an ordinary fresh rejection, not a renewal. Without the
             # branch below, the operator who wants to reject the replacement
             # too is dead-ended: the identical reason returns success and
             # rewrites nothing, a different reason refuses as a conflict, and
