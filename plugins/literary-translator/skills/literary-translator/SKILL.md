@@ -919,6 +919,80 @@ produced. See `references/source-format-adapters/custom.md` and
 `references/false-green-gate.md` for the full reconciliation. The pipeline
 advances to W3 ONLY on its exit `0` (see R2 / `references/false-green-gate.md`).
 
+### Visual-order source — the advisory this gate may print (1.46.0, #489)
+
+The gate can also print, on stderr, a **`WARN visual_order_scan:`** line, and
+name the advisory count in its final status. It is REPORT-ONLY: it never
+changes the exit code in either direction, so an advisory neither blocks a book
+you legitimately want to translate nor rescues a failing extraction.
+
+It means a source EPUB is probably in **visual order** rather than logical
+order — the usual result of a PDF-to-EPUB conversion. Extraction is byte-faithful
+and correct; the mangling is upstream. **Do not send a fix to the extraction
+stage.** The damage lands on the LLM turns instead: a visual-order run tears
+words apart, so a reviewer reads a stranded fragment as a real word and files a
+finding against a CORRECT draft, and a translator can invert who did what to
+whom. Both have happened on a live book, the second reaching a converged draft
+that a full review round had already called clean. No deterministic gate can
+catch this class — token counts, digests, schema validation and `validate_draft`
+never read what a fragment MEANS.
+
+**The scan is a SCREEN, not a verdict.** It detects visual-order *handling* (a
+terminal punctuation mark leading an RTL token, which logical order cannot
+produce), not the word *reordering* that actually tears tokens. Adjudicate it:
+
+1. Read the sampled units the WARN names, in the manifest, against the source.
+   The sample is printed as `\uXXXX` escapes on purpose — **never judge RTL text
+   by looking at it**, because a bidi terminal renders a corrupted token
+   identically to an intact one. Settle it on the codepoints.
+2. **Negative** — the signature fired on something benign: record that in the
+   project's notes and carry on. Nothing else to do.
+3. **Positive** — paste the clause below into the project's own
+   `style_bible.md`, under `### E-traps`. That is the one place all three turns
+   read: the translator reads the style bible in full, the reviewer names it as
+   style authority, and the fix turn reads it before editing.
+
+**Before pasting, know what it costs.** Editing `style_bible.md` moves
+`style_contract_hash`, which mechanically flips every unit ALREADY converged in
+that project to `stale`. R9 means the edit applies FORWARD — nothing needs
+re-reviewing — but with `validation.admit_contract_only_stale` false, W7 and W9
+will refuse until you set it. On a fresh project this costs nothing; on a
+partly-converged one, decide deliberately.
+
+The clause is **not** shipped in `style_bible.template.md`, and this copy is
+**not operative** — it is text for the operator to paste after a positive
+adjudication, never an instruction to any turn. A book whose source is in
+ordinary logical order must never receive it: telling that project's reviewer to
+discount torn-token findings would suppress real defects.
+
+```markdown
+#### E-traps: visual-order source
+
+The extracted source text of THIS book is in VISUAL order, not logical order: a
+PDF-to-EPUB converter emitted runs whose words appear in display sequence, and
+extraction preserved those bytes faithfully. The segpack, `manifest.json` and
+the source EPUB all carry the SAME mangled bytes — there is no unmangled copy to
+consult, so reconstruction is the only recovery. Binding on every turn:
+
+1. **The token order you read is not the author's word order.** Where a span is
+   visually ordered, reconstruct the logical clause before you translate, judge
+   or edit it. Reconstruction is bounded: reverse the order of WORDS, never the
+   characters inside a word (words are themselves stored logically); reverse
+   only a span you have established is WHOLLY reordered, never a partly-affected
+   line; and PRESERVE the internal order of any embedded left-to-right run — a
+   Latin name, a citation sigil, a digit sequence. Treat the result as a
+   hypothesis: keep it only if it yields a grammatical clause consistent with
+   the surrounding context. Where the span is ambiguous or mixed-direction,
+   reconstruct from context and say so — never apply reversal mechanically.
+2. **A short token stranded at a span boundary is usually half of a torn word,
+   not a word.** Do not file a word-order or torn-token finding, and do not act
+   on one, until you have reconstructed the span. Then report only what SURVIVES
+   reconstruction — this is not an instruction to suppress findings.
+3. **Never judge an RTL token by how it looks.** A bidi terminal renders a
+   corrupted token identically to an intact one. Settle any such question on the
+   codepoints.
+```
+
 **New in 1.12.0 (#210) — two additional HARD checks land in
 `run_derivable_checks`**, both exit `1`, both running unconditionally,
 including for `source.format: custom` (only the extractor self-check

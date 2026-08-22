@@ -101,6 +101,7 @@ import hashlib
 import json
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import NoReturn
 
@@ -626,6 +627,206 @@ def run_derivable_checks(manifest: dict, apparatus_policy: str, max_segment_word
 
 
 # ---------------------------------------------------------------------------
+# Advisory scans (#489) -- REPORT-ONLY, never part of the exit decision
+# ---------------------------------------------------------------------------
+#
+# A source EPUB produced by a PDF converter can carry RTL text in VISUAL order
+# rather than logical order. Extraction preserves those bytes faithfully -- that
+# is correct behaviour, measured byte-identical against the raw EPUB -- and
+# every gate downstream passes the result, because token counts, digests, schema
+# validation and validate_draft never read what a fragment MEANS. The damage
+# lands on the LLM turns: a visual-order run tears words apart, a reviewer reads
+# a stranded fragment as a real word and files a finding against a CORRECT
+# draft, and a translator can invert who did what to whom. Both have happened on
+# a live book, the second reaching a converged draft.
+#
+# This scan exists to END THE SILENCE, not to render a verdict. It is a
+# LEADING-TERMINAL-PUNCTUATION SCREEN: it detects visual-order *handling*, not
+# word *reordering*, and its output routes an operator to an adjudication turn
+# that decides. Deliberately NOT in run_derivable_checks(): an advisory must
+# never refuse an ingestion (the operator may legitimately want to translate a
+# mangled book) and must never rescue a failing one.
+#
+# Two obvious reordering detectors were MEASURED and returned clean on the known
+# positive control: whole-block reversal scoring and tail-window reversal
+# scoring. A clean sweep from either would have read as "no visual-order input
+# found" -- a false all-clear. Do not swap this signature for one of those.
+
+# Codepoint ranges whose letters are written right-to-left.
+_RTL_RANGES = (
+    (0x0590, 0x05FF),  # Hebrew
+    (0x0600, 0x06FF),  # Arabic
+    (0x0700, 0x074F),  # Syriac
+    (0x0750, 0x077F),  # Arabic Supplement
+    (0x0780, 0x07BF),  # Thaana
+    (0x07C0, 0x07FF),  # NKo
+    (0x0800, 0x083F),  # Samaritan
+    (0x0840, 0x085F),  # Mandaic
+    (0xFB1D, 0xFB4F),  # Hebrew presentation forms
+    (0xFB50, 0xFDFF),  # Arabic presentation forms A
+    (0xFE70, 0xFEFF),  # Arabic presentation forms B
+)
+
+# Punctuation that in LOGICAL order can only FOLLOW a word, never lead one.
+# Opening marks (Ps/Pi) are excluded by omission and by category: an opening
+# bracket or quote before a word is ordinary logical order. The ELLIPSIS is
+# excluded deliberately -- a sentence-initial elision is legitimate, and it
+# contributed zero of the positive control book's 921 hits, so excluding it
+# costs nothing measured and removes the one false-positive class found.
+# Hebrew's word-INTERNAL marks (geresh U+05F3, gershayim U+05F4, maqaf U+05BE)
+# are likewise absent on purpose.
+_TERMINAL_PUNCT = frozenset(
+    ".,;:!?)]}"
+    "»"  # RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK
+    "”"  # RIGHT DOUBLE QUOTATION MARK
+    "’"  # RIGHT SINGLE QUOTATION MARK
+    "،"  # ARABIC COMMA
+    "؛"  # ARABIC SEMICOLON
+    "؟"  # ARABIC QUESTION MARK
+    "۔"  # ARABIC FULL STOP
+    "׃"  # HEBREW PUNCTUATION SOF PASUQ
+)
+
+_ADVISORY_SAMPLE_CAP = 8
+VISUAL_ORDER_SCAN_NAME = "visual_order_scan"
+
+
+def _is_rtl_letter(ch: str) -> bool:
+    code = ord(ch)
+    if not any(low <= code <= high for low, high in _RTL_RANGES):
+        return False
+    return unicodedata.category(ch).startswith("L")
+
+
+def _is_terminal_punct(ch: str) -> bool:
+    # Pe (close bracket) and Pf (final quote) are whole categories that can only
+    # trail a word; the rest are named individually above.
+    return ch in _TERMINAL_PUNCT or unicodedata.category(ch) in ("Pe", "Pf")
+
+
+def _leading_terminal_punct_hits(text):
+    """Tokens whose FIRST character is terminal punctuation that is followed --
+    across any combining marks or bidi/format controls -- by an RTL letter.
+
+    In logical order this cannot occur: a full stop or comma is stored AFTER the
+    word it ends. In visual order it is what a converter emits at the left edge
+    of a run.
+
+    Skipping ``M*`` matters because niqqud can sit between the punctuation and
+    the letter, which defeats a naive lookahead -- that mistake turned a real
+    777-occurrence count into 677. Skipping ``Cf`` matters because RLM/LRM
+    (U+200F/U+200E) are exactly what a bidi-aware converter emits there."""
+    hits = []
+    for token in (text or "").split():
+        if not token or not _is_terminal_punct(token[0]):
+            continue
+        i = 0
+        while i < len(token) and (
+            _is_terminal_punct(token[i])
+            or unicodedata.category(token[i]).startswith("M")
+            or unicodedata.category(token[i]) == "Cf"
+        ):
+            i += 1
+        if i < len(token) and _is_rtl_letter(token[i]):
+            hits.append(token)
+    return hits
+
+
+def _advisory_text_units(manifest: dict):
+    """Every INDEPENDENT source-text store the extractor emits, as
+    ``(label, text)``.
+
+    Blocks are not all of it. An EMBEDDED verse's text is lifted OUT of its
+    carrier block and replaced by a placeholder sentinel (see
+    extract.py.template's ``container.replace_with(...)`` and segpack.py's own
+    note), so a blocks-only scan cannot see it at all. A STANDALONE verse
+    (``mount == "block"``) is already an ordinary blocks[] entry and must NOT be
+    scanned twice. ``segments[].title_text`` needs no scan of its own: the
+    extractor derives it from the heading block this already reads."""
+    blocks = manifest.get("blocks") or {}
+    if isinstance(blocks, dict):
+        for block_id, block in blocks.items():
+            if isinstance(block, dict):
+                yield str(block_id), block.get("plain_text")
+    store = (manifest.get("verse") or {}).get("store") or []
+    if isinstance(store, list):
+        for entry in store:
+            if not isinstance(entry, dict) or entry.get("mount") != "embedded":
+                continue
+            yield f"verse:{entry.get('vid')}", entry.get("plain_text")
+
+
+def scan_visual_order(manifest: dict):
+    """Returns ``(n_hits, n_units_with_hits, n_rtl_units, histogram, samples)``.
+
+    Pure: reads the manifest, decides nothing, writes nothing."""
+    n_hits = 0
+    units_with_hits = 0
+    rtl_units = 0
+    histogram: dict = {}
+    samples = []
+    for label, text in _advisory_text_units(manifest):
+        if not isinstance(text, str) or not text:
+            continue
+        if not any(_is_rtl_letter(ch) for ch in text):
+            continue
+        rtl_units += 1
+        hits = _leading_terminal_punct_hits(text)
+        if not hits:
+            continue
+        units_with_hits += 1
+        n_hits += len(hits)
+        for token in hits:
+            key = f"U+{ord(token[0]):04X}"
+            histogram[key] = histogram.get(key, 0) + 1
+        if len(samples) < _ADVISORY_SAMPLE_CAP:
+            samples.append((label, hits[0]))
+    return n_hits, units_with_hits, rtl_units, histogram, samples
+
+
+def _escape_evidence(token: str) -> str:
+    """Renders a token as pure-ASCII ``\\uXXXX`` escapes.
+
+    NEVER print a raw RTL token as evidence. A bidi-reordering terminal renders
+    a CORRUPTED token identically to an intact one -- a finding was once filed
+    and then retracted for exactly that reason -- so evidence a human or an LLM
+    is meant to ADJUDICATE has to be codepoints, not glyphs. The histogram keys
+    above are ``U+XXXX`` for the same reason."""
+    return "".join(
+        ch if (ch.isascii() and ch.isprintable() and ch != "\\") else f"\\u{ord(ch):04X}"
+        for ch in token
+    )
+
+
+def run_advisory_scans(manifest: dict):
+    """Report-only scans, as ``[(name, detail)]``. Never affects the exit code."""
+    results = []
+    n_hits, n_units, n_rtl_units, histogram, samples = scan_visual_order(manifest)
+    if n_hits:
+        marks = ", ".join(
+            f"{key}x{count}" for key, count in sorted(histogram.items())
+        )
+        evidence = "; ".join(
+            f"{label} {_escape_evidence(token)}" for label, token in samples
+        )
+        detail = (
+            f"{n_hits} token(s) in {n_units} of {n_rtl_units} RTL-bearing text "
+            f"unit(s) begin with terminal punctuation immediately followed by an "
+            f"RTL letter. In logical order that cannot happen, so this source is "
+            f"probably in VISUAL order (a PDF-to-EPUB conversion artifact). "
+            f"leading marks: {marks}. sample (escaped -- never judge RTL text by "
+            f"looking at it): {evidence}. This is a SCREEN, not a verdict: it "
+            f"detects visual-order handling, not word reordering, and it neither "
+            f"passes nor fails this gate. Adjudicate the sampled units against "
+            f"the source before translating, and if positive, record the "
+            f"condition in style_bible.md's E-traps section (see SKILL.md, "
+            f"'Visual-order source')."
+        )
+        results.append((VISUAL_ORDER_SCAN_NAME, detail))
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -699,6 +900,29 @@ def main(argv=None):
         for err in schema_errors:
             print(f"  - {err}", file=sys.stderr)
         sys.exit(1)
+
+    # --- (a2) report-only advisory scans (#489) -------------------------------
+    # Runs BEFORE re-derivation on purpose. run_derivable_checks() has its own
+    # structural-exception boundary that exits 1 immediately, and a SCHEMA-VALID
+    # manifest can legitimately reach it (the count fields it indexes are not
+    # schema-required) -- so an advisory placed after that boundary would be
+    # silently skipped on exactly the malformed inputs most likely to be
+    # mangled. Its own broad boundary is what keeps the promise that an advisory
+    # can never change the exit decision in EITHER direction: a scan that raises
+    # degrades to a named advisory and the mandatory checks proceed untouched.
+    try:
+        advisories = run_advisory_scans(manifest)
+    except Exception as exc:  # noqa: BLE001 -- an advisory may never gate a run
+        advisories = [
+            (
+                VISUAL_ORDER_SCAN_NAME,
+                f"scan unavailable ({type(exc).__name__}) -- this is an advisory "
+                f"only and does NOT affect whether this gate passes; the "
+                f"mandatory checks below are unaffected.",
+            )
+        ]
+    for name, detail in advisories:
+        print(f"WARN {name}: {detail}", file=sys.stderr)
 
     # --- (b) independent re-derivation of the derivable checks ----------------
     try:
@@ -797,7 +1021,11 @@ def main(argv=None):
         )
 
     if derivable_ok and region_ok:
-        print(f"{manifest_path}: OK -- post-extraction gate passed")
+        # A fired advisory is named in the final status line so it can never sit
+        # under an unqualified OK -- the gate genuinely passed, and something
+        # still wants an operator's eyes.
+        suffix = f" ({len(advisories)} ADVISORY)" if advisories else ""
+        print(f"{manifest_path}: OK -- post-extraction gate passed{suffix}")
         sys.exit(0)
     sys.exit(1)
 
