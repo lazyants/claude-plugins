@@ -138,8 +138,8 @@ into one "`exists()` is unreliable" line, the value here is that they disagree:
 
 **Do not run `select_segments.py --classify-only` or `final_audit.py` against a live book to check its
 state.** Both re-materialize `runs/ledger.json`, which counts as a WRITE to the project you are only
-trying to inspect. This rule is cited from `[[index_literary_translator]]` in the memory that recorded
-it, but that file does not actually contain it — treat this section as the rule's real home. Relatedly,
+trying to inspect. The memory that recorded this rule cited it to an index file that does not actually
+contain it — this section is the rule's real home. Relatedly,
 a `not_evaluated` result from any of these checks is **not** a pass; the script's own output says so.
 The six `not_evaluated` cases found on the live books were closed only by hand inventory, not by
 re-running a script to get a cleaner-looking verdict.

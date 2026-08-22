@@ -35,7 +35,7 @@ The gate: name the shipped function whose branch is wrong, and a person who is n
 Sorting only. The defended verdict on a number that is already open — the dispositions, the brakes, and the refutation second opinion every close needs — belongs to `skill:tracker-triage`.
 
 1. Group every issue by the shipped function it blames. An issue that cannot name one is not a defect report.
-2. Within a group keep the oldest number and fold the rest in as rows, and state which remedy the group settles on before closing the others.
+2. Within a group keep the number carrying the widest measured evidence — not the oldest, not the loudest — and fold the rest in as rows, and state which remedy the group settles on before closing the others.
 3. Sort the ungrouped remainder: a named non-reviewer consumer keeps it open; a correction that is one sentence of prose gets edited at the next touch and closed; no consumer means park or close — say which, in the issue, or the next sweep refiles it.
 4. Re-verify against current code before scheduling. An issue outlives the code it describes, and an already-fixed defect reads exactly like a live one.
 

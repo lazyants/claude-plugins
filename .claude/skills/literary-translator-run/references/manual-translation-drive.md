@@ -40,17 +40,19 @@ The only deliberate deviations from the builders:
 
 Re-reviewing a book already translated (e.g. after a hand-correction) is a routine operator need
 with no shipped path. `mass-translate-wf.template.js` ends in `pipeline(SEGS, translateStage,
-reviewFixLoop)`, and `translateStage` (`:1781-1789`) is UNCONDITIONAL — it does not consult
+reviewFixLoop)`, and `translateStage` (cite it by name; it moves) is UNCONDITIONAL — it does not consult
 `derive_next_action()`, the ledger, or whether a draft already exists; it dispatches
 `codex_job.py --kind translate` and returns. Feeding it segments whose drafts were hand-corrected
 **overwrites that work**. `glossary-pass` and `skeptic-pass` contain no review stage at all.
 
 **The sanctioned substitute is the template's own builders, transcribed verbatim (never
 re-authored) — per the rule above:**
-- `reviewDispatchPrompt(seg, roundLabel)` — `:999-1017`, the whole prompt including its single
-  `⟦JOB_OUT⟧` placeholder.
-- `reviewDrivePrompt(seg, roundLabel)` — `:1027-1044`, the exact `codex_job.py --kind review`
-  launch.
+- `reviewDispatchPrompt(seg, roundLabel)` — the ENTIRE function body, from its `function` line to
+  its closing brace, including the trailing `⟦JOB_OUT⟧` write-destination line and the final
+  `Return exactly the line: REVIEWED` line. Do not cite or cut by line number: the ranges shift, and
+  a range that stops early yields a prompt with no write destination and no return line.
+- `reviewDrivePrompt(seg, roundLabel)` — likewise the entire function body, the exact
+  `codex_job.py --kind review` launch.
 - Acceptance gate: `review_ready.py --expect-token`.
 
 `codex_job.py` supplies the isolated `JOB_OUT` and atomically promotes it to the canonical

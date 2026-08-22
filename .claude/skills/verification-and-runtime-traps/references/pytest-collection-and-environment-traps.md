@@ -1,17 +1,22 @@
 # pytest collection scope and environment-dependent totals (literary-translator)
 
-## `pytest plugins/` silently collects 67 of 5321 tests and exits 0
+## `pytest plugins/` silently collects a sliver of the suite and exits 0
 
-Run the suites per plugin, never from the repo root: `pytest plugins/literary-translator/`
-(5254 tests) and `pytest plugins/cc-usage-coach/` (67). There is no root `pytest.ini`/`conftest.py`.
+Run the suites per plugin, never from the repo root: `pytest plugins/literary-translator/` and
+`pytest plugins/cc-usage-coach/` separately. There is no root `pytest.ini`/`conftest.py`.
 
-`pytest plugins/` collects **67 tests in 0.2s and exits 0** — the 142 `*.test.py` files are all
-invisible. This repo names its tests `*.test.py`, which matches neither of pytest's default
-`python_files` patterns (`test_*.py`, `*_test.py`); the pattern comes from
-`plugins/literary-translator/pytest.ini`, which pytest loads **only when the invocation's rootdir
-resolves into that directory**. From the repo top the ini is never read, so only `cc-usage-coach`'s
-6 `test_*.py` files match. Passing a `.test.py` file explicitly always works, which is why
-single-file runs never expose it.
+`pytest plugins/` collects only `cc-usage-coach`'s handful of tests, in a fraction of a second, and
+exits 0 — every `*.test.py` file in `literary-translator` is invisible. This repo names those tests
+`*.test.py`, which matches neither of pytest's default `python_files` patterns (`test_*.py`,
+`*_test.py`); the pattern comes from `plugins/literary-translator/pytest.ini`, which pytest loads
+**only when the invocation's rootdir resolves into that directory**. From the repo top the ini is
+never read, so only `cc-usage-coach`'s `test_*.py` files match. Passing a `.test.py` file explicitly
+always works, which is why single-file runs never expose it.
+
+The RATIO is the point and it is large; the absolute totals move every release, so derive them when
+you need them (`--collect-only -q` per plugin) rather than trusting a number written here. Snapshot,
+for scale only — measured 2026-08-22 at `531cec8`: 67 at the repo root vs 5 937 inside
+`plugins/literary-translator`, across 161 `*.test.py` files.
 
 Why it bites: a near-empty collection is indistinguishable from a passing full run — same dots,
 same exit 0. **The collected COUNT is the only tell**, so read it before banking any green.
@@ -29,10 +34,11 @@ be ignored"* — which reads like it is about helper modules and is not.
 `assert False, "this must fail"` FAILS under `python3 -m pytest` and PASSES under
 `python3 -O -m pytest`.
 
-**On the real suite, current main:** `python3 -O -m pytest` → **91 failed, 5562 passed**. The 5562
-passes assert nothing — 11 567 `Assert` statements across 159 of 160 test modules are inert. The 91
-REDs are only the residue where a stripped assert carried a side effect, or a narrowing the next
-line depended on.
+**On the real suite** (measured 2026-08-16 on `plugins/literary-translator`; the totals have moved
+since and are here for shape, not for comparison): `python3 -O -m pytest` → **91 failed, 5562
+passed**. Those passes assert nothing — the `Assert` statements in essentially every test module are
+inert. The REDs are only the residue where a stripped assert carried a side effect, or a narrowing
+the next line depended on. Re-measure before quoting any of these figures.
 
 **How to apply:**
 
@@ -41,9 +47,10 @@ line depended on.
 - A ticket framed as *"N tests fail under `-O`"* has its premise backwards, and fixing the N is the
   wrong work — the number to care about is the passes.
 - The inverse question is separate and worth asking on its own: **does any shipped script carry a
-  bare fail-closed `assert`?** In this plugin, no — an AST sweep of all 47 shipped `.py`/`.py.template`
-  files finds 7 `Assert` nodes, every one narrowing after a dependency check, with the anti-bare-assert
-  convention written out at `fetch_citation.py:806` and `skeptic_report.py:517`.
+  bare fail-closed `assert`?** Re-run the AST sweep over the shipped `.py`/`.py.template` files rather
+  than trusting a count — as of 2026-08-16 every `Assert` node found was narrowing after a dependency
+  check, none bare, with the anti-bare-assert convention written out in `fetch_citation.py` and
+  `skeptic_report.py`.
 - Same family as: a check that runs zero times prints exactly what a passing one prints.
 
 ## An absolute suite total is a fact about the MACHINE that ran it — a `--collect-only` delta is not
