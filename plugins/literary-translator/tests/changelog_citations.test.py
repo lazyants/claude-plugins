@@ -68,11 +68,12 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # renumber-preserves-the-wrongness failure this file exists to prevent, and
 # re-resolving it would pin a shipped entry to line numbers it never claimed.
 #
-# 1.34.2 (#580) cites NO `file.ext:NNN`, so this map is empty. The entry names
-# `cache_key.py` and both changelog test modules, but every source claim it
-# makes is about what a file now HOLDS -- a tuple's length, a module count, a
-# heading count -- and the sibling `changelog_figures.test.py` re-derives each
-# of those directly. A line citation would pin WHERE a thing lives, which none
+# 1.34.2 (#580) cites NO `file.ext:NNN`, so this map is empty -- its documented
+# per-release state, not a lapse. The entry names `cache_key.py` and both
+# changelog test modules, but its NUMERIC claims about them are counts -- a
+# tuple's length, a module count, a heading count -- and a count is pinned by
+# re-deriving it, which the sibling `changelog_figures.test.py` does for the
+# three it declares. A line citation would pin WHERE a thing lives, which none
 # of those sentences asserts.
 #
 # Said precisely, because the distinction is the whole point of these two files:

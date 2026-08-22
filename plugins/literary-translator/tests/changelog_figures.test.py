@@ -36,8 +36,8 @@ the same defect class it exists to remove.
   (`tests/changelog_citations.test.py`) and for the same reason: an entry records
   what a past release measured.
 - The entry slicer is fence-unaware. A `## <semver>` line inside a fenced block
-  would end the slice early. Measured on the current file: 60 release headings,
-  ZERO inside a fence. When it does happen the result is usually RED (a declared
+  would end the slice early. Measured across every release heading in this file:
+  ZERO sit inside a fence. When it does happen the result is usually RED (a declared
   phrase falls below the fake heading and goes missing) -- but not always: if every
   declaration sits ABOVE the fake heading, or a duplicate of a phrase sits below
   it, the truncated slice can still satisfy the exactly-once rule and pass GREEN.
@@ -99,9 +99,12 @@ def _release_entry_count():
 
 
 def _test_module_count():
-    """Test modules under `tests/`, by this project's own `*.test.py` glob --
-    the same pattern `pytest.ini` collects on, not a hand-kept list."""
-    return len(list((PLUGIN_ROOT / "tests").glob("*.test.py")))
+    """Test modules under `tests/`, by this project's own `*.test.py` pattern --
+    not a hand-kept list. RECURSIVE, because `python_files` in `pytest.ini` is a
+    BASENAME pattern: pytest would collect `tests/unit/x.test.py` while a
+    top-level glob silently would not, and a derivation that quietly disagrees
+    with the authority it cites is the failure this file warns about."""
+    return len(list((PLUGIN_ROOT / "tests").rglob("*.test.py")))
 
 
 def _tuple_len(filename, name):
@@ -113,6 +116,13 @@ def _tuple_len(filename, name):
         if isinstance(node, ast.Assign) and any(
             getattr(target, "id", "") == name for target in node.targets
         ):
+            # The node must BE a tuple, not merely something `len()` accepts:
+            # `NAME = "abcdefghijklmnopq"` also has length 17, and this row
+            # would then report that it had counted tuple members.
+            assert isinstance(node.value, ast.Tuple), (
+                f"{name} in {filename} is no longer a tuple literal, so its "
+                f"length is not the member count a changelog figure cites"
+            )
             return len(ast.literal_eval(node.value))
     raise AssertionError(
         f"{name} is no longer a module-level assignment in {filename} -- the "
@@ -166,13 +176,41 @@ def test_every_declared_figure_is_still_what_the_tree_says():
             )
             continue
 
-        tokens = _TOKEN.findall(figure.phrase)
+        tokens = [match.group(0) for match in _TOKEN.finditer(figure.phrase)]
         if len(tokens) != 1:
             stale.append(
                 f"{figure.phrase!r} contains {len(tokens)} numeric tokens "
                 f"({tokens}) -- a phrase spanning several numbers would pass "
                 f"every check here while only one of them was ever verified. "
                 f"Narrow the phrase to the one figure this row declares"
+            )
+            continue
+
+        # The phrase was located by plain substring search, so its numeral may
+        # be a FRAGMENT of a longer number in the entry: `61 release entries`
+        # occurs inside `161 release entries`, and every check below would then
+        # compare 61 against 61 while the prose says 161. Same for a sign or a
+        # decimal point immediately before it (`-17`, `.5`). So the numeral's
+        # neighbours in the ENTRY must not extend it. Only the left side needs
+        # a `.` guard: `_TOKEN` already swallows a decimal tail, so a `.` after
+        # a matched token is sentence punctuation and never part of the number.
+        # A following `,` is only extending when a digit follows it -- this file
+        # groups with spaces, but a comma-grouped number must not read as its
+        # first three digits.
+        at = entry.index(figure.phrase)
+        span = next(_TOKEN.finditer(figure.phrase))
+        start, end = at + span.start(), at + span.end()
+        before = entry[start - 1] if start else ""
+        after = entry[end] if end < len(entry) else ""
+        after_next = entry[end + 1] if end + 1 < len(entry) else ""
+        if (before.isdigit() or before in ".,-") or (
+            after.isdigit() or (after == "," and after_next.isdigit())
+        ):
+            stale.append(
+                f"{figure.phrase!r} matched inside a LONGER number in {version} "
+                f"({entry[max(0, start - 4):end + 4]!r}) -- the row would compare "
+                f"its own numeral against itself while the prose states a "
+                f"different one. Widen the phrase to include the whole figure"
             )
             continue
 
