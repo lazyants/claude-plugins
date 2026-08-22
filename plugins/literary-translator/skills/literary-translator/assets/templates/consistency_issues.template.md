@@ -21,6 +21,14 @@
   running this project can track and eventually resolve cross-segment
   issues that per-segment review cannot catch on its own, since each
   reviewer call only ever sees one segment in isolation.
+
+  Because nothing here is read back, a decision recorded in this file binds
+  nobody until it reaches a surface the pipeline actually reads. Decide which
+  surface while you are writing the item down, not later: the routes are not
+  interchangeable, SKILL.md's W6 paragraph carries the discriminator for each
+  one and what each one costs, and the "where the decision now lives" field
+  below is where the answer goes.
+
 -->
 
 # Consistency-pass tracker (W6) -- [PROJECT TITLE / AUTHOR / PERIOD -- fill in]
@@ -30,6 +38,12 @@ isolation). Swept in a deterministic pass after each batch, before the next batc
 part of the W7 final audit. Each item below should record: what was found, the decision, and the exact
 normalization to apply across every affected segment (if any) -- or, when the honest answer is "leave it
 as genuinely ambiguous," record that decision explicitly too, rather than silently resolving it.
+
+Record one thing more, in the same entry: **where the decision now lives** -- a structured owner (name the
+surface: `profile.yml`, the segpack, a task template), `canon.json` (and which segments' segpacks were
+regenerated), section G of `style_bible.md`, the marked style contract, or nothing, because it binds nothing
+enforceable. An item that names none of these, having been promoted nowhere, is a decision the reviewer
+cannot see, and the next round will raise it again with a perfectly good justification.
 
 Typical sources for an item: a direct READ of this batch's converged drafts, in `manifest.json`'s
 `segments[]` order, for narrative voice, for how each recurring character is rendered, and for recurring

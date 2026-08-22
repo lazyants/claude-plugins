@@ -143,26 +143,79 @@ def _test_function_count(filename):
         if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
     )
 
-# Rewritten for 1.50.0 (#441), per the maintenance contract above.
+
+def _files_defining(names):
+    """How many SHIPPED scripts assign any of `names` at module level.
+
+    A COUNT OF FILES, not of grep hits: a changelog sentence about "N copies of
+    this constant" is a statement about how many scripts hold their own
+    definition, and a script that mentions the name in a comment or reads a
+    sibling's copy is not one of them. Read by AST for the same reason
+    _tuple_len() is -- a regex over the source counts the docstring paragraphs
+    that discuss the duplication, which is precisely the prose a release entry
+    is most likely to contain."""
+    hits = []
+    for path in sorted(SCRIPTS.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id in names
+                for target in node.targets
+            ):
+                hits.append(path.name)
+                break
+    assert hits, f"no shipped script assigns any of {sorted(names)} any more"
+    return len(hits)
+
+
+def _local_dict_len(filename, funcname, varname):
+    """Number of keys in the dict literal bound to `varname` inside module-level
+    function `funcname`. Asserts the node IS a dict literal rather than counting
+    whatever `len()` accepts -- the same trap _tuple_len() names."""
+    tree = ast.parse((SCRIPTS / filename).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == funcname:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id == varname
+                    for target in sub.targets
+                ):
+                    assert isinstance(sub.value, ast.Dict), (
+                        f"{varname} in {filename}:{funcname} is no longer a dict "
+                        f"literal, so its key count is not the figure cited"
+                    )
+                    return len(sub.value.keys)
+            raise AssertionError(
+                f"{funcname} in {filename} no longer binds {varname} -- the "
+                f"derivation behind a changelog figure has lost its subject"
+            )
+    raise AssertionError(f"{funcname} is no longer defined in {filename}")
+
+
+# Rewritten for 1.47.0 (#498), per the maintenance contract above. 1.46.0's row
+# -- the test-function count of the suite that entry adds -- retires with it, as
+# 1.45.0's and 1.42.0's rows did before it. `_files_defining`, `_local_dict_len`,
+# `_tuple_len` and `_test_function_count` are kept unused, as earlier releases
+# kept them, for the next entry that cites their class.
 #
-# One row, because 1.50.0 states exactly one figure this tree can answer: the
-# size of the plugin bundle tuple, which is what makes the entry's cost claim
-# true -- both edited scripts are members, so the bundle hash moves.
-# The previous entry's rows retire with it; whichever helper this rotation
-# leaves idle is kept, because the next entry usually needs it back.
+# ZERO rows, because 1.47.0 is a documentation release that states no figure
+# this file's tokenizer can see. Its actual NUMERALS are of three kinds, and
+# none of them is a measurement: the version and issue numbers, the heading's
+# release date, and the pipeline stage labels (W3a/W5/W6, R4/R9, D6).
 #
-# The entry's other numerals are not tree state: `2026-08-07` is the audit's
-# date, `1.20.0` / `1.50.0` are versions, and the verdict tally over #441's
-# eleven findings is a reading result recorded on the issue, not something any
-# check here can re-derive. Declaring one of those would mean hardcoding its
-# answer, which passes every assertion below while proving nothing.
-FIGURES = [
-    Figure(
-        "among the 17 `PLUGIN_BUNDLE_MEMBERS`",
-        17,
-        lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
-    ),
-]
+# Every real quantity the entry states is spelled out as a WORD, which this
+# file's `_TOKEN` cannot see, so none can be declared as a row here -- a row
+# whose phrase holds no numeral fails this test's own one-numeral-per-phrase
+# check. That set is: four counts derived from this tree ("the three edited
+# prose files", "exactly one caller", "the two workflow templates", "three
+# project-local schemas"), plus two field measurements from operator-owned
+# durable roots that are not in this repository and could not be re-derived
+# here in any case (the three-round oscillation on the fr->ru book, the four
+# canon-shaped rulings on the he->en volume, both reported as of the day they
+# were observed). Declaring any of them would mean hardcoding an answer, which
+# passes every assertion below while proving nothing (`lambda: 4`). This is the
+# accepted residual the docstring above names, not an oversight.
+FIGURES = []
 
 
 def _newest_entry():

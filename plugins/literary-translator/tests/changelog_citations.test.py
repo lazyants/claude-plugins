@@ -61,50 +61,40 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.50.0 (#441) per the maintenance contract above. The
-# previous rotation's four `cache_key.py:NNN` anchors went with their entry,
-# exactly as that contract says they must: not carried forward, and not
-# re-resolved against this tree. Carrying them would be the
-# renumber-preserves-the-wrongness failure this file exists to prevent, and
-# re-resolving them would pin a shipped entry to line numbers it never
-# claimed.
+# Rewritten for 1.47.0 (#498 -- which channel a settled W6 decision goes to) per
+# the maintenance contract above. The comment this replaces described 1.34.1 and
+# had been describing it for many releases: every entry since shipped an empty
+# declaration and left it standing. None of them could have been failed for that
+# -- a comment describing a different release is the one half of this file
+# nothing mechanical can catch -- so it is replaced here rather than carried
+# forward.
 #
-# AN EMPTY MAP IS THE DANGEROUS CASE, and this release is the second recorded
-# instance rather than a hypothetical. Both assertions still bite against an
-# empty map -- a citation with no anchors fails, and an anchor no citation
-# uses fails -- but NEITHER FIRES ON A STALE COMMENT. When the previous
-# declaration was also empty, a correct rotation and a skipped one are
-# byte-identical, nothing goes red, and only a reader comparing this prose
-# against the entry catches it. That is why the rewrite is a maintenance
-# contract and not an assertion.
+# 1.47.0 cites NO `file.ext:NNN`, so this map is empty -- its documented
+# per-release state, not a lapse. The entry names `canon_validate.py`,
+# `compute_used_terms_hash()`, `compute_prompt_hash()`, `compute_schema_hash()`,
+# `resume_setup.py`, `PLUGIN_BUNDLE_MEMBERS` and D6's fresh-segpack precondition,
+# but every claim about them is BEHAVIOURAL -- what a validate-only run checks,
+# which canon a hash reads, which file a hash covers -- and a behavioural claim
+# is pinned by a test that exercises it, not by a line number. The one exception
+# is the entry's "exactly one caller" for D6's fresh-segpack precondition: that
+# is a CENSUS, no test asserts it, and it is guarded by review alone -- named
+# here so the gap is recorded rather than implied away. A line citation would
+# still be the wrong instrument for it, since it would pin WHERE the caller
+# lives rather than that there is only one. The entry states no figure this file's
+# sibling `changelog_figures.test.py` can see either -- its counts are spelled
+# out as words, which that file's tokenizer reads nothing of -- so its row list
+# is empty for this release as well, with the residual named in its own comment.
 #
-# Two ways it has actually gone wrong, both worth knowing before the next
-# rotation:
-#   - 1.40.0 (#529) landed with this comment still describing 1.35.0. Caught
-#     by review, not by the suite.
-#   - This file arrived at 1.50.0 with the map holding a PREVIOUS entry's
-#     anchors under a comment announcing a rotation -- the half you edit and
-#     the half you inherit can contradict each other inside one file, and the
-#     comment is the half that looks authoritative to anyone skimming the
-#     diff. Rebasing is how they diverge: this file need not conflict for its
-#     declaration to go stale, so `git status` stays clean and only a full
-#     suite run reports it. Rotate BOTH halves, and read the declaration
-#     rather than the prose when judging what a tree actually declares.
-#
-# Why 1.50.0's own map is empty, specifically: the entry names a great deal of
-# source -- `derive_next_action()`, `_translate_in_progress_since()`,
-# `mark_ever_converged()`, `classify_ever_converged_sentinel()`,
-# `check_segments_dir_identity()` -- but names all of it by SYMBOL, and every
-# claim it makes about them is behavioural (which branch spends a round, what
-# a fragment proves, which directory a sync lands on). A behavioural claim is
-# pinned by a test that exercises it, not by a line number, and each of those
-# is. The one figure the entry states about those files is a count
-# (`17 PLUGIN_BUNDLE_MEMBERS`), pinned by re-derivation in the sibling
-# `changelog_figures.test.py`. A line citation would pin WHERE a thing lives,
-# which none of those sentences asserts -- and over this release's four review
-# rounds and four rebases every function in the diff was renumbered
-# repeatedly, so a line number authored early would have been false by the end
-# with nothing going red.
+# An empty map is exactly the case where a correct rotation and a SKIPPED one
+# look identical, and 1.40.0 is the instance that proved it: the previous
+# release's declaration was ALSO empty, so nothing here went red when that entry
+# landed, and only a reviewer reading the comment caught that it still described
+# 1.35.0. It has happened on every release since, unnoticed each time. The
+# precedent runs further back for their own reasons (1.34.1 (#547) and 1.33.1
+# were empty too). Both halves still bite against an empty map
+# -- a citation with no anchors fails and an anchor no citation uses fails -- but
+# neither half fires on a stale COMMENT, which is why the rewrite is a
+# maintenance contract rather than an assertion.
 CITATION_ANCHORS = {
     # 1.50.0 (#441) cites no `file:NNN` at all, so this map is empty and that
     # is a deliberate rotation, not an oversight -- the previous entry's four

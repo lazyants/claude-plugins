@@ -1173,6 +1173,41 @@ decision, not a supported correction path: the invalidation is precise, but
 every segment it reaches is re-translated. That cost is why an accuracy
 decision is reviewed BEFORE it is merged, never after.
 
+**Two obligations come with that hand edit, and skipping either can let wrong
+text ship under a correct-looking hash.**
+
+*Validate the file you just edited.* `canon_validate.py` run with
+`--research-mode offline` and NO batch flag is its VALIDATE-ONLY mode: no
+merge, no write, Pass 1 over every `entries{}` value against
+`canon-entry.schema.json` and Pass 2 over the whole document. No ordinary W5 or
+assembly step re-checks a hand edit — `segpack.py`'s canon injection copies any
+entry object carrying a non-empty `canonical_target_form` into `canon_map`
+without looking at the schema's required
+`source_form`/`is_proper_name`/`basis`/`confidence` — so an unvalidated
+malformed row reaches the reviewer's authoritative map and then assembly. The
+opt-in Deliver-time `canon_adjudication_audit.py` does re-read the current
+canon and refuses some malformed rows, but it is optional and its check is
+narrower than this one; it is not a substitute. (`--verify-merged`
+is a different mode and cannot stand in for this one: it requires `--batch`
+fragments.)
+
+*Regenerate the segpacks before the next `select_segments.py` run.* A
+segment's `canon_map` was FROZEN when its segpack was built at W3a, while
+`cache_key.py`'s `compute_used_terms_hash()` reads the LIVE `canon.json`. So
+the edit by itself flips every affected segment to `stale` without changing
+what any prompt will see: ordinary W5 then re-translates those segments
+against the OLD frozen target form and records the NEW cache key — a durable
+false green that reaches the assembled book. Re-run `scripts/segpack.py` from
+the durable copy for every affected segment (or `--all`, which walks every
+`manifest.json` `segments[]` entry; the builder is deterministic) before
+selection runs again. Only the CLAIM profiles guard this today:
+`evaluate_fresh_segpack_precondition()` is called from
+`evaluate_claim_admission()`'s D6 and from nowhere else, so an ordinary
+re-selection of a `stale` segment is unguarded. Note that regeneration is not
+itself what invalidates anything — `compute_input_sha1()` hashes only the
+segpack's blocks — it is what makes the corrected form visible to the
+translator and the reviewer.
+
 ## Skeptic pass (RFC #215 Phase 2, opt-in + advisory)
 
 The skeptic pass is an **opt-in, advisory-only** addition (`glossary.skeptic_pass.enabled`, default `false`): a deterministic `suspicion_scan.py` surfaces structurally-risky canon entries (over-merge participants, offline-established entries, singletons, high-dispersion names, citation-only figures, near-spelling pairs, and a globally-capped sample), then a scoped codex pass -- cloning the glossary dispatch control flow, never its identity-decision authority -- is fed bounded, whole-block windows for each flagged entity and adversarially asked to find a contradicting sentence or a genuine homonym split. Its verdict schema (`skeptic-triage.schema.json`) can express only `adverse` / `propose_split` / `propose_rescope` / `insufficient_window` -- there is deliberately no confirmation value, and no freeze/merge reader ever opens the resulting `skeptic_triage.json`. Every actual confirmation still flows through the unchanged human/codex `canon_adjudications.json` / `canon_senses.json` paths. `skeptic_report.py` is a separate, read-only advisory command that renders `skeptic_triage.json` for a human reviewer (per-entity risk context, the verdict, a quote derived fresh from the stored offsets, and evidence coverage) -- it is not a gate, it never blocks, and it runs strictly after `canon_adjudication_audit.py`, which is unchanged byte-for-byte by the skeptic pass's presence (see `tests/audit_unchanged_regression.test.py`).
