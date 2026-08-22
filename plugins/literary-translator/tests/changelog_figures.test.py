@@ -206,7 +206,7 @@ def _local_dict_len(filename, funcname, varname):
 # Every real quantity the entry states is spelled out as a WORD, which this
 # file's `_TOKEN` cannot see, so none can be declared as a row here -- a row
 # whose phrase holds no numeral fails this test's own one-numeral-per-phrase
-# check. That set is: four counts derived from this tree ("the three edited
+# check. That set is: four counts derived from this tree ("the four edited
 # prose files", "exactly one caller", "the two workflow templates", "three
 # project-local schemas"), plus two field measurements from operator-owned
 # durable roots that are not in this repository and could not be re-derived
