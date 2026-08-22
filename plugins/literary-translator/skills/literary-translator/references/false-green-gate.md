@@ -306,6 +306,38 @@ python3 {{PLUGIN_ROOT}}/assets/scripts/validate_extraction.py \
   --profile  <profile.yml path>
 ```
 
+## What this gate does NOT check: reproduced source text
+
+The six checks compare KEY SETS, placeholder multisets and per-mode required
+fields. **No text of any source span a draft reproduces is ever compared to
+the segpack's `plain_text`.** A quoted Hebrew phrase inside an English draft
+can lose a letter and every check above stays green — measured on a real book
+at 206 letter-level differences across 4040 reproduced runs (#502).
+
+`scripts/verbatim_census.py` (1.37.0) covers that population, and it sits
+deliberately OUTSIDE the six checks rather than becoming a seventh:
+
+- **It is not a gate.** Exit `0` whenever the census ran, however long the
+  queue; exit `2` only for usage, environment or a malformed artifact. Nothing
+  in the plugin dispatches it — not the W5 template's
+  `draft_ready.py && validate_draft.py` accept condition, not
+  `segment_dispatch_driver.py`'s sibling allowlist, not `final_audit.py`.
+  It is an operator diagnostic, run by hand.
+- **It never corrects.** The output is a reading queue, not a patch, and the
+  script writes no file at all. The reason is measured, not cautious: on the
+  population that was read word by word there were more cases where the DRAFT
+  was right and the SOURCE was corrupt than cases where the draft was wrong,
+  and no deterministic comparison separates those two.
+- **It never suppresses.** Every non-verbatim run is listed; the class is a
+  rank (tier 1 `letter_diff`/`no_source_run` → tier 4 `verbatim_other_unit`),
+  and the tier is a likelihood heuristic rather than a consequence ordering.
+- **Hebrew only**, and it refuses — exit 2, naming what it refused — rather
+  than reporting an empty census, both for a unit whose block carries no
+  `plain_text` and for a project whose source contains no Hebrew.
+
+Because it joins no hashed bundle, adding it moved neither `plugin_bundle_hash`
+nor `orchestration_bundle_hash`: no converged segment went stale.
+
 ## See also
 
 - [`verse-policy.md`](./verse-policy.md) — the full six-mode
