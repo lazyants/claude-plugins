@@ -68,13 +68,21 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # renumber-preserves-the-wrongness failure this file exists to prevent, and
 # re-resolving it would pin a shipped entry to line numbers it never claimed.
 #
-# 1.34.2 (#580) cites NO `file.ext:NNN`, so this map is empty -- its documented
-# per-release state, not a lapse. The entry names `cache_key.py` and both
-# changelog test modules, but its NUMERIC claims about them are counts -- a
-# tuple's length, a module count, a heading count -- and a count is pinned by
-# re-deriving it, which the sibling `changelog_figures.test.py` does for the
-# three it declares. A line citation would pin WHERE a thing lives, which none
-# of those sentences asserts.
+# 1.35.0 (#546) cites NO `file.ext:NNN`, so this map is empty -- its documented
+# per-release state, not a lapse. The entry names `validate_draft.py`,
+# `assemble.py`, `cache_key.py` and `call_template_functions()`, but every claim
+# about them is BEHAVIOURAL -- what a mode rejects, what an adapter's return is
+# not checked for, which prompt the rule is pushed into -- and a behavioural
+# claim is pinned by a test that exercises it, not by a line number. Only ONE of
+# those three is so pinned: `segment_dispatch_driver.test.py`'s three new
+# regressions cover the prompt-scoping claim and nothing else -- they never
+# touch `validate_draft.py`'s mode rejection or `assemble.py`'s unchecked
+# adapter return, which are guarded by review alone, exactly as the paragraph
+# below says. The one figure the entry states about those files is a count
+# (`17 PLUGIN_BUNDLE_MEMBERS`), pinned by re-derivation in the sibling
+# `changelog_figures.test.py`; the entry's corpus measurements are that file's
+# own declared residual. A line citation would pin WHERE a thing lives, which
+# none of those sentences asserts.
 #
 # Said precisely, because the distinction is the whole point of these two files:
 # the entry's REMAINING claims -- what the new test's contract is, which files

@@ -199,6 +199,24 @@ steps below:
    `python3 {{DURABLE_ROOT}}/scripts/draft_sha1.py <seg>` — never raw
    `sha1sum`. See `references/workflow-schema-validation.md` for the full
    shipped schema.
+   - **Delivery vs storage** (1.35.0, #546): the reviewer is handed the draft's
+     fields and never the page the assembler builds from them, so *"the reader is
+     left without a meaning"* is a claim it cannot check — and one that survives
+     round after round, because each round's fix moves the meaning somewhere the
+     next round also cannot see. `reviewDispatchPrompt` therefore states where a
+     verse's `literal_gloss` lands in the shipped Obsidian output — it becomes the
+     verse body itself when it is the only rendering (the renderer keys on
+     emptiness, not on mode: `body = rendered or gloss`), and sits
+     beneath the verse block (`_render_verse_block`) or inline beside an embedded
+     verse (`_render_verse_inline`) when it accompanies `rendered` — and forbids asserting
+     non-delivery **from the draft alone** for a verse whose own `literal_gloss`
+     supplies the meaning. A verse whose gloss does NOT supply it is reported
+     normally — that finding stays raiseable. Scoped to the reviewer: the same text
+     in `translatePrompt`/`fixPrompt` would read as licence to skimp on `rendered`,
+     which is this defect's mirror image. Under an `output.target: custom` adapter
+     that drops the gloss, this reviewer no longer raises the loss; it could never
+     verify that surface from the draft, and that failure belongs to the
+     render/diff gate and the operator.
    - **Timeout and shared-retry handling** (1.2.0): `reviewWaitPrompt`
      exhausting its bound exits as `blocked review-timeout` — a genuine
      failure to even get a dispatched review to complete. **1.16.1 (#348):**

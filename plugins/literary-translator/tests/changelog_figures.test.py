@@ -107,20 +107,6 @@ _TOKEN = re.compile(r"\d+(?: \d{3})*(?:\.\d+)?")
 Figure = namedtuple("Figure", "phrase value derive")
 
 
-def _release_entry_count():
-    """Release entries in this changelog -- the count its own headings make."""
-    return len(_VERSION_HEADING.findall(CHANGELOG.read_text(encoding="utf-8")))
-
-
-def _test_module_count():
-    """Test modules under `tests/`, by this project's own `*.test.py` pattern --
-    not a hand-kept list. RECURSIVE, because `python_files` in `pytest.ini` is a
-    BASENAME pattern: pytest would collect `tests/unit/x.test.py` while a
-    top-level glob silently would not, and a derivation that quietly disagrees
-    with the authority it cites is the failure this file warns about."""
-    return len(list((PLUGIN_ROOT / "tests").rglob("*.test.py")))
-
-
 def _tuple_len(filename, name):
     """Length of a module-level tuple in a SHIPPED script, read by AST rather
     than imported. Importing would execute the module and bind this test to
@@ -145,24 +131,24 @@ def _tuple_len(filename, name):
     )
 
 
-# Rewritten for 1.34.3 (#582), per the maintenance contract above: the previous
-# entry's rows go with the previous entry. 1.34.2's three rows ("62 release
-# entries", "162 test modules", "17 `PLUGIN_BUNDLE_MEMBERS`") were retired here.
+# Rewritten for 1.35.0 (#546), per the maintenance contract above.
 #
-# EMPTY ON PURPOSE, DISCLOSED RATHER THAN SILENT -- which is the one thing the
-# contract above asks of a release that empties it. The 1.34.3 entry is prose
-# only: it corrects the `{{PLUGIN_ROOT}}` definition and records the #582
-# decision, and states no quantity derived from the tree. There is nothing here
-# to re-derive, and inventing a figure so this list stays non-empty would be
-# writing prose for a test to read rather than for a reader.
-#
-# Worth knowing for the next release, since 1.34.2 shipped one day before this
-# one and could not have seen it: these rows track the NEWEST entry, so the act
-# of adding any newer entry turns every row red at once. That is this list being
-# rewritten on schedule, not a regression in the tree -- but it does mean the
-# check goes red in the middle of an unrelated release, and the fix is always to
-# rewrite the rows for the new entry, never to edit the old entry's prose.
-FIGURES = []
+# One row, because 1.35.0 states exactly one tree-derivable figure: the bundle
+# membership that prices its own migration. The entry's other numbers are
+# CORPUS measurements -- 107 archived reviews, 313 findings, 44 verse-scoped,
+# zero of this shape -- taken from two operator-owned durable roots that are not
+# in this repository and are not reachable from any check here. They are the
+# accepted residual this file's docstring names, not an oversight: declaring
+# them would mean hardcoding an answer, which passes every assertion below while
+# proving nothing (`lambda: 44`). They were verified twice by reading all 44
+# findings, and that is the only verification available for them.
+FIGURES = [
+    Figure(
+        "17 `PLUGIN_BUNDLE_MEMBERS`",
+        17,
+        lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
+    ),
+]
 
 
 def _newest_entry():

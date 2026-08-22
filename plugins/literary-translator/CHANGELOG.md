@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.35.0 — 2026-08-22
+
+**The reviewer judges the draft's fields and never the page built from them, so "the reader gets nothing" was a claim it could not check — and could not be argued out of.** `reviewDispatchPrompt` hands the codex reviewer a segment's `segpack` and `draft.json` and describes the field contract; nothing in it said what the assembler does with those fields. A verse's `rendered` and `literal_gloss` therefore arrive as two independent values, and a reviewer reading `rendered` alone can report the verse as leaving its reader without a meaning that the built book prints one line below it. Measured on `historiettes-fr-ru/tome1` V073: six review rounds and seven renderings in 21 hours, alternating between *"the untranslated foreign word leaves the reader nothing"* and *"the strophic form is broken"* — two objections that cannot both be satisfied in one line, produced by looking at two halves of one container. Closes #546.
+
+One sentence in `reviewDispatchPrompt` now states where a verse's literal gloss lands in the shipped Obsidian output — it is the verse body itself when it is the only rendering (`literal_only`, where `validate_draft.py` rejects a non-empty `rendered`), and sits beneath the verse block or inline beside an embedded verse when it accompanies one — and forbids asserting non-delivery **from the draft alone** for a verse whose own `literal_gloss` supplies the meaning.
+
+### What it deliberately does not say, because the first two drafts of it were false
+
+- **It does not claim the two fields are always delivered together.** `validate_draft.py` rejects a non-empty `rendered` under `literal_only`, requires only `rendered` under `full_rhymed_only` and `rhythmic_approximation`, and exempts content entirely under `skip`; `assemble.py` calls an `output.target: custom` adapter and accepts what it returns without checking that either field was emitted. The positive half is therefore scoped to this plugin's own shipped Obsidian renderer, which is the only claim that survives every mode and target.
+- **It does not require the reviewer to "name the surface it checked".** An earlier wording did, and that clause was unexecutable: the reviewer is given `review_TASK.md`, `style_bible.md`, the segpack and the draft, and never the profile, the adapter or the assembled artifact. A rule demanding evidence the reviewer cannot obtain does not raise the bar on a false finding — it suppresses a true one.
+- **A genuine "the reader gets nothing" finding stays raiseable.** The rule's antecedent is *this verse's `literal_gloss` supplies the meaning*. A verse whose gloss does not supply it — an untranslated word glossed with itself — is reported normally, and the sentence says so in its own last clause.
+- **Named limitation:** under a `custom` adapter that drops the gloss, this reviewer no longer raises the loss. It could never verify that surface from the draft; the render/diff gate and the operator own that failure.
+
+### Scoped to the reviewer, and guarded as such
+
+The same text in `translatePrompt` or `fixPrompt` would read as licence to skimp on `rendered` because the gloss carries the meaning — this defect's mirror image — so it is pushed in `reviewDispatchPrompt` only. That is not left to care: three tests drive the **real** builders through `segment_dispatch_driver.call_template_functions()` (the same node harness the driver itself uses) and assert the rule reaches the reviewer's actual task text and neither of the other two; that no `verse_policy.mode`'s instruction text carries it, since that text is spliced into all three prompts; and that `references/verse-policy.md` — an independent production authority for the manual workflow path — does not carry it either. The assertions pin two load-bearing fragments rather than a heading: a marker like "Delivery vs storage:" would prove a label exists while the prohibition it introduces had been deleted.
+
+### What it costs
+
+`mass-translate-wf.template.js` is one of the 17 `PLUGIN_BUNDLE_MEMBERS`, so this edit moves `plugin_bundle_hash` and every converged segment routes to `stale` — **re-translate only**, no W2/W3 regeneration. Nothing happens on upgrade alone: `cache_key.py` reads the value from `${durable_root}/runs/.plugin_bundle_hash`, a marker Step 0a writes when it copies scripts in, so an existing root pays at its next re-scaffold and not before. **There is no free way to tell the reviewer this.** Hand-editing a project's own `review_TASK.md` instead is not cheaper — `compute_prompt_hash()` hashes that file directly and `prompt_hash` is a cache-key field too, so the local edit re-stales the same segments and does so immediately rather than at the next Step 0a.
+
+Frequency is stated as measured rather than as a rate: across the 107 archived per-round reviews of the French book — 313 findings, 44 of them verse-scoped — **zero** are this shape; every one is a genuine craft or accuracy finding about `rendered`, several explicitly noting the gloss is correct. The confirmed incident falls two days outside that window. One measured occurrence with a six-round tail is what the corpus supports; "rare" is not, and is not claimed.
+
 ## 1.34.3 — 2026-08-22
 
 
@@ -21,6 +44,7 @@ Rewriting the commands was evaluated first. Relocating an individual entry point
 - **A per-command rewrite does not converge.** The invocations are not a closed set — this file, `references/`, the three `*_TASK.template.md` prompts and the three workflow templates' own command builders — and any future dispatch adds one. Three successive review passes over the same change each found more of them.
 
 So the guarantee is stated narrowly rather than broadly: `--plugin-root` bypasses a tampered *sibling checker* by executing the trusted plugin copy — it does not detect or report the tampering, and it does not make a tampered *entry point* impossible; and `plugin_bundle_hash` does not catch one either, since `cache_key.py` reads the Step-0a marker and never re-hashes the copies. The `--plugin-root` paragraphs that implied otherwise now say what the flag does not buy. Closing the class properly means constraining the fix turn's write surface, which is tracked separately.
+
 
 ## 1.34.2 — 2026-08-22
 
