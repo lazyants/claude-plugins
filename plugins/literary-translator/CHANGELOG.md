@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.39.0 — 2026-08-22
+
+**The reviewer was told to check a draft whose `notes[]` it had no legal way to point at, so a true finding about a note forfeited the entire review — valid block findings included.** `findingsAuthentic()` accepts a `loc` on one property only: it contains a colon. Every site that tells a reviewer WHICH colon-bearing forms exist named a block id, `FN:n` and `VERSE:vid` — and the draft's own top-level `notes[]` had no spelling among them. A reviewer with something true to say about a note therefore invented one (`notes[14]`, `NOTES`), the invention was colonless, and `.every()` discarded that review whole. Re-review reproduced it, because the cause was a missing spelling and not a slip. Closes #539, and folds in #543 and #515, which blame the same branch.
+
+Measured over every `runs/*/driver_journal.jsonl` in both live books — the only surviving record, since a blocked review is never promoted and writes no terminal ledger status, so the reviews left on disk are all clean by construction: **eleven `review-fabricated-loc` blockings across eight distinct segments**, in 1363 codex dispatches over 123 units. The 5/3 split below counts SEGMENTS, not blockings: five of the eight are confirmed caused by a `notes[]` finding — three verified against the arrays themselves, two quoted as `loc: "notes"` — and three segments are attributable to nothing, because their rejected artifacts were overwritten. Three individual units reproduced the blocking on a later run, which is why eight segments account for eleven events.
+
+`reviewDispatchPrompt` now states the loc contract outright: every loc is colon-delimited and a bare or holistic token is refused; the forms are a block id, `FN:n`, `VERSE:vid`, and **`NOTE:n` for one entry of the draft's own `notes[]` array**. The same enumeration is mirrored in the inline `REVIEW_SCHEMA` description, `review_TASK.template.md` and `review.schema.json`.
+
+### The fixer has to be able to substantiate it, too
+
+A vocabulary is two contracts, not one. 1.37.0 (#532) made the fix turn apply a finding it can substantiate and REFUSE one it cannot, and its evidence rules are enumerated per loc kind — a body block, `FN:n`, `VERSE:vid`, a footnote-markup claim, a canon claim, a rule-conformance claim. Adding `NOTE:n` to the REVIEWER's side alone would have changed the defect's shape rather than closing it: the review would survive the gate, reach the fixer, and be refused there for want of an evidence rule.
+
+So `fixPrompt` gains one: a `NOTE:n` finding is settled against whatever the note itself is about — the draft's own blocks when it describes the rendered prose, the segpack's `source_text` when it describes the source, `style_bible.md` when it defers to a pass — and, substantiated, the fix is to correct or remove **that note**, never to edit the prose to match a stale note. The adjacent trap is spelled out in the same breath: the existing prohibition on writing a refusal MARKER into `notes[]` is not a ban on editing a note an applied finding is about.
+
+`tests/finding_loc_vocabulary.test.py` pins the pair — every form the reviewer may emit must have an evidence rule in the fixer's substantiation clause — so the next form added to one side cannot silently miss the other. Found by the MR bot after #532 merged underneath this branch, which is exactly the drift the test now catches.
+
+### `NOTE:n` is an index and `FN:n` is a number, and the prose says so
+
+The two spellings look alike and are not the same basis: `NOTE:n` is a **0-based index** into `notes[]` (the first note is `NOTE:0`), while `FN:n` is the footnote's own number. Nothing downstream resolves either, so a reviewer reading `NOTE:n` as one-based aims the fix turn at the wrong note and no check catches it. That contrast is written into the runtime prompt and the TASK template, and `tests/finding_loc_vocabulary.test.py` asserts it against the ACTUAL rendered prompt — not a re-implementation of it — so the sentence cannot be dropped while the enumeration assertions stay green.
+
+### Zero branches changed
+
+`AUTHENTIC_LOC_RE` already admits `NOTE:14`; `review.schema.json` puts no `pattern` on `loc`; nothing machine-resolves a loc (`review_artifact_check.py` compares it for equality, `select_segments.py` type-checks it as a string, `fixPrompt` hands it to an LLM). The all-or-nothing verdict is untouched and stays fail-closed: it is the deliberate trade for a reviewer that died mid-judgment, and with a conforming spelling available a colonless loc is once again the slip `fabricated_loc_retries` already bounds. The gate's own comment and the driver's ported copy are corrected on one point they both overstated — the check tests the SHAPE of a loc, never whether it resolves against the draft, and never whether the finding is true.
+
+### What it deliberately does not do
+
+- **No `NAME:n`.** The draft's `names[]` has the identical structural gap. It has zero CONFIRMED incidence: no blocking is attributable to a names finding — though three of the eight segments are attributable to nothing at all, so this is an absence of evidence over five confirmed notes segments, not a proof. Complexity scales with frequency times impact, so the spelling is not shipped until a names blocking is actually measured — and `tests/finding_loc_vocabulary.test.py` is where that decision is recorded, so adding it later is a deliberate flip rather than a silent extension.
+- **No per-finding partition of the verdict**, no rename of the `review-fabricated-loc` reason string (it has live consumers in tests and two reference docs; a rename is one atomic change across all of them), and no `pattern` on `loc`.
+
+### What it costs, and which roots it reaches
+
+`mass-translate-wf.template.js` and `segment_dispatch_driver.py` are both among the 17 `PLUGIN_BUNDLE_MEMBERS`, and `review.schema.json` is one of the three inputs to `compute_schema_hash()`, so this release moves `plugin_bundle_hash` and `schema_hash`. Not on upgrade alone: `cache_key.py` reads the marker Step 0a writes, so an existing root pays at its next re-scaffold.
+
+**No CONVERGED segment re-translates, and an intact converged record still delivers.** Both moved fields are in `MACHINERY_ONLY_CACHE_KEY_FIELDS`, so #491's carve-out applies: a converged segment whose only drift is these is accepted by `assemble.py`'s `load_converged_segments()` like an unmoved one, and `select_segments.py` REFUSES a `--from-converged` claim over it in as many words — *"assembly no longer requires action for this segment, so there is no re-review to authorize"*. What an operator sees is the reporting change: such entries carry `stale_mismatched_fields`. The qualifier is load-bearing in both halves. A segment that never converged is unaffected by any of this — it is `recoverable`, eligible by default, and re-enters `translateStage` on the next run. And assembly still refuses a record that fails for its OWN reasons: a missing `stale_mismatched_fields`, an absent convergence sentinel, or draft-SHA drift.
+
+**The real cost is resume, and it is the one worth planning around.** `plugin_bundle_hash` and a hash of `schemas/` are both folded into `resume_setup.py`'s `input_digest`. A digest that matches no offered candidate — each is tried, so a single mismatch is not by itself decisive — never resumes: it mints a brand-new `RUN_ID` with `resume: false` and reuses nothing. So the first run in a refreshed root re-dispatches whatever was in flight when the root was refreshed. Refresh between runs, not during one.
+
+`prompt_hash` does NOT move. It hashes `${durable_root}/review_TASK.md`, and Step 0a copies `review_TASK.template.md` as a one-time seed that is never re-copied — so the TASK-template edit here reaches NEW projects only. That is not a gap: the runtime prompt declares itself self-contained and superseding `review_TASK.md` for the field contract, and it is the site that binds. An operator of an existing book who wants the TASK text updated too may hand-edit their own `${durable_root}/review_TASK.md` — `reviewDispatchPrompt` re-reads it fresh per segment — at the cost of moving `prompt_hash` immediately rather than at the next Step 0a.
+
+### The three segments this does not explain
+
+Of the eight, three have no recoverable `loc`: their rejected review artifacts were overwritten and the journal records only the reason string. This release closes the five that are attributable and claims nothing about the rest. The new drift test makes a further spelling a one-line change at four sites if another cause surfaces.
+
 ## 1.38.0 — 2026-08-22
 
 **A dispatch the Step 1 gate REFUSED had already written a claim record and re-stamped 66 drafts — so the refusal did not waste an invocation, it arranged for the NEXT round to come back clean and then fail to record the result.** `select_segments.py`'s `#438` claim block wrote `runs/<RUN_ID>/.claimed.<seg>` and rewrote each admitted draft's own `dispatch_token` to `<RUN_ID>:<seg>` BEFORE three refusals that can still fire: `previously_converged`, `unsafe_run_ids`, `runs_missing_digest`. `ledger_update.py` requires a draft's `dispatch_token` to equal `expected_draft_token(run_token, seg)` on the convergence write and `ledger_merge.py` re-asserts it at batch end, so a draft stamped by a run that never dispatched translates, reviews, comes back clean — and then refuses to converge, as a structured failure after the work is paid for. Measured on a live book: one refused invocation, 66 stamped drafts. Closes #538 (and #544, folded into it).

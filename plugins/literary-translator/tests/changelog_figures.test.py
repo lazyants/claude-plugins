@@ -144,23 +144,21 @@ def _test_function_count(filename):
     )
 
 
-# Rewritten for 1.38.0 (#538), per the maintenance contract above.
+# Rewritten for 1.39.0 (#539), per the maintenance contract above.
 #
-# One row again, and it happens to be the SAME derivation 1.35.0 declared --
-# not a row left un-rewritten. 1.38.0 prices its own migration on the opposite
-# side of that membership: `select_segments.py` is an orchestration member and
-# NOT one of the 17, which is what makes "no converged segment re-stales" true
-# -- a narrower claim than the one this entry's own second draft made. The row
-# is kept deliberately rather than emptied: an empty FIGURES list passes every
-# assertion below while checking nothing, so a release with no tree-derivable
-# figure must state one rather than declare none.
+# One row, because 1.39.0 states exactly one figure this tree can answer: how
+# many members plugin_bundle_hash's allowlist tuple holds, which the entry cites
+# when pricing what the release costs. Everything else the entry counts is a
+# CORPUS measurement taken outside this repository -- eleven
+# review-fabricated-loc blockings over eight segments in 1363 codex dispatches,
+# read out of two live books' driver journals. Nothing here can re-derive those,
+# so declaring one would mean hardcoding its answer (`lambda: 11`), which passes
+# every assertion below while proving nothing.
 #
-# The entry's other number -- 66 stamped drafts -- is a CORPUS measurement from
-# an operator-owned durable root that is not in this repository and is not
-# reachable from any check here. It is the accepted residual this file's
-# docstring names, not an oversight: declaring it would mean hardcoding an
-# answer, which passes every assertion below while proving nothing
-# (`lambda: 66`).
+# The row below was watched failing by removing a member from the TUPLE, not by
+# editing the row. `_test_function_count` is kept although 1.39.0 cites no suite
+# size: it is the general deriver for that class of figure, and 1.36.0's own row
+# used it two releases ago.
 FIGURES = [
     Figure(
         "17 `PLUGIN_BUNDLE_MEMBERS`",

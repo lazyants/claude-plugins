@@ -21,7 +21,7 @@
         "properties": {
           "loc": {
             "type": "string",
-            "description": "Location the finding applies to (e.g. a block/footnote id, or \"VERSE:{vid}\" for verse-specific issues)."
+            "description": "Location the finding applies to. Always colon-delimited, never a bare or holistic token: a block id, \"FN:{n}\" for a footnote, \"VERSE:{vid}\" for a verse, or \"NOTE:{n}\" for one entry of the draft's own notes[] array. \"NOTE:{n}\" is a 0-based index into notes[]; \"FN:{n}\" is the footnote's own number."
           },
           "severity": {
             "type": "string"

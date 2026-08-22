@@ -149,13 +149,19 @@ file + rename, never a partial file visible mid-write):
   "clean": true|false,
   "coverage_ok": true|false,
   "findings": [
-    {"loc": "<block_id | FN:n | VERSE:vid>", "severity": "high|medium|low",
+    {"loc": "<block_id | FN:n | VERSE:vid | NOTE:n>", "severity": "high|medium|low",
      "issue": "<what is wrong>", "suggest": "<how to fix it -- brief, concrete>"}
   ],
   "draft_sha1": "<the sha1 you computed BEFORE reading the draft, above>",
   "dispatch_token": "<the exact token your dispatch prompt gave you for this call -- copy it verbatim>"
 }
 ```
+
+Every `loc` must be colon-delimited. A bare, holistic token (`overall`,
+`NOTES`, `TASK`) is refused outright and discards the entire review, valid
+findings included. `NOTE:n` addresses one entry of the draft's own `notes[]`
+array and is a **0-based index** into it (the first note is `NOTE:0`), whereas
+`FN:n` is the footnote's own **number**, not an index.
 
 `clean: true` only if `findings` is empty (or every entry is cosmetic and
 you have judged none of them require a fix round). `coverage_ok: true`

@@ -3657,7 +3657,7 @@ def test_derive_next_action_re_reviews_instead_of_needs_fix_on_a_fabricated_loc(
     findings[].loc as a bare string with no pattern -- a reviewer that died
     mid-judgment can emit a structurally-valid, PROMOTED review whose
     finding content is semantically empty (team lead's own example: loc:
-    "TASK" instead of a real block_id/FN:n/VERSE:vid reference). Without
+    "TASK" instead of a real block_id/FN:n/VERSE:vid/NOTE:n reference). Without
     the ported findingsAuthentic()/matchedVerdict() gate, this would have
     gone straight to needs_fix and handed an empty finding to
     render_fix_prompt() -- a real content edit dispatched over nothing.
