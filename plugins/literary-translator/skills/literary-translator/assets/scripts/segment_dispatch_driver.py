@@ -4107,8 +4107,8 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
             # process_segment() can bind the cap WRITE to the review this
             # decision was made from, not merely to a review that happens to
             # be on disk when the write runs -- see
-            # _terminal_write_still_binds_what_was_reviewed(). The digest is taken from
-            # review_obj, the object THIS function parsed and judged, which
+            # _terminal_write_still_binds_what_was_reviewed(). The digest is
+            # taken from review_obj, the object THIS function parsed, which
             # is the whole point: a digest re-read from disk at write time
             # would describe the replacement, not the reviewed verdict.
             return {
@@ -4409,7 +4409,8 @@ def _review_verdict_digest(review_obj: dict) -> str:
 
 # #461: the rejection record's EXACT key set, pinned by the contract both
 # sides of this artifact are written against -- producer reject_review.py
-# (the sole writer), consumer _rejection_matches() below (the sole reader).
+# (the sole writer), consumer _rejection_record() below (the sole reader;
+# _rejection_matches() is its predicate wrapper, not a second reader).
 # Named rather than inlined because "exactly these, no more and no fewer"
 # IS the rule, in both directions: a MISSING key means a hand-written stub
 # is trying to authorize with an audit trail it never wrote, and an EXTRA
@@ -4666,14 +4667,14 @@ def _rejection_record(seg: str, segments_dir: Path, review_obj: dict) -> "dict |
 
 def _rejection_matches(seg: str, segments_dir: Path, review_obj: dict) -> bool:
     """True iff _rejection_record() above finds a still-unspent authorization
-    for `review_obj`'s verdict. The two call sites that only need the yes/no
-    answer -- derive_next_action()'s numbered-round branch, and the "final"
-    branch's own fall-through to a fresh re-review -- read better with the
-    predicate, and every rule, refusal direction and residual lives in ONE
-    place rather than being restated here. #527 gave the record a second
-    consumer that needs the record's OWN fields (the operator's `reason` and
-    `rejected_at` are written into the convergence ledger note), which is the
-    only reason the reader was split in two at all."""
+    for `review_obj`'s verdict. ONE production caller -- derive_next_action()'s
+    numbered-round branch, which needs only the yes/no -- plus this file's test
+    suite, whose assertions read as `is True`/`is False` around it. The `final`
+    branch does NOT come through here: since #527 it binds the record itself,
+    because the operator's `reason` and `rejected_at` are written into the
+    convergence ledger note, and that is the only reason the reader was split
+    in two at all. Kept as a wrapper rather than inlined at its one caller so
+    every rule, refusal direction and residual lives in ONE place above."""
     return _rejection_record(seg, segments_dir, review_obj) is not None
 
 
@@ -5348,8 +5349,8 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 # later invocation cannot undo by itself, so it is the one
                 # that has to prove it still describes reviewed bytes AND
                 # the verdict reached over them -- see
-                # _terminal_write_still_binds_what_was_reviewed() for the race, and for
-                # the convergence-side precondition it starts from and then
+                # _terminal_write_still_binds_what_was_reviewed() for the
+                # race, and for the precondition it starts from and then
                 # widens. Refusing writes NOTHING, so whatever fragment is
                 # already on disk is what survives -- which is better than
                 # capping over unreviewed bytes in every case, but is only

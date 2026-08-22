@@ -2289,8 +2289,7 @@ def test_a_final_round_rejection_lapses_the_moment_the_draft_moves(tmp_path):
     _dna_write_review(root, driver_mod, round_label="final", clean=False, coverage_ok=True,
                        draft_sha1=draft_sha1, findings=findings)
 
-    read = print_verdict_digest_in(root, "seg01")
-    printed = json.loads(read.stdout.strip())
+    printed = json.loads(print_verdict_digest_in(root, "seg01").stdout.strip())
     result = run_reject_review_in(
         root, "seg01", reason="verified unfounded against the source",
         round_label=printed["round_label"], expect_token=printed["dispatch_token"],
