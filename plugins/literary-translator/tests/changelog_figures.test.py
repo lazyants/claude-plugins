@@ -173,6 +173,9 @@ def _newest_entry():
 
 def test_every_declared_figure_is_still_what_the_tree_says():
     version, entry = _newest_entry()
+    # Where every whole numeral of the entry begins and ends, by the same
+    # tokenizer a row's phrase is read with.
+    entry_numerals = {(m.start(), m.end()) for m in _TOKEN.finditer(entry)}
 
     stale = []
     for figure in FIGURES:
@@ -212,13 +215,28 @@ def test_every_declared_figure_is_still_what_the_tree_says():
         span = numerals[0]
         at = entry.index(figure.phrase)
         start, end = at + span.start(), at + span.end()
-        # Slices, not indexes: at either end of the entry these are "" rather
-        # than an IndexError, and "" fails every test below -- where `before in
-        # ".,-"` would have been TRUE for the empty string and reported a figure
-        # at offset 0 as embedded in a longer number.
+        # Two guards, because neither alone closes the substring false-green.
+        #
+        # The span must be a WHOLE numeral of the ENTRY, not merely of the
+        # phrase. Checking neighbouring characters is not enough: `_TOKEN`
+        # defines ASCII-space grouping as part of one numeral, so a phrase
+        # ending at `61` survives the prose becoming `61 000`, and a phrase
+        # opening at `137` sits happily inside `20 137` -- both with an
+        # innocent space either side. Comparing spans makes the entry's own
+        # tokenizer the authority on where a number ends.
+        #
+        # Then the neighbour check, for the two extensions `_TOKEN` cannot
+        # express and so tokenizes identically at both spans: a leading sign or
+        # decimal point (`-17`, `.5`), and comma grouping (`61,500`, where
+        # `_TOKEN` stops at the comma). Slices rather than indexes so that
+        # either end of the entry yields "" instead of an IndexError -- and ""
+        # must not compare equal to a punctuation set, which is why this is a
+        # set and not the substring test `before in ".,-"`.
         before, after = entry[start - 1 : start] if start else "", entry[end : end + 2]
-        if (before.isdigit() or before in {".", ",", "-"}) or (
-            after[:1].isdigit() or (after[:1] == "," and after[1:2].isdigit())
+        if (
+            (start, end) not in entry_numerals
+            or before in {".", ",", "-"}
+            or (after[:1] == "," and after[1:2].isdigit())
         ):
             stale.append(
                 f"{figure.phrase!r} matched inside a LONGER number in {version} "
