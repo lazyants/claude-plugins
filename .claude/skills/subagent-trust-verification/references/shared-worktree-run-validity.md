@@ -148,7 +148,7 @@ the real fixture `003 Chapter Two.md` into **three** non-existent paths (`./003`
 
 **Assert a file-count floor.** Count the records inside the snapshot and refuse an implausibly small
 one (`[ "$N" -lt 200 ] && exit 3`); a count you only remember to eyeball is one you forget on the run
-that needed it — same failure shape as [[gotcha-zsh-no-word-splitting]]. Count NUL records, not
+that needed it — same failure shape as zsh does not word-split an unquoted `$VAR` (→skill:cc-harness-ops). Count NUL records, not
 lines: a path containing a NEWLINE is one record but two lines, and a path containing a SPACE is one
 record that `xargs` splits into several ARGUMENTS — exactly the `003 Chapter Two.md` → three
 non-existent paths failure above.
@@ -189,7 +189,7 @@ anything that reads the shared filesystem while a mutant is live elsewhere in it
 
 **Mutation-test in an isolated/detached worktree** (its own `git worktree add`, not the team's shared
 one) whenever teammates are concurrently active — the same "worktree isolation" principle as
-[[gotcha-bash-tool-cwd-persists]] and the standing "always use an isolated working copy" rule,
+the Bash tool's cwd is not stable across builds (→skill:cc-harness-ops) and the standing "always use an isolated working copy" rule,
 extended from "don't edit the same file" to "don't even READ the tree while someone else's scoped
 mutation is on disk."
 

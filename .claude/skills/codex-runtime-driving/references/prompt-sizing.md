@@ -31,7 +31,7 @@ around a phantom) when the real growth was 3.5%. **Always size with**
 python3 -c 'import sys; print(len(open(sys.argv[1], encoding="utf-8").read()))' PATH
 ```
 
-never `wc -c`, when the text is not ASCII. Sibling of [[gotcha-zsh-no-word-splitting]] — same fix
+never `wc -c`, when the text is not ASCII. Sibling of zsh does not word-split an unquoted `$VAR` (→skill:cc-harness-ops) — same fix
 shape: measure it in Python, not in the shell.
 
 ## Trap 3 — the advertised window is not the budget, and the agent preamble is already spending it

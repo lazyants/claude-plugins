@@ -294,9 +294,12 @@ reports a PHANTOM exit-0 "success" with no verdict file.
 When the forwarder's prose "job ID" matches nothing under `status --all`:
 - The job is filed under a state dir keyed on the **launching shell's cwd BASENAME** — so a job
   launched from a worktree files under the WORKTREE name, not the repo slug. Search every candidate
-  dir, not just the repo one. Note the Bash tool's cwd PERSISTS between calls, so an earlier `cd`
-  into a worktree silently redirects later launches (verified 2026-07-19: consecutive reviews in one
-  session landed in `claude-plugins-*` and `eh-220-221-*` purely from a leftover `cd`).
+  dir, not just the repo one. On a build where the Bash tool's cwd PERSISTS between calls, an
+  earlier `cd` into a worktree silently redirects later launches (verified 2026-07-19: consecutive
+  reviews in one session landed in `claude-plugins-*` and `eh-220-221-*` purely from a leftover
+  `cd`). That persistence is NOT a stable property — it has since been observed resetting to the
+  project root and then persisting again — so never assume either direction: pin the launch
+  directory explicitly rather than relying on, or ruling out, a leftover `cd`.
   Recover it by session id
   (a UUID that appears in the forwarder's own Bash tool-call transcript even when the prose id is bogus):
   ```
