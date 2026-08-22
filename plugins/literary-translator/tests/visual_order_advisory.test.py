@@ -116,10 +116,18 @@ def test_arabic_full_stop_led_token_hits():
     assert ve._leading_terminal_punct_hits(token) == [token]
 
 
+def test_astral_rtl_letter_is_seen():
+    # An earlier revision asked a hand-kept table of BMP ranges instead of
+    # Unicode, so Adlam, Hanifi Rohingya and the Syriac supplement carried the
+    # full signature and still finished on an unqualified green.
+    token = f".{ADLAM_ALIF}"
+    assert ve._leading_terminal_punct_hits(token) == [token]
+
+
 # ---------------------------------------------------------------------------
 # The signature: false-positive direction
 #
-# Measured on 46 761 RTL tokens of known logical-order Hebrew (pointed and
+# Measured on 46 762 RTL tokens of known logical-order Hebrew (pointed and
 # unpointed), Arabic, Persian and Urdu: zero hits. These pin the constructions
 # that would break that if the terminal set were widened carelessly.
 # ---------------------------------------------------------------------------
@@ -128,7 +136,7 @@ def test_logical_order_hebrew_does_not_hit():
     assert ve._leading_terminal_punct_hits(f"{SHALOM} {TOV}. {NIQQUD_WORD},") == []
 
 
-def test_sof_pasuq_TERMINATED_verse_does_not_hit():
+def test_sof_pasuq_terminated_verse_does_not_hit():
     # The mirror of test_sof_pasuq_led_token_hits, and the reason adding that
     # mark to the terminal set is safe: 267 real occurrences in the Hebrew
     # negative corpus admitted nothing, because in logical order a sof pasuq
@@ -170,9 +178,9 @@ def test_embedded_verse_alone_triggers_the_advisory():
         blocks={"PARA:seg01:0001": {"plain_text": f"{SHALOM} ⟦VERSE_V001_abc⟧"}},
         verse_store=[{"vid": "V001", "mount": "embedded", "plain_text": f".{TOV}"}],
     )
-    n_hits, n_units, _, _, samples = ve.scan_visual_order(m)
+    n_hits, n_units_with_hits, _, _, samples = ve.scan_visual_order(m)
     assert n_hits == 1
-    assert n_units == 1
+    assert n_units_with_hits == 1
     assert samples[0][0] == "verse:V001", "a verse sample must be labelled by vid"
 
 
@@ -183,9 +191,9 @@ def test_standalone_verse_is_counted_exactly_once():
         blocks={"VERSE:seg01:0012": {"plain_text": f".{TOV}"}},
         verse_store=[{"vid": "V001", "mount": "block", "plain_text": f".{TOV}"}],
     )
-    n_hits, n_units, _, histogram, _ = ve.scan_visual_order(m)
+    n_hits, n_units_with_hits, _, histogram, _ = ve.scan_visual_order(m)
     assert n_hits == 1, "a standalone verse must not be scanned twice"
-    assert n_units == 1
+    assert n_units_with_hits == 1
     assert histogram == {"U+002E": 1}
 
 
@@ -226,10 +234,27 @@ def test_exact_escaped_sample():
     assert ve._escape_evidence(token) == "\\u05C3\\u200F\\u05D8\\u05D5\\u05D1"
 
 
+def test_astral_codepoints_escape_unambiguously():
+    # A four-digit form would render this as "\\u1E900", which reads as U+1E90
+    # followed by "0" -- evidence whose spelling is ambiguous cannot settle the
+    # question it was printed to settle.
+    assert ve._escape_evidence(ADLAM_ALIF) == "\\U0001E900"
+
+
 def test_histogram_keys_are_codepoints_not_glyphs():
     m = _manifest_with(blocks={"PARA:seg01:0001": {"plain_text": f"{SOF_PASUQ}{TOV}"}})
     _, _, _, histogram, _ = ve.scan_visual_order(m)
     assert histogram == {"U+05C3": 1}
+
+
+def test_a_non_ascii_block_id_cannot_reach_the_payload_raw():
+    # The label is extractor-authored and a custom extractor may emit anything.
+    # A raw RTL id would reorder the very diagnostic being adjudicated -- and it
+    # would do so while every other assertion here still passed.
+    m = _manifest_with(blocks={f"PARA:{SHALOM}:0001": {"plain_text": f".{TOV}"}})
+    (_, detail), = ve.run_advisory_scans(m)
+    assert detail.isascii(), "a non-ASCII block id reached the advisory payload raw"
+    assert "\\u05E9" in detail, "the label should appear, escaped rather than dropped"
 
 
 # ---------------------------------------------------------------------------
@@ -293,29 +318,8 @@ def test_schema_valid_but_underivable_manifest_still_warns(tmp_path, monkeypatch
     assert "Traceback" not in captured.err
 
 
-def test_astral_rtl_letter_is_seen():
-    # An earlier revision asked a hand-kept table of BMP ranges instead of
-    # Unicode, so Adlam, Hanifi Rohingya and the Syriac supplement carried the
-    # full signature and still finished on an unqualified green.
-    token = f".{ADLAM_ALIF}"
-    assert ve._leading_terminal_punct_hits(token) == [token]
-
-
-def test_astral_codepoints_escape_unambiguously():
-    # A four-digit form would render this as "\\u1E900", which reads as U+1E90
-    # followed by "0" -- evidence whose spelling is ambiguous cannot settle the
-    # question it was printed to settle.
-    assert ve._escape_evidence(ADLAM_ALIF) == "\\U0001E900"
-
-
-def test_a_non_ascii_block_id_cannot_reach_the_payload_raw():
-    # The label is extractor-authored and a custom extractor may emit anything.
-    # A raw RTL id would reorder the very diagnostic being adjudicated -- and it
-    # would do so while every other assertion here still passed.
-    m = _manifest_with(blocks={f"PARA:{SHALOM}:0001": {"plain_text": f".{TOV}"}})
-    (_, detail), = ve.run_advisory_scans(m)
-    assert detail.isascii(), "a non-ASCII block id reached the advisory payload raw"
-    assert "\\u05E9" in detail, "the label should appear, escaped rather than dropped"
+def _boom(_manifest):
+    raise RuntimeError("synthetic scan failure")
 
 
 def test_a_raising_scan_still_cannot_rescue_a_failing_manifest(tmp_path, monkeypatch, capsys):
@@ -323,10 +327,7 @@ def test_a_raising_scan_still_cannot_rescue_a_failing_manifest(tmp_path, monkeyp
     # clean-manifest version below would be satisfied by a handler that prints
     # "scan unavailable" and then exits 0 -- which would rescue EVERY failing
     # manifest.
-    def _boom(_manifest):
-        raise RuntimeError("synthetic scan failure")
-
-    monkeypatch.setattr(_sib.ve, "run_advisory_scans", _boom)
+    monkeypatch.setattr(ve, "run_advisory_scans", _boom)
     m = _baseline_manifest()
     m["spine"] = list(reversed(m["spine"]))
     code = _run_gate(tmp_path, monkeypatch, m)

@@ -382,7 +382,7 @@ the exact failure this document exists to prevent.
 across 476 of 1212 RTL-bearing text units, 41 of 42 units flagged (the miss is a
 front-matter unit whose RTL content is a single block), and both named control
 blocks hit. Against known logical-order corpora — Hebrew pointed with 267
-sof-pasuq occurrences and unpointed, Arabic, Persian, Urdu — **0 hits in 46 761
+sof-pasuq occurrences and unpointed, Arabic, Persian, Urdu — **0 hits in 46 762
 RTL tokens**. The ellipsis is excluded from the terminal set because a
 sentence-initial elision is legitimate logical order; it contributed zero of the
 921 hits, so the exclusion costs nothing measured.

@@ -687,7 +687,7 @@ def _is_rtl_letter(ch: str) -> bool:
     exact signature below would have finished on an unqualified green. Measured
     when this replaced the table: 1415 codepoints newly admitted, ZERO newly
     rejected, and both the positive control book (921 hits over 476 of 1212
-    units) and the 46 761-token logical-order negative corpus were unchanged."""
+    units) and the 46 762-token logical-order negative corpus were unchanged."""
     return (
         unicodedata.category(ch).startswith("L")
         and unicodedata.bidirectional(ch) in ("R", "AL")
@@ -714,14 +714,18 @@ def _leading_terminal_punct_hits(text):
     (U+200F/U+200E) are exactly what a bidi-aware converter emits there."""
     hits = []
     for token in (text or "").split():
-        if not token or not _is_terminal_punct(token[0]):
+        if not _is_terminal_punct(token[0]):
             continue
-        i = 0
-        while i < len(token) and (
-            _is_terminal_punct(token[i])
-            or unicodedata.category(token[i]).startswith("M")
-            or unicodedata.category(token[i]) == "Cf"
-        ):
+        # Start at 1: token[0] is already known to be terminal punctuation.
+        i = 1
+        while i < len(token):
+            category = unicodedata.category(token[i])
+            if not (
+                _is_terminal_punct(token[i])
+                or category.startswith("M")
+                or category == "Cf"
+            ):
+                break
             i += 1
         if i < len(token) and _is_rtl_letter(token[i]):
             hits.append(token)
@@ -739,12 +743,13 @@ def _advisory_text_units(manifest: dict):
     (``mount == "block"``) is already an ordinary blocks[] entry and must NOT be
     scanned twice. ``segments[].title_text`` needs no scan of its own: the
     extractor derives it from the heading block this already reads."""
-    blocks = manifest.get("blocks") or {}
+    blocks = manifest.get("blocks")
     if isinstance(blocks, dict):
         for block_id, block in blocks.items():
             if isinstance(block, dict):
                 yield str(block_id), block.get("plain_text")
-    store = (manifest.get("verse") or {}).get("store") or []
+    verse = manifest.get("verse")
+    store = verse.get("store") if isinstance(verse, dict) else None
     if isinstance(store, list):
         for entry in store:
             if not isinstance(entry, dict) or entry.get("mount") != "embedded":
@@ -757,9 +762,9 @@ def scan_visual_order(manifest: dict):
 
     Pure: reads the manifest, decides nothing, writes nothing."""
     n_hits = 0
-    units_with_hits = 0
+    n_units_with_hits = 0
     rtl_units = 0
-    histogram: dict = {}
+    histogram = {}
     samples = []
     for label, text in _advisory_text_units(manifest):
         if not isinstance(text, str) or not text:
@@ -770,14 +775,14 @@ def scan_visual_order(manifest: dict):
         hits = _leading_terminal_punct_hits(text)
         if not hits:
             continue
-        units_with_hits += 1
+        n_units_with_hits += 1
         n_hits += len(hits)
         for token in hits:
             key = f"U+{ord(token[0]):04X}"
             histogram[key] = histogram.get(key, 0) + 1
         if len(samples) < _ADVISORY_SAMPLE_CAP:
             samples.append((label, hits[0]))
-    return n_hits, units_with_hits, rtl_units, histogram, samples
+    return n_hits, n_units_with_hits, rtl_units, histogram, samples
 
 
 def _escape_char(ch: str) -> str:
@@ -805,7 +810,7 @@ def _escape_evidence(token: str) -> str:
 def run_advisory_scans(manifest: dict):
     """Report-only scans, as ``[(name, detail)]``. Never affects the exit code."""
     results = []
-    n_hits, n_units, n_rtl_units, histogram, samples = scan_visual_order(manifest)
+    n_hits, n_units_with_hits, n_rtl_units, histogram, samples = scan_visual_order(manifest)
     if n_hits:
         marks = ", ".join(
             f"{key}x{count}" for key, count in sorted(histogram.items())
@@ -815,12 +820,12 @@ def run_advisory_scans(manifest: dict):
         # reorders the very diagnostic being adjudicated. This is also what makes
         # the payload ASCII by CONSTRUCTION rather than by fixture.
         evidence = "; ".join(
-            f"{_escape_evidence(str(label))} {_escape_evidence(token)}"
+            f"{_escape_evidence(label)} {_escape_evidence(token)}"
             for label, token in samples
         )
         detail = (
-            f"{n_hits} token(s) in {n_units} of {n_rtl_units} RTL-bearing text "
-            f"unit(s) begin with terminal punctuation immediately followed by an "
+            f"{n_hits} token(s) in {n_units_with_hits} of {n_rtl_units} RTL-bearing "
+            f"text unit(s) begin with terminal punctuation immediately followed by an "
             f"RTL letter. In logical order that cannot happen, so this source is "
             f"probably in VISUAL order (a PDF-to-EPUB conversion artifact). "
             f"leading marks: {marks}. sample (escaped -- never judge RTL text by "
@@ -932,7 +937,10 @@ def main(argv=None):
         for name, detail in advisories:
             print(f"WARN {name}: {detail}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 -- an advisory may never gate a run
-        advisories = advisories or [(VISUAL_ORDER_SCAN_NAME, "scan unavailable")]
+        # Only the COUNT is consumed from here on (main()'s status suffix); the
+        # text that actually reaches stderr is the richer one built just below.
+        if not advisories:
+            advisories = [(VISUAL_ORDER_SCAN_NAME, None)]
         try:
             print(
                 f"WARN {VISUAL_ORDER_SCAN_NAME}: scan unavailable "
