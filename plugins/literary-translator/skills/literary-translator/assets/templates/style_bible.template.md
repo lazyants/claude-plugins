@@ -252,8 +252,11 @@ canon exists, record here: the frozen-as-of summary -- entry count by basis (`es
 `review_queue` -- and a short table of the established forms most worth calling out for a human skimming
 this document.
 
-`segpack.py` injects `canon_names[]` (locked forms a translator must use verbatim) and `new_names[]` (not
-yet canonized -- the translator resolves by context and flags `NEW:` in its own notes) into every segment.
+`segpack.py` injects `canon_names[]` (locked forms a translator must use verbatim), `new_names[]` (not
+yet canonized -- the translator resolves by context and flags `NEW:` in its own notes) and `split_names{}`
+(adjudicated homonym splits from `canon_senses.json`: one spelling, two or more distinct referents, each
+sense carrying a `disambiguator`; the translator picks the sense per occurrence and flags `NEW:`, since a
+homonym has no single frozen target form) into every segment.
 
 Three of this section's sub-sections -- `G-cast`, `G-voices` and `G-motifs` -- are optional and ship
 empty; an empty one is a legitimate final state for a book that doesn't need it. Like the rest of section

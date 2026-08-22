@@ -183,6 +183,7 @@ def write_segpack(root, seg, blocks, footnotes=None, verses=None, canon_map=None
         # possibly {}) -- assemble.py never reads it, so an empty dict is
         # harmless-but-schema-complete (codex R4 minor 2).
         "canon_map": canon_map if canon_map is not None else {},
+        "split_names": {},
         "generation_hashes": {
             "source_extraction_hash": "backlink-e2e-x",
             "source_input_hash": "backlink-e2e-y",

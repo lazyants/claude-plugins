@@ -95,6 +95,17 @@ written and refuse to record a stale convergence.
   quote the `canon_map` entry it rests on; a form with no `canon_map`
   entry has no frozen canon and you may not assert one. Findings grounded
   in the source rather than in a canonical target form are untouched.
+- `split_names` -- a source form adjudicated as a **homonym split** (one
+  spelling, two or more distinct referents), listed with a `disambiguator`
+  per sense. Such a form carries **no frozen canon**: it is absent from
+  `canon_map` and from `canon.json` by design, because one frozen form is
+  what a homonym cannot have. So do **not** flag it as an uncanonized name,
+  and do **not** prescribe a canonical target form for it -- the rule above
+  (a form with no `canon_map` entry has no frozen canon you may assert)
+  applies here with no exception. What you MAY flag, quoting the
+  `disambiguator` it rests on, is the draft rendering the **wrong sense**
+  for the passage: the referent the source means is a source-grounded
+  question, and settling it is squarely in scope.
 - A `canon_map` target form is authoritative as given. **Never flag a
   canon name merely because its frozen canonical target form is lexically
   unrelated to the source form** -- for a sense-translated speaking name

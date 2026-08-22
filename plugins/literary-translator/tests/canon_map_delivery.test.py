@@ -207,6 +207,7 @@ def _pack_with_canon_map(canon_names=("Jean Valjean",), canon_map=None):
         "canon_names": list(canon_names),
         "new_names": [],
         "canon_map": canon_map,
+        "split_names": {},
         "generation_hashes": {
             "source_extraction_hash": "a" * 40,
             "source_input_hash": "b" * 40,

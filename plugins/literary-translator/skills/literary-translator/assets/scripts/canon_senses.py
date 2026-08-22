@@ -62,17 +62,21 @@ with an actionable pip install -r requirements.txt message" -- mirrors
 is wrapped and exits with an actionable message rather than raising a raw
 ``ImportError``.
 
-Every consumer imports exactly two names from here:
+Consumers read the sidecar ONLY through this module's public surface --
+``load_senses`` (or ``load_senses_from_snapshot``) to get a
+``SensesResult``, ``normalize_form`` to compare source_forms,
+``is_split`` for the "is this an adjudicated split" predicate, and
+``senses_for`` to recover the matching entry's senses. Never a private
+partial reader, and never a second normalizer or second matching
+implementation: ``canon_adjudication_audit.py``'s ``collapsed_split``/
+``homonym_split`` identity, ``canon_validate.py``'s recollapse guard,
+``glossary_batch_plan.py``'s split-form exclusion and ``segpack.py``'s
+``split_names`` delivery (#488) all go through these.
 
-    from canon_senses import normalize_form, load_senses
-
-(``canon_adjudication_audit.py``'s ``collapsed_split``/``homonym_split``
-identity, ``canon_validate.py``'s recollapse guard, and
-``glossary_batch_plan.py``'s split-form exclusion all compare source_forms
-via ``normalize_form`` and load the sidecar via ``load_senses`` -- never a
-private partial reader and never a second normalizer implementation.)
-``is_split`` is provided as a convenience predicate so no consumer has to
-re-derive "len(senses) >= 2, compared via normalize_form" itself.
+``is_split`` and ``senses_for`` are deliberately separate: the predicate
+must not be re-derived from a truthy entry (an entry exists for reasons
+other than being split), and the senses must not be recovered by
+re-normalizing keys at the call site.
 """
 import json
 import os
@@ -224,6 +228,56 @@ def is_split(result: SensesResult, source_form: str) -> bool:
         if normalize_form(key) == target:
             return len(entry.get("senses", [])) >= 2
     return False
+
+
+def senses_for(result: SensesResult, source_form: str) -> Optional[dict]:
+    """The entry matching `source_form` -- compared via the SAME
+    `normalize_form` comparator `is_split` uses, never a raw key lookup --
+    or None when none matches. `is_split` answers *whether* a form is
+    split; this answers *with which senses*, for the consumers that have
+    to show them (segpack.py's `split_names` block, #488) or count them
+    (canon_validate.py's recollapse refusal message).
+
+    Returns the entry object itself, exactly as `entries_by_source_form`
+    holds it -- an already schema-and-procedurally validated dict whose
+    `senses` is a list of >=2 sense objects. Callers read it; they must
+    not mutate it.
+
+    Two things this deliberately does NOT do. It does not re-check the
+    >=2 invariant -- `load_senses`'s schema validation refuses a 1-sense
+    record outright, and a caller wanting the PREDICATE should call
+    `is_split`, so duplicating the length test here would create a second
+    place for "is this split" to drift. And it does not normalize the
+    returned entry's own contents; display fields always keep their
+    original strings (see `normalize_form`'s docstring).
+
+    Uses `result.normalized_index` for an O(1) lookup when `load_senses`
+    built one; falls back to the original O(n) linear scan only for a
+    `SensesResult` constructed directly without an index -- both paths
+    must return identically, and both take the FIRST key whose normalized
+    form matches (`_build_normalized_index`'s `setdefault` is what keeps
+    the fast path agreeing with the scan on that point).
+
+    ``canon_validate.py``'s own ``_matching_senses_entry`` computes the
+    same thing and is deliberately NOT re-pointed here -- see its
+    docstring for the measured reason (a passing performance test
+    monkeypatches that module's own ``normalize_form`` binding and counts
+    the calls). The comparator itself is still defined once, in this
+    module; only four lines of dict lookup exist twice.
+
+    Annotated `Optional[dict]` rather than `dict | None` deliberately:
+    this module has no `from __future__ import annotations`, so a bare
+    PEP-604 union here would be evaluated at import time and fail on the
+    supported Python floor -- `tests/python_floor_pep604_drift.test.py`
+    AST-scans every shipped script for exactly that.
+    """
+    target = normalize_form(source_form) if isinstance(source_form, str) else source_form
+    if result.normalized_index is not None:
+        return result.normalized_index.get(target)
+    for key, entry in result.entries_by_source_form.items():
+        if normalize_form(key) == target:
+            return entry
+    return None
 
 
 # ---------------------------------------------------------------------------
