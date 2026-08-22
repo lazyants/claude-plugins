@@ -1011,6 +1011,18 @@ function reviewDispatchPrompt(seg, roundLabel) {
   lines.push("Then read: " + ROOT + "/review_TASK.md ; " + ROOT + "/style_bible.md ; " + ROOT + "/segments/segpack_" + seg + ".json ; " + ROOT + "/segments/" + seg + ".draft.json.");
   lines.push("As soon as you read the draft, check its own dispatch_token field: it must equal exactly this literal string: " + JSON.stringify(draftToken) + ". If it does not match exactly, STOP here -- this draft belongs to a different, stale run. Do not review it, write no review output at all, and return exactly the line: DRAFT_TOKEN_MISMATCH " + seg + " instead of the REVIEWED line below.");
   lines.push("Verse policy for this project: " + VERSE_POLICY_INSTRUCTION_BLOCK);
+  // #546 -- DELIVERY vs STORAGE. The reviewer is handed the draft's fields and
+  // never the page the assembler builds from them, so "the reader is left with
+  // nothing" is a claim it cannot check and cannot be argued out of: each round's
+  // fix moves the meaning somewhere the next round also cannot see. Measured on
+  // historiettes-fr-ru/tome1 V073: six rounds, seven renderings, alternating
+  // between that objection and "the strophic form is broken". Scoped to THIS
+  // function on purpose -- the same text in translatePrompt/fixPrompt would read
+  // as permission to skimp on `rendered` because the gloss carries the meaning,
+  // which is the opposite defect. The positive half is scoped to the shipped
+  // Obsidian renderer (render_obsidian.py's _render_verse_block/_render_verse_inline);
+  // a `custom` adapter renders per project and is deliberately NOT claimed here.
+  lines.push("Delivery vs storage: `rendered` and `literal_gloss` are two fields of ONE verse entry, and this plugin's shipped Obsidian output prints a verse's literal gloss with the verse it belongs to (beneath its own block, or inline beside an embedded verse). You are given the draft, never the assembled output, so a finding may not assert -- from the draft alone -- that the reader is left without a meaning for a verse whose own `literal_gloss` supplies it. A verse whose `literal_gloss` does NOT supply that meaning is unaffected: report it normally.");
   lines.push("Check the draft against the source for: full accuracy (no omissions or distortions), word-sense and realia fidelity for the source era and context -- ask explicitly whether each notable word means what it meant in that period and context, not what it means today -- name/canon fidelity, placeholder sentinel fidelity, verse per the policy above, and literary quality (register, idiom, natural seams, rhythm).");
   lines.push("Canon-name fidelity specifically: the segpack's canon_map gives each already-canonized name's frozen canonical target form. Flag a canon name ONLY if the draft renders a different name, a different transliteration of the canonical stem, leaves a canonical name untranslated, or swaps an epithet for a real surname -- a correctly inflected/declined form of the canonical stem is CORRECT and must NOT be flagged.");
   lines.push("A canon_map target form is authoritative as given. Never flag a canon name merely because its frozen canonical target form is lexically unrelated to the SOURCE form -- for a sense-translated speaking name (basis:\"sense_translated\") that is expected and correct. The deviation triggers above still apply. Correctness of the frozen canon decision itself is out of scope for this review -- a suspected error is reopened via the glossary/adjudication route, never flagged here.");

@@ -6152,5 +6152,107 @@ def test_resolve_companion_path_succeeds_once_step_0a_copies_it_into_a_deployed_
     assert companion_path == FIXTURE_COMPANION_PATH
 
 
+# ===========================================================================
+# #546 -- the DELIVERY vs STORAGE rule, asserted on the PROMPT OUTPUT.
+#
+# The reviewer judges the draft's fields and never the page the assembler
+# builds from them, so "the reader is left without a meaning" is a claim it
+# cannot check and cannot be argued out of. reviewDispatchPrompt now states
+# where a verse's literal_gloss lands and forbids exactly that inference.
+#
+# WHY THESE ARE OUTPUT-LEVEL AND NOT SOURCE-LEVEL. A substring check against
+# the template's function BODY (prompt_contract_drift.test.py's technique,
+# right for what it locks) would pass on the sentence sitting in a comment or
+# after `return`, without it ever reaching a reviewer. Worse for the negative
+# half: VERSE_POLICY_INSTRUCTION_BLOCK is declared OUTSIDE every function body
+# and spliced into translate, review AND fix, so a leak through that shared
+# text is invisible to any per-body assertion. So these drive the REAL builders
+# through call_template_functions() -- the same node harness the driver itself
+# uses -- and read what a reviewer would actually be handed.
+#
+# WHY TWO FRAGMENTS AND NEITHER OF THEM THE HEADING. A marker like
+# "Delivery vs storage:" would prove a label exists, not that the contract
+# does: replacing the sentence with the label alone would leave every check
+# here green while the prohibition -- the only half that closes the defect --
+# was gone. Both fragments below carry a load-bearing clause, and the second
+# pins the carve-back that keeps a GENUINE "the reader gets nothing" finding
+# raiseable (a verse whose gloss supplies no meaning is reported normally).
+# ===========================================================================
+
+_DELIVERY_PROHIBITION = (
+    "may not assert -- from the draft alone -- that the reader is left without a meaning"
+)
+_DELIVERY_CARVEBACK = "does NOT supply that meaning is unaffected"
+_DELIVERY_FRAGMENTS = (_DELIVERY_PROHIBITION, _DELIVERY_CARVEBACK)
+
+VERSE_POLICY_REFERENCE_DOC = (
+    PLUGIN_ROOT / "skills" / "literary-translator" / "references" / "verse-policy.md"
+)
+
+
+def test_review_dispatch_prompt_states_delivery_and_translate_fix_do_not(tmp_path):
+    """#546. The delivery rule reaches the REVIEWER's actual task text, and
+    neither the translator's nor the fixer's: told that the gloss carries the
+    meaning, a translator has an argument for skimping on `rendered`, which is
+    this defect's mirror image."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod = _load_fixture_driver(root)
+    dirs = driver_mod.resolve_dirs(None)
+    subst = _fixture_template_subst(root, "20260101T000000Z")
+
+    out = DRIVER.call_template_functions(
+        dirs, subst,
+        [
+            {"key": "review", "fn": "reviewDispatchPrompt", "args": ["seg01", "1"]},
+            {"key": "translate", "fn": "translatePrompt", "args": ["seg01"]},
+            {"key": "fix", "fn": "fixPrompt", "args": ["seg01", 1, {"findings": []}]},
+        ],
+    )
+
+    for fragment in _DELIVERY_FRAGMENTS:
+        assert fragment in out["review"], (
+            f"reviewDispatchPrompt's OUTPUT must carry the #546 delivery rule "
+            f"({fragment!r}) -- not merely the template's source text"
+        )
+        assert fragment not in out["translate"], (
+            f"translatePrompt's output must NOT carry {fragment!r} (#546): it "
+            f"reads as licence to skimp on `rendered` because the gloss delivers"
+        )
+        assert fragment not in out["fix"], (
+            f"fixPrompt's output must NOT carry {fragment!r} (#546), same reason"
+        )
+
+
+def test_no_verse_policy_instruction_text_carries_the_delivery_rule():
+    """#546. The one way the rule could reach translate/fix is by being moved
+    into the shared verse-policy instruction text. All six modes, since the
+    resolved text is what gets spliced into all three prompts."""
+    for mode, text in DRIVER._VERSE_POLICY_INSTRUCTIONS.items():
+        for fragment in _DELIVERY_FRAGMENTS:
+            assert fragment not in text, (
+                f"verse_policy.mode={mode!r}'s instruction text carries {fragment!r} "
+                f"(#546) -- that text is spliced into translatePrompt and fixPrompt "
+                f"too, so the rule would leak into both"
+            )
+
+
+def test_verse_policy_reference_doc_does_not_carry_the_delivery_rule():
+    """#546. references/verse-policy.md's mode table is an INDEPENDENT
+    production authority -- Step 0b resolves the instruction row from it for
+    the manual workflow path, and the driver's own map is a hand transcription
+    of it that the driver itself records as drift-prone. A whole-file
+    substring check, deliberately NOT a table parse: a hand-rolled Markdown
+    parser fails OPEN (it silently matches nothing when the table's shape
+    changes), while this fails CLOSED anywhere in the file."""
+    assert VERSE_POLICY_REFERENCE_DOC.is_file(), VERSE_POLICY_REFERENCE_DOC
+    doc = VERSE_POLICY_REFERENCE_DOC.read_text(encoding="utf-8")
+    for fragment in _DELIVERY_FRAGMENTS:
+        assert fragment not in doc, (
+            f"{VERSE_POLICY_REFERENCE_DOC.name} carries {fragment!r} (#546) -- the "
+            f"manual workflow path resolves its instruction text from this table, "
+            f"so the rule would reach translatePrompt and fixPrompt through it"
+        )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
