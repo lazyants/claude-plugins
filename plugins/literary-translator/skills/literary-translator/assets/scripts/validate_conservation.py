@@ -1080,6 +1080,10 @@ def run_output_coverage():
     except va._MalformedArtifact as exc:
         raise ConservationError(str(exc))
 
+    # #533: bound before the scope branch -- `assembled_book` scope reads the
+    # assembled NodeStream and never consults the ledger, so it has no
+    # admission to report and an unbound name would be a NameError below.
+    contract_admitted = []
     if v1_scope == "assembled_book":
         nodestream, err = va.load_json(va.NODESTREAM_PATH, "assembled nodestream")
         if err:
@@ -1111,8 +1115,18 @@ def run_output_coverage():
             # at _validate_manifest_shape() above -- never a second, local
             # notion of "in the manifest", which is exactly how two gates come
             # to disagree about the same book.
-            trusted_drafts, _stale_segs = va.collect_reviewed_draft_rebind(
-                ledger_segments, va.collect_manifest_seg_ids(manifest_segments)
+            #
+            # #533: the opt-in contract-only admission is read through
+            # validate_assembled.py's own reader, never a local copy. This
+            # gate's whole contract is that its population IS that gate's
+            # population; a fourth restatement of the declaration predicate
+            # here could drift against the very function whose argument it
+            # computes, and the symptom would be a book whose blocks silently
+            # stop being eligible for coverage.
+            trusted_drafts, _stale_segs, contract_admitted = va.collect_reviewed_draft_rebind(
+                ledger_segments,
+                va.collect_manifest_seg_ids(manifest_segments),
+                va.admit_contract_only_stale(profile),
             )
         except va._MalformedArtifact as exc:
             raise ConservationError(str(exc))
@@ -1201,9 +1215,25 @@ def run_output_coverage():
                 f"reason={w['reason']}",
                 file=sys.stderr,
             )
+    if contract_admitted:
+        # #533. This lane's eligible population includes these segments only
+        # because the operator declared them shippable; a WARN-only report
+        # that stays silent about that is a report about a different book.
+        print(
+            f"\nCONTRACT-ONLY STALE ADMITTED ({len(contract_admitted)}) -- "
+            f"profile.yml declares validation.admit_contract_only_stale, so "
+            f"these segments' blocks are eligible for the coverage lane above "
+            f"although the style contract moved after they converged.",
+            file=sys.stderr,
+        )
+        for seg in contract_admitted:
+            print(f"  ~ {seg}", file=sys.stderr)
     output_doc = {"warnings": warnings}
     if coverage_distribution is not None:
         output_doc["coverage_distribution"] = coverage_distribution
+    if contract_admitted:
+        # Omitted, never emitted empty -- same rule as every other gate here.
+        output_doc["contract_stale_admitted"] = contract_admitted
     print(json.dumps(output_doc, ensure_ascii=False, allow_nan=False))
     return True
 

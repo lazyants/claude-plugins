@@ -216,10 +216,17 @@ recording the enumeration, or a path to it, over the count.
 
 **Timing, not content, is the constraint on appending here.** These lines sit inside the style_contract
 span, so one more bullet moves `style_contract_hash` and flips every already-converged segment to `stale`.
-That flip is bookkeeping, not an order to re-review anything (SKILL.md's R9) -- but it is only free while
-the loop is still running, so collect traps in `consistency_issues.md` as they surface and promote them
-here in one batch at a batch boundary. A promotion landing after the last segment converges re-stales the
-whole corpus and blocks W9 assembly, buying nothing but a re-run for the stamp.
+That flip is bookkeeping, not an order to re-review anything (SKILL.md's R9). What it costs is that every
+unit converged BEFORE the append is then refused by the W7 completeness gate and W9 assembly until it
+converges again -- whenever the append lands, not only at the end. Two things make that affordable, in
+this order: collect traps in `consistency_issues.md` as they surface and promote them here in one batch at
+a batch boundary, so segments converging afterwards carry the new hash and are never flipped; and, if a
+promotion has already flipped work you do not intend to re-review, set
+`validation.admit_contract_only_stale: true` in `profile.yml`, which lets both gates admit a flipped unit
+whose draft is unchanged since review and name it in their output (SKILL.md's R9, `#533`). That
+declaration is the wrong answer when the promotion REVERSED an earlier rule rather than adding to it: the
+segments converged under the old rule were told to do the thing you have just forbidden, and no hash can
+tell the two cases apart.
 
 ### F. Reference samples (voice anchor -- fill in AFTER the W4 stress gate converges, not at scaffold time)
 

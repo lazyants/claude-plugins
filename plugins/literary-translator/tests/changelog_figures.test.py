@@ -144,32 +144,89 @@ def _test_function_count(filename):
     )
 
 
-# Rewritten for 1.40.0 (#529), per the maintenance contract above.
+def _files_defining(names):
+    """How many SHIPPED scripts assign any of `names` at module level.
+
+    A COUNT OF FILES, not of grep hits: a changelog sentence about "N copies of
+    this constant" is a statement about how many scripts hold their own
+    definition, and a script that mentions the name in a comment or reads a
+    sibling's copy is not one of them. Read by AST for the same reason
+    _tuple_len() is -- a regex over the source counts the docstring paragraphs
+    that discuss the duplication, which is precisely the prose a release entry
+    is most likely to contain."""
+    hits = []
+    for path in sorted(SCRIPTS.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id in names
+                for target in node.targets
+            ):
+                hits.append(path.name)
+                break
+    assert hits, f"no shipped script assigns any of {sorted(names)} any more"
+    return len(hits)
+
+
+def _local_dict_len(filename, funcname, varname):
+    """Number of keys in the dict literal bound to `varname` inside module-level
+    function `funcname`. Asserts the node IS a dict literal rather than counting
+    whatever `len()` accepts -- the same trap _tuple_len() names."""
+    tree = ast.parse((SCRIPTS / filename).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == funcname:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id == varname
+                    for target in sub.targets
+                ):
+                    assert isinstance(sub.value, ast.Dict), (
+                        f"{varname} in {filename}:{funcname} is no longer a dict "
+                        f"literal, so its key count is not the figure cited"
+                    )
+                    return len(sub.value.keys)
+            raise AssertionError(
+                f"{funcname} in {filename} no longer binds {varname} -- the "
+                f"derivation behind a changelog figure has lost its subject"
+            )
+    raise AssertionError(f"{funcname} is no longer defined in {filename}")
+
+
+# Rewritten for 1.41.0 (#533), per the maintenance contract above. The rows of
+# every release this one was renumbered past -- 1.37.0 (#532), 1.38.0 (#538),
+# 1.39.0 (#539) and 1.40.0 (#529, a peer session's, reserved by agreement
+# rather than raced for) -- retire with their entries; `_tuple_len` and
+# `_test_function_count` are kept unused, as those releases kept them, for the
+# next entry that cites their class.
 #
-# One row, and the SAME derivation the last three entries declared -- which is
-# exactly the case this contract is easiest to skip, and the reason it is a
-# contract rather than an assertion: 1.38.0 (#538) priced its migration on the
-# NOT-a-member side of this tuple, 1.39.0 (#539) on the member side, and 1.40.0
-# on the member side again, so an unrotated declaration stays green while
-# describing a different entry entirely. Measured on this release: it carried a
-# stale comment through THREE renumbers, each caught by a reviewer rather than
-# by anything here. Re-declared deliberately.
-#
-# 1.40.0's other numbers are not rows. Its two measured incidents are per-segment
-# events in operator-owned durable roots that are not in this repository (`SSK`
-# he/yi->en `seg35`, `historiettes` fr->ru `seg18`) and no check here can reach
-# them; the mutation counts behind its test claims are events in a review
-# session, not state in the tree. Declaring either would mean hardcoding the
-# answer, which passes every assertion below while proving nothing
-# (`lambda: 2`) -- the accepted residual this file's docstring names.
-#
-# `_test_function_count` is kept although 1.40.0 cites no suite size: it is the
-# general deriver for that class of figure.
+# Two rows, because 1.41.0 states exactly two tree-derivable figures: how many
+# scripts hold their own copy of the machinery-only allowlist the entry promises
+# it did NOT widen, and the size of the field set that decides whether its new
+# profile key moves a cache key. The entry's remaining numbers are of two kinds,
+# neither declarable. The exit codes (0/1/2/3) are not measurements -- they are
+# named constants the entry quotes, and the suite already drives every one of
+# them end to end. The convergence figures (58 of 81 segments, 22 stale, 1
+# non-converged) are a CORPUS measurement from an operator-owned durable root
+# that is not in this repository and is not reachable from any check here; it is
+# also explicitly reported AS OF the issue's filing date, so re-deriving it later
+# would not even be the same quantity. They are the accepted residual this
+# file's docstring names, not an oversight: declaring them would mean hardcoding
+# an answer, which passes every assertion below while proving nothing
+# (`lambda: 58`).
 FIGURES = [
     Figure(
-        "17 `PLUGIN_BUNDLE_MEMBERS`",
-        17,
-        lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
+        "All 4 copies of that allowlist",
+        4,
+        lambda: _files_defining(
+            {"SAFE_STALE_CARVEOUT_FIELDS", "MACHINERY_ONLY_CACHE_KEY_FIELDS"}
+        ),
+    ),
+    Figure(
+        "not one of the 6 fields `compute_profile_semantics_hash()` hashes",
+        6,
+        lambda: _local_dict_len(
+            "cache_key.py", "compute_profile_semantics_hash", "obj"
+        ),
     ),
 ]
 

@@ -169,7 +169,16 @@ def _build_filled_profile(durable_root: Path, source_path: Path) -> dict:
         },
         "footnotes": {"apparatus_policy": "translate_all"},
         "glossary": {"research_mode": "offline"},
-        "validation": {"untranslated_sentinel": "нет перевода"},
+        "validation": {
+            "untranslated_sentinel": "нет перевода",
+            # #533. Carried here because this helper's own docstring claims
+            # structural identity with the shipped example, and the example
+            # now ships this key explicitly at its default. Leaving it out
+            # would keep the SUITE green -- the property is optional -- while
+            # making that claim quietly false, which is the failure this
+            # helper exists to make impossible.
+            "admit_contract_only_stale": False,
+        },
         "output": {
             "v1_scope": "segment_drafts_and_audit",
             "destination": str(durable_root / "out"),

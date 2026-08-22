@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "final-audit-summary.schema.json",
   "title": "Final Audit Summary",
-  "description": "Structured stdout of final_audit.py, run at W7 over every converged segment: 2 hard checks (coverage, stale-review) rolled into hard_failures, 4 WARN checks rolled into warnings, a whole-project completeness gate (completeness_counts/project_complete/stale_previously_converged), and a frontback coverage report. The arithmetic rollup invariant hard_failures == coverage_failures + stale_review_failures is enforced procedurally by final_audit.py itself. project_complete is true if and only if every one of completeness_counts' five values (not_started, recoverable, stale, blocked_needs_regeneration, human_escalation) is 0, EXCEPT for the #409 Step 2 carve-out: a 'stale' segment that also carries the durable .ever_converged.<seg> sentinel (an already-finalized translation whose cache key merely moved) does not count against project_complete -- see stale_previously_converged. This forward direction (all five categories genuinely 0 implies project_complete true) is enforced by this schema below; the carve-out-aware direction (completeness_counts.stale - stale_previously_converged == 0 implies project_complete true) is a cross-field equality this schema cannot express and is enforced procedurally by final_audit.py's own compute_project_complete().",
+  "description": "Structured stdout of final_audit.py, run at W7 over every converged segment: 2 hard checks (coverage, stale-review) rolled into hard_failures, 4 WARN checks rolled into warnings, a whole-project completeness gate (completeness_counts/project_complete/stale_previously_converged), and a frontback coverage report. The arithmetic rollup invariant hard_failures == coverage_failures + stale_review_failures is enforced procedurally by final_audit.py itself. project_complete is true if and only if every one of completeness_counts' five values (not_started, recoverable, stale, blocked_needs_regeneration, human_escalation) is 0, EXCEPT for the #409 Step 2 carve-out: a 'stale' segment that also carries the durable .ever_converged.<seg> sentinel (an already-finalized translation whose cache key merely moved) does not count against project_complete -- see stale_previously_converged. This forward direction (all five categories genuinely 0 implies project_complete true) is enforced by this schema below; the carve-out-aware direction (completeness_counts.stale - stale_previously_converged == 0 implies project_complete true) is a cross-field equality this schema cannot express and is enforced procedurally by final_audit.py's own compute_project_complete(). Since #533 there is a SECOND, opt-in subtraction on the same axis: when the project's profile.yml declares validation.admit_contract_only_stale, a 'stale' segment whose only non-machinery cache-key movement is style_contract_hash -- and whose draft is unchanged since review -- is likewise not counted against project_complete, and is NAMED in the optional stale_contract_admitted array. The full procedural rule is therefore completeness_counts.stale - stale_previously_converged - len(stale_contract_admitted) == 0.",
   "type": "object",
   "properties": {
     "coverage_failures": {
@@ -27,11 +27,11 @@
     },
     "project_complete": {
       "type": "boolean",
-      "description": "Rollup invariant (procedurally enforced by final_audit.py's compute_project_complete(), see this schema's own top-level description): project_complete == true if and only if every one of completeness_counts' four non-'stale' values equals 0 AND completeness_counts.stale - stale_previously_converged equals 0."
+      "description": "Rollup invariant (procedurally enforced by final_audit.py's compute_project_complete(), see this schema's own top-level description): project_complete == true if and only if every one of completeness_counts' four non-'stale' values equals 0 AND completeness_counts.stale - stale_previously_converged - len(stale_contract_admitted) equals 0, counting an absent stale_contract_admitted as 0."
     },
     "completeness_counts": {
       "type": "object",
-      "description": "Whole-project completeness gate: classification counts from a full select_segments.py run over the entire manifest.json with no --only-segs restriction. 'stale' here is the RAW count -- never reduced by the #409 Step 2 carve-out (see stale_previously_converged) -- so an operator can always see the true total.",
+      "description": "Whole-project completeness gate: classification counts from a full select_segments.py run over the entire manifest.json with no --only-segs restriction. 'stale' here is the RAW count -- never reduced by the #409 Step 2 carve-out (see stale_previously_converged) nor by the #533 contract-only admission (see stale_contract_admitted) -- so an operator can always see the true total.",
       "properties": {
         "not_started": { "type": "integer", "minimum": 0 },
         "recoverable": { "type": "integer", "minimum": 0 },
@@ -52,6 +52,14 @@
       "type": "integer",
       "minimum": 0,
       "description": "#409 Step 2: count of completeness_counts.stale segments carved out of the project_complete gate because they (a) carry the durable .ever_converged.<seg> sentinel AND (b) went stale ONLY because a field in the machinery-only allowlist (plugin_bundle_hash, schema_hash, derivation_bundle_hash -- tooling/schema/derivation-code fingerprints that can never by themselves change translated prose) moved, never a content-affecting field (e.g. style_contract_hash, prompt_hash, used_terms_hash, the source text itself) nor a draft hand-edit since review (stale_reason draft_sha1_mismatch). A 'stale' segment failing any of these is never counted here and still blocks project_complete exactly as before (fail-safe direction)."
+    },
+    "stale_contract_admitted": {
+      "type": "array",
+      "items": {"type": "string"},
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "#533, OPTIONAL and OMITTED unless the project's profile.yml declares validation.admit_contract_only_stale AND at least one segment qualified -- an emitted empty array would let a run that never checked be read as a run that checked and found none. The segment IDs (not a count: what is recorded is an operator act naming particular units) of completeness_counts.stale segments carved out of the project_complete gate a SECOND way: they carry the .ever_converged.<seg> sentinel, their stale_reason is exactly ['cache_key_mismatch'] (so the on-disk draft still matches reviewed_draft_sha1 -- no prose changed), style_contract_hash is among their moved fields, and every other moved field is in the machinery-only allowlist. This is what makes the tooling agree with the shipped rule R9: a style-contract edit applies FORWARD and owes no back-sweep. It is disjoint from stale_previously_converged by construction (that count requires EVERY moved field to be machinery-only; style_contract_hash is not), so the two never subtract the same segment twice. It does NOT distinguish a contract addition from a contract reversal -- see profile.schema.json's own field description.",
+      "$comment": "This population is admitted, never certified. No ledger record is rewritten and no hash is stamped: the record still says 'stale', and this list is the only place the run says which units shipped unjudged against the current contract."
     },
     "frontback_coverage": {
       "type": "array",

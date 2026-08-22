@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.41.0 — 2026-08-22
+**R9 says a style-contract edit applies FORWARD and owes no back-sweep; the gates said the book cannot ship until every flipped unit is reviewed again. Only the second one was enforced.** Editing `style_bible.md` between the `STYLE_CONTRACT` markers moves `style_contract_hash`, a GLOBAL cache-key field, so every already-converged segment flips to `stale` at once. `style_contract_hash` sits outside the machinery-only carve-out, so W7's whole-project completeness gate refused (`project_complete: false`, exit 3) and W9's assembly refused after it (`project_incomplete`, exit 2). R9 governed whether you must re-verify; the gates governed whether you can ship, and a two-sentence bible addition therefore cost a full re-review of the corpus. On the fr→ru book at the time of the report: 58 of 81 segments converged, 22 stale, 1 non-converged, with two correct bible additions queued and unaffordable. Closes #533 (and #508, folded into it).
+
+`profile.yml` gains one optional, default-off declaration:
+
+```yaml
+validation:
+  admit_contract_only_stale: true
+```
+
+Declared, W7 and W9 admit a flipped unit when ALL hold: its `.ever_converged.<seg>` sentinel is not absent; its on-disk draft still matches its recorded `reviewed_draft_sha1` (so no prose changed, only the standard); `style_contract_hash` is among the moved cache-key fields; and every OTHER moved field is machinery-only. Undeclared — or declared `false` — every gate behaves exactly as it did before this release: same admissions and refusals, same exit codes, same stdout keys AND values, same stderr, same files written.
+
+### What it deliberately is not
+
+- **Not a widening of `SAFE_STALE_CARVEOUT_FIELDS`.** That set means "can never change what the prose should say", which is FALSE for a style contract, and it is read for two other questions besides this one (`assemble.py`'s assembly gate and `select_segments.py`'s D6 report). All 4 copies of that allowlist still hold exactly `{plugin_bundle_hash, schema_hash, derivation_bundle_hash}`, pinned by a test. This is a separately named second acceptance path, reachable only by declaration.
+- **Not a certification.** No ledger record is rewritten and no hash is stamped. The record still says `stale`. Stamping the current `style_contract_hash` onto a record that was never checked against it would assert a review that did not happen, in the one field nobody re-reads.
+- **Not a count.** Each gate emits the segment IDs — `stale_contract_admitted` in `final_audit.py`'s summary, `contract_stale_admitted` in `assemble.py`'s, `validate_assembled.py`'s and `validate_conservation.py`'s — plus a stderr block naming each one. The key is OMITTED entirely when the declaration is absent or nothing qualified: an emitted empty list would read as "we checked and found none" on a run that never checked.
+- **Not able to tell an ADDITION from a REVERSAL, and it says so.** A rule you reversed actively demanded the wrong choice in every segment converged under it; those genuinely need re-review. One global `style_contract_hash` cannot distinguish that from an append. This is exactly why the admission is an operator declaration — persistent in `profile.yml`, with each qualifying run recording the population it admitted — rather than a default, and why `--from-converged` re-review stays authorizable for these units (`style_contract_hash` is still a content-affecting field to `select_segments.py`).
+
+### Four gates, one predicate, or it is worse than useless
+
+Fixing `assemble.py` alone would have shipped nothing: W9 is gated on W7's `project_complete`, so the book stops one gate earlier. And admitting a unit at W7 makes reachable a path that was dead before — in the default `segment_drafts_and_audit` scope, `validate_assembled.py` would have skipped the same unit, contributed zero output markers for its declared headings, and HARD-failed the structural gate that runs before Deliver, with `validate_conservation.py` inheriting the same population. So the declaration is threaded through all four, and the predicate is tested as SET membership in every one of them: `ledger.schema.json` gives `stale_mismatched_fields` `minItems` but no `uniqueItems`, so a hand-edited `["style_contract_hash", "style_contract_hash"]` is schema-valid, and a list-equality test would have made one gate refuse what another admitted. A cross-gate parity test drives both predicates over one table rather than each against its own expectation.
+
+`validate_assembled.py` keeps its documented asymmetry: it does not read the sentinel, for this population any more than for the machinery-only one. Closing that would make it a SIXTH participant in the #409 sentinel contract, which `tests/select_segments.test.py`'s census refuses by construction — the participant count is written into that test's name so growth is a deliberate rename. The residual window (a sentinel vanishing between `final_audit.py` and that gate) is the same one the machinery-only population has accepted since 1.25.0.
+
+### One behaviour change, scoped to opted-in projects
+
+For a project that declares the admission, a contract-stale unit whose draft was hand-edited after review now aborts assembly with the draft-trust fatal (exit 1, "draft has changed since review") instead of the completeness refusal (exit 2, `project_incomplete`). Both refuse to ship; the fatal names the real cause. No undeclared project can reach the difference.
+
+### Corrections to shipped prose that were false before this release
+
+- **R9's timing clause** said an edit "landing after the last segment converges" re-stales the corpus and blocks W9. Every unit converged BEFORE the edit is blocked, whenever the edit lands; what timing buys is only that later segments carry the new hash. The advice (batch contract corrections early) survives; the reason it was given did not. Same sentence, same defect, in `style_bible.template.md`'s own E-traps note.
+- **`final_audit.py`'s ambiguous-sentinel docstring** justified reporting on stderr by claiming the summary schema's "bytes feed `schema_hash`", so adding a field would stale every converged segment. `compute_schema_hash()` hashes only the project-local `draft`/`review`/`segpack` schemas. The real cost is the resume digest, and it is much smaller — this release pays it and says so below.
+- **`references/assembly-and-output.md`** stated `project_complete == (every one of completeness_counts' five values == 0)`, which predated the #409 subtraction, and that only a `status: converged` segment assembles, false since 1.25.0. Both corrected, with both carve-outs named. Same false `project_complete` claim in `references/orchestration-and-batching.md`.
+
+### What it costs
+
+**No cache key moves.** None of the four edited scripts is in `PLUGIN_BUNDLE_MEMBERS`, so `plugin_bundle_hash` does not move; `compute_schema_hash()` does not cover the two schemas edited here; and the new `validation.*` key is not one of the 6 fields `compute_profile_semantics_hash()` hashes. Nothing re-translates, and no converged segment is reclassified.
+
+**The resume digest moves, at each project's next Step 0a re-scaffold and not before.** `resume_setup._schemas_dir_hash()` sha256s every `*.schema.json` in `${durable_root}/schemas/` — the COPY Step 0a writes, so an existing root pays nothing on upgrade. When it does re-scaffold, `input_digest` changes and an INTERRUPTED, unmerged run restarts; converged segments stay reusable through the cache key, which has not moved. That is the whole price, and it is unavoidable: `final-audit-summary.schema.json` is `additionalProperties: false` and its emitted summary is schema-validated by the suite, so naming the admitted segments requires editing it wherever the declaration itself lives.
+
 ## 1.40.0 — 2026-08-22
 
 **The reviewer was told what IS authoritative and never told what is not, so the artifact under review could become the standard it was reviewed against.** `reviewDispatchPrompt` states that a segpack's `canon_map` target form is authoritative as given. Nothing in it said that the draft's own `names[]` array and its `NEW:`-prefixed notes — written by the translator in the same turn as the prose, and classified by `draft.schema.json` itself as output feeding a WARN-only cross-segment check — carry no authority at all. Both artifacts sit in the reviewer's context with nothing separating them by status, so the reviewer could enforce the draft's own unratified proposal against that same draft and file a canon-shaped finding for a form present in neither `canon.json` nor the segment's `canon_map`. A canon-shaped finding is the least likely of all to be questioned before it is applied, because it cites a frozen authority. Closes #529.
