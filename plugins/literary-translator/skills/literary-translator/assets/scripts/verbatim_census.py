@@ -443,8 +443,20 @@ def _source_units(seg, src):
             continue
         units[label] = b["plain_text"]
     for f in src.get("footnotes") or []:
-        if isinstance(f, dict) and f.get("n") is not None:
-            units[f"footnotes:{f['n']}"] = f.get("source_text") or ""
+        if not isinstance(f, dict) or f.get("n") is None:
+            continue
+        label = f"footnotes:{f['n']}"
+        if label in units:
+            # Same refusal as duplicate block ids, and reachable for the same
+            # reason: validate_segpack() type-checks `n` but never asserts it
+            # is unique, so two footnotes numbered 1 are schema-valid. Letting
+            # the later one win would compare the draft against a source text
+            # chosen by list order.
+            raise CensusError(
+                f"segpack {seg}: duplicate footnote number {f['n']!r} -- "
+                "the source text to compare against is ambiguous"
+            )
+        units[label] = f.get("source_text") or ""
     return units, missing
 
 
@@ -459,6 +471,16 @@ def _draft_units(draft):
 
 def census(segs, segments_dir):
     """The census payload. Raises CensusError for every refusal."""
+    duplicates = sorted({s for s in segs if segs.count(s) > 1})
+    if duplicates:
+        # argparse's nargs="+" accepts a repeat. Aggregating one would need a
+        # rule for what a segment's counts MEAN when scanned twice; refusing
+        # keeps `totals` the sum of `per_segment` and `queued` the length of
+        # the queue, which is what the payload's own invariant rests on.
+        raise CensusError(
+            f"these segment ids are repeated: {duplicates}. Each segment is "
+            "scanned once; pass each id at most once."
+        )
     per_segment, queue, missing_all, source_runs_total = {}, [], [], 0
 
     for seg in segs:

@@ -159,8 +159,8 @@ def _test_function_count(filename):
 # advisory pointer was wrong is a reading result, not tree state.
 FIGURES = [
     Figure(
-        "adds 39 test functions",
-        39,
+        "adds 41 test functions",
+        41,
         lambda: _test_function_count("verbatim_census.test.py"),
     ),
 ]

@@ -2630,7 +2630,7 @@ Runs at W7 over every converged segment:
   `references/ledger-and-resumability.md`; `final_audit.py` is not one of
   them). Editing `final_audit.py` on its own
   never flips a cache key or the resume-integrity digest via either bundle.
-- **Verbatim-reproduction census (`scripts/verbatim_census.py`, 1.37.0, #502)
+- **Verbatim-reproduction census (`scripts/verbatim_census.py`, 1.42.0, #502)
   — OPERATOR-RUN, never dispatched.** Nothing else in this plugin compares
   source text a draft REPRODUCES (a quoted phrase, a name in its original
   script) against the segpack it came from: `validate_draft.py` compares key

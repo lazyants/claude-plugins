@@ -314,7 +314,7 @@ the segpack's `plain_text`.** A quoted Hebrew phrase inside an English draft
 can lose a letter and every check above stays green — measured on a real book
 at 206 letter-level differences across 4040 reproduced runs (#502).
 
-`scripts/verbatim_census.py` (1.37.0) covers that population, and it sits
+`scripts/verbatim_census.py` (1.42.0) covers that population, and it sits
 deliberately OUTSIDE the six checks rather than becoming a seventh:
 
 - **It is not a gate.** Exit `0` whenever the census ran, however long the

@@ -590,6 +590,40 @@ def test_a_malformed_segpack_exits_2_never_1(tmp_path):
     assert "malformed" in proc.stderr or "invalid" in proc.stderr
 
 
+def test_a_duplicate_footnote_number_is_refused(tmp_path):
+    """validate_segpack() type-checks `n` but never asserts uniqueness, so two
+    footnotes numbered 1 are schema-valid. Letting the later one win compared
+    the draft against a source text chosen by list order: the draft's exact
+    reproduction of the FIRST footnote came back `verbatim_other_unit`."""
+    seg = "seg01"
+    root = write_root(
+        tmp_path, seg,
+        make_segpack(seg, [("B1", "אבג")], footnotes=[(1, "אבג"), (1, "קרש")]),
+        make_draft(seg, [("B1", "אבג")], footnotes=[(1, "אבג")]),
+    )
+    proc = run_census(root, seg, expect_exit=2)
+    assert "duplicate footnote number" in proc.stderr
+
+
+def test_a_repeated_segment_argument_is_refused(tmp_path):
+    """`nargs="+"` accepts a repeat. Scanning the segment twice appended its
+    queue rows twice while OVERWRITING its per_segment counts, so
+    `queued == runs - verbatim` -- the invariant the field-check cast asserts
+    -- came out false."""
+    seg = "seg01"
+    root = write_root(
+        tmp_path, seg,
+        make_segpack(seg, [("B1", "אבג")]),
+        make_draft(seg, [("B1", "אבד")]),
+    )
+    proc = run_census(root, seg, seg, expect_exit=2)
+    assert "repeated" in proc.stderr
+    # and the single-pass form still holds the invariant it protects
+    payload = run_census(root, seg)
+    assert payload["totals"]["queued"] == (
+        payload["totals"]["runs"] - payload["totals"]["verbatim"])
+
+
 def test_a_path_unsafe_segment_id_is_refused(tmp_path):
     root = write_root(
         tmp_path, "seg01",
