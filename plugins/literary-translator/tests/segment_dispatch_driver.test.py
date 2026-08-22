@@ -6549,7 +6549,7 @@ def _squash(text):
 def test_review_dispatch_prompt_states_the_canon_authority_direction(tmp_path):
     """#529. The authority-direction rule reaches the REVIEWER's actual task
     text, and neither the translator's nor the fixer's. The fix turn has its OWN
-    apply-side canon rule since 1.36.0 (#532); this is the raise-side half, in the
+    apply-side canon rule since 1.37.0 (#532); this is the raise-side half, in the
     vocabulary of the only turn that files a finding."""
     # DRIVER, not a fixture copy, for the reason the #546 block states:
     # call_template_functions() reads only the template path out of `dirs`.

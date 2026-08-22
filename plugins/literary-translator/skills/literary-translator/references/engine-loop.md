@@ -238,7 +238,7 @@ steps below:
      and the strong-name detector can drop a canonized name from the segpack
      entirely, so an omitted name, an untranslated canonical name and a wrong
      identity stay raiseable exactly as before. Scoped to the reviewer by ROLE:
-     1.36.0 (#532) gave the FIX turn its own apply-side rule — a canon claim whose
+     1.37.0 (#532) gave the FIX turn its own apply-side rule — a canon claim whose
      form resolves in neither the segment's `canon_map` nor `canon.json` is refused —
      and this is the RAISE-side half of the same property, in the vocabulary of the
      only turn that files a finding. The two halves are independent on purpose: a

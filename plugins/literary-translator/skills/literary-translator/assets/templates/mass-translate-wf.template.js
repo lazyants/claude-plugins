@@ -1033,7 +1033,7 @@ function reviewDispatchPrompt(seg, roundLabel) {
   // nothing separating them by status, so it can enforce the draft's own unratified
   // proposal against that same draft and file a canon finding for a form that exists
   // nowhere -- measured twice, once applied and once used to REVERT a correct change.
-  // Scoped to THIS function by ROLE, not by symmetry. 1.36.0 (#532) gave the FIX
+  // Scoped to THIS function by ROLE, not by symmetry. 1.37.0 (#532) gave the FIX
   // turn its own apply-side rule -- a canon claim whose form resolves in neither
   // the segment's canon_map nor canon.json is refused -- so this text is the
   // RAISE-side half of the same property, in the vocabulary of the only turn that
