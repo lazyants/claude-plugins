@@ -1897,7 +1897,7 @@ class. The class survives it for two measured reasons:
    reach and that relocating an entry point does not narrow.
 2. **A per-command rewrite does not converge.** The invocations are not a
    closed set: they live in this file, in `references/`, in the three
-   `*_TASK.template.md` prompts and in the three workflow templates' own
+   per-pass TASK prompt templates and in the three workflow templates' own
    command builders, and a new one is added by any future dispatch. Trust
    that depends on every call site being spelled correctly is trust that
    silently lapses the first time one is not.
