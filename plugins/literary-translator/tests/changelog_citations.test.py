@@ -61,35 +61,24 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.34.0 (#550 -- the opt-in person registry) per the maintenance
-# contract above: each previous entry's map went with its entry, exactly as that
-# contract says it must. The entry this map supersedes is 1.33.1's, which was
-# EMPTY -- so nothing was dropped here, and that is worth saying, because an
-# empty predecessor is exactly the case where "the previous map went with its
-# entry" is indistinguishable from having forgotten to look. No earlier entry's
-# citations are carried forward or re-resolved -- carrying them would be
-# the renumber-preserves-the-wrongness failure this file exists to prevent, and
-# re-resolving them would pin a historical entry to line numbers it never
-# claimed.
+# Rewritten for 1.34.1 (#547 -- the style-contract edit's price) per the
+# maintenance contract above: 1.34.0's single `resume_setup.py:528-531` entry
+# went with its entry, exactly as that contract says it must. It is not carried
+# forward and not re-resolved against this tree -- carrying it would be the
+# renumber-preserves-the-wrongness failure this file exists to prevent, and
+# re-resolving it would pin a shipped entry to line numbers it never claimed.
 #
-# 1.34.0 cites exactly ONE `file.ext:NNN`, and it earns it: the whole reason the
-# registry ships no `profile.yml` knob is that a profile key would edit
-# `profile.schema.json`, whose copy under `${durable_root}/schemas/` is hashed
-# into `input_digest` by a glob that is NON-RECURSIVE -- and "non-recursive" is
-# the entire argument. It is also why the three registry schemas live under
-# `assets/schemas/registry/`. A reader who cannot see that glob has to take the
-# claim on faith, so the entry points at it and this map pins both the function
-# and the glob call, in order. Everything else in the entry names functions,
-# fields and constants instead, which is why this map is short rather than long.
-# Re-resolved against this tree when the branch was rebased, not carried over:
-# the same line numbers were right in two earlier bases too, and that kind of
-# reassurance is exactly what lets a stale citation survive a rebase.
-CITATION_ANCHORS = {
-    "resume_setup.py:528-531": [
-        "def _schemas_dir_hash",
-        "schemas_dir.glob(\"*.schema.json\")",
-    ],
-}
+# 1.34.1 cites NO `file.ext:NNN` at all, so this map is empty. That is a real
+# state and not a forgotten rotation: the entry is prose about two documentation
+# sites, and every source claim in it names a function, a constant or a field
+# instead of a line -- `assemble.py`'s machinery-only carve-out and the
+# `style_contract_hash` that sits outside it, `scaffold_validate.py`'s W1 gate,
+# `style_bible.template.md`'s section E-traps. A reader greps those; none of
+# them can drift the way a line number does, which is the only failure this
+# file detects. 1.33.1's map was empty for the same reason, so the precedent is
+# the entry BEFORE the one this supersedes -- worth saying, because an empty map
+# is exactly the case where a correct rotation and a skipped one look identical.
+CITATION_ANCHORS = {}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
 # alphabetic extension are still required. Pinning a list of extensions was

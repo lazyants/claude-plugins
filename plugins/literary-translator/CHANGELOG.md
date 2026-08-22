@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.34.1 — 2026-08-22
+
+Documentation only, at two sites. The marked bytes of `style_bible.md` are hashed into every segment's cache key, and the two places a reader learns that were each missing one half of the story. No runtime script bytes change — nothing under `assets/scripts/` is in the diff. Closes #547.
+
+### What was already there, and what was not
+
+R9 has stated the consequence since 1.26.0: a style-contract edit moves `style_contract_hash`, flips every already-converged segment to `stale`, is bookkeeping rather than an order to re-review anything, and — landing after the last segment converges — re-stales the corpus and blocks W9 assembly. The issue's claim that *nothing* discloses the cost was wrong against shipped source, and is not what this release fixes.
+
+Two things were genuinely missing:
+
+- **The authoring site said the byte-scope and not the price.** Step 0a's marker guidance told the reader that `STYLE_CONTRACT_BEGIN`/`STYLE_CONTRACT_END` define the `style_contract_hash` byte-scope and that `scaffold_validate.py` enforces the markers — and stopped there. A reader arriving at the contract to edit it read the mechanism with no pointer to the rule that prices it. It now names the flip, states R9's policy, and — because routing to the policy alone would disclose only half the price — names the enforced half beside it: `assemble.py` puts `style_contract_hash` outside its machinery-only carve-out, so W9 refuses each flipped unit until it converges again.
+- **The batching rule had no general home.** The shipped `style_bible.template.md` already tells the operator to collect traps in `consistency_issues.md` and promote them "in one batch at a batch boundary" — but that paragraph sits under section E-traps and governs E-traps, with section F opting in by explicit reference. Sections A–D are inside the same hashed span and inherited nothing. R9 now carries the rule for the whole marked span.
+
+R9's new sentence also says which quantity actually costs: the hash covers the file's current bytes, so corrections landed together before the loop resumes cost one flip between them, while the same corrections interleaved with reconvergence cost a flip each. The number of editor operations is not the unit.
+
+### What it does not do
+
+- **`style_bible.md` is still not a gated frozen input.** `canon.json`, `manifest.json` and `canon_senses.json` go through one gated, tamper-checked capture step; the style contract does not, and this release does not add it. That machinery would defend the operator against a file they author by interview and edit deliberately, and it removes no consequence R9 already discloses.
+- **The assembly refusal is unchanged.** The W9 refusal named above is the enforced half, and this release changes nothing about the gate — it only discloses it at the authoring site. The gap between it and R9's "no back-sweep is owed" prose is tracked in #533, which stays open; the decision settled there is deliberately not re-opened.
+- **No script prints a warning.** The issue suggested one from whatever validates the contract; `scaffold_validate.py` runs at the W1 gate before W2 can start, and no later pipeline stage re-invokes it when the style contract changes — so the one automated caller is not where the cost is incurred. Its standalone CLI can be re-run by hand at any time; nothing does so on a contract edit.
+
 ## 1.34.0 — 2026-08-18
 
 **W9r, an opt-in person registry, for books translated *for* something other than the translation.** When the deliverable a project's owner actually wants is genealogy, the question they need answered is "how many distinct people are in this book, which name forms are the same person, what does the book print them as, and how are they related" — and nothing here answered it: `canon.json` is a 1:1 name-form → target-form dictionary with **no entity model**, by design. `scripts/person_registry.py` consolidates what the pipeline already produced into a person-keyed registry: one record per human being, every source form and alias, the target renderings *as actually printed* with counts taken from the assembled text, typed kinship each carrying the sentence it was derived from, places and dates where stated, mention locations, and an identity-contested flag kept separate from the mention count. Closes #550.

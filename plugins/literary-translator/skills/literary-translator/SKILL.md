@@ -774,7 +774,13 @@ here, follow the linked doc:
   converge AFTER the edit carry the new hash and are unaffected, so make
   contract edits while the loop is still running — an edit landing after the
   last segment converges re-stales the corpus and blocks W9 assembly, buying
-  nothing but a re-run for the stamp.
+  nothing but a re-run for the stamp. The move is in the BYTES, not in the
+  number of edits: corrections landed together before the loop resumes cost
+  one flip for all of them, while the same corrections interleaved with
+  reconvergence cost a flip each. So hold pending contract corrections and
+  land them in one edit at a batch boundary — the shipped
+  `style_bible.template.md` says this under section E-traps; it holds for
+  the whole marked span.
 - **R10 — A previous volume is not an input. A new volume takes from exactly
   three places, and the finished book beside it is none of them.** When a series
   gets its next volume, a completed durable root is usually sitting in the same
@@ -1113,7 +1119,12 @@ output. The shipped template already wraps sections A–F in
 `STYLE_CONTRACT_BEGIN`/`STYLE_CONTRACT_END` markers -- keep them (do not
 delete, duplicate, or reorder them): they define the `style_contract_hash`
 byte-scope, and `scaffold_validate.py` now enforces exactly one of each, in
-order.
+order. That byte-scope is also the price list: every later edit inside the
+markers moves `style_contract_hash`, and the next stale-check flips every
+still-converged segment to `stale`. **R9** gives the policy -- no back-sweep
+is owed -- but not the whole price: a moved `style_contract_hash` sits
+outside `assemble.py`'s machinery-only carve-out, so W9 refuses each flipped
+unit until it converges again (`#533`).
 
 **The pre-merge citation review** gates whether a batch counts as ready at
 all. Under `research_mode: live`, every `basis:"established"` item's `source`
