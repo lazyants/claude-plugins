@@ -4501,16 +4501,18 @@ def _rejection_record(seg: str, segments_dir: Path, review_obj: dict) -> "dict |
     disk has not been rewritten since -- which is the same thing rules 5+6
     are trying to say, made true again after a token can repeat.
 
-    #527 NARROWS THAT rather than contradicting it, and the distinction
-    matters because this is a REPLAY rule. Consumption is still once per
-    review; what changed is that the `final` outcome no longer PRODUCES a
-    replacement review, so nothing rewrites review.json and nothing spends
-    the record. It then keeps matching -- but every re-derivation reaches
-    the identical terminal convergence over the identical unchanged draft,
-    so what it authorizes repeatedly is one already-recorded fact, not a
-    repeated action, and it stops the moment the draft moves. What rule 8
-    exists to prevent -- one operator decision buying unbounded codex spend
-    -- is not reachable through that door.
+    #527 BREAKS THE "exactly ONCE" HALF OF THAT AT `final`, and says so
+    rather than narrowing the words until they still fit. The `final`
+    outcome no longer produces a replacement review, so nothing rewrites
+    review.json and nothing spends the record: it stays REPLAYABLE, and
+    every later invocation over the same review and draft authorizes another
+    convergence write. Those writes are idempotent in content (same status,
+    rounds and reviewed_draft_sha1; the timestamp and recomputed cache_key
+    make the bytes differ), they spend no codex job, and they cannot touch
+    the draft -- so what rule 8 exists to prevent, one operator decision
+    buying unbounded spend, is still prevented. Replayability ends the
+    moment the draft moves, which is the condition the attestation is
+    about.
 
     Compared with `>` and not `>=` (st_mtime_ns, the same primitive
     _translate_redispatched_since() already uses for "did this driver act
@@ -4695,6 +4697,15 @@ def _rejection_convergence_note(seg: str, record: dict) -> str:
     say so would be indistinguishable, forever, from one whose reviewer
     actually returned clean. The stored review sitting beside it says
     clean:false, so without this note the pair reads as corruption.
+
+    QUOTED, NOT MERELY POINTED AT, and that is load-bearing rather than
+    generous: the record this note names can legitimately be gone by the
+    time anyone reads the note. reject_review.py publishes with os.replace()
+    and only then learns whether the directory sync succeeded; on a failure
+    it unlinks the record and reports failure, while a driver that read it
+    in between has already converged. Carrying the reason and the timestamp
+    IN the ledger means the audit trail survives that, and the path stays a
+    convenience rather than the only copy.
 
     Whitespace is collapsed because a reason can carry newlines and the note
     is a single JSON string field."""

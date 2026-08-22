@@ -1288,10 +1288,16 @@ def main():
             # here is the incomplete-coverage case: the consumer sent that
             # verdict back for a fresh review, the review came back over the
             # SAME draft with the same verdict, and the operator is rejecting
-            # it again. The moved-draft fall-through does NOT arrive here --
-            # its replacement review carries a different draft_sha1, so the
-            # whole-review digest differs and this branch is never entered;
-            # that is an ordinary fresh rejection, not a renewal. Without the
+            # it again. The moved-draft fall-through does not ORDINARILY
+            # arrive here -- its replacement review carries a different
+            # draft_sha1, so the whole-review digest differs and this is an
+            # ordinary fresh rejection rather than a renewal. The exception
+            # is an ABA: a draft edited away and then restored to its
+            # original bytes before the replacement review is promoted
+            # produces the same draft_sha1, the same token and the same
+            # digest, and does enter this branch. Safe either way -- the
+            # verdict it renews is byte-identical to the one the operator
+            # already judged -- but "never" would have been false. Without the
             # branch below, the operator who wants to reject the replacement
             # too is dead-ended: the identical reason returns success and
             # rewrites nothing, a different reason refuses as a conflict, and
