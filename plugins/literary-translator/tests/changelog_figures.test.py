@@ -144,24 +144,35 @@ def _test_function_count(filename):
     )
 
 
-# Rewritten for 1.42.0 (#502), per the maintenance contract above.
+# Rewritten for 1.45.0 (#488), per the maintenance contract above. 1.42.0's row
+# (#502) retires with its entry; `_tuple_len` comes back into use here after
+# several releases idle, which is why both helpers are kept when unused.
 #
-# One row, because 1.42.0 states exactly one figure this tree can answer: how
-# many test functions the file covering the change holds. Everything else that
-# entry counts is a CORPUS measurement -- 4040 reproduced Hebrew runs, 3003
-# byte-identical, 831 pointing-only, 206 letter-level, 40 of 42 segments, and
-# the 140 corrections the field trial proposed -- taken from an operator-owned
-# durable root that is not in this repository and is not reachable from any
-# check here. Those are the accepted residual this file's docstring names, not
-# an oversight: declaring one would mean hardcoding its answer, which passes
-# every assertion below while proving nothing (`lambda: 4040`). The "112 of
-# 112" vacuous-screen figure is the same kind, and the "four times" the
-# advisory pointer was wrong is a reading result, not tree state.
+# Two rows, because 1.45.0 states exactly two tree-derivable figures: how many
+# test functions the file covering the change holds, and the size of the script
+# tuple whose hash this release admits it moves. The entry's remaining numbers
+# are of three kinds, none declarable. The suite totals (6094 -> 6137) are a
+# whole-run measurement this file cannot take without running the suite from
+# inside it (6094 -> 6137 passing, the delta being this release's own 43
+# collected tests). The corpus figures -- `Notre-Dame` split three ways across seg17 /
+# seg27 / seg49, 3884 candidate names, a longest of 62 characters, zero past the
+# cap, and the 81-unit book the refused prompt-contract bump would have re-reviewed
+# -- come from an operator-owned durable root that is not in this repository and
+# is not reachable from any check here; declaring one would mean hardcoding its
+# answer, which passes every assertion below while proving nothing
+# (`lambda: 3884`). And the schema/member counts quoted in prose ("one of the
+# three project-local schemas", "the 2 scripts") are named constants the suite
+# already drives, except the one declared below.
 FIGURES = [
     Figure(
-        "adds 41 test functions",
-        41,
-        lambda: _test_function_count("verbatim_census.test.py"),
+        "adds 42 test functions",
+        42,
+        lambda: _test_function_count("segpack_split_names_delivery.test.py"),
+    ),
+    Figure(
+        "one of the 2 scripts `compute_derivation_bundle_hash()` hashes",
+        2,
+        lambda: _tuple_len("cache_key.py", "DERIVATION_BUNDLE_MEMBERS"),
     ),
 ]
 

@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.45.0 — 2026-08-22
+
+**`canon_senses.json` is the only sanctioned answer to a homonym, and the one artifact the translator and reviewer actually open never mentioned it.** A source form denoting two or more distinct referents cannot be canonized as one bare `canon.json` entry: `canon_validate.py`'s merge guard refuses to create one (`recollapse`), and the mandatory pre-W3a audit halts on any that predates the sidecar (`collapsed_split`). `segpack.py` read the sidecar zero times, so every split form fell through `build_pack()`'s `entry is None` branch into `new_names` and reached the translator as an UNRESOLVED NEW NAME — the wrong constraint removed and the right one never delivered. Measured on the live fr→ru book before the fix: `Notre-Dame`, split three ways in the sidecar (the cathedral, the island, the Virgin) and verified there with the project's own `evidence_verify.verify_senses`, sat in `new_names` in seg17, seg27 and seg49 and in neither `canon_names` nor `canon_map`. Closes #488.
+
+`build_pack()` now reads the sidecar through `canon_senses.load_senses` — never a private partial reader — and emits a new required `split_names` block: source form → the adjudicated senses, each as `sense_id` / `disambiguator` / `index_scope`. Keys are a subset of `names` and appear in NEITHER `canon_names` NOR `new_names`; a form is exactly one of canonized, split, or unresolved.
+
+### What it deliberately is not
+
+- **Not a per-occurrence resolution inside `canon_map`.** That map is source form → ONE string, and `validate_segpack()` requires its keys to be a subset of `canon_names`. Resolving per occurrence needs `occ_index` offsets threaded into the segpack, which is strictly more than what removes the consequence.
+- **Not a per-sense target form, because none exists anywhere in the contract.** `canon-senses.schema.json`'s sense object is `additionalProperties:false` over `sense_id`/`disambiguator`/`index_scope`/`evidence`. A consumer picks the sense the passage carries by its disambiguator and records the rendering as a `NEW:` note; a reviewer may argue the WRONG SENSE was chosen, but may never prescribe a canonical target form at a split name, there being no frozen canon there to quote. The prompts now say exactly that, in both directions.
+- **Not a stricter domain than the sidecar it projects.** `disambiguator` is validated as a string and deliberately NOT as a non-empty string: upstream, only `sense_id` carries a non-blank pattern. Requiring non-empty here would turn a loadable, schema-valid sidecar into a FATAL W3a preflight failure with no way to satisfy both files.
+- **Not evidence.** The sense's `block`/`seg`/offsets/`sha256` stay out of the segpack; they exist for `evidence_verify.py`, not for choosing a referent, and copying them would bloat every segment's input.
+- **Not a new prompt-contract version.** Bumping `CURRENT_PROMPT_CONTRACT_VERSION` was considered and refused. Nothing in an existing hand-adapted task file becomes FALSE — `split_names` adds an input class those files do not mention, which is incomplete, not stale — while the bump would FATAL every resumed project until its task files were re-adopted, and re-adopting them moves `prompt_hash`, which is NOT in the machinery-only carve-out. That would convert every converged unit's staleness from admitted-and-shippable into a whole-corpus re-review, on a live book of 81 units, to deliver a field that today concerns one name.
+
+### Where the instruction actually reaches an existing project
+
+Step 0a copies `translate_TASK.md` / `review_TASK.md` / `style_bible.md` ONCE and never re-copies them, but re-instantiates the workflow templates fresh every run. So the three generated prompts are the only route to a resumed project, and all three now carry the split case: `translatePrompt()` (choose the sense per occurrence, flag it `NEW:`), `reviewDispatchPrompt()` (a split form is absent from `canon_map` and `canon.json` BY DESIGN — do not report it as uncanonized, do not prescribe a target form, DO report a wrong sense) and `fixPrompt()` (check `split_names` before refusing a finding on the ground that its form resolves in neither).
+
+**Disclosed residual:** on a project scaffolded before this release, the durable `translate_TASK.md`, `review_TASK.md` and `style_bible.md` will not mention `split_names` until the operator chooses to update them. They contradict nothing; the generated dispatch prompt supersedes them on any point of conflict, and it is complete. The updated seed templates reach new projects from Step 0a.
+
+### What it costs
+
+Three GLOBAL cache-key fields move, and the moved set is exactly the machinery-only carve-out, so **nothing re-translates and nothing needs re-review**: `derivation_bundle_hash` (`segpack.py` is one of the 2 scripts `compute_derivation_bundle_hash()` hashes), `schema_hash` (`segpack.schema.json` is one of the three project-local schemas it covers) and `plugin_bundle_hash` (`canon_senses.py`, `canon_validate.py` and `mass-translate-wf.template.js` are all bundle members). Every converged segment in every project therefore reclassifies `stale` at the next Step 0a refresh, and W7 and W9 go on admitting all of them under the allowlist they have used since 1.25.0.
+
+`used_terms_hash` does NOT move for a form that migrates out of `new_names`: `compute_used_terms_hash()` unions `canon_names | new_names` and then keeps only the names actually present in `canon.entries`, and a split form never is one. Pinned as a characterization rather than claimed.
+
+**One hard failure is newly reachable, loudly:** `verbatim_census.py` (1.42.0) runs `validate_segpack()` over segpacks read from disk, so a root whose `segments/` predate this release is refused by name until `segpack.py` is re-run. That is the same "a missing OR invalid segpack is a FATAL W3a preflight error" stance the script has always taken, and the refresh this release forces anyway rebuilds them.
+
+### Known blind spot, pinned rather than papered over
+
+Both the sidecar lookup and the `canon.json` lookup beside it are keyed on the candidate string exactly as `extract_candidates()` emitted it. For a candidate past `bootstrap_names`' character cap that string carries a truncation marker, so it matches neither key and a capped split form still lands in `new_names`. The blindness is pre-existing and shared identically by the canon lookup; teaching only the sidecar lookup to match a capped representation would make it strictly more capable than its neighbour, which is the half-fix shape #383 already records. Measured population at the time of writing: of 3884 candidate names in the live fr→ru corpus, zero exceed the cap (the longest is 62 characters). Characterized by test, and a comment at the call site names the shared class.
+
+Suite 6094 → 6137 passing; `tests/segpack_split_names_delivery.test.py` adds 42 test functions. Five existing suites gained the new required field in their hand-built segpack fixtures, and `seg_safety_segpack.test.py`'s durable-root scaffolds now copy `canon_senses.py` the way Step 0a really does.
+
 ## 1.42.0 — 2026-08-22
 
 **Nothing compared the source text a draft quotes back to the source it came from.** `validate_draft.py` validates a draft against its canonical segpack, but over KEY SETS plus placeholder and anchor rules; `validate_conservation.py` is a different, opt-in gate and is word-multiset by design. So a Hebrew phrase quoted inside an English draft could lose a letter, a diacritic or a whole character while every gate stayed green. Measured on a real book (`ssk-he-en` vol.2, 42 drafts): 4040 reproduced Hebrew runs, 3003 byte-identical, 831 differing only in pointing, 206 differing in LETTERS, across 40 of 42 segments. Adds `scripts/verbatim_census.py`. Closes #502.
