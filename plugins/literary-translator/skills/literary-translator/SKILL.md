@@ -779,7 +779,7 @@ here, follow the linked doc:
   The mechanical `converged → stale` flip that follows the edit is a
   bookkeeping consequence of `style_contract_hash` being a cache-key field
   (`references/ledger-and-resumability.md`), not evidence that any prose needs
-  rechecking. **Since 1.40.0 the tooling can be told to agree** — set
+  rechecking. **Since 1.41.0 the tooling can be told to agree** — set
   `validation.admit_contract_only_stale: true` in `profile.yml` and both the W7
   completeness gate and W9 assembly admit a flipped unit whose `.ever_converged`
   sentinel is not ABSENT (an unreadable or dangling one carves out like a
@@ -1146,7 +1146,7 @@ byte-scope, and `scaffold_validate.py` now enforces exactly one of each, in
 order. That byte-scope is also the price list: every later edit inside the
 markers moves `style_contract_hash`, and the next stale-check flips every
 still-converged segment to `stale`. **R9** gives the policy -- no back-sweep
-is owed -- and since **1.40.0** the tooling can be told the same thing. A moved
+is owed -- and since **1.41.0** the tooling can be told the same thing. A moved
 `style_contract_hash` still sits outside the machinery-only carve-out (that set
 means "can never change what the prose should say", which is false for a
 contract), so undeclared, W7's completeness gate and W9's assembly refuse each

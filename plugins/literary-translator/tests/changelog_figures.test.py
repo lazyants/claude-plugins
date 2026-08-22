@@ -193,8 +193,9 @@ def _local_dict_len(filename, funcname, varname):
 
 
 # Rewritten for 1.41.0 (#533), per the maintenance contract above. The rows of
-# every release this one was renumbered past -- 1.37.0 (#532), 1.38.0 (#538)
-# and 1.39.0 (#539) -- retire with their entries; `_tuple_len` and
+# every release this one was renumbered past -- 1.37.0 (#532), 1.38.0 (#538),
+# 1.39.0 (#539) and 1.40.0 (#529, a peer session's, reserved by agreement
+# rather than raced for) -- retire with their entries; `_tuple_len` and
 # `_test_function_count` are kept unused, as those releases kept them, for the
 # next entry that cites their class.
 #
