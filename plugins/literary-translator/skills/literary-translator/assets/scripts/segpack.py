@@ -560,14 +560,14 @@ def build_pack(seg_id, manifest, canon, lang_config, apparatus_policy, senses=No
     split_names = {}
     for name in strong_names:
         if senses is not None and is_split(senses, name):
-            entry = senses_for(senses, name)
+            sense_entry = senses_for(senses, name)
             split_names[name] = [
                 {
                     "sense_id": s["sense_id"],
                     "disambiguator": s["disambiguator"],
                     "index_scope": s["index_scope"],
                 }
-                for s in entry["senses"]
+                for s in sense_entry["senses"]
             ]
             continue
         entry = canon_entries.get(name)
@@ -751,24 +751,27 @@ def validate_segpack(pack, seg_id=None):
     else:
         names_val = pack.get("names")
         names_set = set(names_val) if isinstance(names_val, list) else None
-        canon_names_val = pack.get("canon_names")
-        new_names_val = pack.get("new_names")
-        claimed = set()
-        for field, val in (("canon_names", canon_names_val), ("new_names", new_names_val)):
+        # source_form -> the field name(s) that already claim it. One mapping
+        # rather than a membership set plus a rescan: the disjointness test and
+        # the "which other list" the error names are the same lookup.
+        claimed = {}
+        for field in ("canon_names", "new_names"):
+            val = pack.get(field)
             if isinstance(val, list):
-                claimed |= {(x, field) for x in val if isinstance(x, str)}
-        claimed_forms = {x for x, _ in claimed}
+                for x in val:
+                    if isinstance(x, str):
+                        claimed.setdefault(x, set()).add(field)
         for k, senses_list in sn.items():
             if not isinstance(k, str) or not k:
                 errors.append(f"segpack {label}: 'split_names' has a non-string/empty key {k!r}")
                 continue
             if names_set is not None and k not in names_set:
                 errors.append(f"segpack {label}: 'split_names' key {k!r} is not in 'names'")
-            if k in claimed_forms:
-                other = sorted(field for x, field in claimed if x == k)
+            other = claimed.get(k)
+            if other:
                 errors.append(
                     f"segpack {label}: 'split_names' key {k!r} must not also appear in "
-                    f"{other} -- an adjudicated split is neither canonized nor unresolved"
+                    f"{sorted(other)} -- an adjudicated split is neither canonized nor unresolved"
                 )
             if not isinstance(senses_list, list):
                 errors.append(f"segpack {label}: split_names[{k!r}] must be an array")

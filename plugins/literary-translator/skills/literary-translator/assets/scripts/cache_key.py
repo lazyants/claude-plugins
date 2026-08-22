@@ -629,11 +629,44 @@ def load_canon(durable_root: Path) -> dict:
 
 
 def compute_used_terms_hash(durable_root: Path, segpack: dict) -> str:
+    """The per-segment digest of the frozen naming decisions this segment's
+    translator was actually given.
+
+    #488: `split_names` participates, and it has to. A homonym split is the one
+    naming decision that reaches the translator from OUTSIDE canon.json -- it
+    is absent from `entries{}` by construction (canon_validate.py refuses to
+    recollapse a split into a bare entry), so the canon projection below cannot
+    see it. Without this, adding a split to canon_senses.json, or editing a
+    sense's disambiguator afterwards, would change what the translator is told
+    while every per-segment key stayed put. The three GLOBAL fields that DO
+    move on a plugin upgrade -- plugin_bundle_hash, schema_hash,
+    derivation_bundle_hash -- are exactly the machinery-only carve-out, i.e.
+    the set whose whole meaning is "can never change what the prose should
+    say"; a sidecar edit is not that, so it must land on a field that is NOT
+    carved out, and `used_terms_hash` is per-segment, so only the segments that
+    actually contain the split form are affected.
+
+    The payload keeps its historical SHAPE whenever `split_names` is empty --
+    the bare canon projection, byte for byte -- so a project with no
+    adjudicated homonym sees no hash movement at all from this change, and only
+    a segment genuinely carrying a split is reclassified. That equality is NOT
+    optional bookkeeping: `used_terms_hash` is outside the machinery-only
+    carve-out, so moving it for every segment would demand a whole-corpus
+    re-review rather than an admitted stale. It is pinned against an
+    independently restated pre-#488 digest in
+    tests/segpack_split_names_delivery.test.py -- comparing two calls of THIS
+    function to each other would prove only self-consistency, and an
+    unconditional wrapper would pass that."""
     canon = load_canon(durable_root)
     entries = canon.get("entries", {})
     names = sorted(set(segpack.get("canon_names", [])) | set(segpack.get("new_names", [])))
     referenced = {name: entries[name] for name in names if name in entries}
-    return sha1_hex(canonical_json_bytes(referenced))
+    splits = segpack.get("split_names") or {}
+    if not splits:
+        return sha1_hex(canonical_json_bytes(referenced))
+    return sha1_hex(
+        canonical_json_bytes({"canon_entries": referenced, "split_names": splits})
+    )
 
 
 def compute_verse_map_hash(segpack: dict) -> str:

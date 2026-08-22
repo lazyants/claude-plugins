@@ -39,8 +39,9 @@ This suite locks down:
      cannot silently reappear on the production path), and a MALFORMED
      sidecar is FATAL rather than a silent "no splits".
   5. The four prompt sites that tell a consumer what the field means.
-  6. Characterization, not a fix: `used_terms_hash` does not move when a form
-     migrates from `new_names` to `split_names`.
+  6. `used_terms_hash` IS invalidation-load-bearing for `split_names`: it moves
+     when a form becomes split and when a disambiguator is re-glossed, and is
+     byte-identical to a pre-#488 segpack's when there is no split at all.
   7. Characterization, not a fix: a candidate long enough to be CAPPED by
      `bootstrap_names._capped_candidate_name` does not match its own full
      sidecar key -- exactly as it already fails to match its own `canon.json`
@@ -440,16 +441,38 @@ def test_validate_segpack_rejects_split_names_key_not_in_names():
     assert any("is not in 'names'" in e for e in errors), errors
 
 
-def test_validate_segpack_rejects_split_names_key_also_in_new_names():
-    pack = _pack_with_split_names(new_names=(SPLIT_FORM,), names=[SPLIT_FORM])
-    errors = SEGPACK_MODULE.validate_segpack(pack)
-    assert any("must not also appear in" in e for e in errors), errors
+@pytest.mark.parametrize(
+    "field, other_lists",
+    [
+        ("new_names", "['new_names']"),
+        ("canon_names", "['canon_names']"),
+        ("both", "['canon_names', 'new_names']"),
+    ],
+)
+def test_validate_segpack_rejects_split_names_key_claimed_by_another_list(field, other_lists):
+    """The error must NAME the colliding list, not merely report a collision:
+    that name is the whole diagnostic value when a producer files one form in
+    two places, and nothing else pins it."""
+    kwargs = {"names": [SPLIT_FORM]}
+    if field in ("new_names", "both"):
+        kwargs["new_names"] = (SPLIT_FORM,)
+    if field in ("canon_names", "both"):
+        kwargs["canon_names"] = (SPLIT_FORM,)
+    errors = SEGPACK_MODULE.validate_segpack(_pack_with_split_names(**kwargs))
+    assert any(
+        f"'split_names' key {SPLIT_FORM!r} must not also appear in {other_lists}" in e
+        for e in errors
+    ), errors
 
 
-def test_validate_segpack_rejects_split_names_key_also_in_canon_names():
-    pack = _pack_with_split_names(canon_names=(SPLIT_FORM,), names=[SPLIT_FORM])
+def test_validate_segpack_collision_check_ignores_a_non_string_list_member():
+    """A non-string entry alongside the form must not swallow the collision --
+    the claimed-by map is built by skipping non-strings, and skipping the whole
+    LIST instead would silently admit the shape this rule exists to refuse."""
+    pack = _pack_with_split_names(names=[SPLIT_FORM])
+    pack["new_names"] = [SPLIT_FORM, 7]
     errors = SEGPACK_MODULE.validate_segpack(pack)
-    assert any("must not also appear in" in e for e in errors), errors
+    assert any("must not also appear in ['new_names']" in e for e in errors), errors
 
 
 def test_validate_segpack_rejects_fewer_than_two_senses():
@@ -671,33 +694,102 @@ def test_main_treats_an_unreadable_sidecar_as_fatal(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 6. CHARACTERIZATION, not a fix: used_terms_hash does not move.
+# 6. used_terms_hash IS invalidation-load-bearing for split_names (#488).
 #
-#    This assertion passes on the UNMODIFIED implementation too -- it is a
-#    recorded cost claim, not a RED-before-green delivery test. What it pins
-#    is that the two packs differ in MEMBERSHIP while the canon projection
-#    compute_used_terms_hash actually reads stays identical, which is what
-#    makes "no per-segment staleness" true rather than merely asserted.
+#    A homonym split is the one naming decision reaching the translator from
+#    OUTSIDE canon.json, so the canon projection cannot see it. If it did not
+#    participate here, adding a split -- or editing a disambiguator afterwards
+#    -- would change what the translator is told while every per-segment key
+#    stayed put, and the only fields that DO move on a plugin upgrade are the
+#    machinery-only carve-out, whose meaning is "can never change what the
+#    prose should say". These are RED-before-green: each was watched failing
+#    against the unmodified compute_used_terms_hash.
 # ---------------------------------------------------------------------------
 
 
-def test_used_terms_hash_is_unchanged_when_a_form_moves_to_split_names(tmp_path):
-    root = tmp_path / "root"
+def _canon_root(tmp_path):
+    root = tmp_path / "canonroot"
     root.mkdir()
     (root / "canon.json").write_text(
         json.dumps(_canon_without_the_split_form(), ensure_ascii=False), encoding="utf-8"
     )
+    return root
 
+
+def _senses_block(disambiguator="the cathedral"):
+    return [
+        {"sense_id": "cathedral", "disambiguator": disambiguator, "index_scope": "narrative"},
+        {"sense_id": "virgin", "disambiguator": "the Virgin", "index_scope": "allusion"},
+    ]
+
+
+def test_used_terms_hash_moves_when_a_form_becomes_split(tmp_path):
+    """The #488 case itself: a form the translator was told was an unresolved
+    NEW name is now delivered as an adjudicated split. That is a different
+    instruction, so the segment must be reclassified."""
+    root = _canon_root(tmp_path)
     before = _pack_with_split_names(
         split_names={}, new_names=(SPLIT_FORM, PLAIN_FORM), names=[SPLIT_FORM, PLAIN_FORM]
     )
-    after = _pack_with_split_names(new_names=(PLAIN_FORM,), names=[SPLIT_FORM, PLAIN_FORM])
-
-    assert set(before["new_names"]) != set(after["new_names"]), "fixture proves nothing"
-    assert set(before["split_names"]) != set(after["split_names"]), "fixture proves nothing"
-
-    assert CACHE_KEY_MODULE.compute_used_terms_hash(root, before) == \
+    after = _pack_with_split_names(
+        split_names={SPLIT_FORM: _senses_block()},
+        new_names=(PLAIN_FORM,), names=[SPLIT_FORM, PLAIN_FORM],
+    )
+    assert CACHE_KEY_MODULE.compute_used_terms_hash(root, before) != \
         CACHE_KEY_MODULE.compute_used_terms_hash(root, after)
+
+
+def test_used_terms_hash_moves_when_a_disambiguator_is_edited(tmp_path):
+    """The sidecar is not hashed anywhere in the segment cache key, so an
+    operator re-glossing a sense after convergence would otherwise be
+    invisible to every gate."""
+    root = _canon_root(tmp_path)
+    a = _pack_with_split_names(split_names={SPLIT_FORM: _senses_block("the cathedral")},
+                               names=[SPLIT_FORM])
+    b = _pack_with_split_names(split_names={SPLIT_FORM: _senses_block("the island")},
+                               names=[SPLIT_FORM])
+    assert CACHE_KEY_MODULE.compute_used_terms_hash(root, a) != \
+        CACHE_KEY_MODULE.compute_used_terms_hash(root, b)
+
+
+def _historical_used_terms_hash(root, pack):
+    """The PRE-#488 algorithm, restated here independently of the shipped
+    function: sha1 over the canonical JSON of the canon entries this segment's
+    canon_names/new_names actually reference.
+
+    Restated rather than imported on purpose. Comparing two calls of the
+    CURRENT function to each other proves only that it is self-consistent --
+    an unconditional two-key wrapper would hash both an empty and an absent
+    `split_names` identically and keep such a test green while every no-split
+    segment in every project silently moved. The guarantee being defended is
+    equality with the OLD digest, so the old digest has to be computed by
+    something that cannot drift with the new code."""
+    canon = json.loads((root / "canon.json").read_text(encoding="utf-8"))
+    entries = canon.get("entries", {})
+    names = sorted(set(pack.get("canon_names", [])) | set(pack.get("new_names", [])))
+    referenced = {name: entries[name] for name in names if name in entries}
+    return CACHE_KEY_MODULE.sha1_hex(CACHE_KEY_MODULE.canonical_json_bytes(referenced))
+
+
+@pytest.mark.parametrize("shape", ["empty_field", "absent_field"])
+def test_used_terms_hash_equals_the_historical_digest_when_there_is_no_split(tmp_path, shape):
+    """The compatibility half, and the whole reason this costs almost nothing:
+    with no split the payload keeps its historical SHAPE, so a project with no
+    adjudicated homonym sees no movement from this change at all -- and
+    `used_terms_hash` is NOT in the machinery-only carve-out, so any movement
+    here would mean a whole-corpus re-review rather than an admitted stale.
+
+    Both shapes are checked: `split_names: {}` as this release emits it, and no
+    `split_names` key at all, which is what a segpack written before #488 and
+    still on disk looks like."""
+    root = _canon_root(tmp_path)
+    pack = _pack_with_split_names(
+        split_names={}, new_names=(PLAIN_FORM,), names=[PLAIN_FORM]
+    )
+    if shape == "absent_field":
+        pack = {k: v for k, v in pack.items() if k != "split_names"}
+    assert CACHE_KEY_MODULE.compute_used_terms_hash(root, pack) == \
+        _historical_used_terms_hash(root, pack)
 
 
 # ---------------------------------------------------------------------------

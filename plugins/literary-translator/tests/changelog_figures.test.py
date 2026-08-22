@@ -151,9 +151,9 @@ def _test_function_count(filename):
 # Two rows, because 1.45.0 states exactly two tree-derivable figures: how many
 # test functions the file covering the change holds, and the size of the script
 # tuple whose hash this release admits it moves. The entry's remaining numbers
-# are of three kinds, none declarable. The suite totals (6094 -> 6138) are a
+# are of three kinds, none declarable. The suite totals (6094 -> 6143) are a
 # whole-run measurement this file cannot take without running the suite from
-# inside it (6094 -> 6138 passing, the delta being this release's own 44
+# inside it (6094 -> 6143 passing, the delta being this release's own 49
 # collected tests). The corpus figures -- `Notre-Dame` split three ways across seg17 /
 # seg27 / seg49, 3884 candidate names, a longest of 62 characters, zero past the
 # cap, and the 81-unit book the refused prompt-contract bump would have re-reviewed
@@ -165,8 +165,8 @@ def _test_function_count(filename):
 # already drives, except the one declared below.
 FIGURES = [
     Figure(
-        "adds 43 test functions",
-        43,
+        "adds 45 test functions",
+        45,
         lambda: _test_function_count("segpack_split_names_delivery.test.py"),
     ),
     Figure(

@@ -421,6 +421,20 @@ Exact byte-scope per field:
   this segment's hash for the first time, correctly flipping it stale. No
   persisted reverse index is needed — this is a live re-check each
   computation.
+  Since 1.45.0 the segpack's `split_names{}` participates too (#488): an
+  adjudicated homonym split is the one naming decision reaching the
+  translator from OUTSIDE `canon.json` — `canon_validate.py` refuses to
+  recollapse a split into a bare entry, so a split form is never in
+  `entries{}` and the canon projection above cannot see it. Without it,
+  adding a split, re-glossing a sense's `disambiguator`, or removing one
+  would change what the translator is told while every per-segment key
+  stayed put. **The hashed payload keeps its historical shape byte for byte
+  whenever `split_names` is empty**, so a project with no adjudicated
+  homonym sees no movement at all; only a segment genuinely carrying a
+  split is reclassified. That equality is load-bearing rather than tidy:
+  `used_terms_hash` is NOT in the machinery-only carve-out, so moving it
+  everywhere would demand a whole-corpus re-review instead of an admitted
+  stale.
 - **`pipeline_version`** (global) — read directly, verbatim, from
   `project.pipeline_version` in `profile.yml`. Not computed, just copied
   through.
