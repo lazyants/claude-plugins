@@ -48,14 +48,6 @@ SKILL_MD = PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md"
 OPERATING_CONSTELLATION = (
     PLUGIN_ROOT / "skills" / "literary-translator" / "references" / "operating-constellation.md"
 )
-# #538: this file's third source. resume_setup.py's MODULE DOCSTRING carries
-# the operator-facing statement of what `resume: true` does and does not
-# assert; SKILL.md carries the same statement where the claim recipe is. Two
-# sources, two assertions -- a single needle in SKILL.md would leave the
-# docstring half deletable with nothing red.
-RESUME_SETUP_PY = (
-    PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts" / "resume_setup.py"
-)
 
 assert SKILL_MD.is_file(), f"expected {SKILL_MD} to exist"
 
@@ -194,9 +186,14 @@ def test_plugin_root_412_redirect_substitution_present():
 
 
 def test_skill_states_what_resume_true_asserts_and_does_not():
-    # #538/#544. Each fragment sits fully on one line as of this writing,
-    # verified with grep (SKILL.md:2177 and :2183) -- never by eye, see this
-    # file's own docstring's hard-wrap warning.
+    # #538/#544. SKILL.md is the ONLY home for this statement, deliberately:
+    # resume_setup.py -- where a reader might expect its own docstring to say
+    # it -- is a PLUGIN_BUNDLE_MEMBERS member, so editing a single comment
+    # byte there moves plugin_bundle_hash and re-stales every converged
+    # segment in every project. A docstring is not worth a book.
+    #
+    # Each fragment sits fully on one line as of this writing, verified with
+    # grep -- never by eye, see this file's own docstring's hard-wrap warning.
     text = _skill_text()
     # The claim itself: digest identity, not evidence of work.
     assert "asserts digest identity and NOT that any work exists" in text
@@ -205,16 +202,6 @@ def test_skill_states_what_resume_true_asserts_and_does_not():
     # the heading alone would prove a label survived while the explanation
     # under it had been deleted.
     assert "- **A claim run whose Step 1 is REFUSED leaves its `runs/<RUN_ID>/` and" in text
-
-
-def test_resume_setup_docstring_states_what_resume_true_asserts_and_does_not():
-    # The same two statements, in the script an operator runs directly on the
-    # claim path (SKILL.md's step 1). Fragments verified on one line each at
-    # resume_setup.py:168 and :178.
-    assert RESUME_SETUP_PY.is_file(), f"expected {RESUME_SETUP_PY} to exist"
-    text = RESUME_SETUP_PY.read_text(encoding="utf-8")
-    assert "asserts DIGEST IDENTITY and nothing else" in text
-    assert "matches that directory and legitimately reports `resume: true` over a" in text
 
 
 def test_operating_constellation_reference_exists_and_has_review_orchestration_content():

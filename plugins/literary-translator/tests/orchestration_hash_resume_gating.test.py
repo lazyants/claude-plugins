@@ -50,6 +50,12 @@ SCRIPTS_DIR = ASSETS_DIR / "scripts"
 REFERENCES_DIR = SKILL_DIR / "references"
 
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
+# #538: the two bundle memberships live in DIFFERENT files -- cache_key.py
+# owns PLUGIN_BUNDLE_MEMBERS, scaffold_setup.py owns
+# ORCHESTRATION_BUNDLE_MEMBERS -- so checking one side says nothing about
+# the other, and no single file can be read to learn which price a script's
+# edit carries.
+SCAFFOLD_SETUP_SCRIPT = SCRIPTS_DIR / "scaffold_setup.py"
 RESUME_SETUP_SCRIPT = SCRIPTS_DIR / "resume_setup.py"
 DRAFT_READY_SCRIPT = SCRIPTS_DIR / "draft_ready.py"
 REVIEW_READY_SCRIPT = SCRIPTS_DIR / "review_ready.py"
@@ -81,6 +87,31 @@ def cache_key_module() -> types.ModuleType:
     return _load_module("cache_key_under_test_orch_resume_gating", CACHE_KEY_SCRIPT)
 
 
+@pytest.fixture(scope="module")
+def orchestration_bundle_members() -> tuple:
+    """scaffold_setup.py's ORCHESTRATION_BUNDLE_MEMBERS, read from the SOURCE
+    rather than imported: that module imports cache_key at module scope, which
+    is not importable from here, and this test needs the literal it declares
+    and nothing else. The node must BE a tuple -- a string of the right length
+    would otherwise answer membership questions character by character."""
+    import ast
+
+    tree = ast.parse(SCAFFOLD_SETUP_SCRIPT.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "ORCHESTRATION_BUNDLE_MEMBERS"
+            for t in node.targets
+        ):
+            assert isinstance(node.value, ast.Tuple), (
+                "ORCHESTRATION_BUNDLE_MEMBERS is no longer a tuple literal"
+            )
+            return tuple(ast.literal_eval(node.value))
+    raise AssertionError(
+        "ORCHESTRATION_BUNDLE_MEMBERS is no longer a module-level assignment in "
+        "scaffold_setup.py -- the authority behind this split has lost its subject"
+    )
+
+
 # ===========================================================================
 # 1. CODE TRUTH -- documents the invariant (already true pre-fix)
 # ===========================================================================
@@ -90,6 +121,35 @@ def test_orchestration_bundle_hash_never_a_cache_key_field(cache_key_module):
     """Never gates convergence: not one of the 15 composite cache_key
     fields."""
     assert "orchestration_bundle_hash" not in cache_key_module.CACHE_KEY_FIELD_ORDER
+
+
+# #538. Which SIDE of this split a script sits on is what a release entry's
+# "nothing re-translates" sentence rests on, and it is not something a reader
+# can tell by looking at the file: select_segments.py and resume_setup.py sit
+# on opposite sides of it despite being the two halves of one W5 preflight,
+# invoked one after the other on every claim run. 1.36.0's first draft claimed
+# the orchestration-only cost for BOTH, and a docstring-sized edit to
+# resume_setup.py would therefore have moved plugin_bundle_hash and re-staled
+# every converged segment in every project -- a whole-book retranslation, paid
+# for a comment. Pinned here, on both sides, so the claim is checked rather
+# than restated.
+def test_select_segments_is_orchestration_only_never_a_plugin_bundle_member(
+    cache_key_module, orchestration_bundle_members
+):
+    assert "select_segments.py" not in cache_key_module.PLUGIN_BUNDLE_MEMBERS, (
+        "a release that changes select_segments.py prices itself as moving "
+        "orchestration_bundle_hash ONLY -- if this script joins the plugin "
+        "bundle, that price is wrong and every converged segment re-stales"
+    )
+    assert "select_segments.py" in orchestration_bundle_members
+
+
+def test_resume_setup_is_a_plugin_bundle_member_and_so_is_never_free_to_edit(cache_key_module):
+    assert "resume_setup.py" in cache_key_module.PLUGIN_BUNDLE_MEMBERS, (
+        "the bundle hashes this file's RAW BYTES, so no edit to it -- comment, "
+        "docstring or code -- is free; a release that touches it pays a full "
+        "re-stale of every converged segment and must say so"
+    )
 
 
 # A stub cache_key.py -- resume_setup.py shells out to the real one via

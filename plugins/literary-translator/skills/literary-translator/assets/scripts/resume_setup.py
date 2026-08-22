@@ -164,28 +164,6 @@ already names which candidate matched when `resume` is true -- no separate
 "which one matched" field is needed. Omitting both fields is a
 genuinely-first-ever-run signal, exactly as before.
 
-WHAT `resume: true` ACTUALLY ASSERTS, AND WHAT IT DOES NOT (#538/#544).
-A `resume: true` asserts DIGEST IDENTITY and nothing else: the matched
-candidate's recorded `input.digest` equals the digest this invocation just
-computed. It asserts nothing whatever about that run having dispatched
-work, and nothing about any artifact existing under it. The two facts an
-operator has to hold alongside it:
-
-  1. A CLAIM RUN whose Step 1 (`select_segments.py`) is REFUSED on policy
-     performs no durable write of its own -- but the `runs/<RUN_ID>/`
-     directory and the `input.digest` THIS script already wrote for it
-     stay behind. A later invocation computing the SAME digest therefore
-     matches that directory and legitimately reports `resume: true` over a
-     run that dispatched nothing. That is the gate working as specified,
-     not a fault, and it is why the label alone is not evidence of work.
-  2. The artifact that says which run a given segment's work belongs to is
-     that segment's OWN `segments/<seg>.draft.json` `dispatch_token`, read
-     directly. It is optional at the schema level and records only the most
-     recent dispatch, so its absence proves nothing. `select_segments.py`'s
-     `dispatching_run_ids`/`run_id_evidence` report which run ids this
-     project holds evidence for and of what kind -- not a per-segment
-     ownership map, which no single field anywhere provides.
-
 MIGRATION COST (measured, not assumed) -- both the `args` pin and the
 `segs`->manifest.json domain change above alter what
 `compute_input_digest()` hashes for kind="mass", so every pre-existing

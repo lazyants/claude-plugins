@@ -2213,10 +2213,14 @@ says nothing about that run having dispatched anything. Two consequences an
 operator has to hold alongside it:
 
 - **A claim run whose Step 1 is REFUSED leaves its `runs/<RUN_ID>/` and
-  `input.digest` behind.** As of 1.36.0 such a refusal performs no durable
-  write of its own — no claim record, no re-stamped `dispatch_token` — but
-  `resume_setup.py` had already created that directory before Step 1 ever
-  ran. The next invocation computing the same digest therefore matches it
+  `input.digest` behind.** As of 1.36.0 a refusal ON POLICY —
+  `previously_converged`, an unsafe prior RUN_ID, a prior run with no
+  resume-integrity digest — performs no durable write of its own: no claim
+  record, no re-stamped `dispatch_token`. (A refusal because a claim WRITE
+  itself failed is a different case and can still leave a partial one; that
+  refusal names the ids it managed to write.) Either way `resume_setup.py`
+  had already created that directory before Step 1 ever ran, so the next
+  invocation computing the same digest matches it
   and legitimately reports `resume: true` over a run that dispatched
   nothing. That is the gate working as specified; it is not evidence of
   work, and it is not a fault to repair by hand.
