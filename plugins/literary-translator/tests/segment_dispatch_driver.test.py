@@ -6275,10 +6275,6 @@ def test_verse_policy_reference_doc_does_not_carry_the_delivery_rule():
         )
 
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
-
-
 # ===========================================================================
 # #532 -- the fixer may REFUSE a finding it cannot substantiate, asserted on
 # the PROMPT OUTPUT.
@@ -6299,7 +6295,8 @@ if __name__ == "__main__":
 # WHY THESE FRAGMENTS. Each carries a clause that is load-bearing on its own,
 # and none of them is a heading or a label: a marker would stay green while
 # the rule under it was deleted. The negative half matters as much as the
-# positive one -- the two orders this release removes are pinned ABSENT, so
+# positive one -- the two orders and the old reply contract this release removes
+# are pinned ABSENT, so
 # re-adding either (the likeliest regression, since both read as ordinary
 # emphasis) goes red rather than coexisting with the new text.
 # ===========================================================================
@@ -6340,7 +6337,7 @@ _FIX_SENTINEL_GUARD = "do not put the sentinel DRAFT_MISSING followed by this se
 _FIX_ALL_REFUSED_NO_REWRITE = (
     "If you substantiated nothing and refused every finding, leave that file exactly as you found it."
 )
-_FIX_REPLY_CONTRACT = "put any refusal report on the lines above it"
+_FIX_REFUSAL_REPORT_PLACEMENT = "Put any refusal report on the lines above that line"
 # The final-line rule itself, RENDERED: without this the placement clause alone
 # could survive a rewrite that deleted the FIXED line it is placing a report
 # relative to, leaving every assertion here green and the sentence dangling.
@@ -6354,7 +6351,7 @@ _FIX_FRAGMENTS = (
     _FIX_NO_RECORD,
     _FIX_SENTINEL_GUARD,
     _FIX_ALL_REFUSED_NO_REWRITE,
-    _FIX_REPLY_CONTRACT,
+    _FIX_REFUSAL_REPORT_PLACEMENT,
     _FIX_REPLY_FINAL_LINE,
 )
 
@@ -6430,3 +6427,7 @@ def test_fix_prompt_still_carries_the_draft_missing_sentinel_and_rewrite_order(t
     assert "return exactly the line DRAFT_MISSING seg01" in out["fix"]
     assert "do not translate it yourself" in out["fix"]
     assert ".draft.json with your fixes." in out["fix"]
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))

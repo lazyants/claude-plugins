@@ -144,27 +144,29 @@ def _test_function_count(filename):
     )
 
 
-# Rewritten for 1.36.0 (#527), per the maintenance contract above.
+# Rewritten for 1.37.0 (#532), per the maintenance contract above.
 #
-# One row, because 1.36.0 states exactly one figure this tree can answer: how
-# many tests the file covering the change now holds. Everything else the entry
-# counts is a CORPUS measurement -- 1141 glued-punctuation tokens across 581
-# blocks of a live Hebrew/Yiddish source, and the two rounds that re-derived the
-# same false finding -- taken from an operator-owned durable root that is not in
-# this repository and is not reachable from any check here. Those are the
-# accepted residual this file's docstring names, not an oversight: declaring one
-# would mean hardcoding its answer, which passes every assertion below while
-# proving nothing (`lambda: 581`). The `29 before it` half of the same sentence
-# is deliberately NOT a row either -- it is the count on the PREVIOUS commit,
-# and no state in this tree can still be asked for it.
+# One row, because 1.37.0 states exactly one figure this tree can answer: the
+# member count of the bundle tuple whose flip the entry prices. Its other counts
+# are deliberately NOT rows. The pinned-clause and pinned-absent counts are
+# spelled out as words ("nine", "the two removed orders"), and this file's
+# tokenizer only sees numerals -- the accepted residual its docstring names,
+# not an oversight. The 7-false-findings-across-10-filings measurement is a
+# CORPUS figure from two operator-owned durable roots that are not in this
+# repository and are not reachable from any check here; declaring one would mean
+# hardcoding its answer, which passes every assertion below while proving
+# nothing (`lambda: 7`).
+#
+# `_test_function_count` is kept although 1.37.0 cites no suite size: it is the
+# general deriver for that class of figure, and 1.36.0's own row used it one
+# release ago.
 FIGURES = [
     Figure(
-        "holds 36 tests",
-        36,
-        lambda: _test_function_count("review_rejection.test.py"),
+        "17 `PLUGIN_BUNDLE_MEMBERS`",
+        17,
+        lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
     ),
 ]
-
 
 def _newest_entry():
     """(version, text) of the first `## <semver>` section -- the release being

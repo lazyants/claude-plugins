@@ -440,8 +440,8 @@ deterministically, never on an LLM's own say-so.
 `revObj` into its own prompt as the findings source — it instructs the
 fixer to READ `review_path(seg)` itself and work through its on-disk
 `findings[]` array. (Since #532 the fixer applies an entry it can
-substantiate against the source and refuses one it cannot, recording
-nothing in the draft either way; the disk read this section is about is
+substantiate against the source and refuses one it cannot, without
+recording the refusal in the draft; the disk read this section is about is
 unchanged by that.) `review_ready.py` already token-validated this
 exact file fresh THIS round before the fix call was ever dispatched. In the
 SUPPORTED single-orchestrator obedient model the review for `<seg>` round R is

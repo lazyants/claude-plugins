@@ -75,9 +75,9 @@ translate+gloss job ends up quietly provisioning apparatus it will never use.
    `codex_job.py` driver (1.4.7) rather than the old `codex:codex-rescue`
    forwarder; every shipped template enforces this and no profile knob swaps
    either role to a different engine. Claude (the orchestrating session)
-   **only** applies fixes — or refuses a finding it cannot substantiate (#532) —
-   orchestrates, and verifies; it never originates a
-   translation or grades its own output. **codex-translate → deterministic
+   **only** applies fixes (or refuses a finding it cannot substantiate — #532),
+   orchestrates, and verifies; it never originates a translation or grades its
+   own output. **codex-translate → deterministic
    gate → codex-review → Claude-fix, looped to convergence, IS the v1
    default** — not a menu of interchangeable options. Confirm the user has
    Codex CLI access before scaffolding proceeds; v1 has no
