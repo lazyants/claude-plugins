@@ -2830,9 +2830,12 @@ def evaluate_claim_admission(
             # --from-stalled dispatches a fresh review and that review is
             # promoted, the review is CURRENT. If the driver then dies before
             # the convergence write, or the fresh verdict is rejected via
-            # reject_review.py without editing the draft, the unit is back to
-            # in_progress + sentinel + no reviewed_draft_sha1 -- with a
-            # CURRENT review. A standing staleness gate would refuse re-entry
+            # reject_review.py without editing the draft and the driver sends
+            # it back for one more review rather than converging it (#527: at
+            # the `final` label a rejection over an unmoved draft whose verdict
+            # reported coverage_ok terminates the unit as converged instead),
+            # the unit is back to in_progress + sentinel + no
+            # reviewed_draft_sha1 -- with a CURRENT review. A standing staleness gate would refuse re-entry
             # and leave the operator exactly where this profile found them.
             #
             # The continuation is AUTHENTICATED rather than assumed, the same

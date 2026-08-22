@@ -89,6 +89,7 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 SCRIPTS = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "scripts"
+TESTS = PLUGIN_ROOT / "tests"
 
 # `## 1.34.1 - 2026-08-22`: the version, then anything (this repo appends a
 # release date). Requiring end-of-line after the version would match no real
@@ -131,22 +132,36 @@ def _tuple_len(filename, name):
     )
 
 
-# Rewritten for 1.35.0 (#546), per the maintenance contract above.
+def _test_function_count(filename):
+    """How many `def test_*` functions a SHIPPED test file defines, read by AST
+    rather than by counting a string. A grep for `def test_` also matches the
+    phrase inside a docstring or a comment -- which is exactly how a suite-size
+    figure drifts without anything noticing."""
+    tree = ast.parse((TESTS / filename).read_text(encoding="utf-8"))
+    return sum(
+        1 for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+    )
+
+
+# Rewritten for 1.36.0 (#527), per the maintenance contract above.
 #
-# One row, because 1.35.0 states exactly one tree-derivable figure: the bundle
-# membership that prices its own migration. The entry's other numbers are
-# CORPUS measurements -- 107 archived reviews, 313 findings, 44 verse-scoped,
-# zero of this shape -- taken from two operator-owned durable roots that are not
-# in this repository and are not reachable from any check here. They are the
-# accepted residual this file's docstring names, not an oversight: declaring
-# them would mean hardcoding an answer, which passes every assertion below while
-# proving nothing (`lambda: 44`). They were verified twice by reading all 44
-# findings, and that is the only verification available for them.
+# One row, because 1.36.0 states exactly one figure this tree can answer: how
+# many tests the file covering the change now holds. Everything else the entry
+# counts is a CORPUS measurement -- 1141 glued-punctuation tokens across 581
+# blocks of a live Hebrew/Yiddish source, and the two rounds that re-derived the
+# same false finding -- taken from an operator-owned durable root that is not in
+# this repository and is not reachable from any check here. Those are the
+# accepted residual this file's docstring names, not an oversight: declaring one
+# would mean hardcoding its answer, which passes every assertion below while
+# proving nothing (`lambda: 581`). The `29 before it` half of the same sentence
+# is deliberately NOT a row either -- it is the count on the PREVIOUS commit,
+# and no state in this tree can still be asked for it.
 FIGURES = [
     Figure(
-        "17 `PLUGIN_BUNDLE_MEMBERS`",
-        17,
-        lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
+        "holds 36 tests",
+        36,
+        lambda: _test_function_count("review_rejection.test.py"),
     ),
 ]
 

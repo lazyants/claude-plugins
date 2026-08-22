@@ -32,11 +32,20 @@ the sole writer; every other module only reads). derive_next_action()
 (segment_dispatch_driver.py) reads this artifact and NEVER writes it, by
 construction: nothing in that function opens this path for writing.
 
-THE REJECTION NEVER MAKES A TRANSLATE REACHABLE. It only ever converts a
-would-be needs_fix into a fresh review at the next round label -- see
-derive_next_action()'s own consuming branch for the full reasoning. This
-script has no opinion on that at all; it only ever writes the artifact,
-gated by the six refusals below.
+THE REJECTION NEVER MAKES A TRANSLATE REACHABLE, and that is still true
+after #527 widened what it DOES reach. At a numbered round it converts a
+would-be needs_fix into a fresh review at the next round label. At the
+mandatory `final` round -- where there is no next label and no fix step,
+so the old outcome (one more review of an unchanged draft) could only ever
+re-ask a question whose answer had not changed -- a record that also has
+the draft its verdict was written against, and a reviewer-asserted
+coverage_ok, TERMINATES the unit as converged on the operator's own
+`reason`. See derive_next_action()'s own consuming branch for the full
+reasoning, including why a second opinion is the one remedy the #527 case
+cannot use. This script has no opinion on any of it: it only ever writes
+the artifact, gated by the six refusals below, and it gates on `clean`
+alone -- so the CONSUMER, not this script, is what must also require
+coverage_ok before terminating anything.
 
 REFUSES UNLESS ALL SIX HOLD, and refuses (never guesses) whenever any
 of them cannot be established:
@@ -1272,7 +1281,23 @@ def main():
             # pure function of run/seg/label), so the consumer's rule 8 --
             # record strictly newer than review.json -- is the ONLY thing
             # separating the rejected verdict from its replacement, and it has
-            # already taken this record's authorization away. Without the
+            # already taken this record's authorization away. #527 NARROWED
+            # the route to that state without removing it: a `final` rejection
+            # over an unmoved draft with coverage_ok now converges the unit
+            # instead of buying a replacement review, so what still reaches
+            # here is the incomplete-coverage case: the consumer sent that
+            # verdict back for a fresh review, the review came back over the
+            # SAME draft with the same verdict, and the operator is rejecting
+            # it again. The moved-draft fall-through does not ORDINARILY
+            # arrive here -- its replacement review carries a different
+            # draft_sha1, so the whole-review digest differs and this is an
+            # ordinary fresh rejection rather than a renewal. The exception
+            # is an ABA: a draft edited away and then restored to its
+            # original bytes before the replacement review is promoted
+            # produces the same draft_sha1, the same token and the same
+            # digest, and does enter this branch. Safe either way -- the
+            # verdict it renews is byte-identical to the one the operator
+            # already judged -- but "never" would have been false. Without the
             # branch below, the operator who wants to reject the replacement
             # too is dead-ended: the identical reason returns success and
             # rewrites nothing, a different reason refuses as a conflict, and
