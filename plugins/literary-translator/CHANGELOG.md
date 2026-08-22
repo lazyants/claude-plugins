@@ -1,7 +1,31 @@
 # Changelog
 
-## 1.34.1 — 2026-08-22
+## 1.34.2 — 2026-08-22
 
+A measured figure stated in a release entry is now re-derived from the tree on every test run. Closes #580.
+
+### The defect, which is not "the number was wrong"
+
+An entry states a measured cost — how many members a bundle tuple holds, how many files moved, how many entries this changelog carries. Each one is correct when written. An edit made later **in the same release** then moves the thing it measured, and nothing recomputes it: what ships is a figure that was true at the moment of writing and false at the moment of merge, with no red anywhere. 1.29.0 hit this five times in one release, and a reviewer reading the prose caught every one.
+
+`tests/changelog_figures.test.py` declares each figure of the newest entry as three things that must agree — the smallest UNIQUE slice of prose containing it, the value that prose asserts, and a callable that re-derives it from the tree. It is a sibling of `tests/changelog_citations.test.py` and keeps the same maintenance contract: newest entry only, rewritten every release. Its derivations read the authoritative artifact rather than imitating it, which is not a stylistic preference — counting `def test_` by AST gives 78 for the two `person_registry` modules where pytest collects 88, because parametrized cases count as they run, and a re-implementation fails in the direction that looks right.
+
+### Why it is a third of what was designed, and what that costs
+
+The first design also swept every digit in the entry, required each one to be declared or exempted, and added a per-release model call to catch the spelled-out figures a regex cannot see. It was cut on a measurement rather than on taste: of the six figures in shipped entries that can be re-derived today — `PLUGIN_BUNDLE_MEMBERS`, `ORCHESTRATION_BUNDLE_MEMBERS`, `PRODUCER_CODE_CLOSURE`, `CACHE_KEY_FIELD_ORDER`, `select_segments.CACHE_KEY_FIELDS`, and 1.34.0's "88 new tests" — **all six are correct**. Nothing wrong has reached a reader through this surface; review has caught the class every time it fired. The sweep would have added a declaration set of six to thirty-four rows plus a model call to every release, permanently, to guard a defect whose measured ship rate on this surface is zero.
+
+**So the residual is named rather than closed: an UNDECLARED figure is not checked at all**, and the author who mis-measures is the one least likely to declare it. Two further limits sit in the test's own docstring rather than being left to be discovered — a derivation that hardcodes its own answer passes every assertion, which is why each row is watched failing by mutating the TREE and never the row; and the entry slicer is fence-unaware, which usually fails red but can fail green when every declaration happens to sit above a fenced `## <semver>` line.
+
+The class does still escape, on a surface this release does not touch and in a form no digit check would see: `cache_key.py` still says "The thirteen scripts (+ two workflow templates)" for what is now a 17 `PLUGIN_BUNDLE_MEMBERS` tuple. That is #591, it is parked, and it is source-comment prose rather than a release entry.
+
+### Scope
+
+Tests and docs only — nothing under `assets/scripts/` is in the diff and no member of any hashed bundle changes bytes, so no cache key moves, no resume identity moves, and no converged unit re-stales. `tests/changelog_citations.test.py` changes in one place only, and not by choice: adding an entry makes 1.34.1 the newest one, so its `CITATION_ANCHORS` map is rewritten for it — empty, since this entry cites no source line. That is the map's documented per-release state and the failure that forces it is its whole point.
+
+That rewrite is worth naming, because this release's first draft asserted the file was untouched and a later edit in the same release made the sentence false — the exact defect described above, arriving in the entry that introduces the check for it. The digit-bearing figures were caught by the new test; this one was prose with no number in it, and a reviewer caught it.
+
+**And then the check fired for real, on itself, before this ever merged.** 1.34.1 (#547) landed on `main` while this branch was in review, which forced a rebase and a renumber to 1.34.2 — and moved this changelog's entry count out from under a figure written when it was 61. Nobody noticed by reading; the test went red naming the number and the tree's answer. That is the whole shape #580 describes — a figure true when written, false at merge, moved by an edit nobody connected to it — and it is the reason the count in the scope note below is 62. The suite grows to 162 test modules and this file to 62 release entries; both are declared in the new test, and both are moved BY this release, so writing either figure before making the change is that same failure — and it is caught here.
+## 1.34.1 — 2026-08-22
 Documentation only, at two sites. The marked bytes of `style_bible.md` are hashed into every segment's cache key, and the two places a reader learns that were each missing one half of the story. No runtime script bytes change — nothing under `assets/scripts/` is in the diff. Closes #547.
 
 ### What was already there, and what was not
