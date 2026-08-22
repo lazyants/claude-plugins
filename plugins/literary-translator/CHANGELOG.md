@@ -39,14 +39,14 @@ validation:
   admit_contract_only_stale: true
 ```
 
-Declared, W7 and W9 admit a flipped unit when ALL hold: its `.ever_converged.<seg>` sentinel is not absent; its on-disk draft still matches its recorded `reviewed_draft_sha1` (so no prose changed, only the standard); `style_contract_hash` is among the moved cache-key fields; and every OTHER moved field is machinery-only. Undeclared — or declared `false` — every gate behaves exactly as it did in 1.35.0.
+Declared, W7 and W9 admit a flipped unit when ALL hold: its `.ever_converged.<seg>` sentinel is not absent; its on-disk draft still matches its recorded `reviewed_draft_sha1` (so no prose changed, only the standard); `style_contract_hash` is among the moved cache-key fields; and every OTHER moved field is machinery-only. Undeclared — or declared `false` — every gate behaves exactly as it did in 1.36.0.
 
 ### What it deliberately is not
 
 - **Not a widening of `SAFE_STALE_CARVEOUT_FIELDS`.** That set means "can never change what the prose should say", which is FALSE for a style contract, and it is read for two other questions besides this one (`assemble.py`'s assembly gate and `select_segments.py`'s D6 report). All 4 copies of that allowlist still hold exactly `{plugin_bundle_hash, schema_hash, derivation_bundle_hash}`, pinned by a test. This is a separately named second acceptance path, reachable only by declaration.
 - **Not a certification.** No ledger record is rewritten and no hash is stamped. The record still says `stale`. Stamping the current `style_contract_hash` onto a record that was never checked against it would assert a review that did not happen, in the one field nobody re-reads.
 - **Not a count.** Each gate emits the segment IDs — `stale_contract_admitted` in `final_audit.py`'s summary, `contract_stale_admitted` in `assemble.py`'s, `validate_assembled.py`'s and `validate_conservation.py`'s — plus a stderr block naming each one. The key is OMITTED entirely when the declaration is absent or nothing qualified: an emitted empty list would read as "we checked and found none" on a run that never checked.
-- **Not able to tell an ADDITION from a REVERSAL, and it says so.** A rule you reversed actively demanded the wrong choice in every segment converged under it; those genuinely need re-review. One global `style_contract_hash` cannot distinguish that from an append. This is exactly why the admission is an operator declaration recorded per run rather than a default, and why `--from-converged` re-review stays authorizable for these units (`style_contract_hash` is still a content-affecting field to `select_segments.py`).
+- **Not able to tell an ADDITION from a REVERSAL, and it says so.** A rule you reversed actively demanded the wrong choice in every segment converged under it; those genuinely need re-review. One global `style_contract_hash` cannot distinguish that from an append. This is exactly why the admission is an operator declaration — persistent in `profile.yml`, with each qualifying run recording the population it admitted — rather than a default, and why `--from-converged` re-review stays authorizable for these units (`style_contract_hash` is still a content-affecting field to `select_segments.py`).
 
 ### Four gates, one predicate, or it is worse than useless
 

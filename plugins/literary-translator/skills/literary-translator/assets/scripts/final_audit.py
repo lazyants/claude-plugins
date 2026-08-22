@@ -1655,7 +1655,9 @@ def main():
             f"profile.yml declares validation.admit_contract_only_stale, so these "
             f"segments do not block the verdict above although the style contract "
             f"moved after they converged. Their drafts are unchanged since review "
-            f"and their .ever_converged sentinels are intact; what they have NOT "
+            f"and their .ever_converged sentinels are not ABSENT -- an unreadable "
+            f"or dangling one carves out like a present one, as it already does "
+            f"for the machinery-only population. What they have NOT "
             f"had is a review against the CURRENT contract. If the contract edit "
             f"REVERSED a rule rather than adding one, re-review them instead.",
             file=sys.stderr,

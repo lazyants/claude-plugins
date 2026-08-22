@@ -2257,7 +2257,8 @@ def main() -> int:
                 f"these segments are being assembled although the style contract "
                 f"moved after they converged. Their drafts are unchanged since "
                 f"review (verified against reviewed_draft_sha1 below) and their "
-                f".ever_converged sentinels are intact: what they have NOT had is "
+                f".ever_converged sentinels are not ABSENT -- an unreadable or dangling "
+                f"one carves out like a present one. What they have NOT had is "
                 f"a review against the CURRENT contract. If the contract edit "
                 f"REVERSED a rule rather than adding one, re-review them instead "
                 f"of shipping this run.",

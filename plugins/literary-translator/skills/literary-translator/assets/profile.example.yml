@@ -335,7 +335,13 @@ validation:
     # cannot distinguish the two cases. After a reversal, re-review rather than declaring this.
     # Keep the value stable from W7 through delivery -- final_audit.py, assemble.py,
     # validate_assembled.py and validate_conservation.py all read this same field, and toggling it
-    # between those steps is the one way to make them disagree about the same book.
+    # between those steps is the only way a NORMAL run can make them disagree about the same book.
+    # (They take the moved-field list from different authorities: W7 from select_segments.py's
+    # recomputation against the current cache key, the other three from the materialized
+    # stale_mismatched_fields. ledger_merge.py drops any inherited value and re-derives that list
+    # from the same diff, so they agree by construction on anything a run produces -- only a hand
+    # edit of the materialized ledger.json between the steps can split them, and the same edit
+    # could set status: converged, which skips both carve-outs outright.)
 
 output:
   v1_scope: segment_drafts_and_audit

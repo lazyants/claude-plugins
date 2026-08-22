@@ -1145,3 +1145,103 @@ def test_conservation_population_follows_the_declaration(tmp_path, admit, eligib
         f"built from"
     )
     assert (contract_admitted == ["seg01"]) is eligible, contract_admitted
+
+
+# ===========================================================================
+# 14. ...and the lane SAYS SO, through its own CLI.
+#
+#     Section 13 drives the shared helper and stops at the population it
+#     returns. That leaves criterion 3 -- "every gate that admits a segment
+#     NAMES it, on stderr and in its structured stdout" -- unpinned for this
+#     one script: deleting validate_conservation.py's own
+#     `contract_stale_admitted` emission and its `~ <seg>` stderr block keeps
+#     section 13 green, because that helper is not where either lives. This
+#     section runs the real CLI and reads both surfaces.
+#
+#     The fixture is the HOLLOWED shape tests/validate_conservation_carveout
+#     .test.py established (real source words, empty draft block): it earns a
+#     genuine `hollowed_output_block` WARN when the segment is eligible and
+#     none at all when it is not, so "declared" and "undeclared" differ in the
+#     lane's actual work as well as in its naming -- neither assertion can
+#     pass vacuously against a lane that reports on nothing.
+# ===========================================================================
+
+
+def make_vc_root(tmp_path, admit=None) -> Path:
+    """A default-scope root carrying one contract-stale segment whose single
+    PARA block has real source content and an EMPTY draft."""
+    root = make_va_root(tmp_path, admit)
+    (root / "scripts" / VALIDATE_CONSERVATION_SRC.name).write_bytes(
+        VALIDATE_CONSERVATION_SRC.read_bytes()
+    )
+    write_va_manifest(
+        root,
+        {
+            "PARA:seg01:0001": {
+                "type": "PARA",
+                "plain_text": "This block has real, substantial source content.",
+                "order_index": 0,
+            }
+        },
+        [{"seg": "seg01", "kind": "body", "block_ids": ["PARA:seg01:0001"], "word_count": 7}],
+    )
+    write_va_draft(root, "seg01", {"PARA:seg01:0001": ""})
+    write_va_ledger(
+        root,
+        {"seg01": {"status": "stale", "stale_mismatched_fields": [CONTRACT_FIELD]}},
+    )
+    return root
+
+
+def run_validate_conservation(root: Path, timeout: int = 30) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(root / "scripts" / "validate_conservation.py"), "output-coverage"],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+_HOLLOWED = ("seg01", "PARA:seg01:0001", "hollowed_output_block")
+
+
+def test_conservation_cli_names_a_declared_contract_stale_segment(tmp_path):
+    root = make_vc_root(tmp_path, admit=True)
+    proc = run_validate_conservation(root)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    doc = parse_one_json_line(proc)
+
+    kinds = {(w["seg"], w["block_id"], w["kind"]) for w in doc["warnings"]}
+    assert _HOLLOWED in kinds, (
+        "POSITIVE CONTROL failed -- with the declaration in force seg01 is in "
+        "the eligible population, so its hollow block must earn a real WARN. "
+        "Without this the naming assertions below would be about a lane doing "
+        "no work\n" + proc.stdout + proc.stderr
+    )
+    assert doc.get("contract_stale_admitted") == ["seg01"], (
+        "criterion 3: the lane must NAME the segment it only reported on "
+        "because the operator declared it shippable\n" + proc.stdout
+    )
+    assert "CONTRACT-ONLY STALE ADMITTED (1)" in proc.stderr, proc.stderr
+    assert "  ~ seg01" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("admit,label", [(None, "absent"), (False, "explicit-false")])
+def test_conservation_cli_undeclared_neither_reports_nor_names(tmp_path, admit, label):
+    root = make_vc_root(tmp_path, admit)
+    proc = run_validate_conservation(root)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    doc = parse_one_json_line(proc)
+
+    kinds = {(w["seg"], w["block_id"], w["kind"]) for w in doc["warnings"]}
+    assert _HOLLOWED not in kinds, (
+        f"admit={label}: seg01 is not in the eligible population, so its "
+        f"hollow block must NOT be reported on\n" + proc.stdout + proc.stderr
+    )
+    assert "contract_stale_admitted" not in doc, (
+        f"admit={label}: the key must be OMITTED, never emitted empty -- an "
+        f"empty list reads as 'we checked and found none' on a run that never "
+        f"checked\n" + proc.stdout
+    )
+    assert "CONTRACT-ONLY STALE ADMITTED" not in proc.stderr, proc.stderr
+    assert "~ seg01" not in proc.stderr, proc.stderr

@@ -782,7 +782,9 @@ here, follow the linked doc:
   rechecking. **Since 1.40.0 the tooling can be told to agree** — set
   `validation.admit_contract_only_stale: true` in `profile.yml` and both the W7
   completeness gate and W9 assembly admit a flipped unit whose `.ever_converged`
-  sentinel is intact, whose draft still matches its `reviewed_draft_sha1`, and
+  sentinel is not ABSENT (an unreadable or dangling one carves out like a
+  present one, as it already does for the machinery-only population), whose
+  draft still matches its `reviewed_draft_sha1`, and
   whose only non-machinery moved field is `style_contract_hash`. Nothing is
   rewritten and no hash is stamped: the ledger record still says `stale`, and
   every admitted segment is named on stderr and in each gate's structured
@@ -1151,7 +1153,8 @@ contract), so undeclared, W7's completeness gate and W9's assembly refuse each
 flipped unit until it converges again. Setting
 `validation.admit_contract_only_stale: true` in `profile.yml` opens a second,
 separately named acceptance path in both gates for a flipped unit whose
-`.ever_converged` sentinel is intact, whose draft still matches its
+`.ever_converged` sentinel is not ABSENT (an unreadable or dangling one
+carves out like a present one), whose draft still matches its
 `reviewed_draft_sha1`, and whose only non-machinery moved field is that one:
 it is admitted and NAMED, its ledger record untouched. The declaration is the
 wrong answer after a rule REVERSAL, and no hash can detect that for you
@@ -2717,7 +2720,15 @@ from the same merged ledger rather than trusting the summary. When either
 admits a unit, both name it — `stale_contract_admitted` in W7's summary,
 `contract_stale_admitted` in `assemble.py`'s, and a stderr block in each.
 Keep the declaration stable across the whole W7→W9 chain; toggling it between
-steps is the one way to make the two gates disagree about the same book.
+steps is the only way a normal run can make the two gates disagree about the
+same book. (They read the moved-field list from different authorities -- W7
+from `select_segments.py`'s recomputation against the CURRENT cache key, W9
+from the materialized `stale_mismatched_fields` -- but `ledger_merge.py:648`
+drops any inherited value and re-derives that list from the same diff, so the
+two agree by construction on anything a run produces. Hand-editing the
+materialized `ledger.json` between the two steps can split them; so can
+editing one segment's `status` to `converged`, which skips both carve-outs
+entirely.)
 
 Run `scripts/assemble.py`, which reconstructs the whole-book reading order
 from `manifest.json` + every converged segment's draft + `ledger.json`'s
