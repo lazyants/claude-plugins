@@ -4657,7 +4657,6 @@ def run(args, dirs: dict) -> dict:
         # record the result. ADMISSION stays here because D5.2 immediately
         # below has to know which ids were admitted; only the writing moved.
 
-
         # D5.2: a SENTINEL-BEARING claim clears previously_converged for
         # EXACTLY its own SUCCESSFULLY-ADMITTED ids -- never the merely
         # requested ones. A claim that failed any gate above already fataled

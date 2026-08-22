@@ -4332,10 +4332,7 @@ def _write_unrelated_draft(root, seg, dispatch_token):
     by evaluate_claim_admission() (S3) before any write, so it would prove
     nothing about what a refusal AFTER the writes leaves behind.
     """
-    (root / "segments" / f"{seg}.draft.json").write_text(
-        json.dumps({"seg": seg, "dispatch_token": dispatch_token}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    write_draft_doc(root, seg, {"seg": seg, "dispatch_token": dispatch_token})
 
 
 def _assert_claim_left_no_trace(root, seg, expected_token):

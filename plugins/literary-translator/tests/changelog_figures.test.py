@@ -149,7 +149,8 @@ def _test_function_count(filename):
 # One row again, and it happens to be the SAME derivation 1.35.0 declared --
 # not a row left un-rewritten. 1.38.0 prices its own migration on the opposite
 # side of that membership: `select_segments.py` is an orchestration member and
-# NOT one of the 17, which is what makes "nothing re-translates" true. The row
+# NOT one of the 17, which is what makes "no converged segment re-stales" true
+# -- a narrower claim than the one this entry's own second draft made. The row
 # is kept deliberately rather than emptied: an empty FIGURES list passes every
 # assertion below while checking nothing, so a release with no tree-derivable
 # figure must state one rather than declare none.
