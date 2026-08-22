@@ -53,11 +53,25 @@ every check here while only one of its numbers was ever verified. And it must
 occur exactly once, because bare numerals repeat freely inside a single entry --
 which is why the key is a phrase and never the numeral itself.
 
+`value` is the number written out where a reviewer reads it, in the diff, next
+to the phrase and the derivation. Be clear about what its check is worth: with
+the prose and the tree both compared directly, a wrong `value` cannot by itself
+ship a wrong figure -- if the prose is right the entry is right. It is a
+readability device with a consistency guard attached, not a third independent
+check, and calling it one would be this file's own defect class.
+
 `derive` MUST CALL THE AUTHORITATIVE IMPLEMENTATION, never a lookalike. Measured
 while this test was being written: counting `def test_` by AST gives 78 for the two
 `person_registry` modules where pytest collects 88, because parametrized cases
 count as they run. A re-implementation is not a verification -- it is a second
 chance to make the same mistake, and it fails in the direction that looks right.
+
+`_newest_entry` here is a near-copy of the one in `changelog_citations.test.py`,
+and deliberately so: both modules are named `*.test.py`, so neither can import
+the other by module name without `importlib` machinery worth more than the dozen
+shared lines. One asymmetry to know about, since nothing flags it -- the
+citations copy blanks fenced blocks BEFORE slicing and this one does not (see
+above) -- so a future correction to either body does not reach the other.
 
 MAINTENANCE CONTRACT. This tracks the NEWEST entry only, since that is the one
 under active edit, and it is rewritten every release -- exactly like
@@ -114,7 +128,8 @@ def _tuple_len(filename, name):
     tree = ast.parse((SCRIPTS / filename).read_text(encoding="utf-8"))
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
-            getattr(target, "id", "") == name for target in node.targets
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
         ):
             # The node must BE a tuple, not merely something `len()` accepts:
             # `NAME = "abcdefghijklmnopq"` also has length 17, and this row
@@ -161,10 +176,6 @@ def test_every_declared_figure_is_still_what_the_tree_says():
 
     stale = []
     for figure in FIGURES:
-        if not callable(figure.derive):
-            stale.append(f"{figure.phrase!r} declares a derivation that is not callable")
-            continue
-
         found = entry.count(figure.phrase)
         if found != 1:
             stale.append(
@@ -176,11 +187,12 @@ def test_every_declared_figure_is_still_what_the_tree_says():
             )
             continue
 
-        tokens = [match.group(0) for match in _TOKEN.finditer(figure.phrase)]
-        if len(tokens) != 1:
+        numerals = list(_TOKEN.finditer(figure.phrase))
+        if len(numerals) != 1:
             stale.append(
-                f"{figure.phrase!r} contains {len(tokens)} numeric tokens "
-                f"({tokens}) -- a phrase spanning several numbers would pass "
+                f"{figure.phrase!r} contains {len(numerals)} numeric tokens "
+                f"({[m.group(0) for m in numerals]}) -- a phrase spanning "
+                f"several numbers would pass "
                 f"every check here while only one of them was ever verified. "
                 f"Narrow the phrase to the one figure this row declares"
             )
@@ -197,14 +209,16 @@ def test_every_declared_figure_is_still_what_the_tree_says():
         # A following `,` is only extending when a digit follows it -- this file
         # groups with spaces, but a comma-grouped number must not read as its
         # first three digits.
+        span = numerals[0]
         at = entry.index(figure.phrase)
-        span = next(_TOKEN.finditer(figure.phrase))
         start, end = at + span.start(), at + span.end()
-        before = entry[start - 1] if start else ""
-        after = entry[end] if end < len(entry) else ""
-        after_next = entry[end + 1] if end + 1 < len(entry) else ""
-        if (before.isdigit() or before in ".,-") or (
-            after.isdigit() or (after == "," and after_next.isdigit())
+        # Slices, not indexes: at either end of the entry these are "" rather
+        # than an IndexError, and "" fails every test below -- where `before in
+        # ".,-"` would have been TRUE for the empty string and reported a figure
+        # at offset 0 as embedded in a longer number.
+        before, after = entry[start - 1 : start] if start else "", entry[end : end + 2]
+        if (before.isdigit() or before in {".", ",", "-"}) or (
+            after[:1].isdigit() or (after[:1] == "," and after[1:2].isdigit())
         ):
             stale.append(
                 f"{figure.phrase!r} matched inside a LONGER number in {version} "
@@ -214,7 +228,7 @@ def test_every_declared_figure_is_still_what_the_tree_says():
             )
             continue
 
-        quoted = Decimal(tokens[0].replace(" ", ""))
+        quoted = Decimal(span.group(0).replace(" ", ""))
         declared = Decimal(str(figure.value))
         if quoted != declared:
             stale.append(
