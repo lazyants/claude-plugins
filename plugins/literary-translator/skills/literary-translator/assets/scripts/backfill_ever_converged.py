@@ -106,8 +106,10 @@ The body is NOT the same bytes, and since #443 that is the point. Both writers
 emit one line of JSON from the shared ``sentinel_body()``; this script writes
 ``"by": "backfill_ever_converged"`` and the evidence it actually has (the
 ledger row's status, its source, and its ``reviewed_draft_sha1``), while
-``ledger_update.py`` writes ``"by": "ledger_update"`` plus the run token, round
-label and reviewed draft sha1 of the convergence it just recorded. Before #443
+``ledger_update.py`` writes ``"by": "ledger_update"`` plus the reviewed draft
+sha1 of the convergence it just recorded, and its run token and round label
+when the recording call supplied a run token and a round label can be read off
+the review artifact. Before #443
 both published the identical ten bytes ``converged\n``, so a marker this script
 retrofitted and a marker earned at a real convergence were indistinguishable,
 and the only thing separating them on the project that motivated the issue was
@@ -524,6 +526,12 @@ _STAGING_NAME_ATTEMPTS = 32
 SENTINEL_MARKER_NAME = "ever_converged"
 SENTINEL_BODY_VERSION = 1
 
+# Byte-identical to ledger_update.py's, and the reason the reader below can
+# refuse an oversized body outright: no writer publishes one. See
+# sentinel_body()'s own docstring for why it drops evidence instead of
+# truncating it.
+SENTINEL_BODY_MAX_BYTES = 4096
+
 # What this script writes into `by`. The ONE field that must differ from
 # ledger_update.py's: #443 exists because a marker this script retrofitted from
 # a ledger row and a marker earned at a real convergence were the same ten
@@ -547,6 +555,14 @@ def sentinel_body(seg, writer, evidence=None) -> bytes:
     assigned AFTER it, so no caller can forge `by`, `marker`, `v` or `seg`;
     a direct in-process caller supplying `{"by": "..."}` moves nothing.
 
+    BOUNDED, and by dropping evidence rather than by truncating it. A body
+    that would exceed SENTINEL_BODY_MAX_BYTES is re-emitted with the identity
+    fields alone -- those are bounded by construction (`seg` is a validated
+    segment id, short enough to be a filename) -- because a truncated JSON body
+    is not shorter evidence, it is unparseable evidence, and the reader would
+    report the marker `unattributed` either way. Losing the evidence while
+    keeping a marker that still says WHO wrote it is the better half.
+
     WHAT THIS BODY IS NOT: it is not authority. Nothing in this plugin gates
     on it, and classify_ever_converged_sentinel() above still decides
     protection from the entry's TYPE alone. A marker written before this
@@ -554,15 +570,25 @@ def sentinel_body(seg, writer, evidence=None) -> bytes:
     body this parses, keeps classifying SENTINEL_PRESENT, and keeps blocking
     dispatch exactly as it did. That is the whole reason the provenance went
     into the body rather than into the predicate."""
+    def encode(fields):
+        return (
+            json.dumps(fields, sort_keys=True, ensure_ascii=False,
+                       separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+
+    identity = {
+        "marker": SENTINEL_MARKER_NAME,
+        "v": SENTINEL_BODY_VERSION,
+        "by": writer,
+        "seg": seg,
+    }
     fields = {k: v for k, v in dict(evidence or {}).items() if v is not None}
-    fields["marker"] = SENTINEL_MARKER_NAME
-    fields["v"] = SENTINEL_BODY_VERSION
-    fields["by"] = writer
-    fields["seg"] = seg
-    return (
-        json.dumps(fields, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-        + "\n"
-    ).encode("utf-8")
+    fields.update(identity)
+    body = encode(fields)
+    if len(body) > SENTINEL_BODY_MAX_BYTES:
+        return encode(identity)
+    return body
 
 def write_all(fd, data: bytes) -> None:
     """`os.write()` until every byte is out, or raise.
@@ -584,7 +610,6 @@ def write_all(fd, data: bytes) -> None:
             )
         view = view[written:]
 
-
 # The body reader. The ONLY one in the plugin, and it decides nothing: see
 # read_sentinel_attribution()'s own docstring.
 SENTINEL_ATTRIBUTION_UNATTRIBUTED = "unattributed"
@@ -599,11 +624,14 @@ SENTINEL_ATTRIBUTION_UNREADABLE = "unreadable"
 # commit that adds the writer.
 SENTINEL_KNOWN_WRITERS = ("ledger_update", "backfill_ever_converged")
 
-# A whole marker body is well under 300 bytes. The cap is not a guess at that
-# size, it is a refusal to let an operator-authored or foreign file at this
-# path decide how much this run reads: everything past it is discarded and the
-# body is judged on what came back.
-SENTINEL_BODY_READ_CAP = 4096
+# ONE MORE BYTE than any writer will publish (SENTINEL_BODY_MAX_BYTES), which
+# is what makes an over-long body DETECTABLE rather than silently truncated.
+# Reading exactly the maximum could not tell a body that ends at the limit from
+# one that runs past it, so a hostile file whose first 4096 bytes parse as a
+# valid attributed marker -- with anything at all after them -- would have been
+# reported as a known writer's. The extra byte is the whole difference between
+# a cap and an overflow check.
+SENTINEL_BODY_READ_CAP = SENTINEL_BODY_MAX_BYTES + 1
 
 
 def read_sentinel_attribution(path: Path, *, dir_fd=None, expected_seg=None) -> str:
@@ -629,7 +657,9 @@ def read_sentinel_attribution(path: Path, *, dir_fd=None, expected_seg=None) -> 
     can be trusted on its own.
 
     Which is why a body is attributed only when it matches the shape
-    sentinel_body() actually emits -- the right `marker`, this `v`, a
+    sentinel_body() actually emits -- no longer than SENTINEL_BODY_MAX_BYTES,
+    the right `marker`, this `v` as a real JSON integer (`true` and `1.0` both
+    compare equal to 1 in Python and neither is anything a writer emits), a
     non-empty `seg` (equal to `expected_seg` when the caller knows which
     segment it is asking about, so a marker copied from another segment is
     not reported as this one's provenance), and a `by` from
@@ -662,6 +692,14 @@ def read_sentinel_attribution(path: Path, *, dir_fd=None, expected_seg=None) -> 
     except OSError:
         return SENTINEL_ATTRIBUTION_UNREADABLE
 
+    if len(raw) > SENTINEL_BODY_MAX_BYTES:
+        # The read asked for one byte past what any writer publishes, so a full
+        # buffer means the file runs past the maximum: this is not a marker
+        # either writer wrote, and what came back is a PREFIX of something
+        # else. Judging it on that prefix is how an oversized foreign file gets
+        # a known writer's name.
+        return SENTINEL_ATTRIBUTION_UNATTRIBUTED
+
     try:
         body = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError):
@@ -678,7 +716,12 @@ def read_sentinel_attribution(path: Path, *, dir_fd=None, expected_seg=None) -> 
         return SENTINEL_ATTRIBUTION_UNATTRIBUTED
     if body.get("marker") != SENTINEL_MARKER_NAME:
         return SENTINEL_ATTRIBUTION_UNATTRIBUTED
-    if body.get("v") != SENTINEL_BODY_VERSION:
+    version = body.get("v")
+    if type(version) is not int or version != SENTINEL_BODY_VERSION:
+        # `type(...) is not int` and not isinstance(): bool is a SUBCLASS of
+        # int, so `True == 1` and isinstance(True, int) both hold, and a body
+        # carrying `"v": true` would otherwise pass a check meant to pin an
+        # exact emitted shape.
         return SENTINEL_ATTRIBUTION_UNATTRIBUTED
     seg = body.get("seg")
     if not isinstance(seg, str) or not seg:

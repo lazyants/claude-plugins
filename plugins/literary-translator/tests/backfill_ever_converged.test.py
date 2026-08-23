@@ -3253,3 +3253,109 @@ def test_the_body_reader_is_safe_on_both_branches_a_symlink_and_a_fifo(tmp_path)
         )
     finally:
         os.close(dir_fd)
+
+
+def test_an_oversized_body_is_refused_rather_than_judged_on_its_prefix(tmp_path):
+    """The cap alone was not an overflow check. Reading exactly the maximum
+    cannot tell a body that ENDS at the limit from one that runs past it, so a
+    file whose first bytes parse as a valid attributed marker -- with anything
+    at all after them -- was reported as a known writer's.
+
+    The fixture is deliberately the hostile shape rather than a truncated
+    string: valid, complete, attributed JSON that fits inside the maximum,
+    followed by trailing bytes. On the pre-fix reader this returned
+    `ledger_update`."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_overflow")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    path = segments_dir / ".ever_converged.segO"
+
+    body = json.dumps({"marker": "ever_converged", "v": 1,
+                       "by": "ledger_update", "seg": "segO"}).encode("utf-8")
+    padding = b" " * (backfill.SENTINEL_BODY_MAX_BYTES - len(body))
+    assert len(body + padding) == backfill.SENTINEL_BODY_MAX_BYTES
+
+    path.write_bytes(body + padding)
+    assert backfill.read_sentinel_attribution(path) == "ledger_update", (
+        "a body exactly AT the maximum must still be read -- the check is an "
+        "overflow detector, not an off-by-one that rejects the largest legal "
+        "marker"
+    )
+
+    path.write_bytes(body + padding + b"X")
+    assert backfill.read_sentinel_attribution(path) == "unattributed"
+
+
+VERSION_CASES = [
+    ("a real integer", 1, "ledger_update"),
+    # bool is a SUBCLASS of int and True == 1, so an equality-only check
+    # accepts this; neither writer can emit it.
+    ("JSON true", True, "unattributed"),
+    ("a float that compares equal", 1.0, "unattributed"),
+    ("the version as a string", "1", "unattributed"),
+    ("a future version", 2, "unattributed"),
+]
+
+
+@pytest.mark.parametrize("label,version,expected", VERSION_CASES,
+                         ids=[case[0] for case in VERSION_CASES])
+def test_the_version_must_be_the_integer_the_writers_emit(tmp_path, label, version, expected):
+    """The strict-shape check pins what sentinel_body() ACTUALLY emits, and
+    Python's numeric equality is looser than that: `True == 1` and `1.0 == 1`
+    both hold. A foreign body carrying either was attributed to a known
+    writer."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, f"backfill_v_{abs(hash(label))}")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    path = segments_dir / ".ever_converged.segV"
+    path.write_text(
+        json.dumps({"marker": "ever_converged", "v": version,
+                    "by": "ledger_update", "seg": "segV"}),
+        encoding="utf-8",
+    )
+    assert backfill.read_sentinel_attribution(path) == expected, label
+
+
+def test_a_writer_can_never_publish_a_body_its_own_reader_would_refuse(tmp_path):
+    """THE WRITER/READER ROUND TRIP, and the seam #443 could have failed at
+    silently. `run_token` is a free-form string with no length constraint
+    anywhere in the payload schema, and it is copied into the marker -- so an
+    unbounded evidence field produced a marker that was GENUINELY EARNED and
+    read back `unattributed`, defeating the feature on exactly the markers it
+    exists for. No hostile actor is needed; a long run id suffices.
+
+    sentinel_body() answers by dropping the evidence rather than truncating
+    it: a truncated JSON body is not shorter evidence, it is unparseable
+    evidence. The marker still says who wrote it, which is the half worth
+    keeping. Both writers are checked, because the bound lives in the shared
+    function and a divergence there is exactly what the source pin exists for."""
+    writer = _load_module(LEDGER_UPDATE_SRC, "ledger_update_roundtrip")
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_roundtrip")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+
+    huge = "R" * (backfill.SENTINEL_BODY_MAX_BYTES * 3)
+    for module, name, seg in (
+        (writer, "ledger_update", "segRT1"),
+        (backfill, "backfill_ever_converged", "segRT2"),
+    ):
+        body = module.sentinel_body(seg, name, {
+            "run_token": huge, "reviewed_draft_sha1": huge, "ledger_status": huge,
+        })
+        assert len(body) <= backfill.SENTINEL_BODY_MAX_BYTES, (
+            f"{name} published {len(body)} bytes, past the maximum its own "
+            f"reader accepts"
+        )
+        path = segments_dir / f".ever_converged.{seg}"
+        path.write_bytes(body)
+        assert backfill.read_sentinel_attribution(
+            path, expected_seg=seg
+        ) == name, (
+            "an earned marker read back as unattributed -- the writer emitted "
+            "a body its reader refuses, which is #443 defeated on the markers "
+            "it exists for"
+        )
+        assert "run_token" not in json.loads(body.decode("utf-8")), (
+            "the oversized evidence must be DROPPED, not truncated into "
+            "something unparseable"
+        )

@@ -369,6 +369,16 @@ _SENTINEL_REMEDY_VANISHED = (
 SENTINEL_MARKER_NAME = "ever_converged"
 SENTINEL_BODY_VERSION = 1
 
+# The marker's body never exceeds this, BY CONSTRUCTION rather than by
+# convention -- sentinel_body() drops the evidence and emits identity alone
+# rather than publish a body its reader would have to truncate. The reader
+# (backfill_ever_converged.py's read_sentinel_attribution()) refuses anything
+# longer, so an unbounded writer field would have produced markers that are
+# genuinely earned and REPORT AS `unattributed`, defeating #443 on exactly the
+# markers it exists for. Reachable without anything hostile: `run_token` is a
+# free-form string with no length constraint anywhere in the payload schema.
+SENTINEL_BODY_MAX_BYTES = 4096
+
 # Written by THIS script's mark_ever_converged(); backfill_ever_converged.py
 # writes its own name here. #443: the two writers used to publish the identical
 # fixed bytes `b"converged\n"`, so nothing on disk could tell a marker earned at
@@ -392,6 +402,14 @@ def sentinel_body(seg, writer, evidence=None) -> bytes:
     assigned AFTER it, so no caller can forge `by`, `marker`, `v` or `seg`;
     a direct in-process caller supplying `{"by": "..."}` moves nothing.
 
+    BOUNDED, and by dropping evidence rather than by truncating it. A body
+    that would exceed SENTINEL_BODY_MAX_BYTES is re-emitted with the identity
+    fields alone -- those are bounded by construction (`seg` is a validated
+    segment id, short enough to be a filename) -- because a truncated JSON body
+    is not shorter evidence, it is unparseable evidence, and the reader would
+    report the marker `unattributed` either way. Losing the evidence while
+    keeping a marker that still says WHO wrote it is the better half.
+
     WHAT THIS BODY IS NOT: it is not authority. Nothing in this plugin gates
     on it, and classify_ever_converged_sentinel() above still decides
     protection from the entry's TYPE alone. A marker written before this
@@ -399,15 +417,25 @@ def sentinel_body(seg, writer, evidence=None) -> bytes:
     body this parses, keeps classifying SENTINEL_PRESENT, and keeps blocking
     dispatch exactly as it did. That is the whole reason the provenance went
     into the body rather than into the predicate."""
+    def encode(fields):
+        return (
+            json.dumps(fields, sort_keys=True, ensure_ascii=False,
+                       separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+
+    identity = {
+        "marker": SENTINEL_MARKER_NAME,
+        "v": SENTINEL_BODY_VERSION,
+        "by": writer,
+        "seg": seg,
+    }
     fields = {k: v for k, v in dict(evidence or {}).items() if v is not None}
-    fields["marker"] = SENTINEL_MARKER_NAME
-    fields["v"] = SENTINEL_BODY_VERSION
-    fields["by"] = writer
-    fields["seg"] = seg
-    return (
-        json.dumps(fields, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-        + "\n"
-    ).encode("utf-8")
+    fields.update(identity)
+    body = encode(fields)
+    if len(body) > SENTINEL_BODY_MAX_BYTES:
+        return encode(identity)
+    return body
 
 
 def write_all(fd, data: bytes) -> None:

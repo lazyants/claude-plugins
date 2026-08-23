@@ -591,8 +591,9 @@ census established nothing read as a healthy project:
 **`sentinel_attribution` is not on that list, and deliberately so.** The
 report also names, for every marker it found ALREADY present, which writer
 the marker SAYS published it — `ledger_update` (earned at a real convergence,
-carrying that convergence's reviewed draft sha1, plus its run token and round
-label when the recording call supplied a run token), `backfill_ever_converged`
+carrying that convergence's reviewed draft sha1, plus its run token, and the
+round label when the recording call supplied a run token and a non-empty label
+could be read off the review artifact), `backfill_ever_converged`
 (retrofitted from a ledger row by a run of this script), `unattributed`, or
 `unreadable`. It is a DIAGNOSTIC: it moves no bucket, no count and not
 `success`, and no gate anywhere reads a marker's body. It is also
