@@ -2159,23 +2159,18 @@ called. It:
   `--only-segs` was indistinguishable from a complete one. Read the IDs, not
   just the count — an omission and a deliberate batch differ only in *which*
   units are outstanding. `segment_dispatch_driver.py` carries the same list in
-<<<<<<< HEAD
-  its `step1_gate_passed` journal entry and prints the same one-line
-  disclosure on its own stderr.
-- **#536:** the second report-only field carried into the driver's journal is
+  its `step1_gate_passed` journal entry — the durable copy — and RELAYS
+  `select_segments.py`'s own one-line disclosure onto its own stderr (#551),
+  rather than re-printing a second copy of it under its own prefix.
+- **#536:** the second report-only field carried into that journal entry is
   `claims_from_cap_over_sentinel` — the `--from-cap` ids admitted over a
   PRESENT `.ever_converged` sentinel (the #537 population; see the `--from-cap`
   bullet below). Always emitted by `select_segments.py`, `[]` when there were
   none; the driver REQUIRES it only on a `--from-cap` invocation, because
   outside one such an admission is impossible by construction and a missing key
-  would then mean exactly what `[]` means. Unlike `eligible_not_dispatched` it
-  gets no driver-side stderr line: the selector already announces each
-  admission, so a re-print would double the fact in the run log.
-=======
-  its `step1_gate_passed` journal entry — the durable copy — and RELAYS
-  `select_segments.py`'s own one-line disclosure onto its own stderr (#551),
-  rather than re-printing a second copy of it under its own prefix.
->>>>>>> origin/main
+  would then mean exactly what `[]` means. It gets no driver-side stderr line
+  of its own for the reason above: #551's relay already carries the selector's
+  announcement.
 - **#409:** `--allow-retranslate-converged` (optional) — without it,
   `select_segments.py` FATALs if the emitted `SEGS` would include any
   segment that has EVER converged before (a durable per-segment sentinel,
@@ -3026,28 +3021,22 @@ reclassified into another one:
   contract moved, re-entered the loop and exhausted its rounds there is
   capped *and* sentinel-bearing, and that intersection was previously
   admissible by no profile at all. When the sentinel is present the
-<<<<<<< HEAD
-  admission is disclosed on `select_segments.py`'s **stderr** — which is what
-  you read on the hand-run recipe above — and, since #536, also RECORDED: the ids
-  travel in the selector's payload field `claims_from_cap_over_sentinel` and
-  are journalled into `segment_dispatch_driver.py`'s `step1_gate_passed` entry,
-  which is the only durable copy of the fact — the claim record deliberately
-  does not carry it, and a stderr line never survived a run. The driver prints
-  no line of its own; relaying the selector's stderr is #551's job. Both are
-  success-path only: an invocation that publishes some ids and then refuses on
-  a later one leaves those records durable while the refusal payload carries no
-  `claims`, no `claims_admitted_via` and no `claims_from_cap_over_sentinel` —
-  read the authorizations that did land off `runs/<RUN_ID>/.claimed.<seg>`.
-  #536 neither widens nor closes that older residual. An *unreadable*
-=======
   admission is disclosed on `select_segments.py`'s **stderr** — on the
   hand-run recipe above, and, since #551, through `segment_dispatch_driver.py`
   too: that driver captures the selector's stderr and now relays it verbatim
   onto its own, so the line reaches the `runs/driver.<SESSION_ID>.log` the
   launch recipe redirects into (the D9 lost-token disclosure arrives by the
-  same relay). The fact is still not written into the claim record — stderr is
-  the only channel that reports it, on either path. An *unreadable*
->>>>>>> origin/main
+  same relay). Since #536 the ids are also RECORDED rather than only
+  announced: they travel in the selector's payload field
+  `claims_from_cap_over_sentinel` and are journalled into the driver's
+  `step1_gate_passed` entry, the only copy that survives the run. The fact is
+  still not written into the claim record — it describes how the invocation
+  reached the admission, not the claim. Both are success-path only: an
+  invocation that publishes some ids and then refuses on a later one leaves
+  those records durable while the refusal payload carries no `claims`, no
+  `claims_admitted_via` and no `claims_from_cap_over_sentinel` — read the
+  authorizations that did land off `runs/<RUN_ID>/.claimed.<seg>`. #536
+  neither widens nor closes that older residual. An *unreadable*
   sentinel is still refused: it is evidence of nothing. Because a capped
   segment is
   `human_escalation`, `--only-segs` naming the same id(s) is ALSO required
