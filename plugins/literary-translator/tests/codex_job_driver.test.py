@@ -3635,5 +3635,156 @@ def test_promote_refuses_when_stderr_raises_an_arbitrary_unenumerated_exception(
     )
 
 
+
+# ---- #429: a deferral must not destroy the pending slot's occupant -----------
+#
+# _defer_attempt() used to os.replace() the fresh attempt straight onto the slot, so a
+# previously validated candidate that had merely gone UNREADABLE between runs was destroyed
+# by the next ordinary no-budget completion (adopt_pending() refuses such an occupant at its
+# first _is_regular() check and _clear_nonregular() deliberately leaves regular inodes alone,
+# so nothing else touched it). The fix LINKS the occupant to a second name before replacing:
+# a link adds a name and never removes one, so the slot itself is never vacated and
+# os.replace() stays the only mutation of it.
+
+
+def _superseded_links(job):
+    """Every superseded link this job's segments dir currently holds."""
+    return sorted(Path(job.segdir).glob(".att_superseded.*"))
+
+
+def _fault_pending_link(monkeypatch, job, exc):
+    """Fault ONLY the pending -> superseded link, so the failure under test is attributable to
+    that one call and stays so if a second os.link caller is ever added. The narrowing matters
+    here in a way a blanket patch cannot be trusted to: _publish_from_sandbox() runs FIRST and
+    relocates the candidate itself, so faulting a primitive it also uses (its own fd-pinned
+    os.rename()) makes PUBLICATION fail instead -- the function then returns False with the
+    occupant untouched, satisfying every assertion below without ever reaching the branch under
+    test. Publication does not call os.link, so only the link below is affected."""
+    real = os.link
+
+    def faulting(src, dst, *a, **kw):
+        if src == job.pending:
+            raise exc
+        return real(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "link", faulting)
+
+
+def test_defer_preserves_superseded_pending(tmp_path):
+    """#429 RED-before-green: the displaced occupant's bytes must survive the deferral."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text(json.dumps({"marker": "OLD"}), encoding="utf-8")
+    _seed_sandbox(tmp_path, job, content=json.dumps({"marker": "NEW"}))
+    assert job._defer_attempt() is True
+    assert json.loads(Path(job.pending).read_text())["marker"] == "NEW"
+    superseded = _superseded_links(job)
+    assert len(superseded) == 1, superseded          # exactly one, not zero and not a pile
+    assert json.loads(superseded[0].read_text())["marker"] == "OLD"
+
+
+def _load_scanner(module_name, filename):
+    """Load a sibling script's REAL scan_dispatching_run_ids(). Driving the shipped function
+    is the point: an earlier version of the test below re-implemented each scan's filter by
+    hand, which froze a copy of code this module does not own -- and #428 then changed both
+    scans from a `.draft.json` suffix test to skipping the whole dot-prefixed namespace,
+    which a hand-copied filter would have gone on passing against forever."""
+    spec = importlib.util.spec_from_file_location(module_name, str(SCRIPTS_DIR / filename))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.scan_dispatching_run_ids
+
+
+def test_defer_superseded_is_invisible_to_both_real_dispatch_scans(tmp_path):
+    """The preserved copy must not be read as a real segment draft by either scan that
+    enumerates segments/. Both are CALLED here, not imitated. The existence assertion is
+    load-bearing: without it every assertion below passes vacuously on code that creates no
+    preserved copy at all."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text(json.dumps({"marker": "OLD"}), encoding="utf-8")
+    _seed_sandbox(tmp_path, job, content=json.dumps({"marker": "NEW"}))
+    assert job._defer_attempt() is True
+    links = _superseded_links(job)
+    assert len(links) == 1                          # it EXISTS, so the rest is not vacuous
+
+    segdir = Path(job.segdir)
+    # A real canonical draft, so each scan has something it MUST still count -- otherwise a
+    # scan that counted nothing at all would satisfy the assertions below.
+    (segdir / "c001.draft.json").write_text(
+        json.dumps({"dispatch_token": "RUN:c001"}), encoding="utf-8")
+
+    for name, filename in (("select_segments", "select_segments.py"),
+                           ("backfill", "backfill_resume_gate_ack.py")):
+        scan = _load_scanner("scan_%s_mod" % name, filename)
+        result = scan(segdir)
+        assert result["drafts_scanned"] == 1, (name, result)   # the canonical one, and only it
+        assert list(result["by_run_id"]) == ["RUN"], (name, result)
+        attributed = result["by_run_id"]["RUN"]
+        assert len(attributed) == 1, (name, result)            # not duplicated by the copy
+        assert not any(links[0].name in str(e) for e in attributed), (name, result)
+
+
+def test_defer_without_occupant_leaves_no_superseded_link(tmp_path):
+    """The ordinary path -- an empty slot -- must create no garbage and must still defer."""
+    job = _mkjob(tmp_path, kind="translate")
+    assert not os.path.exists(job.pending)
+    _seed_sandbox(tmp_path, job, content=json.dumps({"marker": "NEW"}))
+    assert job._defer_attempt() is True                 # FileNotFoundError -> nothing to preserve
+    assert json.loads(Path(job.pending).read_text())["marker"] == "NEW"
+    assert _superseded_links(job) == []
+
+
+@pytest.mark.parametrize("exc", [PermissionError(13, "denied"), NotImplementedError()])
+def test_defer_refuses_when_occupant_cannot_be_preserved(tmp_path, monkeypatch, exc):
+    """Could-not-preserve REFUSES rather than destroying. Refusing sacrifices the fresh
+    candidate, which is unvalidated by construction here (the defer fires precisely because no
+    budget remained to gate it) -- the less-established artifact, which is the correct trade at
+    THIS site. NotImplementedError is parametrized because it is what an unsupported
+    follow_symlinks raises and it is NOT an OSError: a handler catching OSError alone lets it
+    escape to run()'s generic catch with no error_detail at all."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text(json.dumps({"marker": "OLD"}), encoding="utf-8")
+    _seed_sandbox(tmp_path, job, content=json.dumps({"marker": "NEW"}))
+    _fault_pending_link(monkeypatch, job, exc)
+    assert job._defer_attempt() is False
+    assert os.path.exists(job.attempt)                  # publication DID happen: the fault
+    assert json.loads(Path(job.attempt).read_text())["marker"] == "NEW"   # reached the branch
+    assert json.loads(Path(job.pending).read_text())["marker"] == "OLD"   # occupant intact
+    assert _superseded_links(job) == []
+    assert job.error_detail                             # the refusal is diagnosable, not opaque
+
+
+def test_defer_leaves_occupant_in_slot_when_replace_fails(tmp_path, monkeypatch):
+    """The link is ADDITIVE, so a failing os.replace() after it leaves the occupant exactly
+    where a later run looks -- no restore branch does this, and a rename-based preserve would
+    have left the slot EMPTY with both candidates unreachable."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text(json.dumps({"marker": "OLD"}), encoding="utf-8")
+    _seed_sandbox(tmp_path, job, content=json.dumps({"marker": "NEW"}))
+
+    def boom(src, dst):
+        raise OSError(5, "EIO")
+    monkeypatch.setattr(os, "replace", boom)
+
+    assert job._defer_attempt() is False
+    assert json.loads(Path(job.pending).read_text())["marker"] == "OLD"   # STILL in the slot
+    superseded = _superseded_links(job)
+    assert len(superseded) == 1
+    assert json.loads(superseded[0].read_text())["marker"] == "OLD"
+    assert job.error_detail
+
+
+def test_defer_superseded_name_carries_kind_and_seg(tmp_path):
+    """Hand recovery cannot read identity out of the payload: the candidate is UNVALIDATED at
+    defer time, and review.schema.json has no `seg` property at all. The NAME therefore has to
+    carry both, and `inv` keeps a second deferral of the same segment from overwriting the
+    first."""
+    job = _mkjob(tmp_path, kind="review", seg="c042")
+    Path(job.pending).write_text(json.dumps({"marker": "OLD"}), encoding="utf-8")
+    _seed_sandbox(tmp_path, job, content=json.dumps({"marker": "NEW"}))
+    assert job._defer_attempt() is True
+    name = _superseded_links(job)[0].name
+    assert name == ".att_superseded.review.c042.%s" % job.inv
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

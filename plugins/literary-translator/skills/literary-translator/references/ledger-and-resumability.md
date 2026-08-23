@@ -206,11 +206,12 @@ fresh, no-resume run) but never flips an individual converged segment
 
 ## Run-scratch files, the codex-job wait bound, and what the resume digest excludes (1.4.7, #198)
 
-The W5 `codex_job.py` driver writes several ephemeral **run-scratch** dotfiles
-under `${durable_root}/segments/` (and consumes a per-dispatch task-file). These
-are NOT segment artifacts and NOT convergence/resume inputs — they are excluded
-from every bundle/cache-key hash, from `final_audit.py`/`assemble.py` coverage,
-and from the resume-integrity digest:
+The W5 `codex_job.py` driver writes several **run-scratch** dotfiles under
+`${durable_root}/segments/` (and consumes a per-dispatch task-file). These are
+NOT segment artifacts and NOT convergence/resume inputs — they are excluded from
+every bundle/cache-key hash, from `final_audit.py`/`assemble.py` coverage, and
+from the resume-integrity digest. All but one are **ephemeral**; the exception is
+called out below and must not be swept with the rest:
 
 - `.codex_task.*.<DISP>` — the per-dispatch codex task-file (the drive agent
   writes it; the driver is its sole consumer and deletes it),
@@ -236,6 +237,24 @@ and from the resume-integrity digest:
   gate now deliberately stops honouring that trace rather than refusing on a run
   whose only surviving artifact is private staging state. `scan_dispatching_run_ids()`
   documents the resulting widened undetectable case,
+- `.att_superseded.<draft|review>.<seg>.<INV>` — **the one DURABLE entry in this
+  list** (#429). When a deferral displaces a pending occupant, the occupant is first
+  given this second name with `os.link()` — a link ADDS a name and removes none, so
+  the slot is never vacated — and only then is the slot overwritten. Before it, a
+  candidate that had merely gone UNREADABLE between runs was destroyed by the next
+  ordinary no-budget completion. Nothing re-adopts it, nothing collects it, and its
+  accumulation is bounded by nothing: it exists for HAND recovery, which is why the
+  name carries the kind and the segment (the payload cannot be trusted to — the
+  candidate is unvalidated at defer time, and `review.schema.json` has no `seg` field
+  at all). Like every other entry here it is dot-prefixed, so the #428 skip above
+  covers it for free and no suffix rule has to. **Known limit, and the reason it is
+  called out rather than folded into the list:** these are DURABLE and they
+  ACCUMULATE, while `fixPrompt()` asks the fix agent to settle a book-scoped rule
+  against "the other segments' drafts under `segments/`" — a natural-language census
+  no filename convention binds. So a retained copy can in principle be read as
+  evidence, and that exposure grows over time rather than passing with the next
+  dispatch, which is the one respect in which this entry is worse than the transient
+  slot it preserves,
 - `.codex_job.<seg>.json` — the driver's HYGIENE control state (overwritten per
   dispatch; read ONLY by the driver, never by the Workflow),
 - `.codex_job.<seg>.lock` — the never-unlinked kernel-`flock` sentinel that
