@@ -2283,12 +2283,13 @@ def test_forbidden_patterns_malformed_regex_warns_once_and_siblings_still_run(tm
     add_converged_segment(root, "seg01", clean_segpack(), draft)
     add_converged_segment(root, "seg02", clean_segpack(seg="seg02"), clean_draft(seg="seg02"))
     proc = run_final_audit(root)
-    # The EXACT baseline, not `!= 2`: this fixture carries PAD_SEG, so a run
-    # whose only WARNs are advisory exits 3 (project incomplete) and nothing
-    # else. `!= 2` would stay green if a declaration warning started exiting 1,
-    # which is precisely the regression -- an advisory lane gating delivery --
-    # that the older generic "WARN checks do not gate" tests cannot see,
-    # because they never declare a pattern.
+    # This fixture carries PAD_SEG, so 3 ("project incomplete") is its baseline
+    # for reasons unrelated to the declaration. That makes it USELESS as
+    # exit-code evidence on its own -- a mutation forcing project_complete
+    # False on a declaration warning would still return 3 here. The exit-code
+    # property is pinned instead by
+    # test_forbidden_patterns_never_gate_a_complete_project below, on a
+    # fixture whose baseline is 0.
     assert proc.returncode == 3, (proc.returncode, proc.stderr)
     broken = [ln for ln in _style_lines(proc) if "broken" in ln]
     assert len(broken) == 1, proc.stderr
@@ -2328,6 +2329,78 @@ def test_forbidden_patterns_uncompilable_beyond_re_error_is_still_advisory(tmp_p
     assert len([ln for ln in _style_lines(proc) if "no-placeholder" in ln]) == 1
 
 
+def test_forbidden_patterns_never_gate_a_complete_project(tmp_path):
+    """Acceptance criterion 6, on the only fixture that can prove it.
+
+    NO padding segment, so a clean run of this project exits 0. Both a HIT and
+    a rejected declaration are then asserted to leave that 0 untouched. Any
+    mutation that lets an advisory declaration reach `hard_failures` or
+    `project_complete` turns this red -- which the same assertions on a
+    PAD_SEG fixture cannot do, since that one already exits 3."""
+    baseline = make_durable_root(tmp_path / "base", seg_ids=("seg01",))
+    add_converged_segment(baseline, "seg01", clean_segpack(), clean_draft())
+    clean = run_final_audit(baseline)
+    assert clean.returncode == 0, clean.stderr
+    assert parse_summary(clean)["project_complete"] is True
+
+    for name, patterns in (
+        ("hit", [{"id": "note-marker", "pattern": "note", "message": "marker left in"}]),
+        ("broken", [{"id": "broken", "pattern": "(unclosed", "message": "never mind"}]),
+        ("not-a-list", {"id": "no-dash", "pattern": "note", "message": "dropped dash"}),
+    ):
+        root = make_durable_root(tmp_path / name, seg_ids=("seg01",), forbidden_patterns=patterns)
+        add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
+        proc = run_final_audit(root)
+        summary = parse_summary(proc)
+        assert_schema_valid(summary)
+        assert _style_lines(proc), (name, proc.stderr)
+        assert summary["warnings"] >= 1, (name, proc.stderr)
+        assert summary["hard_failures"] == 0, (name, proc.stderr)
+        assert summary["project_complete"] is True, (name, proc.stderr)
+        assert proc.returncode == 0, (name, proc.returncode, proc.stderr)
+
+
+def test_forbidden_patterns_malformed_container_is_reported_not_silent(tmp_path):
+    """The false green this feature exists to remove, one layer up from a bad
+    pattern. W7 reads profile.yml through a loader that never re-runs the
+    schema, so a hand edit made after Step 0 arrives unvalidated -- and
+    dropping the list dash turns the block into a MAPPING carrying a perfectly
+    usable triple. Reading that as 'declared nothing' would report a clean run
+    for a ban the operator believes is enforced."""
+    draft = clean_draft(p1_text=f"A line with FORBIDDEN text in it {FN_PH}.")
+    root = make_durable_root(
+        tmp_path,
+        seg_ids=("seg01", PAD_SEG),
+        forbidden_patterns={"id": "no-dash", "pattern": "FORBIDDEN", "message": "dropped dash"},
+    )
+    add_converged_segment(root, "seg01", clean_segpack(), draft)
+    proc = run_final_audit(root)
+    lines = _style_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "not a list of declarations" in lines[0]
+    assert "NO rule was enforced" in lines[0]
+
+
+def test_forbidden_patterns_non_mapping_entry_is_reported_not_dropped(tmp_path):
+    """Same class, per ITEM: a scalar in the list is named rather than
+    silently filtered, and its siblings still run."""
+    draft = clean_draft(p1_text=f"A line with FORBIDDEN text in it {FN_PH}.")
+    root = make_durable_root(
+        tmp_path,
+        seg_ids=("seg01", PAD_SEG),
+        forbidden_patterns=[
+            "a bare string where a mapping belongs",
+            {"id": "no-placeholder", "pattern": "FORBIDDEN", "message": "placeholder left in"},
+        ],
+    )
+    add_converged_segment(root, "seg01", clean_segpack(), draft)
+    proc = run_final_audit(root)
+    dropped = [ln for ln in _style_lines(proc) if "not a mapping" in ln]
+    assert len(dropped) == 1, proc.stderr
+    assert "#0" in dropped[0], dropped[0]
+    assert len([ln for ln in _style_lines(proc) if "no-placeholder" in ln]) == 1
+
+
 def test_forbidden_patterns_many_hits_collapse_to_one_line(tmp_path):
     draft = clean_draft(p1_text=f"X X X X X {FN_PH}")
     root = _pattern_root(
@@ -2341,18 +2414,28 @@ def test_forbidden_patterns_many_hits_collapse_to_one_line(tmp_path):
     assert "(hits=5)" in lines[0]
 
 
-def test_forbidden_patterns_zero_width_pattern_terminates(tmp_path):
-    """A zero-width pattern must not spin: the hit count is over finditer's
-    non-overlapping matches, which for an empty match is one per position
-    plus one."""
-    draft = clean_draft(p1_text=f"abcd {FN_PH}")
+def test_forbidden_patterns_zero_width_pattern_terminates_and_counts(tmp_path):
+    """A zero-width pattern must not spin, and its count must be the one the
+    schema promises: `finditer`'s non-overlapping matches, which for an
+    always-empty match is one per position plus one at the end.
+
+    Asserting only that SOME warning appeared would stay green under an
+    implementation that reported every zero-width leaf as `hits=1`, which the
+    ordinary counting test cannot see either."""
+    body = "abcd"
+    draft = clean_draft(p1_text=body)
+    draft["footnotes"] = {}
+    draft["blocks"]["vblockA"] = V_PH_A
+    draft["blocks"]["vblockB"] = V_PH_B
     root = _pattern_root(
         tmp_path,
-        [{"id": "zero-width", "pattern": "(?=a)|(?!x)", "message": "zero width"}],
+        [{"id": "zero-width", "pattern": "(?!x)", "message": "zero width"}],
         draft=draft,
     )
     proc = run_final_audit(root, timeout=90)
-    assert [ln for ln in _style_lines(proc) if "zero-width" in ln], proc.stderr
+    line = [ln for ln in _style_lines(proc) if "in blocks['p1']" in ln]
+    assert len(line) == 1, proc.stderr
+    assert f"(hits={len(body) + 1})" in line[0], line[0]
 
 
 def test_forbidden_patterns_newlines_never_split_a_warn_line(tmp_path):

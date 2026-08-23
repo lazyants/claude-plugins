@@ -781,40 +781,65 @@ SCANNED_DRAFT_SECTIONS = ("blocks", "footnotes", "verses")
 
 
 def forbidden_patterns(profile):
-    """Reads profile.yml's `validation.forbidden_patterns` (#520) as a list
-    of declaration dicts, or `[]` when the project declares none.
+    """Reads profile.yml's `validation.forbidden_patterns` (#520) RAW -- the
+    value as written, or `None` when the key is absent.
 
-    The ONE compatibility case this has to serve is the sub-key being
-    ABSENT -- every project that predates this field. A missing `validation`
-    object is not a real state to support: `ProfileConfig` already requires
-    `validation.untranslated_sentinel` (validate_draft.py) and this same run
-    has consumed it in hard_check_coverage() long before any WARN runs. The
-    defensive `or {}` below therefore buys robustness, not a supported shape.
+    Deliberately no shape coercion here. This reader is downstream of an
+    operator who may have edited profile.yml since Step 0 validated it (W7
+    reaches the profile through `vd.load_profile()`, which only
+    `yaml.safe_load`s and never re-runs the schema), and the shapes a hand
+    edit produces are not exotic. Dropping a list dash turns
 
-    Anything that is not a list of dicts reads as no declaration at all, and
-    a declaration missing a required key is dropped by
-    compile_forbidden_patterns() with its own WARN -- profile.schema.json is
-    the gate that refuses those at Step 0, and this reader is downstream of
-    an operator who may have edited profile.yml since."""
+        forbidden_patterns:
+          - id: no-forbidden
+
+    into a MAPPING carrying a perfectly usable triple. Coercing that to `[]`
+    here would make an intended ban read as a clean run -- the precise false
+    green this whole check exists to remove. So the malformed shape is
+    carried to compile_forbidden_patterns(), which reports it exactly as it
+    reports an uncompilable pattern.
+
+    The ONE compatibility case is the sub-key being ABSENT -- every project
+    predating this field. A missing `validation` object is not a real state to
+    support: `ProfileConfig` already requires `validation.untranslated_sentinel`
+    and this same run consumed it in hard_check_coverage() long before any WARN
+    runs. The defensive `or {}` buys robustness, not a supported shape."""
     validation = (profile or {}).get("validation")
     if not isinstance(validation, dict):
-        return []
-    decls = validation.get("forbidden_patterns")
-    if not isinstance(decls, list):
-        return []
-    return [d for d in decls if isinstance(d, dict)]
+        return None
+    return validation.get("forbidden_patterns")
 
 
-def compile_forbidden_patterns(decls):
+def compile_forbidden_patterns(raw):
     """(compiled, warns) -- compiled is a list of (id, regex, message).
 
-    A `re.error` never propagates: it becomes a WARN naming the id, and the
-    SIBLING declarations still compile and run. The alternative (raise, or
-    skip quietly) either takes down an advisory lane over an operator typo or
-    reports a clean audit for a rule that was never enforced."""
+    Every rejection is REPORTED and none is fatal. A malformed container, a
+    non-mapping entry, a missing field and an uncompilable pattern are four
+    shapes of the same operator mistake, and the alternative to warning about
+    each (raise, or skip quietly) either takes down an advisory lane over a
+    typo or reports a clean audit for a rule that was never enforced.
+
+    `raw` is the value exactly as profile.yml carries it; `None` means the key
+    is absent, which is the one shape that is silent."""
     compiled = []
     warns = []
-    for index, decl in enumerate(decls):
+    if raw is None:
+        return compiled, warns
+    if not isinstance(raw, list):
+        return compiled, [
+            f"STYLE-PATTERN validation.forbidden_patterns is a "
+            f"{type(raw).__name__}, not a list of declarations -- NO rule was "
+            f"enforced this run (a dropped list dash produces exactly this) "
+            f"-- MANUAL"
+        ]
+    for index, decl in enumerate(raw):
+        if not isinstance(decl, dict):
+            warns.append(
+                f"STYLE-PATTERN #{index}: declaration is a "
+                f"{type(decl).__name__}, not a mapping -- rule NOT enforced "
+                f"this run -- MANUAL"
+            )
+            continue
         rule_id = decl.get("id")
         pattern = decl.get("pattern")
         message = decl.get("message")
@@ -858,12 +883,13 @@ def _string_leaves(node, path):
     An explicit stack, NOT recursion: `json.loads` decodes container nesting
     far deeper than Python's own recursion limit (measured: past 20 000 levels
     against a default limit of 1 000), and a `verses` value may legitimately
-    carry nested objects. This is NOT the script's first depth-sensitive step
-    and does not claim to be -- `hard_check_stale_review()` canonically
-    re-encodes the whole draft long before any WARN runs, and that
-    `json.dumps` raises first on such a draft. The iterative form costs the
-    same as the recursive one and simply declines to add a SECOND place that
-    fails; the pre-existing one is disclosed rather than fixed here.
+    carry nested objects. This is NOT the script's first depth-sensitive step:
+    the two HARD checks load and canonically re-encode the whole draft before
+    any WARN runs, and which of those raises first on a given draft depends on
+    its nesting shape and depth -- so no claim is made here about which one
+    does. That pre-existing behaviour is disclosed rather than fixed. The
+    iterative form costs the same as the recursive one and simply declines to
+    add one more place that fails.
 
     Each path component is bracketed and repr'd -- `verses['v1']['rendered']`
     -- so that a key which itself contains a dot cannot render the same as the
@@ -895,10 +921,14 @@ def warn_forbidden_patterns(seg, compiled):
     for section in SCANNED_DRAFT_SECTIONS:
         for label, text in _string_leaves(draft.get(section), section):
             for rule_id, regex, message in compiled:
-                hits = regex.findall(text)
-                if not hits:
+                # ONE traversal, and `finditer` rather than `findall`: the
+                # count and the first match come from the same walk, and the
+                # schema's own description of how a pattern is matched stays
+                # literally true of the code.
+                matches = list(regex.finditer(text))
+                if not matches:
                     continue
-                first = next(regex.finditer(text))
+                first = matches[0]
                 start = max(0, first.start() - 40)
                 snippet = text[start:first.end() + 40]
                 # One normalization, applied to the WHOLE formatted line as
@@ -910,7 +940,7 @@ def warn_forbidden_patterns(seg, compiled):
                 # U+0085, U+2028 and U+2029 collapse too, not just CR/LF.
                 warns.append(_norm_ws(
                     f"[{seg}] STYLE-PATTERN {rule_id} in {label}: {message} "
-                    f"(hits={len(hits)}) :: {snippet!r} -- MANUAL"
+                    f"(hits={len(matches)}) :: {snippet!r} -- MANUAL"
                 ))
     return warns
 
