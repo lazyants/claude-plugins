@@ -4341,7 +4341,8 @@ def test_adopt_pending_non_content_rejection_leaves_the_flag_false(
     )
 
 
-def test_a_pending_that_vanished_under_the_gates_is_recoverable_not_terminal(tmp_path, monkeypatch):
+@pytest.mark.parametrize("race", ["unlink", "overwrite"])
+def test_a_pending_mutated_under_the_gates_is_recoverable_not_terminal(tmp_path, monkeypatch, race):
     """The terminal verdict must rest on the candidate the gates actually judged.
 
     Each gate re-OPENS self.pending BY PATH, and unlike validate_attempt()'s per-invocation
@@ -4352,25 +4353,46 @@ def test_a_pending_that_vanished_under_the_gates_is_recoverable_not_terminal(tmp
     content verdict, so a concurrent unlink inside that window is indistinguishable from one
     -- and without the re-check it would block the segment permanently.
 
-    Simulated at the seam it actually opens: the gate stub deletes the pending as
-    validate_draft.py "runs", then rejects with exit 1."""
+    Simulated at the seam it actually opens: the gate stub mutates the pending as
+    validate_draft.py "runs", then rejects with exit 1.
+
+    The two rows are the whole point of pinning BYTES rather than file type. `unlink` is
+    caught by any re-check. `overwrite` is not: the file is still a perfectly regular,
+    readable file -- only its contents changed -- so a type-only guard passes it through and
+    the segment is blocked permanently over a write nothing judged. That row was reproduced
+    by the MR reviewer against the type-only version of this guard."""
     job = _mkjob(tmp_path, kind="translate")
-    Path(job.pending).write_text("{}", encoding="utf-8")
+    Path(job.pending).write_text(json.dumps({"draft": "the bytes draft_ready.py approved"}),
+                                 encoding="utf-8")
     calls = []
+    still_regular = {"v": None}
 
     def racing_gate(args, timeout):
         calls.append(args[0])
         if args[0] == "validate_draft.py":
-            os.unlink(job.pending)          # the straggler turn wins the race
+            if race == "unlink":
+                os.unlink(job.pending)                       # straggler removes it
+            else:
+                Path(job.pending).write_text("{", encoding="utf-8")   # ... or truncates it
+                # Sampled HERE, not after adopt_pending() returns: the rejection path
+                # discards the pending, so by then the distinction this row exists for
+                # (a still-regular file with different bytes) is no longer observable.
+                still_regular["v"] = os.path.isfile(job.pending)
             return SimpleNamespace(returncode=1, stdout="FAIL: candidate missing", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
     monkeypatch.setattr(job, "_gate", racing_gate)
 
     assert job.adopt_pending() is False
     assert calls == ["draft_ready.py", "validate_draft.py"]
+    if race == "overwrite":
+        assert still_regular["v"] is True, (
+            "precondition: this row only proves anything if the mutated candidate was still "
+            "a regular file when the guard ran -- otherwise it duplicates the unlink row"
+        )
     assert job.translate_content_rejected is False, (
-        "a candidate that stopped being the file the gates were pointed at was treated as a "
-        "permanent content verdict -- a concurrent write can now block a segment forever"
+        "%s: the candidate validate_draft.py answered for was not the one draft_ready.py "
+        "approved, and the verdict was still made terminal -- a concurrent write can block "
+        "a segment forever" % race
     )
 
 
