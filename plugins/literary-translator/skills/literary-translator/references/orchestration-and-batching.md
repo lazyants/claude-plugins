@@ -316,8 +316,9 @@ and atomically promotes it.
    runs before a timeout is declared, because a job that finishes after the last
    chunk's poll ended leaves a valid draft that nothing would otherwise read.
    Only if that re-check also fails does this branch return
-   `{ seg, converged: false, reason: 'translate-timeout' }`, and the loop never
-   reaches a review call at all for this segment. The reason string is
+   `{ seg, converged: false, reason: 'translate-timeout', detail }` (#400,
+   see item 5 below), and the loop never reaches a review call at all for
+   this segment. The reason string is
    deliberately unchanged: `select_segments.py`'s "non-terminal → recoverable"
    rule and every recovery doc key off it. **1.16.0:** this wait is
    containment-guarded — a reply carrying the fail sentinel (`FAILED <seg>`
@@ -385,8 +386,9 @@ and atomically promotes it.
    identical dispatch → wait → read → check sequence (`roundLabel: 'final'`
    in its `dispatch_token`).
 5. **Result.** Ordinary translate/review non-convergence returns a structured
-   `{ seg, converged: false, reason, rounds, lastFindings }` object — never
-   throws, never silently marks done. `reason` is one of
+   `{ seg, converged: false, reason, rounds, lastFindings, detail }` object —
+   never throws, never silently marks done; `detail` is optional (#400, see
+   below). `reason` is one of
    `translate-timeout`, `review-timeout`, `review-null`,
    `review-artifact-mismatch`, `review-fabricated-loc` (1.3.6/#133 — a
    schema-valid, artifact-matched verdict whose finding carries a bare,
@@ -432,6 +434,33 @@ and atomically promotes it.
    convergence ledger write (see `references/ledger-and-resumability.md`'s
    commit-gate chain) also surfaces as `reason: 'ledger-write-failed'` —
    never recorded `converged`.
+
+   **`detail` (#400).** The runtime hands this script no error text when a
+   subagent dies on a terminal API error — `agent()` just returns `null` —
+   so `reason` can name a STAGE but never a CAUSE. On a failed-call reason
+   (`translate-timeout`, `review-timeout`, `review-null`,
+   `review-artifact-mismatch`, `fix-call-failed`, `ledger-write-failed`,
+   `ledger-merge-failed`) `detail` describes what the call actually
+   returned, capped and collapsed to one line (`replyDetail()`,
+   `DETAIL_CAP = 160`). Two reasons read differently: `review-fabricated-loc`'s
+   `detail` is the fixed `FABRICATED_LOC_DETAIL` constant naming the shape
+   defect, never a returned reply, and `draft-missing`/`cap` carry no
+   `detail` at all. A `source:` prefix (`review dispatch`, `translate
+   dispatch`, `draft probe`, `fix call`) is added only where one `reason`
+   can be produced by two different failing calls that it alone cannot
+   distinguish; elsewhere `detail` is deliberately unlabelled, so an outage
+   that kills calls at several stages still forms one bucket in the batch
+   tally below instead of fragmenting per stage. `waitDetail` rides
+   alongside `detail` only on the two timeout reasons, and only when a
+   dispatch-sourced `detail` displaced the wait reply — the proximate wait
+   text is then kept rather than discarded.
+
+   The batch summary (after the "Translate/review pass done" log line, once
+   `pipeline()` returns) tallies these `detail` strings across every failed
+   segment: any value repeated on two or more rows is logged and returned
+   as `failureDetailTally`, an array of `{ detail, count }` ordered by
+   count descending then `detail` ascending, on both the `batchComplete:
+   true` return and the `ledger-merge-failed` return.
 
 No sub-chunking exists anywhere in this loop in v1 — `mass-translate-wf.template.js`
 operates only on whole `seg` items; a segment whose `word_count` exceeds
