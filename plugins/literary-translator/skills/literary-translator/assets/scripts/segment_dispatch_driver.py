@@ -342,6 +342,12 @@ ordering property that makes resolving early safe). Whatever
 `select_segments.py` reports back in its own `claims` field is read back,
 validated (see `parse_claims_field()`), and folded into the dispatch
 context -- fatal on anything missing, malformed, or mismatched (#438 D3).
+Its sibling `claims_admitted_via` field is validated in the same
+fail-closed way (see `parse_claims_admitted_via()`) and journaled beside it: `claims` reports
+the DURABLE record, which on a re-claim inside one run id was written at
+that run id's first claim, while `claims_admitted_via` reports the gate
+THIS invocation admitted under (#545/#549). Report-only -- nothing gates
+on it.
 `--from-stalled` additionally carries `--driver-lease-held` forward to
 `select_segments.py` whenever at least one id is requested under it, but
 only ever on this code path -- run after `acquire_driver_lock()` has
@@ -1706,6 +1712,78 @@ def parse_claims_field(select_result: dict, segs: list) -> dict:
             )
         result[seg] = profile
     return result
+
+
+def parse_claims_admitted_via(select_result: dict, claims: dict) -> dict:
+    """Validates select_segments.py's `claims_admitted_via` field and returns
+    `{seg: profile}` -- the gate THIS invocation admitted each id under.
+
+    `claims` must be parse_claims_field()'s own RETURN VALUE (the reduced
+    `{seg: profile}` map), never select_segments.py's raw `claims` JSON. That
+    is what makes the key check below sufficient on its own: every key in the
+    reduced map has already passed validate_seg() and the subset-of-`segs`
+    check up there, so equality with it transitively supplies both here.
+
+    #545: the `profile` inside select_segments.py's own `claims` record, which
+    parse_claims_field() above reduces this map's values to, is the DURABLE
+    claim record's. On a re-claim inside one run id that record is the one
+    written at that run id's FIRST claim, so its profile can be older than the
+    admission this invocation actually performed. Both are true
+    statements about different questions, and the `step1_gate_passed` record
+    below is the only durable copy of either REDUCED map (#549) -- the full
+    record stays durable at runs/<RUN_ID>/.claimed.<seg>, but nothing on disk
+    would otherwise say which gate this invocation ran. So both are carried,
+    and neither is corrected into the other.
+
+    Validated for the same reason and in the same fail-closed way as `claims`
+    itself: a selector that stopped emitting the field has broken the
+    transport, and reading that as "nothing was admitted" is exactly the
+    silent-loss shape #438 D3 refuses.
+    The key set must be EQUAL to `claims`' (not merely a subset): the selector
+    writes both in one loop iteration after the same guards, so any divergence
+    means one of the two maps is not the one this invocation produced.
+
+    This field is REPORT-ONLY. Nothing gates on it -- `ctx.claims` still
+    carries the record's profile, and claim_capability_refusal_for_translate()
+    refuses on MEMBERSHIP, never on the profile string. Widening its authority
+    would make a reporting fix into an admission change, which #545 explicitly
+    is not.
+
+    FATAL (never a silent default) on: the field missing entirely; not a JSON
+    object; a key set that is not exactly `claims`' key set; or a value outside
+    KNOWN_CLAIM_PROFILES."""
+    admitted_via = select_result.get("claims_admitted_via")
+    if admitted_via is None:
+        fatal(
+            "select_segments.py's JSON output has no 'claims_admitted_via' field -- "
+            "refusing to journal a claim map that cannot say which gate this "
+            "invocation admitted under (#545). A driver from this release requires a "
+            "selector from it: --plugin-root can point the two at different installs, "
+            "and this is where that mismatch is caught.",
+            exit_code=2,
+        )
+    if not isinstance(admitted_via, dict):
+        fatal(
+            f"select_segments.py's 'claims_admitted_via' field is not a JSON object: "
+            f"{admitted_via!r} (#545)",
+            exit_code=2,
+        )
+    if set(admitted_via) != set(claims):
+        fatal(
+            f"'claims_admitted_via' names {sorted(admitted_via)!r}, which disagrees with "
+            f"'claims' ({sorted(claims)!r}) -- the two are written together by the "
+            f"selector, so a disagreement means one of them is not this invocation's "
+            f"own (#545)",
+            exit_code=2,
+        )
+    for seg, profile in admitted_via.items():
+        if profile not in KNOWN_CLAIM_PROFILES:
+            fatal(
+                f"claims_admitted_via[{seg!r}] must be one of {KNOWN_CLAIM_PROFILES}, "
+                f"got {profile!r} (#545)",
+                exit_code=2,
+            )
+    return dict(admitted_via)
 
 
 # ---------------------------------------------------------------------------
@@ -6404,6 +6482,11 @@ def run(args, dirs: dict) -> dict:
         # here, not read as "nothing was claimed". See parse_claims_field()'s
         # own docstring for the full validation list.
         claims = parse_claims_field(select_result, segs)
+        # #545/#549: validated on EVERY invocation for the same reason `claims`
+        # is, and journaled beside it -- this record is the only DURABLE copy
+        # of the reported profile, so a fix that reached stdout alone would
+        # leave the audit surface wrong.
+        claims_admitted_via = parse_claims_admitted_via(select_result, claims)
 
         # #530: the eligible units this dispatch is NOT carrying. Computed by
         # select_segments.py (which owns DEFAULT_ELIGIBLE_CATEGORIES) and read
@@ -6441,6 +6524,7 @@ def run(args, dirs: dict) -> dict:
             {
                 "type": "step1_gate_passed", "segs": segs,
                 "counts": select_result.get("counts"), "claims": claims,
+                "claims_admitted_via": claims_admitted_via,
                 "eligible_not_dispatched": eligible_not_dispatched,
             },
         )
@@ -6488,6 +6572,7 @@ def run(args, dirs: dict) -> dict:
                 "success": True, "session_id": session_id, "durable_root": str(durable_root),
                 "segs": segs, "counts": select_result.get("counts"), "engine": engine_cfg,
                 "dispatched": False, "results": [], "claims": claims,
+                "claims_admitted_via": claims_admitted_via,
                 # Always present, `null` on the ordinary path that never got
                 # as far as resolving one -- never a key that appears only
                 # sometimes. On a claim invocation this is the id whose
@@ -6582,6 +6667,7 @@ def run(args, dirs: dict) -> dict:
             "dispatched": True,
             "results": segment_results,
             "claims": claims,
+            "claims_admitted_via": claims_admitted_via,
             "summary": {
                 "converged": [r["seg"] for r in converged],
                 "needs_fix": [{"seg": r["seg"], "round_label": r.get("round_label")} for r in needs_fix],

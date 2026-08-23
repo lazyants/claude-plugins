@@ -253,6 +253,76 @@ def test_parse_claims_field_valid_multi_entry_all_profiles():
 
 
 # ---------------------------------------------------------------------------
+# #545 -- parse_claims_admitted_via(): the sibling map's own fail-closed
+# transport. `claims` answers "what does the durable record say"; this answers
+# "which gate did THIS invocation admit under", and on a re-claim inside one
+# run id those are different questions with different answers.
+# ---------------------------------------------------------------------------
+
+def test_parse_claims_admitted_via_missing_field_is_fatal():
+    """The reason the field is required rather than optional: a selector that
+    stopped emitting it has broken the transport, and defaulting to {} would
+    journal a claim map that silently cannot answer which gate ran -- the exact
+    silence #545 exists to remove. It also catches the one real mixed-version
+    path: --plugin-root can point this driver at a selector from an older
+    install."""
+    claims = {"seg01": "from-cap"}
+    with pytest.raises(DRIVER.DriverError, match="no 'claims_admitted_via' field"):
+        DRIVER.parse_claims_admitted_via({"claims": {"seg01": _claim_entry("seg01")}}, claims)
+
+
+def test_parse_claims_admitted_via_not_an_object_is_fatal():
+    with pytest.raises(DRIVER.DriverError, match="not a JSON object"):
+        DRIVER.parse_claims_admitted_via({"claims_admitted_via": ["seg01"]}, {"seg01": "from-cap"})
+
+
+@pytest.mark.parametrize("admitted_via", [
+    {},
+    {"seg01": "from-cap", "seg02": "from-cap"},
+    {"seg02": "from-cap"},
+])
+def test_parse_claims_admitted_via_key_set_must_equal_claims(admitted_via):
+    """EQUAL, not a subset. The selector writes both maps in one loop iteration
+    after the same guards, so any divergence means one of the two is not this
+    invocation's own -- and a subset rule would let a selector drop the very
+    entry whose gate disagrees, which is the only entry that matters."""
+    with pytest.raises(DRIVER.DriverError, match="disagrees with"):
+        DRIVER.parse_claims_admitted_via(
+            {"claims_admitted_via": admitted_via}, {"seg01": "from-cap"}
+        )
+
+
+def test_parse_claims_admitted_via_unknown_profile_is_fatal():
+    with pytest.raises(DRIVER.DriverError, match="must be one of"):
+        DRIVER.parse_claims_admitted_via(
+            {"claims_admitted_via": {"seg01": "from-thin-air"}}, {"seg01": "from-cap"}
+        )
+
+
+def test_parse_claims_admitted_via_empty_is_valid():
+    """An invocation with no claim flag: both maps are {} and the field is
+    still REQUIRED to be present, which is what makes "nothing was claimed"
+    distinguishable from "the selector stopped reporting"."""
+    assert DRIVER.parse_claims_admitted_via({"claims_admitted_via": {}}, {}) == {}
+
+
+def test_parse_claims_admitted_via_carries_a_profile_that_DISAGREES_with_the_record():
+    """The defect's own shape at this seam: the record says `from-converged`
+    (it was written at this run id's first claim) while this invocation
+    admitted under `--from-cap`. The parser must carry the disagreement
+    through, never reconcile it -- reconciling in either direction throws away
+    exactly the fact the field exists to report."""
+    claims = DRIVER.parse_claims_field(
+        {"claims": {"seg01": _claim_entry("seg01", profile="from-converged")}}, ["seg01"]
+    )
+    assert claims == {"seg01": "from-converged"}
+    admitted_via = DRIVER.parse_claims_admitted_via(
+        {"claims_admitted_via": {"seg01": "from-cap"}}, claims
+    )
+    assert admitted_via == {"seg01": "from-cap"}
+
+
+# ---------------------------------------------------------------------------
 # B -- claim_refusal_for_translate() (#438 D8), unit tests against a
 # minimal dirs{}/DispatchContext -- no full phase2 dispatch fixture needed,
 # only claim_record.py present under scripts_dir and a runs_dir to write
@@ -954,8 +1024,15 @@ def main():
     # segment_dispatch_driver.py refuses a payload without it (exit 2) rather
     # than reading a missing key as "nothing outstanding". This fake emits no
     # segs at all, so `[]` is also the truthful value here.
+    #
+    # `claims_admitted_via` is REQUIRED of every selector from 1.57.0 on
+    # (#545), for the same reason and with the same refusal --
+    # parse_claims_admitted_via() fatals without it, so a fake that omitted it
+    # would make every CLI-level test in this section exit 2. Empty here for
+    # the same reason `claims` is: this fake never folds the claim flags into
+    # `segs`.
     print(json.dumps({
-        "success": True, "segs": [], "claims": {},
+        "success": True, "segs": [], "claims": {}, "claims_admitted_via": {},
         "counts": {}, "classification": {}, "eligible_not_dispatched": [],
     }))
 
@@ -1267,6 +1344,70 @@ def test_accepted_run_id_refuses_an_unsafe_effective_run_id():
                 {"effectiveRunId": "run id with spaces"}):
         with pytest.raises(DRIVER.DriverError, match="unusable effectiveRunId"):
             DRIVER.accepted_run_id(bad)
+
+
+def test_a_selector_that_omits_claims_admitted_via_is_refused_at_the_CLI(tmp_path):
+    """#545, through the driver's REAL call path rather than against the
+    parser function.
+
+    The unit tests above pin parse_claims_admitted_via()'s own refusals; they
+    say nothing about whether run() actually calls it fail-closed. Mutating
+    that call site to `select_result.get("claims_admitted_via", {})` leaves
+    every one of them green, and leaves every journal test green too, because
+    each of those drives a selector that supplies the field -- while a driver
+    pointed by --plugin-root at a pre-1.52.0 install would then silently
+    default instead of refusing. This test is the one that goes red on that
+    mutation.
+
+    The fake here is deliberately a SUCCESSFUL selector: `success: true` with a
+    well-formed `claims` and everything else the driver reads. The only thing
+    wrong with it is the missing field, so a refusal cannot be coming from
+    anywhere else."""
+    root = make_cli_root(tmp_path)
+    stripped = FAKE_SELECT_SEGMENTS_PY.replace(
+        '"claims": {}, "claims_admitted_via": {},', '"claims": {},'
+    )
+    # The patch has to have LANDED. If the fake's payload line is ever
+    # reworded, `.replace()` silently returns the original and this test would
+    # then assert the refusal of a payload that still carries the field --
+    # green, and proving nothing. Keyed on the JSON key (quoted, with its
+    # colon), which appears only in the payload; the surrounding comment
+    # mentions the name in prose.
+    assert stripped != FAKE_SELECT_SEGMENTS_PY, (
+        "the fake's payload no longer matches the string this test patches"
+    )
+    assert '"claims_admitted_via":' not in stripped, stripped
+    (root / "scripts" / "select_segments.py").write_text(stripped, encoding="utf-8")
+
+    proc = run_driver(root, "--allow-empty")
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = json.loads(proc.stdout)
+    assert payload["success"] is False, payload
+    assert "claims_admitted_via" in payload["error"], payload
+
+    # A fatal payload carries no `session_id`, so the journal has to be found
+    # by GLOB rather than by journal_path(root, payload["session_id"]) --
+    # journal_path() with an empty id yields runs/driver_journal.jsonl, which
+    # never exists, and an assertion over that file is vacuous: it would stay
+    # green over a real session journal that DID record the gate as passed.
+    journals = sorted((root / "runs").glob("*/driver_journal.jsonl"))
+    assert journals, (
+        "the driver journals `driver_started` before it ever calls the "
+        "selector, so a refusal at the claim-map check must still have left a "
+        "session journal on disk -- finding none means this assertion is "
+        "looking in the wrong place, not that the gate was skipped"
+    )
+    types = [
+        json.loads(ln)["type"]
+        for journal in journals
+        for ln in journal.read_text(encoding="utf-8").splitlines()
+    ]
+    assert "driver_started" in types, types
+    assert "step1_gate_passed" not in types, (
+        f"the gate must not be recorded as passed over a claim map that cannot "
+        f"say which profile admitted: {types}"
+    )
 
 
 def test_claims_field_is_required_and_propagates_through_the_empty_segs_result(tmp_path):

@@ -698,6 +698,7 @@ _SELECT_SEGMENTS_WITHOUT_THE_FIELD = (
     "import sys\n"
     "print(json.dumps({\n"
     '    "success": True, "segs": ["seg01"], "claims": {},\n'
+    '    "claims_admitted_via": {},\n'
     '    "counts": {}, "classification": {}, "ids_by_category": {},\n'
     "}))\n"
     "sys.exit(0)\n"
@@ -719,6 +720,12 @@ def test_a_selector_payload_without_the_field_is_refused_not_defaulted(tmp_path)
     (root / "scripts" / "select_segments.py").write_text(
         _SELECT_SEGMENTS_WITHOUT_THE_FIELD, encoding="utf-8"
     )
+    # The stub omits ONE field. #545 added a second required field
+    # (`claims_admitted_via`) whose check runs earlier, so the stub supplies it
+    # -- otherwise this test would pass on the wrong refusal and stop covering
+    # `eligible_not_dispatched` at all.
+    assert "claims_admitted_via" in _SELECT_SEGMENTS_WITHOUT_THE_FIELD
+    assert "eligible_not_dispatched" not in _SELECT_SEGMENTS_WITHOUT_THE_FIELD
 
     proc = run_driver(root, timeout=60)
 
@@ -1044,6 +1051,115 @@ def test_from_cap_claim_admitted_end_to_end_through_the_real_selector(tmp_path):
         "driver_started", "run_id_resolved", "step1_gate_passed", "volume_check_passed",
     ], types
     assert types.count("run_id_resolved") == 1, types
+
+
+def test_claims_admitted_via_reaches_the_durable_journal_through_the_real_selector(tmp_path):
+    """#545/#549: `step1_gate_passed` is the only DURABLE copy of the reported
+    profile, so the fix has to reach `driver_journal.jsonl` and not only
+    stdout. Driven through the REAL select_segments.py, so what is asserted is
+    the value that script actually produced, not a fixture's idea of it.
+
+    This is the AGREEING case -- a first claim, where the durable record and
+    the admitting gate are the same profile. It proves the transport; the
+    DISAGREEING case, which is the defect itself, is pinned end to end by the
+    test below it and at the producer by
+    tests/claim_selector.test.py's section 23."""
+    root = from_cap_project(tmp_path)
+
+    proc = run_driver(root, "--only-segs", "seg01", "--from-cap", "seg01", timeout=60)
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["claims"] == {"seg01": "from-cap"}, payload
+    assert payload["claims_admitted_via"] == {"seg01": "from-cap"}, payload
+
+    journal = DRIVER.journal_path(root, payload["session_id"])
+    gate = [
+        json.loads(ln)
+        for ln in journal.read_text(encoding="utf-8").splitlines()
+        if json.loads(ln)["type"] == "step1_gate_passed"
+    ]
+    assert len(gate) == 1, gate
+    assert gate[0]["claims"] == {"seg01": "from-cap"}, gate[0]
+    assert gate[0]["claims_admitted_via"] == {"seg01": "from-cap"}, gate[0]
+
+
+def test_a_reclaim_under_a_resumed_run_id_journals_both_the_record_and_the_gate(tmp_path):
+    """The #545 mechanism through this driver end to end and on a RESUMED run
+    id -- #549's own carried-forward requirement, and the only shape in which
+    the defect exists at all.
+
+    It runs the mechanism in REVERSE of the reported direction: the field
+    observation was a --from-cap admission reported as `from-converged`, and
+    what is driveable here is a --from-cap claim reported back under a later
+    --from-converged admission. The branch, the reuse and the disagreement are
+    the same; only which profile lands on which side is swapped, because a
+    capped unit is what this driver fixture can reach first. The observed
+    direction itself is covered at the producer, by
+    tests/claim_selector.test.py's
+    test_a_reclaim_under_a_DIFFERENT_profile_reports_both_the_record_and_the_gate.
+
+    Invocation 1 claims the capped segment `--from-cap`; the driver re-reviews
+    it and it converges, which writes `reviewed_draft_sha1` and the
+    `.ever_converged` sentinel. A hand edit then puts it in the
+    `--from-converged` population, and invocation 2 claims it under THAT
+    profile. The resume digest reads bundle hashes, the manifest and the
+    substitution set -- none of which either invocation moved -- so
+    resume_setup.py resumes the SAME run id, run()'s
+    "already claimed by this run" branch fires, and the durable record it
+    re-reads is invocation 1's `from-cap` one.
+
+    Both halves are asserted. `claims` must still be the durable record
+    (rewriting it would break the property section 10 of
+    tests/claim_selector.test.py pins), and `claims_admitted_via` must say
+    `from-converged`, which is the gate that actually ran."""
+    root = from_cap_project(tmp_path)
+
+    first = run_driver(root, "--only-segs", "seg01", "--from-cap", "seg01", timeout=60)
+    assert first.returncode == 0, f"stdout={first.stdout!r} stderr={first.stderr!r}"
+    first_payload = parse_stdout(first)
+    assert first_payload["summary"]["converged"] == ["seg01"], first_payload
+    run_id = first_payload["run_id"]
+
+    # The hand edit that moves the converged unit into the --from-converged
+    # population: the draft no longer matches the `reviewed_draft_sha1` the
+    # convergence recorded, while the stored review stays clean.
+    draft_path = root / "segments" / "seg01.draft.json"
+    draft = json.loads(draft_path.read_text(encoding="utf-8"))
+    draft["blocks"]["p1"] = draft["blocks"]["p1"] + " Hand-edited after convergence."
+    draft_path.write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
+
+    second = run_driver(root, "--only-segs", "seg01", "--from-converged", "seg01", timeout=60)
+    assert second.returncode == 0, f"stdout={second.stdout!r} stderr={second.stderr!r}"
+    payload = parse_stdout(second)
+    assert payload["run_id"] == run_id, (
+        "the second invocation must RESUME the first run id -- without that "
+        "there is no re-claim and this test proves nothing: "
+        f"{payload['run_id']!r} vs {run_id!r}"
+    )
+
+    assert payload["claims"] == {"seg01": "from-cap"}, (
+        "`claims` reports the DURABLE record, written at this run id's first "
+        f"claim, and must not have been rewritten: {payload['claims']!r}"
+    )
+    assert payload["claims_admitted_via"] == {"seg01": "from-converged"}, (
+        "`claims_admitted_via` must report the gate THIS invocation ran: "
+        f"{payload['claims_admitted_via']!r}"
+    )
+
+    journal = DRIVER.journal_path(root, payload["session_id"])
+    gate = [
+        json.loads(ln)
+        for ln in journal.read_text(encoding="utf-8").splitlines()
+        if json.loads(ln)["type"] == "step1_gate_passed"
+    ]
+    assert len(gate) == 1, gate
+    assert gate[0]["claims"] == {"seg01": "from-cap"}, gate[0]
+    assert gate[0]["claims_admitted_via"] == {"seg01": "from-converged"}, gate[0]
+    assert gate[0]["claims_admitted_via"] != gate[0]["claims"], (
+        "the durable journal must be able to show the two disagreeing -- that "
+        "disagreement is the whole fact #545 says is currently unprintable"
+    )
 
 
 def test_a_refused_claim_still_refuses_and_leaves_exactly_one_orphaned_run_dir(tmp_path):

@@ -2608,6 +2608,22 @@ durable root's owner, who can already rewrite a draft or the ledger
 directly — so the gate exists against operator mistake and against a
 fabricated model finding, never against that operator.
 
+**Which gate admitted a unit is reported SEPARATELY from the durable
+record — read `claims_admitted_via`, not `claims`, to answer it** (1.57.0,
+#545/#549). `select_segments.py` reports `claims: {seg: <record>}`, and that
+record is the one durably written at this RUN_ID's *first* claim on that
+segment; a re-claim inside the same run id deliberately does not rewrite it,
+so its `profile` can be older than the admission that just happened. The
+sibling map `claims_admitted_via: {seg: profile}` reports the gate *this*
+invocation ran, and `segment_dispatch_driver.py` journals both into
+`step1_gate_passed`. They differ for a real population: a unit claimed
+`--from-converged` early in a run, re-reviewed, capped inside that same run,
+then re-claimed `--from-cap` under the same RUN_ID. When they disagree, the
+disagreement is the interesting fact — `from-converged` and `from-cap` admit
+on different evidence and carry different remedies — and neither map is a
+correction of the other. Nothing gates on `claims_admitted_via`; it is
+report-only.
+
 **Staleness gates ENTRY only, and continuation of the SAME loop does not
 re-trigger it.** Once `--from-stalled` dispatches a fresh review and that
 review is promoted, the review is current. If the driver then dies before

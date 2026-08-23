@@ -4436,3 +4436,166 @@ def test_runs_missing_digest_refusal_leaves_no_claim_record_and_no_restamped_dra
     )
     assert UNGATED_RUN_ID in out["runs_missing_digest"], out["runs_missing_digest"]
     _assert_claim_left_no_trace(root, claimed_seg, token_before)
+
+
+# ---------------------------------------------------------------------------
+# 23. #545 -- `claims_admitted_via`: the gate THIS invocation admitted under,
+# reported beside the durable record rather than instead of it.
+#
+# The durable record's immutability on the already-claimed-by-this-run path is
+# correct and is NOT what these tests attack; section 10 already pins it. What
+# they pin is that the record's `profile` stopped being the only answer the
+# output gives to "which gate let this unit through", because on a re-claim
+# inside one run id the record answers for the FIRST claim.
+# ---------------------------------------------------------------------------
+
+def test_admitted_via_agrees_with_the_record_on_a_first_claim(tmp_path):
+    """The ordinary case: nothing was reused, so the two maps agree. Stated as
+    its own test because the divergence test below would pass just as happily
+    over a `claims_admitted_via` that ALWAYS said `from-cap`."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    proc = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+
+    assert out["claims"][seg]["profile"] == "from-converged", out["claims"]
+    assert out["claims_admitted_via"] == {seg: "from-converged"}, out["claims_admitted_via"]
+
+
+def test_admitted_via_is_empty_when_no_claim_was_requested(tmp_path):
+    """Present-and-empty, never absent -- "no id was claimed" and "this script
+    stopped reporting the field" must stay distinguishable, which is the same
+    rule `claims` itself follows and the reason the driver may validate the
+    field unconditionally."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    # --classify-only: the one shape that reaches the success result with no
+    # claim block having run at all. (A bare --only-segs over this fixture is
+    # refused by the previously-converged gate, which is a different test's
+    # subject.)
+    proc = run_select(root, "--classify-only", "--only-segs", seg)
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+
+    assert out["claims"] == {}, out["claims"]
+    assert "claims_admitted_via" in out, sorted(out)
+    assert out["claims_admitted_via"] == {}, out["claims_admitted_via"]
+
+
+def test_a_reclaim_under_a_DIFFERENT_profile_reports_both_the_record_and_the_gate(tmp_path):
+    """#545's defect, reproduced: the same id claimed --from-converged early in
+    a run and re-claimed --from-cap later in that SAME run id.
+
+    This is a real population, not a contrived one. A unit admitted
+    --from-converged is dispatched for re-review; the re-review can go dirty,
+    the fix rounds can be exhausted, and the unit is then capped -- inside the
+    same run. Re-dispatching it needs --from-cap, and the run id has not
+    changed, so run()'s "already claimed by this run" branch re-reads the
+    ORIGINAL record and reports its `from-converged` profile.
+
+    Both facts are asserted, because a fix that merely overwrote the reported
+    profile would be a regression: the record must still be reported verbatim
+    (it is the durable authorization and a re-run must not rewrite it), and the
+    admitting gate must now be readable too."""
+    root = make_durable_root(tmp_path)
+    seg = "seg22"
+    fixture_keys = {}
+    build_from_converged_segment(root, seg, fixture_keys)
+    write_manifest(root, [seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    first = run_select(root, "--from-converged", seg, "--run-id", RUN_ID, "--run-resume", "false")
+    assert first.returncode == 0, f"stdout={first.stdout!r} stderr={first.stderr!r}"
+    first_out = parse_stdout(first)
+    assert first_out["claims_admitted_via"] == {seg: "from-converged"}, first_out["claims_admitted_via"]
+    record_path = root / "runs" / RUN_ID / f".claimed.{seg}"
+    # BYTES, not parsed JSON. A mutation that re-serialized the existing record
+    # on exactly this branch would preserve every parsed value and every
+    # asserted profile while rewriting the one artifact the reuse path exists
+    # to leave alone.
+    first_record_bytes = record_path.read_bytes()
+
+    # The state the segment reaches by being re-reviewed and capped INSIDE this
+    # run: dirty stored review with findings, ledger non_converged/reason=cap,
+    # and -- because it did converge once, long ago -- the .ever_converged
+    # sentinel still present (the #537 population --from-cap was widened to
+    # admit). `source_run_id=RUN_ID` because the first claim already re-stamped
+    # this draft's dispatch_token to RUN_ID:seg; the token is PRESENT, so D9's
+    # lost-token path (the one place an existing record's profile IS read) is
+    # never entered and admission is decided purely by --from-cap's own arm.
+    build_from_cap_segment(
+        root, seg, fixture_keys, source_run_id=RUN_ID, sentinel_present=True
+    )
+    write_fixture_cache_keys(root, fixture_keys)
+    make_run_dir(root, RUN_ID)
+
+    # --only-segs because a capped unit classifies human_escalation, which
+    # reaches `segs` only when the operator names it -- exactly as one would
+    # have to in the field.
+    second = run_select(
+        root, "--from-cap", seg, "--only-segs", seg,
+        "--run-id", RUN_ID, "--run-resume", "true",
+    )
+    assert second.returncode == 0, (
+        f"the capped unit must be admitted through --from-cap\n"
+        f"stdout={second.stdout!r} stderr={second.stderr!r}"
+    )
+    out = parse_stdout(second)
+
+    assert record_path.read_bytes() == first_record_bytes, (
+        "the durable record must not have been rewritten by the re-claim -- "
+        "not even re-serialized to the same values"
+    )
+    assert out["claims"][seg]["profile"] == "from-converged", (
+        "`claims` must keep reporting the durable record VERBATIM -- correcting it "
+        "here would silently disagree with the marker file an operator reads after "
+        f"the fact: {out['claims'][seg]!r}"
+    )
+    assert out["claims_admitted_via"] == {seg: "from-cap"}, (
+        "`claims_admitted_via` must report the gate THIS invocation admitted under, "
+        f"which is --from-cap: {out['claims_admitted_via']!r}"
+    )
+    assert out["claims_admitted_via"][seg] != out["claims"][seg]["profile"], (
+        "the whole point of this test is that the two CAN differ; if they agree "
+        "here the fixture stopped reproducing #545 and this test proves nothing"
+    )
+
+
+def test_admitted_via_keys_are_exactly_the_claims_keys_over_a_mixed_invocation(tmp_path):
+    """Two ids, two different profiles, one invocation -- the key-set equality
+    the driver's own validator refuses on, asserted at the producer."""
+    root = make_durable_root(tmp_path)
+    converged_seg, cap_seg = "seg22", "seg23"
+    fixture_keys = {}
+    build_from_converged_segment(root, converged_seg, fixture_keys)
+    build_from_cap_segment(root, cap_seg, fixture_keys)
+    write_manifest(root, [converged_seg, cap_seg])
+    write_fixture_cache_keys(root, fixture_keys)
+
+    proc = run_select(
+        root,
+        "--from-converged", converged_seg,
+        "--from-cap", cap_seg,
+        "--only-segs", f"{converged_seg},{cap_seg}",
+        "--run-id", RUN_ID, "--run-resume", "false",
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+
+    assert set(out["claims_admitted_via"]) == set(out["claims"]), (
+        f"{sorted(out['claims_admitted_via'])!r} vs {sorted(out['claims'])!r}"
+    )
+    assert out["claims_admitted_via"] == {
+        converged_seg: "from-converged", cap_seg: "from-cap",
+    }, out["claims_admitted_via"]

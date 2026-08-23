@@ -194,7 +194,8 @@ Output: exactly one JSON object on stdout. Success:
  "requested_only_segs": [...] | null, "classification": {seg: {...}},
  "counts": {...}, "ids_by_category": {category: [seg, ...]},
  "overrides": [...], "excluded_only_segs": [...],
- "eligible_not_dispatched": [...], "claims": {seg: {...}}}.
+ "eligible_not_dispatched": [...], "claims": {seg: {...}},
+ "claims_admitted_via": {seg: profile}}.
  `eligible_not_dispatched` (#530) is the other direction of
  `excluded_only_segs`: the eligible units this invocation is NOT dispatching,
  i.e. `select_default()`'s own result minus the emitted SEGS, in candidate
@@ -4536,6 +4537,13 @@ def run(args, dirs: dict) -> dict:
     # (a successful --from-converged claim clears THAT gate for exactly its
     # own successfully-admitted ids -- D5.2).
     claims_payload: dict = {}
+    # #545: the sibling of `claims_payload`, keyed identically, whose value is
+    # the profile THIS invocation admitted the id under. The two differ for a
+    # real population: a unit claimed --from-converged early in a run,
+    # translated, reviewed and capped inside it, then re-claimed --from-cap
+    # under the same run id. See the `claims_admitted_via` entry in the result
+    # payload below for why they can differ at all.
+    claims_admitted_via: dict = {}
     # #538: hoisted to run() scope because ADMISSION and the durable WRITE no
     # longer sit together. Admission happens here; the write happens after the
     # three policy refusals, and the publication block reads this to know what
@@ -5157,6 +5165,17 @@ def run(args, dirs: dict) -> dict:
             # what is actually on disk. The record now carries all four
             # itself, so the spread is not merely wrong, it is redundant.
             claims_payload[seg] = record_for_output
+            # #545: `profile` is this invocation's own admitting gate --
+            # admitted[seg]'s first element, set from parse_claim_requests()'s
+            # flag-derived map and never rewritten between there and here. It
+            # is recorded BESIDE the record rather than spliced INTO it, for
+            # the reason the comment directly above gives: an entry in
+            # `claims` is the durable record field-for-field, and the last
+            # thing spliced on top silently overwrote durable values on this
+            # exact branch. Keyed identically to `claims_payload` by
+            # construction -- both are written here, after the same
+            # `continue` guards, in the same iteration.
+            claims_admitted_via[seg] = profile
 
         if write_failures:
             fatal(
@@ -5202,6 +5221,21 @@ def run(args, dirs: dict) -> dict:
         # FROM DISK, so a re-claim reports the original authorization rather
         # than a freshly recomputed lookalike.
         "claims": claims_payload,
+        # #545: {seg: profile} -- the gate THIS invocation admitted each id
+        # under, for exactly the ids in `claims`. Always present, `{}` when no
+        # claim was requested, so "no id was claimed" and "this script stopped
+        # reporting the field" stay distinguishable to a consumer (the same
+        # rule `claims` itself follows).
+        #
+        # It exists because `claims[seg]["profile"]` answers a DIFFERENT
+        # question: it is the durable record, which on a re-claim inside one
+        # run id is the profile of the FIRST claim, not of this admission.
+        # Which gate let a unit through is the whole question on a capped
+        # unit -- `from-converged` and `from-cap` admit on different evidence
+        # and have different remedies -- and the disagreement between the two
+        # maps is the fact worth reading, so both are reported rather than one
+        # being corrected into the other.
+        "claims_admitted_via": claims_admitted_via,
         # #409: a consumer must be able to tell an authorizing result from a
         # merely descriptive one without re-deriving which flags were passed.
         "authorizes_dispatch": authorizes_dispatch,
