@@ -1,9 +1,11 @@
 # Orchestration and batching
 
 This file covers how a run actually gets dispatched: the W1–W8 pipeline shape,
-why dispatch is a Workflow-tool `pipeline()` call and never named-teammate
-`Agent()` fan-out, the exact per-segment loop as it executes inside that
-pipeline, how the prompt functions are generated, and the `batch_agent_cap`
+why dispatch is a sanctioned launcher — W5's default
+`segment_dispatch_driver.py` (#516) or the retained `pipeline()` fallback this
+file otherwise describes — and never named-teammate `Agent()` fan-out, the
+exact per-segment loop as it executes inside that pipeline, how the prompt
+functions are generated, and the `batch_agent_cap`
 preflight estimator that can refuse to start an oversized batch. It is the
 orchestration-mechanics counterpart to `references/engine-loop.md` (which
 owns the *rules* the loop enforces) and `references/ledger-and-resumability.md`
@@ -107,7 +109,11 @@ is the orchestration-level summary of what each stage hands to the next):
   trusting the mechanism at batch scale. If the book genuinely has neither
   verse nor footnotes, record that fact in `PLAN.md` or a ledger note and
   stress-test the longest body segment alone.
-- **W5 Mass-translate** — the main event: `select_segments.py` classifies
+- **W5 Mass-translate** — the main event. On W5's DEFAULT launcher since
+  #516, `segment_dispatch_driver.py` runs `select_segments.py` itself and
+  drives the same per-segment loop locally, with no agent-call budget to
+  estimate. What follows is the retained FALLBACK path: `select_segments.py`
+  classifies
   every candidate segment and emits `SEGS`, the batch-size preflight
   estimates the worst-case agent-call count against `engine.batch_agent_cap`,
   then (if under cap) `mass-translate-wf.template.js`'s `pipeline()` call
@@ -136,7 +142,10 @@ is the orchestration-level summary of what each stage hands to the next):
 
 Only W3's glossary-pass and W5's mass-translate are themselves Workflow
 `pipeline()` calls; the rest are scripts or hand-driven steps the
-orchestrating session runs directly.
+orchestrating session runs directly. For W5 that describes its FALLBACK
+launcher: since #516 its default is the local `segment_dispatch_driver.py`,
+which runs the same per-segment loop with no Workflow tool involved (SKILL.md,
+"Default dispatch path").
 
 ## W5: `select_segments.py` preflight, then `pipeline()`
 

@@ -1414,13 +1414,14 @@ class CodexJob:
         if state == claim_record.CLAIM_ABSENT:
             # "This run has not claimed seg" is NOT "seg is unclaimed", and
             # conflating the two was this guard's defect -- the same one the
-            # optional driver's D8 had, found here second and reachable on the
-            # DEFAULT path, since mass-translate-wf.template.js launches
-            # codex_job.py directly and never passes through that driver. An
-            # ordinary run B supplies --expect-token B:seg and --run-id B, so
-            # the consistency check agrees; safe_adopt() rejects the A-stamped
-            # draft; B's own namespace reads absent; and the translate reached
-            # launch() while A's claim record sat untouched.
+            # segment dispatch driver's D8 had, found here second and reachable
+            # on the mass-translate-wf.template.js path (W5's fallback launcher
+            # since #516), which launches codex_job.py directly and never
+            # passes through that driver. An ordinary run B supplies
+            # --expect-token B:seg and --run-id B, so the consistency check
+            # agrees; safe_adopt() rejects the A-stamped draft; B's own
+            # namespace reads absent; and the translate reached launch() while
+            # A's claim record sat untouched.
             #
             # Delegated, not re-implemented. Two independent hand-rolled
             # answers to "is this claimed?" is exactly what produced three

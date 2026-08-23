@@ -1,9 +1,9 @@
 """tests/claim_chokepoint.test.py -- #438 D8 regression lock: codex_job.py's OWN
 chokepoint refusal for a translate launch against a CLAIMED segment.
 
-Why this file exists (D8, PLAN.md): the default W5 dispatch path
-(`mass-translate-wf.template.js`) has NO claim-aware guard of its own --
-`translateStage` is nine flagless lines that unconditionally invoke
+Why this file exists (D8, PLAN.md): the `mass-translate-wf.template.js`
+dispatch path (W5's fallback launcher since #516) has NO claim-aware guard of
+its own -- `translateStage` is nine flagless lines that unconditionally invoke
 `codex_job.py --kind translate`. So the refusal that keeps a claimed segment
 from ever being re-translated has to live HERE, inside codex_job.py itself.
 
@@ -29,7 +29,7 @@ A guard placed naively right after `--kind` parsing (rather than below
 invokes `codex_job.py --kind translate` DIRECTLY (constructing a real
 `CodexJob` and calling its real `.run()`, in-process -- never through
 `segment_dispatch_driver.py`, which already had its own derived-action check
-and would prove nothing about this, the DEFAULT path's only guard).
+and would prove nothing about this, the fallback path's only guard).
 
 Gate scripts (`draft_ready.py`/`validate_draft.py`) are STUBBED via a
 monkeypatched `_gate` -- this file's subject is the CHOKEPOINT'S OWN
@@ -853,9 +853,10 @@ def test_a_normal_claim_record_is_written_byte_identically_after_the_encode_move
 
 
 # --------------------------------------------------------------------------- #
-# D8's CROSS-RUN half at the DEFAULT chokepoint. codex_job.py is launched
-# directly by mass-translate-wf.template.js, so this guard -- not the optional
-# dispatch driver's -- is the one on the shipped path. It had the identical
+# D8's CROSS-RUN half at the codex_job.py chokepoint. codex_job.py is launched
+# directly by mass-translate-wf.template.js (W5's fallback launcher since
+# #516), so this guard -- not the segment dispatch driver's -- is the one on
+# that path. It had the identical
 # self-namespace defect: _claim_state() built runs/<self.run_id>/.claimed.<seg>
 # and CLAIM_ABSENT permitted the translate.
 # --------------------------------------------------------------------------- #
@@ -905,7 +906,7 @@ def test_default_chokepoint_refuses_a_translate_over_a_draft_another_run_owns(tm
 
     assert refuse is True, (
         "run B must not translate over a draft run A holds a live claim on -- "
-        "this is the DEFAULT dispatch path, not the optional driver's"
+        "this is the template dispatch path, not the segment driver's"
     )
     assert "RUN-A" in (detail or ""), f"the refusal must name the owner: {detail!r}"
     assert "#438 D8" in (detail or ""), detail

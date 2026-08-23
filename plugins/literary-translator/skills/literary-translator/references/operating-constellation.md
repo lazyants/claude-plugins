@@ -7,15 +7,18 @@ and `references/orchestration-and-batching.md`: those two own *what the
 roles are* and *how dispatch works* (hard rules, never profile-configurable).
 This file is a recommended answer to "which concrete agent/model/effort
 should sit in each seat, and how tightly should the review loop run,
-today." It changes nothing about R1 role separation or the `pipeline()`-only
+today." It changes nothing about R1 role separation or the sanctioned-launcher
 dispatch rule — the per-segment codex-translate → deterministic gate →
-codex-review → Claude-fix loop stays exactly as specified there, always
-through workflow-level `agent()`/`pipeline()` dispatch, never ad hoc
-named-teammate fan-out. (For W5 translate/review the codex work-call is now
-launched by the shipped `codex_job.py` driver, dispatched detached by a
-plain-Claude workflow-level drive agent and gated by the Workflow's own on-disk
-validate-before-promote gate — see `references/engine-loop.md` R1; the glossary
-pass keeps its direct schema-validated `codex:codex-rescue` `agent()` call.)
+codex-review → Claude-fix loop stays exactly as specified there, driven
+either by W5's default launcher `segment_dispatch_driver.py` (#516) or,
+on the retained fallback path, through workflow-level `agent()`/`pipeline()`
+dispatch; never ad hoc named-teammate fan-out. (For W5 translate/review the
+codex work-call is launched by the shipped `codex_job.py` driver either way:
+on the default launcher the local driver `Popen`s it directly; on the
+fallback path a plain-Claude workflow-level drive agent dispatches it
+detached, gated by the Workflow's own on-disk validate-before-promote gate
+— see `references/engine-loop.md` R1; the glossary pass keeps its direct
+schema-validated `codex:codex-rescue` `agent()` call.)
 Pipeline role assignment itself (who translates /
 reviews / fixes / orchestrates) is fixed by R1 — confirmed, not chosen, at
 intake time; see SKILL.md's "Intake & proportionality" step.

@@ -1051,8 +1051,8 @@ def test_verify_writes_nothing(tmp_path, scenario):
 def test_verify_plugin_root_binds_the_checked_tree(tmp_path):
     """Leg 3, pinned against the REAL consumer rather than asserted in prose.
     --plugin-root decides which tree the verdict is about, and
-    segment_dispatch_driver.resolve_dirs() -- the documented alternative W5
-    path -- must resolve its template and sibling scripts inside that same
+    segment_dispatch_driver.resolve_dirs() -- W5's default launcher since
+    #516 -- must resolve its template and sibling scripts inside that same
     tree, or the verified tree and the executed tree are different trees."""
     root = _make_scaffold_root(tmp_path)
     clean = _make_plugin_copy(tmp_path, name="plugin_clean")

@@ -2041,10 +2041,20 @@ ledger status. In its place, W2's extraction self-check FATALLY halts
 v1 (needs v2's real sub-chunking design, or a `custom` co-designed extractor
 performing a principled pre-split).
 
-**W5 Mass-translate** — instantiate `mass-translate-wf.template.js` fresh
-from the plugin's current copy every run (never reuse a stale generated copy).
-A concrete preflight, `scripts/select_segments.py`, runs before `pipeline()`
-is called. It:
+**W5 Mass-translate** — W5's DEFAULT launcher is
+`segment_dispatch_driver.py` (#516), the detached local driver: it runs the
+per-segment translate/review loop as an ordinary local process and invokes
+the preflight below itself. See **Default dispatch path** further down for
+its launch recipe and for the whole loop it belongs to. Most of what lies
+between here and that section is the `mass-translate-wf.template.js` +
+`pipeline()` path, which remains shipped and supported as W5's FALLBACK
+launcher — but not all of it: the #396 bundle-verification rule and the
+#412 `{{PLUGIN_ROOT}}` mandate below both bind a driver launch too, and each
+says so where it stands — instantiate that template fresh from the
+plugin's current copy every run (never reuse a stale generated copy). Both launchers gate on the
+same concrete preflight, `scripts/select_segments.py`: the driver shells it
+itself, and a session driving the fallback runs it before `pipeline()` is
+called. It:
 
 1. Runs `ledger_merge.py` to materialize current `ledger.json`.
 2. Reads the full candidate segment-ID list from `manifest.json`'s
@@ -2155,7 +2165,8 @@ is called. It:
 
 **1.2.0: the deterministic pre-workflow step, after `SEGS` and before
 `pipeline()`.** With `SEGS` finalized, invoke `resume_setup.py` (kind
-`mass`) before the Workflow tool ever launches: it derives the resume-
+`mass`) before the Workflow tool ever launches (on the DEFAULT driver path
+the driver performs this call itself — see **Default dispatch path**): it derives the resume-
 integrity digest's own segment domain directly from `manifest.json`'s full
 candidate set (LT-409 — NEVER from `SEGS`, which shrinks by one entry every
 time a segment converges, and would otherwise force a fresh, non-resuming
@@ -2217,10 +2228,11 @@ invocation": `backfill_resume_gate_ack.py` accepts that flag for uniformity
 and resolves nothing through it, so that proxy would block an unrelated
 migration tool for no reason.
 
-Only then is `mass-translate-wf.template.js` instantiated (fresh from the
-plugin's current copy every run — never reuse a stale generated copy),
-substituting the resolved `{{RUN_ID}}` alongside every other token, and
-`pipeline()` launched. **#197:** the same instantiation substitutes
+Only then — on the FALLBACK path — is `mass-translate-wf.template.js`
+instantiated (fresh from the plugin's current copy every run — never reuse a
+stale generated copy), substituting the resolved `{{RUN_ID}}` alongside
+every other token, and `pipeline()` launched. **#197:** the same
+instantiation substitutes
 `{{EFFORT}}` (`engine.effort`) and `{{MODEL}}` (`engine.model`, or an
 empty string when unset) too; the `resume_setup.py` payload's `subst`
 object must carry the resolved `effort` value as well (see the W3
@@ -2445,26 +2457,77 @@ tampering**: a plugin upgraded mid-project gives the identical signal, and
 the one remedy serves both readings — re-run Step 0a's copy pass, then re-run
 the segment.
 
-**Optional dispatch path — `segment_dispatch_driver.py` (#409).** Everything
-above (`mass-translate-wf.template.js` instantiation, `pipeline()`, the
-DISPATCH/WAIT/CONSUME chunking apparatus) remains W5's DEFAULT dispatch
-mechanism. `segment_dispatch_driver.py` — copied into
-`${durable_root}/scripts/` at Step 0a like every other bundle member — is an
-ALTERNATIVE, not a replacement: it runs the identical per-segment
-translate/review loop as a detached local process instead of inside the
-Workflow tool, eliminating the WAIT-polling chunking apparatus entirely.
-Unlike the `pipeline()` path above, where the orchestrating session invokes
-`resume_setup.py` itself as an explicit preflight step before instantiating
-the template, the driver resolves the resume-integrity `RUN_ID` on its own,
-via `resume_setup.py`, every time it runs — there is no separate preflight
-call for a session driving this path to make. Switching W5 over to it by
-default is deferred to a later step (the fix step
-below still needs a Claude turn today, and nothing currently automates the
-hand-off — see below); until then, use it only if you deliberately choose
-to, and never against the same `durable_root` as a concurrent `pipeline()`
-run — nothing in either path guards against that (the driver's own
-project-wide lock, `runs/.driver.lock`, only serializes two driver launches
-against each other, never a driver against a Workflow-driven run).
+**Default dispatch path — `segment_dispatch_driver.py` (#409, made W5's
+default by #516).** This is W5's default launcher. Copied into
+`${durable_root}/scripts/` at Step 0a like every other bundle member, it runs
+the identical per-segment translate/review loop as a detached local process
+instead of inside the Workflow tool, eliminating the WAIT-polling chunking
+apparatus entirely. That apparatus is what the flip is about: measured on a
+real 40-segment run (`wf_e75b4b96-ac1`), orchestration bookkeeping was
+**83.4% of 25.0M tokens** — 694,852 per converged segment — and it is the
+share this path does not spend. Unlike the fallback path above, where the
+orchestrating session invokes `resume_setup.py` itself as an explicit
+preflight step before instantiating the template, the driver resolves the
+resume-integrity `RUN_ID` on its own, via `resume_setup.py`, every time it
+runs, and shells `select_segments.py` for Step 1 itself — there is no
+separate preflight call for a session driving this path to make.
+
+**The fallback is RETAINED, not retired.** Everything above
+(`mass-translate-wf.template.js` instantiation, `pipeline()`, the
+DISPATCH/WAIT/CONSUME chunking apparatus, the `batch_agent_cap` preflight)
+stays shipped and supported, and is the path to take when this driver cannot
+be used. Retiring it is a SEPARATE decision and never a rider on this flip:
+an escape hatch is not removed before the driver has carried a book end to
+end as the default (#432 is the live example of a driver-only path with none).
+Never run the two against the same `durable_root` concurrently — nothing in
+either path guards against that (the driver's own project-wide lock,
+`runs/.driver.lock`, only serializes two driver launches against each other,
+never a driver against a Workflow-driven run).
+
+**What the default path does NOT carry, stated where the launcher is
+chosen.** Three items, each measured rather than argued.
+
+**(1) `fix_scope_audit.py` (#607) does not fire here at all.** A
+driver-mediated fix turn is outside it entirely — the driver hands the
+rendered prompt out as `needs_fix` and truncates the template before every
+top-level preflight, so no audit call site exists on this route. Say what
+that check actually is, because "the fix turn is unaudited" understates it:
+it is a COPY-FIDELITY comparison of every file Step 0a copied into the
+durable root against the plugin bytes it came from — 45 scripts, the three
+workflow templates, 24 schemas and the 6 language files, 78 artifacts — run
+after every dispatched fix call on the fallback. What the default path has
+in its place is the #396 rule below: `scaffold_setup.py --verify` before
+each driver launch, which compares the two BUNDLES — 19 scripts plus
+`mass-translate-wf.template.js` and `glossary-pass-wf.template.js`, 21
+members. So 57 copied artifacts have no byte comparison on this path,
+including every durable schema, every language preset,
+`skeptic-pass-wf.template.js`, and the W7/W8 entry points `final_audit.py`
+and `assemble.py` — and `final_audit.py` is in NO bundle hash by design (see
+W7), so the file the section below names as this path's whole-book authority
+is itself one of the uncompared copies. The whole durable root is
+codex-writable (`codex_job.py` grants `--write` across it) on both paths.
+The fix turn being performed by hand from the rendered prompt is a real
+difference from the fallback's automatic `agent()` call — a person reads it
+— but it bears on the DRAFT edit, not on any of the above. A digest handed
+out at `needs_fix` and required back on the next invocation, tracked
+separately, would bracket that draft edit; it closes none of the
+copy-fidelity delta.
+
+**(2) A missing `--plugin-root` is not refused.** The fallback template
+refuses to start a batch at all when `{{PLUGIN_ROOT}}` arrives empty
+(`reason: "fix-scope-plugin-root-missing"`). The driver's equivalent is
+softer by design: an EMPTY string is refused, but an OMITTED flag takes the
+documented self-anchored mode and resolves `codex_job.py`,
+`select_segments.py` and `mass-translate-wf.template.js` itself out of
+`${durable_root}/scripts/` — the tree codex holds write access over. That
+mode exists for the no-orchestrating-session case and is not being removed;
+what changes with the flip is that a session IS driving, so pass
+`--plugin-root` (it is in the launch recipe below), and know that forgetting
+it fails open rather than loud.
+
+**(3) The batch-final `batchComplete` merge: this path has no per-batch
+equivalent, deliberately** — see below for what carries that guarantee
+instead.
 
 **#396:** this launch is one of the operations covered by the W5 rule above
 that verifies the bundle markers against the live plugin tree. When the
@@ -2480,6 +2543,7 @@ the spawned worker keeps running, producing a false "completed"):
 
 ```
 nohup python3 {durable_root}/scripts/segment_dispatch_driver.py \
+    --plugin-root {plugin_root} \
     [--only-segs SEG1,SEG2,...] [--allow-retranslate-converged] \
     > {durable_root}/runs/driver.<SESSION_ID>.log 2>&1 < /dev/null & disown
 ```
@@ -2557,11 +2621,13 @@ value — do not drop the flag to make it go away, because that swaps a loud ref
 for the self-anchored checker this flag exists to bypass.
 
 Do NOT reach for `--expected-from-manifest`/`--expected-segs` here, and never
-add `--run-token` to them. Either expected-segment flag turns on the
+add `--run-token` to them — that combination belongs to the batch-final check
+below, not to this mid-run refresh. Either expected-segment flag turns on the
 missing-fragment completeness check, which REFUSES outright for a manifest id
 that has no fragment yet — the normal state of a book mid-way through; adding
 `--run-token` further arms the batch-final re-verification that
-`mass-translate-wf.template.js`'s `batchComplete` step exists for. Both
+`mass-translate-wf.template.js`'s `batchComplete` step performs on the
+fallback path and that the step below performs on this one. Both
 refusals raise BEFORE `ledger.json` is written at all, so what you get is
 exactly the staleness you were trying to clear. Second axis, and this one
 survives the merge: a fragment records the LAST CONVERGENCE, not the current
@@ -2571,16 +2637,31 @@ reviewer saw" — that is `reviewed_draft_sha1` against the draft's current
 content sha1, which `final_audit.py` and `assemble.py` each recompute for
 themselves before anything ships.
 
-**The driver cannot perform the fix step, and nothing today automates the
-hand-off.** When a segment's review comes back not-clean, the driver stops
-at that segment and returns `outcome: "needs_fix"` — the round label, the
-findings, and the exact rendered fix prompt — then moves on/exits without
-fixing it (applying findings to a draft is a real LLM content-editing turn a
-plain Python process cannot perform). Someone — a human, or an orchestrating
-session — must notice this in the driver's own JSON output or its redirected
-log (`runs/driver.<SESSION_ID>.log`, per the launch command above), perform
-ONE Claude turn using that exact fix prompt to rewrite the draft, and
-re-invoke the driver to resume. **That JSON arrives only at exit** — stdout
+**Step of this loop, not an exception to it: the fix turn (#516).** The
+driver dispatches translate and review; it does not fix, and nothing
+automates the hand-off. The default W5 loop is therefore: launch the driver →
+read its printed JSON → perform ONE Claude fix turn per `needs_fix` segment
+using the prompt that JSON carries → re-launch the driver, which re-derives
+each segment's state from durable disk facts (`derive_next_action()`) and
+picks up at the next review round (re-running #396's `scaffold_setup.py
+--verify` before EACH launch, not once per session — the flip multiplies
+launches, one per fix round rather than one per batch) → repeat until the
+summary reports
+neither `needs_fix` NOR `failed`. What confirms the BOOK is W7's own audit,
+not a per-batch check — see below. "No `needs_fix`" alone is not the
+completion condition: a segment whose translate or review FAILED produces no
+fix prompt to act on, and the driver still exits successfully carrying it in
+`summary.failed`. A batch holding a failure is unfinished, and that id
+belongs in no completeness claim. When a segment's review comes back
+not-clean, the driver stops at that segment and returns
+`outcome: "needs_fix"` — the round label, the findings, and the exact
+rendered fix prompt — then moves on/exits without fixing it (applying
+findings to a draft is a real LLM content-editing turn a plain Python process
+cannot perform). Someone — a human, or an orchestrating session — has to
+notice that: the only two channels it is ever announced on are the driver's
+own JSON output and its redirected log (`runs/driver.<SESSION_ID>.log`, per
+the launch command above), and what follows from reading either is the fix
+turn of the loop above. **That JSON arrives only at exit** — stdout
 carries exactly ONE line, printed on the driver's terminal path, so the
 redirected log shows no per-segment progress at all while the run is in
 flight; what lands there live is the driver's stderr — its own warnings, plus
@@ -2603,6 +2684,50 @@ the tier is really carried beside it, as `callFix`'s own `agent()` option
 (`references/engine-loop.md`, "Effort discipline"). Run by hand, that
 opener pins nothing — set the reasoning effort of the turn you dispatch
 yourself, to the same `engine.effort` value the line names.
+
+**What replaces the fallback's batch-final check here (#516).** The driver's
+only ledger write is the per-segment fragment; it does NOT perform the
+batch-final `ledger_merge.py --expected-segs … --run-token …`
+re-verification that `mass-translate-wf.template.js`'s `batchComplete` step
+performs (the driver's own docstring names that as the caller's). Do not try
+to reconstruct that check's roster out of driver output. A driver run is a
+repeated SUBSET invocation, not one batch: `--only-segs` is deliberately
+outside resume identity, so successive invocations under one `RUN_ID` each
+report only their own ids, and a unit that failed in an earlier invocation is
+simply absent from a later summary — any roster assembled from summaries is
+a claim about what you remembered to run, not about the book.
+
+**W7 carries it instead, on the axis that matters most here.**
+`final_audit.py` runs over EVERY currently-converged segment in the project
+and recomputes each draft's content sha1 against that segment's own
+`reviewed_draft_sha1`; `assemble.py` refuses on the same identity before
+anything ships. That is whole-book and roster-free, and it is where "is the
+draft on disk the one the reviewer saw" is actually decided — on both
+launchers. It is not a superset of the batch-final merge: that merge ALSO
+re-asserts the draft's `<run_token>:<seg>` stamp and the review artifact's
+matching `:r<round>` token, and W7 reads neither. What W7 does not carry is
+the run-token binding, not the draft identity.
+
+You may still run the batch-final merge over a set you are explicitly
+claiming complete. If you do, read its OUTPUT rather than its exit status,
+because neither weak case is a refusal: an id you did not name is outside the
+check entirely, and an id the merge materializes `stale` has its token/sha
+re-assertion SKIPPED while the command still reports success, listing that id
+in `stale_segments`. A non-empty `stale_segments`, or an id you meant to
+claim and did not name, means NOT complete.
+
+```
+python3 {durable_root}/scripts/ledger_merge.py \
+    --durable-root {durable_root} --plugin-root {plugin_root} \
+    --expected-segs SEG1,SEG2,... --run-token RUN_ID
+```
+
+`RUN_ID` is the driver's own printed `run_id`. Name only ids converged under
+THAT run: the re-assertion reconstructs `<run_token>:<seg>` per id, so an id
+stamped by an earlier run fails it. And name only ids you are claiming
+CONVERGED — the completeness half is satisfied by whatever fragment happens
+to exist, so a `needs_fix` or `failed` id in the list makes an unfinished
+batch read as verified.
 
 **When the finding is WRONG (#461) — rejecting a verdict instead of
 applying it.** Since #532 the fix turn refuses a finding it cannot substantiate

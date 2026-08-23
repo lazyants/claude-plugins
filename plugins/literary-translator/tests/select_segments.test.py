@@ -731,7 +731,7 @@ def test_only_segs_discloses_the_outstanding_remainder_on_stderr(tmp_path):
     """#530 (plan test 2): the selector's OWN stderr is a frozen output
     channel of this release, not only the driver's.
 
-    The direct-selector operator (W5's default `pipeline()` path) never sees
+    The direct-selector operator (the `pipeline()` fallback path) never sees
     segment_dispatch_driver.py's line at all, and #551 keeps this script's
     stderr from reaching the DRIVER's operator -- so neither channel covers
     the other and both are asserted.

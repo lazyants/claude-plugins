@@ -4,13 +4,13 @@ own claim-aware --expect-token refusal.
 
 ## Why this file exists, and why it is split into parts
 
-D9 (PLAN.md) measured that the DEFAULT `mass-translate-wf.template.js`
-dispatch path has exactly ONE deterministic site that ever runs
-`draft_ready.py --expect-token` (`translateAcceptCmd`, the translate wait
-poll) and it never runs again after a fix round -- `runRound` goes straight
-from `callFix()` to the NEXT `getVerifiedReview()`, whose own accept command
-is `review_ready.py --expect-token` (the REVIEW artifact's token, not the
-DRAFT's). So on that path, the only thing standing between a claimed
+D9 (PLAN.md) measured that the `mass-translate-wf.template.js` dispatch path
+(W5's fallback launcher since #516) has exactly ONE deterministic site that
+ever runs `draft_ready.py --expect-token` (`translateAcceptCmd`, the translate
+wait poll) and it never runs again after a fix round -- `runRound` goes
+straight from `callFix()` to the NEXT `getVerifiedReview()`, whose own accept
+command is `review_ready.py --expect-token` (the REVIEW artifact's token, not
+the DRAFT's). So on that path, the only thing standing between a claimed
 segment's token and a fix round that drops it is a sentence in `fixPrompt()`
 -- "copy its existing value byte for byte ... never invent, drop, or
 recompute it." A prompt line protected by a prompt line.
@@ -46,7 +46,7 @@ this file's own author found while building the #438 end-to-end test:
 `codex_job.py`'s `main()` now FATALs (exit 2) whenever `--run-id` is absent
 -- required on EVERY invocation, translate and review alike (D8, #438) --
 but `translateDrivePrompt()`/`reviewDrivePrompt()` never forwarded it,
-meaning the DEFAULT dispatch path FATALed on every launch. The template fix
+meaning the template dispatch path FATALed on every launch. The template fix
 lives in this file's own scope (`mass-translate-wf.template.js` is listed
 below); `test_default_path_forwards_run_id_to_codex_job` pins it against
 the ACTUAL rendered nohup command AND against `codex_job.py`'s own real
@@ -1275,8 +1275,8 @@ def test_a_token_less_draft_with_no_claim_record_is_still_refused(tmp_path):
 
 
 # =============================================================================
-# Part 3 -- the DEFAULT path's ACTUAL rendered fix prompt (D9's real
-# protection) and the characterization test pinning the gap it covers.
+# Part 3 -- the fallback template path's ACTUAL rendered fix prompt (D9's
+# real protection) and the characterization test pinning the gap it covers.
 # =============================================================================
 
 # Deliberately NOT a module-level `pytestmark`: that would also skip Parts 1
@@ -1434,7 +1434,7 @@ def run_pipeline(tmp_path, seg, *, max_fix_rounds=2, timeout=30) -> dict:
 @_needs_node
 @pytest.mark.parametrize("seg", ["seg01", "FRONTBACK:errata_02"])
 def test_fix_prompt_actual_rendered_text_preserves_the_claimed_token_byte_for_byte(tmp_path, seg):
-    """D9's actual protection on the DEFAULT path (PLAN.md D9,
+    """D9's actual protection on the fallback template path (PLAN.md D9,
     mass-translate-wf.template.js:1288): the claim survives a fix round
     ONLY because fixPrompt()'s own rendered text instructs the fixer to
     copy the draft's existing dispatch_token byte for byte, unchanged. This
@@ -1455,7 +1455,7 @@ def test_fix_prompt_actual_rendered_text_preserves_the_claimed_token_byte_for_by
 def test_default_path_has_no_deterministic_draft_token_recheck_after_a_fix(tmp_path):
     """Characterization test (PLAN.md D9 and the Tests entry "D9's default-
     path shape"): pins the actual protection GAP the byte-for-byte prompt
-    line above is compensating for. On the DEFAULT template path there is
+    line above is compensating for. On the fallback template path there is
     exactly one code site that ever runs `draft_ready.py --expect-token`
     (translateAcceptCmd, the translate wait poll) and it never runs again
     after a fix round -- `runRound` goes straight from `callFix()` to the
