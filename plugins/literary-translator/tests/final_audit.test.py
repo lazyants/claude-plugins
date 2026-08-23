@@ -1553,14 +1553,16 @@ def test_an_ambiguous_sentinel_still_carves_out_and_is_reported(tmp_path):
     """1.19.1 fail-closed predicate, final_audit's half -- and the half where
     "fail-closed" points at the OPPOSITE ACTION from the dispatch gate's.
 
-    The other three consumers refuse when the sentinel is unreadable. Here
-    refusing IS the destructive branch: a dangling symlink read as "absent"
-    drops seg02 out of the carve-out, leaves stale_blocking at 1, and reports
-    a finished book as INCOMPLETE -- over a broken dotfile, with no way out,
-    because the operator's only route to a fresh sentinel is a retranslate
-    that select_segments.py's gate now correctly refuses for this very
-    segment. Sentinel respected in one place and not the other is exactly the
-    "tokens saved, book undeliverable" shape.
+    The writer and the dispatch gate refuse when the sentinel is unreadable;
+    backfill's scan reports it unprotected; assemble.py's #491 carve-out
+    admits it for the same reason this one does. Here refusing IS the
+    destructive branch: a dangling symlink read as "absent" drops seg02 out
+    of the carve-out, leaves stale_blocking at 1, and reports a finished
+    book as INCOMPLETE -- over a broken dotfile, with no way out, because
+    the operator's only route to a fresh sentinel is a retranslate that
+    select_segments.py's gate now correctly refuses for this very segment.
+    Sentinel respected in one place and not the other is exactly the "tokens
+    saved, book undeliverable" shape.
 
     Fails against the unfixed code at `assert result.returncode == 0` (and at
     project_complete/stale_previously_converged): pre-fix `.exists()` follows

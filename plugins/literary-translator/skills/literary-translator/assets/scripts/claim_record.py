@@ -123,7 +123,7 @@ above still classifies PRESENT); this one leaves a record whose DIRECTORY
 ENTRY is missing, so the record is not there at all. Closing either does
 nothing for the other.
 
-Unlike the four duplicated copies of the `.ever_converged` predicate, this
+Unlike the five duplicated copies of the `.ever_converged` predicate, this
 one is SHARED by import (`import claim_record`, the flat sibling-import
 idiom already used for cache_key.py). A drift test and a census test pin
 the readers together, so a third reader appearing later is caught rather
@@ -146,7 +146,7 @@ from pathlib import Path
 # The three-state claim-record predicate.
 #
 # Deliberately NOT a copy of the `.ever_converged` SENTINEL_* block: that one
-# is duplicated across four scripts because those scripts must stay
+# is duplicated across five scripts because those scripts must stay
 # independently runnable from a durable root. This record is read by two
 # callers that already import shared helpers, so it is shared by import --
 # which is what lets one drift test pin every reader at once.
