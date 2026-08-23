@@ -130,7 +130,7 @@ academic romanization scheme, not an ad hoc one)?
 <!-- LT_REQUIRED_FILL_END -->
 
 - Nicknames / speaking names -- translate the sense where the source clearly intends one; keep the
-  original in a translator's note when it matters and the sense doesn't carry over cleanly.
+  original alongside it when it matters and the sense doesn't carry over cleanly.
 
 ### C-translit. Practical source -> target transcription rule (the fixed rule for names with no established form)
 
@@ -146,12 +146,11 @@ transcription practice where one exists. Cases the rule doesn't cleanly resolve 
 
 Fill in this project's own conventions: dialogue/direct-speech punctuation; quotation-mark style (and how
 it differs for nested/embedded quotes or titles); italics (foreign-language insertions, titles of works,
-the source's own emphasis); footnote numbering/marker style (this project's apparatus keeps the source's
-own numbering; a translator's own added notes, if any, use a visibly distinct marker/namespace so the two
-are never confused); how numbers, dates, and money/measurement realia are rendered, including the gloss
-mechanism for a realia term at its first appearance (inline parenthetical vs. its own note -- pick one and
-apply it consistently; a segment's own schema may not have a slot for a brand-new footnote, in which case
-an inline gloss is usually the only mechanism actually available).
+the source's own emphasis); how numbers, dates, and money/measurement realia are rendered, including the
+gloss for a realia term at its first appearance. Footnote numbering and marker style are NOT yours to set:
+the apparatus is the source's own, and there is no translator-note namespace beside it. So what you fix
+here is the gloss's FORM -- parenthetical, an em-dash aside, italics: pick one, apply it consistently, and
+put it in the translated unit that already carries the term.
 
 ### E. Techniques and hard cases
 
@@ -167,9 +166,9 @@ an inline gloss is usually the only mechanism actually available).
 LT_PLACEHOLDER_UNFILLED -- state this project's own fixed convention for embedded third-language text (a
 language other than both source and target appearing inline in the source -- e.g. Yiddish inside a Hebrew
 source, Latin inside an English source, an older stage of the source language, ...): romanize it or
-translate it outright; the gloss format (inline parenthetical vs. its own footnote -- pick one and apply it
-uniformly, same choice as section D's realia gloss mechanism); and whether the kept original is set off
-from the surrounding target-language prose in a particular way (parentheses, italics, a distinct marker).
+translate it outright; the gloss format (the same form section D fixes for its realia gloss -- pick one and
+apply it uniformly); and whether the kept original is set off from the surrounding target-language prose in
+a particular way (parentheses, italics, a distinct marker).
 If this project's source has no embedded third-language text at all, state that explicitly here rather
 than leaving this unfilled.
 <!-- LT_REQUIRED_FILL_END -->
@@ -187,9 +186,8 @@ than leaving this unfilled.
   two apart by feel: a genuinely missed idiom leaves the target thinner at that WORD; a deliberate
   ambiguity is thin at the word and load-bearing in the PASSAGE. So before calling a rendering weak,
   read what the surrounding sentences do with it -- an ambiguity the narrator goes on to exploit,
-  attribute to gossip, or dismantle is the author's device, not the translator's omission. If the
-  reader genuinely needs the stronger reading, it belongs in the apparatus, never in the narrator's
-  voice.
+  attribute to gossip, or dismantle is the author's device, not the translator's omission. The stronger
+  reading never enters the narrator's voice.
 - **A repetition the author uses as a link** -- when the source repeats a word about one referent AND the
   passage leans on that repetition (the later occurrence answers, echoes or reinterprets the earlier one),
   the link is content: keep ONE target lexeme across the pair wherever the target language permits it.

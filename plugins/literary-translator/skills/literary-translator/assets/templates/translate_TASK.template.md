@@ -110,9 +110,11 @@ match the source block.
 - **Embedded third-language text** (e.g. Latin, an older stage of the
   source language, or a similar aside) -- ALWAYS gloss it in-text: keep
   the original AND give the target-language translation immediately
-  alongside it (inline in parentheses, or as its own footnote). Never bury
-  the gloss only in `notes` -- a reader of the draft alone would never see
-  it there, which is a reviewable defect, not a stylistic choice.
+  alongside it, inside the same string you are already writing -- the
+  block, the verse rendering, or the source footnote's own translated
+  text. Do NOT add a `footnotes` entry of your own. Never bury the gloss
+  only in `notes` -- that array never reaches the assembled book, so
+  burying it there is a reviewable defect, not a stylistic choice.
 
 ## Output -- EXACTLY this JSON (no markdown fencing)
 
