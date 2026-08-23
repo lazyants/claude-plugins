@@ -77,7 +77,13 @@ Four deterministic CLI modes, mutually exclusive:
     same as every other genuine precondition failure in this function --
     see that call's own comment for why degrading it to ``missing[]`` would
     be fail-OPEN on exactly the property this release makes fail-closed.
-    Every check that follows that call IS fail-closed into ``missing[]``:
+    manifest.json's own PARSE is a second, narrower exception in the same
+    direction: it runs right AFTER that tripwire (#268), off the bytes the
+    tripwire captured, and a failure still raises -- EXCEPT when a frozen-
+    input mismatch already stands, in which case it is reported through
+    ``frozen_input_mismatch`` rather than raised, since raising would strip
+    that field from the output and downgrade a FATAL tamper to an advisory
+    failure. Every check that follows IS fail-closed into ``missing[]``:
       - coverage: the merged triage's ``assignment_id`` set is EXACTLY the
         assignment manifest's assigned set (a gap -- an assigned entity with
         no triage record -- is a FAIL, same as an extra record referencing
@@ -366,6 +372,37 @@ def _read_json(path: Path, label: str) -> dict:
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
+        raise SkepticReadyError(f"{label} is not valid JSON: {path} ({exc})")
+
+
+def _read_json_from_snapshot(snapshot: tuple, path: Path, label: str) -> dict:
+    """Like ``_read_json``, but parses bytes ALREADY CAPTURED by
+    ``frozen_input_check()``'s own single read loop (a
+    ``read_frozen_input_snapshot()`` ``(state, content)`` pair) instead of
+    reading `path` a second time. Same failure classification and the same
+    message text as ``_read_json``, so a caller can swap between the two
+    without a consumer noticing which one produced the error.
+
+    #268: this exists so ``run_verify_merged`` can parse manifest.json
+    WITHOUT reopening it after H1 already hashed it -- the round-5 race the
+    canon/senses ``canon_snapshot``/``senses_snapshot`` reuse closed, where
+    H1 approves one on-disk version while a later independent read silently
+    consumes another. ``path`` is passed for MESSAGES only; it is never
+    read here."""
+    state, content = snapshot
+    if state == "absent":
+        raise SkepticReadyError(f"{label} not found: {path}")
+    if state != "regular":
+        raise SkepticReadyError(f"{label} could not be read: {path} (not a regular file)")
+    try:
+        # `.decode("utf-8")` rather than handing bytes straight to
+        # `json.loads`, which would also accept UTF-16/UTF-32 -- `_read_json`
+        # decodes strictly as UTF-8, and the two must agree on what "not
+        # valid JSON" means. `UnicodeDecodeError` is a `ValueError`, so the
+        # one clause below covers a non-UTF-8 tamper too; `RecursionError`
+        # is what deeply nested JSON raises and is NOT a `ValueError`.
+        return json.loads(content.decode("utf-8"))
+    except (ValueError, RecursionError) as exc:
         raise SkepticReadyError(f"{label} is not valid JSON: {path} ({exc})")
 
 
@@ -1005,8 +1042,9 @@ def _frozen_input_tamper_reason(
     canon_senses.json alike -- it used to have a path-based twin (re-reading
     ``path`` itself via ``compute_frozen_input_hash()``) that
     ``frozen_input_check()`` called for manifest.json specifically, on the
-    reasoning that manifest.json has no downstream parser in this module to
-    keep consistent with a REUSED snapshot the way canon/senses do. That
+    reasoning that manifest.json had no downstream parser in this module to
+    keep consistent with a REUSED snapshot the way canon/senses do (it does
+    now -- #268, ``run_verify_merged``'s own manifest parse). That
     reasoning was true but answered the wrong question: whether a read can
     fail without crashing the caller (``tolerant_reads``) is about SNAPSHOT
     CAPTURE, not about snapshot reuse. The path-based twin captured its own
@@ -1051,8 +1089,9 @@ def frozen_input_check(
     stamps -- a state-tagged hash comparison only (never requires any of
     the three to successfully PARSE, so a deleted or schema-malformed
     frozen input still produces an answer here). Returns
-    ``(frozen_input_mismatch: bool, reasons: list[str], canon_snapshot:
-    tuple[str, bytes] | None, senses_snapshot: tuple[str, bytes] | None)``.
+    ``(frozen_input_mismatch: bool, reasons: list[str], canon_snapshot,
+    manifest_snapshot, senses_snapshot)`` -- the three snapshots in
+    ``FROZEN_INPUT_SPECS`` order, each a ``tuple[str, bytes] | None``.
     A snapshot is ``None`` whenever there was no stamp to compare it
     against (see below) OR (``tolerant_reads=True`` only) the read itself
     failed.
@@ -1084,10 +1123,13 @@ def frozen_input_check(
     ``senses_snapshot`` kwargs) can reuse this EXACT snapshot instead of
     re-reading the path a second time -- closing the race where H1
     approves one on-disk version while a later independent read silently
-    consumes another. manifest.json has no such downstream parser in this
-    module, so its snapshot is captured through the SAME table/loop (codex
-    round 7) but not part of the return tuple -- only its tamper
-    comparison feeds ``reasons``/``frozen_input_mismatch``.
+    consumes another. #268: manifest.json is returned on exactly the same
+    terms, and for exactly the same reason -- ``run_verify_merged`` parses
+    it to re-authenticate every cited evidence record, so a second
+    independent read there would reopen that race on the one frozen input
+    it was still open on. All three snapshots are captured through the SAME
+    table/loop (codex round 7) and all three are now part of the return
+    tuple; a caller that needs none of them discards all three.
 
     Codex round 6 BLOCKER: canon.json/canon_senses.json used to be read
     UNCONDITIONALLY, even when AGGREGATE had no stamp at all for that
@@ -1119,7 +1161,8 @@ def frozen_input_check(
 
     Used by BOTH ``run_verify_merged`` (called AFTER schema-validating
     AGGREGATE, before anything downstream ever attempts to PARSE
-    canon.json/canon_senses.json) and the standalone ``--check-frozen-inputs``
+    canon.json/manifest.json/canon_senses.json -- #268 moved the last of
+    those three below this call) and the standalone ``--check-frozen-inputs``
     CLI mode below -- the latter exists so the calling Workflow can run this
     exact check at a SECOND decision point the merged-verification path
     never reaches: when every batch's own fragment fails to become ready
@@ -1241,12 +1284,17 @@ def frozen_input_check(
                     frozen_input_mismatch = True
         snapshots[key] = snapshot
 
-    # manifest_snapshot is captured through the exact same gated loop above
-    # (that parity is the whole point of this round's fix) but was never
-    # part of this function's return contract -- manifest.json has no
-    # downstream parser in this module to hand it to (unlike canon/senses,
-    # see _resolve_competitors' own canon_snapshot/senses_snapshot reuse).
-    return frozen_input_mismatch, reasons, snapshots["canon"], snapshots["senses"]
+    # All three snapshots are captured through the exact same gated loop
+    # above (that parity is the round-7 fix) and all three are returned, in
+    # FROZEN_INPUT_SPECS order. #268 added manifest.json to the return
+    # contract: run_verify_merged parses it downstream (evidence
+    # re-authentication) exactly as it parses canon/senses via
+    # _resolve_competitors, so it needs the SAME bytes this loop hashed
+    # rather than a second, independently-read version of the file.
+    return (
+        frozen_input_mismatch, reasons,
+        snapshots["canon"], snapshots["manifest"], snapshots["senses"],
+    )
 
 
 # Round 9 (codex, HIGH): both `missing` lists below (run_check_frozen_inputs'
@@ -1538,9 +1586,10 @@ def run_check_frozen_inputs(aggregate_manifest_path, canon_path=None, manifest_p
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         pass
 
-    # This mode has no downstream parser of canon/senses to feed -- discard
-    # the two returned snapshots (codex round 5 added them for
-    # run_verify_merged's own _resolve_competitors() reuse).
+    # This mode has no downstream parser of any frozen input to feed --
+    # discard all three returned snapshots (codex round 5 added canon/senses
+    # for run_verify_merged's own _resolve_competitors() reuse, #268 added
+    # manifest.json for that same function's evidence re-authentication).
     # tolerant_reads=True (codex round 6 BLOCKER): this mode is documented
     # as "never a crash", but a read failure on canon/senses used to raise
     # RAW regardless -- since nothing here ever consumes the snapshot,
@@ -1550,7 +1599,7 @@ def run_check_frozen_inputs(aggregate_manifest_path, canon_path=None, manifest_p
     # frozen_input_check()'s own tolerance gate entirely via a
     # hand-written call site, so a manifest read failure escaped raw even
     # though this exact tolerant_reads=True was already being passed.
-    frozen_input_mismatch, reasons, _canon_snapshot, _senses_snapshot = frozen_input_check(
+    frozen_input_mismatch, reasons, _canon_snap, _manifest_snap, _senses_snap = frozen_input_check(
         aggregate, canon_path, manifest_path, senses_path, tolerant_reads=True
     )
     return {"frozen_input_mismatch": frozen_input_mismatch, "missing": _bounded_missing(reasons)}
@@ -1599,12 +1648,16 @@ def run_verify_merged(
     if not aggregate_manifest_path.is_file():
         raise SkepticReadyError(f"{aggregate_manifest_path} not found (nothing to verify against)")
 
-    # These two are genuine preconditions (without them evidence can't be
-    # re-authenticated at all) -- a bad manifest/particle-config raises,
-    # same as everywhere else. TRIAGE/AGGREGATE_MANIFEST content problems,
-    # by contrast, degrade to `missing[]` below -- they are the very things
-    # this mode's contract documents as expected FAIL cases, not crashes.
-    manifest = _read_json(Path(manifest_path), "manifest.json")
+    # The particle config is a genuine precondition (without it evidence
+    # can't be re-authenticated at all) and a bad one raises, same as
+    # everywhere else. It is resolved HERE, ahead of the H1 checks, and
+    # manifest.json deliberately is not (#268, see its own parse further
+    # down): --particle-config resolves into the PLUGIN's own languages/
+    # assets, so it is not a frozen input, not inside durable_root, and not
+    # writable by the agent H1's threat model is about.
+    # TRIAGE/AGGREGATE_MANIFEST content problems, by contrast, degrade to
+    # `missing[]` below -- they are the very things this mode's contract
+    # documents as expected FAIL cases, not crashes.
     try:
         language_config = load_language_config(
             particle_config, languages_dir=Path(languages_dir) if languages_dir else LANGUAGES_DIR_DEFAULT
@@ -1626,6 +1679,7 @@ def run_verify_merged(
     # independently -- None falls back to a fresh read for THAT input only
     # (see its own docstring).
     canon_snapshot = None
+    manifest_snapshot = None
     senses_snapshot = None
 
     triage_schema = _load_schema_document(schemas_dir / SKEPTIC_TRIAGE_SCHEMA)
@@ -1686,12 +1740,57 @@ def run_verify_merged(
             # universe downstream and let every ambiguous form sail through
             # unflagged -- fail-OPEN on the exact property this release
             # makes fail-closed.
-            mismatch, reasons, canon_snapshot, senses_snapshot = frozen_input_check(
+            mismatch, reasons, canon_snapshot, manifest_snapshot, senses_snapshot = frozen_input_check(
                 aggregate, canon_path, Path(manifest_path), resolved_senses_path,
                 tolerant_reads=False,
             )
             missing.extend(reasons)
             frozen_input_mismatch = frozen_input_mismatch or mismatch
+
+    # #268: manifest.json is parsed HERE, after the H1 tripwire above and
+    # never before it, and from the bytes that check ALREADY captured.
+    #
+    # Two separate defects closed by one move. (1) Parsing it first made a
+    # post-setup tamper that leaves manifest.json UNPARSEABLE -- corrupt
+    # bytes, non-UTF-8 bytes, deleted, replaced by a directory -- raise out
+    # of this function before frozen_input_mismatch was ever computed, so
+    # main() printed {"success": false, "error": ...} with no
+    # frozen_input_mismatch key at all and the calling Workflow bucketed a
+    # FATAL frozen-input tamper as an ordinary advisory "verify-failed"
+    # (skeptic-pass-wf.template.js; SKILL.md's exit contract gates HALT on
+    # that one field). The same tamper on canon.json/canon_senses.json was
+    # always reported correctly -- manifest.json was the last input still
+    # parsed ahead of the check. (2) Re-reading the path here instead of
+    # reusing the captured snapshot would reopen the codex round-5 race for
+    # manifest.json specifically: H1 approves one on-disk version while the
+    # evidence re-authentication below silently consumes another, with
+    # frozen_input_mismatch still False.
+    #
+    # A parse failure with NO mismatch standing is still a hard precondition
+    # (evidence cannot be re-authenticated without the manifest) and raises
+    # exactly as it did before -- an already-broken manifest is a broken
+    # setup, not a tamper. When a mismatch DOES stand, the failure is
+    # reported through the one field the caller gates HALT on instead.
+    #
+    # manifest_snapshot is None whenever H1 never read the file: an absent,
+    # unparseable or schema-invalid AGGREGATE (no trustworthy stamp to
+    # compare against), or a schema-valid one carrying no manifest_sha256.
+    # A fresh read is then the only available source, exactly as before.
+    try:
+        manifest = (
+            _read_json_from_snapshot(manifest_snapshot, Path(manifest_path), "manifest.json")
+            if manifest_snapshot is not None
+            else _read_json(Path(manifest_path), "manifest.json")
+        )
+    except SkepticReadyError as exc:
+        if not frozen_input_mismatch:
+            raise
+        missing.append(str(exc))
+        return {
+            "verified": False,
+            "missing": _bounded_missing(sorted(set(missing))),
+            "frozen_input_mismatch": True,
+        }
 
     # #243: project the ambiguity-competitors universe -- AFTER the H1
     # byte-level tamper checks above, never before (see their own comment).
