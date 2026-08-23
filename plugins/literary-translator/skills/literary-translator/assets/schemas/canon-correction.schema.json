@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "canon-correction.schema.json",
+  "title": "Canon Correction",
+  "description": "ONE out-of-band, adjudicated correction to an ALREADY-FROZEN canon.json entries{} record, submitted to canon_validate.py --correct as a whole JSON document and appended verbatim to canon.json's corrections[] once applied (#495). The same shape is both the request and the record, deliberately: two shapes for one decision drift apart, and the record's whole job is to let the next operator see what was adjudicated. This is NOT a relaxed merge -- an ordinary --merge-batches item carrying a differing resolution for a frozen source_form still collides and still raises; correction is a separate, explicitly-named route. old_entry is a REQUIRED interlock, not documentation: --correct refuses, naming both values, when it does not equal what is on disk, so the mode cannot be used blind against a canon.json that moved since it was read. disposition:\"correct\" replaces the record under the same source_form key (new_entry required, and its own source_form field must equal that key); disposition:\"remove\" deletes it (new_entry forbidden) -- removal is the sanctioned repair for an entry that should never have existed, and the only route to clear canon_adjudication_audit.py's BLOCKING collapsed_split, which no substituted bare entry can satisfy. A key RENAME is a remove followed by an ordinary --merge-batches under the new key, never a third disposition.",
+  "type": "object",
+  "properties": {
+    "source_form": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The entries{} key being corrected. Must already be present -- a correction never inserts blind; adding a new name is --merge-batches' job."
+    },
+    "disposition": {
+      "type": "string",
+      "enum": ["correct", "remove"]
+    },
+    "old_entry": {
+      "description": "The value the caller states is CURRENTLY on disk under source_form. The blind-use interlock: --correct refuses, naming both, when this does not match. UNCONSTRAINED -- not a $ref to canon-entry.schema.json, and not even `type: object` -- and the asymmetry with new_entry is the point. old_entry's job is EQUALITY against what is on disk, not shape, and the value most in need of correcting is the one that fails its own schema. A hand-edited canon.json (the only repair route that existed before this mode) can put ANY JSON value under an entries{} key -- `_load_canon` type-checks `entries` itself but never its values -- and --validate-only exists to find exactly that. Constraining this field at all would leave those rows with no route but the hand edit this mode replaces: `type: object` alone already refused a string, an array or a null, so a malformed row could be diagnosed and not repaired. new_entry IS $ref-validated, because it becomes the frozen record."
+    },
+    "new_entry": {
+      "$ref": "canon-entry.schema.json",
+      "description": "The corrected record. Required for disposition:\"correct\", forbidden for disposition:\"remove\"."
+    },
+    "reason": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "Why this frozen decision was wrong, in the corrector's own words. Required and non-blank -- an unexplained diff is the thing #495 exists to stop -- but deliberately NOT length-capped: canon-entry.schema.json's own `note` is unbounded and rides in the same document via new_entry, so a cap here would bound one field while leaving the record's total size exactly as open as every other operator-authored free text in canon.json. Same convention as `note`, no special pleading."
+    }
+  },
+  "required": ["source_form", "disposition", "old_entry", "reason"],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "required": ["disposition"],
+        "properties": {
+          "disposition": { "const": "correct" }
+        }
+      },
+      "then": {
+        "required": ["new_entry"]
+      }
+    },
+    {
+      "if": {
+        "required": ["disposition"],
+        "properties": {
+          "disposition": { "const": "remove" }
+        }
+      },
+      "then": {
+        "properties": {
+          "new_entry": false
+        }
+      }
+    }
+  ]
+}

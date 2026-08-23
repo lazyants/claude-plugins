@@ -1273,8 +1273,32 @@ through whatever `cache_key.py` happens to be on disk.
 recovery with no orchestrating session to supply a plugin root: it accepts
 the durable sibling knowingly, on the operator's own judgement, rather
 than silently. `canon_validate.py`'s NON-stamping modes — `--check-batch`,
-`--verify-merged`, and validate-only (no mode flag) — resolve no sibling at
-all and are unaffected; do not add either flag to them.
+`--correct`, `--verify-merged`, and validate-only (no mode flag) — resolve no sibling at
+all and are unaffected; do not add either flag to them. `--correct` is the one
+that WRITES `canon.json` without stamping it, so the four modes named above are
+the STAMPING ones, not every mode that writes.
+
+**#495 — correcting a canon entry that is simply WRONG.** `canon.json` is
+otherwise write-once: `--merge-batches` refuses a differing resolution for an
+already-frozen `source_form` (correctly — that guard is what stops a
+re-adjudication pass silently overwriting a frozen decision), `--init` is
+create-only, and validate-only writes nothing. The sanctioned route is
+`canon_validate.py --research-mode offline --correct correction.json`, where
+`correction.json` is one `canon-correction.schema.json` document naming the
+`source_form`, stating its CURRENT on-disk value as `old_entry` (the call is
+refused, naming both values, if that does not match — so it cannot be used
+blind), carrying a required free-text `reason`, and dispositioning either
+`correct` (replace) or `remove` (delete — what an interpolated name with zero
+source occurrences needs, and the only repair
+`canon_adjudication_audit.py`'s BLOCKING `collapsed_split` accepts). The
+document is appended verbatim to `canon.json`'s `corrections[]`, so the change
+is recorded rather than arriving as an unexplained diff. Never hand-edit
+`canon.json` instead: that is a change to the artifact every gate downstream
+trusts, made outside every validation this plugin owns. A correction re-stales
+exactly the segments whose segpack references that form — bounded re-review via
+`--from-converged`, never re-translation — but it does change `canon.json`'s
+bytes, which the skeptic pass holds as a frozen input, so run it BETWEEN passes.
+Full contract: `references/canon-and-glossary.md`, "`--correct PATH`".
 
 Otherwise run the codex-glossary-pass,
 instantiating `glossary-pass-wf.template.js` fresh from the plugin's current

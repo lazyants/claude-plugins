@@ -22,7 +22,7 @@ violates the tool-use API's "top-level object, no combinator" constraint
 codex dispatches (`batchDispatchPrompt`) that write their own fragment file
 atomically and self-validate it via THIS script's `--check-batch` mode,
 never via an agent-returned schema. `CANON_BATCH_SCHEMA` no longer exists
-in any template. Seven CLI modes now exist, selected by which flag is given
+in any template. Eight CLI modes now exist, selected by which flag is given
 (mutually exclusive; `--research-mode {live,offline}` is REQUIRED for
 every one of them, even where it has no effect, so no call site can
 accidentally omit declaring the precondition):
@@ -52,6 +52,46 @@ accidentally omit declaring the precondition):
     explicitly unsanctioned escape from `blocked_needs_regeneration` on a
     mature, zero-candidate project. Reports which fields moved. Refuses on
     a project with no canon.json yet (use --init).
+
+--correct PATH
+    The ONE sanctioned, RECORDED route to change an already-frozen
+    entries{} record (#495). Every other path refuses: --merge-batches
+    collides (which is correct -- a re-adjudication must never silently
+    overwrite a frozen decision), --init is create-only, validate-only
+    writes nothing. That left a canon entry that is simply WRONG
+    repairable only by a hand-edit of the exact artifact the whole gate
+    chain treats as frozen, performed outside every validation this script
+    owns and recorded nowhere -- and a canon that contradicts the text
+    keeps generating false review findings, so the cheapest way to silence
+    them was to revert correct prose to match a wrong canon.
+
+    PATH is a canon-correction.schema.json document (a FILE, never inline
+    argv -- a corrected canonical_target_form is exactly the kind of
+    multiword/apostrophe/RTL string --expect-source-forms-file is read
+    from a file to avoid). It names the source_form, states the OLD value
+    (refused, naming both, when it does not match disk -- so the mode
+    cannot be used blind), carries a required free-text reason, and
+    dispositions either `correct` (replace, new_entry required) or
+    `remove` (delete, new_entry forbidden). The document is appended
+    verbatim to canon.json's corrections[].
+
+    A `correct` runs new_entry through the SAME content controls the merge
+    path enforces -- the #347 static citation boundary and the offline
+    basis:"established" backstop -- because being a second write path into
+    entries{} is precisely why they must apply here too. `remove` is
+    exempt from both: they constrain what may be FROZEN, and nothing is.
+
+    OUT-OF-BAND, deliberately: _merge_batch is not touched, no --force
+    exists, and an ordinary batch carrying a differing resolution still
+    raises. Also the one WRITING mode that does not STAMP: the existing
+    generation_hashes are carried forward verbatim, because restamping
+    would advance the derivation-bundle provenance claim and clear
+    select_segments.py's derivation-state gate with nothing regenerated
+    (the #291 hole). Nothing is lost -- the re-stale signal for a
+    corrected entry is cache_key.py's per-segment used_terms_hash, which
+    hashes only the entries a segment actually references, so a correction
+    costs bounded re-review of exactly those segments and never reaches
+    translate.
 
 --check-batch PATH [--expect-source-forms-file M.json]
     Pass 1 (per-item) + the offline backstop on the ONE fragment at PATH.
@@ -132,7 +172,8 @@ This script performs no file locking of its own; it relies entirely on
 that precondition, same as ledger_merge.py's own materialization step.
 
 Reads canon-entry.schema.json / canon-batch.schema.json /
-canon-file.schema.json from ${durable_root}/schemas/ -- never the plugin's
+canon-file.schema.json / canon-correction.schema.json
+from ${durable_root}/schemas/ -- never the plugin's
 own assets/schemas/ (this script always runs from the durable, per-project
 copy).
 
@@ -146,6 +187,7 @@ root, i.e. SKILL.md's {{PLUGIN_ROOT}}:
     python3 canon_validate.py --research-mode offline --init --plugin-root ${plugin_root}
     python3 canon_validate.py --research-mode offline --init --allow-durable-sibling
     python3 canon_validate.py --research-mode offline --restamp-derivation --plugin-root ${plugin_root}
+    python3 canon_validate.py --research-mode offline --correct correction.json
     python3 canon_validate.py --research-mode live --check-batch out_0.json
     python3 canon_validate.py --research-mode live --check-batch out_0.json --expect-source-forms-file manifest_0.json
     python3 canon_validate.py --research-mode live --merge-batches out_0.json out_1.json --plugin-root ${plugin_root}
@@ -377,6 +419,23 @@ MODE_SPECS = (
         source_forms_refusal=_READS_NO_FRAGMENT,
         approve_to_refusal=_READS_NO_FRAGMENT,
         stamps_generation_hashes=True,
+    ),
+    # #495. The one WRITING mode with stamps_generation_hashes=False: it
+    # carries canon.json's existing stamp forward verbatim and computes no
+    # hash, so it resolves no sibling cache_key.py and the #412
+    # trusted-sibling precondition below has nothing to guard. That breaks
+    # the identity --plugin-root's help used to state ("'stamping' and
+    # 'writing' name the SAME four modes"), which is corrected there.
+    # source_forms_refusal/_READS_NO_FRAGMENT is exact: --correct reads a
+    # correction DOCUMENT, never a batch fragment, so there is no item set
+    # for --expect-source-forms-file to cover.
+    ModeSpec(
+        "--correct",
+        "correct",
+        batch_ok=False,
+        source_forms_refusal=_READS_NO_FRAGMENT,
+        approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
+        stamps_generation_hashes=False,
     ),
     ModeSpec(
         "--check-batch",
@@ -1343,6 +1402,53 @@ def _load_batch_bytes(batch_path_str: str):
     return raw, doc
 
 
+def _same_json_value(a, b) -> bool:
+    """Type-exact equality for two decoded JSON values -- the comparison the
+    `--correct` interlock needs, which `==` is not.
+
+    Python's `==` collapses the boolean/number boundary: `True == 1` and
+    `False == 0`. Once `old_entry` accepts ANY JSON value (it must -- see the
+    schema), that leaks straight into the interlock: an on-disk `true` could be
+    matched by a stated `1`, and the correction would be applied and RECORDED
+    with the wrong value. The record is this mode's whole deliverable, so a
+    record that misstates what was on disk defeats it even when the edit itself
+    was the one the operator wanted.
+
+    Compared as canonical JSON text rather than by walking the structures:
+    `sort_keys=True` makes object key ORDER irrelevant (it is not part of the
+    value) while list order stays significant (it is), and the encoder writes
+    `true` and `1` differently, which is the whole point. Both sides came out
+    of `json.loads`, so both are always encodable.
+    """
+    return json.dumps(a, sort_keys=True, ensure_ascii=False) == json.dumps(
+        b, sort_keys=True, ensure_ascii=False
+    )
+
+
+def _load_correction(correction_path_str: str) -> dict:
+    """The parsed correction document for --correct (#495), read through
+    `_read_json_bytes` for the same reason every fragment read is: a
+    non-UTF-8 file raises UnicodeDecodeError out of read_text(), which
+    `_read_json_file` does not catch, so it would escape into main()'s
+    defensive catch-all as "unexpected error: 'utf-8' codec can't decode
+    byte ..." instead of a failure naming the offending file. The raw bytes
+    are discarded -- nothing snapshots them; the document itself is what
+    gets appended to corrections[], and it is appended as the PARSED value
+    so the record is canonicalized by the same json.dumps every other
+    canon.json write goes through.
+    """
+    correction_path = Path(correction_path_str)
+    _, doc = _read_json_bytes(correction_path, "correction file")
+    if not isinstance(doc, dict):
+        raise CanonValidationError(
+            f"correction file at {correction_path} does not contain a JSON "
+            f"object (one correction per call, never an array -- a batch of "
+            f"corrections would reintroduce the partial-application question "
+            f"--merge-batches solves by validating every fragment first)"
+        )
+    return doc
+
+
 def _write_approved_snapshot(path: Path, raw: bytes) -> None:
     """Publish `raw` at `path` CREATE-ONCE: write it to a unique tmp name, then
     os.link() that into place. What this function does, and refuses:
@@ -1943,10 +2049,11 @@ def _preservable_prior(canon_path: Path) -> "dict | None":
 
 def _stamp_write_verify(
     canon_path: Path, merged: dict, registry: "Registry", force_restamp: bool = False,
-    plugin_root_str=None,
+    plugin_root_str=None, preserve_stamp: bool = False,
 ) -> "tuple[dict, bool]":
     """Shared by every mode that writes canon.json (`run_merge`,
-    `run_merge_batches`, `run_init`, `run_restamp_derivation`): resolves
+    `run_merge_batches`, `run_init`, `run_restamp_derivation`, and -- with
+    `preserve_stamp=True` -- `run_correct`): resolves
     generation_hashes onto the in-memory `merged` document,
     Pass-2-validates it BEFORE ever touching disk (so a corrupted merge is
     caught before it's written, not just after), performs ONE atomic write,
@@ -1982,15 +2089,59 @@ def _stamp_write_verify(
     (or None), threaded straight through to `_stamp_generation_hash()` --
     see that function's own docstring for the forwarding rule.
 
+    `preserve_stamp=True` (#495, `--correct`) is the exact OPPOSITE
+    override: the document DID change and the #291 rule would therefore
+    restamp, but this caller must not, so the existing stamp is carried
+    forward verbatim anyway. `_content_view` excludes only
+    generation_hashes, so a corrected entry reads as a changed document --
+    and restamping it would advance canon.json's particle_config /
+    derivation-bundle provenance claim, which is precisely what
+    select_segments.py's derivation-state gate reads to decide whether a
+    particle_config edit or a bootstrap_names.py/segpack.py fix has been
+    regenerated through. A correction regenerates nothing, so it must not
+    clear that gate. Nothing is lost: the re-stale signal for a corrected
+    entry is cache_key.py's per-segment `used_terms_hash`, never these
+    hashes.
+
+    Preserving requires something trustworthy to preserve, so
+    `preserve_stamp` with no `_preservable_prior` is a REFUSAL, not a
+    silent fresh stamp -- a correction that healed a corrupt stamp as a
+    side effect would be exactly the silent provenance advance the whole
+    parameter exists to prevent. `--restamp-derivation` is the one mode
+    that may do that, deliberately and by name.
+
     Returns `(freshly re-read on-disk document, restamped)`.
     """
+    if force_restamp and preserve_stamp:
+        # Its own error rather than a fall-through to the preservation refusal
+        # below, which would blame an unpreservable stamp -- true of the wrong
+        # thing, and misleading to whoever wired the new caller.
+        raise CanonValidationError(
+            "internal: force_restamp and preserve_stamp are contradictory -- "
+            "a writing mode must pass at most one"
+        )
     # This re-reads canon.json from disk even though the caller already holds
     # a pre-merge copy. That is DELIBERATE, not redundant I/O -- see
     # _preservable_prior's docstring: reading here keeps the guard correct
     # even if a future refactor starts mutating the merge accumulator in
     # place, rather than resting on _merge_batch's docstring promise.
     prior = None if force_restamp else _preservable_prior(canon_path)
-    restamped = prior is None or _content_view(merged) != _content_view(prior)
+    if preserve_stamp and prior is None:
+        raise CanonValidationError(
+            f"canon.json at {canon_path} carries no trustworthy "
+            f"generation_hashes stamp to preserve (absent, malformed, "
+            f"incomplete or empty), and a correction never stamps one -- "
+            f"it would advance the provenance claim "
+            f"select_segments.py's derivation-state gate reads without "
+            f"anything having been regenerated. Repair the stamp first "
+            f"with --restamp-derivation, then re-run the correction."
+        )
+    # `not preserve_stamp` leads so a preserving caller short-circuits before
+    # two _content_view builds, and so the line reads as what it means: a
+    # preserving caller never restamps.
+    restamped = not preserve_stamp and (
+        prior is None or _content_view(merged) != _content_view(prior)
+    )
 
     if restamped:
         merged.setdefault("generation_hashes", {})
@@ -2123,6 +2274,259 @@ def run_restamp_derivation(
         ),
         "entries_count": len(on_disk["entries"]),
         "review_queue_count": len(on_disk["review_queue"]),
+    }
+
+
+def run_correct(
+    canon_path: Path,
+    correction_path: str,
+    research_mode: str,
+    registry: "Registry",
+    senses_path: Path,
+    allow_absent_senses: bool,
+) -> dict:
+    """--correct: apply ONE out-of-band, adjudicated correction to an
+    already-frozen entries{} record, and record it in canon.json's
+    corrections[] (#495).
+
+    Why this is a separate mode rather than a relaxed merge: `_merge_batch`
+    refuses an accepted item whose source_form already carries a DIFFERENT
+    resolution, and that refusal is correct -- it is the only thing standing
+    between a frozen decision and a re-adjudication pass silently
+    overwriting it. But it made canon.json write-once in practice, so an
+    entry that is simply WRONG (a factual person-merge, an interpolated name
+    with zero source occurrences, one entity frozen under two spellings)
+    could only be repaired by hand-editing the exact artifact the whole gate
+    chain treats as frozen -- outside every validation this script owns, and
+    recorded nowhere. A canon that contradicts the text is not inert: it
+    keeps generating false review findings, and the cheapest way to silence
+    those is to revert correct prose to match a wrong canon. The guard
+    therefore pushed toward corrupting the deliverable.
+
+    So: `_merge_batch` is NOT touched, there is no --force, and an ordinary
+    batch carrying a differing resolution still raises. Correction is
+    out-of-band, one entry per call, and states what it is changing FROM --
+    `old_entry` must equal what is on disk or the call is refused naming
+    both values, so the mode cannot be used blind against a canon.json that
+    moved since it was read.
+
+    Two dispositions, and the asymmetry between them is deliberate:
+
+      correct -- replace the record under the same key. Refused when
+        `source_form` is an adjudicated homonym split, through the SAME
+        `is_split` predicate `_merge_batch`'s recollapse guard uses: any
+        single bare entry for a form with 2+ senses is a recollapse, and
+        substituting a different bare entry is still one bare entry.
+
+      remove -- delete the record. Deliberately NOT split-refused.
+        `canon_adjudication_audit.py`'s BLOCKING `collapsed_split` finding
+        says "the underlying canon.json entry must actually be corrected"
+        for exactly this state (a split added to the sidecar after the bare
+        entry already existed), and no substituted value can satisfy it --
+        removal is the only repair, so refusing it here would leave that
+        finding with no route at all. Removal is also what an interpolated
+        name with zero source occurrences needs, and a key RENAME is a
+        remove followed by an ordinary --merge-batches under the new key.
+
+    Writes through the SAME `_stamp_write_verify` path every other writing
+    mode uses -- Pass 2 before disk, one atomic write, post-write re-read
+    and re-validate -- but with `preserve_stamp=True`: see that function's
+    docstring for why a correction must never advance the provenance claim.
+    """
+    if not canon_path.is_file():
+        raise CanonValidationError(
+            f"canon.json not found at {canon_path} (nothing to correct -- "
+            f"bootstrap a new project with --init)"
+        )
+
+    doc = _load_correction(correction_path)
+    validator = _validator_for_schema_file("canon-correction.schema.json", registry)
+    errors = _sorted_errors(validator, doc)
+    if errors:
+        raise CanonValidationError(
+            "correction document failed schema validation: "
+            + _format_errors(errors, instance=doc, root_schema=validator.schema)
+        )
+
+    canon = _load_canon(canon_path)
+    # Loaded before the disposition branch, exactly as run_merge/
+    # run_merge_batches load it: only the `correct` branch READS it, but an
+    # EXPLICIT --senses-path that turns out missing must block in every
+    # mode alike, never silently read as "no splits yet" in the one mode
+    # that happens not to need it.
+    senses = _load_senses_or_raise(senses_path, allow_absent_senses)
+
+    entries = dict(canon.get("entries", {}))
+    source_form = doc["source_form"]
+    if source_form not in entries:
+        raise CanonValidationError(
+            f"{source_form!r}: no such entry in canon.json's entries{{}} -- a "
+            f"correction never inserts blind. Add a new name through the "
+            f"ordinary glossary-pass merge (--merge-batches) instead.",
+            offending=[_bounded_message(repr(source_form))],
+        )
+
+    existing = entries[source_form]
+    old_entry = doc["old_entry"]
+    if not _same_json_value(existing, old_entry):
+        # The blind-use interlock, and the whole reason old_entry is
+        # required. Both values are named: a correction authored against a
+        # stale read must show the operator WHAT it read and what is
+        # actually there, not merely that they differ.
+        raise CanonValidationError(
+            f"{source_form!r}: stated old value does not match canon.json -- "
+            f"refusing to correct blind. On disk: {existing!r}. Stated: "
+            f"{old_entry!r}. Re-read canon.json and re-author the correction "
+            f"against its CURRENT value.",
+            offending=[_bounded_message(repr(source_form))],
+        )
+
+    disposition = doc["disposition"]
+    if disposition == "correct":
+        new_entry = doc["new_entry"]
+        if _same_json_value(new_entry, old_entry):
+            raise CanonValidationError(
+                f"{source_form!r}: new_entry is identical to old_entry -- "
+                f"nothing to correct. The merge path treats an identical "
+                f"resubmission as a silent no-op; a correction must not, or a "
+                f"mis-authored one reports success having changed nothing."
+            )
+        if new_entry.get("source_form") != source_form:
+            raise CanonValidationError(
+                f"{source_form!r}: new_entry's own source_form field is "
+                f"{new_entry.get('source_form')!r} -- the entries{{}} map key "
+                f"and the record's own authoritative source_form must agree. "
+                f"To change the KEY itself, remove this entry and add the "
+                f"corrected form through --merge-batches."
+            )
+        # The two content controls every OTHER route into entries{} enforces.
+        # Passing the ENTRY to helpers written for batch ITEMS is exact, not a
+        # coercion: `_enforce_citation_source_safety` selects on carrying a
+        # `source` string (mirroring fetch_citation.iter_sources) and
+        # `_enforce_offline_backstop` on `basis` -- neither reads
+        # `disposition`. Omitting them was a measured hole, not a theoretical
+        # one: --correct froze a `source` of "http://127.0.0.1:8080/x" that
+        # --merge-batches refuses as `loopback-address`, and froze
+        # basis:"established" under --research-mode offline, which the merge
+        # path refuses outright. #347's docstring calls itself "the only place
+        # such a `source` can be stopped before it is frozen into canon.json",
+        # and a second write path that skipped it would have made that false.
+        #
+        # The `remove` branch is deliberately exempt from both: they constrain
+        # what may be FROZEN, and a removal freezes nothing. Refusing a removal
+        # because the entry being deleted carries a bad `source` would trap the
+        # exact record most worth deleting.
+        _enforce_citation_source_safety([new_entry])
+        # `old_entry` is an UNCONSTRAINED JSON value on purpose (see the
+        # schema): the row most worth correcting is one a hand edit left
+        # malformed, and that includes a string, an array or a null under an
+        # entries{} key -- `_load_canon` type-checks `entries` itself, never
+        # its values. So read `basis` off it defensively; a non-mapping simply
+        # has no basis, which is the right answer here (any new established
+        # claim over it IS new).
+        old_is_dict = isinstance(old_entry, dict)
+        # WHAT THE CLAIM IS, and why keying this on `basis` alone was wrong.
+        # An established entry asserts "this canonical_target_form is the
+        # conventional one, and here is the citation". So the claim is the
+        # (canonical_target_form, source) PAIR, not the basis label. Scoping
+        # only on `basis` let a correction replace BOTH halves offline and
+        # keep the exemption purely because the old row also said
+        # "established" -- i.e. rewrite the claim without ever declaring that
+        # research was possible. Caught on PR review; reproduced before fixing.
+        claim_unchanged = (
+            old_is_dict
+            and old_entry.get("basis") == "established"
+            and _same_json_value(
+                new_entry.get("canonical_target_form"),
+                old_entry.get("canonical_target_form"),
+            )
+            and _same_json_value(new_entry.get("source"), old_entry.get("source"))
+        )
+        if new_entry.get("basis") == "established" and not claim_unchanged:
+            # SCOPED TO THE CLAIM, and the citation check above deliberately
+            # is not scoped at all -- the asymmetry is measured, not aesthetic.
+            #
+            # The backstop's own rule is "offline forbids basis:established for
+            # every NEW entry", and the claim_unchanged test above is what
+            # decides "new" here. It compares the (canonical_target_form,
+            # source) pair rather than the `basis` label, because that pair IS
+            # the assertion an established row makes: "this rendering is the
+            # conventional one, and here is the citation". Restating either half
+            # offline is a new claim about the world whether or not the label
+            # moved -- an earlier revision keyed on the label alone and let a
+            # correction replace BOTH halves offline while keeping the exemption.
+            #
+            # What the scoping still admits, and why it exists: correcting
+            # note/confidence/category on an established row restates no claim
+            # and stays legal offline. That is not a corner -- 488 of the 999
+            # frozen entries across the four live books are basis:"established",
+            # so an unscoped call would put half the corpus out of reach of the
+            # mode built to repair it. Do NOT widen this back to the label to
+            # make an offline canonical_target_form edit legal again; that edit
+            # is a restated claim, and its answer is --research-mode live.
+            #
+            # The citation check stays absolute because the same measurement
+            # runs the other way: 0 of 497 sourced entries in that corpus carry
+            # a `source` it refuses, so scoping it to changed-source-only would
+            # buy nothing real while adding a second condition to get right --
+            # and it would reopen the promotion case where a
+            # transliterated->established entry keeps an unsafe source that only
+            # now becomes a citation. Absolute is simpler AND stronger here.
+            try:
+                _enforce_offline_backstop([new_entry], research_mode)
+            except CanonValidationError as e:
+                # The helper's remediation advice is batch-shaped and names
+                # disposition:"review_queue", which this mode's enum does not
+                # admit -- following it is impossible. Re-raise naming the two
+                # moves that DO exist here.
+                raise CanonValidationError(
+                    f"{e} (this correction STATES an established claim -- a "
+                    f"canonical_target_form and its source -- that the frozen "
+                    f"row did not already carry, which is a new claim about "
+                    f"the world, so it needs --research-mode live; or correct "
+                    f"it to an offline-legal basis instead. "
+                    f"disposition:\"review_queue\" is a BATCH disposition and "
+                    f"is not available to --correct.)",
+                    offending=e.offending,
+                )
+        if is_split(senses, source_form):
+            split_entry = _matching_senses_entry(senses, source_form)
+            n = len(split_entry.get("senses", [])) if split_entry else 0
+            raise CanonValidationError(
+                f"{source_form!r}: is an adjudicated homonym split "
+                f"({n} senses in canon_senses.json) -- refusing to correct it "
+                f"into another single bare entry (recollapse). A form with two "
+                f"referents has no one canonical target form; use "
+                f"disposition:\"remove\" to clear the collapsed entry.",
+                offending=[_bounded_message(repr(source_form))],
+            )
+        entries[source_form] = new_entry
+    else:  # "remove" -- the schema's enum admits nothing else
+        del entries[source_form]
+
+    merged = dict(canon)
+    merged["entries"] = entries
+    # Append-only, and created on first use: a canon.json written before
+    # this mode existed has no corrections[] and must stay valid without one.
+    merged["corrections"] = list(canon.get("corrections", [])) + [doc]
+
+    on_disk, restamped = _stamp_write_verify(
+        canon_path, merged, registry, preserve_stamp=True
+    )
+
+    return {
+        "success": True,
+        "mode": "correct",
+        "canon_path": str(canon_path),
+        "research_mode": research_mode,
+        "source_form": source_form,
+        "disposition": disposition,
+        "entries_count": len(on_disk["entries"]),
+        "review_queue_count": len(on_disk["review_queue"]),
+        "corrections_count": len(on_disk["corrections"]),
+        # Every writing mode answers this the same way. Always false here --
+        # a correction carries the stamp forward verbatim, by design.
+        "generation_hashes_restamped": restamped,
     }
 
 
@@ -2442,6 +2846,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--correct",
+        metavar="PATH",
+        default=None,
+        help=(
+            "#495: apply ONE out-of-band, adjudicated correction to an "
+            "already-frozen canon.json entries{} record. PATH is a "
+            "canon-correction.schema.json document; it must state the OLD "
+            "value (refused, naming both, when it does not match disk) and "
+            "carry a reason, and it dispositions either 'correct' or "
+            "'remove'. Deliberately NOT a relaxed merge, and the one WRITING "
+            "mode that does not STAMP -- see this file's module docstring."
+        ),
+    )
+    parser.add_argument(
         "--check-batch",
         metavar="PATH",
         default=None,
@@ -2542,9 +2960,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "four that WRITE generation_hashes (--init, "
             "--restamp-derivation, --merge-batches, legacy --batch) -- "
             "unless --allow-durable-sibling is given instead; ignored by "
-            "every other mode, which resolves no sibling. 'Stamping' and "
-            "'writing' name the SAME four modes here; the surrounding "
-            "docs still use the older 'writing' spelling."
+            "every other mode, which resolves no sibling. STAMPING is now "
+            "the NARROWER set: #495's --correct also writes canon.json, "
+            "but carries its existing stamp forward verbatim and computes "
+            "no hash, so it resolves no sibling and takes neither flag. "
+            "Read any 'writing modes' phrasing elsewhere as these four "
+            "STAMPING ones."
         ),
     )
     parser.add_argument(
@@ -2701,6 +3122,15 @@ def main(argv=None) -> int:
             result = run_init(canon_path, args.research_mode, registry, args.plugin_root)
         elif args.restamp_derivation:
             result = run_restamp_derivation(canon_path, args.research_mode, registry, args.plugin_root)
+        elif args.correct is not None:
+            result = run_correct(
+                canon_path,
+                args.correct,
+                args.research_mode,
+                registry,
+                senses_path,
+                allow_absent_senses,
+            )
         elif args.check_batch is not None:
             result = run_check_batch(
                 canon_path,
