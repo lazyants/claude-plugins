@@ -1012,12 +1012,24 @@ remain**:
    status anymore.
 
    **#620 — `segment_dispatch_driver.py` writes this site TWICE, and only the
-   second write is evidence.** The pre-dispatch write above is unchanged and
-   still carries no `note`: it exists to make an interruption recoverable, and
-   because it happens *before* the job it can only ever prove intent — a
+   second write ORIGINATES evidence.** The pre-dispatch write above never
+   mints a `note` of its own: it exists to make an interruption recoverable,
+   and because it happens *before* the job it can only ever prove intent — a
    driver killed between the two, a failed launch, or a `codex_job.py` that
    adopted an already-valid canonical without launching would all leave it
-   standing over a draft no translate produced. So once `run_one_codex_job()`
+   standing over a draft no translate produced. It does, however, **re-state
+   verbatim** a promotion note it finds already on disk (an `in_progress`
+   fragment whose `note` carries the promotion prefix), because this write
+   replaces the fragment wholesale: writing it bare would erase the evidence
+   that had just authorized the re-translate, and a transient dispatch
+   failure would then leave the draft untouched with nothing naming it — the
+   next derivation halting terminally at `invalid_post_fix_draft` over a
+   draft no operator ever touched. Re-stating cannot manufacture evidence:
+   the string is unchanged and the canonical draft is not touched in between,
+   so the reader's equality test against the *current* draft's hash comes out
+   the same either way. Nothing else is carried — not the #432/#461 reopen
+   note, not a rejection note, not a promotion-shaped note on a terminal
+   status. So once `run_one_codex_job()`
    returns a genuine promotion (`ok` and not `adopted`, which is exactly
    `codex_job.py`'s own `promoted`, since its `finalize()` sets
    `ok = promoted or adopted`), the driver writes the fragment a second time

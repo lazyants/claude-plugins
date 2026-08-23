@@ -6006,7 +6006,13 @@ def test_process_segment_carries_forward_nothing_but_promotion_evidence(tmp_path
     pre-dispatch write as note-less as it was before #620. Without this the
     reopen note -- the one other note an in_progress fragment legitimately
     carries -- would be copied into a translate's own fragment, where it
-    describes nothing that happened."""
+    describes nothing that happened.
+
+    Stated honestly: the no-note case is a REGRESSION GUARD and passes with
+    or without the carry-forward -- it pins that the ordinary first translate
+    still writes the bare fragment. Only the other two distinguish the
+    narrowed recognition from "keep whatever was there", and both were
+    watched failing against exactly that widening."""
     root = phase2_project(tmp_path, n=1)
     driver_mod, ctx = _dna_setup(root)
     _dna_write_draft(root, driver_mod)
