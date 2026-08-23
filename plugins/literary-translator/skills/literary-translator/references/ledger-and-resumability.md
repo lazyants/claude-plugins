@@ -732,13 +732,15 @@ carve-out lets `assemble.py` and `final_audit.py` treat such a record like
 `.ever_converged.<seg>` sentinel that is not absent, and the unrelaxed
 draft-sha1 match — live in `references/assembly-and-output.md`), and
 `final_audit.py` prints `stale_previously_converged=` beside its completeness
-counts. That carve-out states what the two gates DO, not that the release
-changed nothing a translator was told: `PLUGIN_BUNDLE_MEMBERS` includes the two
-workflow templates, and their text is where the translate and review prompts
-are built. When a release's notes describe an instruction change, whether the
-converged units are re-reviewed against it is an operator decision, taken
-through `select_segments.py`'s claim gates (`--from-converged`) — the admission
-above has judged nothing about it. That pair — the completeness verdict and its carve-out count — is what
+counts. That carve-out states what the two gates DO. It is not a judgement that
+the release changed nothing a translator was told — `PLUGIN_BUNDLE_MEMBERS`
+includes the two workflow templates, and their text is where the translate and
+review prompts are built — and no gate makes that judgement: a claim under
+`--from-converged` is in fact REFUSED for a unit whose draft is unchanged and
+whose every moved field is machinery-only, on the ground that assembly needs
+nothing from it. So running converged units against a changed instruction is an
+operator decision to authorize a fresh pass, at the cost W5's own re-dispatch
+flag describes. That pair — the completeness verdict and its carve-out count — is what
 answers "is this book done"; the raw `converged` tally is not, and neither is a
 count of `.ever_converged` sentinels (those are backfilled history, see
 `SKILL.md`'s `backfill_ever_converged.py` step). `select_segments.py`'s
