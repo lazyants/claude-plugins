@@ -71,6 +71,11 @@ from typing import NoReturn
 # A plain sibling import leaves assets/scripts/__pycache__/*.pyc behind in the
 # PLUGIN tree this script runs from -- a real mutation of the very tree
 # `--verify` reports on, and one that makes "this mode writes nothing" false.
+# Deliberately UNCONDITIONAL rather than scoped to --verify: this is the one
+# behavioural difference the write mode inherits, it costs one bytecode
+# recompile on a script that runs once or twice per session, and a
+# mode-conditional import (module-level for one mode, function-level for the
+# other) is a far worse thing to maintain than the .pyc it would preserve.
 sys.dont_write_bytecode = True
 
 import cache_key
@@ -320,7 +325,7 @@ def read_marker(durable_root: Path, marker_rel, what: str) -> str:
         raw = path.read_bytes()
     except OSError as exc:
         fail(f"could not read {what} at {path}: {exc} -- has Step 0a run for this project?")
-    value = raw.decode("utf-8", errors="replace").strip()
+    value = raw.decode("utf-8").strip()
     if not value:
         fail(f"{path} is empty -- has Step 0a run for this project?")
     return value

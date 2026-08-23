@@ -800,11 +800,19 @@ def test_write_mode_output_is_unchanged(tmp_path):
     root = _make_scaffold_root(tmp_path)
     result = run_scaffold_setup(root)
     assert result.returncode == 0
+    assert result.stderr == ""
     assert result.stdout == (
         "scaffold_setup: wrote "
         f"plugin_bundle_hash={_independent_bundle_hash(root, PLUGIN_BUNDLE_MEMBERS)} "
         f"orchestration_bundle_hash={_independent_bundle_hash(root, EXPECTED_ORCHESTRATION_BUNDLE_MEMBERS)}\n"
     )
+    # stdout alone would not notice a change to what the mode actually
+    # PRODUCES. Both markers, exact bytes, trailing newline included.
+    for which, members in (
+        ("plugin", PLUGIN_BUNDLE_MEMBERS),
+        ("orchestration", EXPECTED_ORCHESTRATION_BUNDLE_MEMBERS),
+    ):
+        assert _read_marker(root, which) == _independent_bundle_hash(root, members) + "\n"
 
 
 def test_verify_detects_a_stale_marker(tmp_path):
@@ -866,7 +874,10 @@ def test_verify_reports_every_drifted_member(tmp_path):
     root = _make_scaffold_root(tmp_path)
     plugin_copy = make_plugin_copy(tmp_path)
     _rewrite_markers(root)
-    for name in ("claim_record.py", PLUGIN_ONLY_MEMBER):
+    # One member from each tuple plus the one registered in BOTH: an
+    # implementation that aggregated the plugin tuple but reported only the
+    # first orchestration offender would pass a plugin-only pair.
+    for name in ("claim_record.py", PLUGIN_ONLY_MEMBER, ORCHESTRATION_ONLY_MEMBER):
         live = plugin_copy / "assets" / "scripts" / name
         live.write_bytes(live.read_bytes() + b"\n# a later release\n")
     result = run_scaffold_verify(root, plugin_root=plugin_copy)
@@ -878,6 +889,7 @@ def test_verify_reports_every_drifted_member(tmp_path):
         if line.startswith("  - ")
     ]
     assert PLUGIN_ONLY_MEMBER in reported, result.stderr
+    assert ORCHESTRATION_ONLY_MEMBER in reported, result.stderr
     # Counted over the REPORTED-MEMBER column, never over the whole message:
     # every bullet also spells the member name inside its path, so a raw
     # substring count is 2 for a correctly deduped report and cannot
@@ -918,19 +930,59 @@ def test_verify_refuses_a_non_regular_member(tmp_path):
     assert "draft_sha1.py" in result.stderr
     assert "is missing" in result.stderr
 
+    # BOTH trees, not just the live one: a check that walked only the plugin
+    # side would pass every assertion above.
+    durable_symlinked = _make_scaffold_root(tmp_path / "durable_symlinked")
+    _rewrite_markers(durable_symlinked)
+    clean = make_plugin_copy(tmp_path, name="plugin_for_durable_case")
+    member = durable_symlinked / "scripts" / ORCHESTRATION_ONLY_MEMBER
+    target = tmp_path / "durable_elsewhere.py"
+    target.write_bytes(member.read_bytes())
+    member.unlink()
+    member.symlink_to(target)
+    result = run_scaffold_verify(durable_symlinked, plugin_root=clean)
+    assert result.returncode == 1, f"stdout={result.stdout} stderr={result.stderr}"
+    assert "reason=member_not_regular" in result.stderr
+    assert f"{ORCHESTRATION_ONLY_MEMBER}: durable copy is a symlink" in result.stderr
 
-def test_verify_writes_nothing(tmp_path):
-    """The contract: --verify NEVER repairs. Asserts the intended refusal
-    FIRST -- an unfixed tree exits 2 having touched nothing, so a bare
-    no-write assertion is green before the flag exists. Snapshots the plugin
-    tree too, which is here both the INVOKED and the CHECKED tree, so a
-    stray __pycache__/ has nowhere else to land: removing
-    sys.dont_write_bytecode must turn this RED."""
+
+def _drift_scenario(root, plugin_copy):
+    live = plugin_copy / "assets" / "scripts" / "draft_ready.py"
+    live.write_bytes(live.read_bytes() + b"\n# a later release\n")
+    return 1, "reason=live_plugin_drift"
+
+
+def _stale_scenario(root, plugin_copy):
+    member = root / "scripts" / ORCHESTRATION_ONLY_MEMBER
+    member.write_bytes(member.read_bytes() + b"\n# tampered\n")
+    live = plugin_copy / "assets" / "scripts" / ORCHESTRATION_ONLY_MEMBER
+    live.write_bytes(member.read_bytes())
+    return 1, "reason=marker_stale"
+
+
+def _success_scenario(root, plugin_copy):
+    return 0, "scaffold_setup: verified"
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [_success_scenario, _stale_scenario, _drift_scenario],
+    ids=["success", "marker_stale", "live_plugin_drift"],
+)
+def test_verify_writes_nothing(tmp_path, scenario):
+    """The contract: --verify NEVER repairs, on ANY path -- including the one
+    that PASSES, where "it wrote a marker" would be invisible because the
+    value it wrote is the value already there. Asserts the intended exit code
+    and message FIRST: an unfixed tree exits 2 having touched nothing, so a
+    bare no-write assertion is green before the flag exists.
+
+    Snapshots the plugin tree too, which is here both the INVOKED and the
+    CHECKED tree, so a stray __pycache__/ has nowhere else to land --
+    removing sys.dont_write_bytecode turns the passing case RED."""
     root = _make_scaffold_root(tmp_path)
     plugin_copy = make_plugin_copy(tmp_path)
     _rewrite_markers(root)
-    live = plugin_copy / "assets" / "scripts" / "draft_ready.py"
-    live.write_bytes(live.read_bytes() + b"\n# a later release\n")
+    expected_code, expected_message = scenario(root, plugin_copy)
 
     before_root = tree_snapshot(root)
     before_plugin = tree_snapshot(plugin_copy)
@@ -939,8 +991,8 @@ def test_verify_writes_nothing(tmp_path):
         plugin_root=plugin_copy,
         script=plugin_copy / "assets" / "scripts" / "scaffold_setup.py",
     )
-    assert result.returncode == 1, f"stdout={result.stdout} stderr={result.stderr}"
-    assert "reason=live_plugin_drift" in result.stderr
+    assert result.returncode == expected_code, f"stdout={result.stdout} stderr={result.stderr}"
+    assert expected_message in (result.stdout + result.stderr)
     assert tree_snapshot(root) == before_root, "durable_root was mutated by --verify"
     assert tree_snapshot(plugin_copy) == before_plugin, "the plugin tree was mutated by --verify"
 
@@ -995,7 +1047,13 @@ def test_verify_refuses_a_bad_plugin_root(tmp_path):
     not_a_plugin.mkdir()
     shapeless = run_scaffold_verify(root, plugin_root=not_a_plugin)
     assert shapeless.returncode == 1
-    assert "assets/scripts/" in shapeless.stderr
+    # The DEDICATED refusal, by its own phrase -- and the absence of the
+    # member-shape one. Deleting the --plugin-root shape check entirely would
+    # still exit 1 here, because every member would then be "missing" under a
+    # path that itself contains "assets/scripts/"; asserting only that
+    # substring cannot tell the two apart.
+    assert "does not resolve to a directory containing assets/scripts/" in shapeless.stderr
+    assert "reason=member_not_regular" not in shapeless.stderr
 
     without_verify = subprocess.run(
         [

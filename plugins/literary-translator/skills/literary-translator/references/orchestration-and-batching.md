@@ -169,9 +169,17 @@ bundle member — is what closes that gap, comparing the durable copies against
 the live plugin tree on demand. Residual: that verify runs once per
 session, so an update landing mid-session, after it runs, stays masked until
 the next session's own verify. Prose enforcement is a weaker guarantee than a
-code gate; it was chosen because every script that runs at the point the
-check would need to fire is itself a bundle member, and editing it would move
-the very hash the check is meant to protect (#482).
+code gate, and it was chosen for a maintenance reason rather than an
+impossibility one: the check has to fire ahead of MANY entry points -- every
+script that redirects a bundle member's resolution with `--plugin-root` --
+and most of those are themselves bundle members, so wiring the call into them
+would move the very hash the check protects and re-stale every converged
+segment (#482). Not all of them: `final_audit.py` is excluded from both
+bundles and could host the call at no hash cost. But a per-entry-point call
+is an enumeration that grows with every new `--plugin-root` consumer, and
+there is no single host all of them pass through. One rule stated over the
+class is the smaller thing to maintain and the harder thing to leave
+incomplete.
 
 Bundle membership stays split three ways. `plugin_bundle_hash` gates cache
 reuse and covers every entry of `cache_key.py`'s own `PLUGIN_BUNDLE_MEMBERS`
