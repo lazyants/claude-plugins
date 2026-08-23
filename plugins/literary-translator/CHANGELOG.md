@@ -1,5 +1,93 @@
 # Changelog
 
+## 1.69.0 — 2026-08-23
+
+**A batch fold.** Every merge below landed on `main` on its own reviewed PR without a version bump, under this file's standing convention that a release commit folds the batch in later rather than cutting a version per issue. Nothing here is new work: the code has been on `main` since each PR merged, and this entry is the version label that finally makes it deliverable to an already-installed copy. The convention exists because a per-issue cut prices every one-line fix at a four-surface sync; its cost, paid here, is that a single entry has to account for a large batch, so the items are enumerated by issue rather than narrated one by one, and the release-level cost paragraph below is written once for all of them.
+
+### Gates, refusals and false-GREEN closures
+
+- **#383** — a machine-truncated `source_form` is refused at the batch gate and not only in the prompt, the glossary adjudicator refuses a truncated candidate name, an unmigrated durable glossary prompt halts instead of only new roots being protected, and every batch path routes through one validator so the legacy `--batch` mode cannot miss a gate.
+- **#116** — the W3 gate refuses `has_elision: false` beside a live `ELISION_RE`.
+- **#244** — a surface-variant duplicate `source_form` stops being maskable.
+- **#284** — the W3 smoke test reports which `name_inventory` entries never match.
+- **#268** — an unparseable `manifest.json` is reported as the frozen-input tamper it is, rather than as a crash.
+- **#277** — an operator-authored conservation artifact exits 2, not a traceback at exit 1.
+- **#398** — a translate whose content the gate rejected is no longer auto-redispatched.
+- **#665** — a content-rejected DEFERRED translate candidate stops buying a fresh job.
+- **#483** — a promote re-checks its authorization instead of assuming it.
+- **#495** — a frozen canon entry can be corrected, on the record.
+- **`--correct PATH`** — the recovery route #495 registers was written `--correct-entry` in all three places that point an operator at it (`SKILL.md`, the canon-and-glossary reference, and the runtime refusal message read at the moment the merge halts); following any of them yielded `unrecognized arguments`.
+- **#653** — a reviewed candidate can be dismissed without freezing an entry.
+- **#407** — a fused function word over a known bare form is queued, never resolved.
+- **#399** — a refused adoption of a pre-existing canonical records the gate's own output.
+
+### Ledger, resume and convergence bookkeeping
+
+- **#442** — a lost `.ever_converged` marker no longer leaves converged work eligible; the issue stays open for the second witness it does not close.
+- **#443** — the ever-converged sentinel records who published it.
+- **#536** — a `--from-cap` claim over an already-converged unit leaves a durable record.
+- **#622** — the ordinary `already_converged` path binds the verdict it converged on.
+- **#621** — an unresolvable `segments/` no longer reads as "nothing ever converged".
+- **#507** — R8 authorizes two fix executors, and now says they cannot hold one segment at once.
+- **#453** — `_claim_note()`'s verdicts stop respelling the facts they open with.
+- **#482** — a converged count is bundle-relative, and the prose says so.
+
+### W5 dispatch and the out-of-band driver
+
+- **#516** — `segment_dispatch_driver.py` becomes W5's default launcher.
+- **#551** — the driver relays the selector's stderr disclosures instead of swallowing them.
+- **#620** — a translate-dispatch marker must name the draft it attests.
+- **#400** — a dispatcher that ANSWERS with a failure is the same shared observation as one that died: every detail source goes through one normalizer, a relayed error that is only whitespace is not a detail, and a failure record says what the call returned while the batch summary says what the failures share.
+- **#109** — the codex dispatch names its own routing control.
+- **#287** — the running config profile, not a hardcoded assumption, decides the codex-companion binding.
+- **#360** — the diagnostics `skeptic_ready.py` relays into an agent prompt are bounded.
+- **#666** — the skeptic pass resolves its template where Step 0a writes it.
+
+### Canon, glossary and citation research
+
+- **#505** — the writer refuses to freeze an unattested established citation.
+- **`glossary_preflight.py`** — an unusable durable script now exits 2 with one actionable line instead of an exit-1 traceback. `Path.resolve()` raises `RuntimeError` on a self-referential symlink on Python 3.10, 3.11 and 3.12 and resolves silently on 3.13 and 3.14; the durable side is read first, and both resolves are guarded.
+- **#361** — a citation-evidence directory gets an aggregate byte budget.
+- **#406** — the shipped glossary pass never asks for canon `category`, and the docs now say that.
+- **#199** — a pinned common-noun term of art is drift-checked at W7.
+- **#697** — the gated candidate is enumerable, and the disclosure now says so. The issue stays open.
+
+### Structure, extraction and output
+
+- **#233** — W2 discloses the heading outline it resolved instead of guessing a level in silence.
+- **#437** — what happens to a custom extractor's own `⟦…⟧` token is documented.
+- **#235** — the inert `output.index` knob is retired.
+- **#413** — one authority for the workflow templates' substitution tokens.
+- **#578** — the W1 gate reports the `STYLE_CONTRACT` span size.
+- **#405** — the audit's item list names what each key stands for.
+
+### Cache-key and bundle plumbing
+
+- **#446** — `select_segments.py` is registered in `PLUGIN_BUNDLE_MEMBERS`.
+- **#369** — agent-read stdout no longer carries a raw U+2028; one shared `dumps_line()` in a new `json_stdout.py` closes the class, and that file joins both bundle tuples.
+- **#370** — the glossary and skeptic templates guard their two spliced profile scalars.
+- **#469** — the last three `validate_seg` carriers are enrolled in the drift census.
+- **#591** — the bundle comment points at the tuple instead of restating its size.
+- **#306** — `ledger_update.test.py`'s verbatim JS extraction is routed through the code projection.
+
+### Test-suite and documentation accuracy
+
+- **#416** — the ladder-table parity test can tell its two identical rows apart.
+- **#430** — three deadline-bound tests get headroom instead of a race.
+- **#467** — the EACCES sentinel test stops pinning one interpreter; the boundary was measured across five real interpreters.
+- **#679** — the `exists()` OSError-swallowing boundary is dated 3.14, not 3.13.
+- **#701** — the sentinel contract names its real enforcing test rather than a neighbour.
+- **PR #705** — #442's residual no longer points at #443, which shipped without closing it.
+- **PR #718** — `load_json`'s deep-nest example was measured on an older interpreter and is re-measured here.
+
+### What it costs
+
+This release moves `plugin_bundle_hash`, and it moves it more than any single-issue cut has. `PLUGIN_BUNDLE_MEMBERS` gained two entries and is now 19: `select_segments.py` (#446) and `json_stdout.py` (#369). `ORCHESTRATION_BUNDLE_MEMBERS` gained `json_stdout.py` too and is now 6. Beyond membership, fifteen of the nineteen plugin-bundle members carry a diff in this range — the four untouched are `draft_sha1.py`, `review_artifact_check.py`, `review_ready.py` and `canon_senses.py` — so the hash would move even if the tuples had not grown. Six schemas changed as well (`canon-adjudication-audit-summary`, `canon-correction`, `canon-entry`, `canon-file`, `final-audit-summary`, `profile`), which moves `schema_hash` and, because `resume_setup.py` digests the schemas directory, moves resume identity unconditionally: an interrupted run cannot resume across this upgrade.
+
+`cache_key.py` reads the Step-0a marker and never re-hashes the copies, so a project feels none of this until its **next Step 0a refresh**, where every converged segment reclassifies `stale`. Nothing re-translates on its own on a project whose `.ever_converged` sentinels exist: `select_segments.py` refuses to dispatch a previously-converged segment without `--allow-retranslate-converged`, and `final_audit.py`'s `SAFE_STALE_CARVEOUT_FIELDS` — which carves `plugin_bundle_hash`, `schema_hash` and `derivation_bundle_hash` out of the completeness gate — covers both of the fields this release moves. That refusal is conditional on the sentinel population being non-empty, so an older project with none needs the documented `backfill_ever_converged.py` pass first; without it, the first post-upgrade dispatch is ungated.
+
+What the carve-out rests on is that a machinery-only field cannot by itself change a segment's translated prose. This batch does change prompts, templates and gates, so a segment that has NOT yet converged will be translated under the new ones — that is the point of the release. An already-converged segment's prose is finished, and nothing here rewrites it.
+
 ## 1.68.0 — 2026-08-23
 
 **The W5 review-fix turn was never told it had one write target, and nothing afterwards looked at what it changed.** `runRound()` dispatches it through `callFix()` as a plain Claude `agent()` with no `agentType`, so none of #409's `codex_job.py` sandboxing reaches it, and it consumes `issue`/`suggest` prose that `REVIEW_SCHEMA` constrains only in shape. Since #532 it adjudicates that text rather than executing it, but it is still a write-capable agent, and the only thing `runRound` ever read back was one sentinel. Two halves ship. The prompt now names its single write target, `segments/<seg>.draft.json`, and refuses on that ground alone any finding whose remedy needs another file — editing a gate script so that it accepts a draft is never a fix. And a new plugin-path-only `fix_scope_audit.py` checks, after every dispatched fix call, that every file Step 0a copied into the durable root still equals the plugin bytes it came from. Closes #607.
