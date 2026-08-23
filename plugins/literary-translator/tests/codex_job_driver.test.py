@@ -2086,13 +2086,21 @@ def test_internal_launch_always_write_and_effort_high(tmp_path):
 
 
 def test_hung_status_bounded_by_deadline(tmp_path):
-    """A status call that sleeps past the per-call cap does not run past deadline+150.
+    """A status call that sleeps past the per-call cap is KILLED at the poll deadline, and
+    the job does not run past deadline+150.
 
-    #430: the deadline is 8s and the wall-clock ceiling 120s, both deliberately loose --
-    the 30s sleep blows any of them, so what is asserted is unchanged, while a tight bound
-    made this fail under ordinary concurrent load and read as a deadline-enforcement bug."""
+    #430: what proves the clip fired is the fake node's OWN completion marker, not the wall
+    clock. FAKE_NODE's status branch bumps `<CJ_STATE>.ctr` only AFTER its sleep returns, and
+    spawn_driver unlinks that file before the run -- so the counter exists if and only if a
+    status call was allowed to sleep to completion. A wall-clock ceiling cannot carry this:
+    it has to sit far enough above the real runtime to survive a loaded machine, and anything
+    that loose also admits a status call clipped at the WRONG bound (a cap of 31s against a
+    30s sleep runs 30s and lands well inside any ceiling generous enough to be stable). The
+    two elapsed assertions below stay, deliberately loose, for the abs_ceiling property only."""
     root, companion, node = build_root(tmp_path)
     seg, tok = "c001", "RUN:c001"
+    state_file = root / "state.D1.json"
+    completed_status_calls = Path(str(state_file) + ".ctr")
     t0 = time.monotonic()
     proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
                         base_state(seg, tok, "translate", attempt_mode="valid",
@@ -2101,6 +2109,10 @@ def test_hung_status_bounded_by_deadline(tmp_path):
     elapsed = time.monotonic() - t0
     line = parse_line(proc)
     assert line["timed_out"] is True
+    assert not completed_status_calls.exists(), (
+        "the hung status call ran to completion -- the driver did not clip the subprocess to "
+        "its poll deadline (poll_timeout()), so nothing here bounds a status call that hangs"
+    )
     assert elapsed < 8 + codex_job.CODEX_FINALIZE_BUDGET_SEC   # never past abs_ceiling
     assert elapsed < 120                                       # and nowhere near the 30s*N sleep sum
 
