@@ -181,6 +181,60 @@ def run_draft_ready(root, seg, *extra_args, timeout=30):
     )
 
 
+# The FOREIGN profile every four-way fixture below gives its foreign record.
+# It must differ from the profile this run's own record carries ("from-cap",
+# either written directly or minted by the real selector's --from-cap), and
+# every one of those tests asserts that it does: until #453 all four fixtures
+# wrote "from-cap" on BOTH records, so no assertion in this file could tell
+# whose facts _claim_note() was printing, and a note that reported the foreign
+# record's profile and claim time as this run's own passed the whole suite.
+FOREIGN_CLAIM_PROFILE = "from-stalled"
+
+
+def assert_records_are_not_swapped(out, *, seg, run_id, profile, claimed_at,
+                                    foreign_run_id, foreign_profile,
+                                    foreign_claimed_at):
+    """Pins each of the two claim records' facts to the RECORD THEY BELONG TO,
+    on a FOREIGN/CLAIM_PRESENT verdict.
+
+    Presence assertions cannot do this. `_claim_note()` prints both records'
+    profile and claimed_at, so a swap -- this run's slot filled from the
+    foreign payload, or the reverse -- leaves every individual value still
+    somewhere in the output and satisfies any "is this string present" check.
+    What distinguishes the two is ADJACENCY: each run id sits immediately
+    before its own record's `(profile=..., claimed_at=...)`. So each side is
+    asserted as ONE CONTIGUOUS substring spanning the run id through that
+    closing paren, and nothing between them is left unpinned.
+
+    The fixture self-check comes first on purpose: two records carrying the
+    same profile make the pin vacuous again without failing anything, which is
+    exactly how this surface came to be unprotected (#453)."""
+    assert profile != foreign_profile, (
+        f"fixture is vacuous: both claim records carry profile {profile!r}, so "
+        f"a swap of the two records' facts cannot be detected by any assertion "
+        f"below -- give the foreign record FOREIGN_CLAIM_PROFILE"
+    )
+    this_facts = (
+        f"a claim record for run {run_id!r} IS present for this segment "
+        f"(profile={profile!r}, claimed_at={claimed_at!r})"
+    )
+    foreign_facts = (
+        f"a DIFFERENT run, {foreign_run_id!r}, which itself holds a live "
+        f"claim record for {seg!r} (profile={foreign_profile!r}, "
+        f"claimed_at={foreign_claimed_at!r})"
+    )
+    assert this_facts in out, (
+        f"this run's own claim record must be reported with ITS OWN profile "
+        f"and claim time, adjacent to its own run id -- expected "
+        f"{this_facts!r} in: {out!r}"
+    )
+    assert foreign_facts in out, (
+        f"the foreign run's claim record must be reported with ITS OWN profile "
+        f"and claim time, adjacent to its own run id -- expected "
+        f"{foreign_facts!r} in: {out!r}"
+    )
+
+
 def _claim_record_module():
     """The REAL, shipped claim_record.py, imported in-process -- never a
     hand-typed reimplementation of its record shape or its exclusivity
@@ -957,7 +1011,7 @@ def test_draft_ready_reports_a_FOREIGN_claim_as_superseded_not_lost(tmp_path):
         f"fixture setup: A's own record unreadable: {a_state} {a_detail}")
     a_at = datetime.strptime(a_payload["claimed_at"], "%Y-%m-%dT%H:%M:%SZ")
     b_at = (a_at + timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    write_real_claim(root, run_b, seg, profile="from-cap",
+    write_real_claim(root, run_b, seg, profile=FOREIGN_CLAIM_PROFILE,
                       source_run_id=CLAIM_RUN_ID, previous_dispatch_token=token_a,
                       claimed_at=b_at)
 
@@ -995,6 +1049,14 @@ def test_draft_ready_reports_a_FOREIGN_claim_as_superseded_not_lost(tmp_path):
         f"that hedge belongs to the UNDETERMINED branch, where the ages "
         f"cannot be compared -- not here, where they can: {out!r}"
     )
+    # A's profile and claimed_at are read off A's OWN record rather than
+    # restated here: A's claim is minted by the real selector, so both are
+    # whatever it actually wrote.
+    assert_records_are_not_swapped(
+        out, seg=seg, run_id=CLAIM_RUN_ID, profile=a_payload["profile"],
+        claimed_at=a_payload["claimed_at"], foreign_run_id=run_b,
+        foreign_profile=FOREIGN_CLAIM_PROFILE, foreign_claimed_at=b_at,
+    )
 
 
 def test_draft_ready_reports_this_runs_later_claim_as_the_remedy_not_superseded(tmp_path):
@@ -1027,10 +1089,12 @@ def test_draft_ready_reports_this_runs_later_claim_as_the_remedy_not_superseded(
     foreign_run_id = "20260805T000000Z"
     # This run's own claim is the LATER of the two -- the selector's own
     # guard admits a retry on exactly this fact.
+    this_claimed_at = "2026-08-08T10:00:00Z"
+    foreign_claimed_at = "2026-08-08T09:00:00Z"
     _, payload = write_real_claim(root, run_id, seg, profile="from-cap",
-                                   claimed_at="2026-08-08T10:00:00Z")
-    write_real_claim(root, foreign_run_id, seg, profile="from-cap",
-                      claimed_at="2026-08-08T09:00:00Z")
+                                   claimed_at=this_claimed_at)
+    write_real_claim(root, foreign_run_id, seg, profile=FOREIGN_CLAIM_PROFILE,
+                      claimed_at=foreign_claimed_at)
     draft = clean_draft(seg, dispatch_token=f"{foreign_run_id}:{seg}")
     write_segment(root, seg, clean_segpack(), draft)
 
@@ -1055,7 +1119,16 @@ def test_draft_ready_reports_this_runs_later_claim_as_the_remedy_not_superseded(
         f"the refusal should name the crash-recovery shape this run is in: {out!r}"
     )
     assert "remedy" in out, f"the refusal must point at the retry as the remedy: {out!r}"
-    assert payload["profile"] in out, "the refusal should still name this run's own claim's profile"
+    # Was `assert payload["profile"] in out`, which proved nothing here: the
+    # foreign record carried the same profile, so that string was in the output
+    # whichever record it came from. Both records' facts are now pinned to
+    # their own run id.
+    assert_records_are_not_swapped(
+        out, seg=seg, run_id=run_id, profile=payload["profile"],
+        claimed_at=this_claimed_at, foreign_run_id=foreign_run_id,
+        foreign_profile=FOREIGN_CLAIM_PROFILE,
+        foreign_claimed_at=foreign_claimed_at,
+    )
 
 
 def test_draft_ready_reports_a_tie_in_claim_age_as_permanent_not_a_retry(tmp_path):
@@ -1083,7 +1156,11 @@ def test_draft_ready_reports_a_tie_in_claim_age_as_permanent_not_a_retry(tmp_pat
     foreign_run_id = "20260813T000000Z"
     tied_claimed_at = "2026-08-08T09:00:00Z"
     write_real_claim(root, run_id, seg, profile="from-cap", claimed_at=tied_claimed_at)
-    write_real_claim(root, foreign_run_id, seg, profile="from-cap", claimed_at=tied_claimed_at)
+    # The tie fixture is the one where claimed_at CANNOT discriminate the two
+    # records -- it is identical by construction -- so the profile is the only
+    # thing that can, and it has to differ.
+    write_real_claim(root, foreign_run_id, seg, profile=FOREIGN_CLAIM_PROFILE,
+                      claimed_at=tied_claimed_at)
     draft = clean_draft(seg, dispatch_token=f"{foreign_run_id}:{seg}")
     write_segment(root, seg, clean_segpack(), draft)
 
@@ -1101,6 +1178,12 @@ def test_draft_ready_reports_a_tie_in_claim_age_as_permanent_not_a_retry(tmp_pat
     assert "different --run-id" in out or "manual" in out, (
         f"the refusal should point at an actual way out of a tie (a "
         f"different run identity or a manual decision), not silence: {out!r}"
+    )
+    assert_records_are_not_swapped(
+        out, seg=seg, run_id=run_id, profile="from-cap",
+        claimed_at=tied_claimed_at, foreign_run_id=foreign_run_id,
+        foreign_profile=FOREIGN_CLAIM_PROFILE,
+        foreign_claimed_at=tied_claimed_at,
     )
 
 
@@ -1135,10 +1218,12 @@ def test_draft_ready_reports_an_unparseable_claim_age_as_undetermined(tmp_path):
     seg = "seg01"
     expect_token = f"{run_id}:{seg}"
     foreign_run_id = "20260813T000000Z"
+    this_claimed_at = "not-a-real-timestamp"
+    foreign_claimed_at = "2026-08-13T00:00:00Z"
     write_real_claim(root, run_id, seg, profile="from-cap",
-                      claimed_at="not-a-real-timestamp")
-    write_real_claim(root, foreign_run_id, seg, profile="from-cap",
-                      claimed_at="2026-08-13T00:00:00Z")
+                      claimed_at=this_claimed_at)
+    write_real_claim(root, foreign_run_id, seg, profile=FOREIGN_CLAIM_PROFILE,
+                      claimed_at=foreign_claimed_at)
     draft = clean_draft(seg, dispatch_token=f"{foreign_run_id}:{seg}")
     write_segment(root, seg, clean_segpack(), draft)
 
@@ -1158,6 +1243,12 @@ def test_draft_ready_reports_an_unparseable_claim_age_as_undetermined(tmp_path):
     assert "NOT the fix" not in out, (
         f"neither definite outcome may be asserted when the comparison "
         f"cannot run at all: {out!r}"
+    )
+    assert_records_are_not_swapped(
+        out, seg=seg, run_id=run_id, profile="from-cap",
+        claimed_at=this_claimed_at, foreign_run_id=foreign_run_id,
+        foreign_profile=FOREIGN_CLAIM_PROFILE,
+        foreign_claimed_at=foreign_claimed_at,
     )
 
 
