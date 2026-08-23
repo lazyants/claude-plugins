@@ -1688,8 +1688,11 @@ def test_the_codex_job_lease_is_still_held_after_the_claim_record_is_written(tmp
 
     codex_job.py flocks exactly `segments/.codex_job.<seg>.lock` immediately
     before launch() and releases it after finalize(), and its canonical
-    promotion -- os.replace(attempt, canonical) -- sits INSIDE that window,
-    re-checking neither the draft's dispatch_token nor any claim record. So a
+    promotion -- os.replace(attempt, canonical) -- sits INSIDE that window.
+    Since #483 it re-checks whether the canonical's dispatch_token moved since
+    the job's own first observation, refusing if it did, but it still consults
+    no claim record and is still not atomic -- which is exactly why this lease
+    is still load-bearing here. So a
     lease dropped after the claim record lands but before the token re-stamp
     would let an already-launched job overwrite the freshly claimed draft and
     put its old token back: a silent draft overwrite, not a lost turn.

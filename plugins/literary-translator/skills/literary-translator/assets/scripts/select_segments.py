@@ -3441,9 +3441,17 @@ def rewrite_draft_dispatch_token(
     Workflow fix turn, which also holds nothing; an id admitted under
     --from-converged or --from-cap, since the per-segment lease is taken for
     the stalled ids only; a second concurrent claim invocation, where
-    neither carries --from-stalled and so neither excludes the other; and a
+    neither carries --from-stalled and so neither excludes the other; a
     second machine reaching this durable root through a sync-replicated
-    folder, since flock cannot see across kernels. (An unenforcing
+    folder, since flock cannot see across kernels; and a promoting codex job
+    that has ALREADY PASSED its own late re-check when this write lands.
+    That last one is what #483 does and does not buy, and the direction
+    matters: a job whose token baseline predates this write is now CAUGHT --
+    it re-reads the token before its own promote, sees it moved, and refuses.
+    What it cannot see is this write arriving after that final read, in its
+    own check-then-replace window; nor does it consult a claim record, so the
+    interval between our record write and our re-stamp stays invisible to it
+    too. (An unenforcing
     filesystem is NOT on that list: acquire_and_hold_lease() re-attempts
     every lease it holds from an independent descriptor and refuses if that
     attempt SUCCEEDS, so that case fails closed.)
@@ -4063,8 +4071,11 @@ def acquire_from_stalled_leases(stalled_segs: list, dirs: dict, args) -> "dict[s
     by closing that descriptor in run()'s own finally, after finalize(). run() is
     the only way that job is ever driven (main() ends in job.run()), so no
     promotion route exists outside that window. Its canonical promotion --
-    os.replace(self.attempt, self.canonical) -- sits INSIDE it re-checking neither
-    the draft's dispatch_token nor any claim record. Cited by SYMBOL and not by
+    os.replace(self.attempt, self.canonical) -- sits INSIDE it. Since #483,
+    it re-checks whether the canonical's dispatch_token moved since the job's own
+    first observation, refusing the promotion if it did; it still consults no claim
+    record, and it is still not atomic -- the window between that final check and
+    the os.replace stays open. Cited by SYMBOL and not by
     line: this docstring shipped four numeric citations and every one of them had
     drifted. Holding it across our claim write and token re-stamp is what stops an
     already-launched job from overwriting a freshly claimed draft and restoring
@@ -4145,8 +4156,10 @@ def acquire_from_stalled_leases(stalled_segs: list, dirs: dict, args) -> "dict[s
                 f"{seg!r} requested under --from-stalled, but this invocation could not take "
                 f"that segment's own codex-job lease at {seg_lock}: {problem}. codex_job.py "
                 f"holds exactly this lock across its canonical promotion "
-                f"(os.replace(attempt, canonical), in its run()), which re-checks "
-                f"neither the draft's dispatch_token nor any claim record -- so claiming "
+                f"(os.replace(attempt, canonical), in its run()), which now re-checks "
+                f"whether the canonical's dispatch_token moved since its own first "
+                f"observation and refuses the promotion if it did -- but it still "
+                f"consults no claim record, and it is still not atomic, so claiming "
                 f"while it is held would let an already-launched job overwrite the draft "
                 f"this claim just re-stamped and put its old token back. "
                 f"{FROM_STALLED_DISCLOSURE}"
