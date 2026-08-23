@@ -1572,7 +1572,8 @@ the per-site cost of a false reject, and why a repair after the merge is not
 available at all: `references/canon-and-glossary.md`, "Pre-merge citation
 review".
 
-**Canon human-adjudication audit, categories 1-4 (opt-in rollout gate)** —
+**Canon human-adjudication audit, categories 1-4 (opt-in rollout gate, with
+one always-enforced carve-out)** —
 `scripts/canon_adjudication_audit.py` enumerates every canon
 name-adjudication a human/codex must sign off (duplicate source forms,
 existing merges, all candidate missed-merge pairs, and un-drained
@@ -1588,12 +1589,20 @@ now holds only genuinely disputed/unresolvable names. Run before Deliver (W7/W8)
 exit `0` = every required item has a matching `confirmed_ok` (or a valid
 risk-acceptance / the queue is drained), `1` = blocking findings, `2` =
 fatal. Add `--advisory` to report without blocking (preserves the plugin's
-WARN-first name policy). **Status: categories 1-4 remain an OPT-IN gate** a
-project enables for this Deliver-time invocation; the script defaults to
-hard-blocking (exit 1) so a project that wires it in gets the full gate.
+WARN-first name policy). **Status: categories 2-4 — and category 1's
+identical-surface shape — remain an OPT-IN gate** a project enables for this
+Deliver-time invocation; the script defaults to hard-blocking (exit 1) so a
+project that wires it in gets the full gate.
 Category 5 (the homonym-split evidence audit) is a SEPARATE, MANDATORY
 W-step — see immediately below — never opt-in, regardless of whether a
-project enables this Deliver-time categories-1-4 gate. The accuracy calls
+project enables this Deliver-time categories-1-4 gate. **A category-1
+SURFACE-VARIANT finding is likewise never opt-in (#244):** `--advisory`
+cannot mask it, so the mandatory pre-W3a invocation below halts on one even
+on a project that never enabled this gate. That is the only pipeline-reachable
+category-1 shape — `canon_validate.py` writes `entries[source_form] = entry`,
+so anything the pipeline produces has distinct raw surfaces — and the
+identical-surface shape it leaves advisory is reachable only from a
+hand-authored or legacy canon. The accuracy calls
 it audits are authored by a human
 reviewer or a schema-validated codex workflow — the script never decides
 identity itself. Enable ONLY when a per-person index, per-person bios, or
@@ -1621,17 +1630,31 @@ reconstructed from `source.language.code`, same discipline as the
 `bootstrap_names.py` invocation above); `--senses-path` is left at its
 default, `${durable_root}/canon_senses.json`. **Always pass `--advisory`
 here:** per this script's narrowed `--advisory` contract, `--advisory`
-downgrades ONLY a categories-1-4 finding (those stay governed solely by
-whether a project has separately opted into the Deliver-time gate above) —
-it NEVER masks `homonym_split`'s missing/stale verdict, `collapsed_split`,
+downgrades ONLY a categories-2-4 finding, plus a category-1
+IDENTICAL-SURFACE one (those stay governed solely by whether a project has
+separately opted into the Deliver-time gate above) —
+it NEVER masks a category-1 **surface-variant** finding (#244),
+`homonym_split`'s missing/stale verdict, `collapsed_split`,
 `evidence_unverified`, or `canon_absent_with_senses`. So this W-step still
 exits `1` — HALTING here, before W3a, nothing dispatches past it — whenever
 `canon_senses.json` is non-empty and carries any unverified, stale, or
 collapsed split, even on a project that has never opted into the
-categories-1-4 gate. On a project whose `canon_senses.json` is absent or
+categories-1-4 gate; and likewise whenever `canon.json` holds two
+proper-name entries whose `source_form` values differ only by case,
+whitespace, NFC-vs-NFD or `casefold` (`'Nachman'` vs `'nachman '`) — the one
+category-1 shape the pipeline itself can write. Clear that halt by
+correcting `canon.json` so the two records become one surface (no
+`canon_adjudications.json` is needed for this route — an absent file reads
+as empty), or, if the two spellings really are two different people, by
+recording a `confirmed_ok` verdict for the item. The escalation makes the
+question mandatory; it does not assert the answer. On a project whose
+`canon_senses.json` is absent or
 schema-valid-empty, this call is a no-op pass-through (`gate_passed: true`)
-— run it unconditionally rather than special-casing whether the sidecar
-exists. It says so explicitly rather than reporting a bare zero: the
+**for category 5** — run it unconditionally rather than special-casing
+whether the sidecar exists. It is NOT a whole-gate no-op: category 1 is
+computed from `canon.json` regardless of the sidecar, so a surface-variant
+duplicate still exits `1` here on a project that has no adjudicated splits
+at all. It says so explicitly rather than reporting a bare zero: the
 report's `homonym_split` row reads `NOT ENUMERATED` and the summary carries
 `senses_enumerated: false`, so a vacuous zero is never mistaken for an
 enumerated-clean one.

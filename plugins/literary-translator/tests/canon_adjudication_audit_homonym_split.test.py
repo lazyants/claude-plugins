@@ -626,18 +626,30 @@ def test_canon_absent_with_empty_senses_is_still_the_ordinary_green(tmp_path):
 
 
 # ===========================================================================
-# 4. --advisory narrowed contract: masks categories 1-4 only
+# 4. --advisory narrowed contract: masks categories 2-4, plus category 1's
+#    IDENTICAL-SURFACE shape -- never category 5
 # ===========================================================================
 
 
-def test_advisory_masks_categories_1_to_4_but_not_a_concurrent_split_blocker(tmp_path):
+def test_advisory_masks_maskable_categories_but_not_a_concurrent_split_blocker(tmp_path):
     root = make_durable_root(tmp_path)
     block_text, senses = two_jean_senses()
     write_manifest(root, {"b1": {"seg": None, "plain_text": block_text}})
     write_senses(root, {"Jean": {"senses": senses}})
     # A category-1 duplicate_source_form (two Marie entries) PLUS the homonym_split above,
     # both missing a verdict.
-    write_canon(root, [entry("Marie", "Marie-A"), entry("Marie", "Marie-B")])
+    #
+    # #244: write_canon's list branch auto-keys the raw-string collision as
+    # "Marie"/"Marie__1" while BOTH entries keep source_form == "Marie", so this group is
+    # the IDENTICAL-SURFACE shape -- the one --advisory still masks. Pinned below rather
+    # than left implicit: if the fixture ever drifted to two differing raw surfaces it
+    # would become the never-maskable surface-variant shape and this test would silently
+    # start asserting something else.
+    canon = write_canon(root, [entry("Marie", "Marie-A"), entry("Marie", "Marie-B")])
+    assert sorted(canon["entries"]) == ["Marie", "Marie__1"]
+    assert {e["source_form"] for e in canon["entries"].values()} == {"Marie"}, (
+        "fixture must stay the identical-surface shape (one byte-identical source_form)"
+    )
 
     proc = run_audit(root, "--check", "--particle-config", "fr.json", "--advisory")
     summary = parse_stdout(proc)
@@ -648,8 +660,8 @@ def test_advisory_masks_categories_1_to_4_but_not_a_concurrent_split_blocker(tmp
     assert proc.returncode == 1, "the split's own missing_verdict must keep exit 1 even under --advisory"
 
     # Now confirm the split -- category 1's duplicate_source_form is STILL missing a
-    # verdict, but with the split cleared, --advisory should mask what remains (categories
-    # 1-4 only), proving the narrowing is scoped, not blanket.
+    # verdict, but with the split cleared, --advisory should mask what remains (an
+    # identical-surface category-1 item), proving the narrowing is scoped, not blanket.
     write_adjudications(root, {split_key("Jean", senses): adjudication_record("confirmed_ok")})
     proc2 = run_audit(root, "--check", "--particle-config", "fr.json", "--advisory")
     summary2 = parse_stdout(proc2)
@@ -657,7 +669,10 @@ def test_advisory_masks_categories_1_to_4_but_not_a_concurrent_split_blocker(tmp
     assert summary2["totals"]["by_kind"]["duplicate_source_form"] == 1
     assert summary2["totals"]["missing_verdict"] >= 1, "category 1's own duplicate_source_form is still unresolved"
     assert summary2["blocking_count"] > 0 and summary2["gate_passed"] is False
-    assert proc2.returncode == 0, "--advisory DOES mask a pure categories-1-4 blocking finding"
+    assert proc2.returncode == 0, (
+        "--advisory DOES mask a pure maskable finding (here category 1's "
+        "identical-surface shape)"
+    )
 
     # Without --advisory, the SAME state (split resolved, cat 1 still missing) exits 1.
     proc3 = run_audit(root, "--check", "--particle-config", "fr.json")
