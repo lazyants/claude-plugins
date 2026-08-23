@@ -69,6 +69,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,18 @@ TEMPLATES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "tem
 GLOSSARY_TEMPLATE = TEMPLATES_DIR / "glossary-pass-wf.template.js"
 
 assert GLOSSARY_TEMPLATE.is_file(), f"expected plugin template not found: {GLOSSARY_TEMPLATE}"
+
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+from _agent_definition import citation_judge_agent_type  # noqa: E402
+
+# Read out of the shipped agent definition rather than typed here (#353), so
+# renaming the agent on one side of the pair cannot leave this assertion
+# passing against a stale literal. The allowlist that name resolves to is
+# tests/citation_judge_agent_contract.test.py's business -- that file needs no
+# Node, so it is not skipped on a host without it.
+JUDGE_AGENT_TYPE = citation_judge_agent_type()
 
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(
@@ -1734,19 +1747,26 @@ def test_live_per_batch_ceiling_is_pinned_to_the_template_and_the_estimator_file
 # Call-shape invariants for the new stage.
 # ---------------------------------------------------------------------------
 
-def test_citation_review_is_a_claude_call_not_a_second_codex_dispatch(tmp_path):
+def test_citation_review_dispatches_the_tool_restricted_judge_not_codex(tmp_path):
     """The reviewer must not be the same engine that produced the citation --
-    an independent opinion, not the same reasoning re-run. Also keeps
-    tests/bounded_poll_present.test.py's "exactly one codex work-call in this
-    template" pin true, and keeps the stage schema-less like every other
-    sentinel-verdict call here (a schema-bearing call can wedge the Workflow if
-    the forwarder detaches, #97)."""
+    an independent opinion, not the same reasoning re-run -- and since #353 it
+    must be the tool-restricted plugin agent rather than a default-toolset one.
+    The agentType is read out of the agent file's own frontmatter rather than
+    typed here, so renaming either side alone goes RED. It is a Claude agent,
+    not a codex dispatch, so tests/bounded_poll_present.test.py's "exactly one
+    codex work-call in this template" pin stays true; and the stage stays
+    schema-less like every other sentinel-verdict call here (a schema-bearing
+    call can wedge the Workflow if the forwarder detaches, #97)."""
     res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Ninon"])])
     assert res["ok"], res["stderr"]
     review_calls = [c for c in res["out"]["calls"] if c["label"] == "glossary:citation-review:0"]
     assert len(review_calls) == 1
-    assert review_calls[0]["agentType"] is None, (
-        f"the citation review must be a plain Claude call: {review_calls[0]}"
+    assert review_calls[0]["agentType"] == JUDGE_AGENT_TYPE, (
+        f"the citation review must dispatch {JUDGE_AGENT_TYPE!r}: {review_calls[0]}"
+    )
+    assert not review_calls[0]["agentType"].startswith("codex"), (
+        "the citation review must not be a codex dispatch: "
+        f"{review_calls[0]}"
     )
     assert review_calls[0]["hasSchema"] is False
     assert review_calls[0]["phase"] == "GlossaryPass"
@@ -1929,7 +1949,7 @@ def test_regeneration_prompt_marks_the_relayed_rejection_as_data(tmp_path):
 # Until 1.16.1 ONE agent both fetched every `source` URL and judged what came
 # back, which is two holes sharing one call. The SSRF half is closed by
 # assets/scripts/fetch_citation.py. The PROMPT-INJECTION half cannot be closed
-# by a rule addressed to that same agent: it holds Bash and it ingests
+# by a rule addressed to that same agent: it held Bash and it ingests
 # attacker-authorable page text, so a hostile citation page can simply instruct
 # it to curl something else. A rule the attacker can talk the enforcer out of is
 # not an enforcement point -- which is why the earlier "fetch only through the
@@ -1948,10 +1968,17 @@ def test_regeneration_prompt_marks_the_relayed_rejection_as_data(tmp_path):
 # AUDIT path retrieval happens only through fetch_citation.py, launched by an
 # agent that never reads the retrieved bytes, and the agent that judges performs
 # no retrieval at all. The PIPELINE still fetches unvalidated URLs by design --
-# the dispatch agent does open web research under research_mode:live -- and the
-# judge still holds a Bash tool. Neither is what this split fixes. Asserting the
+# the dispatch agent does open web research under research_mode:live -- which is
+# accepted by design (#353) and is not what this split fixes. Asserting the
 # wider claim here would be worse than the original bug, because the next reader
 # would stop looking.
+#
+# The judge's own Bash residual was closed separately, in #353, by dispatching
+# it as a tool-restricted plugin agent. THIS file owns only the observable half
+# of that -- the agentType the shipped template actually passes, asserted below
+# against the agent file's own frontmatter. The frontmatter's tool allowlist is
+# owned by tests/citation_judge_agent_contract.test.py, which needs no Node and
+# so is not skipped on a host without it.
 # ---------------------------------------------------------------------------
 
 # Cross-file contracts with the template's own author. Each is one sentence this

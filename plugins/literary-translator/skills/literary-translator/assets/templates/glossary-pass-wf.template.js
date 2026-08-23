@@ -60,7 +60,7 @@
 // fetched every cited URL itself and judged what came back, which is an SSRF
 // hole and a prompt-injection hole in one call. scripts/fetch_citation.py closes
 // the first. The second cannot be closed by instructing that same agent to fetch
-// only through the helper -- it holds Bash and it ingests attacker-authorable
+// only through the helper -- it held Bash and it ingests attacker-authorable
 // page text, so a hostile page can simply tell it to curl something else -- so
 // the review became TWO calls: a PREPARE step that runs the snapshot command and
 // the fetcher while reading no retrieved bytes at all, and a JUDGE step that
@@ -941,8 +941,9 @@ function batchWaitRecheckPrompt(batch, attempt) {
 }
 
 // ---------------------------------------------------------------------------
-// CITATION REVIEW (1.16.0), SPLIT INTO PREPARE + JUDGE (1.16.1, #347).
-// Both halves are Claude, no agentType, no schema -- sentinel-verdict shaped
+// CITATION REVIEW (1.16.0), SPLIT INTO PREPARE + JUDGE (1.16.1, #347),
+// JUDGE TOOL-RESTRICTED (#353).
+// Neither half is codex and neither carries a schema -- sentinel-verdict shaped
 // exactly like the precheck and wait steps above, for the same reason they are:
 // a schema-bearing call can wedge the Workflow if the forwarder detaches (#97),
 // and this stage sits on the critical path of every live run.
@@ -966,18 +967,28 @@ function batchWaitRecheckPrompt(batch, attempt) {
 //              nothing it ingests was authored outside this project. An agent
 //              that reads no attacker text cannot be talked out of anything.
 //   JUDGE   -- reads local files only and needs no network at all. Every byte it
-//              judges arrived through fetch_citation.py's checks.
+//              judges arrived through fetch_citation.py's checks, and since
+//              #353 it is dispatched as the plugin agent
+//              literary-translator:citation-judge, whose frontmatter grants it
+//              `tools: Read` and nothing else.
 //
 // THE CLAIM THIS SUPPORTS, exactly, and no wider one: in the citation audit path
 // retrieval happens only through fetch_citation.py, launched by an agent that
-// never reads the retrieved bytes, and the agent that judges performs no
-// retrieval at all. It does NOT make the pass SSRF-free. The dispatch agent
-// still does open web research by design under research_mode:live (see
-// batchDispatchPrompt()), and the judge still holds a Bash tool -- the split
-// removes its REASON to use it and tells it not to, which is a different and
-// smaller thing than removing the capability. Both are named as residual
-// exposures in the release notes and tracked as #353. Overclaiming here would
+// never reads the retrieved bytes, and the agent that judges neither performs
+// retrieval nor holds a tool that could. It does NOT make the pass SSRF-free:
+// the dispatch agent still does open web research by design under
+// research_mode:live (see batchDispatchPrompt()), which is accepted by design
+// and documented rather than quietly covered (#353). Overclaiming here would
 // be worse than the original bug, because the next reader would stop looking.
+//
+// What #353 changed, stated at its true width: 1.16.1 removed the judge's
+// REASON to fetch and its INPUT for fetching, and said so explicitly rather
+// than claiming it had removed the CAPABILITY, which it had not. The capability
+// is gone now, and it is gone because the harness resolves the agentType to a
+// definition carrying a tool allowlist -- not because this comment or the
+// judge's prompt says so. An agentType that cannot be resolved is fail-closed:
+// the call does not fall back to a full-tool agent, and a batch whose verdict
+// never arrives is not approved.
 //
 // SNAPSHOT FIRST, THEN FETCH, THEN AUDIT -- the ORDER is what this stage gets
 // right, and it is not an implementation detail. Prepare's first command is
@@ -1779,7 +1790,14 @@ async function batchStep(batch) {
       sentinelVerdict(prepared, prepareOk, prepareFail)
 
     if (evidenceReady) {
+      // agentType is the ENFORCEMENT half of this stage (#353). The judge reads
+      // attacker-authored page bodies, so the prompt's "run no command" clause
+      // is a rule the attacker can argue with; the plugin agent it names holds
+      // `tools: Read` and nothing else, which is a rule it cannot. Renaming
+      // either side alone goes red in
+      // tests/citation_judge_agent_contract.test.py.
       const verdict = await agent(citationJudgePrompt(batch, attempt), {
+        agentType: "literary-translator:citation-judge",
         effort: "high", phase: "GlossaryPass", label: "glossary:citation-review:" + batch.index,
       })
       const okSentinel = "CITATIONS_OK " + batch.index + " ATTEMPT " + attempt

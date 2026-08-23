@@ -206,9 +206,10 @@ engine:
     # and judged them became a prepare call that retrieves without reading and a judge call that reads without
     # retrieving. Stated at its true width, narrower than an earlier draft of this note claimed: the judge is given
     # no retrieval INSTRUCTION and no fragment path, but it DOES receive URLs -- index.json's `source` field is the
-    # cited URL itself, and a fetched body can contain any URL at all. It is an ordinary agent and still holds Bash.
-    # What changed is that nothing in its prompt asks it to fetch and every byte it judges arrived through
-    # fetch_citation.py's checks -- not that URLs were kept away from it, and not that the tool was taken away.
+    # cited URL itself, and a fetched body can contain any URL at all. What changed in 1.16.1 is that nothing in
+    # its prompt asks it to fetch and every byte it judges arrived through fetch_citation.py's checks -- not that
+    # URLs were kept away from it, and not that the tool was taken away. The tool went separately, in #353: the
+    # judge now runs as the plugin agent literary-translator:citation-judge, granted `tools: Read` and nothing else.
     # Its prompt therefore marks those fields UNTRUSTED explicitly. That is a security boundary,
     # not extra work -- but it IS extra calls. The live per-batch term then rose again from 13 to 19 in 1.16.2
     # (#352), for an unrelated reason: not a new review step, but the WAIT itself becoming worth UP TO
