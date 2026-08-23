@@ -99,7 +99,9 @@ naming what was written). Exit 1 = a fatal defect -- one JSON line,
 `success:false`, `error`, and (for the newer, reviewer-hardened checks) a
 machine-matchable `reason`: `orphan_footnote_def` / `orphan_verse` (a
 converged segment's own draft defines a footnote/verse never referenced by
-any sentinel in its blocks), `duplicate_verse_placeholder` (the same verse
+any sentinel in its blocks), `verse_fnref_coverage` (a footnote anchor the
+SOURCE verse carried is absent from that verse's translated content, so it
+would print on whichever other line kept it), `duplicate_verse_placeholder` (the same verse
 placeholder sentinel referenced more than once), `duplicate_footnote_ref`
 (the same footnote number referenced more than once -- manifest.footnotes[]
 records exactly one anchor per number, so a repeat is a data-model
@@ -1793,6 +1795,80 @@ def build_nodestream(profile: dict, manifest: dict, converged: dict) -> tuple:
                     f"orphan verse",
                     reason="orphan_verse",
                 )
+
+        # -- per-verse FNREF anchor coverage (#433): a footnote anchor the
+        # -- SOURCE verse carried must survive into THAT verse's translation.
+        # -- The orphan-definition check above is segment-WIDE (its
+        # -- seg_referenced_ns is a flat union over block text and every
+        # -- verse's content), so an anchor the translation moved to a
+        # -- different verse of this same segment satisfies it and the
+        # -- footnote then prints on the wrong line with every gate green.
+        # -- Ordered LAST so an input that also orphans a definition still
+        # -- reports the older, narrower reason.
+        # --
+        # -- Iterates draft.verses, NOT the per-block `claims` walk above: a
+        # -- verse embedded in a footnote DEFINITION is parented to a block
+        # -- outside this segment's blocks[] and never appears there.
+        # --
+        # -- Expected comes from a sentinel scan of the source verse's
+        # -- `plain_text` ALONE. _footnote_verse_cited_in_segment() unions
+        # -- that scan with verse.store[].fnrefs, but there the union widens
+        # -- an EXEMPTION; here it would widen what gets REFUSED, inverting
+        # -- its safety direction -- and nothing validates that list
+        # -- (validate_extraction.py scans plain_text), so a stale entry
+        # -- naming a footnote whose anchor legitimately lives in the
+        # -- surrounding prose would refuse a correct translation.
+        if not verse_skip_mode:
+            # Bounded by the footnotes THIS segment's segpack declares -- the
+            # segpack is the translate job's contract, and it does not always
+            # agree with the manifest. Measured on a real book: a manifest
+            # anchored five footnotes in a verse's own parent block while that
+            # segment's segpack carried neither, so the draft correctly cited
+            # neither; an unbounded expectation refuses that book for anchors
+            # its translator was never given. The defect this check exists for
+            # is untouched -- an anchor that merely moved to another verse of
+            # this segment is by construction one the segment declares.
+            segpack_fn_ns = {
+                f.get("n") for f in (segpack.get("footnotes") or [])
+                if isinstance(f, dict)
+            }
+            for vid in sorted(draft_verses):
+                store = verse_store_by_vid.get(vid) or {}
+                expected = _fnref_numbers_in(store.get("plain_text") or "") & segpack_fn_ns
+                if not expected:
+                    # No source anchor recorded for this verse, no store entry
+                    # at all, or none of its anchors is a footnote this segment
+                    # carries -- nothing to require. Defensive by design,
+                    # matching _footnote_verse_cited_in_segment.
+                    continue
+                # Normalize a malformed (non-object) verse entry to empty
+                # rather than skipping it: skipping would let a draft that
+                # is BOTH malformed and missing an anchor pass unchecked.
+                # Deliberately an isinstance test, not
+                # _scan_verse_content_fnrefs' `content = content or {}` -- that
+                # idiom leaves a TRUTHY non-object in place and would raise
+                # AttributeError on the .get() below rather than refuse. The
+                # ordinary producer path cannot reach here -- validate_draft's
+                # check 5 rejects a non-object verse entry -- so this is a
+                # fail-CLOSED default, not a supported input shape.
+                content = draft_verses.get(vid)
+                if not isinstance(content, dict):
+                    content = {}
+                got = (
+                    _fnref_numbers_in(content.get("rendered") or "")
+                    | _fnref_numbers_in(content.get("literal_gloss") or "")
+                )
+                missing = sorted(expected - got)
+                if missing:
+                    raise AssembleError(
+                        f"[{seg}] verse {vid} loses footnote anchor(s) "
+                        f"{missing} its source verse carried: the translated "
+                        f"rendered/literal_gloss cite "
+                        f"{sorted(got) or 'none'} -- an anchor that survives "
+                        f"elsewhere in this segment would print on the wrong "
+                        f"line",
+                        reason="verse_fnref_coverage",
+                    )
 
     # -- monotonicity sanity WARN: manifest.segments[] array order vs. --
     # -- each included segment's own minimum block order_index. Nodes  --

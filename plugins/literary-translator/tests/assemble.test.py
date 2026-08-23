@@ -3240,5 +3240,420 @@ def test_explicit_flag_also_fails_closed(tmp_path):
     )
 
 
+# ---------------------------------------------------------------------------
+# #433 -- per-verse FNREF anchor coverage. assemble.py's orphan-definition
+# check is SEGMENT-wide (seg_referenced_ns is a flat union over block text and
+# every verse's content), so an anchor the source verse carried and the
+# translation moved to a DIFFERENT verse of the same segment satisfies it --
+# the footnote then prints on the wrong line with every gate green. These
+# tests pin the per-verse comparison that closes it, and the two shapes it
+# must NOT refuse.
+# ---------------------------------------------------------------------------
+
+FN_PH_7 = "⟦FNREF_7⟧"
+V_PH_V1 = "⟦VERSE_v1_aaaaaaaa⟧"
+V_PH_V2 = "⟦VERSE_v2_bbbbbbbb⟧"
+V_PH_FOOT = "⟦VERSE_vFoot_cccccccc⟧"
+V_PH_BODY = "⟦VERSE_vBody_dddddddd⟧"
+
+
+def test_verse_fnref_moved_to_another_verse_is_fatal(tmp_path):
+    """#433 -- the anchor the SOURCE put in v1 is dropped from v1's
+    translation and appears in v2 of the SAME segment. Footnote 7 is still
+    referenced somewhere in the segment, so the flat orphan-definition union
+    is satisfied and the pre-fix build assembles cleanly (exit 0) while the
+    footnote renders on v2's line. RED = a clean assembly, not an incidental
+    orphan_footnote_def."""
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_V1},
+            "vblockB": {"type": "VERSE", "seg": "seg01", "order_index": 1,
+                        "plain_text": V_PH_V2},
+            "FN7": {"type": "FN", "seg": None, "order_index": 2,
+                    "plain_text": "Note seven."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA", "vblockB"], "word_count": 10}],
+        footnotes=[{"n": 7, "anchor_block": "vblockA", "anchor_seg": "seg01",
+                    "def_block": "FN7"}],
+        verse_store=[
+            {"vid": "v1", "placeholder": V_PH_V1, "context": "body",
+             "parent_block": "vblockA", "mount": "block",
+             "plain_text": f"Source line {FN_PH_7} here"},
+            {"vid": "v2", "placeholder": V_PH_V2, "context": "body",
+             "parent_block": "vblockB", "mount": "block",
+             "plain_text": "A second poem"},
+        ],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_V1},
+                {"id": "vblockB", "order_index": 1, "plain_text": V_PH_V2}],
+        footnotes=[{"n": 7, "source_text": "Note seven."}],
+        verses=[{"vid": "v1", "placeholder": V_PH_V1, "parent_block": "vblockA"},
+                {"vid": "v2", "placeholder": V_PH_V2, "parent_block": "vblockB"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_V1, "vblockB": V_PH_V2},
+        footnotes={"7": "Translated note seven."},
+        verses={
+            "v1": {"rendered": "Translated line, anchor lost",
+                   "literal_gloss": "Literal line, anchor lost"},
+            "v2": {"rendered": f"Second poem {FN_PH_7}",
+                   "literal_gloss": "Second poem gloss"},
+        },
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 1, (
+        f"an anchor moved to another verse of the same segment must be fatal:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = parse_one_json_line(result)
+    assert payload["success"] is False
+    assert payload.get("reason") == "verse_fnref_coverage", payload
+    assert "v1" in payload["error"] and "7" in payload["error"], payload
+    assert not (root / "out" / ".assembled").exists(), (
+        "a refused assembly must not leave assembled output behind"
+    )
+
+
+def test_verse_fnref_lost_from_footnote_embedded_verse_is_fatal(tmp_path):
+    """#433 -- same defect where the owning verse is parented to a FOOTNOTE
+    DEFINITION block rather than one of the segment's own blocks[]. Such a
+    verse never appears in the per-block `claims` walk, so a comparison nested
+    there would miss it entirely; the check iterates draft.verses instead."""
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "p1": {"type": "PARA", "seg": "seg01", "order_index": 0,
+                   "plain_text": f"Prose {FN_PH_1} here."},
+            "vblockB": {"type": "VERSE", "seg": "seg01", "order_index": 1,
+                        "plain_text": V_PH_BODY},
+            "FN1": {"type": "FN", "seg": None, "order_index": 2,
+                    "plain_text": f"A note quoting a poem: {V_PH_FOOT}"},
+            "FN7": {"type": "FN", "seg": None, "order_index": 3,
+                    "plain_text": "Note seven."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["p1", "vblockB"], "word_count": 10}],
+        footnotes=[
+            {"n": 1, "anchor_block": "p1", "anchor_seg": "seg01", "def_block": "FN1"},
+            {"n": 7, "anchor_block": "FN1", "anchor_seg": "seg01", "def_block": "FN7"},
+        ],
+        verse_store=[
+            {"vid": "vFoot", "placeholder": V_PH_FOOT, "context": "footnote",
+             "parent_block": "FN1", "mount": "embedded",
+             "plain_text": f"Quoted line {FN_PH_7} inside the note"},
+            {"vid": "vBody", "placeholder": V_PH_BODY, "context": "body",
+             "parent_block": "vblockB", "mount": "block",
+             "plain_text": "An ordinary body poem"},
+        ],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "p1", "order_index": 0, "plain_text": f"Prose {FN_PH_1} here."},
+                {"id": "vblockB", "order_index": 1, "plain_text": V_PH_BODY}],
+        footnotes=[{"n": 1, "source_text": f"A note quoting a poem: {V_PH_FOOT}"},
+                   {"n": 7, "source_text": "Note seven."}],
+        verses=[{"vid": "vFoot", "placeholder": V_PH_FOOT, "parent_block": "FN1"},
+                {"vid": "vBody", "placeholder": V_PH_BODY, "parent_block": "vblockB"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"p1": f"Translated prose {FN_PH_1} here.", "vblockB": V_PH_BODY},
+        footnotes={"1": f"A translated note quoting a poem: {V_PH_FOOT}",
+                   "7": "Translated note seven."},
+        verses={
+            "vFoot": {"rendered": "Quoted line, anchor lost",
+                      "literal_gloss": "Quoted gloss, anchor lost"},
+            "vBody": {"rendered": f"An ordinary body poem {FN_PH_7}",
+                      "literal_gloss": "Body poem gloss"},
+        },
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 1, (
+        f"a footnote-definition-parented verse is in scope too:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = parse_one_json_line(result)
+    assert payload.get("reason") == "verse_fnref_coverage", payload
+    assert "vFoot" in payload["error"], payload
+
+
+def test_verse_fnref_stale_fnrefs_list_does_not_refuse_a_correct_translation(tmp_path):
+    """#433 -- the expected set comes from a sentinel scan of the source
+    verse's plain_text ALONE, never unioned with verse.store[].fnrefs. Here
+    the list staleley names footnote 7 while the anchor legitimately lives in
+    the surrounding prose, in both source and translation. Nothing validates
+    that list (validate_extraction.py scans plain_text), so unioning it in
+    would refuse a correct book. RED against a unioned expected set."""
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "p1": {"type": "PARA", "seg": "seg01", "order_index": 0,
+                   "plain_text": f"Prose {FN_PH_7} here."},
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 1,
+                        "plain_text": V_PH_V1},
+            "FN7": {"type": "FN", "seg": None, "order_index": 2,
+                    "plain_text": "Note seven."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["p1", "vblockA"], "word_count": 10}],
+        footnotes=[{"n": 7, "anchor_block": "p1", "anchor_seg": "seg01",
+                    "def_block": "FN7"}],
+        # STALE: fnrefs[] names 7, but the verse's own plain_text carries no
+        # anchor -- the anchor is in the prose block, where it belongs.
+        verse_store=[{"vid": "v1", "placeholder": V_PH_V1, "context": "body",
+                      "parent_block": "vblockA", "mount": "block",
+                      "fnrefs": [7],
+                      "plain_text": "A poem with no anchor of its own"}],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "p1", "order_index": 0, "plain_text": f"Prose {FN_PH_7} here."},
+                {"id": "vblockA", "order_index": 1, "plain_text": V_PH_V1}],
+        footnotes=[{"n": 7, "source_text": "Note seven."}],
+        verses=[{"vid": "v1", "placeholder": V_PH_V1, "parent_block": "vblockA"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"p1": f"Translated prose {FN_PH_7} here.", "vblockA": V_PH_V1},
+        footnotes={"7": "Translated note seven."},
+        verses={"v1": {"rendered": "A translated poem",
+                       "literal_gloss": "A literal poem"}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 0, (
+        f"a stale fnrefs[] entry must not refuse a correct translation:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+
+def test_verse_fnref_gloss_only_anchor_is_accepted(tmp_path):
+    """#433 -- render_obsidian emits whichever of rendered/literal_gloss is
+    non-empty (there is no verse_policy.mode branch there), so an anchor kept
+    only in the crib still reaches the book. A placement oddity, not a loss:
+    the check reads the union of the two fields and must accept it."""
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_V1},
+            "FN7": {"type": "FN", "seg": None, "order_index": 1,
+                    "plain_text": "Note seven."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA"], "word_count": 10}],
+        footnotes=[{"n": 7, "anchor_block": "vblockA", "anchor_seg": "seg01",
+                    "def_block": "FN7"}],
+        verse_store=[{"vid": "v1", "placeholder": V_PH_V1, "context": "body",
+                      "parent_block": "vblockA", "mount": "block",
+                      "plain_text": f"Source line {FN_PH_7} here"}],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_V1}],
+        footnotes=[{"n": 7, "source_text": "Note seven."}],
+        verses=[{"vid": "v1", "placeholder": V_PH_V1, "parent_block": "vblockA"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_V1},
+        footnotes={"7": "Translated note seven."},
+        verses={"v1": {"rendered": "Rhymed line without the anchor",
+                       "literal_gloss": f"Literal line {FN_PH_7} with it"}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 0, (
+        f"an anchor kept in literal_gloss alone still renders:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+
+def test_verse_fnref_coverage_exempt_under_skip_mode(tmp_path):
+    """#433 -- under verse_policy.mode: skip every verse's content is voided
+    by design, so EVERY source-anchored verse would trip a naive coverage
+    check. The exemption is load-bearing, not decoration: without it this
+    ordinary skip-mode book stops assembling."""
+    root = make_root(tmp_path, verse_mode="skip")
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_V1},
+            "vblockB": {"type": "VERSE", "seg": "seg01", "order_index": 1,
+                        "plain_text": V_PH_V2},
+            "FN7": {"type": "FN", "seg": None, "order_index": 2,
+                    "plain_text": "Note seven."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA", "vblockB"], "word_count": 10}],
+        footnotes=[{"n": 7, "anchor_block": "vblockA", "anchor_seg": "seg01",
+                    "def_block": "FN7"}],
+        verse_store=[
+            {"vid": "v1", "placeholder": V_PH_V1, "context": "body",
+             "parent_block": "vblockA", "mount": "block",
+             "plain_text": f"Source line {FN_PH_7} here"},
+            {"vid": "v2", "placeholder": V_PH_V2, "context": "body",
+             "parent_block": "vblockB", "mount": "block",
+             "plain_text": "A second poem"},
+        ],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_V1},
+                {"id": "vblockB", "order_index": 1, "plain_text": V_PH_V2}],
+        footnotes=[{"n": 7, "source_text": "Note seven."}],
+        verses=[{"vid": "v1", "placeholder": V_PH_V1, "parent_block": "vblockA"},
+                {"vid": "v2", "placeholder": V_PH_V2, "parent_block": "vblockB"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_V1, "vblockB": V_PH_V2},
+        footnotes={"7": "Translated note seven."},
+        verses={"v1": {}, "v2": {}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 0, (
+        f"skip mode voids verse content by design and must stay assemblable:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    # Asserted off the parsed payload, never a substring search of stdout: the
+    # pytest tmp_path is named after this test, so the durable-root paths in
+    # the success line contain the reason string and a naive search self-matches.
+    assert parse_one_json_line(result)["success"] is True
+
+
+def test_verse_fnref_not_declared_by_this_segpack_is_not_required(tmp_path):
+    """#433 -- the expectation is bounded by the footnotes THIS segment's
+    segpack declares, because the segpack is the translate job's contract and
+    does not always agree with the manifest. Measured on a real book: the
+    manifest anchored footnotes in a verse's own parent block while that
+    segment's segpack carried none of them, so the draft correctly cited none.
+    RED against an unbounded manifest-derived expectation, which refuses this
+    book for an anchor its translator was never given."""
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_V1},
+            "FN7": {"type": "FN", "seg": None, "order_index": 1,
+                    "plain_text": "Note seven."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA"], "word_count": 10}],
+        # The manifest anchors 7 in this segment...
+        footnotes=[{"n": 7, "anchor_block": "vblockA", "anchor_seg": "seg01",
+                    "def_block": "FN7"}],
+        verse_store=[{"vid": "v1", "placeholder": V_PH_V1, "context": "body",
+                      "parent_block": "vblockA", "mount": "block",
+                      "plain_text": f"Source line {FN_PH_7} here"}],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_V1}],
+        # ...but the segpack this segment was translated from declares no
+        # footnote at all, so the draft carries none.
+        footnotes=[],
+        verses=[{"vid": "v1", "placeholder": V_PH_V1, "parent_block": "vblockA"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_V1},
+        footnotes={},
+        verses={"v1": {"rendered": "A translated poem",
+                       "literal_gloss": "A literal poem"}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 0, (
+        f"an anchor for a footnote this segment's segpack never declared "
+        f"must not be required of the translation:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+
+def test_verse_fnref_malformed_verse_entry_is_not_a_free_pass(tmp_path):
+    """#433 -- a draft verse entry that is not an object is normalized to
+    empty for coverage, not skipped. Skipping would let a draft that is BOTH
+    malformed and missing its anchor through: v1's anchor is gone, v2 of the
+    same segment carries it, so the segment-wide orphan union is satisfied.
+    validate_draft's check 5 rejects a non-object verse entry, so the ordinary
+    producer path never reaches here -- this pins the fail-CLOSED default.
+
+    Scope, stated because it is narrower than it looks: only a FALSEY non-object
+    reaches this loop. _scan_verse_content_fnrefs runs first and coerces with
+    `content = content or {}`, so a truthy non-object (e.g. ["x"]) raises there
+    on .get() and exits 1 under the generic catch, never reaching the coverage
+    check at all. Both refuse; only this one refuses with a named reason."""
+    root = make_root(tmp_path)
+    write_manifest(
+        root,
+        blocks={
+            "vblockA": {"type": "VERSE", "seg": "seg01", "order_index": 0,
+                        "plain_text": V_PH_V1},
+            "vblockB": {"type": "VERSE", "seg": "seg01", "order_index": 1,
+                        "plain_text": V_PH_V2},
+            "FN7": {"type": "FN", "seg": None, "order_index": 2,
+                    "plain_text": "Note seven."},
+        },
+        segments=[{"seg": "seg01", "kind": "body", "title_text": "Ch1",
+                   "block_ids": ["vblockA", "vblockB"], "word_count": 10}],
+        footnotes=[{"n": 7, "anchor_block": "vblockA", "anchor_seg": "seg01",
+                    "def_block": "FN7"}],
+        verse_store=[
+            {"vid": "v1", "placeholder": V_PH_V1, "context": "body",
+             "parent_block": "vblockA", "mount": "block",
+             "plain_text": f"Source line {FN_PH_7} here"},
+            {"vid": "v2", "placeholder": V_PH_V2, "context": "body",
+             "parent_block": "vblockB", "mount": "block",
+             "plain_text": "A second poem"},
+        ],
+    )
+    write_segpack(
+        root, "seg01",
+        blocks=[{"id": "vblockA", "order_index": 0, "plain_text": V_PH_V1},
+                {"id": "vblockB", "order_index": 1, "plain_text": V_PH_V2}],
+        footnotes=[{"n": 7, "source_text": "Note seven."}],
+        verses=[{"vid": "v1", "placeholder": V_PH_V1, "parent_block": "vblockA"},
+                {"vid": "v2", "placeholder": V_PH_V2, "parent_block": "vblockB"}],
+    )
+    write_draft(
+        root, "seg01",
+        blocks={"vblockA": V_PH_V1, "vblockB": V_PH_V2},
+        footnotes={"7": "Translated note seven."},
+        verses={"v1": [], "v2": {"rendered": f"Second poem {FN_PH_7}",
+                                 "literal_gloss": "Second poem gloss"}},
+    )
+    write_ledger(root, {"seg01": {"status": "converged"}})
+
+    result = run_assemble(root)
+    assert result.returncode == 1, (
+        f"a malformed verse entry must not buy a free pass past coverage:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    payload = parse_one_json_line(result)
+    assert payload.get("reason") == "verse_fnref_coverage", payload
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
