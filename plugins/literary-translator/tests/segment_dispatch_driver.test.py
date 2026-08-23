@@ -4125,6 +4125,73 @@ def test_derive_next_action_already_converged_on_final_round(tmp_path):
     }
 
 
+def test_already_converged_binding_fields_describe_the_review_this_call_parsed(tmp_path):
+    """#622. The three reviewed_* fields must come from the review object
+    derive_next_action() ITSELF parsed, never from a re-read at return time --
+    the property every comment on this path rests on, and the one thing the
+    other assertions here cannot see, because they never change review.json
+    inside a single derivation and a re-reading implementation would return
+    the identical values.
+
+    The seam is real, not injected: current_draft_sha1() is called after
+    review.json has been parsed and before the clean branch returns, so
+    wrapping it substitutes the artifact at a point inside the derivation
+    that a re-read would land after. An implementation that re-read the file
+    while building the action would report the SUBSTITUTE's digest and fail
+    the two assertions below; the shipped one reports the clean object it
+    actually judged.
+
+    Nothing about this is exotic at the trust boundary: a same-round review
+    carries the same deterministic dispatch_token and, over an unmoved draft,
+    the same draft_sha1, so a substitute is indistinguishable by provenance
+    alone -- which is exactly why the digest has to describe the PARSED
+    object."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    draft_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    clean_review = _dna_write_review(root, driver_mod, round_label="1", clean=True, coverage_ok=True,
+                                      draft_sha1=draft_sha1)
+
+    real_sha1 = driver_mod.current_draft_sha1
+    substituted = {}
+
+    def _substitute_mid_derivation(seg, segments_dir, scripts_dir):
+        value = real_sha1(seg, segments_dir, scripts_dir)
+        if not substituted:
+            substituted["review"] = _dna_write_review(
+                root, driver_mod, round_label="1", clean=False, coverage_ok=True,
+                draft_sha1=draft_sha1,
+                findings=[{"loc": "p1:1", "severity": "major",
+                           "issue": "never attested", "suggest": "n/a"}],
+            )
+        return value
+
+    driver_mod.current_draft_sha1 = _substitute_mid_derivation
+    try:
+        action = driver_mod.derive_next_action("seg01", ctx)
+    finally:
+        driver_mod.current_draft_sha1 = real_sha1
+
+    assert substituted, (
+        "CONTROL: the seam never fired, so this test proves nothing -- "
+        "derive_next_action() no longer calls current_draft_sha1() between "
+        "parsing review.json and returning, and the substitution point has to "
+        "be moved rather than the assertion relaxed"
+    )
+    assert action["action"] == "already_converged", action
+    assert action["reviewed_sha1"] == draft_sha1, action
+    assert action["reviewed_token"] == clean_review["dispatch_token"], action
+    assert action["reviewed_digest"] == driver_mod._review_verdict_digest(clean_review), (
+        f"the digest must describe the CLEAN review this call parsed: {action!r}"
+    )
+    assert action["reviewed_digest"] != driver_mod._review_verdict_digest(substituted["review"]), (
+        "the substitute's digest must differ -- otherwise the two objects are "
+        "indistinguishable and this test cannot fail against a re-reading "
+        "implementation"
+    )
+
+
 def test_the_convergence_handler_refuses_and_writes_nothing_when_the_binding_check_fails(tmp_path):
     """#622. That the ORDINARY already_converged handler CALLS the binding
     check -- which the derive_next_action() tests above cannot show, since

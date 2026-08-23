@@ -5331,7 +5331,10 @@ def _terminal_write_still_binds_what_was_reviewed(
     """None if the terminal verdict in `action` still describes the review
     and the draft bytes it was derived from, or a human-readable reason
     string if either moved in between. `what` names the write in those
-    strings ("cap", or "convergence" for #527's operator-attested one) --
+    strings ("cap", or "convergence" for EITHER convergence route -- the
+    ordinary already_converged one and #527's operator-attested
+    converged_by_rejection, which share it because they share the refusal
+    reason and the operator's remedy) --
     the CHECK is identical for both, and that is the point of one helper
     rather than two: what has to hold before a terminal write is a property
     of the write being terminal, not of which verdict it records.
@@ -5932,12 +5935,19 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 # rejection convergence do, under the helper's own general name.
                 #
                 # DRIVER-SIDE HALF ONLY, deliberately, and this comment is where
-                # that is recorded rather than in a release note. The half this
-                # closes is the VERDICT: ledger_update.py's
+                # that is recorded rather than in a release note. The half that
+                # MOTIVATED it is the VERDICT: ledger_update.py's
                 # enrich_converged_fields() already re-reads review.json and
-                # refuses on a draft_sha1 or token-prefix mismatch, so the
-                # provenance was never the gap -- what it never reads is whether
-                # the review declared the segment clean at all. A precondition
+                # refuses on a draft_sha1 mismatch or a dispatch_token that does
+                # not match the run/segment prefix, but it never reads whether
+                # the review declared the segment clean at all -- so a non-clean
+                # substitute at the same token over the same unread draft was
+                # accepted there. The provenance half is NOT merely mirrored
+                # either, and saying it was would be wrong: review_token_matches()
+                # is a PREFIX match that admits any ':r<roundLabel>' suffix
+                # (ledger_update.py:821), while the comparison here is against
+                # the EXACT token this decision was made from, round label
+                # included. A precondition
                 # THERE would close it for every caller, including the shipped
                 # Workflow template, and it is not bought: converged_by_rejection
                 # records convergence over a review whose `clean` is False by
