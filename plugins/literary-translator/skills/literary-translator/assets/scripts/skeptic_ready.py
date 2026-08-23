@@ -1329,12 +1329,14 @@ _MAX_LISTED_MISSING = 8
 #     (reachable only in the aggregate-schema-VALID branch, hence never
 #     alongside that aggregate failure), <=1 competitors-resolution failure,
 #     <=1 run_id mismatch -- 6 standalone, and that 6 needs an INVALID
-#     triage, which leaves `records == []` and empties both the coverage and
-#     the per-record populations. With the schema-valid triage those
-#     populations require, structural tops out at 5, so the simultaneously
-#     reachable ceiling is 5 + 5 + 3 + 3 + 5 = 21, against 15 before this
-#     split: six lines, for the guarantee that neither integrity kind can be
-#     evicted by a routine one.
+#     triage, which leaves `records == []` and so empties both integrity
+#     coverage populations and the per-record one (the routine gaps survive:
+#     a valid aggregate still populates `assigned_ids`, and every assignment
+#     is then uncovered). With the schema-valid triage the integrity and
+#     per-record populations require, structural tops out at 5, so the
+#     simultaneously reachable ceiling is 5 + 5 + 3 + 3 + 5 = 21, against 15
+#     before this split: six lines, for the guarantee that neither integrity
+#     kind can be evicted by a routine one.
 _MAX_LISTED_MISSING_HALF = _MAX_LISTED_MISSING // 2
 # #377: the two INTEGRITY coverage kinds (a foreign record, a duplicated
 # record) get their own small guaranteed slice instead of competing with the
