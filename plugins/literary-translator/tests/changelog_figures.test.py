@@ -198,6 +198,38 @@ def _local_dict_len(filename, funcname, varname):
     raise AssertionError(f"{funcname} is no longer defined in {filename}")
 
 
+# Rewritten for 1.69.0, per the maintenance contract above. 1.69.0 is a BATCH
+# FOLD -- the merges it labels each landed on `main` on their own PR without a
+# version bump -- so the rotation it replaces is 1.68.0's (#607), whose single
+# row, "38 new test functions across two files", is RETIRED here with the entry
+# it described. (The record below that row was headed 1.67.0 while the row it
+# introduced was 1.68.0's; that mislabel is left in place as the historical text
+# it is, and is named here so this rotation is not read as inheriting from it.)
+#
+# TWO rows, both membership counts of a SHIPPED tuple, because a batch fold's
+# one release-level cost is exactly that: it moves `plugin_bundle_hash`, and the
+# two tuples the entry cites are the only figures in it a derivation can reach.
+# `_tuple_len` reads each by AST from the script that owns it.
+#
+# What the entry states and this file deliberately does NOT declare, so an empty
+# space below is read as a decision rather than an omission:
+#
+# - "fifteen of the nineteen plugin-bundle members carry a diff in this range",
+#   and the six named schemas. Both are measurements over a GIT RANGE
+#   (1.68.0..this cut), not over the tree, and this file can only read the tree.
+#   A derivation would have to shell out to `git diff` against a base commit the
+#   fold's own merge can move, which is a second implementation of what the diff
+#   already says -- and pinning the base here would hardcode the answer, the
+#   `lambda: 17` failure the docstring refuses. Both are spelled as WORDS or as
+#   an enumeration for that reason: the schemas are NAMED rather than counted, so
+#   that half cannot drift into a wrong total at all.
+# - The remaining numerals are identifiers, never measurements: the version
+#   numbers, the release date, every issue and PR number in the enumeration, the
+#   pipeline stage labels (W1, W2, W3, W5, W7, R8, Step 0a), the two exit codes
+#   in the #277 line, the interpreter versions in the #679 line, and `U+2028`.
+#
+# The rotations before it, each kept as its own record:
+#
 # Rewritten for 1.67.0 (#520), per the maintenance contract above. The rotation
 # this replaces was 1.66.0's (#541) and it declared ONE row -- "30 new test
 # functions across three files" -- which this rotation RETIRED, because 1.67.0
@@ -336,12 +368,16 @@ def _local_dict_len(filename, funcname, varname):
 # filed about.
 FIGURES = [
     Figure(
-        phrase="38 new test functions across two files",
-        value=38,
-        derive=lambda: sum(_test_function_count(f) for f in (
-            "fix_scope_audit.test.py",
-            "fix_scope_gate.test.py",
-        )),
+        phrase="gained two entries and is now 19",
+        value=19,
+        derive=lambda: _tuple_len("cache_key.py", "PLUGIN_BUNDLE_MEMBERS"),
+    ),
+    Figure(
+        phrase="too and is now 6",
+        value=6,
+        derive=lambda: _tuple_len(
+            "scaffold_setup.py", "ORCHESTRATION_BUNDLE_MEMBERS"
+        ),
     ),
 ]
 
