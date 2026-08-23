@@ -178,6 +178,16 @@ def _build_filled_profile(durable_root: Path, source_path: Path) -> dict:
             # making that claim quietly false, which is the failure this
             # helper exists to make impossible.
             "admit_contract_only_stale": False,
+            # #520 and #199, for the same reason the key above carries its own
+            # note: this helper's docstring claims structural identity with the
+            # shipped example, and the example ships both of these explicitly at
+            # their empty default. Omitting either keeps the SUITE green -- both
+            # properties are optional -- while making that claim quietly false,
+            # which is the failure this helper exists to make impossible.
+            # `forbidden_patterns` was missing here from 1.67.0 until #199
+            # added its neighbour and the gap became visible.
+            "forbidden_patterns": [],
+            "terms": [],
         },
         "output": {
             "v1_scope": "segment_drafts_and_audit",

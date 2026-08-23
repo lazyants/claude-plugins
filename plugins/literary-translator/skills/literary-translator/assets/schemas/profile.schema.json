@@ -640,6 +640,29 @@
             }
           }
         },
+        "terms": {
+          "description": "OPT-IN, default absent (#199). A project's own pinned COMMON-NOUN terms of art -- an office title, a recurring institutional realia -- that must render one way for the whole book. canon.json cannot hold such a term (it is a proper-name dictionary by construction, and the shipped adjudication contract never accepts an is_proper_name:false entry), and final_audit.py's cross-segment glossary-diff keys on canon entries and per-draft names[], both proper-name channels -- so without this a recurring common noun renders two ways in one delivered volume and nothing reports it. This declares the DETECTION half only; the term itself is pinned where it always was, in style_bible.md section C's title/honorific mapping, which is delivered in full to every translate and review job. final_audit.py's WARN 6 reports a CARRIER (a block, a footnote definition, a verse) whose source contains source_form while its own translated counterpart contains no occurrence of target_form. Purely ADVISORY -- never a hard failure, never an exit-code change -- and the run always prints how many terms it checked, so an absent or empty list cannot read as a clean pass. Matching is by SUBSTRING over NFC-normalized, casefolded text, which is what makes a suffixing target language work: pin the INVARIANT part of the target form and its inflected surfaces are found inside it. A target language that inflects by prefix or stem change cannot be pinned this way. Carriers the active policy passes through UNTRANSLATED are never compared: footnote definitions under footnotes.apparatus_policy preserve_source, verses under verse_policy.mode skip, and the placeholder-only draft block of a mount:\"block\" verse. The list is not size-capped: profile.yml is operator-authored, the same trust footing as forbidden_patterns above.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source_form", "target_form"],
+            "properties": {
+              "source_form": {
+                "description": "The source-language term to look for in a carrier's own source text. Deliberately no id and no message field: unlike a forbidden_patterns regex, this string is readable on its own and is echoed verbatim in the WARN line, so a separate identifier would name what is already named.",
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "target_form": {
+                "description": "The frozen target-language rendering, or the INVARIANT part of it (a stem) when the target language inflects by suffix. A carrier translating source_form without containing this string is what WARN 6 reports.",
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              }
+            }
+          }
+        },
         "admit_contract_only_stale": {
           "description": "OPT-IN, default false (#533). When true, the whole-project completeness gate (final_audit.py) and the assembly gate (assemble.py) admit an already-converged unit that went 'stale' ONLY because style_contract_hash moved -- a style-bible edit inside the STYLE_CONTRACT markers -- provided its .ever_converged sentinel is not absent, its on-disk draft still matches the recorded reviewed_draft_sha1, and every other moved cache-key field is machinery-only. This makes the tooling agree with the shipped rule R9 ('a style-contract edit applies FORWARD; a converged segment stays converged'), which the gates otherwise contradict by refusing to ship until every flipped unit is reviewed again. It does NOT widen SAFE_STALE_CARVEOUT_FIELDS, rewrite any ledger record or stamp any hash: the record keeps saying 'stale' and every admitted segment is named on stderr and in the run's structured stdout, so shipping them is a recorded operator act. It CANNOT distinguish a contract ADDITION from a contract REVERSAL -- a reversed rule genuinely demanded the defect in the earlier segments -- which is why it is a declaration and not a default. Only a literal true enables it; absent, null and false all mean refuse. Keep the value stable from W7 through delivery: every gate reads this same field, and toggling it mid-chain makes them disagree.",
           "type": "boolean",

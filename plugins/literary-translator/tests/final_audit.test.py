@@ -83,7 +83,7 @@ Coverage (per the test's own enumeration):
     ledger-fragment reviewed_draft_sha1 mismatch, isolated from hard check 1;
   - the hard_failures rollup invariant across two segments, one failing each
     hard check;
-  - all five WARN-only advisory checks (glossary-diff name-form drift +
+  - all six WARN-only advisory checks (glossary-diff name-form drift +
     canon.json self-consistency, link-graph sentinel bijection,
     foreign-remainder stopword-density scan, verse-structure per
     verse_policy.mode);
@@ -183,6 +183,8 @@ def default_profile(
     verse_mode="full_rhymed_plus_literal",
     admit_contract_only_stale=None,
     forbidden_patterns=None,
+    terms=None,
+    apparatus_policy="translate_all",
 ):
     """`admit_contract_only_stale=None` OMITS the #533 key entirely -- the
     shape every existing project has -- while True/False write it
@@ -206,7 +208,7 @@ def default_profile(
         },
         "target": {"language": {"code": "ru"}},
         "verse_policy": {"mode": verse_mode, "threshold_lines": None},
-        "footnotes": {"apparatus_policy": "translate_all"},
+        "footnotes": {"apparatus_policy": apparatus_policy},
         "validation": {"untranslated_sentinel": "[TODO-UNTRANSLATED]"},
     }
     if admit_contract_only_stale is not None:
@@ -218,6 +220,13 @@ def default_profile(
     # that could only express one of them could not prove it.
     if forbidden_patterns is not None:
         profile["validation"]["forbidden_patterns"] = forbidden_patterns
+    # #199, same three-shape discipline as the two keys above: None OMITS
+    # `terms` entirely (every project predating the field), [] declares it
+    # empty, and a list declares pins. Absent and declared-empty must be
+    # indistinguishable in behaviour, and a fixture that could only express one
+    # of them could not prove it.
+    if terms is not None:
+        profile["validation"]["terms"] = terms
     return profile
 
 
@@ -230,6 +239,9 @@ def make_durable_root(
     canon=None,
     admit_contract_only_stale=None,
     forbidden_patterns=None,
+    terms=None,
+    apparatus_policy="translate_all",
+    verse_store=None,
 ) -> Path:
     """Build a COMPLETE, internally-consistent durable_root: real copies of
     every script final_audit.py touches, real schemas/ (ledger_merge.py
@@ -255,6 +267,8 @@ def make_durable_root(
                 verse_mode=verse_mode,
                 admit_contract_only_stale=admit_contract_only_stale,
                 forbidden_patterns=forbidden_patterns,
+                terms=terms,
+                apparatus_policy=apparatus_policy,
             ),
             sort_keys=False,
         ),
@@ -291,16 +305,19 @@ def make_durable_root(
     source_file = root / "source_original.txt"
     source_file.write_bytes(b"Ceci est un texte source de test.\n")
 
+    manifest = {
+        "source_inputs": [str(source_file.resolve())],
+        "segments": [{"seg": s} for s in seg_ids],
+        "frontback": frontback or [],
+    }
+    # #199: the SOURCE text of a verse lives here, not in any segpack -- W7's
+    # term-consistency lane reads `verse.store[]` to get it. Omitted entirely
+    # unless a test asks for it, so every pre-existing case keeps the manifest
+    # it had.
+    if verse_store is not None:
+        manifest["verse"] = {"store": verse_store}
     (root / "manifest.json").write_text(
-        json.dumps(
-            {
-                "source_inputs": [str(source_file.resolve())],
-                "segments": [{"seg": s} for s in seg_ids],
-                "frontback": frontback or [],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
     )
 
     (root / "canon.json").write_text(
@@ -551,7 +568,7 @@ def load_final_audit_module():
 
 
 # ---------------------------------------------------------------------------
-# 1. Clean baseline: hard checks AND all five WARN checks clean.
+# 1. Clean baseline: hard checks AND all six WARN checks clean.
 # ---------------------------------------------------------------------------
 
 
@@ -2498,3 +2515,519 @@ if __name__ == "__main__":
     import pytest
 
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# 9. WARN 6 -- term-consistency (#199).
+#
+# The plugin ships NO terms, so every case here declares its own. The office
+# under test is the one the issue was filed for: the Ancien-Régime court
+# `président`, rendered `президент` in the body of a delivered volume and
+# `председатель` in two of its footnotes.
+#
+# Every assertion runs the REAL script as a subprocess (run_final_audit), so
+# each is simultaneously the wiring test: deleting the `warn_term_drift(...)`
+# call from main() turns them red. That deletion was watched failing, as was
+# making `declared_terms()` return [] unconditionally.
+#
+# `PRESIDENT`/`PRESIDENT_RU` are spelled with explicit escapes rather than
+# literal characters where a case or normalization form is the POINT of the
+# test, so a test cannot silently pass because an editor normalized the file.
+# ---------------------------------------------------------------------------
+
+# Built through unicodedata rather than typed as two literals: an editor or a
+# copy-paste that normalized this file would silently make the two spellings
+# identical, and the NFC test below would then pass while asserting nothing.
+PRESIDENT_FR = unicodedata.normalize("NFC", "pr\u00e9sident")
+PRESIDENT_FR_NFD = unicodedata.normalize("NFD", PRESIDENT_FR)
+PRESIDENT_RU = "президент"
+CHAIRMAN_RU = "председатель"
+PRESIDENT_PIN = [{"source_form": PRESIDENT_FR, "target_form": PRESIDENT_RU}]
+
+
+def _term_lines(proc):
+    return [ln for ln in proc.stderr.splitlines() if "TERM-DRIFT" in ln]
+
+
+def _term_count_line(proc):
+    lines = [ln for ln in proc.stderr.splitlines() if ln.startswith("TERM CONSISTENCY:")]
+    assert len(lines) == 1, proc.stderr
+    return lines[0]
+
+
+def _office_segpack(block_source=None, footnote_source=None, **kwargs):
+    """A clean segpack whose p1 block and footnote 1 both carry the office in
+    the SOURCE language. `plain_text` is used rather than `source_html` because
+    that is what every schema-valid manifest block actually carries; the
+    de-tagging fallback gets its own test below."""
+    segpack = clean_segpack(**kwargs)
+    for block in segpack["blocks"]:
+        if block["id"] == "p1":
+            block.pop("source_html", None)
+            block["plain_text"] = block_source if block_source is not None else (
+                f"Le {PRESIDENT_FR} de la chambre des comptes {FN_PH} y siegeait."
+            )
+    segpack["footnotes"][0]["source_text"] = footnote_source if footnote_source is not None else (
+        f"Le {PRESIDENT_FR} des enquetes, magistrat de la cour souveraine."
+    )
+    return segpack
+
+
+def _office_root(tmp_path, terms=PRESIDENT_PIN, block_target=None, footnote_target=None,
+                 segpack=None, **kwargs):
+    root = make_durable_root(
+        tmp_path, seg_ids=("seg01", PAD_SEG), terms=terms, **kwargs
+    )
+    draft = clean_draft(
+        p1_text=block_target if block_target is not None else (
+            f"На посту {PRESIDENT_RU}а "
+            f"счётной палаты "
+            f"{FN_PH} он заседал."
+        ),
+        extra_footnotes={"1": footnote_target} if footnote_target is not None else None,
+    )
+    add_converged_segment(root, "seg01", segpack or _office_segpack(), draft)
+    return root
+
+
+def test_terms_absent_adds_no_warning_but_still_reports_zero(tmp_path):
+    """The compatibility case: a profile.yml predating #199 has no key at all.
+    The lane must add nothing -- and must still SAY it checked nothing, which is
+    the whole point of the count line."""
+    root = _office_root(tmp_path, terms=None)
+    proc = run_final_audit(root)
+    summary = parse_summary(proc)
+    assert_schema_valid(summary)
+    assert _term_lines(proc) == []
+    assert summary["warnings"] == 0, proc.stderr
+    assert _term_count_line(proc) == (
+        "TERM CONSISTENCY: 0 declared term(s) checked over 1 converged segment(s)"
+    )
+
+
+def test_terms_declared_empty_matches_absent(tmp_path):
+    """Declared-empty and absent must be indistinguishable. Compared on the
+    parsed summary with `generated_at` dropped -- the script stamps a fresh
+    timestamp every run -- plus the stderr WARN section and the count line."""
+    absent = run_final_audit(_office_root(tmp_path / "a", terms=None))
+    empty = run_final_audit(_office_root(tmp_path / "b", terms=[]))
+
+    def comparable(proc):
+        summary = dict(parse_summary(proc))
+        summary.pop("generated_at")
+        return summary
+
+    assert comparable(absent) == comparable(empty)
+    assert _term_lines(absent) == _term_lines(empty) == []
+    assert _term_count_line(absent) == _term_count_line(empty)
+    assert absent.returncode == empty.returncode
+
+
+def test_declared_term_reports_the_footnote_a_correct_body_would_mask(tmp_path):
+    """THE case #199 was filed for, and the reason this check is carrier-local
+    rather than segment-wide.
+
+    The source block and the source footnote both carry the office. The draft
+    block renders it `президент`; the draft footnote renders it `председатель`.
+    A whole-draft "contains zero occurrences" test sees the block's correct
+    rendering and stays silent -- which is exactly how the real volume shipped.
+    Carrier-local absence names the footnote and NOT the block."""
+    root = _office_root(
+        tmp_path,
+        footnote_target=(
+            f"{CHAIRMAN_RU}м следственной "
+            f"палаты."
+        ),
+    )
+    proc = run_final_audit(root)
+    summary = parse_summary(proc)
+    assert_schema_valid(summary)
+    lines = _term_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    line = lines[0]
+    assert "[seg01]" in line
+    assert "footnotes['1']" in line
+    assert "blocks[" not in line
+    assert PRESIDENT_FR in line
+    assert PRESIDENT_RU in line
+    assert summary["warnings"] == 1
+    assert _term_count_line(proc).startswith("TERM CONSISTENCY: 1 declared term(s)")
+
+
+def test_every_carrier_renders_the_pin_produces_no_warning(tmp_path):
+    root = _office_root(
+        tmp_path,
+        footnote_target=(
+            f"{PRESIDENT_RU}ом следственной "
+            f"палаты."
+        ),
+    )
+    proc = run_final_audit(root)
+    assert _term_lines(proc) == [], proc.stderr
+    assert parse_summary(proc)["warnings"] == 0
+
+
+def test_a_carrier_whose_source_lacks_the_term_never_warns(tmp_path):
+    """The source side gates everything: a carrier that never mentions the
+    office cannot warn, however its translation reads."""
+    root = _office_root(
+        tmp_path,
+        segpack=_office_segpack(
+            footnote_source="Une note sans aucune charge de justice."
+        ),
+        footnote_target=f"{CHAIRMAN_RU} чего-то.",
+    )
+    proc = run_final_audit(root)
+    assert _term_lines(proc) == [], proc.stderr
+
+
+def test_a_sentence_initial_source_form_still_reaches_the_check(tmp_path):
+    """Source-side casefolding, asserted in the direction that can FAIL.
+
+    An earlier version of this test asserted SILENCE on a sentence-initial
+    `Président` whose translation was correct -- and silence is exactly what
+    dropping the casefold also produces, because the pin then stops matching
+    the source at all. Mutation caught it: the assertion has to be that the
+    capitalized source form WARNS when its carrier does not render the pin."""
+    root = _office_root(
+        tmp_path,
+        segpack=_office_segpack(
+            footnote_source=f"{PRESIDENT_FR.capitalize()} des requetes, dit-on."
+        ),
+        footnote_target=f"{CHAIRMAN_RU} палаты прошений.",
+    )
+    proc = run_final_audit(root)
+    lines = _term_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "footnotes['1']" in lines[0]
+
+
+def test_a_suffixed_and_title_cased_target_both_satisfy_the_pin(tmp_path):
+    """Target-side, and the two properties that make a pin usable at all.
+
+    The pinned form is a STEM and the draft carries it INFLECTED
+    (`президентом`) and TITLE-CASED at the head of the sentence. Both must
+    count, so this asserts silence -- and unlike the source direction that is
+    non-vacuous here: dropping either the substring match or the casefold makes
+    the pin stop matching and a warning APPEAR."""
+    root = _office_root(
+        tmp_path,
+        footnote_target=(
+            f"{PRESIDENT_RU.capitalize()}ом Палаты прошений он и остался."
+        ),
+    )
+    proc = run_final_audit(root)
+    assert _term_lines(proc) == [], proc.stderr
+
+
+def test_decomposed_source_matches_a_precomposed_declaration(tmp_path):
+    """Extraction's own normalize_text() only collapses whitespace, so a
+    decomposed `é` reaches W7 as different bytes from a precomposed one. Without
+    the NFC pass this is a silent miss on input that looks identical."""
+    assert PRESIDENT_FR != PRESIDENT_FR_NFD  # the fixture is only meaningful if so
+    root = _office_root(
+        tmp_path,
+        segpack=_office_segpack(
+            footnote_source=f"Le {PRESIDENT_FR_NFD} des enquetes."
+        ),
+        footnote_target=f"{CHAIRMAN_RU} палаты.",
+    )
+    proc = run_final_audit(root)
+    lines = _term_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "footnotes['1']" in lines[0]
+
+
+def test_html_only_carrier_counts_visible_text_not_markup(tmp_path):
+    """A segpack block carrying `source_html` and no `plain_text` is counted on
+    what a reader sees. The office sits in a TAG ATTRIBUTE only, so it is not an
+    occurrence -- counting raw markup would warn about a word that appears
+    nowhere in the book."""
+    segpack = clean_segpack()
+    for block in segpack["blocks"]:
+        if block["id"] == "p1":
+            block["source_html"] = (
+                f'<p title="{PRESIDENT_FR}">Un magistrat quelconque {FN_PH}.</p>'
+            )
+    segpack["footnotes"][0]["source_text"] = "Une note en francais."
+    # The draft deliberately does NOT render the pin. An earlier fixture left
+    # the default translation in place, which carries `президент` and made the
+    # case vacuous -- counting raw markup produced silence too, because the
+    # target satisfied the pin anyway. With the pin absent from the draft, the
+    # ONLY thing keeping this silent is that the attribute is not visible text.
+    root = _office_root(
+        tmp_path, segpack=segpack,
+        block_target=f"Некий судейский чиновник {FN_PH}.",
+    )
+    proc = run_final_audit(root)
+    assert _term_lines(proc) == [], proc.stderr
+
+    # ...and the converse, on the same de-tagged projection: the office in
+    # ELEMENT TEXT is an occurrence, so the same draft now warns.
+    segpack2 = clean_segpack()
+    for block in segpack2["blocks"]:
+        if block["id"] == "p1":
+            block["source_html"] = f"<p>Le <em>{PRESIDENT_FR}</em> y siegeait {FN_PH}.</p>"
+    segpack2["footnotes"][0]["source_text"] = "Une note en francais."
+    root2 = _office_root(
+        tmp_path / "b", segpack=segpack2,
+        block_target=f"Он заседал {FN_PH}.",
+    )
+    proc2 = run_final_audit(root2)
+    lines = _term_lines(proc2)
+    assert len(lines) == 1, proc2.stderr
+    assert "blocks['p1']" in lines[0]
+
+
+# --- the verse lane, and the two policy exclusions --------------------------
+#
+# A verse's SOURCE text is the one carrier that does NOT live in the segpack:
+# extraction substitutes a placeholder into the owning block and keeps the poem
+# in manifest.json's `verse.store[]`. These cases drive that path end to end.
+
+VERSE_STORE_WITH_OFFICE = [
+    {
+        "vid": "vA",
+        "placeholder": V_PH_A,
+        "context": "body",
+        "parent_block": "vblockA",
+        "plain_text": f"Le {PRESIDENT_FR} passe en robe rouge\nDeuxieme ligne du poeme",
+        "sha1": "0" * 40,
+    },
+]
+
+
+def _verse_root(tmp_path, verse_a=None, **kwargs):
+    """A root whose verse vA's SOURCE carries the office. `verse_a` is the
+    draft's own `verses["vA"]` object, so a case can control exactly which
+    fields carry the pin."""
+    root = make_durable_root(
+        tmp_path, seg_ids=("seg01", PAD_SEG), terms=PRESIDENT_PIN,
+        verse_store=VERSE_STORE_WITH_OFFICE, **kwargs
+    )
+    draft = clean_draft()
+    if verse_a is not None:
+        draft["verses"]["vA"] = verse_a
+    add_converged_segment(root, "seg01", clean_segpack(), draft)
+    return root
+
+
+def test_verse_carrier_warns_when_no_delivered_field_carries_the_pin(tmp_path):
+    """Round 2's MAJOR: excluding verses outright drops a translated carrier
+    under all five non-`skip` modes, so a term of art inside a verse could drift
+    into the delivered book unreported."""
+    root = _verse_root(tmp_path, verse_a={
+        "rendered": f"{CHAIRMAN_RU} проходит в красной мантии\nВторая строка",
+        "literal_gloss": "Дословно: глава палаты идёт в красном одеянии",
+    })
+    proc = run_final_audit(root)
+    lines = _term_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "verses['vA']" in lines[0]
+
+
+def test_verse_carrier_is_quiet_when_a_delivered_field_carries_the_pin(tmp_path):
+    root = _verse_root(tmp_path, verse_a={
+        "rendered": f"{PRESIDENT_RU} проходит в красной мантии\nВторая строка",
+        "literal_gloss": "Дословно: глава палаты идёт в красном одеянии",
+    })
+    proc = run_final_audit(root)
+    assert _term_lines(proc) == [], proc.stderr
+
+
+def test_a_non_delivered_verse_field_cannot_suppress_the_warning(tmp_path):
+    """Round 3's MAJOR, and the one place this check deliberately parts from
+    WARN 5's every-string-leaf scan.
+
+    WARN 5 asks "did the translator write something BANNED?", where a superset
+    of fields can only over-report. This one asks "is the pin PRESENT?", where a
+    superset lets ANY extra field suppress the warning. Here `rendered` ships
+    the wrong term while an ignored field holds the pin: a string-leaf scan
+    finds it and stays silent, and the book ships the wrong word."""
+    root = _verse_root(tmp_path, verse_a={
+        "rendered": f"{CHAIRMAN_RU} проходит в красной мантии\nВторая строка",
+        "literal_gloss": "Дословно: глава палаты идёт в красном одеянии",
+        "translator_note": f"передано как {PRESIDENT_RU} в основном тексте",
+    })
+    proc = run_final_audit(root)
+    lines = _term_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "verses['vA']" in lines[0]
+
+
+def test_verse_mode_skip_excludes_verse_carriers(tmp_path):
+    """`skip` passes verse content through as-is while still requiring every
+    verse KEY to be present, so an unexcluded project would warn on every verse
+    for doing exactly what its own policy asks."""
+    root = _verse_root(
+        tmp_path,
+        verse_mode="skip",
+        verse_a={"rendered": f"Le {PRESIDENT_FR} passe en robe rouge\nDeuxieme ligne"},
+    )
+    proc = run_final_audit(root)
+    assert _term_lines(proc) == [], proc.stderr
+
+
+def test_a_standalone_verse_block_is_not_compared_as_prose(tmp_path):
+    """Extraction leaves the original poem in a `mount:"block"` verse's segpack
+    BLOCK while validate_draft.py requires its draft block to be ONLY the verse
+    placeholder. Comparing that block would warn on every pinned term the poem
+    contains even when the verse itself renders it correctly."""
+    segpack = clean_segpack(
+        vblockA_source=f"<p>Le {PRESIDENT_FR} passe en robe rouge<br/>Deuxieme ligne</p>"
+    )
+    root = make_durable_root(
+        tmp_path, seg_ids=("seg01", PAD_SEG), terms=PRESIDENT_PIN,
+        verse_store=VERSE_STORE_WITH_OFFICE,
+    )
+    draft = clean_draft()
+    draft["verses"]["vA"] = {
+        "rendered": f"{PRESIDENT_RU} проходит в красной мантии\nВторая строка",
+        "literal_gloss": "Дословно: глава палаты идёт в красном одеянии",
+    }
+    add_converged_segment(root, "seg01", segpack, draft)
+    proc = run_final_audit(root)
+    assert _term_lines(proc) == [], proc.stderr
+
+
+def test_preserve_source_excludes_footnote_carriers_but_not_blocks(tmp_path):
+    """`preserve_source` carries footnote definitions through UNTRANSLATED, so
+    every such definition would otherwise warn. The exclusion is scoped to
+    footnotes: a block in the SAME segment still warns, which is what proves the
+    policy did not switch the whole lane off."""
+    root = _office_root(
+        tmp_path,
+        apparatus_policy="preserve_source",
+        block_target=f"Он заседал в счётной палате {FN_PH}.",
+        footnote_target=f"Le {PRESIDENT_FR} des enquetes, magistrat.",
+    )
+    proc = run_final_audit(root)
+    lines = _term_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "blocks['p1']" in lines[0]
+    assert "footnotes[" not in lines[0]
+
+
+def test_a_duplicate_manifest_vid_is_dropped_rather_than_mis_attributed(tmp_path):
+    """`vid` is book-global, but neither manifest.schema.json nor the W2
+    derivable check rejects a duplicate -- only assemble.py does, much later.
+    Keeping the last writer would compare ONE segment's verse source against
+    ANOTHER segment's draft, and a silently mis-attributed comparison is worse
+    than none in a lane whose contract is to be quiet on inputs it cannot
+    trust."""
+    # BOTH entries carry the office, deliberately. An earlier fixture gave the
+    # second one innocuous text, which made the test vacuous: "keep the last
+    # writer" then produced silence too, for the wrong reason. With the office
+    # in both, ANY resolution -- first-wins or last-wins -- warns, and only
+    # dropping the ambiguous id is silent.
+    duplicated = VERSE_STORE_WITH_OFFICE + [
+        {
+            "vid": "vA",
+            "placeholder": V_PH_A,
+            "context": "body",
+            "parent_block": "vblockA",
+            "plain_text": f"Un autre {PRESIDENT_FR} passe, en robe noire",
+            "sha1": "1" * 40,
+        },
+    ]
+    root = make_durable_root(
+        tmp_path, seg_ids=("seg01", PAD_SEG), terms=PRESIDENT_PIN,
+        verse_store=duplicated,
+    )
+    draft = clean_draft()
+    draft["verses"]["vA"] = {
+        "rendered": f"{CHAIRMAN_RU} проходит в красной мантии\nВторая строка",
+        "literal_gloss": "Дословно: глава палаты идёт в красном одеянии",
+    }
+    add_converged_segment(root, "seg01", clean_segpack(), draft)
+    proc = run_final_audit(root)
+    assert _term_lines(proc) == [], proc.stderr
+
+
+def test_a_carrier_missing_from_the_draft_is_left_to_the_hard_check(tmp_path):
+    """A segpack carrier with no counterpart in the draft is NOT this lane's
+    to report. Hard check 1 (coverage) already fails such a book, and saying it
+    twice -- once as a structural failure, once as a term advisory -- makes the
+    WARN count read as a translation defect it is not.
+
+    Footnote 2 exists in the segpack, carries the office in its source, and has
+    no `footnotes["2"]` in the draft at all. Only TERM-DRIFT lines are asserted
+    on: whatever else this deliberately broken book trips is another check's
+    business."""
+    segpack = _office_segpack()
+    segpack["footnotes"].append(
+        {"n": 2, "source_text": f"Le {PRESIDENT_FR} des comptes, second renvoi."}
+    )
+    root = _office_root(
+        tmp_path, segpack=segpack,
+        footnote_target=f"{CHAIRMAN_RU}м счётной палаты.",
+    )
+    proc = run_final_audit(root)
+    # POSITIVE, not just an absence. Footnote 1 must still be reported, which is
+    # what proves the lane ran at all: an earlier version asserted only that no
+    # `footnotes['2']` line appeared, and a run that CRASHED on the missing
+    # carrier satisfied that too, by emitting no lines whatsoever.
+    lines = _term_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "footnotes['1']" in lines[0]
+    assert "footnotes['2']" not in proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+
+
+def test_term_warnings_never_gate_a_complete_project(tmp_path):
+    """The contract this lane shares with every other WARN: advisory, and it
+    never touches the exit code. Deliberately built with NO padding segment, so
+    the project genuinely completes and the exit code has nothing else to say."""
+    root = make_durable_root(tmp_path, seg_ids=("seg01",), terms=PRESIDENT_PIN)
+    add_converged_segment(
+        root, "seg01", _office_segpack(),
+        clean_draft(
+            p1_text=f"Он заседал в счётной палате {FN_PH}.",
+            extra_footnotes={"1": f"{CHAIRMAN_RU} следственной палаты."},
+        ),
+    )
+    proc = run_final_audit(root)
+    summary = parse_summary(proc)
+    assert_schema_valid(summary)
+    assert len(_term_lines(proc)) == 2, proc.stderr
+    assert summary["warnings"] == 2
+    assert summary["project_complete"] is True
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_an_unreadable_manifest_never_makes_the_term_lane_raise(tmp_path):
+    """The verse source is the one input this lane cannot get anywhere else,
+    and it comes from a file the lane does not own.
+
+    What is asserted is exactly what the lane owes and no more: a manifest it
+    cannot parse produces NO traceback out of the term reader. The run still
+    dies at exit 2 -- the whole-project completeness gate FATALs on an
+    unreadable manifest, which is select_segments.py's contract and predates
+    this check -- and because that fatal happens before main() prints its
+    human-readable report, no WARN line is emitted at all. Asserting a warn here
+    would be asserting the fatal path had not fired."""
+    root = _office_root(
+        tmp_path,
+        footnote_target=f"{CHAIRMAN_RU}м следственной палаты.",
+    )
+    (root / "manifest.json").write_text("{ not json", encoding="utf-8")
+    proc = run_final_audit(root)
+    assert proc.returncode == 2, proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "is not valid JSON" in proc.stderr
+
+
+def test_a_manifest_with_no_verse_block_leaves_the_other_carriers_working(tmp_path):
+    """The ordinary prose-only book: manifest.json carries no `verse` key at
+    all, so the verse index is empty. Blocks and footnotes must still compare --
+    an empty index is a missing SOURCE for verses, never a switched-off lane."""
+    root = _office_root(
+        tmp_path,
+        footnote_target=f"{CHAIRMAN_RU}м следственной палаты.",
+    )
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    assert "verse" not in manifest
+    proc = run_final_audit(root)
+    lines = _term_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "footnotes['1']" in lines[0]

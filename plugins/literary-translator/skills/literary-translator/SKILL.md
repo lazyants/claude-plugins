@@ -3035,9 +3035,9 @@ Runs at W7 over every converged segment:
   but silently substitutes prose the reviewer never saw. Counted separately
   from check 1, both roll into `hard_failures` for backward-compat
   reporting.
-- **Five WARN-only, advisory, whole-book checks** — four generalized from the
+- **Six WARN-only, advisory, whole-book checks** — four generalized from the
   real reference's A1/A3/A4/A5 (the real `main()` only ever gates on coverage),
-  plus (5) whose content the project itself supplies:
+  plus (5) and (6), whose content the project itself supplies:
   (1) glossary-diff — cross-segment name-form drift + `canon.json`
   self-consistency using each draft's `names[]`; (2) link-graph —
   `⟦FNREF_N⟧`/`⟦VERSE_...⟧` sentinel bijection on the translated draft,
@@ -3056,7 +3056,22 @@ Runs at W7 over every converged segment:
   `blocks`/`footnotes`/`verses` is tested **as the translator wrote it**
   (sentinels not stripped, emphasis not stripped), and a pattern that fails
   to compile is reported as its own WARN rather than skipped, so an
-  unenforced rule can never read as a clean run. Prints every WARN as free text for human eyeballing — never
+  unenforced rule can never read as a clean run; (6) term-consistency — the
+  project's own pinned COMMON-NOUN terms of art, declared as
+  `validation.terms` in `profile.yml` (#199), each a bare
+  `source_form`/`target_form` pair. `canon.json` is a proper-name dictionary by
+  construction and check (1) above keys on proper-name channels only, so a
+  recurring office title or institutional realia renders two ways inside one
+  delivered volume with nothing noticing. This reports a CARRIER — one block,
+  one footnote definition, one verse — whose source carries the term while its
+  OWN translated counterpart carries no occurrence of the pinned form, so a body
+  that renders it correctly cannot mask a footnote that does not. Matching is by
+  substring over NFC-normalized, casefolded text: pin the INVARIANT part of the
+  target form. Carriers the active policy passes through untranslated are never
+  compared (`preserve_source` footnotes, `skip` verses, a standalone verse's
+  placeholder-only block), and the run always prints how many terms it checked,
+  so an absent list cannot read as a pass. The plugin ships no terms and
+  hardcodes none. Prints every WARN as free text for human eyeballing — never
   auto-"fixed."
 - **Whole-project completeness gate** (a third gate, distinct from the two
   hard checks which only ever cover segments already converged): shells out

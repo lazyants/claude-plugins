@@ -343,6 +343,42 @@ validation:
     #     - id: adjacent-asterisks
     #       pattern: '\*{2,}'
     #       message: "two or more adjacent asterisks reach the reader verbatim -- separate the spans"
+  terms: []
+    # OPT-IN, default absent (#199). Your project's own pinned COMMON-NOUN TERMS OF ART -- an office
+    # title, a recurring institutional realia -- that must render one way for the whole book. Each
+    # entry is a source_form/target_form pair and nothing else: unlike a forbidden_patterns regex,
+    # the source form is readable on its own and is echoed verbatim in the WARN line, so there is no
+    # id and no message to write.
+    #
+    # Why this is not canon.json: canon is a PROPER-NAME dictionary by construction -- the candidate
+    # extractor surfaces capitalized forms, and the glossary contract never accepts an entry marked
+    # is_proper_name:false -- and W7's cross-segment glossary-diff keys on canon entries and each
+    # draft's own names[], both proper-name channels. A recurring common noun therefore renders two
+    # ways inside one delivered volume with nothing, not even a WARN, noticing. This field is the
+    # DETECTION half only. The term itself is pinned where it always was: style_bible.md section C's
+    # title/honorific mapping, which is delivered in full to every translate and review job.
+    #
+    # What W7 reports: a CARRIER -- one block, one footnote definition, one verse -- whose SOURCE
+    # contains source_form while its OWN translated counterpart contains no occurrence of
+    # target_form. Carrier-local, so a body that renders the office correctly cannot hide a footnote
+    # that does not. Advisory only: never a hard failure, never an exit-code change. The run always
+    # prints how many terms it checked, so an absent or empty list can never read as a clean pass.
+    #
+    # Matching is by SUBSTRING over NFC-normalized, casefolded text. That is what makes a suffixing
+    # target language work: pin the INVARIANT part of the target form and its inflected surfaces are
+    # found inside it (`президент` is found in `президента`). A target language that inflects by
+    # prefix or stem change cannot be pinned this way. A carrier whose occurrence you legitimately
+    # omitted or rendered pronominally still warns -- the line names the carrier, so that costs one
+    # glance.
+    #
+    # Carriers your own policy passes through UNTRANSLATED are never compared: footnote definitions
+    # under footnotes.apparatus_policy: preserve_source, verses under verse_policy.mode: skip, and
+    # the placeholder-only draft block of a standalone verse.
+    #
+    # Example -- the Ancien-Regime court office that motivated this:
+    #   terms:
+    #     - source_form: "président"
+    #       target_form: "президент"
   admit_contract_only_stale: false
     # OPT-IN, default false (#533). Editing style_bible.md between the STYLE_CONTRACT markers moves
     # style_contract_hash, which flips EVERY already-converged segment to `stale` -- and both the W7

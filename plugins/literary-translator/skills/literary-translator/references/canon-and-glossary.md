@@ -340,6 +340,25 @@ Note the field-name generalization from the source project: the proven
 `canonical_ru`); the plugin generalizes these to `source_form` and
 `canonical_target_form` so the same schema works for any language pair.
 
+**A recurring COMMON-NOUN term of art is out of canon scope, by design — and it
+has a home.** An office title or institutional realia that must render one way
+for the whole book (`président` of an Ancien-Régime sovereign court) is not a
+name, and nothing here can freeze it: the candidate extractor surfaces
+capitalized forms, the `sense_translated` constraint above deliberately walls
+common nouns out, and the shipped adjudication contract gives an
+`is_proper_name:false` entry `disposition:"review_queue"`, never `"accepted"`.
+That is the correct boundary, not a gap to close in canon — widening it would
+re-open exactly the leak the `is_proper_name: const true` rule closes, a
+common-noun candidate frozen and delivered by the basis-blind `segpack.py`.
+Such a term is PINNED in `style_bible.md` section C's title/honorific mapping,
+which is delivered in full to every translate and review job. Its
+machine-checkable twin is `profile.yml`'s `validation.terms` (#199), an opt-in
+list of bare `source_form`/`target_form` pairs that `final_audit.py`'s WARN 6
+tests carrier by carrier at W7. Before that existed, drift of such a term was
+invisible to every gate — `final_audit.py`'s cross-segment glossary-diff keys on
+`canon.entries` and each draft's own `names[]`, both proper-name channels — and
+a single volume shipped one court office under two target words.
+
 ### `canon-batch.schema.json` — one fragment's real content contract
 
 ```
