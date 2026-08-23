@@ -1028,6 +1028,64 @@ as a content block (or so the empty definition is not emitted), then re-extract.
 Do NOT edit the check: the failure is real, and it is cheaper here than after a
 translation round.
 
+### Oversized source block — the census this gate always prints (#504)
+
+The gate also prints, on stdout, one **`NOTE block_size_census:`** line for
+every schema-valid run, clean or not — e.g. `NOTE block_size_census: n=1212
+blocks, median 6, p90 851, largest 17896 characters; artifact threshold 10x p90
+= 8510 (1 block(s) at or above it). largest: PARA:seg21:0001=17896; ...`. When
+at least one block crosses the threshold, it additionally prints a **`WARN
+block_size_census:`** line on stderr and adds to the advisory count in the
+final status line; the NOTE alone never does. Both are REPORT-ONLY: they touch
+neither `derivable_ok` nor `region_ok`, so this census can neither refuse an
+ingestion nor rescue a failing one.
+
+It means one of the blocks some segment claims — a member of that segment's
+`block_ids` — is disproportionately large next to the rest of this book's own
+blocks. The usual cause is a wrap/extraction artifact: a converter joining a
+whole narrative, or several paragraphs, into a single block. Nothing else in
+this pipeline is size-aware at the block level to catch it — the only existing
+size check is the per-segment word count, and a 17 896-character block passes
+that exactly as a 400-character one does.
+
+**The census is a SCREEN, not a verdict.** The reference is this book's own p90
+block size; the threshold is 10x that reference, computed only over the
+distinct blocks some segment's `block_ids` names whose `plain_text` is
+non-empty (this excludes `FN:` footnote-definition blocks, unattached
+front/back matter such as the Project Gutenberg licence block, and an embedded
+verse's text, which is lifted out of its carrier block). Below 30 such blocks
+the check is silent about outliers — the reference would sit inside the
+outlier's own neighbourhood — but the NOTE still prints the count, so the
+silence is visible rather than absent. A genuinely long paragraph looks
+identical here to an artifact; the census cannot tell them apart, and does not
+try to.
+
+Adjudicate a WARN the same way as the visual-order advisory above:
+
+1. Read the named block(s), in the manifest, against the printed source.
+2. **A genuinely long paragraph** — record nothing, carry on.
+3. **An extraction artifact** — the source block is not authoritative
+   structure, so this segment's translation may need to reflect the printed
+   book's real paragraphing rather than the extractor's block boundary. Record
+   that finding, with the census figures as evidence, in that segment's own
+   draft `notes[]` array (see `review_TASK.template.md`), never in the
+   manifest. At W2 no draft exists yet, and a `manifest.json` segment object is
+   `additionalProperties: false` with no `notes` field to write into — carry
+   the finding forward to the translate turn, which is where the draft, and its
+   `notes[]`, first exist.
+
+One exception to "always": if the census cannot be BUILT -- a malformed
+`blocks{}` the mandatory checks own, say -- no NOTE is printed and the failure
+is named as a `WARN block_size_census: scan unavailable` advisory instead, so
+the absence is reported rather than silent. A census that could not be
+*printed* stays silent: nothing is invented about a run whose stdout failed.
+
+**Nothing is re-paragraphed for you.** Re-cutting a block changes the segpack's
+block-key set, and `validate_draft.py` locks that key set 1:1 against the draft
+— re-extracting to fix an artifact would force every already-reviewed draft to
+be re-cut. This gate names the outlier; it does not act on it, and it does not
+ask you to edit `style_bible.md`.
+
 **New in 1.12.0 (#210) — two additional HARD checks land in
 `run_derivable_checks`**, both exit `1`, both running unconditionally,
 including for `source.format: custom` (only the extractor self-check
