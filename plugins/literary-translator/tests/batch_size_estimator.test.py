@@ -534,7 +534,7 @@ async function agent(promptText, opts) {
     // defaults to a clean pass, so the many fixtures that predate #607 and
     // care only about call COUNTS need no per-round scripting.
     const q = queues[seg].fixScopes;
-    if (q.length === 0) return { ok: true, n_checked: 79 };
+    if (q.length === 0) return { ok: true, n_checked: 79, n_expected: 79 };
     return q.shift();
   }
   if (label.indexOf("draft-probe:") === 0) {
@@ -747,7 +747,7 @@ def converged_worst_case_plan(seg: str, max_fix_rounds: int, *, final_clean: boo
     # confirming round dispatches no fix and so consumes none.
     fix_scopes = []
     for _ in range(max_fix_rounds):
-        fix_scopes.extend([None, {"ok": True, "n_checked": 79}])
+        fix_scopes.extend([None, {"ok": True, "n_checked": 79, "n_expected": 79}])
 
     plan = {
         "wait": ready,

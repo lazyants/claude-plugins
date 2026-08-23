@@ -714,8 +714,10 @@ it.
   reached:** 1 `in_progress` ledger write + 1 translate DISPATCH + 1
   translate WAIT = **`2 + WAIT_CALLS` fixed calls** (3 before #348, 11 now).
 - **A NORMAL round** (one that neither converges nor terminates the loop):
-  one review point (`5 + WAIT_CALLS`) + one fix call (1) =
-  **`6 + WAIT_CALLS` calls**.
+  one review point (`5 + WAIT_CALLS`) + one fix call (1) + #607's fix-scope
+  audit (up to 2 — a round that CONTINUES may spend a failed first relay and
+  its successful retry) = **`8 + WAIT_CALLS` calls** (`6 + WAIT_CALLS` before
+  #607).
 - **The final confirming review** (always runs, even after the round cap):
   one review point = **`5 + WAIT_CALLS` calls**, no fix call attached to it.
 - **+1 terminal ledger write**, whichever terminal status fires

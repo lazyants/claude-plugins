@@ -212,7 +212,7 @@ async function agent(promptText, opts) {
   // TEXT and branch reachability, never about the audit's own verdict, so a
   // clean pass is the right constant here; batch_size_estimator.test.py and
   // fix_scope_gate.test.py own the mismatch and relay-failure paths.
-  if (label.indexOf("fix-scope:") === 0) return { ok: true, n_checked: 79 };
+  if (label.indexOf("fix-scope:") === 0) return { ok: true, n_checked: 79, n_expected: 79 };
   if (label.indexOf("draft-probe:") === 0) return { present: true };
   throw new Error("mock agent(): unrecognized label " + label);
 }

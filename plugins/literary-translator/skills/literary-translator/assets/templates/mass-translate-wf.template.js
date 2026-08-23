@@ -109,8 +109,11 @@
 //                                          bash argument (space/unicode paths included).
 //   {{PLUGIN_ROOT}}                       -- #412: the plugin's own install root (NEVER
 //                                          {{DURABLE_ROOT}}/scripts/, the Step-0a COPY the codex
-//                                          process this driver launches can write to), or an EMPTY
-//                                          STRING when this dispatch does not opt into the redirect.
+//                                          process this driver launches can write to). #607: this
+//                                          token is now MANDATORY for this template -- an empty
+//                                          string used to mean "does not opt into the redirect" and
+//                                          is now REFUSED by the batch preflight, because the
+//                                          fix-scope audit runs only from the plugin install tree.
 //                                          Same substitution shape as {{CODEX_COMPANION_PATH_JSON}}
 //                                          immediately above (a strict json.dumps JS STRING LITERAL,
 //                                          WITH its own surrounding quotes, sitting OUTSIDE quotes in
@@ -345,10 +348,11 @@ const DRAFT_PROBE_SCHEMA = {
 const FIX_SCOPE_SCHEMA = {
   type: "object",
   additionalProperties: true,
-  required: ["ok"],
+  required: ["ok", "n_checked", "n_expected"],
   properties: {
     ok: { type: "boolean" },
     n_checked: { type: "integer" },
+    n_expected: { type: "integer" },
     verdict: { type: "string" },
     differing: { type: "array", items: { type: "string" } },
     missing: { type: "array", items: { type: "string" } },
@@ -417,10 +421,15 @@ const COMPANION = {{CODEX_COMPANION_PATH_JSON}};
 // but unlike COMPANION there is no dedicated resolver script
 // (resolve_codex_companion.py's own counterpart) to lean on, so this file
 // re-checks it itself -- mirroring EFFORT_RE/MODEL_RE above -- before it
-// ever reaches the codex_job.py dispatch SHELL command: empty is valid (the
-// redirect opt-out), a non-empty value must contain no single quote or
-// control character -- the exact class that would break out of the
-// SINGLE-QUOTED bash splice below.
+// ever reaches the codex_job.py dispatch SHELL command. A non-empty value
+// must contain no single quote or control character -- the exact class that
+// would break out of the SINGLE-QUOTED bash splice below.
+//
+// #607: empty is NO LONGER a valid runtime state for this template. It used
+// to mean "not opted into the redirect"; the batch preflight further down now
+// refuses it outright, because the fix-scope audit runs only from the plugin
+// install tree and there is no weaker fallback worth taking. The check below
+// still guards only the non-empty case, since empty never reaches a dispatch.
 const PLUGIN_ROOT = {{PLUGIN_ROOT}};
 const PLUGIN_ROOT_UNSAFE_RE = /['\x00-\x1f\x7f]/;
 if (PLUGIN_ROOT !== "" && PLUGIN_ROOT_UNSAFE_RE.test(PLUGIN_ROOT)) {
@@ -1523,7 +1532,15 @@ function fixScopeAuditPrompt(seg) {
   const lines = [];
   lines.push("Effort: low. Mechanical verification only -- do not judge the comparison yourself, and do not repair anything you are told about.");
   lines.push("Segment: " + seg + ". Durable root: " + ROOT + ".");
-  lines.push("Run exactly: " + PY + " " + PLUGIN_ROOT + "/assets/scripts/fix_scope_audit.py --verify-copies --durable-root " + ROOT);
+  // Both paths SINGLE-QUOTED, the same splice contract every codex_job.py
+  // launch line above uses. PLUGIN_ROOT is already validated to contain no
+  // single quote or control character; ROOT comes from the same operator
+  // config. Interpolating either bare would split a perfectly legitimate
+  // install path like /Users/First Last/... into several shell arguments,
+  // the checker would print no JSON, and two such attempts would spend the
+  // segment on fix-scope-unverified -- a false RED this diff would have
+  // introduced on a plugin-root shape the template explicitly supports.
+  lines.push("Run exactly: " + PY + " '" + PLUGIN_ROOT + "/assets/scripts/fix_scope_audit.py' --verify-copies --durable-root '" + ROOT + "'");
   lines.push("Relay that command's single printed JSON line verbatim as your own structured result. The script already did the comparison. If it exits non-zero, that is a verdict, not a failure to report -- relay the line exactly as printed.");
   return lines.join("\n");
 }
@@ -1688,6 +1705,36 @@ async function callFix(seg, round, revObj) {
 // block) -- which is inconclusive and never a pass, so runRound retries once
 // and then treats a second failure as terminal rather than proceeding on an
 // unverified surface.
+// #607 -- the batch-level record of every fix-scope halt, kept in THIS
+// script's memory and returned in the batch result.
+//
+// It exists because the per-segment terminal fragment cannot be the only
+// record. Writing that fragment runs ledger_update.py from
+// ${ROOT}/scripts/ -- the very tree the audit has just reported as diverging
+// from the plugin -- so the write can fail for exactly the reason the halt
+// fired, and recordLedgerCall's ok:false path then returns ledger-write-
+// failed WITHOUT the promised blocked fragment. The in_progress fragment
+// translateStage already wrote survives, select_segments.py classifies it
+// recoverable, and the next batch redispatches over the unverified tree.
+//
+// This array is not on disk and does not depend on that tree, so the
+// operator is told either way. It does NOT make the durable record
+// bulletproof: what it guarantees is that the BATCH cannot end looking
+// clean when a halt fired. Shipped prose must claim that and no more.
+const fixScopeHalts = [];
+
+function haltBatchOnFixScope(seg, reason, ledgerRecorded) {
+  fixScopeHalts.push({ seg: seg, reason: reason, ledgerRecorded: ledgerRecorded === true });
+  log(
+    "FIX-SCOPE HALT on " + seg + ": " + reason +
+    (ledgerRecorded === true
+      ? " (recorded in the ledger)"
+      : " -- THE LEDGER WRITE ALSO FAILED, so no durable blocked fragment exists for this segment. " +
+        "Do not re-run this batch before re-running Step 0a's copy pass: the segment's surviving " +
+        "in_progress fragment classifies as recoverable and would be redispatched over the same tree.")
+  );
+}
+
 async function callFixScopeAudit(seg, round, isRetry) {
   const label = "fix-scope:" + seg + ":r" + round + (isRetry ? ":retry" : "");
   return await agent(fixScopeAuditPrompt(seg), {
@@ -1875,7 +1922,31 @@ async function runRound(seg, round, isFinal) {
         note: "the fix-scope audit relay failed twice; the durable root's plugin-installed copies could not be verified after this fix turn" },
       "ledger:blocked:fix-scope-unverified:" + seg,
     );
+    haltBatchOnFixScope(seg, "fix-scope-unverified", recUnverified.ok);
     if (!recUnverified.ok) return { terminal: true, value: recUnverified.failResult };
+    return { terminal: true, value: { seg: seg, converged: false, reason: "fix-scope-unverified", rounds: round } };
+  }
+  // A clean verdict must also SHOW that it compared something. `ok` alone is
+  // the classic false GREEN: a walk that covered nothing prints exactly like
+  // a walk that covered everything, and the relay is a model turn that could
+  // return a bare {ok:true}. The script reports both the number it checked
+  // and the number it was supposed to check, and they must agree and be
+  // non-zero. This does NOT stop a relay that fabricates BOTH numbers -- that
+  // residual is disclosed in SKILL.md rather than papered over with a check
+  // that cannot see it.
+  const scopeCountSound = Number.isInteger(scope.n_expected) && scope.n_expected > 0 &&
+    scope.n_checked === scope.n_expected;
+  if (scope.ok === true && !scopeCountSound) {
+    const recCount = await recordLedgerCall(
+      seg,
+      { status: "blocked", reason: "fix-scope-unverified",
+        note: "the fix-scope audit reported a clean verdict whose coverage count is missing, zero, or inconsistent (n_checked=" +
+              String(scope.n_checked) + ", n_expected=" + String(scope.n_expected) +
+              ") -- a pass that compared nothing is not a pass" },
+      "ledger:blocked:fix-scope-unverified:" + seg,
+    );
+    haltBatchOnFixScope(seg, "fix-scope-unverified", recCount.ok);
+    if (!recCount.ok) return { terminal: true, value: recCount.failResult };
     return { terminal: true, value: { seg: seg, converged: false, reason: "fix-scope-unverified", rounds: round } };
   }
   if (scope.ok !== true) {
@@ -1899,6 +1970,7 @@ async function runRound(seg, round, isFinal) {
               "Re-run Step 0a's copy pass from the plugin path, then re-run this segment." },
       "ledger:blocked:fix-scope-violation:" + seg,
     );
+    haltBatchOnFixScope(seg, "fix-scope-violation", recViolation.ok);
     if (!recViolation.ok) return { terminal: true, value: recViolation.failResult };
     return { terminal: true, value: { seg: seg, converged: false, reason: "fix-scope-violation", rounds: round } };
   }
@@ -2287,6 +2359,18 @@ if (!ledgerMergeSucceeded(mergeResult)) {
   return {
     converged: converged, failed: failed,
     batchComplete: false, reason: "ledger-merge-failed", detail: detail,
+    fixScopeHalts: fixScopeHalts,
+  };
+}
+
+// #607 -- a batch in which any fix-scope halt fired is NOT batchComplete,
+// whatever the ledger says. This is the outcome that does not depend on the
+// durable tree the halt just called into question.
+if (fixScopeHalts.length > 0) {
+  return {
+    converged: converged, failed: failed, batchComplete: false,
+    reason: "fix-scope-halt", fixScopeHalts: fixScopeHalts,
+    ledgerPath: mergeResult.ledger_path, staleSegments: mergeResult.stale_segments,
   };
 }
 

@@ -368,9 +368,17 @@ def audit(durable_root: Path) -> dict:
             marker_mismatches.append(label)
 
     ok = not (differing or missing or irregular or extra or marker_mismatches or unreadable)
+    # n_expected is the size of the set this run was SUPPOSED to compare --
+    # len(compared_pairs()) plus the two markers. The caller binds
+    # n_checked == n_expected and n_expected > 0, so a walk that silently
+    # covered nothing can no longer print exactly like a walk that covered
+    # everything (a loop that runs zero times is the classic false GREEN).
+    # It does not defend against a RELAY that fabricates the pair; that
+    # residual is disclosed in SKILL.md rather than papered over here.
     result = {
         "ok": ok,
         "n_checked": n_checked,
+        "n_expected": len(compared_pairs()) + len(MARKER_SPECS),
     }
     if not ok:
         result["verdict"] = "mismatch"

@@ -2278,12 +2278,34 @@ whole residual:
   it needs a digest handed out at `needs_fix` and required back on the next
   invocation; that is tracked separately and is not in 1.52.0.
 
-**Halt contract.** A mismatch records a terminal `blocked` fragment with
-reason `fix-scope-violation`; two consecutive failures of the audit relay
-record `fix-scope-unverified`. Both classify `human_escalation`. Neither is
-recoverable on its own, deliberately: leaving the segment `in_progress` would
-let the next batch run over exactly the state the gate could not verify.
-Clearing one costs that segment a re-translation — name it under
+**Halt contract.** A mismatch ends the segment with reason
+`fix-scope-violation`; two consecutive failures of the audit relay end it as
+`fix-scope-unverified`. Both attempt a terminal `blocked` fragment and both
+classify `human_escalation`. Neither is recoverable on its own,
+deliberately: leaving the segment `in_progress` would let the next batch run
+over exactly the state the gate could not verify.
+
+That durable fragment, though, is written by `ledger_update.py` FROM the tree
+the audit has just reported as diverging, so the write can fail for the very
+reason the halt fired — and the `in_progress` fragment already on disk
+classifies `recoverable`. So the halt is ALSO recorded where the audited tree
+cannot reach it: a `FIX-SCOPE HALT` log line, and a batch result of
+`batchComplete: false`, `reason: "fix-scope-halt"`, with one `fixScopeHalts`
+entry per halted segment carrying `ledgerRecorded`. **Read the batch return
+before dispatching another batch** — that entry, not the ledger, is what
+survives a failed write. It does not make the durable record bulletproof; it
+makes a batch that halted unable to end looking clean.
+
+**A clean verdict is honoured only if it counted something.** The script
+reports both `n_checked` and the `n_expected` it derives from the same walk;
+W5 honours `ok: true` only when they are equal and non-zero, and otherwise
+takes the `fix-scope-unverified` path. `ok` alone was a false GREEN — a walk
+that runs zero times prints exactly like one that covered everything. The
+residual is stated rather than closed: the audit reaches W5 through a model
+relay, and a relay that fabricates its reply can fabricate BOTH numbers.
+Nothing here prevents that.
+
+Clearing a halt costs that segment a re-translation — name it under
 `--only-segs`, and for a previously converged segment add
 `--allow-retranslate-converged`. And a mismatch is **not by itself proof of
 tampering**: a plugin upgraded mid-project gives the identical signal, and

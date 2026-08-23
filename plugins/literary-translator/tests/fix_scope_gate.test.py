@@ -43,10 +43,12 @@ pytestmark = _bse.NODE_REQUIRED if hasattr(_bse, "NODE_REQUIRED") else pytest.ma
 )
 
 SEG = "seg01"
+CLEAN = {"ok": True, "n_checked": 79, "n_expected": 79}
 MISMATCH = {
     "ok": False,
     "verdict": "mismatch",
     "n_checked": 79,
+    "n_expected": 79,
     "differing": ["scripts/validate_draft.py"],
     "missing": [],
     "irregular": [],
@@ -145,7 +147,7 @@ def test_audit_runs_before_fx_is_inspected(tmp_path, fix_reply, case):
 def test_one_relay_failure_retries_and_continues(tmp_path):
     """A single dead relay is infra flakiness. It must cost one retry, not a
     segment: the round carries on exactly as it would have."""
-    plan = one_round_plan(fix_scopes=[None, {"ok": True, "n_checked": 79}])
+    plan = one_round_plan(fix_scopes=[None, CLEAN])
     plan[SEG]["reviewWaits"] = [f"READY {SEG}", f"READY {SEG}"]
     plan[SEG]["reviews"] = [review_obj(clean=False), review_obj(clean=True)]
     plan[SEG]["artifactChecks"] = [match_true(), match_true()]
@@ -174,7 +176,7 @@ def test_final_round_dispatches_no_audit(tmp_path):
     """`isFinal` returns before `callFix`, so the mandatory confirming round
     never dispatches a fix and has nothing to audit. An audit there would be
     a call the estimator does not budget."""
-    plan = one_round_plan(fix_scopes=[{"ok": True, "n_checked": 79}])
+    plan = one_round_plan(fix_scopes=[CLEAN])
     plan[SEG]["reviewWaits"] = [f"READY {SEG}", f"READY {SEG}"]
     plan[SEG]["reviews"] = [review_obj(clean=False), review_obj(clean=False)]
     plan[SEG]["artifactChecks"] = [match_true(), match_true()]
@@ -197,3 +199,53 @@ def test_clean_verdict_never_reaches_the_audit(tmp_path):
     out = drive(tmp_path, plan)
     assert [r["seg"] for r in out["result"]["converged"]] == [SEG]
     assert not any(lb.startswith("fix-scope:") for lb in labels_of(out))
+
+
+@pytest.mark.parametrize("clean,case", [
+    ({"ok": True, "n_checked": 0, "n_expected": 0}, "checked nothing, and said so consistently"),
+    ({"ok": True, "n_checked": 0, "n_expected": 79}, "walk covered nothing"),
+    ({"ok": True, "n_checked": 12, "n_expected": 79}, "walk truncated part-way"),
+])
+def test_a_clean_verdict_that_compared_nothing_is_not_a_pass(tmp_path, clean, case):
+    """`ok` alone was the false GREEN: a walk that runs zero times prints
+    exactly like one that covered everything, and the relay between the script
+    and this workflow is a model turn. The script reports what it checked AND
+    what it was supposed to check; a clean verdict is only honoured when those
+    agree and are non-zero.
+
+    This does not stop a relay that fabricates BOTH numbers, which is why
+    SKILL.md discloses that residual instead of implying this closes it."""
+    out = drive(tmp_path, one_round_plan(fix_scopes=[clean]))
+    failed = out["result"]["failed"][0]
+    assert failed["reason"] == "fix-scope-unverified", case
+    assert out["result"]["batchComplete"] is False, case
+
+
+def test_a_halt_is_reported_at_batch_level_even_when_the_ledger_write_fails(tmp_path):
+    """The blocked fragment is written by `ledger_update.py` FROM THE DURABLE
+    TREE the audit has just reported as diverging -- so the write can fail for
+    exactly the reason the halt fired, and `recordLedgerCall`'s failure path
+    returns without the promised fragment. The surviving `in_progress`
+    fragment then classifies as recoverable and the next batch redispatches.
+
+    The batch-level record does not live in that tree. It cannot make the
+    durable record bulletproof; what it guarantees is that the batch cannot
+    END LOOKING CLEAN when a halt fired."""
+    plan = one_round_plan(fix_scopes=[MISMATCH])
+    plan[SEG]["ledgerWrites"] = {"blocked": None}
+    out = drive(tmp_path, plan)
+    result = out["result"]
+    assert result["batchComplete"] is False
+    assert result["reason"] == "fix-scope-halt" or result.get("fixScopeHalts")
+    halts = result["fixScopeHalts"]
+    assert [h["seg"] for h in halts] == [SEG]
+    assert halts[0]["reason"] == "fix-scope-violation"
+    assert any("FIX-SCOPE HALT" in line for line in out["log"]), out["log"]
+
+
+def test_a_successful_halt_still_marks_the_batch_incomplete(tmp_path):
+    out = drive(tmp_path, one_round_plan(fix_scopes=[MISMATCH]))
+    result = out["result"]
+    assert result["batchComplete"] is False
+    assert result["reason"] == "fix-scope-halt"
+    assert result["fixScopeHalts"][0]["ledgerRecorded"] is True

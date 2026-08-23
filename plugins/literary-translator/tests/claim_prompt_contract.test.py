@@ -1296,7 +1296,7 @@ async function agent(promptText, opts) {
   // TEXT (the claimed dispatch_token must survive byte for byte), never about
   // the audit's verdict, so a clean pass is the right constant; the mismatch
   // and relay-failure branches belong to fix_scope_gate.test.py.
-  if (label === "fix-scope:" + SEG + ":r1") return { ok: true, n_checked: 79 };
+  if (label === "fix-scope:" + SEG + ":r1") return { ok: true, n_checked: 79, n_expected: 79 };
   if (label === "draft-probe:" + SEG) return { present: true };
   throw new Error("mock agent(): unrecognized label " + JSON.stringify(label));
 }
