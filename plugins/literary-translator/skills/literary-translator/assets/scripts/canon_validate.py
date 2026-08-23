@@ -1402,6 +1402,29 @@ def _load_batch_bytes(batch_path_str: str):
     return raw, doc
 
 
+def _same_json_value(a, b) -> bool:
+    """Type-exact equality for two decoded JSON values -- the comparison the
+    `--correct` interlock needs, which `==` is not.
+
+    Python's `==` collapses the boolean/number boundary: `True == 1` and
+    `False == 0`. Once `old_entry` accepts ANY JSON value (it must -- see the
+    schema), that leaks straight into the interlock: an on-disk `true` could be
+    matched by a stated `1`, and the correction would be applied and RECORDED
+    with the wrong value. The record is this mode's whole deliverable, so a
+    record that misstates what was on disk defeats it even when the edit itself
+    was the one the operator wanted.
+
+    Compared as canonical JSON text rather than by walking the structures:
+    `sort_keys=True` makes object key ORDER irrelevant (it is not part of the
+    value) while list order stays significant (it is), and the encoder writes
+    `true` and `1` differently, which is the whole point. Both sides came out
+    of `json.loads`, so both are always encodable.
+    """
+    return json.dumps(a, sort_keys=True, ensure_ascii=False) == json.dumps(
+        b, sort_keys=True, ensure_ascii=False
+    )
+
+
 def _load_correction(correction_path_str: str) -> dict:
     """The parsed correction document for --correct (#495), read through
     `_read_json_bytes` for the same reason every fragment read is: a
@@ -2345,7 +2368,7 @@ def run_correct(
 
     existing = entries[source_form]
     old_entry = doc["old_entry"]
-    if existing != old_entry:
+    if not _same_json_value(existing, old_entry):
         # The blind-use interlock, and the whole reason old_entry is
         # required. Both values are named: a correction authored against a
         # stale read must show the operator WHAT it read and what is
@@ -2361,7 +2384,7 @@ def run_correct(
     disposition = doc["disposition"]
     if disposition == "correct":
         new_entry = doc["new_entry"]
-        if new_entry == old_entry:
+        if _same_json_value(new_entry, old_entry):
             raise CanonValidationError(
                 f"{source_form!r}: new_entry is identical to old_entry -- "
                 f"nothing to correct. The merge path treats an identical "

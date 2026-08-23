@@ -963,5 +963,57 @@ def test_a_primitive_old_entry_still_faces_the_interlock(tmp_path):
     assert_refused(proc, root, before, "a-different-string", "not-an-object")
 
 
+@pytest.mark.parametrize(
+    "on_disk,stated",
+    [(True, 1), (False, 0), (1, True), (0, False), (1, 1.0)],
+    ids=["true-vs-1", "false-vs-0", "1-vs-true", "0-vs-false", "int-vs-float"],
+)
+def test_the_interlock_is_type_exact_not_python_equal(tmp_path, on_disk, stated):
+    """A consequence of unconstraining `old_entry`, found on PR review.
+
+    Python's `==` collapses the boolean/number boundary (`True == 1`), so a
+    correction could state `1` for an on-disk `true`, pass the interlock, and be
+    RECORDED with the wrong value. The record is this mode's whole deliverable —
+    a record that misstates what was on disk defeats it even when the edit
+    itself was the one the operator wanted. Reproduced exactly that way before
+    the fix: rc=0, row removed, `corrections[0].old_entry == 1`.
+
+    `1` vs `1.0` rides along because it is the same class of collapse and the
+    canonical-JSON comparison settles it for free."""
+    root = make_french_project(tmp_path)
+    canon = read_canon(root)
+    canon["entries"]["broken"] = on_disk
+    (root / "canon.json").write_text(json.dumps(canon, ensure_ascii=False), encoding="utf-8")
+    before = canon_bytes(root)
+
+    doc = {
+        "source_form": "broken",
+        "disposition": "remove",
+        "old_entry": stated,
+        "reason": "stating a Python-equal but JSON-different value",
+    }
+    proc = run_correct(root, write_correction(root, doc))
+    assert_refused(proc, root, before, "refusing to correct blind")
+
+
+def test_the_type_exact_comparison_still_admits_a_reordered_object(tmp_path):
+    """The other side of that fix: object key ORDER is not part of a JSON
+    value, so a correction whose `old_entry` states the same fields in a
+    different order must still be admitted. Comparing serialized text WITHOUT
+    `sort_keys` would have broken every ordinary correction — the one authored
+    by hand rather than copy-pasted out of the file."""
+    root = make_french_project(tmp_path)
+    frozen = read_canon(root)["entries"][CORRECTED]
+    reordered = dict(reversed(list(frozen.items())))
+    assert list(reordered) != list(frozen), "fixture did not actually reorder the keys"
+
+    doc = correction_doc(old_entry=reordered)
+    proc = run_correct(root, write_correction(root, doc))
+    assert proc.returncode == 0, (
+        f"a key-reordered old_entry was refused -- key order is not part of the "
+        f"value:\n{proc.stdout}\n{proc.stderr}"
+    )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

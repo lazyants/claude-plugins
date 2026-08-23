@@ -417,8 +417,11 @@ Two asymmetries carry real weight:
   `null`, so such a row could be DIAGNOSED and not REPAIRED, sending the
   operator back to the hand edit. `new_entry` is what gets frozen, so it
   validates.
-- **`old_entry` is not an open channel, despite its loose type.** It must EQUAL
-  what is on disk, so the only value that can ever be recorded through it is one
+- **`old_entry` is not an open channel, despite its loose type.** It must equal
+  what is on disk — compared as canonical JSON, not with Python `==`, so the
+  boolean/number collapse (`True == 1`) cannot let a correction state one value,
+  pass, and be RECORDED as another; object key order stays irrelevant. So the
+  only value that can ever be recorded through it is one
   `canon.json` already held. `reason` is required and non-blank but NOT
   length-capped — `canon-entry.schema.json`'s own `note` is unbounded and rides
   in the same document via `new_entry`, so capping `reason` would bound one
