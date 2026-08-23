@@ -12,9 +12,18 @@ the_gate_can_raise` staying GREEN while listed as a PROOF, and six further
 tests belonging to no listed category at all. Re-measured directly against
 that mutation before writing the corrected lists below -- every RED/GREEN
 verdict stated here is the actual pytest outcome under it, not a
-recollection. Every test in this file now appears in EXACTLY ONE of the four
-categories; "not in the BOUNDS list" must never again be read as "therefore
-a PROOF".
+recollection. "Not in the BOUNDS list" must never be read as "therefore a
+PROOF".
+
+SCOPE of these four categories, stated because an earlier version of this
+paragraph claimed more than it held: they cover the tests of the #409 Step 3
+gate and its RUN_ID security fix -- the two mechanisms this taxonomy was
+measured against. Tests belonging to a LATER, separately-scoped fix live
+under their own banner further down (the #460 unstattable-directory fix, the
+#428 slot-file fix) and are deliberately outside these lists, since neither
+is about whether the Step 3 refusal fires. Do not add a test to this file
+without either placing it in one of the four categories below or giving it
+such a banner.
 
 PROOFS -- these go RED under that exact mutation, and they are the ONLY
 tests that may ever be cited as evidence the Step 3 refusal itself works:
@@ -1127,9 +1136,11 @@ def test_workflow_scan_folds_an_unstattable_entry_into_evidence(tmp_path):
 def _slot_paths(root, seg, kind="translate"):
     """`(attempt, pending)` for `seg`, built by the REAL producer.
 
-    `CodexJob.__init__` is pure state setup -- it does no filesystem I/O and
-    validates neither `companion` nor `prompt_file` -- so constructing one
-    with placeholder paths is enough to read the two slot names off it. Its
+    `CodexJob.__init__` is pure state setup: it creates and reads nothing,
+    and validates neither `companion` nor `prompt_file` (it canonicalizes
+    `root` through `os.path.realpath`, which touches no file it needs to
+    exist) -- so constructing one with placeholder paths is enough to read
+    the two slot names off it. Its
     own docstring anticipates a direct construction by a test; several
     sibling suites already do it (codex_job_driver.test.py, claim_end_to_end
     .test.py)."""

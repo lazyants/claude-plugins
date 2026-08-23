@@ -227,8 +227,10 @@ and from the resume-integrity digest:
   the next run's `adopt_pending()` (which re-validates it through the same candidate
   gates before promoting anything). Same suffix collision, same resolution: it is
   skipped by the dispatch scans, which matters more here than for `.att.*`, because a
-  pending left by an EARLIER run carries that run's `dispatch_token` and used to inject
-  a run id with no real draft behind it into the resume-integrity gate's evidence,
+  pending left by an EARLIER run CAN carry that run's `dispatch_token` (it holds a
+  completed but not-yet-validated candidate, so a malformed one may carry no usable
+  token at all) and a tokened one used to inject a run id with no real draft behind it
+  into the resume-integrity gate's evidence,
 - `.codex_job.<seg>.json` — the driver's HYGIENE control state (overwritten per
   dispatch; read ONLY by the driver, never by the Workflow),
 - `.codex_job.<seg>.lock` — the never-unlinked kernel-`flock` sentinel that
