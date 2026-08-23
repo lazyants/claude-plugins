@@ -2014,7 +2014,13 @@ is called. It:
      the mismatch is caused specifically by
      `particle_config_hash`/`source_extraction_hash`/`source_input_hash`/
      `derivation_bundle_hash` and the segpack hasn't been regenerated since
-     (see `blocked_needs_regeneration` below). Records which trigger fired
+     (see `blocked_needs_regeneration` below). W7 and W9 do ship a `stale`
+     unit whose `.ever_converged` sentinel is not ABSENT, whose draft still
+     matches `reviewed_draft_sha1` and whose every moved field is
+     machinery-only, without that pass (#491, conditions in
+     `references/assembly-and-output.md`; the bundle-hash section of
+     `references/ledger-and-resumability.md` says why a `converged` count
+     falls whenever a release moves the plugin bundle). Records which trigger fired
      as a `stale_reason` sub-field: `cache_key_mismatch` and/or
      `draft_sha1_mismatch`. A `draft_sha1_mismatch`-triggered stale is never
      reclassified as `blocked_needs_regeneration` — the two gates are
