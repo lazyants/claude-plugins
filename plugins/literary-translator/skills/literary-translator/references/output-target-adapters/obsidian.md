@@ -525,6 +525,15 @@ output:
         # absent-or-blank category always routes to "other"
 ```
 
+**The shipped glossary pass never asks for `category`** —
+`glossary_TASK.template.md` neither requests the field nor illustrates it. So a
+catalog declared here routes only the entries that actually carry one, which
+under the shipped prompt may be none of them. An entry can still acquire the
+field by other routes: `canon-entry.schema.json`'s own `category` description
+owns that list, and says what a failed category check does and does not
+establish. Declaring the catalog populates nothing by itself, so do not write a
+canon completeness gate that assumes the field is populated.
+
 ## Security: only mapped folder VALUES ever reach a filesystem path
 
 `category` itself is used **exclusively as a dict-lookup key** into
