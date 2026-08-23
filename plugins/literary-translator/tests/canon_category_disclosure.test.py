@@ -5,7 +5,8 @@ it -- and the shipped glossary templates must keep not asking.
 
 WHAT THIS FILE PROVES, EXACTLY:
 
-  1. the disclosure sentence is present in `properties.category.description` of
+  1. the pinned disclosure FRAGMENTS are present in
+     `properties.category.description` of
      canon-entry.schema.json, in the `folders` description of
      profile.schema.json, inside obsidian.md's "Category->folder catalog"
      section, and inside profile.example.yml's comment block under
@@ -22,8 +23,10 @@ WHAT IT DOES **NOT** PROVE, and must never be read as proving:
   - that the disclosures are intact. Each assertion pins a short fragment of
     its site, so the surrounding load-bearing clauses -- the producer list, the
     `vault/other/` routing statement, the cross-reference -- can still be
-    deleted while this file stays green. It guards the LOAD-BEARING SENTENCE
-    against silent removal or relocation, not the paragraph against editing.
+    deleted while this file stays green. It guards the pinned fragments
+    against removal and against relocation OUT OF their scoped window -- not
+    the paragraph against editing, and not a move WITHIN the same property,
+    section, or comment block, which stays green.
   - that no shipped template ASKS for the field. Half 2 is a literal
     `categor` token scan: a prompt saying "include every optional field the
     batch schema admits" requests `category` without containing the token and
@@ -167,8 +170,10 @@ def test_profile_example_discloses_in_the_folders_comment_block():
 def test_shipped_glossary_templates_do_not_mention_category():
     """The disclosure above is only true while this holds. Case-insensitive and
     stem-level (`categor`), so `Category`, `categories` and `categorise` all
-    count: any of them appearing means the shipped prompt has started to talk
-    about the field, and every disclosure site must then be revised."""
+    count. A hit means the shipped prompt has started to MENTION the field and
+    every disclosure site must be RE-READ against it -- not that they are
+    already false: a prompt forbidding the field trips this scan and leaves
+    them true."""
     for template in (GLOSSARY_TASK_TEMPLATE, GLOSSARY_WF_TEMPLATE):
         hits = [
             f"{template.name}:{n}: {line.strip()}"
