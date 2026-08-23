@@ -83,6 +83,14 @@ Four independent, unrelated checks:
 Dependency-free by design: stdlib `re`/`os` only, no jsonschema, no
 requirements.txt entry, no preflight needed.
 
+The clean-exit summary also reports the byte size of the STYLE_CONTRACT
+span (#578) -- the exact bytes `compute_style_contract_hash` hashes, and
+the quantity `style_bible.template.md`'s authoring header exists to
+contain (its rule is about what KIND of text belongs between the markers,
+never about a size target). Reported, never gated: no threshold, no warning, no
+non-zero exit at any size. The authoring rule is what says what to do
+about the number; a threshold here would be a second, silent policy.
+
 Exit 0 = clean (every scanned file present, no unfilled marker span, no
 surviving bracket placeholder, no surviving trap example, well-formed
 STYLE_CONTRACT markers). Exit 1 = one or more fatal findings (all are
@@ -324,6 +332,44 @@ def scan_style_contract_markers(path: Path, text: str) -> list[str]:
     return findings
 
 
+def style_contract_span_bytes() -> int:
+    """Return the byte length of the span `compute_style_contract_hash` hashes.
+
+    Mirrors `cache_key.py`'s slice exactly: from the end of the BEGIN marker
+    to the start of the END marker, measured on RAW BYTES, not on decoded
+    characters. A real style bible is rarely all-ASCII, and a character count
+    would report a number smaller than the one that is actually hashed.
+
+    Re-validates marker uniqueness and order on this second read rather than
+    inheriting the earlier scan's verdict. That scan read a different snapshot
+    of the file; if `style_bible.md` was edited in between, unchecked index
+    arithmetic would print a confident, wrong number underneath an OK line --
+    exactly the outcome this report exists to prevent. Raising is loud, and it
+    is not a second gate: a file whose markers are intact can never reach it.
+    """
+    raw = (DURABLE_ROOT / "style_bible.md").read_bytes()
+    begin_marker = STYLE_CONTRACT_BEGIN_MARKER.encode("utf-8")
+    end_marker = STYLE_CONTRACT_END_MARKER.encode("utf-8")
+
+    if raw.count(begin_marker) != 1 or raw.count(end_marker) != 1:
+        raise ValueError(
+            "style_bible.md changed while scaffold_validate was running -- "
+            "expected exactly one STYLE_CONTRACT_BEGIN and one "
+            "STYLE_CONTRACT_END marker to measure the style_contract span"
+        )
+
+    begin_idx = raw.index(begin_marker) + len(begin_marker)
+    end_idx = raw.index(end_marker)
+    if end_idx < begin_idx:
+        raise ValueError(
+            "style_bible.md changed while scaffold_validate was running -- its "
+            "STYLE_CONTRACT_END marker now precedes its STYLE_CONTRACT_BEGIN "
+            "marker, so the style_contract span cannot be measured"
+        )
+
+    return end_idx - begin_idx
+
+
 def collect_findings(
     names: list[str], scanner: Callable[[Path, str], list[str]]
 ) -> list[str]:
@@ -367,10 +413,13 @@ def main() -> None:
             print(f"  - {f}")
         sys.exit(1)
 
+    span_bytes = style_contract_span_bytes()
     print(
         "scaffold_validate: OK -- no unfilled LT_REQUIRED_FILL markers, "
         "no unfilled bracket placeholders, no surviving trap example, "
-        "well-formed STYLE_CONTRACT markers"
+        "well-formed STYLE_CONTRACT markers; style_bible.md's style_contract "
+        f"span is {span_bytes} bytes (exactly the bytes hashed into "
+        "style_contract_hash)"
     )
     sys.exit(0)
 
