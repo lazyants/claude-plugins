@@ -4341,59 +4341,86 @@ def test_adopt_pending_non_content_rejection_leaves_the_flag_false(
     )
 
 
-@pytest.mark.parametrize("race", ["unlink", "overwrite"])
-def test_a_pending_mutated_under_the_gates_is_recoverable_not_terminal(tmp_path, monkeypatch, race):
-    """The terminal verdict must rest on the candidate the gates actually judged.
+@pytest.mark.parametrize("race", ["unlink", "overwrite", "aba"])
+def test_a_straggler_writing_the_pending_cannot_change_what_the_gates_judge(
+        tmp_path, monkeypatch, race):
+    """The terminal verdict must rest on an artifact no other process can write.
 
-    Each gate re-OPENS self.pending BY PATH, and unlike validate_attempt()'s per-invocation
-    .att.<seg>.<inv>... name, this slot's name is deterministic and persists across runs --
-    derivable by the codex process this driver launches, which holds write access over
-    segments/ and whose straggler turn can outlive poll()'s cancel. validate_draft.py's own
-    contract puts a MISSING OR MALFORMED candidate on exit 1, the same code it uses for a
-    content verdict, so a concurrent unlink inside that window is indistinguishable from one
-    -- and without the re-check it would block the segment permanently.
+    `self.pending` is a DETERMINISTIC name that persists across runs, inside segments/ --
+    a directory the codex process this driver launches holds write access over, and whose
+    straggler turn can outlive poll()'s best-effort cancel. Every gate re-OPENS its
+    --candidate-file BY PATH, so gating that name directly means two independent opens with
+    a writable window between them. validate_draft.py answers a MISSING OR MALFORMED
+    candidate with exit 1, the same code its contract reserves for a content verdict, so a
+    write landing in that window is indistinguishable from one -- and since #665 acts on it
+    TERMINALLY, it would block the segment permanently.
 
-    Simulated at the seam it actually opens: the gate stub mutates the pending as
-    validate_draft.py "runs", then rejects with exit 1.
-
-    The two rows are the whole point of pinning BYTES rather than file type. `unlink` is
-    caught by any re-check. `overwrite` is not: the file is still a perfectly regular,
-    readable file -- only its contents changed -- so a type-only guard passes it through and
-    the segment is blocked permanently over a write nothing judged. That row was reproduced
-    by the MR reviewer against the type-only version of this guard."""
+    The three rows are a history of guards that did not hold, kept because each still
+    describes a real straggler and the design has to survive all three:
+      * `unlink`    -- caught by any re-check at all;
+      * `overwrite` -- still a perfectly regular readable file, only its bytes changed, so a
+                       type-only re-check passes it through;
+      * `aba`       -- truncate, let the validator read the partial JSON, then RESTORE the
+                       original bytes before returning. A before/after digest samples the
+                       same value at both ends and passes. Not adversarial and not a hash
+                       collision: an ordinary truncate-and-rewrite does it.
+    The first two were reproduced against by the MR reviewer. What holds is not a third
+    guard but a different artifact: the gates judge a per-invocation snapshot carrying
+    os.urandom(8) in its name, so this test asserts the strongest available property --
+    every gate is handed a path that is NOT self.pending, and the bytes at that path are
+    the ORIGINAL ones no matter what the row does to the slot."""
     job = _mkjob(tmp_path, kind="translate")
-    Path(job.pending).write_text(json.dumps({"draft": "the bytes draft_ready.py approved"}),
-                                 encoding="utf-8")
-    calls = []
-    still_regular = {"v": None}
+    original = json.dumps({"draft": "the bytes a prior run deferred"})
+    Path(job.pending).write_text(original, encoding="utf-8")
+    seen = []
 
     def racing_gate(args, timeout):
-        calls.append(args[0])
+        candidate = args[args.index("--candidate-file") + 1]
+        seen.append((args[0], candidate, Path(candidate).read_text(encoding="utf-8")))
         if args[0] == "validate_draft.py":
             if race == "unlink":
-                os.unlink(job.pending)                       # straggler removes it
+                os.unlink(job.pending)                                    # straggler removes it
             else:
-                Path(job.pending).write_text("{", encoding="utf-8")   # ... or truncates it
-                # Sampled HERE, not after adopt_pending() returns: the rejection path
-                # discards the pending, so by then the distinction this row exists for
-                # (a still-regular file with different bytes) is no longer observable.
-                still_regular["v"] = os.path.isfile(job.pending)
+                Path(job.pending).write_text("{", encoding="utf-8")       # ... or truncates it
+                if race == "aba":
+                    # ... and finishes rewriting it before the validator's process exits
+                    Path(job.pending).write_text(original, encoding="utf-8")
             return SimpleNamespace(returncode=1, stdout="FAIL: candidate missing", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
     monkeypatch.setattr(job, "_gate", racing_gate)
 
     assert job.adopt_pending() is False
-    assert calls == ["draft_ready.py", "validate_draft.py"]
-    if race == "overwrite":
-        assert still_regular["v"] is True, (
-            "precondition: this row only proves anything if the mutated candidate was still "
-            "a regular file when the guard ran -- otherwise it duplicates the unlink row"
+    assert [g for g, _, _ in seen] == ["draft_ready.py", "validate_draft.py"]
+    for gate, candidate, content in seen:
+        assert candidate != job.pending, (
+            "%s: %s was pointed straight at the deterministic slot, so a straggler write "
+            "between the two gate opens decides a TERMINAL verdict" % (race, gate)
         )
-    assert job.translate_content_rejected is False, (
-        "%s: the candidate validate_draft.py answered for was not the one draft_ready.py "
-        "approved, and the verdict was still made terminal -- a concurrent write can block "
-        "a segment forever" % race
-    )
+        assert content == original, (
+            "%s: %s judged bytes that are not the ones this run snapshotted" % (race, gate)
+        )
+    # The straggler's writes went to the slot and changed nothing that was judged, so the
+    # gate's exit 1 IS a genuine content verdict on the snapshot and stays terminal.
+    assert job.translate_content_rejected is True
+    assert not os.path.exists(job.attempt), "the snapshot is this invocation's alone"
+
+
+def test_a_pending_that_cannot_be_snapshotted_is_recoverable(tmp_path, monkeypatch):
+    """A snapshot that cannot be taken -- unreadable, non-regular, or a writer still mutating
+    it underneath the fd-pinned read (_publish_from_sandbox refuses all three) -- means
+    NOTHING was judged. So nothing is discarded and no gate runs: the pending survives and
+    the run launches fresh, exactly as it does when a gate could not run."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    gate, calls = _gate_recorder({"draft_ready.py": 0, "validate_draft.py": 0})
+    monkeypatch.setattr(job, "_gate", gate)
+    monkeypatch.setattr(job, "_publish_from_sandbox", lambda src, dst: False)
+
+    assert job.adopt_pending() is False
+    assert calls == [], "no gate may run against an artifact that was never snapshotted"
+    assert job.translate_content_rejected is False
+    assert os.path.exists(job.pending), "unjudged work is recoverable, never discarded"
+    assert not os.path.exists(job.canonical)
 
 
 def test_run_stops_before_launch_on_a_content_rejected_pending(tmp_path, monkeypatch):

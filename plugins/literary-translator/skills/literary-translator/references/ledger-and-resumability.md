@@ -1100,9 +1100,28 @@ alike, neither of which is changed to get it:
   a stale token. A stale token, an exit 2, a gate that could not run, and a
   review candidate all keep the behaviour the pending slot exists for: discard
   the pending and launch fresh -- except a gate that could not run at all,
-  which KEEPS it, because that is recoverable work nothing has judged. A
-  candidate that stops being the regular file the gates were pointed at,
-  between their two opens, is treated the same recoverable way.
+  which KEEPS it, because that is recoverable work nothing has judged.
+
+  **What the gates judge changed with it.** `adopt_pending()` used to point
+  each gate's `--candidate-file` straight at the pending slot. That name is
+  deterministic and persists across runs, it lives in `segments/` -- which the
+  codex process this driver launches can write, and whose straggler turn can
+  outlive `poll()`'s best-effort cancel -- and every gate re-OPENS it by path,
+  so there is a writable window between the two opens. That was tolerable
+  while every rejection was recoverable; it stopped being tolerable once a
+  `validate_draft.py` exit 1 became terminal, because that script answers a
+  missing or malformed candidate with exit 1 too. An ordinary truncate-and-
+  rewrite in that window is indistinguishable from a content verdict.
+
+  No re-check of the slot closes that: a type re-check passes an in-place
+  overwrite, and a before/after digest passes a truncate-then-restore (both
+  samples read bytes the validator never saw). So the gates now judge an
+  immutable per-invocation SNAPSHOT instead -- copied once through the same
+  fd-pinned, digest-verified primitive `validate_attempt()` already uses, into
+  the `.att.<seg>.<inv>...` name that carries `os.urandom(8)` and that no other
+  process can name -- and the promote moves the very bytes that were judged.
+  A snapshot that cannot be taken is not a verdict: the pending survives and
+  the run launches fresh, exactly as when a gate could not run.
 
   The rejected pending is still discarded, as it always was -- its bytes are
   defective by the very gate that blocks the segment, and that gate's own

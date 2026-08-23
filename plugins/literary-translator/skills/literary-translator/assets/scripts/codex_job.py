@@ -880,20 +880,6 @@ class CodexJob:
     # (reusing the #400 plumbing) instead.
     _GATE_OUTPUT_CAP = 4000  # chars; this text lands in the durable joblog, so it must stay bounded
 
-    def _pending_fingerprint(self):
-        """sha256 of self.pending's CURRENT bytes, or None when it cannot be pinned at all
-        -- absent, a symlink or FIFO, over the size ceiling, growing past it, or the phase
-        budget spent mid-read (every one of those is _read_regular_bounded()'s own refusal,
-        reused rather than re-implemented; see its docstring).
-
-        #665: this exists so a TERMINAL verdict can name the bytes it was passed on. The
-        weaker question -- is this still A regular file -- does not settle it: overwriting
-        the candidate in place with malformed JSON leaves a perfectly regular file, and
-        validate_draft.py answers a malformed candidate with exit 1, the SAME code it uses
-        for a content verdict. Only comparing the bytes across the gates separates the two."""
-        data = self._read_regular_bounded(self.pending, self.poll_remaining)
-        return None if data is None else hashlib.sha256(data).hexdigest()
-
     def _gate_rejection_text(self, gate_name, proc):
         """`proc` is the CompletedProcess of a gate call that just REJECTED
         (returncode != 0) -- never a None proc (a gate that could not even run
@@ -1501,6 +1487,10 @@ class CodexJob:
         True. Return False in every other case, handling the pending file so it is never lost or left
         to block a future run:
           - absent / a non-regular squatter -> cleared, return False;
+          - #665: the gates judge an immutable per-invocation SNAPSHOT of the pending, not the
+            deterministic slot -- see the body for why a terminal verdict cannot rest on a name
+            another process can write. A snapshot that cannot be taken -> LEAVE the pending
+            intact, return False (nothing was judged, so nothing is discarded);
           - a gate that RAN and REJECTED the candidate (proc.returncode != 0: bad content / stale
             cross-run token) -> DISCARD the pending, return False;
           - a gate that could NOT run (proc is None: exhausted budget / timeout / spawn fail) -> LEAVE
@@ -1520,70 +1510,84 @@ class CodexJob:
         if not self._is_regular(self.pending, self.poll_remaining):
             self._clear_nonregular(self.pending)
             return False
-        # #665: the bytes the gates below are about to judge, pinned BEFORE the first of
-        # them opens the path. Only the terminal branch consumes it; None here simply means
-        # no verdict can be made terminal this run, which is the pre-#665 behaviour.
-        pinned = self._pending_fingerprint() if self.kind == "translate" else None
+        # #665: gate an IMMUTABLE SNAPSHOT, never the deterministic slot itself.
+        #
+        # Every gate re-OPENS its --candidate-file BY PATH, so gating self.pending directly
+        # means two independent opens of a name that persists across runs and is trivially
+        # derivable -- inside segments/, a directory the codex process this driver launches
+        # holds write access over, and whose straggler turn can outlive poll()'s best-effort
+        # cancel (see _record_translate_rejected()'s own comment on that same actor). That
+        # was tolerable while every rejection was recoverable. It stopped being tolerable
+        # when a validate_draft.py exit 1 became TERMINAL: that script answers a missing or
+        # malformed candidate with exit 1 as well, so an ordinary truncate-and-rewrite
+        # between the two opens is indistinguishable from a content verdict and would block
+        # the segment permanently.
+        #
+        # Re-checking the slot after the fact cannot close that -- neither a type re-check
+        # (an in-place overwrite leaves a perfectly regular file) nor a before/after digest
+        # (a truncate-then-restore is an ABA: both samples read the same bytes the validator
+        # never saw). Both were tried and both were reproduced against. The property the
+        # terminal verdict actually needs is that the judged artifact CANNOT be written by
+        # anyone else, and the only way to have it is to hold one.
+        #
+        # So: copy once, through the same fd-pinned, digest-verified primitive
+        # validate_attempt() already uses (identity + digest BOTH before and after -- it
+        # refuses outright if a writer is still mutating the source underneath the read),
+        # into self.attempt: the per-invocation .att.<seg>.<inv>... name that carries
+        # os.urandom(8) and that no other process can name. Every gate then judges that
+        # snapshot, and the promote moves the very bytes that were judged. This makes
+        # adopt_pending() the same shape as validate_attempt(), which is the point: the
+        # deferred path had no reason to be the weaker of the two.
+        if not self._publish_from_sandbox(self.pending, self.attempt):
+            # Could not take a trustworthy snapshot (unreadable, non-regular, or mutating
+            # under the read). Nothing has been judged, so nothing is discarded: keep the
+            # pending and launch fresh, exactly as the could-not-run gate branch below does.
+            return False
         for name, with_token in self._adoption_gates():
             argv = [name, self.seg]
             if with_token:
                 argv += ["--expect-token", self.tok]
-            argv += ["--candidate-file", self.pending]
+            argv += ["--candidate-file", self.attempt]
             proc = self._gate(argv, self.poll_timeout())
             if proc is None:
+                _silent_remove(self.attempt)       # the snapshot is this invocation's alone
                 return False                       # could not validate -> keep pending, launch fresh
             if proc.returncode != 0:
                 self._capture_gate_rejection(name, proc)  # #399: capture before discarding
-                if (name == "validate_draft.py" and proc.returncode == 1
-                        and pinned is not None
-                        and self._pending_fingerprint() == pinned):
+                if name == "validate_draft.py" and proc.returncode == 1:
                     # #665: the SAME exit-1 contract _validate_candidate() reads for a fresh
-                    # attempt, read here for a DEFERRED one. That this is a same-token verdict
-                    # on CONTENT, and never a stale cross-run token, is guaranteed by the gate
-                    # ORDER _adoption_gates() owns: draft_ready.py carries --expect-token and
-                    # runs first, and this loop returns on its rejection -- so reaching
-                    # validate_draft.py at all proves the pending's own dispatch_token already
-                    # matched THIS run. run() acts terminally on the flag; every other rejection
-                    # here (draft_ready.py at any code, validate_draft.py exit 2, review_ready.py)
-                    # leaves it false and keeps the discard-and-relaunch this branch always did.
-                    #
-                    # The fingerprint conjuncts are what make the verdict safe to act on
-                    # TERMINALLY, and they are not a repeat of the _is_regular() at the top of
-                    # this method. Each gate re-OPENS self.pending BY PATH, and unlike
-                    # validate_attempt()'s candidate (self.attempt, an unguessable
-                    # per-invocation .att.<seg>.<inv>... name) this slot's name is deterministic
-                    # and persists across runs -- derivable by the codex process this driver
-                    # launches, which holds write access over segments/ and whose straggler turn
-                    # can outlive poll()'s best-effort cancel (see _record_translate_rejected()'s
-                    # own comment on that same actor). validate_draft.py puts a MISSING OR
-                    # MALFORMED candidate on exit 1 as well, so a concurrent unlink, truncate or
-                    # in-place overwrite inside that window is indistinguishable from a content
-                    # verdict, and would block the segment permanently.
-                    #
-                    # Comparing BYTES, not file type: an in-place overwrite with malformed JSON
-                    # leaves a perfectly regular file, so a type-only re-check passes it. What
-                    # this pins is that the candidate validate_draft.py answered for is byte-
-                    # identical to the one draft_ready.py approved. Residual, disclosed rather
-                    # than closed: an adversary that mutates the file and restores it byte-
-                    # identically across the whole window defeats any check short of handing
-                    # both gates one immutable artifact, which the gates' --candidate-file PATH
-                    # interface cannot express. Whatever this returns False for, the flag stays
-                    # down and the discard-and-relaunch below runs exactly as it did before
-                    # #665 -- a recoverable outcome for a state nothing has actually judged.
+                    # attempt, read here for a DEFERRED one, and now on the same footing --
+                    # an artifact only this invocation can name. That this is a same-token
+                    # verdict on CONTENT, and never a stale cross-run token, is guaranteed by
+                    # the gate ORDER _adoption_gates() owns: draft_ready.py carries
+                    # --expect-token and runs FIRST, and this loop returns on its rejection,
+                    # so reaching validate_draft.py at all proves the snapshot's own
+                    # dispatch_token already matched THIS run. run() acts terminally on the
+                    # flag; every other rejection here (draft_ready.py at any code,
+                    # validate_draft.py exit 2, review_ready.py) leaves it false and keeps the
+                    # discard-and-relaunch this branch always did.
                     self.translate_content_rejected = True
+                _silent_remove(self.attempt)
                 _silent_remove(self.pending)       # gate ran & rejected -> discard stale/bad, launch fresh
                 return False
         if not self._canonical_replaceable(self.poll_remaining):
-            # Every gate above validated self.pending, never self.canonical -- os.replace()
+            # Every gate above validated the snapshot, never self.canonical -- os.replace()
             # only needs write permission on the DIRECTORY, not the target, so blindly
             # replacing here could destroy bytes this process never read. Refuse and leave
             # self.pending exactly as every other "could not promote" branch above does:
             # intact, for a future dispatch to retry once the canonical is readable again.
+            _silent_remove(self.attempt)
             self.canonical_unreadable = True
             self.reason = "canonical-unreadable"
             return False
         self._archive_outgoing_review(self.poll_remaining)  # #541, advisory; never gates this promote
-        os.replace(self.pending, self.canonical)   # every gate passed
+        os.replace(self.attempt, self.canonical)   # every gate passed -- and judged THESE bytes
+        # The slot is moot now: its content is the canonical. Two steps rather than the one
+        # os.replace() that used to consume the pending directly, so a crash between them
+        # leaves a valid canonical plus a stale pending -- which the NEXT run self-heals at
+        # run()'s own safe_adopt() branch, whose _silent_remove(self.pending) exists for
+        # exactly that state ("canonical already valid -> any deferred attempt is moot").
+        _silent_remove(self.pending)
         return True
 
     def launch(self):
