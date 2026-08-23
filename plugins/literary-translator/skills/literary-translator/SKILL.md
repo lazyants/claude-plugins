@@ -2129,8 +2129,9 @@ is called. It:
   `--only-segs` was indistinguishable from a complete one. Read the IDs, not
   just the count — an omission and a deliberate batch differ only in *which*
   units are outstanding. `segment_dispatch_driver.py` carries the same list in
-  its `step1_gate_passed` journal entry and prints the same one-line
-  disclosure on its own stderr.
+  its `step1_gate_passed` journal entry — the durable copy — and RELAYS
+  `select_segments.py`'s own one-line disclosure onto its own stderr (#551),
+  rather than re-printing a second copy of it under its own prefix.
 - **#409:** `--allow-retranslate-converged` (optional) — without it,
   `select_segments.py` FATALs if the emitted `SEGS` would include any
   segment that has EVER converged before (a durable per-segment sentinel,
@@ -2582,10 +2583,12 @@ ONE Claude turn using that exact fix prompt to rewrite the draft, and
 re-invoke the driver to resume. **That JSON arrives only at exit** — stdout
 carries exactly ONE line, printed on the driver's terminal path, so the
 redirected log shows no per-segment progress at all while the run is in
-flight; only the driver's stderr warnings land there live. The channel that
-IS live is its own journal: one entry per event, each flushed and fsynced as
-it is written, opening with a `driver_started` entry carrying the pid —
-which is also how you tell a driver still working from one that died. No
+flight; what lands there live is the driver's stderr — its own warnings, plus
+`select_segments.py`'s relayed stderr (#551), which is where the Step 1 gate's
+own disclosures arrive. The channel that IS live is its own journal: one entry
+per event, each flushed and fsynced as it is written, opening with a
+`driver_started` entry carrying the pid — which is also how you tell a driver
+still working from one that died. No
 script or template anywhere in this plugin currently reads `needs_fix`, the
 driver's stdout, or its own journal
 (`runs/<internal-session-id>/driver_journal.jsonl`) on the driver's behalf.
@@ -2864,11 +2867,13 @@ reclassified into another one:
   contract moved, re-entered the loop and exhausted its rounds there is
   capped *and* sentinel-bearing, and that intersection was previously
   admissible by no profile at all. When the sentinel is present the
-  admission is disclosed on `select_segments.py`'s **stderr** — so you see
-  it on the hand-run recipe above, but **not** through
-  `segment_dispatch_driver.py`, which captures the selector's stderr and
-  discards it on success (the same fate as the D9 lost-token disclosure);
-  the fact is not written into the claim record either. An *unreadable*
+  admission is disclosed on `select_segments.py`'s **stderr** — on the
+  hand-run recipe above, and, since #551, through `segment_dispatch_driver.py`
+  too: that driver captures the selector's stderr and now relays it verbatim
+  onto its own, so the line reaches the `runs/driver.<SESSION_ID>.log` the
+  launch recipe redirects into (the D9 lost-token disclosure arrives by the
+  same relay). The fact is still not written into the claim record — stderr is
+  the only channel that reports it, on either path. An *unreadable*
   sentinel is still refused: it is evidence of nothing. Because a capped
   segment is
   `human_escalation`, `--only-segs` naming the same id(s) is ALSO required
