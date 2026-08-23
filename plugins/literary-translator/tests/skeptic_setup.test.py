@@ -147,9 +147,7 @@ def make_skeptic_root(tmp_path) -> Path:
     language file, and trivial canon.json/manifest.json.
 
     Every one of those lands FLAT under scripts/, the workflow template
-    included -- the shape Step 0a's copy pass actually produces. A real
-    durable root has no templates/ directory at all
-    (test_fixture_stages_no_durable_templates_dir below pins that)."""
+    included -- the shape Step 0a's copy pass actually produces."""
     root = tmp_path / "durable_root"
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
@@ -164,11 +162,8 @@ def make_skeptic_root(tmp_path) -> Path:
     for src in (WORKLIST_SCHEMA_SRC, ASSIGNMENT_SCHEMA_SRC):
         shutil.copy2(src, schemas_dir / src.name)
 
-    # #666: the template goes FLAT into scripts/, beside the .py gates --
-    # the placement Step 0a actually produces. This fixture used to hand-build
-    # a root/"templates" directory instead; no scaffold has ever produced one,
-    # and staging it here is what kept the suite green over a resolution path
-    # no real project could take. Deliberately the same staging
+    # #666: the template goes FLAT into scripts/, beside the .py gates -- the
+    # placement Step 0a actually produces, and deliberately the same staging
     # tests/fix_scope_audit.test.py's build_durable_root() already performs
     # for all three WORKFLOW_TEMPLATES.
     shutil.copy2(SKEPTIC_TEMPLATE_SRC, scripts_dir / SKEPTIC_TEMPLATE_SRC.name)
@@ -191,7 +186,9 @@ def make_skeptic_root(tmp_path) -> Path:
 # every real root. The suite stayed green only because make_skeptic_root()
 # hand-built that directory -- the fixture WAS the defect. Relocating the
 # fixture alone would leave nothing stopping a future edit from re-introducing
-# the wrong path, so the placement is pinned from two directions.
+# the wrong path, so the placement is pinned from two independent directions
+# (the shipped Step-0a mapping, and this script's own resolved path), with a
+# third test keeping the fixture itself honest.
 
 
 def _load_fix_scope_audit():

@@ -145,10 +145,9 @@ SCRIPT_DIR = _SCRIPT_FILE.parent
 DURABLE_ROOT = _SCRIPT_FILE.parents[1]
 SCHEMAS_DIR = DURABLE_ROOT / "schemas"
 LANGUAGES_DIR = DURABLE_ROOT / "languages"
-# No TEMPLATES_DIR: there is no ${durable_root}/templates/. Step 0a gives the
-# three *.template.js workflow templates the same flat scripts/ placement the
-# *.py gates get, so the skeptic template sits BESIDE this file -- see
-# SKEPTIC_TEMPLATE_PATH below for where that is resolved and why.
+# No TEMPLATES_DIR: there is no ${durable_root}/templates/ -- see
+# SKEPTIC_TEMPLATE_PATH below for where the workflow template is resolved
+# instead, and why (#666).
 
 try:
     from skeptic_constants import (
@@ -243,9 +242,7 @@ SKEPTIC_TEMPLATE_FILENAME = "skeptic-pass-wf.template.js"
 # scripts/templates/ subdir") and fix_scope_audit.py's compared_pairs(),
 # which maps each WORKFLOW_TEMPLATES entry to Path("scripts") / name.
 # segment_dispatch_driver._self_anchored_template_path() settles the same
-# question for the mass-translate template in the same words: "A real
-# deployed root has no templates/ directory at all ... the template sits
-# BESIDE this file."
+# question for the mass-translate template, in the same terms.
 #
 # SCRIPT_DIR, not DURABLE_ROOT / "scripts": this is the same directory
 # compute_skeptic_input_digest() already reads every SKEPTIC_CLOSURE_SCRIPT_
@@ -783,10 +780,9 @@ def run(args) -> dict:
     config_values["source_lang"] = args.source_lang
 
     schemas_dir_hash_hex = _schemas_dir_hash()
-    template_path = SKEPTIC_TEMPLATE_PATH
-    if not template_path.is_file():
-        raise SkepticSetupError(f"skeptic template not found: {template_path}")
-    template_bytes = template_path.read_bytes()
+    if not SKEPTIC_TEMPLATE_PATH.is_file():
+        raise SkepticSetupError(f"skeptic template not found: {SKEPTIC_TEMPLATE_PATH}")
+    template_bytes = SKEPTIC_TEMPLATE_PATH.read_bytes()
 
     # Round 9 (#243): same caveat as the compute_producer_input_digest call
     # above -- fixed keyword args, not FROZEN_INPUT_SPECS-driven.
