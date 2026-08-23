@@ -1376,5 +1376,302 @@ def test_lsr_extract_candidate_names_hebrew_ascii_quote_acronym_matches_gershayi
     assert text_name in {n for n, _mid in out}
 
 
+# ---------------------------------------------------------------------------
+# name_inventory coverage census (#284)
+#
+# The census answers ONE question -- "does this name_inventory form have any
+# token-aligned occurrence in the book at all?" -- over the WHOLE manifest,
+# and prints the answer. It is deliberately absent from the report (a
+# sample-keyed artifact must not carry a whole-book fact), so every assertion
+# here is against stdout/stderr or against the census functions themselves.
+# ---------------------------------------------------------------------------
+
+BOOTSTRAP_PATH = (
+    PLUGIN_ROOT
+    / "skills"
+    / "literary-translator"
+    / "assets"
+    / "scripts"
+    / "bootstrap_names.py"
+)
+
+assert BOOTSTRAP_PATH.is_file(), f"bootstrap_names.py not found at {BOOTSTRAP_PATH}"
+
+
+def _load_bootstrap_names_module():
+    """The PRODUCTION extractor, loaded the same way _lsr is -- used only by
+    the elision-parity test, which asserts the two agree rather than
+    asserting a hand-written expectation about either. Same guards as this
+    file's own module loader: a moved or unloadable path must fail as itself,
+    not as an AttributeError inside the parity assertion."""
+    spec = importlib.util.spec_from_file_location(
+        "bootstrap_names_under_test_from_lsr_tests", BOOTSTRAP_PATH
+    )
+    assert spec is not None and spec.loader is not None, (
+        f"could not load spec for {BOOTSTRAP_PATH}"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def zero_forms(text_pieces, lang):
+    return set(lang["name_inventory"]) - _lsr.inventory_forms_seen(list(text_pieces), lang)
+
+
+BARDITCHEV = "בארדיטשוב"                 # the bare toponym, as the inventory lists it
+FROM_BARDITCHEV = "מ" + BARDITCHEV       # the only form the book actually uses (mi- proclitic)
+
+
+def test_inventory_census_scans_blocks_outside_the_stratified_sample(tmp_path, root):
+    # THE test that pins full-manifest scope. With 6 body segments the sample
+    # picks seg0/seg1/seg3/seg5 (first/middle/late/high-density); an UNCASED
+    # form raises no density score, so seg4 is never selected and the sample
+    # never sees it -- candidate_names_total stays 1. The census must still
+    # find it. This fails the moment the census is narrowed to the sample.
+    body = [f"Anna walked in segment {i}." for i in range(6)]
+    body[4] = f"Anna walked here with {BARDITCHEV} nearby."
+    manifest = build_manifest(body)
+    config = particle_config_payload()
+    config["name_inventory"] = [BARDITCHEV]
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, config,
+        checked_names=["Anna"], low_name_density_confirmed=True, no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    used = {s["segment_id"] for s in report["source_sample_selection"]["segments_used"]}
+    assert "seg4" not in used, f"fixture no longer excludes seg4 from the sample: {used}"
+    assert report["candidate_names_total"] == 1  # the sample saw only "Anna"
+    assert "inventory_forms_total       = 1" in proc.stdout
+    assert "inventory_zero_match_forms  = 0" in proc.stdout
+
+
+def test_inventory_census_reports_a_bare_form_the_book_only_writes_prefixed(tmp_path, root):
+    # #284 itself: Hebrew proclitics fuse, matching is exact-form and
+    # token-aligned, so the bare inventory entry can never reach the fused
+    # surface token -- today that is silent, and this is the report of it.
+    manifest = build_manifest([f"Anna met the rabbi {FROM_BARDITCHEV} today."])
+    config = particle_config_payload()
+    config["name_inventory"] = [BARDITCHEV]
+    proc, _report, _ = run_smoke(
+        root, tmp_path, manifest, config,
+        checked_names=["Anna"], low_name_density_confirmed=True, no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "inventory_zero_match_forms  = 1" in proc.stdout
+    assert BARDITCHEV in proc.stderr
+    assert "NO token-aligned occurrence" in proc.stderr
+
+
+def test_inventory_census_clears_once_the_attested_surface_form_is_listed(tmp_path, root):
+    # The documented remedy (add the exact surface form the book uses) must
+    # actually close the finding -- otherwise the WARN sends the operator
+    # somewhere that does not work.
+    manifest = build_manifest([f"Anna met the rabbi {FROM_BARDITCHEV} today."])
+    config = particle_config_payload()
+    config["name_inventory"] = [BARDITCHEV, FROM_BARDITCHEV]
+    proc, _report, _ = run_smoke(
+        root, tmp_path, manifest, config,
+        # FROM_BARDITCHEV is now surfaced by the inventory bypass, so the
+        # low-density path's set-coverage rule requires it to be checked too.
+        checked_names=["Anna", FROM_BARDITCHEV],
+        low_name_density_confirmed=True, no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "inventory_forms_total       = 2" in proc.stdout
+    assert "inventory_zero_match_forms  = 1" in proc.stdout   # the bare form still never occurs
+    assert FROM_BARDITCHEV not in proc.stderr.split("NO token-aligned occurrence")[-1]
+
+
+def test_inventory_census_counts_every_terminal_not_the_emission_winner():
+    # pass 2 emits AT MOST ONE candidate per position (the longest fresh one),
+    # so "a" is never emitted from "a b" -- an emitted-candidates census would
+    # report it unmatched. Measured on the live he->en book, three real
+    # inventory forms are in exactly this position.
+    lang = make_lang_dict(name_inventory=["a", "a b"])
+    emitted = {n for n, _mid in _lsr.extract_candidate_names("a b", lang)}
+    assert emitted == {"a b"}, emitted
+    assert zero_forms(["a b"], lang) == set()
+
+
+def test_inventory_census_refuses_a_sub_token_match():
+    # Token alignment: a bare form inside a longer connector-joined token is
+    # NOT an occurrence of that form (the same rule pass 2 enforces).
+    lang = make_lang_dict(name_inventory=["משה"])
+    assert zero_forms(["פגשתי את משה־לייב אתמול."], lang) == {"משה"}
+
+
+def test_inventory_census_refuses_a_match_across_a_terminator():
+    lang = make_lang_dict(name_inventory=["a b"])
+    assert zero_forms(["a. b"], lang) == {"a b"}
+
+
+def test_inventory_census_reports_a_form_that_tokenizes_to_nothing():
+    # name_inventory only requires non-empty strings, so a punctuation-only
+    # entry is accepted and then dropped by the trie builder's own `if f`
+    # filter. Reporting it as unmatched is the honest verdict; omitting it
+    # would hide an entry that can never match anything.
+    lang = make_lang_dict(name_inventory=["!!!", "Anna"])
+    assert zero_forms(["Anna walked here."], lang) == {"!!!"}
+
+
+def test_inventory_census_gives_fold_colliding_forms_one_verdict():
+    # Two surface forms folding to the same #238/#241 match key share one
+    # trie path, so they must share one verdict -- either both seen or both
+    # not, never a split that reads as a real difference between them.
+    pointed = "בְּרֶסְלֶב"
+    unpointed = "ברסלב"
+    lang = make_lang_dict(name_inventory=[pointed, unpointed])
+    assert _lsr.match_units(pointed) == _lsr.match_units(unpointed)
+    assert zero_forms([f"נסע ל {unpointed} בשנת תקפ״ג."], lang) == set()
+    assert zero_forms(["nothing relevant here"], lang) == {pointed, unpointed}
+
+
+def test_inventory_census_names_every_zero_form_not_just_the_first(tmp_path, root):
+    # No cap on the list: a truncated one is the silent under-report this
+    # census exists to end. The WARN's own rendering of the sorted set is
+    # asserted verbatim, so dropping or adding one form fails here.
+    missing_a = "אוסטרהא"
+    missing_b = "זלאטיפאלי"
+    manifest = build_manifest(["Anna walked in a quiet port."])
+    config = particle_config_payload()
+    config["name_inventory"] = [missing_a, missing_b]
+    proc, _report, _ = run_smoke(
+        root, tmp_path, manifest, config,
+        checked_names=["Anna"], low_name_density_confirmed=True, no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "inventory_zero_match_forms  = 2" in proc.stdout
+    warn = [ln for ln in proc.stderr.splitlines() if "NO token-aligned occurrence" in ln]
+    assert len(warn) == 1, proc.stderr
+    assert repr(sorted([missing_a, missing_b])) in warn[0], warn[0]
+
+
+def test_inventory_census_matches_a_connector_joined_token_from_a_space_joined_entry():
+    # One SOURCE token contributing several match units -- the whole-token
+    # descent has to consume all of them before consulting `None in node`.
+    space_joined = "משה לייב"
+    maqaf_joined = "משה" + "־" + "לייב"
+    lang = make_lang_dict(name_inventory=[space_joined])
+    assert zero_forms([f"פגשתי את {maqaf_joined} אתמול."], lang) == set()
+
+
+def test_inventory_census_counts_a_multi_token_form_across_an_inline_sentinel():
+    # ⟦FNREF_N⟧/⟦VERSE_...⟧ sentinels are production input. They are stripped by
+    # _inventory_scan_pieces (exactly as the sample path strips them, and as
+    # bootstrap_names.py's own same-length mask_sentinels() does), so they must
+    # not break a multi-token inventory form that spans one. Driven through
+    # _inventory_scan_pieces rather than a hand-built piece list, so the test
+    # pins the strip at the seam that actually owns it.
+    lang = make_lang_dict(name_inventory=["Marie Claire"])
+    manifest = build_manifest(["Marie ⟦FNREF_5⟧ Claire went home."])
+    pieces = _lsr._inventory_scan_pieces(manifest)
+    assert zero_forms(pieces, lang) == set()
+
+
+def test_inventory_scan_pieces_takes_every_non_empty_block_whatever_its_kind():
+    # The production scan scope is bootstrap_names.iter_manifest_texts(): every
+    # non-empty block's plain_text, filtered by NEITHER a block's `type` nor a
+    # segment's `kind` nor a frontback `decision`. An omit-decision frontback
+    # block is still scanned by the production extractor, so a form living only
+    # there must not be reported as never occurring -- while build_source_sample
+    # deliberately skips exactly that block.
+    manifest = build_manifest(
+        ["Anna walked in a quiet port."],
+        frontback_items=[{"id": "fb1", "decision": "omit", "text": "Anna met משה כהן."}],
+    )
+    pieces = _lsr._inventory_scan_pieces(manifest)
+    assert len(pieces) == 2
+    lang = make_lang_dict(name_inventory=["משה כהן"])
+    assert _lsr.inventory_forms_seen(pieces, lang) == {"משה כהן"}
+
+
+def test_inventory_scan_pieces_never_joins_two_blocks():
+    # Pieces stay separate for the same reason build_source_sample's
+    # extraction_pieces do: joining non-adjacent text fabricates a match that
+    # no per-block production scan could produce.
+    manifest = build_manifest(["Anna met משה", "כהן walked home."])
+    pieces = _lsr._inventory_scan_pieces(manifest)
+    lang = make_lang_dict(name_inventory=["משה כהן"])
+    assert _lsr.inventory_forms_seen(pieces, lang) == set()
+
+
+def test_inventory_census_tokenizes_elision_exactly_like_the_production_extractor():
+    # #284 parity: BOTH loaders accept has_elision:false beside a non-null,
+    # 2-group ELISION_RE. This file used to gate the elision split on
+    # has_elision, so that config tokenized differently here than in
+    # production -- and the census would have reported a form the production
+    # extractor finds as never occurring. Asserted against bootstrap_names.py's
+    # OWN output, never a hand-written expectation.
+    bn = _load_bootstrap_names_module()
+    pattern = r"^([dl])['\u2019]([A-Z].*)$"
+    text = "Il vit d'Effiat ce matin."
+    lang = make_lang_dict(
+        name_inventory=["Effiat"], elision_pattern=pattern, has_elision=False
+    )
+    bn_lang = bn.LanguageConfig(
+        path=BOOTSTRAP_PATH,
+        particles=frozenset(),
+        stopwords=frozenset(),
+        elision_re=re.compile(pattern),
+        has_elision=False,
+        raw_bytes=b"{}",
+        name_inventory=frozenset({"Effiat"}),
+    )
+    produced = {n for n, _mid in bn.extract_candidates(text, bn_lang)}
+    assert "Effiat" in produced, produced
+    assert zero_forms([text], lang) == set()
+
+
+def test_inventory_census_is_not_a_gate(tmp_path, root):
+    # A curated form absent from THIS book is an operator curation fact, not
+    # a language-config failure. Gating it would fail every existing project
+    # on upgrade with no migration route.
+    manifest = build_manifest(["Anna walked in a quiet port."])
+    config = particle_config_payload()
+    config["name_inventory"] = ["אוסטרהא"]
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, config,
+        checked_names=["Anna"], low_name_density_confirmed=True, no_particles_confirmed=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    assert report["pass"] is True
+    assert "inventory_zero_match_forms  = 1" in proc.stdout
+
+
+def test_inventory_census_adds_no_field_to_the_stored_report(tmp_path, root):
+    # The whole design rests on the census NOT being stored: W3 reuses a
+    # report while its sample-scoped triple matches, so a whole-book fact
+    # stored beside it could be replayed stale. Whole-set assertion, so a
+    # future field cannot be added here without this test being updated.
+    manifest = build_manifest(["Anna walked in a quiet port."])
+    config = particle_config_payload()
+    config["name_inventory"] = ["אוסטרהא"]
+    _proc, report, _ = run_smoke(
+        root, tmp_path, manifest, config,
+        checked_names=["Anna"], low_name_density_confirmed=True, no_particles_confirmed=True,
+    )
+    assert report is not None
+    assert set(report) == {
+        "candidate_names_total",
+        "checked_names",
+        "elision_test_cases",
+        "has_elision",
+        "low_name_density_confirmed",
+        "no_names_confirmed",
+        "no_particles_confirmed",
+        "particle_config_sha1",
+        "particle_list_size",
+        "particle_smoke_cases",
+        "pass",
+        "smoke_report_contract_hash",
+        "source_sample_selection",
+        "source_sample_sha1",
+    }
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

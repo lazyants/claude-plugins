@@ -188,6 +188,11 @@ the first attempt rather than failing on a missing parent directory.
    French `d'X`/`l'X` examples, which don't apply to a non-elision language.
 4. Run `scripts/language_smoke_report.py`, which owns the whole report:
    deterministic, schema-validated, never free-text.
+5. Read its `inventory_zero_match_forms` line and the `WARN` beneath it
+   before accepting the run — a `pass:true` says nothing about whether the
+   `name_inventory` entries this project curated actually occur in its book
+   (see "Which entries never match anything" below). Nothing here fails on
+   them; the operator decides.
 
 ### Sample selection (stratified, not front-loaded)
 
@@ -360,6 +365,11 @@ has_elision == true, then elision_test_cases required, minItems: 1`. When
 - `low_name_density_confirmed` / `no_names_confirmed` (booleans)
 - `particle_list_size` / `no_particles_confirmed`
 - `has_elision` (boolean)
+- `inventory_coverage` is deliberately NOT a field here — the per-form
+  coverage census is printed on stdout/stderr on every run and never stored
+  (see "Which entries never match anything"), because this report's reuse
+  identity is scoped to the sample and could otherwise replay a whole-book
+  fact stale.
 - `pass` — a single field, `true` only if every checked name was found,
   every elision test passed, **and** every particle-smoke case (when
   present) passed. Never a human-typed "looks good" note standing in for
@@ -463,6 +473,40 @@ generic guidance, not a description of any specific project's data.
 5. Re-run the mandatory smoke test (above) against the SAME sample after
    editing the `.local.json` override -- never skip it because "only
    `name_inventory` changed."
+
+#### Which entries never match anything (issue #284)
+
+Every run of `language_smoke_report.py` also reports `name_inventory`
+COVERAGE, and it is the one number in that run computed over the **whole
+manifest** rather than over the stratified sample: how many entries have no
+token-aligned occurrence anywhere in the book, printed as
+`inventory_zero_match_forms`, followed by a `WARN` on stderr naming every one
+of them. Sample scope would have been useless here — most of a real inventory
+simply is not inside four capped excerpts, so nearly every entry would be
+reported missing.
+
+It is **printed, never written into the report**, and that is deliberate. W3
+reuses a stored report while its triple (`particle_config_sha1`,
+`source_sample_sha1`, `smoke_report_contract_hash`) still matches, and that
+triple is scoped to the SAMPLE; a whole-book fact stored beside it could be
+replayed unchanged after an edit to any unsampled block, reading as current
+while being wrong. So a run that reuses a stored report prints no coverage at
+all — never a stale one. Editing `name_inventory` moves
+`particle_config_sha1` and forces a fresh run, which is exactly the moment the
+list is wanted.
+
+The census asks only *does this entry occur at all*, under the same rules the
+matcher itself applies: token-aligned (never a sub-token match), never across
+a sentence terminator, mark- and connector-insensitive. A zero is not
+automatically a defect. It may be a typo, an entry belonging to another
+volume, or — the case #284 was filed for — a name this book only ever writes
+with a fused prefix. Hebrew proclitics (ו/ב/כ/ל/מ/ש/ה) attach directly to the
+following word, so `בארדיטשוב` and `מבארדיטשוב` are two different tokens and
+an exact-form matcher reaches only the one that is listed. Measured on a real
+he→en book: **185 of 616 curated forms had no occurrence at all, and 95 of
+those occur in the source only with a leading proclitic.** The remedy is the
+documented exact-form route above — list the surface form the book actually
+uses as its own entry — and rules 3 and 4 above still apply to it.
 
 **`particle_config_hash` (the ledger cache-key field) is what guarantees an
 already-converged segment can never silently keep reflecting the pre-fix
