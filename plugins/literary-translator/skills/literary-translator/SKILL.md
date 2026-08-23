@@ -1971,7 +1971,8 @@ is called. It:
      without that pass (#491, conditions in
      `references/assembly-and-output.md`; the bundle-hash section of
      `references/ledger-and-resumability.md` says why a `converged` count
-     falls at every release) — unless the mismatch is caused specifically by
+     falls whenever a release moves the plugin bundle) — unless the mismatch
+     is caused specifically by
      `particle_config_hash`/`source_extraction_hash`/`source_input_hash`/
      `derivation_bundle_hash` and the segpack hasn't been regenerated since
      (see `blocked_needs_regeneration` below). Records which trigger fired

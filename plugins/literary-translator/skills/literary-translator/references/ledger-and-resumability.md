@@ -717,11 +717,12 @@ determinism: scripts/templates for `plugin_bundle_hash`, and scripts for
 `orchestration_bundle_hash`, computed by Step 0a at the moment it copies
 scripts into `${durable_root}/scripts/`.
 
-**A `converged` count is bundle-relative.** Every plugin release moves
-`plugin_bundle_hash`, so the Step 0a refresh that installs it flips the whole
+**A `converged` count is bundle-relative.** A release that edits any
+`PLUGIN_BUNDLE_MEMBERS` entry moves `plugin_bundle_hash` — most do; a docs-only
+one does not — and the Step 0a refresh that installs it then flips the whole
 converged corpus to `stale` at once, with no draft byte touched and no prose
-needing a recheck. The ledger's `converged` tally therefore FALLS as releases
-land while the translation itself never regresses — measured on one live book
+needing a recheck. The ledger's `converged` tally therefore FALLS as such
+releases land while the translation itself never regresses — measured on one live book
 as 4 → 2 → 1 across three releases in three days, and as 75 `stale` / 0
 `converged` on another (#482) — because what it counts is "converged under the
 CURRENT bundle", not how much of the book has been reviewed. Since 1.25.0
