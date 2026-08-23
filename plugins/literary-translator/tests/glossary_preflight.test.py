@@ -345,6 +345,75 @@ def test_stale_durable_glossary_task_prompt_halts_with_prompt_axis(tmp_path):
     assert_halts(result, contains=("axis=prompt", "glossary_TASK.md"))
 
 
+def test_durable_task_without_the_style_bible_prohibition_halts(tmp_path):
+    """#510 step 6b. The one shape the VERSION axis structurally cannot see:
+    a durable copy seeded before 1.65.0 carries the OPPOSITE instruction --
+    log the discovery in style_bible.md's E-traps -- at the SAME
+    PROMPT_CONTRACT_VERSION marker the plugin ships, so every marker
+    comparison passes it. Reproduces the rollout the review found: without
+    this axis the next glossary pass dispatches the authority-file write
+    this release exists to remove."""
+    root = make_current_durable_root(tmp_path)
+    current = (root / "glossary_TASK.md").read_text(encoding="utf-8")
+    marker = current.splitlines()[0]
+    assert "PROMPT_CONTRACT_VERSION" in marker, marker
+    # A pre-1.65.0 durable task: same leading marker, the OLD directive, and
+    # no prohibition anywhere. Keeps "sense_translated" so step 6's version
+    # axis is satisfied and this test can only fail on the content axis.
+    (root / "glossary_TASK.md").write_text(
+        marker
+        + "\n\n# a durable glossary task seeded before 1.65.0\n\n"
+        + 'A candidate may resolve with basis:"sense_translated".\n'
+        + "There is no separate trap-string gate for THIS file -- log a\n"
+        + "genuine discovery in `style_bible.md`'s own E-traps section\n"
+        + "instead, so future batches and segments benefit from it too.\n",
+        encoding="utf-8",
+    )
+
+    result = run_preflight(root)
+    assert_halts(result, contains=("axis=prompt", "style_bible.md", "1.65.0"))
+
+
+def test_a_rewrapped_durable_task_carrying_the_prohibition_passes(tmp_path):
+    """The other side of the same axis, and the reason it matches a
+    whitespace-flattened copy: the durable file is a hand-migratable seed, so
+    an operator who applies the paragraph and re-wraps it to their own width
+    has complied. A re-wrap is not a reword and must not halt them."""
+    root = make_current_durable_root(tmp_path)
+    current = (root / "glossary_TASK.md").read_text(encoding="utf-8")
+    rewrapped = current.replace(
+        "Write no other file.\nIn particular never `style_bible.md`:",
+        "Write no other\nfile. In particular never\n`style_bible.md`:",
+    )
+    assert rewrapped != current, (
+        "fixture did not re-wrap anything -- the shipped paragraph's line "
+        "break moved, so this test is no longer exercising a re-wrap"
+    )
+    (root / "glossary_TASK.md").write_text(rewrapped, encoding="utf-8")
+
+    assert_ok(run_preflight(root))
+
+
+def test_plugin_template_without_the_prohibition_halts_as_a_packaging_bug(tmp_path):
+    """Strictness bias, same shape as the missing-plugin-marker halt: if the
+    SHIPPED template loses the literal this axis matches, the axis must fail
+    loud rather than quietly stop checking. A deliberate reword updates the
+    script constant and the test pin in the same commit; anything else is a
+    damaged install."""
+    fixture = make_fixture_plugin(
+        tmp_path,
+        glossary_task_text=(
+            "<!-- PROMPT_CONTRACT_VERSION: 3 -->\n"
+            'A candidate may resolve with basis:"sense_translated".\n'
+            "This shipped template has lost the style_bible prohibition.\n"
+        ),
+    )
+    root = make_current_durable_root(tmp_path)
+
+    result = run_preflight_with_script(fixture, root)
+    assert_halts(result, contains=("STYLE_BIBLE_PROHIBITION",))
+
+
 def test_missing_durable_glossary_task_prompt_halts_with_prompt_axis(tmp_path):
     """Same axis, absent rather than merely stale -- guarded per the CLI
     contract ("guard this read too"), never a crash."""
@@ -489,7 +558,12 @@ def test_reformatted_durable_prompt_with_current_marker_passes(tmp_path):
     current_marker = plugin_prompt_contract_version()
     (root / "glossary_TASK.md").write_text(
         f"<!-- PROMPT_CONTRACT_VERSION: {current_marker} -->\n"
-        f"<!-- a hand-migrated, differently-worded but up-to-date copy -->\n",
+        f"<!-- a hand-migrated, differently-worded but up-to-date copy -->\n"
+        # Carries the #510 prohibition because step 6b requires it of every
+        # durable copy; this case is about the VERSION axis, and a fixture
+        # missing the clause would fail on the content axis instead and stop
+        # exercising what it names.
+        f"Write no other file. In particular never `style_bible.md`.\n",
         encoding="utf-8",
     )
 
@@ -670,7 +744,10 @@ def test_durable_leading_marker_wins_over_later_conflicting_marker(tmp_path):
     (root / "glossary_TASK.md").write_text(
         f"<!-- PROMPT_CONTRACT_VERSION: {current_marker} -->\n"
         f"<!-- PROMPT_CONTRACT_VERSION: {conflicting} -->\n"  # later, conflicting -- must be ignored
-        f"<!-- rest of a hand-migrated but up-to-date file -->\n",
+        f"<!-- rest of a hand-migrated but up-to-date file -->\n"
+        # See the reformatted-copy case above: step 6b's content axis applies
+        # to every durable copy, this case is about the marker.
+        f"Write no other file. In particular never `style_bible.md`.\n",
         encoding="utf-8",
     )
 

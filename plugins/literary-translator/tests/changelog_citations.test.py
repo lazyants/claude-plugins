@@ -61,6 +61,20 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
+# Rewritten for 1.65.0 (#510 -- the glossary agent's trap discovery is rerouted
+# out of style_bible.md's E-traps, and the durable prompt is gated on content)
+# per the maintenance contract above. This rotation inherited an already-empty
+# map from 1.63.0 (#526) and left it empty: the 1.65.0 entry names files,
+# functions and constants in prose -- glossary_preflight.py, canon_validate.py,
+# segpack.py, render_obsidian.py, compute_prompt_hash, PLUGIN_BUNDLE_MEMBERS --
+# and declares no `name.ext:NNN` line citation, so there was nothing to anchor
+# and nothing to retire. Its two census-shaped claims (that this was the ONLY
+# agent-facing write instruction to an authority file, and the pre-fix token
+# counts behind the new regression test) are guarded by review and by that
+# test's own docstring; a line citation would pin WHERE something lives rather
+# than that it is the only one.
+#
+# The previous rotation, kept as its own record:
 # Rewritten for 1.63.0 (#526 -- a book-scoped style rule is unevaluable from one
 # segment) per the maintenance contract above. EMPTY, and empty by construction
 # rather than by omission: the entry cites its subjects by FUNCTION and FILE name

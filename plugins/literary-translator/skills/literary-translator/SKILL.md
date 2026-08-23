@@ -1227,7 +1227,12 @@ schema-axis failure means re-run Step 0 + Step 0a to refresh
 `${durable_root}/schemas/`; a prompt-axis failure means hand-re-apply the
 current `glossary_TASK.template.md` into `${durable_root}/glossary_TASK.md`
 (never auto-overwritten, per item 12 above) and bump its
-`PROMPT_CONTRACT_VERSION` marker. Without this gate, a resumed project whose
+`PROMPT_CONTRACT_VERSION` marker. **Since 1.65.0 that axis also fails on
+CONTENT at an unchanged marker** (`#510`): a durable copy that does not carry
+the shipped prohibition on writing `style_bible.md` halts, because the old
+copy's instruction to log a discovery into E-traps survives a marker
+comparison. Its remedy is the paragraph, not the marker — apply the current
+template's word-sense paragraph and leave the marker alone. Without this gate, a resumed project whose
 durable schemas or prompt predate this basis value would either reject a
 `sense_translated` batch item outright or never teach the agent the value in
 the first place — this preflight is run fresh on every dispatch (never

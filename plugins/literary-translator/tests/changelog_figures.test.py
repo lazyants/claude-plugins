@@ -192,6 +192,31 @@ def _local_dict_len(filename, funcname, varname):
     raise AssertionError(f"{funcname} is no longer defined in {filename}")
 
 
+# Rewritten for 1.65.0 (#510 -- the glossary agent's trap discovery is
+# rerouted, and the durable prompt is gated on content), per the maintenance
+# contract above. This rotation inherited an already-empty row list from
+# 1.63.0 (#526) and left it empty; the last row this file carried,
+# `defines 72 test functions`, was declared by 1.58.0 (#433) and retired by
+# 1.62.0 (#534).
+#
+# ZERO rows, because 1.65.0 states no figure this file's tokenizer can see. Its
+# actual NUMERALS are of three kinds, none of them a measurement: the version
+# and issue numbers, the heading's release date, and the contract-rule labels
+# (R9, and the `3` of an unchanged PROMPT_CONTRACT_VERSION marker). Every real
+# quantity it states is spelled out as a WORD, which `_TOKEN` cannot see: "all
+# three TASK files" (the count profile_validate.py's resumed-project check
+# walks), the "four assertions" a review round's inversion mutant turned red,
+# and the pre-fix token counts recorded in tests/glossary_trap_routing.test.py's
+# docstring. The last two are counts over a file as it stood BEFORE this diff,
+# or over a mutant that exists in no tree at all, so neither is re-derivable
+# here however it were phrased. Declaring any of them would hardcode an answer,
+# which passes every assertion below while proving nothing (`lambda: 3`).
+#
+# Stated exactly because a rotation of THIS block on THIS branch got it wrong:
+# it claimed to have inherited an empty list while the base it had just been
+# rebased onto declared one row, and only a reviewer reading the note caught it.
+#
+# The previous rotation, kept as its own record:
 # Rewritten for 1.63.0 (#526), per the maintenance contract above. The previous
 # rotation (1.51.0, #498) retired the one inherited row, the size of
 # `PLUGIN_BUNDLE_MEMBERS`. `_files_defining`, `_local_dict_len`, `_tuple_len`

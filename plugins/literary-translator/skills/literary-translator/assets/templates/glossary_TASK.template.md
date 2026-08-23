@@ -181,12 +181,20 @@ canon-batch item:
   reference URL -- never an invented one.
 
 Word-sense and realia accuracy applies to names too: a title or place name
-can carry a period/domain-specific sense that differs from its modern
-one. There is no separate trap-string gate for THIS file the way
-`translate_TASK.md`/`review_TASK.md` carry one (`scripts/scaffold_validate.py`'s
-trap-string scan only covers those two files) -- log a genuine discovery
-in `style_bible.md`'s own E-traps section instead, so future batches and
-segments benefit from it too.
+can carry a period/domain-specific sense that differs from its modern one.
+Record a genuine discovery of that kind in that candidate's own `note`, in
+the run-scoped fragment -- the merge carries an accepted item's note into
+`canon.json`, so the discovery outlives this run through the same validated
+path as every other result of this pass. That note is reader-facing --
+`render_obsidian.py` publishes an accepted entry's note on that entity's own
+page -- so write it as a publication-safe sentence about the word itself,
+never as a message to the operator. Write no other file.
+In particular never `style_bible.md`: its E-traps section sits inside the
+style_contract span, so an append there is both an unreviewed edit to the
+authority every translate, review and fix turn reads and a move of
+`style_contract_hash`, which flips every already-converged segment to
+`stale`. Promoting a trap into E-traps is the operator's own step, taken
+at a batch boundary with that cost in view -- never this pass's.
 
 ## Output -- EXACTLY this JSON (no markdown fencing)
 
