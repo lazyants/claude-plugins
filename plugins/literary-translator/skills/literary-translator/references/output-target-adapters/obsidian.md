@@ -189,12 +189,12 @@ hand-rolled occurrence-gathering script) is deliberately not ported as a
 *separate* index file — instead, the source-anchored `## Mentions` section
 below is the authoritative, variant-immune, homonym-split occurrence index,
 and `validate_backlinks.py` is what verifies its coverage.
-`output.index.enabled` (see `references/assembly-and-output.md`) governs a
-*different*, still-later-phase concept — a generated standalone index page
-— and stays irrelevant to this adapter's own occurrence tracking. A depth-1
-MOC (map-of-content) stub listing every category folder is a reasonable,
-proportional addition; a deeper generated index is explicitly out of scope
-here.
+`output.index` is retired, not a later phase (see
+`references/assembly-and-output.md` for what a project builds instead in its
+place); this adapter's own occurrence tracking never depended on it. A
+depth-1 MOC (map-of-content) stub listing every category folder is a
+reasonable, proportional addition; a deeper generated index is explicitly
+out of scope here.
 
 ### 1.8.0+ — source-anchored `## Mentions` section, ON BY DEFAULT since 1.10.0
 
@@ -248,8 +248,13 @@ migration note (a rendered vault holding an accepted
 re-accept once this lands, since `render_obsidian.py`'s own bytes changed;
 converged segments are never re-translated by this flip).
 The advisory `validate_backlinks.py` W9 gate (non-blocking) reports coverage;
-the aggregated `output.index` person-index page + `index_scope` routing
-remain a later phase.
+the aggregated `output.index` person-index page it once might have routed to
+is retired, not a later phase. `index_scope` is a different case and stays:
+it is carried end-to-end rather than merely declared — validated on
+`canon-senses.schema.json`, re-declared and enum-checked on
+`segpack.schema.json` by `segpack.py`, and projected into the registry row
+`person_registry.py` writes. It was never added to `canon-entry.schema.json`,
+and is not being added.
 
 **Checking a POST-PROCESSED vault (`--entity-note-map FILE`).** Both metrics
 locate each entity's note by re-deriving its path through the renderer's own

@@ -713,20 +713,6 @@
             }
           }
         },
-        "index": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "enabled": {
-              "type": "boolean",
-              "default": false
-            },
-            "person_grouping": {
-              "type": "boolean",
-              "default": false
-            }
-          }
-        },
         "adapter_config": {
           "type": "object",
           "additionalProperties": false,
@@ -769,33 +755,7 @@
             }
           }
         }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "index": {
-                "properties": {
-                  "person_grouping": { "const": true }
-                },
-                "required": ["person_grouping"]
-              }
-            },
-            "required": ["index"]
-          },
-          "then": {
-            "properties": {
-              "index": {
-                "properties": {
-                  "enabled": { "const": true }
-                },
-                "required": ["enabled"]
-              }
-            },
-            "required": ["index"]
-          }
-        }
-      ]
+      }
     }
   },
   "patternProperties": {

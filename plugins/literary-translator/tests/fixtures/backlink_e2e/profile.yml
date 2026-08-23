@@ -58,9 +58,6 @@ output:
   target: obsidian
   name_display:
     parenthetical_originals: never
-  index:
-    enabled: false
-    person_grouping: false
   adapter_config:
     obsidian:
       folders:

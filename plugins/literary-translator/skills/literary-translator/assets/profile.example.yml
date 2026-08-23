@@ -396,17 +396,6 @@ output:
       # never | first_occurrence -- whether a name's original-script form is shown parenthetically alongside
       # its target-language rendering the first time it occurs. Only consulted by the obsidian adapter at
       # render time, i.e. only under v1_scope: assembled_book; inert under the default segment_drafts_and_audit.
-  index:
-    enabled: false
-      # A separate, generated occurrence-index PAGE -- a still-later-phase feature, not yet built for any
-      # target -- OFF by default; a plain translate+gloss job never pays for it. The obsidian target's own
-      # native backlinks panel is a best-effort reading affordance, not an authoritative occurrence index
-      # (see references/output-target-adapters/obsidian.md) -- the authoritative one is the source-anchored
-      # "## Mentions" section below (mentions_section), so this knob stays irrelevant there too until that
-      # later phase ships.
-    person_grouping: false
-      # Opt-in lightweight name-grouping for the index. REQUIRES index.enabled: true (schema-enforced) --
-      # setting this true while enabled is false/absent is a validation error.
   adapter_config:
     # Per-target settings for the assembler -- only the sub-block matching `target` above is meaningful;
     # the others sit inert. Field-level shape validation is real for obsidian/custom (see below); epub

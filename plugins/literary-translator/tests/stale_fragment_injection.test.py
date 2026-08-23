@@ -216,7 +216,6 @@ def default_profile():
             "destination": "/placeholder/out/",
             "target": "obsidian",
             "name_display": {"parenthetical_originals": "never"},
-            "index": {"enabled": False, "person_grouping": False},
             "adapter_config": {
                 "obsidian": {"folders": {}, "mentions_section": {"enabled": False}},
                 "epub": None,
