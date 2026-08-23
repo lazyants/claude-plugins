@@ -161,8 +161,29 @@ def write_converged_fragment(root: Path, seg: str, cache_key: dict, draft_sha1: 
 
 
 def classify(root: Path, seg: str = SEG) -> dict:
+    """The classification of `seg`, and ONLY that -- this helper reads
+    `classification[seg]` and nothing else, so it must not ask for a dispatch
+    authorization it never uses.
+
+    `--classify-only` is what says so, and #442 is why it now has to be said.
+    `write_converged_fragment()` below hand-writes a `converged` row straight
+    into `runs/ledger.d/` without raising the `.ever_converged` marker that
+    `ledger_update.py` makes a hard precondition of publishing one -- fine for
+    a fixture, but it is a state the real pipeline cannot produce, and the
+    #409 Step 1 census now refuses exactly that combination (a ledger record
+    that says converged with no marker) rather than dispatching over finished
+    work. Passing the retranslate flag here would silence that by asserting
+    something this test has no opinion about; `--classify-only` skips the
+    census outright, which is the honest fix because classification is all
+    this helper ever wanted.
+    """
     proc = subprocess.run(
-        [sys.executable, str(root / "scripts" / "select_segments.py"), "--allow-empty"],
+        [
+            sys.executable,
+            str(root / "scripts" / "select_segments.py"),
+            "--allow-empty",
+            "--classify-only",
+        ],
         capture_output=True,
         text=True,
         timeout=120,
