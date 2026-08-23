@@ -328,17 +328,13 @@ def _local_dict_len(filename, funcname, varname):
 # 10 and 11 on the fr->ru book). Those are field observations from an
 # operator-owned durable root outside this repository and could not be re-derived
 # here in any case -- the accepted residual the docstring above names.
-FIGURES = [
-    Figure(
-        phrase="30 new test functions across three files",
-        value=30,
-        derive=lambda: sum(_test_function_count(f) for f in (
-            "prev_review_archive.test.py",
-            "fix_prompt_prior_round.test.py",
-            "prev_review_driver_handoff.test.py",
-        )),
-    ),
-]
+# The 1.66.0 (#541) row this rotation retired, kept as its own record: "30 new
+# test functions across three files", derived by summing `_test_function_count`
+# over prev_review_archive.test.py, fix_prompt_prior_round.test.py and
+# prev_review_driver_handoff.test.py. This file checks the NEWEST entry only, so
+# that phrase -- absent from a 1.67.0 entry that never claimed it -- fails as
+# stale, which is why retiring it is part of the rotation rather than cleanup.
+FIGURES = []
 
 
 def _newest_entry():

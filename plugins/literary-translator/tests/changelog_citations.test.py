@@ -147,32 +147,14 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # behavioural claims in this entry (what the archiver keys on, what the prompt
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
-CITATION_ANCHORS = {
-    # 1.66.0 (#541). These two ranges carry the first half of the entry's cost
-    # claim: that both edited files sit in the bundle tuple, and that the hash
-    # they move is GLOBAL rather than per-segment. Either drifting would make
-    # the release's stated cost wrong in the direction operators plan around.
-    "cache_key.py:143-171": [
-        "PLUGIN_BUNDLE_MEMBERS = (",
-        '"codex_job.py"',
-        '"mass-translate-wf.template.js"',
-    ],
-    "cache_key.py:178-199": [
-        "CACHE_KEY_FIELD_ORDER = (",
-        '"plugin_bundle_hash"',
-        "PER_SEGMENT_FIELDS",
-        "GLOBAL_CACHE_KEY_FIELDS",
-    ],
-    # The resume-identity half of the same cost. A reader planning an upgrade
-    # around segment staleness alone would miss it, and nothing else in the
-    # suite pins that this marker reaches the digest.
-    "resume_setup.py:723-740": [
-        '"plugin_bundle_hash"',
-        ".plugin_bundle_hash",
-        '"version": version',
-        "_sha256_hex(_canonical_json_bytes(digest_input))",
-    ],
-}
+# The 1.66.0 (#541) rows this rotation retired, kept as their own record: three
+# ranges -- `cache_key.py:143-171`, `cache_key.py:178-199` and
+# `resume_setup.py:723-740` -- pinning that entry's two-part cost claim (both
+# edited files inside `PLUGIN_BUNDLE_MEMBERS`, the hash they move being global
+# rather than per-segment, and the same marker reaching the resume digest).
+# Retiring them is not optional bookkeeping: this file checks the NEWEST entry
+# only, so an anchor no current citation uses fails as stale.
+CITATION_ANCHORS = {}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
 # alphabetic extension are still required. Pinning a list of extensions was
