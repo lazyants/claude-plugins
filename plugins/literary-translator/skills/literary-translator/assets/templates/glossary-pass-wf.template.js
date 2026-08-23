@@ -181,9 +181,13 @@
 //                        deliberately self-anchored merge is still possible
 //                        by running `canon_validate.py --merge-batches ...
 //                        --allow-durable-sibling` BY HAND, outside this
-//                        template. Substituted as a strict json.dumps JS
-//                        STRING LITERAL (WITH its own surrounding quotes,
-//                        sitting OUTSIDE quotes) in
+//                        template -- which under research_mode:live also
+//                        needs `--citations-reviewed` for any
+//                        basis:"established" item (#505), since the citation
+//                        review that would justify it runs in THIS file and
+//                        a hand-driven merge has not had one. Substituted
+//                        as a strict json.dumps JS STRING LITERAL (WITH its
+//                        own surrounding quotes, sitting OUTSIDE quotes) in
 //                        `const PLUGIN_ROOT = {{PLUGIN_ROOT}};` below --
 //                        same splice-safety contract as
 //                        mass-translate-wf.template.js's own
@@ -1318,6 +1322,18 @@ function mergeBatchesPrompt(fragments) {
   const cmdParts = [PY, ROOT + "/scripts/canon_validate.py", "--merge-batches"]
   for (let i = 0; i < fragments.length; i++) cmdParts.push(fragments[i])
   cmdParts.push("--research-mode", RESEARCH_MODE)
+  // #505: canon_validate.py refuses to freeze a basis:"established" citation
+  // under live unless the caller attests an independent citation review
+  // approved these exact bytes -- because the review lives HERE, in this
+  // template's control flow, and the writer serves a hand-driven caller too.
+  // Attaching it on exactly CITATION_REVIEW_ENABLED is what keeps the
+  // attestation TRUE rather than ceremonial: under live this pass has one
+  // ready:true return and it sits behind a matching CITATIONS_OK verdict, and
+  // the paths merged are the approved snapshots the reviewer audited (see
+  // mergePath above). Under offline no review runs -- and none is needed,
+  // since basis:"established" is forbidden outright there -- so the flag is
+  // correctly absent rather than asserted vacuously.
+  if (CITATION_REVIEW_ENABLED) cmdParts.push("--citations-reviewed")
   // #412: --merge-batches is one of canon_validate.py's STAMPING modes (it
   // calls _stamp_generation_hash via run_merge_batches), so it is the one
   // command this template threads PLUGIN_ROOT_ARG into -- see the header

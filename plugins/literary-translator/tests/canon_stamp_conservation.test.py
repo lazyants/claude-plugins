@@ -309,8 +309,11 @@ def test_batch_alongside_another_mode_is_rejected(tmp_path, other_mode):
 # Scoped precisely, because the earlier wording here overstated it: adding a
 # mode is still THREE edits (a MODE_SPECS row, an add_argument(), a dispatch
 # branch). What the table plus the drift test below guarantee is narrower and
-# still worth having -- the row cannot be forgotten, and the three cross-flag
-# guards cannot diverge from each other. Two guards remain hardcoded
+# still worth having -- the row cannot be forgotten, and the table-driven
+# cross-flag guards cannot diverge from each other. Stated without a COUNT
+# deliberately: the number here read "three" through both --approve-to and
+# #505's --citations-reviewed, and a count in a comment is exactly the kind of
+# claim that goes wrong silently. Two guards remain hardcoded
 # per-flag (--verify-merged requires --batch; --batch repeatable only under
 # it); both express a requires-relation between two named flags, not a
 # per-mode property.

@@ -129,6 +129,22 @@ Order of operations:
      has lost the literal, that HALTS too** -- a reworded shipped
      prohibition must update this constant in the same commit, never
      silently disable the axis.
+  6d. Script axis (#505): every DURABLE_SCRIPT_FILENAMES entry -- today
+     just `canon_validate.py` -- is compared BYTE-FOR-BYTE between the
+     plugin's own `assets/scripts/` and `${durable_root}/scripts/`.
+     Missing, unreadable, or differing -> exit 2, axis=script, remedy
+     "re-run Step 0a's copy pass". Byte-equality is sound here precisely
+     because Step 0a copies `assets/scripts/*.py` VERBATIM -- token
+     substitution applies to the workflow TEMPLATES, a different tree --
+     so a healthy durable copy is a byte-copy. The failure it prevents is
+     a LATE one: the template is instantiated fresh from the plugin every
+     run but executes the DURABLE script, so a flag the template passes
+     and the durable copy has never heard of dies with argparse exit 2
+     *after* every batch's dispatch, retrieval and citation review has
+     been spent, surfacing only as a merge that produced nothing.
+     Deliberately not a feature-detection of one flag: that check's
+     trigger would stop firing once every root had been refreshed.
+
   7. All pass -> exit 0, stdout `{"preflight":"ok"}`.
 
 Robustness -- nothing here to keep in sync with the schemas by hand: the
@@ -276,6 +292,27 @@ SCRIPTS_DIR = ASSETS_DIR / "scripts"
 
 SCHEMA_FILENAMES = ("canon-entry.schema.json", "canon-batch.schema.json")
 
+# #505 -- the SCRIPT axis. The workflow template is instantiated FRESH from the
+# plugin on every W3 run, but the command it builds executes the DURABLE copy
+# of canon_validate.py. So the two can be a release apart, and a template that
+# passes a flag the durable copy has never heard of fails with an argparse
+# `unrecognized arguments` exit 2 -- AFTER every batch's dispatch, retrieval
+# and citation review has already been paid for, and reported as a merge that
+# simply produced nothing.
+#
+# Byte-equality is the right predicate, and only because of a fact worth
+# stating rather than assuming: Step 0a copies assets/scripts/*.py VERBATIM,
+# with no token substitution (substitution applies to the workflow TEMPLATES,
+# which are a different tree). A healthy durable copy is therefore a byte-copy,
+# so any inequality genuinely means "re-run Step 0a's copy pass".
+#
+# Same strictness bias as every other axis here: a false HALT's remedy is safe
+# and idempotent, a false PASS is the late failure above. Deliberately NOT a
+# feature-detection of one flag -- that check's trigger would stop firing the
+# moment every root was refreshed, which is precisely how a gate rots.
+DURABLE_SCRIPT_FILENAMES = ("canon_validate.py",)
+PLUGIN_SCRIPTS_DIR = ASSETS_DIR / "scripts"
+
 
 def _halt(message: str) -> NoReturn:
     """Prints ONE actionable line to stderr and exits 2. Never a traceback,
@@ -310,6 +347,34 @@ def _read_text_guarded(path: Path):
         return path.read_text(encoding="utf-8"), None
     except (OSError, UnicodeDecodeError) as e:
         return None, f"could not read {path}: {e}"
+
+
+def _read_bytes_guarded(path: Path):
+    """(bytes, None) on success, (None, reason) on any read failure. Mirrors
+    _read_text_guarded, but byte-exact: this axis compares a copied script to
+    its origin, and a text read would normalize nothing useful while opening a
+    decode-error path on a file that is not required to be valid UTF-8."""
+    if not os.path.isfile(path):
+        return None, "file not found"
+    try:
+        return path.read_bytes(), None
+    except OSError as exc:
+        return None, f"unreadable ({type(exc).__name__})"
+
+
+def _resolve_guarded(path: Path):
+    """(resolved_path, None) on success, (None, reason) on any resolution
+    failure. `Path.resolve()` is NOT uniformly non-raising across the
+    interpreters this plugin runs on: measured, a self-referential symlink
+    raises `RuntimeError: Symlink loop` on 3.10/3.11/3.12 and resolves
+    silently on 3.13/3.14. An uncaught raise here would exit 1 with a
+    traceback, breaking this module's contract that EVERY fatal preflight
+    state exits 2 with one actionable line -- on exactly the interpreters
+    where the operator is least likely to be told why."""
+    try:
+        return path.resolve(), None
+    except (OSError, RuntimeError, ValueError) as exc:
+        return None, f"unresolvable ({type(exc).__name__})"
 
 
 def _reject_duplicate_keys(pairs):
@@ -547,10 +612,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description=(
             "W3 glossary pre-dispatch staleness gate -- compares the "
             "durable_root's copy of canon-entry.schema.json / "
-            "canon-batch.schema.json / glossary_TASK.md against the "
-            "plugin's own shipped copies for basis:\"sense_translated\" "
+            "canon-batch.schema.json / glossary_TASK.md against the plugin's "
+            "own shipped copies for basis:\"sense_translated\" "
             "support. See this file's own module docstring for the full "
-            "spec."
+            "spec. Separately (#505), the durable canon_validate.py must be "
+            "BYTE-IDENTICAL to the plugin's own -- that axis is about "
+            "template/durable-script version skew, not about any one basis "
+            "value, so it halts on any difference at all."
         )
     )
     parser.add_argument(
@@ -729,7 +797,6 @@ def main(argv=None) -> int:
             f"'never this pass's') before retrying the glossary pass. It is in "
             f"no cache-key field, so the edit re-translates nothing."
         )
-
     # --- Step 6c: prompt axis, CONTENT (#383) --------------------------------
     # Same shape as 6b, and for the same reason: glossary_TASK.md is seeded
     # ONCE and never auto-overwritten, so a rule added to the shipped template
@@ -779,6 +846,82 @@ def main(argv=None) -> int:
             f"bullets before retrying the glossary pass. They are in no "
             f"cache-key field, so the edit re-translates nothing."
         )
+
+    # --- Step 6d: script axis (#505) ------------------------------------------
+    durable_scripts_dir = durable_root / "scripts"
+    for filename in DURABLE_SCRIPT_FILENAMES:
+        plugin_path = PLUGIN_SCRIPTS_DIR / filename
+        plugin_bytes, err = _read_bytes_guarded(plugin_path)
+        if err is not None:
+            _halt(
+                f"glossary_preflight: could not read this plugin's OWN shipped "
+                f"{plugin_path} ({err}) -- this is a literary-translator plugin "
+                f"install/packaging problem, not a durable_root staleness issue; "
+                f"reinstall the plugin."
+            )
+        durable_path = durable_scripts_dir / filename
+        # Read the durable side BEFORE the self-comparison below: this reader
+        # halts cleanly on a durable copy that is missing, unreadable, or a
+        # broken/looping symlink, so resolve() below only ever runs on two
+        # paths the OS has just resolved to real regular files.
+        durable_bytes, err = _read_bytes_guarded(durable_path)
+        if err is not None:
+            _halt(
+                f"glossary_preflight: durable {durable_path} is unusable, "
+                f"axis=script ({err}) -- the glossary pass executes the DURABLE "
+                f"copy of this script, so it must exist and be readable. Re-run "
+                f"Step 0a's copy pass against this durable_root before retrying "
+                f"the glossary pass."
+            )
+        # A byte-comparison whose two sides can be the SAME FILE is the one
+        # failure this axis cannot survive: it passes vacuously, forever, and
+        # looks identical to a healthy root. It is reachable exactly one way --
+        # running this script from ${durable_root}/scripts/ instead of the
+        # plugin's own assets/scripts/, which makes ASSETS_DIR self-anchor onto
+        # the durable tree and collapses both paths onto one inode. Step 0a's
+        # copy-exclusion list already forbids copying this script there, and the
+        # module docstring says why, but nothing in CODE enforced it. Compared
+        # after resolve() so a symlinked durable copy of the plugin's own file
+        # is caught too, not just an identical pathname.
+        resolved_plugin, err = _resolve_guarded(plugin_path)
+        if err is not None:
+            _halt(
+                f"glossary_preflight: could not resolve this plugin's OWN "
+                f"shipped {plugin_path} ({err}) -- this is a "
+                f"literary-translator plugin install/packaging problem, not a "
+                f"durable_root staleness issue; reinstall the plugin."
+            )
+        resolved_durable, err = _resolve_guarded(durable_path)
+        if err is not None:
+            _halt(
+                f"glossary_preflight: durable {durable_path} is unusable, "
+                f"axis=script ({err}) -- the glossary pass executes the DURABLE "
+                f"copy of this script, so it must exist and be readable. Re-run "
+                f"Step 0a's copy pass against this durable_root before retrying "
+                f"the glossary pass."
+            )
+        if resolved_plugin == resolved_durable:
+            _halt(
+                f"glossary_preflight: refusing to compare {durable_path} "
+                f"against itself, axis=script -- both sides resolved to the "
+                f"same file, so this check could only ever pass. This script "
+                f"must be run from the PLUGIN's own assets/scripts/ (it is on "
+                f"Step 0a's copy-exclusion list and self-anchors relative to "
+                f"its own location); running the durable copy compares the "
+                f"durable tree against itself."
+            )
+        if durable_bytes != plugin_bytes:
+            _halt(
+                f"glossary_preflight: durable {durable_path} is STALE, "
+                f"axis=script (its bytes differ from this plugin's own shipped "
+                f"{plugin_path}) -- the workflow template is instantiated fresh "
+                f"from the plugin on every run but executes the DURABLE copy of "
+                f"this script, so a version skew between them fails the merge "
+                f"after the whole pass has been spent. Step 0a copies "
+                f"assets/scripts/*.py verbatim, so a healthy durable copy is "
+                f"byte-identical: re-run Step 0a's copy pass against this "
+                f"durable_root before retrying the glossary pass."
+            )
 
     # --- Step 7: all clear ----------------------------------------------------
     print(json.dumps({"preflight": "ok"}, separators=(",", ":"), ensure_ascii=False))

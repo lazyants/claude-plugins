@@ -1596,7 +1596,18 @@ retrieves every cited page through `scripts/fetch_citation.py` (scheme and
 address allowlist, connection pinned to the address it vetted, every redirect
 hop re-validated, caps on time/bytes/content-type), reading nothing either
 command wrote; an independent JUDGE at `effort:"high"` then reads only local
-files and retrieves nothing at all. The split is what makes that boundary an
+files and retrieves nothing at all. **Auditing a citation BY HAND goes through
+that same `scripts/fetch_citation.py` boundary, never `curl`** — it is what
+checks the scheme and address, pins the connection to the address it vetted,
+re-validates every redirect hop and caps time, bytes and content type, and a
+cited page is attacker-authorable whoever opens it. **#505:** a merge run by
+hand under `research_mode: live` is refused outright for any
+`basis:"established"` item unless you pass `canon_validate.py`'s
+`--citations-reviewed`, attesting such a review approved those exact bytes —
+the Workflow passes it itself on the reviewed path, and a merged row is frozen
+against any further merge (revisable only by a deliberate `--correct`,
+`#495`), so an unaudited citation that reaches the merge stays until somebody
+notices it. The split is what makes that boundary an
 enforcement point rather than a rule the attacker can argue with — an agent
 that ingests attacker-authored page text can be told by that text to fetch
 something else, so the agent that decides what to fetch is the one that never

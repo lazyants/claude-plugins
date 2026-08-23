@@ -671,6 +671,14 @@ def test_merge_live_mode_allows_established_item_through_backstop(tmp_path):
     # accepted_item rejects under offline must merge cleanly under live --
     # proving the backstop is genuinely conditional on research_mode, not a
     # blanket rejection of basis:"established".
+    #
+    # #505 added a SECOND, independent live-side gate: a merge carrying any
+    # basis:"established" item is refused unless the caller attests a citation
+    # review approved those bytes. That attestation is passed here so this test
+    # keeps asking its own question -- is the OFFLINE backstop conditional --
+    # rather than silently re-testing the new one. The new gate has its own
+    # file (tests/canon_merge_citation_attestation.test.py), including the
+    # unattested refusal this call would otherwise hit.
     root = make_durable_root(tmp_path)
     batch_path = write_batch(
         root,
@@ -685,7 +693,10 @@ def test_merge_live_mode_allows_established_item_through_backstop(tmp_path):
         ],
     )
 
-    proc = run_canon_validate(root, "live", batch_path=batch_path)
+    proc = run_canon_validate_cli(
+        root,
+        ["--research-mode", "live", "--batch", str(batch_path), "--citations-reviewed"],
+    )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     payload = parse_stdout(proc)
     assert payload["success"] is True

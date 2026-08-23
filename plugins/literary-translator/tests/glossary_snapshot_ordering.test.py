@@ -1132,3 +1132,31 @@ def test_the_emitted_attempt_basename_is_one_the_wipe_matches(tmp_path):
         "which resume_setup.py's _GLOSSARY_FRAGMENT_RE does not match"
     )
     assert match.group(1) == "out"
+
+
+def test_merge_batches_command_carries_the_citation_attestation_under_live(tmp_path):
+    """#505. canon_validate.py now refuses a live merge carrying any
+    basis:"established" item without --citations-reviewed, because the
+    pre-merge citation review runs in THIS template and the writer serves a
+    hand-driven caller too. The template must therefore pass the attestation
+    on the reviewed path -- otherwise the fix turns the pipeline itself RED,
+    and it would fail LATE, after every batch's review has already been paid
+    for."""
+    out = one_batch_run(tmp_path, research_mode="live")
+    merge = sole_prompt(out, "glossary:merge")
+    assert "--citations-reviewed" in merge, (
+        "under research_mode:live every batch reaching the merge has passed a "
+        "CITATIONS_OK verdict, so mergeBatchesPrompt() must attest it: " + merge
+    )
+
+
+def test_merge_batches_command_omits_the_citation_attestation_under_offline(tmp_path):
+    """The other half, and not symmetry for its own sake: under offline
+    CITATION_REVIEW_ENABLED is false and no review runs at all, so passing the
+    flag there would assert a review that never happened. The writer's guard
+    cannot fire under offline either -- basis:"established" is forbidden
+    outright and rejected by the older backstop -- so the correct spelling is
+    absence, not a vacuous truth."""
+    out = one_batch_run(tmp_path, research_mode="offline")
+    merge = sole_prompt(out, "glossary:merge")
+    assert "--citations-reviewed" not in merge, merge

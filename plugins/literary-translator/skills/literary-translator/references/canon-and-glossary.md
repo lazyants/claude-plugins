@@ -633,8 +633,10 @@ verbatim and computes no hash at all.
 1.2.0 adds three new modes to close #87 (schema-less glossary dispatch,
 `references/orchestration-and-batching.md`), #90 (concurrent-batch races),
 and #88 (unverified merge) — routed by `main()` on which flag is given,
-alongside the original `--batch PATH` merge path (kept working unchanged;
-existing tests exercise it directly):
+alongside the original `--batch PATH` merge path (still supported and
+exercised directly by existing tests; like `--merge-batches` it has since
+taken **#291**'s no-op stamp conservation, **#412**'s trusted-sibling
+requirement and now **#505**'s live citation attestation):
 
 ### `--check-batch PATH [--expect-source-forms-file M.json]` — one fragment, no write
 
@@ -719,6 +721,62 @@ promotion into `style_bible.md`'s E-traps waits for a batch boundary, where
 `SKILL.md`'s R9 prices it; that split is the ordering `style_bible.template.md`
 already ships under E-traps.
 
+**`--citations-reviewed` — the writer refuses to freeze an unaudited citation
+(#505).** Under `--research-mode live`, both merge modes REFUSE a fragment
+carrying any `basis: "established"` item unless the caller passes
+`--citations-reviewed`. Nothing is written when this fires; the whole batch
+merge is rejected and `canon.json` is byte-unchanged.
+
+The gate exists because the pre-merge citation review above is the ONLY thing
+anywhere that opens a cited page, and it lives entirely inside the glossary
+pass's Workflow control flow — while this script serves a second caller the
+Workflow knows nothing about: a merge run BY HAND. That is not a hypothetical
+path. This script's own module docstring records that the real historiettes-t3
+project ran its glossary pass as ad hoc `glossary/TASK.md` + codex batches,
+never through this pipeline, and `#505`'s own measurement — 7 of 23 citations
+unusable, 4 of them well-formed product URLs on the publisher's real domain —
+came from exactly such a pass. A merged row is frozen by the merge and the
+downstream reviewer is forbidden to question a frozen canon form, so what
+reached the writer unaudited stayed — until somebody noticed and ran
+**#495**'s `--correct`, which is exactly the point: that is an act
+somebody has to know to perform, and an unaudited citation announces nothing.
+
+Three properties worth stating exactly, because each is a limit:
+
+- **It is an attestation, not a proof.** No artifact on disk records a
+  `CITATIONS_OK` verdict, and the approved snapshot the reviewer audits is
+  written by PREPARE *before* any evidence is fetched — so even "this path is
+  an `approved_*.json`" would say nothing about the verdict. What the refusal
+  converts is a SILENT freeze into a deliberate act, the same ceiling as
+  `--plugin-root`/`--allow-durable-sibling` (#412) and `reject_review.py`'s
+  attested `--reason` (#461).
+- **It keys on `basis`, never on `disposition`.** A `review_queue` item may
+  carry `basis: "established"` — the queued branch requires only `note` and
+  leaves `source` unconstrained — and `_merge_batch` freezes it into
+  `review_queue[]` verbatim, so an accepted-only scan would leave that door
+  open. The Workflow's own reviewer scopes by `basis` for the same reason.
+- **`offline` is untouched.** There `basis: "established"` is forbidden
+  outright and the older backstop rejects it first, with its own message.
+  Telling an offline operator to attest a review that offline cannot run would
+  be worse than saying nothing.
+
+Auditing a citation by hand goes through `scripts/fetch_citation.py`, never
+`curl` — that boundary is what checks scheme and address, pins the connection
+to the address it vetted, re-validates every redirect hop, and caps time,
+bytes and content type. The reason is set out under "Since 1.16.1 (#347) the
+stage is TWO calls per attempt" above, and it applies to a human reaching for
+a terminal exactly as it applies to a judging agent holding Bash.
+
+The Workflow passes the flag itself, on exactly the reviewed path: see
+`references/orchestration-and-batching.md`'s final-merge command. That is also
+why `glossary_preflight.py` gained a **script axis** — the template is
+instantiated fresh from the plugin every run but executes the DURABLE copy of
+`canon_validate.py`, so a durable root that has not re-run Step 0a's copy pass
+would meet the new flag with `unrecognized arguments`, *after* the whole pass
+had been spent. The preflight halts on that skew before dispatch instead. It
+guards the documented SKILL W3 launch path, which is where preflight runs; a
+caller that instantiates and runs the template directly does not get it.
+
 ### `--verify-merged --batch f1 --batch f2 … [--expect-source-forms-file M.json]` — disk-independent re-check (closes #88)
 
 The glossary disk-verify call's own invocation (`schema: CANON_VERIFY_SCHEMA`
@@ -742,12 +800,15 @@ applied identically to the ledger literals).
 
 ### `--batch PATH` — the original single-fragment merge path (kept)
 
-Unchanged from pre-1.2.0: merges one glossary-pass batch result into
+Still the same shape it had pre-1.2.0 — though not untouched since: it takes
+every cross-cutting merge precondition `--merge-batches` does, **#505**'s live
+citation attestation included. It merges one glossary-pass batch result into
 `canon.json` in a single call, running Pass 1 + the offline backstop + the
-dedup/collision merge + `generation_hashes` stamping + the atomic write +
-Pass 2. Existing tests exercise this path directly; it is not deprecated,
-just no longer how the Workflow template itself drives a real multi-batch
-glossary pass (that's `--merge-batches` now).
+citation attestation + the dedup/collision merge + `generation_hashes`
+stamping + the atomic write + Pass 2. Existing tests exercise this path
+directly; it is not deprecated, just no longer how the Workflow template
+itself drives a real multi-batch glossary pass (that's `--merge-batches`
+now).
 
 ### `--batch` omitted entirely — VALIDATE-ONLY mode (kept)
 
@@ -1243,8 +1304,10 @@ exists at all — so several atomic renames onto the reviewed path are ordinary
 expected behaviour. `pipeline()` then waits for every batch before the one
 `--merge-batches`, so an approved fragment sits un-rechecked while its
 siblings climb their retry ladders; `--merge-batches` fresh-reads from disk
-and knows nothing of the citation review, and `--verify-merged` re-reads too
-but checks shape and coverage, never citations.
+and knows nothing of the citation review's VERDICT — since **#505** it knows
+only whether the caller attested one (`--citations-reviewed`, below), which is
+a different and much smaller thing — and `--verify-merged` re-reads too but
+checks shape and coverage, never citations.
 
 So the fragment's own `--check-batch` validation is re-run with
 `--approve-to` as PREPARE's first command, before anything is fetched and

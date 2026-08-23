@@ -414,6 +414,14 @@ def test_orchestration_merge_batches_command_carries_plugin_root():
         "`canon_validate.py --merge-batches <frag1> <frag2> … "
         "--research-mode X --plugin-root {{PLUGIN_ROOT}}`"
     )
+    # #505 -- the live-only attestation the same command now carries. Pinned
+    # beside the command rather than folded into the needle above, because the
+    # flag is appended CONDITIONALLY by the template (CITATION_REVIEW_ENABLED)
+    # and the prose says so in words rather than in the code span.
+    assert "--citations-reviewed" in _normalized(ORCHESTRATION_AND_BATCHING), (
+        "orchestration-and-batching.md's final-merge description must name the "
+        "#505 attestation the template appends under research_mode:live"
+    )
     assert needle in _normalized(ORCHESTRATION_AND_BATCHING), (
         "orchestration-and-batching.md's final-merge command must read "
         f"{needle}"
