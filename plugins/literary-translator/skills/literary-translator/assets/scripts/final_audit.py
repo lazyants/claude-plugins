@@ -25,9 +25,9 @@ Two HARD checks, each counted separately, both rolling into `hard_failures`
      structurally valid but silently substitutes prose the reviewer never
      saw.
 
-Five WARN-only, advisory, non-gating checks -- four generalized from the
+Six WARN-only, advisory, non-gating checks -- four generalized from the
 real reference's A1/A3/A4/A5 (the real `main()` only ever gated on coverage),
-plus one whose content the PROJECT supplies:
+plus two whose content the PROJECT supplies:
 
   (1) glossary-diff    -- cross-segment source-name -> target-form drift
                            using each converged draft's own `names[]`, plus
@@ -56,6 +56,19 @@ plus one whose content the PROJECT supplies:
                            codepoint-decidable style_bible rules are the only
                            thing this check knows. Scans every string leaf of
                            blocks/footnotes/verses exactly as written.
+  (6) term-consistency   -- the PROJECT's own pinned common-noun TERMS OF ART
+                           (an office title, a recurring institutional realia),
+                           declared as profile.yml's `validation.terms` (#199).
+                           `canon.json` is a proper-name glossary by
+                           construction and cannot hold such a term, and WARN 1
+                           above keys on canon entries and per-draft `names[]`
+                           -- both proper-name channels -- so a recurring common
+                           noun renders two ways with nothing noticing. This
+                           check compares each SOURCE-BEARING CARRIER against
+                           its own translated counterpart and reports a carrier
+                           whose source carries the term while its draft carries
+                           no occurrence of the pinned target form. The plugin
+                           ships no terms and hardcodes none.
 
 A third, distinct gate -- the **whole-project completeness gate** -- shells
 out to `select_segments.py` one final time, over the FULL `manifest.json`
@@ -63,7 +76,7 @@ with no `--only-segs` restriction, and folds its classification report into
 `completeness_counts`/`project_complete`. This is NOT the same population as
 the two hard checks above: the hard checks only ever look at segments
 ALREADY converged; the completeness gate looks at the whole book, converged
-or not. Unlike the five WARN-only checks below, this gate DOES affect the
+or not. Unlike the six WARN-only checks below, this gate DOES affect the
 exit code -- a project that is not yet complete exits `3` (below `1`
 priority) rather than `0`, so `select_segments.py`'s W5 delivery-refusal
 rule holds on this default path too.
@@ -211,7 +224,7 @@ import stat
 import subprocess
 import sys
 import unicodedata
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
@@ -941,6 +954,381 @@ def warn_forbidden_patterns(seg, compiled):
                     f"[{seg}] STYLE-PATTERN {rule_id} in {label}: {message} "
                     f"(hits={hit_count}) :: {snippet!r} -- MANUAL"
                 ))
+    return warns
+
+
+# ---------------------------------------------------------------------------
+# WARN 6: term-consistency -- the project's OWN pinned common-noun terms of
+# art, declared in profile.yml as `validation.terms` (#199).
+#
+# WHY THIS LANE EXISTS AT ALL. `canon.json` is a 1:1 PROPER-NAME dictionary by
+# construction: `bootstrap_names.py` surfaces capitalized candidates, and the
+# shipped adjudication contract refuses to `accept` an `is_proper_name:false`
+# entry (assets/templates/glossary_TASK.template.md). WARN 1 above -- the only
+# cross-segment consistency check this script has -- keys on `canon.entries`
+# and each draft's own `names[]`, both proper-name channels. So a recurring
+# COMMON NOUN that must render one way for the whole book (an Ancien-Regime
+# court office, an institutional realia) can be neither frozen in canon nor
+# seen by the drift check, and renders two ways in one delivered volume with
+# nothing -- not even a WARN -- noticing. The pinning half is already served:
+# `style_bible.md` section C carries a required-fill title/honorific mapping and
+# is delivered in full to every translate and review job. The DETECTION half is
+# what this buys, and it is what #199 asks for.
+#
+# THE RULE IS A CARRIER-LOCAL OCCURRENCE COUNT, AND THE SCOPE IS THE WHOLE
+# POINT. For each carrier the segpack and the draft key by the same identifier,
+# the check compares how often the pinned SOURCE form appears in that carrier's
+# source against how often the pinned TARGET form appears in that carrier's own
+# translated text, and reports a SHORTFALL.
+#
+# Two coarser scopes were tried and are both wrong, in opposite directions:
+#
+#   - PER-SEGMENT totals are not comparable at all. Under
+#     `full_rhymed_plus_literal` one source verse legitimately yields two target
+#     fields, so the target total inflates and MASKS a genuinely missing prose
+#     or footnote occurrence.
+#   - PER-SEGMENT absence ("the draft mentions the pin somewhere") misses the
+#     instance #199 was filed for: a body that renders the office correctly
+#     hides a footnote that does not.
+#
+# Carrier-local ABSENCE, the rule this shipped with first, has the same defect
+# one level down and was caught in review: a block whose source carries the
+# office twice and whose translation reads `президент ... председатель` is
+# clean under it, although the second occurrence is exactly the drift being
+# hunted. Counting inside ONE delivered text is sound precisely because nothing
+# duplicates content there -- which is why a verse contributes one carrier PER
+# delivered field rather than one carrier holding both.
+#
+# WHICH CARRIERS ARE COMPARED, AND THE ONE PRINCIPLE BEHIND IT: a carrier is
+# compared only where the ACTIVE POLICY says it is TRANSLATED. A carrier the
+# project has declared passed through in the SOURCE language is not a
+# source/target pair at all, and comparing it would warn on every occurrence of
+# a term the operator handled exactly as instructed.
+#
+#   - blocks -- compared, EXCEPT a block claimed by a `mount:"block"` verse.
+#     Extraction leaves the original poem in that segpack block while
+#     validate_draft.py requires its `draft.blocks[id]` to be ONLY the verse
+#     placeholder, so comparing it warns on every pinned term the poem contains
+#     even when the verse itself renders it correctly.
+#   - footnotes -- compared unless `footnotes.apparatus_policy` is
+#     `preserve_source`, which carries definitions through UNTRANSLATED while
+#     segpack.py still ships them. `body_refs_only`/`omit_apparatus` carry no
+#     definitions at all, so they need no case of their own.
+#   - verses -- compared unless `verse_policy.mode` is `skip`, which passes
+#     verse content through as-is while still requiring every verse KEY to be
+#     present. A verse's SOURCE text is not in the segpack (extraction
+#     substitutes a placeholder); it lives in manifest.json's `verse.store[]`.
+#     Each DELIVERED FIELD is its own carrier: both `rendered` and
+#     `literal_gloss` reach the reader, so one must never be able to satisfy the
+#     pin on the other's behalf.
+#
+# THE VERSE TARGET IS `rendered` AND `literal_gloss` -- each on its own -- AND
+# NOT EVERY STRING LEAF, and
+# that is where this check deliberately parts from WARN 5 above. The reason is
+# POLARITY, not disagreement. WARN 5 asks "did the translator write something
+# BANNED?", where scanning a superset of fields can only over-report. This one
+# asks "is the pin PRESENT?", where scanning a superset lets any extra field
+# SUPPRESS the warning: a schema-valid draft carrying `rendered` with the wrong
+# term plus an ignored `note` holding the pin would ship the wrong term
+# unreported. Those two fields are not a second copy of validate_draft.py's
+# per-mode authority -- they are the DELIVERED surface, and all three consumers
+# agree on it mode-independently (validate_draft.py, assemble.py,
+# render_obsidian.py).
+#
+# WHAT IT DOES NOT DECIDE. Whether a rendering is CORRECT is an editorial call
+# and never a script's (see this plugin's iron rule). This check knows only what
+# the operator pinned. It matches by SUBSTRING, which is what makes a suffixing
+# target language work -- a pinned `<stem>` is found inside its inflected forms
+# -- so the pinning contract is that an operator pins the INVARIANT part. A
+# target language that inflects by prefix or stem change cannot be pinned this
+# way. A carrier whose occurrence is legitimately omitted or rendered
+# pronominally still warns; the line names the carrier so that costs one glance.
+#
+# Advisory only. A hit never changes the exit code -- see this module's
+# docstring on the WARN/hard split.
+# ---------------------------------------------------------------------------
+
+# One value carrying everything the lane resolved once for the whole run.
+TermCheck = namedtuple(
+    "TermCheck", "terms apparatus_policy verse_mode verse_sources"
+)
+
+# The verse fields that actually reach the reader. Kept as a constant because
+# three shipped consumers agree on it and this check must not drift from them.
+DELIVERED_VERSE_FIELDS = ("rendered", "literal_gloss")
+
+# Tags are replaced by a SPACE, never by the empty string: gluing two adjacent
+# elements together would manufacture an occurrence that spans a boundary no
+# reader ever sees. The disclosed cost of that choice is the converse -- a term
+# split by inline markup (`pre<em>sident</em>`) is a miss -- which only reaches
+# a segpack block carrying `source_html` and no `plain_text`.
+#
+# `[^<>]`, NOT `[^>]`, and that one character is the whole difference between
+# linear and QUADRATIC on malformed input. With `[^>]*`, every `<` in a run
+# scans to end-of-string looking for a terminator, fails, and the search
+# restarts at the next `<`: measured on this machine, 120 000 consecutive `<`
+# with no `>` takes 5.18s, against 0.001s here. A draft or segpack is
+# LLM-written and hand-editable, and a stall in an advisory lane blocks W7
+# before it prints the two HARD verdicts -- so the pathological case is the one
+# that matters, not the well-formed one. Excluding `<` from the body also means
+# an unterminated `<` can no longer swallow the following tag. On real markup
+# the two spellings are identical, which is exactly why the cheap fix is
+# available. (`validate_draft._TAG_RE` spells it `<[^>]+>` and carries the same
+# quadratic; that is pre-existing and not this change's to fix.)
+_HTML_TAG_RE = re.compile(r"<[^<>]*>")
+
+
+def _fold_term_text(text):
+    """NFC, then casefold -- the one normalization both sides of this check go
+    through, including the declared forms themselves.
+
+    NFC is load-bearing, not decoration: extraction's own `normalize_text()`
+    only collapses whitespace, so a decomposed `e` + COMBINING ACUTE and a
+    precomposed one reach this script as different bytes and would silently
+    fail to match while looking identical to the operator who wrote the pin."""
+    return unicodedata.normalize("NFC", text).casefold()
+
+
+def declared_terms(profile):
+    """profile.yml's `validation.terms` (#199) as a list of
+    (source_form, target_form, folded_source, folded_target) tuples, or `[]`
+    when the project declares none.
+
+    Shape is settled at Step 0 by profile.schema.json and is NOT re-decided
+    here -- the same split WARN 5's own `forbidden_patterns()` documents at
+    length. What this reader owes is not to crash on a shape Step 0 would have
+    refused. Unlike WARN 5 there is no second, script-owned rejection: a
+    declaration is two plain strings, and a string that is well-formed has
+    nothing left that only a runtime can decide."""
+    validation = (profile or {}).get("validation")
+    if not isinstance(validation, dict):
+        return []
+    decls = validation.get("terms")
+    if not isinstance(decls, list):
+        return []
+    terms = []
+    for decl in decls:
+        if not isinstance(decl, dict):
+            continue
+        source_form = decl.get("source_form")
+        target_form = decl.get("target_form")
+        if not (isinstance(source_form, str) and source_form):
+            continue
+        if not (isinstance(target_form, str) and target_form):
+            continue
+        terms.append(
+            (source_form, target_form,
+             _fold_term_text(source_form), _fold_term_text(target_form))
+        )
+    return terms
+
+
+def verse_source_index(manifest):
+    """`vid` -> that verse's SOURCE `plain_text`, from manifest.json's
+    `verse.store[]` (where both fields are schema-REQUIRED).
+
+    A `vid` appearing MORE THAN ONCE is dropped rather than resolved. The id is
+    book-global -- the extractor assigns it from a single counter -- but neither
+    manifest.schema.json nor the W2 derivable check rejects a duplicate, and
+    assemble.py only refuses one much later. Keeping the last writer would let
+    ONE segment's verse source be compared against ANOTHER segment's draft, and
+    a silently mis-attributed comparison is worse than no comparison at all in a
+    lane whose whole contract is to be quiet on inputs it cannot trust."""
+    verse_block = (manifest or {}).get("verse")
+    if not isinstance(verse_block, dict):
+        return {}
+    store = verse_block.get("store")
+    if not isinstance(store, list):
+        return {}
+    index = {}
+    duplicated = set()
+    for entry in store:
+        if not isinstance(entry, dict):
+            continue
+        vid = entry.get("vid")
+        if not (isinstance(vid, str) and vid):
+            continue
+        if vid in index or vid in duplicated:
+            duplicated.add(vid)
+            index.pop(vid, None)
+            continue
+        plain_text = entry.get("plain_text")
+        index[vid] = plain_text if isinstance(plain_text, str) else ""
+    return index
+
+
+def _as_mapping(value):
+    """`value` when it is a dict, otherwise an empty one -- never `value or {}`,
+    which passes a non-empty list straight through to a `.get()` that raises."""
+    return value if isinstance(value, dict) else {}
+
+
+def _as_sequence(value):
+    """`value` when it is a list, otherwise an empty one. A string is
+    deliberately NOT accepted: iterating one yields characters, which would
+    compare nothing while looking exactly like a lane that ran."""
+    return value if isinstance(value, list) else []
+
+
+def _carrier_source_text(block):
+    """One segpack block's source text as a reader would see it.
+
+    `plain_text` when the adapter supplied it -- every schema-valid manifest
+    block carries it, so this is the normal path. `source_html` is a defensive
+    fallback, de-tagged: counting raw markup would make an attribute value
+    holding the term an occurrence that appears nowhere in the book."""
+    plain_text = block.get("plain_text")
+    if isinstance(plain_text, str) and plain_text:
+        return plain_text
+    source_html = block.get("source_html")
+    if isinstance(source_html, str) and source_html:
+        return _HTML_TAG_RE.sub(" ", source_html)
+    return ""
+
+
+def term_carriers(segpack, draft, term_check):
+    """The (label, source_text, target_text) triples WARN 6 compares for one
+    segment -- see this section's header for which carriers qualify and why.
+
+    A carrier whose translated counterpart is absent, non-string or blank is
+    omitted rather than reported: that is a coverage defect, and hard check 1
+    already owns it. Reporting it here too would say the same thing twice, in
+    the advisory lane, about a book that is already failing."""
+    carriers = []
+    # Every container is type-CHECKED, not merely defaulted, and the reason is
+    # this lane's own contract rather than defensiveness for its own sake: a
+    # traceback here aborts W7 before it prints either HARD verdict, which is a
+    # worse outcome than any wrong warning. A hand-edited draft can be valid
+    # JSON carrying `"blocks": ["..."]`, and `x or {}` does NOT catch that -- a
+    # non-empty list is truthy and reaches a `.get()` that raises. (The same
+    # shape already raises one lane earlier, in warn_link_graph's
+    # `blocks.values()`; that is pre-existing and untouched here. This simply
+    # declines to add a second place that fails.)
+    draft_blocks = _as_mapping(draft.get("blocks"))
+    draft_footnotes = _as_mapping(draft.get("footnotes"))
+    draft_verses = _as_mapping(draft.get("verses"))
+    segpack_verses = [v for v in _as_sequence(segpack.get("verses")) if isinstance(v, dict)]
+
+    # `mount` is tested for "embedded" and everything ELSE reads as "block" --
+    # the exact normalization segpack.py itself applies when it writes this
+    # field ("embedded" -> "embedded"; missing, "block", or an unknown adapter
+    # value -> "block"). Testing `== "block"` instead would re-derive a
+    # STRICTER rule than the producer's and silently compare a standalone
+    # verse's placeholder-only draft block as though it were prose.
+    # Only a STRING parent_block is collected: a corrupt segpack can carry an
+    # unhashable one (a list), and building the set would raise TypeError before
+    # a single carrier was compared.
+    placeholder_only_blocks = {
+        v.get("parent_block") for v in segpack_verses
+        if v.get("mount") != "embedded" and isinstance(v.get("parent_block"), str)
+    }
+
+    def add(label, source_text, target_text):
+        if not isinstance(target_text, str) or not target_text.strip():
+            return
+        if not source_text:
+            return
+        carriers.append((label, source_text, target_text))
+
+    for block in _as_sequence(segpack.get("blocks")):
+        if not isinstance(block, dict):
+            continue
+        block_id = block.get("id")
+        if not isinstance(block_id, str) or block_id in placeholder_only_blocks:
+            continue
+        add(f"blocks[{block_id!r}]", _carrier_source_text(block),
+            draft_blocks.get(block_id))
+
+    if term_check.apparatus_policy != "preserve_source":
+        for footnote in _as_sequence(segpack.get("footnotes")):
+            if not isinstance(footnote, dict):
+                continue
+            number = footnote.get("n")
+            if number is None:
+                continue
+            source_text = footnote.get("source_text")
+            add(f"footnotes[{str(number)!r}]",
+                source_text if isinstance(source_text, str) else "",
+                draft_footnotes.get(str(number)))
+
+    if term_check.verse_mode != "skip":
+        for verse in segpack_verses:
+            vid = verse.get("vid")
+            if not isinstance(vid, str):
+                continue
+            source_text = term_check.verse_sources.get(vid)
+            if source_text is None:
+                continue
+            rendered_verse = draft_verses.get(vid)
+            if not isinstance(rendered_verse, dict):
+                continue
+            # ONE CARRIER PER DELIVERED FIELD, never the two joined. Both
+            # `rendered` and `literal_gloss` reach the reader under
+            # `full_rhymed_plus_literal`, so concatenating them lets a correct
+            # `rendered` mask a drifted `literal_gloss` -- the same masking this
+            # check exists to break, one level down.
+            for field in DELIVERED_VERSE_FIELDS:
+                add(f"verses[{vid!r}].{field}", source_text,
+                    rendered_verse.get(field))
+
+    return carriers
+
+
+def build_term_check(profile):
+    """Everything WARN 6 needs for a whole run, resolved ONCE.
+
+    One value rather than four loose arguments, matching how every sibling
+    hands its per-run configuration to the loop (`stopwords_lower`,
+    `compiled_patterns`). The two policy fields come from `vd.ProfileConfig`,
+    which is this plugin's sole authority on them -- never re-derived here.
+    Constructing it cannot newly fail: `hard_check_coverage()` already built one
+    from this same parsed mapping, far above, and would have exited then.
+
+    `manifest.json` is read only when something is actually pinned, and an
+    unreadable one leaves the verse lane empty rather than aborting the audit --
+    the completeness gate below owns that fatal, and owns it identically whether
+    or not this lane looked first."""
+    terms = declared_terms(profile)
+    if not terms:
+        return TermCheck((), None, None, {})
+    policy = vd.ProfileConfig(profile)
+    verse_sources = {}
+    manifest, manifest_err = load_json(MANIFEST_PATH, "manifest.json")
+    if not manifest_err and isinstance(manifest, dict):
+        verse_sources = verse_source_index(manifest)
+    return TermCheck(terms, policy.apparatus_policy, policy.verse_mode, verse_sources)
+
+
+def warn_term_drift(seg, term_check):
+    warns = []
+    if not term_check.terms:
+        return warns
+    draft, err = load_json(draft_path(seg), f"draft {seg}")
+    if err or not isinstance(draft, dict):
+        return warns  # already reported as a coverage hard failure
+    segpack, err = load_json(segpack_path(seg), f"segpack {seg}")
+    if err or not isinstance(segpack, dict):
+        return warns  # already reported as a coverage hard failure
+
+    for label, source_text, target_text in term_carriers(segpack, draft, term_check):
+        folded_source = _fold_term_text(source_text)
+        folded_target = _fold_term_text(target_text)
+        for source_form, target_form, folded_form, folded_pin in term_check.terms:
+            in_source = folded_source.count(folded_form)
+            if not in_source:
+                continue
+            in_target = folded_target.count(folded_pin)
+            if in_target >= in_source:
+                continue
+            # Normalized as ONE last step over the whole formatted line, for
+            # the reason WARN 5 documents: main() prints each warning raw, and
+            # a break reaching stderr from either operator-controlled fragment
+            # would split one warning across physical lines.
+            warns.append(_norm_ws(
+                f"[{seg}] TERM-DRIFT {label}: source carries {source_form!r} "
+                f"{in_source}x but this carrier's translation has {target_form!r} "
+                f"{in_target}x -- MANUAL"
+            ))
     return warns
 
 
@@ -1749,7 +2137,8 @@ def main():
     hard_failures = coverage_failures + stale_review_failures
 
     # WARN checks: A1 cross-segment once; A2 (link-graph)/A3 (foreign-scan)/
-    # A4 (verse-structure)/#520 (forbidden-pattern) per converged segment.
+    # A4 (verse-structure)/#520 (forbidden-pattern)/#199 (term-consistency) per
+    # converged segment.
     warn_details.extend(warn_glossary_diff(converged))
 
     stopwords_lower = frozenset()
@@ -1779,16 +2168,27 @@ def main():
     # silently cancel the operator's forbidden-pattern declaration while the
     # audit still reported a clean WARN lane. A malformed profile cannot reach
     # here -- hard_check_coverage()'s own unguarded load raises first.
+    #
+    # ONE read, shared by BOTH operator-declaration lanes (#199). A second call
+    # here would buy no authority and would let the two lanes observe different
+    # bytes of a file an operator edits while the audit runs.
+    operator_profile = vd.load_profile()
     compiled_patterns, pattern_decl_warns = compile_forbidden_patterns(
-        forbidden_patterns(vd.load_profile())
+        forbidden_patterns(operator_profile)
     )
     warn_details.extend(pattern_decl_warns)
+
+    # #199. One value, resolved once -- see build_term_check() for what it
+    # reads and why the two policy fields come from vd.ProfileConfig rather
+    # than being re-derived here.
+    term_check = build_term_check(operator_profile)
 
     for seg in sorted(converged):
         warn_details.extend(warn_link_graph(seg))
         warn_details.extend(warn_foreign_remainder(seg, stopwords_lower))
         warn_details.extend(warn_verse_structure(seg))
         warn_details.extend(warn_forbidden_patterns(seg, compiled_patterns))
+        warn_details.extend(warn_term_drift(seg, term_check))
 
     warnings_count = len(warn_details)
 
@@ -1878,6 +2278,16 @@ def main():
     print(f"\nWARN / MANUAL-REVIEW ({warnings_count}):", file=sys.stderr)
     for w in warn_details:
         print("  •", w, file=sys.stderr)
+    # #199, printed UNCONDITIONALLY and with the count first. A project that
+    # declares no terms is the same run, on this lane, as one whose every term
+    # held -- both produce zero warnings -- so without this line an absent or
+    # empty declaration reads as a clean term-consistency pass. Naming the
+    # number checked is what makes the two distinguishable at a glance.
+    print(
+        f"\nTERM CONSISTENCY: {len(term_check.terms)} declared term(s) checked over "
+        f"{len(converged)} converged segment(s)",
+        file=sys.stderr,
+    )
     print(
         f"\nWHOLE-PROJECT COMPLETENESS: "
         f"{'COMPLETE' if project_complete else 'INCOMPLETE'} -- "

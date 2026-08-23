@@ -54,10 +54,14 @@ W7 runs `final_audit.py` over every converged segment. `coverage_failures`
 are hard failures from re-running `validate_draft.py` against each current
 converged draft. `stale_review_failures` are hard failures where the current
 draft sha1 no longer matches that segment's ledger `reviewed_draft_sha1`.
-`warnings` counts the five WARN-only advisory checks: glossary-diff,
-link-graph, foreign-remainder scan, verse-structure, and forbidden-pattern
+`warnings` counts the six WARN-only advisory checks: glossary-diff,
+link-graph, foreign-remainder scan, verse-structure, forbidden-pattern
 (the project's own `validation.forbidden_patterns` declarations, #520 — the
-plugin ships none). WARN findings are for
+plugin ships none), and term-consistency (the project's own
+`validation.terms` pins for recurring COMMON-NOUN terms of art, #199 — the
+plugin ships none either; canon.json is proper-name-only, so glossary-diff
+above cannot see such a term, and the count is per CARRIER so one correct
+occurrence cannot mask a drifted one beside it). WARN findings are for
 human review; they are never auto-fixed by guessing.
 
 `completeness_counts` uses exactly `not_started`, `recoverable`, `stale`,

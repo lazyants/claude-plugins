@@ -1037,6 +1037,102 @@ def test_forbidden_patterns_must_be_a_list_of_objects():
     assert schema_errors(_with_patterns(["just a string"])) != []
 
 
+
+
+# ---------------------------------------------------------------------------
+# validation.terms (#199) -- the Step 0 schema gate.
+#
+# These belong HERE for the same reason the forbidden_patterns cases above do:
+# final_audit.py reaches profile.yml through vd.load_profile(), which only
+# yaml.safe_load()s and never validates. A W7-side assertion about what the
+# schema accepts would pass whether or not the schema says so.
+#
+# There is one further reason this set is wider than it looks. #199 chose
+# profile.yml over a new ${durable_root}/terms.json precisely BECAUSE
+# profile.schema.json settles shape at Step 0 -- so the shapes that argument
+# rests on (a null, a mapping where a list belongs, a scalar list item) are
+# pinned here rather than assumed. If any of them silently validated, W7 would
+# read an invalid declaration as no declaration at all: a run that checked
+# nothing, reading exactly like a run whose every term held.
+# ---------------------------------------------------------------------------
+
+
+def _with_terms(terms):
+    profile = make_base_profile()
+    profile["validation"]["terms"] = terms
+    return profile
+
+
+def test_terms_absent_is_valid():
+    """Every project predating #199 has no such key; that must stay valid."""
+    assert schema_errors(make_base_profile()) == []
+
+
+def test_terms_empty_list_is_valid():
+    assert schema_errors(_with_terms([])) == []
+
+
+def test_terms_well_formed_entry_is_valid():
+    assert schema_errors(_with_terms([
+        {"source_form": "président", "target_form": "президент"},
+    ])) == []
+
+
+@pytest.mark.parametrize("missing", ["source_form", "target_form"])
+def test_terms_missing_required_key_rejected(missing):
+    entry = {"source_form": "président", "target_form": "президент"}
+    del entry[missing]
+    errors = schema_errors(_with_terms([entry]))
+    assert len(errors) == 1
+    assert missing in errors[0]
+
+
+@pytest.mark.parametrize("stray", ["id", "message", "note", "severity"])
+def test_terms_unknown_property_rejected(stray):
+    """The declaration is deliberately a bare pair. `id` and `message` are named
+    among these because the sibling forbidden_patterns entry HAS both, so an
+    operator copying that shape must be told at Step 0, not silently ignored."""
+    errors = schema_errors(_with_terms([
+        {"source_form": "président", "target_form": "президент", stray: "x"},
+    ]))
+    assert len(errors) == 1
+    assert stray in errors[0]
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t", "\n"])
+@pytest.mark.parametrize("field", ["source_form", "target_form"])
+def test_terms_blank_form_rejected(field, blank):
+    """`minLength: 1` alone would admit a form that is only whitespace, which
+    W7 would then look for in every carrier and find in most of them. The
+    `\\S` pattern is what refuses it."""
+    entry = {"source_form": "président", "target_form": "президент"}
+    entry[field] = blank
+    assert schema_errors(_with_terms([entry])) != []
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        None,
+        {"source_form": "président", "target_form": "президент"},
+        ["président"],
+        "président",
+        42,
+    ],
+    ids=["null", "mapping-not-list", "list-of-list", "bare-string", "number"],
+)
+def test_terms_malformed_container_rejected(malformed):
+    """The three shapes #199's own argument for profile.yml rests on, plus two
+    neighbours. Each must be refused at Step 0, because final_audit.py's reader
+    treats anything that is not a list of mappings as NO declaration -- which is
+    the correct thing for it to do, and the wrong thing for the run to mean."""
+    assert schema_errors(_with_terms(malformed)) != []
+
+
+def test_terms_scalar_list_item_rejected():
+    assert schema_errors(_with_terms(["président"])) != []
+
+
 if __name__ == "__main__":
     import sys
 

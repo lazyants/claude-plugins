@@ -119,6 +119,12 @@ direct address"). If the source language has no honorific/title system worth a f
 explicitly here rather than leaving this unfilled.
 <!-- LT_REQUIRED_FILL_END -->
 
+This table IS where a recurring common-noun term of art lives -- `canon.json` cannot hold one, by design
+(see `references/canon-and-glossary.md`). Nothing checks a rule stated only here, though. Each row worth
+enforcing mechanically gets a machine-checkable twin in `profile.yml` under `validation.terms`, one bare
+`source_form`/`target_form` pair, and W7 then reports any carrier translating the source form without the
+pinned target form. Pin the INVARIANT part of the target form if the target language inflects by suffix.
+
 - **Original-script parenthetical** -- whether this project renders the source-form / original-script name
   in parentheses on first mention, and if so, in which form.
 
