@@ -84,9 +84,8 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "templates"
 MASS_TRANSLATE_SRC = TEMPLATES_DIR / "mass-translate-wf.template.js"
 GLOSSARY_SRC = TEMPLATES_DIR / "glossary-pass-wf.template.js"
-# #109 -- skeptic joins this file for the codex-dispatch sweep at its foot.
-# It has no bounded-poll assertions here (those live in its own suite); it is
-# loaded because the routing pin below is a property of EVERY codex dispatch
+# #109 -- skeptic joins this file for the codex-dispatch sweep at its foot, and
+# for nothing else here: the routing pin is a property of EVERY codex dispatch
 # this plugin ships, and a sweep that silently omits a template is the shape
 # that lets one lose the line while the sweep stays green.
 SKEPTIC_SRC = TEMPLATES_DIR / "skeptic-pass-wf.template.js"
@@ -1318,24 +1317,6 @@ def test_glossary_codex_dispatch_set_is_exactly_batch_dispatch():
     )
 
 
-def test_skeptic_codex_dispatch_set_is_exactly_batch_dispatch():
-    """#109 -- skeptic's own exact-set lock, the twin of glossary's above.
-
-    It exists for the sweep below rather than for its own sake: an exact set,
-    asserted per template, is what stops a discovery-driven loop from passing
-    over an EMPTY population. `find_all_agent_calls` recognises one syntactic
-    shape -- `agent(someBuilder(...), { ... })` -- so a dispatch rewritten to
-    pass its prompt or its options through a variable would simply not be
-    found, and a loop over the findings would then assert nothing at all while
-    still reporting green."""
-    calls = find_all_agent_calls(SKEPTIC_SOURCE)
-    codex_builders = {name for name, opts in calls if is_codex_dispatch(opts)}
-    assert codex_builders == {"batchDispatchPrompt"}, (
-        f"expected exactly the skeptic batch codex work-call in "
-        f"skeptic-pass-wf.template.js, got {codex_builders}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # #109 -- THE BACKGROUND ROUTING PIN, swept across every template this plugin
 # ships.
@@ -1347,25 +1328,26 @@ def test_skeptic_codex_dispatch_set_is_exactly_batch_dispatch():
 # names one; foreground runs the codex turn inside that single Bash call, so
 # the await blocks for the whole turn and the turn dies with the call at the
 # harness's per-call cap. Background enqueues a detached worker and returns.
-# Both templates' bounded waits, and the comments that say the codex job
-# outlives the awaited call, are written for the second shape only.
+# Both dispatching templates' bounded waits, and the comments that say the
+# codex job outlives the awaited call, are written for the second shape only.
 #
-# Asserted as the FIRST pushed line, not merely as present somewhere: a
+# Asserted as the builder's FIRST STATEMENT, not merely as present somewhere: a
 # forwarder reads a routing control at the head of the request, and "present
 # anywhere" would be satisfied by a mention buried a hundred lines into a
-# prompt, or by a comment. The pin is paired with the exact-set locks above so
-# that a template whose dispatch stops being recognisable fails the set
-# assertion rather than silently contributing nothing to this sweep.
+# prompt, or by a comment. Each case asserts its template's EXACT dispatch set
+# before looping over it: `find_all_agent_calls` recognises one syntactic shape
+# -- `agent(someBuilder(...), { ... })` -- so a dispatch rewritten to pass its
+# prompt or its options through a variable would simply not be found, and a
+# loop over the findings would then assert nothing at all while still
+# reporting green.
 #
 # The rendered counterpart -- the same line asserted on the prompt a real run
 # actually emits, taken from the e2e harnesses' own promptByLabel capture --
 # lives in glossary_pipeline_e2e.test.py and skeptic_pipeline_e2e.test.py.
-# This one is the by-shape sweep; that one proves the string reaches the wire.
+# This one is the by-shape sweep; those prove the string reaches the wire.
 # ---------------------------------------------------------------------------
 
 BACKGROUND_ROUTING_PUSH = 'lines.push("--background")'
-
-_FIRST_PUSH_RE = re.compile(r"^\s*lines\.push\(.*$", re.MULTILINE)
 
 CODEX_DISPATCH_POPULATION = [
     (MASS_TRANSLATE_SOURCE, "mass-translate-wf.template.js", set()),
@@ -1393,14 +1375,13 @@ def test_every_codex_dispatch_prompt_opens_with_the_background_routing_line(sour
         body = extract_function_body(source, builder)
 
         # UNCONDITIONAL, not merely first. "The first push is --background" is
-        # satisfied by `if (!rejectionReason) lines.push("--background")`, and
-        # that mutation is invisible to every other pin in this change: the
-        # glossary e2e harness runs offline, which returns before the citation
-        # ladder, so no emitted-prompt assertion ever sees a retry dispatch --
-        # exactly the dispatch a rejection-driven redispatch would send without
-        # the routing line. Requiring the push to be the first STATEMENT after
-        # `const lines = []`, with only comments and blank lines between,
-        # forbids the guard structurally instead of hoping a run reaches it.
+        # satisfied by `if (!rejectionReason) lines.push("--background")`, and a
+        # guard like that hides from an emitted-prompt assertion entirely: that
+        # kind of pin only ever sees the dispatches a run actually reaches, so a
+        # retry-only or mode-only path stays unwatched. Requiring the push to be
+        # the first STATEMENT after `const lines = []`, with only comments and
+        # blank lines between, forbids the guard structurally instead of hoping
+        # a run reaches it.
         # EXACTLY ONE declaration, because the anchor below is textual and the
         # extraction helper slices a function without brace-depth analysis. A
         # second `const lines = []` anywhere in the slice -- a nested closure,
@@ -1414,33 +1395,22 @@ def test_every_codex_dispatch_prompt_opens_with_the_background_routing_line(sour
             f"routing-push anchor below is textual, so a second one makes it "
             f"ambiguous which array the pin is talking about (#109)"
         )
-        after_decl = body.split("const lines = []", 1)
-        assert len(after_decl) == 2, (
-            f"{label}: {builder}() no longer opens with `const lines = []`, so this "
-            f"pin can no longer say where the routing push sits (#109)"
-        )
+        after_decl = body.split("const lines = []", 1)[1]
         statements = [
-            ln.strip() for ln in after_decl[1].splitlines()
+            ln.strip() for ln in after_decl.splitlines()
             if ln.strip() and not ln.strip().startswith("//")
         ]
         assert statements and statements[0] == BACKGROUND_ROUTING_PUSH, (
             f"{label}: {builder}() must push the routing control UNCONDITIONALLY, as "
-            f"the first statement after `const lines = []` -- a guarded push would "
-            f"leave a retry or a mode-specific dispatch running foreground (#109). "
-            f"First statement is instead: {statements[0] if statements else '<none>'}"
-        )
-
-        pushes = _FIRST_PUSH_RE.findall(body)
-        assert pushes, f"{label}: {builder}() pushes no prompt lines at all"
-        assert pushes[0].strip() == BACKGROUND_ROUTING_PUSH, (
-            f"{label}: {builder}() must open with {BACKGROUND_ROUTING_PUSH} so the "
-            f"codex:codex-rescue forwarder is given an explicit routing control "
-            f"instead of choosing foreground by its own heuristic (#109). Its "
-            f"first pushed line is instead: {pushes[0].strip()}"
+            f"the first statement after `const lines = []`, so the codex:codex-rescue "
+            f"forwarder is given an explicit routing control instead of choosing "
+            f"foreground by its own heuristic -- a guarded push would leave a retry or "
+            f"a mode-specific dispatch running foreground (#109). First statement is "
+            f"instead: {statements[0] if statements else '<none>'}"
         )
         assert 'lines.join("\\n")' in body, (
             f"{label}: {builder}() must still render by joining `lines`, or the "
-            f"first-push assertion above stops being a claim about the first "
+            f"first-statement assertion above stops being a claim about the first "
             f"rendered line"
         )
 

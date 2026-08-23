@@ -844,12 +844,11 @@ function batchDispatchPrompt(batch, attempt, rejectionReason) {
   // The codex:codex-rescue agent this prompt is dispatched to is a thin
   // forwarder around one `codex-companion.mjs task` call, and it picks
   // foreground or background BY ITS OWN HEURISTIC unless the request states
-  // one -- its definition defers to the operator only "if the user
-  // explicitly chose --background or --wait". Foreground runs the codex turn
-  // IN-PROCESS inside that forwarder's single Bash call, so the awaited
-  // dispatch below blocks for the whole turn and the turn dies with the call
-  // when the harness reaches its per-call cap: no fragment, the batch's whole
-  // WAIT_BOUND_SEC spent, and batchStep() returning glossary-pass-null.
+  // one. Foreground runs the codex turn IN-PROCESS inside that forwarder's
+  // single Bash call, so the awaited dispatch below blocks for the whole turn
+  // and the turn dies with the call when the harness reaches its per-call cap:
+  // no fragment, the batch's whole WAIT_BOUND_SEC spent, and batchStep()
+  // returning glossary-pass-null.
   // Background enqueues a session-detached worker and returns, which is the
   // shape every comment in this file already ASSUMES (see the snapshot-order
   // comment's "the codex job outlives the awaited call", and the wait chunk
@@ -1046,9 +1045,9 @@ function batchWaitRecheckPrompt(batch, attempt) {
 // from THAT snapshot; and the judge audits the same snapshot. The reverse order
 // does not work and must not be "simplified" back into: the batch dispatch is
 // agentType:"codex:codex-rescue" and REQUESTS background execution in its
-// prompt's first line (#109 -- without that request the forwarder chooses
-// foreground or background by its own heuristic, and a foreground choice makes
-// the sentence below false), so the codex job outlives the awaited call (that
+// prompt's first line (#109, see batchDispatchPrompt() -- without that
+// request a foreground choice makes the sentence below false), so the codex
+// job outlives the awaited call (that
 // is why the WAIT_BOUND_SEC wait exists at all -- spent since 1.16.2 across
 // WAIT_CHUNKS chunks plus one authoritative re-check rather than in a single
 // call), and its own prompt instructs an

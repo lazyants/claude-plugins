@@ -492,13 +492,11 @@ def test_check_batch_and_verify_merged_commands_never_carry_plugin_root(tmp_path
 # #109 -- the background routing control, asserted on the prompt a real run
 # EMITS rather than on the source that builds it.
 #
-# tests/bounded_poll_present.test.py pins the same line by shape, across all
-# three templates, as batchDispatchPrompt()'s first `lines.push(...)`. That pin
-# is a claim about source text; this one closes the gap between the source and
-# the wire by reading the string the harness's own agent() mock received under
-# `glossary:dispatch:0`. A refactor that kept the push but stopped rendering it
-# first -- a reordered join, a second `lines` array, a builder that returns
-# early -- passes there and fails here.
+# tests/bounded_poll_present.test.py pins this line by shape, in the template
+# SOURCE, for every codex dispatch this plugin ships -- a claim about text.
+# This one closes the gap between that text and the wire by reading the string
+# the harness's own agent() mock received under `glossary:dispatch:0`, so a
+# refactor that keeps the push but stops RENDERING it first fails here.
 # ---------------------------------------------------------------------------
 
 
