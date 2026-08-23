@@ -354,7 +354,8 @@ Such a term is PINNED in `style_bible.md` section C's title/honorific mapping,
 which is delivered in full to every translate and review job. Its
 machine-checkable twin is `profile.yml`'s `validation.terms` (#199), an opt-in
 list of bare `source_form`/`target_form` pairs that `final_audit.py`'s WARN 6
-tests carrier by carrier at W7. Before that existed, drift of such a term was
+counts carrier by carrier at W7 — each block, each footnote definition and each
+delivered verse field on its own. Before that existed, drift of such a term was
 invisible to every gate — `final_audit.py`'s cross-segment glossary-diff keys on
 `canon.entries` and each draft's own `names[]`, both proper-name channels — and
 a single volume shipped one court office under two target words.

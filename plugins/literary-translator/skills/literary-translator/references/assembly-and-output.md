@@ -63,7 +63,8 @@ link-graph, foreign-remainder scan, verse-structure, forbidden-pattern
 plugin ships none), and term-consistency (the project's own
 `validation.terms` pins for recurring COMMON-NOUN terms of art, #199 — the
 plugin ships none either; canon.json is proper-name-only, so glossary-diff
-above cannot see such a term). WARN findings are for
+above cannot see such a term, and the count is per CARRIER so one correct
+occurrence cannot mask a drifted one beside it). WARN findings are for
 human review; they are never auto-fixed by guessing.
 
 `completeness_counts` uses exactly `not_started`, `recoverable`, `stale`,

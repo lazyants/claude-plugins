@@ -2838,14 +2838,19 @@ def test_verse_carrier_warns_when_no_delivered_field_carries_the_pin(tmp_path):
     })
     proc = run_final_audit(root)
     lines = _term_lines(proc)
-    assert len(lines) == 1, proc.stderr
-    assert "verses['vA']" in lines[0]
+    # ONE PER DELIVERED FIELD: both reach the reader and both drifted.
+    assert len(lines) == 2, proc.stderr
+    assert {"rendered", "literal_gloss"} == {
+        ln.split("verses['vA'].")[1].split(":")[0] for ln in lines
+    }
 
 
-def test_verse_carrier_is_quiet_when_a_delivered_field_carries_the_pin(tmp_path):
+def test_verse_carrier_is_quiet_when_EVERY_delivered_field_carries_the_pin(tmp_path):
+    """Every delivered field, not any -- see
+    test_one_verse_field_cannot_satisfy_the_pin_for_the_other for why."""
     root = _verse_root(tmp_path, verse_a={
         "rendered": f"{PRESIDENT_RU} проходит в красной мантии\nВторая строка",
-        "literal_gloss": "Дословно: глава палаты идёт в красном одеянии",
+        "literal_gloss": f"Дословно: {PRESIDENT_RU} идёт в красном одеянии",
     })
     proc = run_final_audit(root)
     assert _term_lines(proc) == [], proc.stderr
@@ -2867,8 +2872,55 @@ def test_a_non_delivered_verse_field_cannot_suppress_the_warning(tmp_path):
     })
     proc = run_final_audit(root)
     lines = _term_lines(proc)
+    assert len(lines) == 2, proc.stderr
+    assert not any("translator_note" in ln for ln in lines), proc.stderr
+
+
+def test_a_second_drifted_occurrence_in_one_carrier_is_reported(tmp_path):
+    """Review found this false-green in the shipped first cut: the rule was
+    carrier-local ABSENCE, so one correct occurrence made the whole carrier
+    clean. The source footnote names the office TWICE and the translation
+    renders it `президент ... председатель` -- the second occurrence is exactly
+    the drift this lane exists to expose, and absence-of-the-pin cannot see it.
+    The count comparison can."""
+    root = _office_root(
+        tmp_path,
+        segpack=_office_segpack(
+            footnote_source=(
+                f"Le {PRESIDENT_FR} des enquetes et le "
+                f"{PRESIDENT_FR} des requetes."
+            )
+        ),
+        footnote_target=(
+            f"{PRESIDENT_RU} следственной палаты и "
+            f"{CHAIRMAN_RU} Палаты прошений."
+        ),
+    )
+    proc = run_final_audit(root)
+    lines = _term_lines(proc)
     assert len(lines) == 1, proc.stderr
-    assert "verses['vA']" in lines[0]
+    assert "footnotes['1']" in lines[0]
+    # Both counts are reported: the shortfall is the finding, and an operator
+    # needs to know it is 2-vs-1 rather than 2-vs-0.
+    assert "2x" in lines[0] and "1x" in lines[0]
+
+
+def test_one_verse_field_cannot_satisfy_the_pin_for_the_other(tmp_path):
+    """The same masking, one level down, and the reason a verse contributes one
+    carrier PER delivered field rather than one carrier holding both.
+
+    Under `full_rhymed_plus_literal` BOTH `rendered` and `literal_gloss` reach
+    the reader. Concatenating them made a correct `rendered` cover a drifted
+    `literal_gloss`; each is now judged on its own."""
+    root = _verse_root(tmp_path, verse_a={
+        "rendered": f"{PRESIDENT_RU} проходит в красной мантии\nВторая строка",
+        "literal_gloss": f"Дословно: {CHAIRMAN_RU} идёт в красном одеянии",
+    })
+    proc = run_final_audit(root)
+    lines = _term_lines(proc)
+    assert len(lines) == 1, proc.stderr
+    assert "verses['vA'].literal_gloss" in lines[0]
+    assert "verses['vA'].rendered" not in lines[0]
 
 
 def test_verse_mode_skip_excludes_verse_carriers(tmp_path):
@@ -2894,7 +2946,7 @@ def test_a_standalone_verse_block_is_not_compared_as_prose(tmp_path):
     )
     root = _verse_root(tmp_path, segpack=segpack, verse_a={
         "rendered": f"{PRESIDENT_RU} проходит в красной мантии\nВторая строка",
-        "literal_gloss": "Дословно: глава палаты идёт в красном одеянии",
+        "literal_gloss": f"Дословно: {PRESIDENT_RU} идёт в красном одеянии",
     })
     proc = run_final_audit(root)
     assert _term_lines(proc) == [], proc.stderr

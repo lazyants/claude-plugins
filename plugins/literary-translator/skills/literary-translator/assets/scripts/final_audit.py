@@ -975,16 +975,29 @@ def warn_forbidden_patterns(seg, compiled):
 # is delivered in full to every translate and review job. The DETECTION half is
 # what this buys, and it is what #199 asks for.
 #
-# THE RULE IS CARRIER-LOCAL ABSENCE, NOT A COUNT. For each carrier the segpack
-# and the draft key by the same identifier, the check asks one question: does
-# this carrier's SOURCE contain the pinned source form while its OWN translated
-# counterpart contains no occurrence of the pinned target form? An earlier
-# design compared per-segment occurrence TOTALS instead, and the totals are not
-# comparable: under `full_rhymed_plus_literal` one source verse legitimately
-# yields two target fields, inflating the target count and MASKING a genuinely
-# missing prose or footnote occurrence. Segment-wide absence is the opposite
-# failure -- a body that renders the office correctly hides a footnote that does
-# not, which is exactly the instance #199 was filed for.
+# THE RULE IS A CARRIER-LOCAL OCCURRENCE COUNT, AND THE SCOPE IS THE WHOLE
+# POINT. For each carrier the segpack and the draft key by the same identifier,
+# the check compares how often the pinned SOURCE form appears in that carrier's
+# source against how often the pinned TARGET form appears in that carrier's own
+# translated text, and reports a SHORTFALL.
+#
+# Two coarser scopes were tried and are both wrong, in opposite directions:
+#
+#   - PER-SEGMENT totals are not comparable at all. Under
+#     `full_rhymed_plus_literal` one source verse legitimately yields two target
+#     fields, so the target total inflates and MASKS a genuinely missing prose
+#     or footnote occurrence.
+#   - PER-SEGMENT absence ("the draft mentions the pin somewhere") misses the
+#     instance #199 was filed for: a body that renders the office correctly
+#     hides a footnote that does not.
+#
+# Carrier-local ABSENCE, the rule this shipped with first, has the same defect
+# one level down and was caught in review: a block whose source carries the
+# office twice and whose translation reads `президент ... председатель` is
+# clean under it, although the second occurrence is exactly the drift being
+# hunted. Counting inside ONE delivered text is sound precisely because nothing
+# duplicates content there -- which is why a verse contributes one carrier PER
+# delivered field rather than one carrier holding both.
 #
 # WHICH CARRIERS ARE COMPARED, AND THE ONE PRINCIPLE BEHIND IT: a carrier is
 # compared only where the ACTIVE POLICY says it is TRANSLATED. A carrier the
@@ -1005,8 +1018,12 @@ def warn_forbidden_patterns(seg, compiled):
 #     verse content through as-is while still requiring every verse KEY to be
 #     present. A verse's SOURCE text is not in the segpack (extraction
 #     substitutes a placeholder); it lives in manifest.json's `verse.store[]`.
+#     Each DELIVERED FIELD is its own carrier: both `rendered` and
+#     `literal_gloss` reach the reader, so one must never be able to satisfy the
+#     pin on the other's behalf.
 #
-# THE VERSE TARGET IS `rendered` + `literal_gloss`, NOT EVERY STRING LEAF, and
+# THE VERSE TARGET IS `rendered` AND `literal_gloss` -- each on its own -- AND
+# NOT EVERY STRING LEAF, and
 # that is where this check deliberately parts from WARN 5 above. The reason is
 # POLARITY, not disagreement. WARN 5 asks "did the translator write something
 # BANNED?", where scanning a superset of fields can only over-report. This one
@@ -1245,9 +1262,14 @@ def term_carriers(segpack, draft, term_check):
             rendered_verse = draft_verses.get(vid)
             if not isinstance(rendered_verse, dict):
                 continue
-            delivered = (rendered_verse.get(field) for field in DELIVERED_VERSE_FIELDS)
-            add(f"verses[{vid!r}]", source_text,
-                " ".join(text for text in delivered if isinstance(text, str)))
+            # ONE CARRIER PER DELIVERED FIELD, never the two joined. Both
+            # `rendered` and `literal_gloss` reach the reader under
+            # `full_rhymed_plus_literal`, so concatenating them lets a correct
+            # `rendered` mask a drifted `literal_gloss` -- the same masking this
+            # check exists to break, one level down.
+            for field in DELIVERED_VERSE_FIELDS:
+                add(f"verses[{vid!r}].{field}", source_text,
+                    rendered_verse.get(field))
 
     return carriers
 
@@ -1292,9 +1314,11 @@ def warn_term_drift(seg, term_check):
         folded_source = _fold_term_text(source_text)
         folded_target = _fold_term_text(target_text)
         for source_form, target_form, folded_form, folded_pin in term_check.terms:
-            if folded_form not in folded_source:
+            in_source = folded_source.count(folded_form)
+            if not in_source:
                 continue
-            if folded_pin in folded_target:
+            in_target = folded_target.count(folded_pin)
+            if in_target >= in_source:
                 continue
             # Normalized as ONE last step over the whole formatted line, for
             # the reason WARN 5 documents: main() prints each warning raw, and
@@ -1302,7 +1326,8 @@ def warn_term_drift(seg, term_check):
             # would split one warning across physical lines.
             warns.append(_norm_ws(
                 f"[{seg}] TERM-DRIFT {label}: source carries {source_form!r} "
-                f"but this carrier's translation has no {target_form!r} -- MANUAL"
+                f"{in_source}x but this carrier's translation has {target_form!r} "
+                f"{in_target}x -- MANUAL"
             ))
     return warns
 

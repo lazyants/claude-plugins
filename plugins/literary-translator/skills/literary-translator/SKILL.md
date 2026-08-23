@@ -3063,9 +3063,11 @@ Runs at W7 over every converged segment:
   construction and check (1) above keys on proper-name channels only, so a
   recurring office title or institutional realia renders two ways inside one
   delivered volume with nothing noticing. This reports a CARRIER — one block,
-  one footnote definition, one verse — whose source carries the term while its
-  OWN translated counterpart carries no occurrence of the pinned form, so a body
-  that renders it correctly cannot mask a footnote that does not. Matching is by
+  one footnote definition, one delivered verse FIELD — whose source carries the
+  term more often than its OWN translated counterpart carries the pinned form.
+  Counting inside a single delivered text is what stops one correct occurrence
+  masking a drifted one beside it, and a body that renders the office correctly
+  cannot mask a footnote that does not. Matching is by
   substring over NFC-normalized, casefolded text: pin the INVARIANT part of the
   target form. Carriers the active policy passes through untranslated are never
   compared (`preserve_source` footnotes, `skip` verses, a standalone verse's

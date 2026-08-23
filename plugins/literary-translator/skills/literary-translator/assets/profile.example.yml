@@ -358,10 +358,12 @@ validation:
     # DETECTION half only. The term itself is pinned where it always was: style_bible.md section C's
     # title/honorific mapping, which is delivered in full to every translate and review job.
     #
-    # What W7 reports: a CARRIER -- one block, one footnote definition, one verse -- whose SOURCE
-    # contains source_form while its OWN translated counterpart contains no occurrence of
-    # target_form. Carrier-local, so a body that renders the office correctly cannot hide a footnote
-    # that does not. Advisory only: never a hard failure, never an exit-code change. The run always
+    # What W7 reports: a CARRIER -- one block, one footnote definition, or ONE delivered verse field
+    # -- whose SOURCE contains source_form MORE OFTEN than its own translated counterpart contains
+    # target_form. Counting inside one delivered text is what stops a correct occurrence masking a
+    # drifted one beside it, and carrier-locality is what stops a body that renders the office
+    # correctly from hiding a footnote that does not. A verse's `rendered` and `literal_gloss` both
+    # reach the reader, so each is judged on its own. Advisory only: never a hard failure, never an exit-code change. The run always
     # prints how many terms it checked, so an absent or empty list can never read as a clean pass.
     #
     # Matching is by SUBSTRING over NFC-normalized, casefolded text. That is what makes a suffixing
