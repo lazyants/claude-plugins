@@ -144,8 +144,10 @@ _SCRIPT_FILE = Path(__file__).resolve()
 SCRIPT_DIR = _SCRIPT_FILE.parent
 DURABLE_ROOT = _SCRIPT_FILE.parents[1]
 SCHEMAS_DIR = DURABLE_ROOT / "schemas"
-TEMPLATES_DIR = DURABLE_ROOT / "templates"
 LANGUAGES_DIR = DURABLE_ROOT / "languages"
+# No TEMPLATES_DIR: there is no ${durable_root}/templates/ -- see
+# SKEPTIC_TEMPLATE_PATH below for where the workflow template is resolved
+# instead, and why (#666).
 
 try:
     from skeptic_constants import (
@@ -230,6 +232,30 @@ SKEPTIC_CLOSURE_SCRIPT_FILENAMES = tuple(
     sorted(set(PRODUCER_CODE_CLOSURE) | set(_SKEPTIC_ONLY_SCRIPT_FILENAMES))
 )
 SKEPTIC_TEMPLATE_FILENAME = "skeptic-pass-wf.template.js"
+# #666: resolved BESIDE this file, never at ${durable_root}/templates/ -- a
+# directory Step 0a creates for nobody. `templates` is in neither SKILL.md's
+# MANAGED_ENTRIES nor its fixed skeleton; SKILL.md's Step 0a copy paragraph
+# gives all three *.template.js files "scripts/-style" treatment, and two
+# shipped scripts already resolve them there: scaffold_setup.py's own header
+# ("both the *.py scripts AND the *.template.js workflow templates hash
+# uniformly at ${durable_root}/scripts/<name> ... there is no
+# scripts/templates/ subdir") and fix_scope_audit.py's compared_pairs(),
+# which maps each WORKFLOW_TEMPLATES entry to Path("scripts") / name.
+# segment_dispatch_driver._self_anchored_template_path() settles the same
+# question for the mass-translate template, in the same terms.
+#
+# SCRIPT_DIR, not DURABLE_ROOT / "scripts": this is the same directory
+# compute_skeptic_input_digest() already reads every SKEPTIC_CLOSURE_SCRIPT_
+# FILENAMES member from, so the template is hashed from the same place as
+# the code it is hashed alongside. The two spellings are identical for a
+# deployed root and this one cannot drift from the closure read.
+#
+# Deliberately NOT the two-candidate deployed/checkout resolution
+# segment_dispatch_driver.py performs: that function selects EXECUTABLE
+# authority (it dynamically imports its result), while this path is only
+# ever read for its raw bytes, and every documented invocation of this
+# script is `python3 ${durable_root}/scripts/skeptic_setup.py`.
+SKEPTIC_TEMPLATE_PATH = SCRIPT_DIR / SKEPTIC_TEMPLATE_FILENAME
 
 # Per-batch assignment fragment filename pattern -- see this file's module
 # docstring "Filename note" for the proposed skeptic_constants.py promotion.
@@ -754,10 +780,9 @@ def run(args) -> dict:
     config_values["source_lang"] = args.source_lang
 
     schemas_dir_hash_hex = _schemas_dir_hash()
-    template_path = TEMPLATES_DIR / SKEPTIC_TEMPLATE_FILENAME
-    if not template_path.is_file():
-        raise SkepticSetupError(f"skeptic template not found: {template_path}")
-    template_bytes = template_path.read_bytes()
+    if not SKEPTIC_TEMPLATE_PATH.is_file():
+        raise SkepticSetupError(f"skeptic template not found: {SKEPTIC_TEMPLATE_PATH}")
+    template_bytes = SKEPTIC_TEMPLATE_PATH.read_bytes()
 
     # Round 9 (#243): same caveat as the compute_producer_input_digest call
     # above -- fixed keyword args, not FROZEN_INPUT_SPECS-driven.
