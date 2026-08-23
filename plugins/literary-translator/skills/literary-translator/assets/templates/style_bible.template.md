@@ -144,13 +144,18 @@ transcription practice where one exists. Cases the rule doesn't cleanly resolve 
 
 ### D. Formatting
 
-Fill in this project's own conventions: dialogue/direct-speech punctuation; quotation-mark style (and how
-it differs for nested/embedded quotes or titles); italics (foreign-language insertions, titles of works,
-the source's own emphasis); how numbers, dates, and money/measurement realia are rendered, including the
-gloss for a realia term at its first appearance. Footnote numbering and marker style are NOT yours to set:
-the apparatus is the source's own, and there is no translator-note namespace beside it. So what you fix
-here is the gloss's FORM -- parenthetical, an em-dash aside, italics: pick one, apply it consistently, and
-put it in the translated unit that already carries the term.
+Footnote numbering and marker style are NOT yours to set, whatever you choose below: the apparatus is
+the source's own, and there is no translator-note namespace beside it. What section D fixes is the FORM the
+gloss takes, and the unit it goes in.
+
+<!-- LT_REQUIRED_FILL_BEGIN: formatting-conventions -->
+LT_PLACEHOLDER_UNFILLED -- state this project's own conventions: dialogue/direct-speech punctuation;
+quotation-mark style (and how it differs for nested/embedded quotes or titles); italics (foreign-language
+insertions, titles of works, the source's own emphasis); how numbers, dates, and money/measurement realia
+are rendered; and the FORM of the gloss for a realia term at its first appearance -- parenthetical, an
+em-dash aside, italics: pick one, apply it consistently, and put it in the translated unit that already
+carries the term. Section E's embedded-third-language span refers back to the form fixed here.
+<!-- LT_REQUIRED_FILL_END -->
 
 ### E. Techniques and hard cases
 
