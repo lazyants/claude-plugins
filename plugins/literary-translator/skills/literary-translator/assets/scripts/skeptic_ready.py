@@ -315,8 +315,37 @@ class SkepticReadyError(Exception):
     per offending item), so a caller never has to re-derive that from a bare
     message."""
 
+    # Total ceiling for one failure payload's message. Generous: every
+    # legitimate diagnostic in this file is far under it. `--merge-fragments`
+    # is the measured reason it exists at all -- its run_id mismatch message
+    # interpolates the FRAGMENT's own `run_id`, and `skeptic-triage.schema
+    # .json` constrains that field to `"pattern": "\\S"` with no maxLength, so
+    # a 200 000-char run_id produced 200 167 bytes of stdout before this bound.
+    MAX_MESSAGE_CHARS = 4000
+
     def __init__(self, message, offending=None):
+        # BOUNDED HERE, at the one place every failure passes through, rather
+        # than at each site that happens to build a list -- `canon_validate.py`
+        # 1.16.1's own experience was that a guard placed at the sites you
+        # happen to be looking at inherits the blind spot it was meant to
+        # remove. main() prints this payload to stdout, and `skeptic-pass-wf
+        # .template.js` relays that output into the next agent's prompt, so
+        # both halves are attacker-shaped: the message via an interpolated
+        # fragment field, `offending` via one entry per record.
+        message = str(message)
+        if len(message) > self.MAX_MESSAGE_CHARS:
+            message = (message[:self.MAX_MESSAGE_CHARS]
+                       + f"\n  ... [truncated, {len(message)} chars total]")
         super().__init__(message)
+        # `_bounded_missing` is defined further down this module; the reference
+        # resolves at CALL time and nothing here raises at import time, so the
+        # order is sound and moving 70 lines of round-10 commentary above this
+        # class would buy nothing. No type branch: every raise site in this
+        # file passes a list, and the one exception elsewhere in this plugin
+        # that carries a scalar `offending` is converted to a message-only
+        # failure at `_resolve_competitors`' own `except` (see it above).
+        if offending is not None:
+            offending = _bounded_missing(offending)
         self.offending = offending
 
 
@@ -853,8 +882,14 @@ def run_validate_fragment(
         gap = sorted(expected_ids - actual_ids)
         extra = sorted(actual_ids - expected_ids)
         if gap or extra:
-            offending = [f"missing: {aid}" for aid in gap] + [f"unexpected: {aid}" for aid in extra]
-            raise SkepticReadyError(f"{fragment_path}: assignment_id coverage mismatch", offending=offending)
+            # Per-side reservation, not a plain concatenation: `extra` is the
+            # entirely fragment-authored side, and a single head-keeping cap
+            # over `gap + extra` reports none of it once `gap` fills the
+            # budget (and the mirror, when the fragment invents many ids).
+            raise SkepticReadyError(
+                f"{fragment_path}: assignment_id coverage mismatch",
+                offending=_labelled_sides(gap, extra),
+            )
 
     manifest = _read_json(Path(manifest_path), "manifest.json")
     try:
@@ -1336,6 +1371,44 @@ def _bounded_missing(values, max_items: int = _MAX_LISTED_MISSING) -> list:
             f"... and {extra} more (showing the first {max_items} of {len(values)})"
         )
     return bounded
+
+
+# One slot of the count budget is reserved for the overflow marker itself, so
+# that `SkepticReadyError.__init__`'s own `_bounded_missing` NEVER re-cuts a
+# list this function already sized. That is not belt-and-braces, it is the
+# difference between an accurate marker and a wrong one: `canon_validate.py`'s
+# `_labelled_sides` emits 4 + 4 + a marker = 9 items against its own cap of 8,
+# so its constructor drops the accurate `... and 72 more` and appends
+# `... and 1 more` in its place. Measured here over 15 population shapes: with
+# both branches sized (3 per side when both are populated, 7 when one is), no
+# shape is re-cut and every reported count equals the number actually dropped.
+_MAX_LISTED_SIDE = _MAX_LISTED_MISSING - 1
+_MAX_LISTED_SIDE_HALF = (_MAX_LISTED_MISSING - 1) // 2
+
+
+def _labelled_sides(missing, extra) -> list:
+    """Label and COUNT-bound two genuinely different populations so neither can
+    be evicted wholesale by the other -- the coverage-mismatch analogue of what
+    round 10 fixed for `run_verify_merged`'s pooled `missing[]`.
+
+    A single head-keeping cap over `missing + extra` reports nothing from the
+    second population once the first fills the budget, whichever way the
+    discrepancy is skewed. Reserving a slice per side keeps both visible.
+
+    Deliberately does NOT length-bound an entry: that is the constructor's job
+    (`_bounded_missing`), applied once, to whatever any raise site hands it."""
+    missing = list(missing)
+    extra = list(extra)
+    cap = _MAX_LISTED_SIDE_HALF if (missing and extra) else _MAX_LISTED_SIDE
+    shown = [f"missing: {aid}" for aid in missing[:cap]]
+    shown += [f"unexpected: {aid}" for aid in extra[:cap]]
+    dropped = max(0, len(missing) - cap) + max(0, len(extra) - cap)
+    if dropped:
+        shown.append(
+            f"... and {dropped} more (showing the first {len(shown)} "
+            f"of {len(missing) + len(extra)})"
+        )
+    return shown
 
 
 def _bounded_notes_detail(notes) -> str:

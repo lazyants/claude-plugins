@@ -2557,3 +2557,172 @@ def test_main_escapes_boundary_chars_in_verify_merged_result_via_real_pipeline(c
         "the hostile note's TEXT content must survive round-tripping through the escape -- "
         "only its embedded boundary character is marked, nothing is silently dropped"
     )
+
+
+# ---------------------------------------------------------------------------
+# #360 -- the failure payload main() prints to stdout is relayed verbatim into
+# the next agent's prompt by skeptic-pass-wf.template.js, and its size was a
+# function of the LLM-authored fragment: one `offending` entry per record, each
+# carrying that record's own fields, plus a message interpolating a fragment
+# field with no maxLength. The bound lives in SkepticReadyError.__init__, the
+# one place every failure passes through -- 1.16.1's lesson from
+# canon_validate.py was that a guard placed per-raise-site inherits the blind
+# spot it was meant to remove.
+#
+# Measured on the code these tests were written against, all four modes'
+# payloads unbounded: 40 records (the shipped DEFAULT_BATCH_SIZE) -> 10 113 B;
+# the same 40 with a 4 000-char source_form -> 168 593 B; 500 records ->
+# 125 053 B; a 200 000-char run_id -> 200 167 B; a 40-and-40 coverage mismatch
+# -> 80 entries in 6 433 B.
+# ---------------------------------------------------------------------------
+
+# _bounded_missing_item keeps a 600-char PREFIX and appends its own marker, so
+# the per-entry ceiling is the prefix plus that marker, not a flat 600.
+_MAX_ENTRY_CHARS = sr._MISSING_ITEM_MAX_CHARS + len(" [...truncated]")
+
+
+def _bounded_payload_assertions(offending):
+    """Every #360 assertion that holds for ANY bounded payload, in one place."""
+    # The overflow marker is an entry of its own, by design -- `_bounded_missing`
+    # appends it rather than hiding the truncation -- so the ceiling is the
+    # count bound PLUS that one line, never a flat _MAX_LISTED_MISSING.
+    assert len(offending) <= sr._MAX_LISTED_MISSING + 1, (
+        f"payload carried {len(offending)} entries; the count bound is "
+        f"{sr._MAX_LISTED_MISSING} plus one marker line, so the size is still a "
+        "function of the input"
+    )
+    for entry in offending:
+        assert len(entry) <= _MAX_ENTRY_CHARS, (
+            f"entry of {len(entry)} chars exceeds the per-entry ceiling {_MAX_ENTRY_CHARS}"
+        )
+
+
+def _token_mismatch_fixture(tmp_path, *, records, source_form_chars):
+    """A schema-VALID fragment whose every record fails the token check --
+    assignment_id is 64 hex (so the schema passes) but is not
+    sha256(NFC(source_form)), which is the shape a batch that got its dispatch
+    token wrong actually produces."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest(block("Jean walked home.")))
+
+    filler = ("Injected sentence. " * (source_form_chars // 19 + 1))[:source_form_chars]
+    frag_path = tmp_path / "triage_0.json"
+    write_json(frag_path, {
+        "schema_version": 1, "run_id": "run-1",
+        "records": [
+            insufficient_record(f"{filler}{i}", assignment_id="0" * 64)
+            for i in range(records)
+        ],
+    })
+    return frag_path, manifest_path, particle_config, lang_dir
+
+
+@pytest.mark.parametrize("records,source_form_chars", [(40, 40), (40, 4000), (500, 40)])
+def test_token_mismatch_payload_is_bounded_in_count_and_entry_length(
+    tmp_path, records, source_form_chars
+):
+    """MUTATION this guards: dropping the bound from SkepticReadyError.__init__
+    puts one interpolated line per record back on stdout, each carrying that
+    record's own source_form verbatim -- 168 593 bytes at 40 records with a
+    4 000-char source_form, relayed into the next agent's prompt."""
+    frag_path, manifest_path, particle_config, lang_dir = _token_mismatch_fixture(
+        tmp_path, records=records, source_form_chars=source_form_chars
+    )
+    with pytest.raises(sr.SkepticReadyError) as excinfo:
+        sr.run_validate_fragment(frag_path, manifest_path, particle_config, languages_dir=lang_dir)
+
+    _bounded_payload_assertions(excinfo.value.offending)
+    assert "token mismatch" in str(excinfo.value)
+    assert any(entry.startswith("... and ") for entry in excinfo.value.offending), (
+        "a truncated payload must SAY it was truncated, never read as a smaller problem"
+    )
+    payload = json.dumps(
+        {"success": False, "error": str(excinfo.value), "offending": excinfo.value.offending},
+        ensure_ascii=False,
+    )
+    assert len(payload.encode("utf-8")) < 16000, (
+        f"the serialized payload is {len(payload.encode('utf-8'))} B; it must be bounded by a "
+        "constant, not by the fragment's record count or field lengths"
+    )
+
+
+def test_error_message_is_bounded_when_a_fragment_field_is_oversized(tmp_path):
+    """MUTATION this guards: removing MAX_MESSAGE_CHARS puts the fragment's own
+    `run_id` back into the message verbatim. skeptic-triage.schema.json
+    constrains run_id to "\\S" with no maxLength; 200 000 chars measured as
+    200 167 B of stdout before the bound."""
+    run_dir = tmp_path / "run-A"
+    run_dir.mkdir()
+    oversized = "X" * 200000
+    write_json(run_dir / "triage_0.json", {
+        "schema_version": 1, "run_id": oversized, "records": [],
+    })
+
+    with pytest.raises(sr.SkepticReadyError) as excinfo:
+        sr.run_merge_fragments(run_dir, tmp_path / "merged.json")
+
+    message = str(excinfo.value)
+    assert len(message) <= sr.SkepticReadyError.MAX_MESSAGE_CHARS + 64, (
+        f"message of {len(message)} chars is still a function of the fragment's own run_id"
+    )
+    assert "[truncated," in message, "a truncated message must say so, and say how much was cut"
+    assert oversized not in message
+
+
+@pytest.mark.parametrize("n_missing,n_unexpected", [(40, 1), (1, 40), (40, 40), (40, 0), (0, 40)])
+def test_coverage_mismatch_reserves_a_slice_for_each_side(tmp_path, n_missing, n_unexpected):
+    """MUTATION this guards, in BOTH skew directions: concatenating the two
+    populations and applying ONE head-keeping cap reports nothing at all from
+    whichever side sorts second -- `unexpected` is the entirely
+    fragment-authored side. A many-plus-one skew alone does not catch an
+    OVERSIZED reservation either, which is why 40-and-40 (the only shape where
+    4-per-side would push the list past the constructor's cap and replace the
+    accurate marker) and the one-sided shapes are parameterized in too."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest(block("Jean walked home.")))
+
+    # `unexpected` = in the fragment but not in the manifest; `missing` = the
+    # reverse. Both sides are driven off the SAME expected/actual construction
+    # the production path uses, never a hand-built offending list.
+    present = [f"Present{i}" for i in range(n_unexpected)]
+    absent = [f"Absent{i}" for i in range(n_missing)]
+    frag_path = tmp_path / "triage_0.json"
+    write_json(frag_path, {
+        "schema_version": 1, "run_id": "run-1",
+        "records": [insufficient_record(form) for form in present],
+    })
+    expect_path = tmp_path / "assignments_0.json"
+    write_json(expect_path, [aid(form) for form in absent])
+
+    with pytest.raises(sr.SkepticReadyError) as excinfo:
+        sr.run_validate_fragment(
+            frag_path, manifest_path, particle_config, languages_dir=lang_dir,
+            expect_assignments_file=expect_path,
+        )
+
+    offending = excinfo.value.offending
+    _bounded_payload_assertions(offending)
+
+    shown_missing = [e for e in offending if e.startswith("missing: ")]
+    shown_unexpected = [e for e in offending if e.startswith("unexpected: ")]
+    if n_missing:
+        assert shown_missing, "the operator-assigned gap must not be evicted wholesale"
+    if n_unexpected:
+        assert shown_unexpected, "the fragment-authored side must not be evicted wholesale"
+
+    markers = [e for e in offending if e.startswith("... and ")]
+    real_dropped = (n_missing - len(shown_missing)) + (n_unexpected - len(shown_unexpected))
+    assert len(markers) <= 1, "one truncation, one marker -- never a marker about a marker"
+    if real_dropped:
+        assert markers, f"{real_dropped} entries were dropped with nothing saying so"
+        reported = int(markers[0].split()[2])
+        assert reported == real_dropped, (
+            f"the marker reports {reported} omitted entries but {real_dropped} were dropped -- "
+            "an understated count is what a second, outer cap over an already-bounded list does"
+        )
+    else:
+        assert not markers, "nothing was dropped, so nothing may claim it was"
