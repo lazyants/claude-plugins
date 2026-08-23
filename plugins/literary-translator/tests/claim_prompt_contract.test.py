@@ -46,7 +46,7 @@ this file's own author found while building the #438 end-to-end test:
 `codex_job.py`'s `main()` now FATALs (exit 2) whenever `--run-id` is absent
 -- required on EVERY invocation, translate and review alike (D8, #438) --
 but `translateDrivePrompt()`/`reviewDrivePrompt()` never forwarded it,
-meaning the DEFAULT dispatch path FATALed on every launch. The template fix
+meaning the template dispatch path FATALed on every launch. The template fix
 lives in this file's own scope (`mass-translate-wf.template.js` is listed
 below); `test_default_path_forwards_run_id_to_codex_job` pins it against
 the ACTUAL rendered nohup command AND against `codex_job.py`'s own real
@@ -1275,8 +1275,8 @@ def test_a_token_less_draft_with_no_claim_record_is_still_refused(tmp_path):
 
 
 # =============================================================================
-# Part 3 -- the DEFAULT path's ACTUAL rendered fix prompt (D9's real
-# protection) and the characterization test pinning the gap it covers.
+# Part 3 -- the fallback template path's ACTUAL rendered fix prompt (D9's
+# real protection) and the characterization test pinning the gap it covers.
 # =============================================================================
 
 # Deliberately NOT a module-level `pytestmark`: that would also skip Parts 1
@@ -1434,7 +1434,7 @@ def run_pipeline(tmp_path, seg, *, max_fix_rounds=2, timeout=30) -> dict:
 @_needs_node
 @pytest.mark.parametrize("seg", ["seg01", "FRONTBACK:errata_02"])
 def test_fix_prompt_actual_rendered_text_preserves_the_claimed_token_byte_for_byte(tmp_path, seg):
-    """D9's actual protection on the DEFAULT path (PLAN.md D9,
+    """D9's actual protection on the fallback template path (PLAN.md D9,
     mass-translate-wf.template.js:1288): the claim survives a fix round
     ONLY because fixPrompt()'s own rendered text instructs the fixer to
     copy the draft's existing dispatch_token byte for byte, unchanged. This

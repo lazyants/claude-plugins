@@ -29,7 +29,7 @@ A guard placed naively right after `--kind` parsing (rather than below
 invokes `codex_job.py --kind translate` DIRECTLY (constructing a real
 `CodexJob` and calling its real `.run()`, in-process -- never through
 `segment_dispatch_driver.py`, which already had its own derived-action check
-and would prove nothing about this, the DEFAULT path's only guard).
+and would prove nothing about this, the fallback path's only guard).
 
 Gate scripts (`draft_ready.py`/`validate_draft.py`) are STUBBED via a
 monkeypatched `_gate` -- this file's subject is the CHOKEPOINT'S OWN
