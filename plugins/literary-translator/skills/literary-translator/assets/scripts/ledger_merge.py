@@ -88,9 +88,19 @@ resolve it against the subprocess's own cwd whenever it was relative; see
 _compute_stale_segments()'s own docstring for the exact scenario). Omitting
 BOTH reproduces today's self-anchored behavior byte-for-byte.
 
+#608: --plugin-root has TWO outcomes. NOT GIVEN is the self-anchored sibling
+lookup above, unchanged. GIVEN but not resolving to a directory containing
+assets/scripts/ is REFUSED by validate_plugin_root() before any fragment is
+read -- see its docstring for what that used to do instead. The per-segment
+stale-check skip is unchanged and stays non-fatal.
+
 Exit code 0 on success, 1 on failure. Either way, exactly one JSON line is
 printed to stdout -- callers (the `mergeLedgerPrompt` agent prompt, tests)
-should read stdout, not rely on the exit code alone.
+should read stdout, not rely on the exit code alone. #608's refusal keeps that
+shape rather than adopting codex_job.py's stderr-plus-exit-2, because both
+in-repo callers json.loads() this stdout and branch on "success": a
+bare-stderr refusal would reach them as unparseable output and surface a
+JSON-decode complaint instead of the operator's actual mistake.
 """
 import argparse
 import hashlib
@@ -134,6 +144,61 @@ SEGMENTS_DIR = DURABLE_ROOT / "segments"
 LEDGER_D = DURABLE_ROOT / "runs" / "ledger.d"
 LEDGER_JSON_PATH = DURABLE_ROOT / "runs" / "ledger.json"
 CACHE_KEY_SCRIPT = SCRIPTS_DIR / "cache_key.py"
+
+
+def validate_plugin_root(plugin_root_str):
+    """#608: a GIVEN --plugin-root that cannot resolve is a whole-run
+    precondition failure, not a per-segment one.
+
+    resolve_dirs() below performs no I/O and validates neither branch, so an
+    unresolvable --plugin-root used to survive all the way to
+    _compute_stale_segments()'s `if not cache_key_script.is_file():` branch --
+    which is deliberately NON-FATAL, warns on stderr and `continue`s. That
+    policy is right for what it was written for (a segment whose segpack was
+    deleted must not sink an entire merge) and is left exactly as it is. What
+    it cannot distinguish is the case where the operator mistyped the flag and
+    EVERY segment is therefore unchecked: the merge then prints its ordinary
+    success JSON and materializes runs/ledger.json with every status left as
+    written, which is a false green and a silent one. The flag exists
+    precisely so a durable-root copy of the checker -- writable by the codex
+    process the stale-check gates -- is not the one that runs; degrading to
+    "no checker ran at all" while reporting success is that same failure one
+    step over.
+
+    Raises LedgerMergeError (main() renders it as this script's ordinary
+    one-JSON-line failure, exit 1). `plugin_root_str is None` -- the
+    documented, deliberate self-anchored path -- returns without checking
+    anything, so omitting the flag is untouched.
+
+    The empty/whitespace-only leg is NOT a separate feature: Path("").resolve()
+    is the CURRENT WORKING DIRECTORY, so `--plugin-root ""` (typically an
+    unsubstituted {{PLUGIN_ROOT}}) run from a cwd that happens to contain
+    assets/scripts/ passes a bare is_dir() check and silently runs THAT tree's
+    checker. codex_job.py rejects it explicitly at its own equivalent site for
+    the same reason; the message body here is deliberately the same one, so
+    two scripts sharing this flag say the same thing about the same mistake.
+
+    Path.is_dir() rather than the os.stat()/FileNotFoundError triad used by
+    the data-loss guards elsewhere in this codebase: those sites care WHICH
+    error occurred because a swallowed OSError would read as "converged". Here
+    every non-directory answer -- ENOENT, ENOTDIR, ELOOP, EACCES -- reaches
+    the identical refusal, so is_dir()'s swallowing cannot change the verdict.
+    """
+    if plugin_root_str is None:
+        return
+    if not plugin_root_str.strip():
+        raise LedgerMergeError(
+            "--plugin-root was given but is empty/whitespace-only -- this "
+            "usually means a {{PLUGIN_ROOT}} template substitution did not "
+            "happen. Omit the flag entirely for today's self-anchored "
+            "behavior, or pass a real path."
+        )
+    plugin_scripts_dir = Path(plugin_root_str).resolve() / "assets" / "scripts"
+    if not plugin_scripts_dir.is_dir():
+        raise LedgerMergeError(
+            f"--plugin-root {plugin_root_str} does not resolve to a directory "
+            f"containing assets/scripts/ (resolved: {plugin_scripts_dir})"
+        )
 
 
 def resolve_dirs(durable_root_str, plugin_root_str=None):
@@ -820,7 +885,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "grants --write over the whole durable root), so resolving the "
             "checker from inside the thing it checks would let a tampered "
             "copy pass itself. Optional; omit for today's self-anchored "
-            "sibling lookup."
+            "sibling lookup -- but #608: if it IS given and does not resolve "
+            "to a directory containing assets/scripts/ (or is empty), the "
+            "whole merge is REFUSED before any segment is processed, rather "
+            "than silently skipping the stale-check for every segment and "
+            "reporting success."
         ),
     )
     return parser
@@ -831,6 +900,12 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        # #608: FIRST, before resolve_dirs() and therefore before any fragment
+        # is read, any schema registry is built, any cache_key.py subprocess is
+        # spawned, or anything is written. The position is the requirement, not
+        # an optimization; test_plugin_root_refusal_precedes_any_fragment_read
+        # pins it and its docstring says why an absent ledger cannot.
+        validate_plugin_root(args.plugin_root)
         dirs = resolve_dirs(args.durable_root, args.plugin_root)
         registry = _build_schema_registry(dirs["schemas_dir"])
         result = merge(args, registry, dirs)
