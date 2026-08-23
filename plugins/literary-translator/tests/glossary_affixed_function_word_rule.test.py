@@ -128,11 +128,12 @@ TASK_PINS = {
         "candidate on its own merits",
 }
 
-# Same rule, as the DISPATCH PROMPT renders it. Deliberately not byte-identical
-# to the markdown copy -- the prompt is prose in a JS string with no backticks
-# and carries the manifest's real path -- so these are pinned separately rather
-# than shared, which also means a drift between the two surfaces cannot hide
-# behind one shared constant.
+# Same rule, as the DISPATCH PROMPT renders it. Most of these literals happen to
+# coincide with the markdown copy's today; two do not, because the prompt is
+# prose inside a JS string with no backticks and spells the nickname rule in
+# caps. They are pinned INDEPENDENTLY rather than shared for the case that
+# matters: either surface may be honestly reworded on its own, and a shared
+# constant would let that reword silently loosen the other surface's pin.
 RENDERED_PINS = {
     "presence is run-wide":
         "anywhere in this run's own candidate manifest",
@@ -146,6 +147,12 @@ RENDERED_PINS = {
     "queue routing names the bare form":
         'disposition:"review_queue" with a note naming the bare form you '
         "believe it carries",
+    # Without this pin the rendered surface can lose the precedence clause
+    # while every other assertion here stays green: PRECEDENCE_PIN below names
+    # the ELISION order, not this one, and the ordering test compares OFFSETS,
+    # which survives the clause's deletion. Measured on that exact mutation.
+    "precedence over the nickname rule":
+        "so it takes precedence over the NICKNAMES rule below",
     "the bare-absent ELSE branch":
         "When the bare form is NOT present anywhere in this run, resolve the "
         "candidate on its own merits",
@@ -237,10 +244,12 @@ def _load_harness():
 
 _HARNESS = _load_harness()
 
-pytestmark = pytest.mark.skipif(
-    _HARNESS.NODE is None,
-    reason="node is required to render the real dispatch prompt",
-)
+# The Node skip lives in the fixture below, NOT in a module-level `pytestmark`.
+# A module-level mark also disables the task-template pins and the helper
+# self-tests, none of which touch Node -- so on a machine without Node the
+# AUTHORITATIVE surface's coverage would vanish and read exactly like a clean
+# run. Measured with `node` made unresolvable on PATH: 12 passed, 12 skipped --
+# under a module-level mark the same run reported every test skipped.
 
 DISPATCH_LABEL = "glossary:dispatch:0"
 
@@ -249,6 +258,8 @@ DISPATCH_LABEL = "glossary:dispatch:0"
 def rendered_dispatch_prompt(tmp_path_factory):
     """The FLATTENED text of the first dispatch prompt the real template hands
     to `agent()`. One render, reused by every assertion below."""
+    if _HARNESS.NODE is None:
+        pytest.skip("node is required to render the real dispatch prompt")
     tmp = tmp_path_factory.mktemp("affixed_rule")
     batch = _HARNESS.make_batch(0, ["Alpha", "Beta"])
     result = _HARNESS.run(tmp_path=tmp, batches=[batch])
@@ -352,9 +363,15 @@ def test_rule_precedes_the_nickname_rule_in_the_rendered_prompt(
 
 def test_flatten_makes_a_wrapped_clause_matchable_and_is_not_vacuous():
     wrapped = "never resolve it\n  as an entry\n  of its own"
-    assert "never resolve it as an entry of its own" in _flat(wrapped)
+    assert "never resolve it as an entry of its own" in _flat(wrapped), (
+        "_flat must make a hard-wrapped clause matchable, or every pin above "
+        "goes red on a pure re-wrap"
+    )
     assert "never resolve it as an entry of its own" not in _flat(
         "never resolve it as an entry of somebody else's"
+    ), (
+        "_flat must NOT match a differing clause -- if it did, the pins above "
+        "would be satisfied by prose that says something else"
     )
 
 
@@ -377,12 +394,21 @@ def test_carve_out_scan_catches_an_appended_exception_and_spares_the_real_prose(
 
 
 def test_anchor_is_absent_from_unrelated_prose():
-    """The anchor's whole value is that it appeared NOWHERE in either template
-    before this rule landed, so it cannot be satisfied by neighbouring text."""
+    """Guards the ANCHOR CONSTANT, which is what the two anchor assertions and
+    the ordering test all key on.
+
+    A hand-written sentence cannot re-verify the pre-fix grep count in the
+    module docstring. What it CAN do is fail the moment someone weakens ANCHOR
+    to a common word: at "name" or "own" the neighbouring canon prose below
+    satisfies it, and the anchor stops discriminating this rule from its
+    neighbours."""
     assert ANCHOR not in _flat(
         "only true orthographic spelling variants of the same surface name "
         "may ever share one canonical_target_form"
-    ).lower()
+    ).lower(), (
+        f"ANCHOR {ANCHOR!r} is satisfied by unrelated canon prose, so it no "
+        "longer identifies the #407 rule; pick a token this rule alone carries"
+    )
 
 
 if __name__ == "__main__":
