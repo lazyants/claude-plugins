@@ -720,8 +720,8 @@ scripts into `${durable_root}/scripts/`.
 **A `converged` count is bundle-relative.** A release that edits any
 `PLUGIN_BUNDLE_MEMBERS` entry moves `plugin_bundle_hash` — most do; a docs-only
 one does not — and the Step 0a refresh that installs it then flips the whole
-converged corpus to `stale` at once, with no draft byte touched and no prose
-needing a recheck. The ledger's `converged` tally therefore FALLS as such
+converged corpus to `stale` at once, with no draft byte touched. The
+ledger's `converged` tally therefore FALLS as such
 releases land while the translation itself never regresses — measured on one live book
 as 4 → 2 → 1 across three releases in three days, and as 75 `stale` / 0
 `converged` on another (#482) — because what it counts is "converged under the
@@ -732,7 +732,13 @@ carve-out lets `assemble.py` and `final_audit.py` treat such a record like
 `.ever_converged.<seg>` sentinel that is not absent, and the unrelaxed
 draft-sha1 match — live in `references/assembly-and-output.md`), and
 `final_audit.py` prints `stale_previously_converged=` beside its completeness
-counts. That pair — the completeness verdict and its carve-out count — is what
+counts. That carve-out states what the two gates DO, not that the release
+changed nothing a translator was told: `PLUGIN_BUNDLE_MEMBERS` includes the two
+workflow templates, and their text is where the translate and review prompts
+are built. When a release's notes describe an instruction change, whether the
+converged units are re-reviewed against it is an operator decision, taken
+through `select_segments.py`'s claim gates (`--from-converged`) — the admission
+above has judged nothing about it. That pair — the completeness verdict and its carve-out count — is what
 answers "is this book done"; the raw `converged` tally is not, and neither is a
 count of `.ever_converged` sentinels (those are backfilled history, see
 `SKILL.md`'s `backfill_ever_converged.py` step). `select_segments.py`'s
