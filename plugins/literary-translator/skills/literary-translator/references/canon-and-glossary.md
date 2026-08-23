@@ -463,6 +463,43 @@ confirmed `READY` — is the sole writer of `canon.json` for this glossary
 pass. The docstring states this precisely as single-writer-by-operational-
 precondition, not a locking guarantee.
 
+**A trap this pass discovers rides its own `note`, and is collected the moment
+the pass returns.** A word-sense or realia discovery — a title or place name
+whose period sense differs from its modern one — is recorded by the glossary
+agent in that candidate's own `note`, in the run-scoped fragment, and the merge
+carries an accepted item's note into `canon.json` along with the entry.
+`glossary_TASK.template.md` forbids the agent every other write, and
+`style_bible.md` above all: its E-traps section sits inside the style_contract
+span, so an agent append there would be an unreviewed edit to the authority
+every translate, review and fix turn reads, and would move
+`style_contract_hash` — flipping every already-converged segment to `stale`
+(#510).
+
+What `canon.json` gives such a note is durability and a READER, but never the
+reader who would act on it. An accepted entry's note IS published verbatim —
+`render_obsidian.py` prints it in that entity's page, in the YAML frontmatter
+and again in the body — which is why the task template tells the agent to keep
+a note publication-safe. What a note does not do is travel in a prompt:
+`segpack.py` builds `canon_names` from `entries{}` keys and `canon_map` from
+their non-empty `canonical_target_form` values, and carries no `note` field at
+all, so a translate or review turn is never shown one through its read list.
+Two turns can still reach one, both deliberately: a FIX turn is told to settle
+an unresolvable canon claim against `canon.json` itself
+(`mass-translate-wf.template.js`'s fix prompt), so it may read a note in
+passing though nothing asks it to act on one; and the opt-in W9r registry prep
+projects `review_queue` notes into its own model input
+(`person_registry.py --prep`). A queued note reaches nothing else —
+`glossary_batch_plan.py`'s selection excludes a queued `source_form` from every
+later pass unless `--retry` names it.
+
+So the moment this workflow returns `merged: true` — after its own
+`--verify-merged` call, which is the first point the operator or the
+orchestrating turn has control again — copy every such note into
+`consistency_issues.md`, one line each, before the next batch starts. Only the
+promotion into `style_bible.md`'s E-traps waits for a batch boundary, where
+`SKILL.md`'s R9 prices it; that split is the ordering `style_bible.template.md`
+already ships under E-traps.
+
 ### `--verify-merged --batch f1 --batch f2 … [--expect-source-forms-file M.json]` — disk-independent re-check (closes #88)
 
 The glossary disk-verify call's own invocation (`schema: CANON_VERIFY_SCHEMA`

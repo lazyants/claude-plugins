@@ -113,6 +113,22 @@ Order of operations:
      because the durable copy is a one-time hand-migratable seed that may
      be reformatted (unlike the shipped templates `canon_enum_drift.test
      .py`'s TP-3 strictly set-compares).
+  6b. Prompt axis, CONTENT (#510). The version compare above cannot see a
+     durable task that carries the OPPOSITE of a safety rule at the SAME
+     marker value, which is exactly the 1.65.0 case: every project
+     scaffolded earlier holds a `glossary_TASK.md` telling the glossary
+     agent to append its discovery to `style_bible.md`'s E-traps section,
+     and its marker is the same `3` this plugin ships. So if the plugin's
+     own template carries the prohibition literal, the durable copy must
+     carry it too -- absent -> exit 2, axis=prompt, naming the paragraph to
+     hand-apply. Matched against a whitespace-FLATTENED copy, because the
+     durable file is a hand-migratable seed that may be re-wrapped and a
+     re-wrap is not a reword. Unlike step 6's `sense_translated` case a
+     substring check is NOT vacuous here: the literal IS the rule, not a
+     keyword standing in for a contract. **If the PLUGIN's own template
+     has lost the literal, that HALTS too** -- a reworded shipped
+     prohibition must update this constant in the same commit, never
+     silently disable the axis.
   7. All pass -> exit 0, stdout `{"preflight":"ok"}`.
 
 Robustness -- nothing here to keep in sync with the schemas by hand: the
@@ -165,6 +181,14 @@ from typing import NoReturn
 
 SENSE_TRANSLATED = "sense_translated"
 
+# The one clause the #510 routing rule turns on, matched literally (step 6b).
+# Kept in sync BY EYE with assets/templates/glossary_TASK.template.md and with
+# tests/glossary_trap_routing.test.py's SENTENCE_PINS, which pin the same
+# literal in the shipped template: rewording it there must reword it in both,
+# and the plugin-side check below turns a missed update into a loud halt
+# rather than a silently disabled axis.
+STYLE_BIBLE_PROHIBITION = "In particular never `style_bible.md`"
+
 # Same marker syntax/regex as profile_validate.py's own
 # PROMPT_CONTRACT_MARKER_RE (kept in sync by eye -- this gate's own concern,
 # durable-vs-plugin staleness at glossary pre-dispatch, is deliberately
@@ -195,6 +219,14 @@ def _halt(message: str) -> NoReturn:
     into more than one. Display-only normalization, no correctness impact."""
     sys.stderr.write(" ".join(message.split()) + "\n")
     sys.exit(2)
+
+
+def _flatten(text: str) -> str:
+    """Whitespace-collapsed copy, for matching a literal that this plugin's
+    ~79-column hard wrap (or a hand-migrator's own re-wrap of the durable
+    seed) may have split across lines. A re-wrap is not a reword, and must
+    neither fail this gate nor hide a stale copy from it."""
+    return " ".join(text.split())
 
 
 def _read_text_guarded(path: Path):
@@ -592,6 +624,42 @@ def main(argv=None) -> int:
                 f"PROMPT_CONTRACT_VERSION marker to {plugin_marker}) before "
                 f"retrying the glossary pass."
             )
+
+    # --- Step 6b: prompt axis, CONTENT (#510) --------------------------------
+    if STYLE_BIBLE_PROHIBITION not in _flatten(plugin_task_text):
+        _halt(
+            f"glossary_preflight: this plugin's own shipped "
+            f"{PLUGIN_GLOSSARY_TASK_TEMPLATE} no longer carries the literal "
+            f"{STYLE_BIBLE_PROHIBITION!r} -- either the shipped prohibition on "
+            f"writing style_bible.md was reworded without updating this "
+            f"script's STYLE_BIBLE_PROHIBITION constant, or the plugin install "
+            f"is damaged. This axis is never skipped silently; fix the "
+            f"constant (and tests/glossary_trap_routing.test.py's matching "
+            f"pin) or reinstall the plugin."
+        )
+    durable_task_path = durable_root / "glossary_TASK.md"
+    durable_task_text, err = _read_text_guarded(durable_task_path)
+    if err is not None:
+        reason = err
+    elif STYLE_BIBLE_PROHIBITION not in _flatten(durable_task_text):
+        reason = (
+            "it does not carry the prohibition on writing style_bible.md that "
+            "this plugin's own glossary_TASK.template.md ships"
+        )
+    else:
+        reason = None
+    if reason is not None:
+        _halt(
+            f"glossary_preflight: durable {durable_task_path} is STALE, "
+            f"axis=prompt ({reason}) -- a copy seeded before literary-translator "
+            f"1.65.0 still tells the glossary agent to log its discovery in "
+            f"style_bible.md's E-traps section, an ungated write to the file "
+            f"every translate, review and fix turn reads. glossary_TASK.md is "
+            f"NEVER auto-overwritten -- hand-apply this plugin's current "
+            f"glossary_TASK.template.md word-sense paragraph (the one ending "
+            f"'never this pass's') before retrying the glossary pass. It is in "
+            f"no cache-key field, so the edit re-translates nothing."
+        )
 
     # --- Step 7: all clear ----------------------------------------------------
     print(json.dumps({"preflight": "ok"}, separators=(",", ":"), ensure_ascii=False))
