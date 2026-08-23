@@ -62,12 +62,26 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
 # Rewritten for 1.51.0 (#498 -- which channel a settled W6 decision goes to) per
-# the maintenance contract above. The four `cache_key.py` rows this replaces go
-# with their entry, exactly as that contract says. They were labelled 1.44.0 and
-# were still standing under 1.49.0's entry, while the prose above them announced
+# the maintenance contract above. This rotation inherited an already-empty map
+# (1.50.0 had retired the previous entry's anchors) and left it empty.
+#
+# Phrase every future note this way -- in the PAST tense, about what this
+# rotation did to what it inherited, never in the present tense about what the
+# base contains. A note that says "the base declares X" expires the next time
+# this branch is rebased, and no assertion here can tell: the guards check the
+# DECLARATION against the newest entry, never the prose against the base it
+# describes, and the base is not in the tree at test time. Measured the hard
+# way -- two rotations of this file shipped green with a note that had been
+# true one rebase earlier.
+#
+# Worth carrying forward, because this file cannot detect it and it was live on
+# main within the last day: four `cache_key.py` anchors labelled 1.44.0 were
+# still standing under 1.49.0's entry while the prose above them announced
 # itself as "Rewritten for 1.34.1" -- rows, comment and newest entry each naming
-# a different release. Nothing here could have caught that: a comment describing
-# the wrong release is the one half of this file no assertion reaches.
+# a different release, with every assertion here green. Rebasing is how the two
+# halves diverge: the declaration and the comment sit in different regions, so
+# one can be rotated, or inherited from main, without the other conflicting.
+# Rotate this block BY NAME every release; nothing prompts it.
 #
 # 1.51.0 cites NO `file.ext:NNN`, so this map is empty -- its documented
 # per-release state, not a lapse. The entry names `canon_validate.py`,

@@ -192,12 +192,14 @@ def _local_dict_len(filename, funcname, varname):
     raise AssertionError(f"{funcname} is no longer defined in {filename}")
 
 
-# Rewritten for 1.51.0 (#498), per the maintenance contract above. There are no
-# rows to retire: 1.49.0's declaration was already empty, for its own reason
-# (that entry's cost paragraph argues from set membership, which its sibling
-# citation guard pins instead). `_files_defining`, `_local_dict_len`,
-# `_tuple_len` and `_test_function_count` are kept unused, as earlier releases
-# kept them, for the next entry that cites their class.
+# Rewritten for 1.51.0 (#498), per the maintenance contract above. This rotation
+# retired one inherited row, the size of `PLUGIN_BUNDLE_MEMBERS`, which the
+# entry it belonged to quoted -- stated in the past tense about what was
+# retired rather than about what the base holds, because the latter expires on
+# the next rebase and nothing here can catch it (see the sibling citation
+# guard's note for the measured instances). `_files_defining`,
+# `_local_dict_len`, `_tuple_len` and `_test_function_count` are kept unused, as
+# earlier releases kept them, for the next entry that cites their class.
 #
 # ZERO rows, because 1.51.0 is a documentation release that states no figure
 # this file's tokenizer can see. Its actual NUMERALS are of three kinds, and
