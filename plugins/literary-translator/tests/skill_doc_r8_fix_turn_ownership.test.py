@@ -59,9 +59,9 @@ def _delimited_block(path: Path, start_marker: str, end_marker: str, min_chars: 
     collapsed, so hard-wrapping never breaks a pin.
 
     Always delimited at the NEXT rule, never by a character window: measured,
-    R8 is 436 normalised characters in engine-loop.md, so a 700-char slice
-    would reach 264 characters into R9/R10 and the clauses could be deleted
-    from R8, restated under R9, and still pass.
+    R8's entry in engine-loop.md is 419 normalised characters, so the 700-char
+    slice this file first used reached 281 characters into R9/R10 -- the
+    clauses could be deleted from R8, restated under R9, and still pass.
 
     `min_chars` is not decoration. If a marker moves, the slice collapses and
     every pin over it would be checking almost nothing while still reporting a
@@ -94,9 +94,11 @@ def _r8_block() -> str:
 
 
 def _r8_index_entry() -> str:
-    """R8's one-line entry in engine-loop.md's rule index. Measured at 438
+    """R8's one-line entry in engine-loop.md's rule index. Measured at 419
     normalised characters, so 300 is a floor a real entry clears and a
-    collapsed slice does not."""
+    collapsed slice does not. Re-measure it here if the entry is rewritten:
+    a floor above the real size is a permanent RED, one far below it stops
+    catching a collapsed slice."""
     return _delimited_block(ENGINE_LOOP_MD, "- **R8**", "- **R9**", 300)
 
 
