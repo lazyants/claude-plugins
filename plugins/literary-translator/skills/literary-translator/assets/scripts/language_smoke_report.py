@@ -49,6 +49,16 @@ exactly like profile_validate.py's own convention, and only lazily (a
 --particle-config AND --report-path override on the command line means this
 script never needs to read profile.yml, or import PyYAML, at all).
 
+name_inventory coverage (#284) is reported on every run and is NOT part of
+the report: `inventory_forms_total` / `inventory_zero_match_forms` on stdout,
+plus a stderr WARN naming every entry with no token-aligned occurrence. It is
+the one figure computed over the WHOLE manifest rather than the sample -- a
+sample-scoped coverage verdict would call most of a real inventory missing --
+and it stays out of the report precisely because the report's reuse identity
+IS sample-scoped, so a stored whole-book fact could be replayed stale. See
+references/language-pair-parameterization.md, "Which entries never match
+anything".
+
 Exit codes:
   0 -- report written, pass: true
   1 -- report written, pass: false (a checked name/elision case/particle
@@ -539,13 +549,29 @@ def load_particle_config(path):
     if not isinstance(has_elision, bool):
         fatal(f"particle_config at {path}: has_elision must be a JSON boolean")
 
-    elision_re = None
     if has_elision:
         if not isinstance(elision_re_str, str) or not elision_re_str:
             fatal(
                 f"particle_config at {path}: has_elision is true but "
                 "ELISION_RE is missing/empty"
             )
+    elif elision_re_str is not None and not isinstance(elision_re_str, str):
+        fatal(f"particle_config at {path}: ELISION_RE must be a string or null")
+
+    # #284: compile on the PATTERN, never on has_elision -- byte-for-byte the
+    # rule bootstrap_names.py's own load_language_config() applies
+    # (`elision_re = None; if elision_pattern: ...`). The two loaders both
+    # ACCEPT `has_elision:false` beside a non-null, 2-group ELISION_RE, and
+    # gating compilation on has_elision made this file tokenize that config
+    # differently from the extractor it is required to mirror: production
+    # splits "d'Effiat" into "d" + "Effiat", this file did not. Nothing
+    # currently ships that shape (all five presets are true+pattern or
+    # false+null), so the correction is behavior-preserving where it runs --
+    # but the inventory-coverage census below reports on the WHOLE book, and
+    # a divergence here would surface as a form the operator is told never
+    # occurs while the production extractor finds it.
+    elision_re = None
+    if elision_re_str:
         try:
             elision_re = re.compile(elision_re_str)
         except re.error as exc:
@@ -556,8 +582,6 @@ def load_particle_config(path):
                 f"2 capture groups (particle prefix, remaining name), got "
                 f"{elision_re.groups}"
             )
-    elif elision_re_str is not None and not isinstance(elision_re_str, str):
-        fatal(f"particle_config at {path}: ELISION_RE must be a string or null")
 
     name_inventory_raw = config.get("name_inventory")
     if name_inventory_raw is None:
@@ -592,7 +616,7 @@ def load_particle_config(path):
 # the four required + optional name_inventory particle_config fields (no
 # per-language literals here).
 # ---------------------------------------------------------------------------
-def _tokenize(text, has_elision, elision_re):
+def _tokenize(text, elision_re):
     """(token, preceding_char) pairs -- mirrors bootstrap_names.py's own
     tokenize() (this script is a deliberately SEPARATE re-implementation,
     see module docstring), but returns no spans since this script only
@@ -601,6 +625,16 @@ def _tokenize(text, has_elision, elision_re):
     name_inventory entry with its own elidable article (e.g. French
     "d'Effiat") tokenizes IDENTICALLY to how the same text would tokenize in
     the scanned block.
+
+    #284: the split is gated on ``elision_re`` ALONE, exactly like
+    bootstrap_names.py's -- taking its signature too, so the two cannot drift
+    back apart by one argument. It previously required ``has_elision`` as
+    well, which made a `has_elision:false` + non-null ELISION_RE config (a
+    shape BOTH loaders accept) tokenize differently here than in production.
+    ``has_elision`` keeps its other jobs: the elision-test-file obligation,
+    the report field, and density_score()'s elision bonus -- that last one is
+    smoke-only, has no production counterpart to be at parity with, and feeds
+    sample SELECTION, so moving it would move source_sample_sha1 for no gain.
     """
     tokens = []
     for m in TOKEN_RE.finditer(text):
@@ -610,7 +644,7 @@ def _tokenize(text, has_elision, elision_re):
         while j >= 0 and (text[j].isspace() or text[j] in _WRAPPERS):
             j -= 1
         preceding = text[j] if j >= 0 else "."
-        elided = elision_re.match(raw) if (has_elision and elision_re is not None) else None
+        elided = elision_re.match(raw) if elision_re is not None else None
         if elided:
             # Split an elided article fused to a capitalized name (e.g.
             # French/Italian d'Effiat, l'Autriche) into its own two tokens
@@ -653,26 +687,27 @@ def _build_inventory_trie(inventory_forms):
 
 
 @lru_cache(maxsize=32)
-def _compiled_inventory_trie(name_inventory: frozenset, has_elision: bool, elision_re):
-    """The inventory trie for one ``(name_inventory, has_elision, elision_re)``
-    triple, built once and cached -- NOT rebuilt on every
-    ``extract_candidate_names()`` call. Mirrors ``bootstrap_names.py``'s own
-    ``_compiled_inventory_trie()`` exactly (parity is a hard requirement here
-    too), including WHY: an uncached build re-tokenized every inventory form
-    and rebuilt the whole trie once per manifest block scanned (issue #204
-    follow-up finding 3). ``has_elision`` is part of this file's cache key
-    (unlike bootstrap_names.py's, which only ever needs ``elision_re``)
-    because this file's own ``_tokenize()`` gates elision splitting on BOTH
-    ``has_elision`` and ``elision_re`` together, not on ``elision_re`` alone.
+def _compiled_inventory_trie(name_inventory: frozenset, elision_re):
+    """The inventory trie for one ``(name_inventory, elision_re)`` pair, built
+    once and cached -- NOT rebuilt on every ``extract_candidate_names()``
+    call. Mirrors ``bootstrap_names.py``'s own ``_compiled_inventory_trie()``
+    exactly (parity is a hard requirement here too), including WHY: an
+    uncached build re-tokenized every inventory form and rebuilt the whole
+    trie once per manifest block scanned (issue #204 follow-up finding 3).
     The trie is read-only after construction, so sharing it across every
     block/call is safe.
+
+    #284: ``has_elision`` used to be a third cache-key member here. Its only
+    stated justification was that this file's ``_tokenize()`` gated elision
+    splitting on it; that gate is gone (see ``_tokenize``), so the key is
+    bootstrap_names.py's again and the two signatures match.
 
     Keyed on #238/#241 MATCH UNITS (``match_units()``), not raw tokens --
     mirrors bootstrap_names.py's own ``_compiled_inventory_trie()`` exactly
     (parity is a hard requirement here too).
     """
     inventory_forms = (
-        tuple(u for t, _p in _tokenize(form, has_elision, elision_re) for u in match_units(t))
+        tuple(u for t, _p in _tokenize(form, elision_re) for u in match_units(t))
         for form in name_inventory
     )
     return _build_inventory_trie(f for f in inventory_forms if f)
@@ -765,11 +800,10 @@ def _capped_candidate_name(name: str) -> str:
 def extract_candidate_names(text, lang):
     particles_lower = lang["particles_lower"]
     stopwords = lang["stopwords"]
-    has_elision = lang["has_elision"]
     elision_re = lang["elision_re"]
     name_inventory = lang["name_inventory"]
 
-    tokens = _tokenize(text, has_elision, elision_re)
+    tokens = _tokenize(text, elision_re)
     n = len(tokens)
     out = []
     # De-dup key for pass 2 (see its own comment below): (name, start_token_
@@ -856,7 +890,7 @@ def extract_candidate_names(text, lang):
     # would skip. At a given position, forms are tried longest-first and
     # the first one that token-matches AND is not an exact duplicate wins.
     if name_inventory:
-        trie = _compiled_inventory_trie(name_inventory, has_elision, elision_re)
+        trie = _compiled_inventory_trie(name_inventory, elision_re)
         idx = 0
         while idx < n:
             # Walk the trie as deep as the token run allows, collecting EVERY
@@ -930,6 +964,155 @@ def extract_candidate_names(text, lang):
 def classify_is_particle(token, lang):
     normalized = token.lower().rstrip(_APOSTROPHES)
     return normalized in lang["particles_lower"]
+
+
+# ---------------------------------------------------------------------------
+# name_inventory coverage census (#284)
+#
+# The sample this report is otherwise built from is a stratified excerpt --
+# four body anchors plus the translate-frontback bucket, each capped at
+# SAMPLE_WORD_CAP words. A per-form coverage verdict computed over THAT would
+# report "never matches" for most of a real inventory simply because the form
+# is not in those excerpts, which is a worse artifact than the silence it
+# replaces. So the census reads the WHOLE manifest, separately from the
+# sample, and source_sample_sha1 keeps meaning exactly what it meant.
+#
+# It is PRINTED, never written into the report. W3 reuses a stored report
+# whenever the (particle_config, source_sample, contract) triple still
+# matches, and that triple is scoped to the SAMPLE -- so a whole-book fact
+# stored beside it could be reused unchanged after an edit to any unsampled
+# block, reading as current while being wrong in either direction. A number
+# that is never persisted cannot be reused stale.
+# ---------------------------------------------------------------------------
+def _inventory_scan_pieces(manifest):
+    """Every non-empty block's `plain_text`, sentinel-stripped, one piece per
+    block -- the PRODUCTION scan scope, equivalent to
+    ``bootstrap_names.iter_manifest_texts()`` for any schema-valid manifest:
+    filtered by neither a block's `type` (an adapter-defined free-text tag)
+    nor a segment's `kind` nor a frontback `decision`. (Not byte-for-byte
+    identical on INVALID input: production calls ``text.strip()`` and raises
+    on a truthy non-string `plain_text`, this skips it. `plain_text` is
+    required and string-typed by manifest.schema.json and validation precedes
+    W3, so no book reaches either branch; a census is also the wrong place to
+    grow a second manifest validator.) A form living only in a HEAD block or an
+    omit-decision frontback block is reachable by the production extractor,
+    so reporting it as unmatched here would be a false zero.
+
+    Pieces stay SEPARATE and are never joined, for the same reason
+    `build_source_sample`'s `extraction_pieces` are: the run-continuation
+    walk has no sentence-boundary check of its own, so concatenating
+    non-adjacent blocks fabricates cross-piece matches that no per-block
+    production scan could produce.
+    """
+    blocks = manifest.get("blocks", {})
+    if not isinstance(blocks, dict):
+        fatal("manifest.json: 'blocks' must be an object")
+    pieces = []
+    for block in blocks.values():
+        text = block.get("plain_text", "")
+        if isinstance(text, str) and text.strip():
+            pieces.append(SENTINEL_RE.sub(" ", text))
+    return pieces
+
+
+def inventory_forms_seen(pieces, lang):
+    """The set of `name_inventory` surface forms with at least one
+    token-aligned occurrence anywhere in `pieces`.
+
+    Walks the same compiled trie `extract_candidate_names()`'s pass 2 walks,
+    under the same rules: the `TERMINATORS` break at `j >= 1`, and a whole
+    token's `match_units()` consumed before `None in node` is consulted, so a
+    terminal found mid-token is never counted (token-aligned only, never a
+    sub-token match).
+
+    It differs from pass 2 in exactly one way, deliberately: it records EVERY
+    terminal at every position, where pass 2 emits at most one candidate per
+    position (the longest fresh one). Measured on the live he/yi->en book,
+    three inventory forms occur in the text and are never emitted because a
+    longer inventory form covers them at every position. "Absent from the
+    book" and "always subsumed by a longer entry" are different operator
+    problems and only the first is what this census reports, so counting
+    emissions would file those three into the wrong bucket silently.
+
+    Attribution: the trie's terminals do not carry the surface form, so a
+    parallel `match-unit tuple -> [forms]` map is built from the SAME
+    `_tokenize()` -> `match_units()` pipeline `_compiled_inventory_trie()`
+    builds the trie from, which is exactly what the walk accumulates. A form
+    that tokenizes to nothing enters neither the map (the `if units` filter
+    below) nor the trie (the trie builder's own `if f` filter), so it is
+    simply never seen -- and is therefore reported as unmatched rather than
+    silently omitted, which is the honest verdict for an entry that cannot
+    match anything. Forms sharing a #238/#241 fold key share one verdict, as
+    they share one trie path.
+    """
+    name_inventory = lang["name_inventory"]
+    if not name_inventory:
+        return set()
+    elision_re = lang["elision_re"]
+
+    forms_by_units = {}
+    for form in name_inventory:
+        units = tuple(
+            u for t, _p in _tokenize(form, elision_re) for u in match_units(t)
+        )
+        if units:
+            forms_by_units.setdefault(units, []).append(form)
+
+    trie = _compiled_inventory_trie(name_inventory, elision_re)
+    seen = set()
+    for piece in pieces:
+        tokens = _tokenize(piece, elision_re)
+        n = len(tokens)
+        for idx in range(n):
+            node = trie
+            units_so_far = ()
+            j = 0
+            while idx + j < n:
+                if j >= 1 and tokens[idx + j][1] in TERMINATORS:
+                    break
+                units = match_units(tokens[idx + j][0])
+                matched_token = True
+                for u in units:
+                    nxt = node.get(u)
+                    if nxt is None:
+                        matched_token = False
+                        break
+                    node = nxt
+                if not matched_token:
+                    break
+                units_so_far = units_so_far + units
+                j += 1
+                if None in node:
+                    seen.update(forms_by_units.get(units_so_far, ()))
+    return seen
+
+
+def _warn_inventory_zero_coverage(zero_forms, manifest_path):
+    """Name EVERY `name_inventory` form with no token-aligned occurrence in
+    the whole manifest -- warn, NEVER fatal. Mirrors
+    `_warn_inventory_match_key_collisions()`'s channel and its deterministic
+    (sorted) ordering, so the message never depends on set iteration order.
+
+    Deliberately uncapped: a truncated list is precisely the silent
+    under-report this census exists to end.
+
+    The wording does not presume the remedy. A zero form may be a typo, an
+    entry that belongs to a different volume, or -- the #284 case -- a name
+    the book only ever writes with a fused proclitic (Hebrew mi-/be-/le-/...),
+    which an exact-form, token-aligned matcher cannot reach from the bare
+    entry. Which of those it is, is the operator's call, not this script's.
+    """
+    if not zero_forms:
+        return
+    print(
+        f"WARN {manifest_path}: {len(zero_forms)} name_inventory form(s) have "
+        f"NO token-aligned occurrence anywhere in this manifest, so they can "
+        f"never surface a candidate: {sorted(zero_forms)!r}. Matching is "
+        f"exact-form and token-aligned -- verify the spelling, drop the entry, "
+        f"or add the exact surface form the book actually uses (including an "
+        f"affixed one, listed as its own entry).",
+        file=sys.stderr,
+    )
 
 
 def density_score(text, lang):
@@ -1215,6 +1398,15 @@ def main():
         fatal(f"manifest.json at {manifest_path} must be a JSON object")
 
     sample_text, selection, extraction_pieces = build_source_sample(manifest, lang)
+
+    # #284: whole-manifest name_inventory coverage. Computed here, printed
+    # below, and deliberately absent from the report -- see the census
+    # section's own comment for why a sample-keyed artifact must not carry a
+    # whole-book fact.
+    inventory_forms_total = len(lang["name_inventory"])
+    inventory_zero_forms = lang["name_inventory"] - inventory_forms_seen(
+        _inventory_scan_pieces(manifest), lang
+    )
     source_sample_sha1 = sha1_bytes(sample_text.encode("utf-8"))
     smoke_report_contract_hash = sha1_file(THIS_SCRIPT_PATH)
 
@@ -1418,7 +1610,11 @@ def main():
     print(f"language_smoke_report.py: source_sample_sha1          = {source_sample_sha1}")
     print(f"language_smoke_report.py: smoke_report_contract_hash  = {smoke_report_contract_hash}")
     print(f"language_smoke_report.py: candidate_names_total       = {candidate_names_total}")
+    print(f"language_smoke_report.py: inventory_forms_total       = {inventory_forms_total}")
+    print(f"language_smoke_report.py: inventory_zero_match_forms  = {len(inventory_zero_forms)}")
     print(f"language_smoke_report.py: report written to           = {report_path}")
+
+    _warn_inventory_zero_coverage(inventory_zero_forms, manifest_path)
 
     if overall_pass:
         print("language_smoke_report.py: PASS")
