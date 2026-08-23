@@ -1052,6 +1052,11 @@ def test_adopt_pending_no_budget_preserves_pending(tmp_path, monkeypatch):
     assert job.adopt_pending() is False
     assert not os.path.exists(job.canonical)
     assert os.path.exists(job.pending)             # NOT deleted
+    # #665: the same distinction, now on the OTHER axis. A gate that could not run must not
+    # set the content-rejection flag either -- run() acts TERMINALLY on it, so an
+    # implementation that set it here would block a segment whose gate merely ran out of
+    # budget, while this test's own pending assertion above still passed.
+    assert job.translate_content_rejected is False
 
 
 def test_adopt_pending_absent_is_false(tmp_path, monkeypatch):
@@ -4249,4 +4254,257 @@ def test_fragment_lands_under_the_durable_root_not_the_plugin_root(tmp_path):
     assert fragment["status"] == "blocked" and fragment["reason"] == "translate-rejected"
     assert not (plugin_root / "runs").exists(), (
         "the fragment must never land under the plugin installation tree"
+    )
+
+
+# =========================================================================== #
+# #665 -- a DEFERRED candidate the gate later rejects on CONTENT must not be
+# silently replaced by a fresh paid job.
+#
+# #398 closed the direct route (a fresh attempt rejected in validate_attempt())
+# and deliberately left this one: adopt_pending() returned a bare False for
+# BOTH "the pending's cross-run token is stale" and "the pending's content is
+# defective", run() could not tell them apart, and fell through to launch() --
+# spending a full translation the gate has already permanently refused.
+#
+# The split is decided by WHICH gate rejected, and adopt_pending()'s gate ORDER
+# is what makes that readable: _adoption_gates() runs draft_ready.py
+# --expect-token FIRST and the loop returns on its rejection, so reaching
+# validate_draft.py at all proves the pending's own dispatch_token already
+# matched THIS run. A validate_draft.py exit 1 there is therefore a same-token
+# verdict on content, never a stale-token one.
+#
+# Same lopsided shape as #398's own block: the expensive mistake is not missing
+# a rejection, it is blocking a segment whose gate merely ran out of budget or
+# whose token was simply stale.
+# =========================================================================== #
+def test_adopt_pending_content_rejection_sets_the_flag_and_discards(tmp_path, monkeypatch):
+    """validate_draft.py exit 1 against a pending whose token already passed draft_ready.py
+    -> the flag run() acts terminally on is set, and the pending is discarded exactly as
+    before (its bytes are defective by the very gate that blocks the segment; the gate's own
+    output is already captured into error_detail by #399)."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    gate, calls = _gate_recorder_with_output({
+        "draft_ready.py": (0, "[c001] READY", ""),
+        "validate_draft.py": (1, "[c001] FAIL (quality)", ""),
+    })
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.adopt_pending() is False
+    assert calls == ["draft_ready.py", "validate_draft.py"]
+    assert job.translate_content_rejected is True
+    assert not os.path.exists(job.pending)
+    assert not os.path.exists(job.canonical)
+    assert job.error_detail == "validate_draft.py: [c001] FAIL (quality)"
+
+
+@pytest.mark.parametrize("label,kind,results,expected_calls", [
+    # validate_draft.py RAN but reported usage/environment/source availability, not a verdict
+    # on the candidate. This is the row that makes exit 1 a discriminator rather than "any
+    # non-zero" -- and it asserts the DISCARD too, because an implementation that starts
+    # preserving an exit-2 pending has changed today's slot behaviour while still passing
+    # every flag assertion.
+    ("validate_draft_exit_2", "translate",
+     {"draft_ready.py": (0, "", ""), "validate_draft.py": (2, "", "ERROR: no segpack")},
+     ["draft_ready.py", "validate_draft.py"]),
+    # The stale-cross-run-token case, which is what the pending slot exists to survive:
+    # draft_ready.py rejects and validate_draft.py never runs at all.
+    # This row is also what pins the GATE-NAME half of the discriminator: draft_ready.py
+    # rejects with exit 1, the very code validate_draft.py's contract reserves for a content
+    # verdict, so an implementation that dropped the name conjunct and read "exit 1 from any
+    # gate" would terminally block a segment over a stale token and go red here.
+    ("draft_ready_rejection", "translate",
+     {"draft_ready.py": (1, "not ready: token", "")},
+     ["draft_ready.py"]),
+    # A review candidate never reaches validate_draft.py in the first place; blocking a
+    # segment over a review pending would strand work that already has a good draft.
+    ("review_kind_rejection", "review",
+     {"review_ready.py": (1, '{"ready": false}', "")},
+     ["review_ready.py"]),
+])
+def test_adopt_pending_non_content_rejection_leaves_the_flag_false(
+        tmp_path, monkeypatch, label, kind, results, expected_calls):
+    """The two-sided half. Each row also pins the exact call sequence, so a row cannot pass by
+    rejecting EARLIER than it advertises and never exercising the gate it is named for."""
+    job = _mkjob(tmp_path, kind=kind)
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    gate, calls = _gate_recorder_with_output(results)
+    monkeypatch.setattr(job, "_gate", gate)
+    assert job.adopt_pending() is False
+    assert calls == expected_calls, "%s: this row never reached its advertised gate" % label
+    assert job.translate_content_rejected is False, (
+        "%s: a non-content rejection must not arm the terminal write" % label
+    )
+    assert not os.path.exists(job.pending), (
+        "%s: a gate that RAN and rejected still discards the pending -- unchanged by #665"
+        % label
+    )
+
+
+def test_a_pending_that_vanished_under_the_gates_is_recoverable_not_terminal(tmp_path, monkeypatch):
+    """The terminal verdict must rest on the candidate the gates actually judged.
+
+    Each gate re-OPENS self.pending BY PATH, and unlike validate_attempt()'s per-invocation
+    .att.<seg>.<inv>... name, this slot's name is deterministic and persists across runs --
+    derivable by the codex process this driver launches, which holds write access over
+    segments/ and whose straggler turn can outlive poll()'s cancel. validate_draft.py's own
+    contract puts a MISSING OR MALFORMED candidate on exit 1, the same code it uses for a
+    content verdict, so a concurrent unlink inside that window is indistinguishable from one
+    -- and without the re-check it would block the segment permanently.
+
+    Simulated at the seam it actually opens: the gate stub deletes the pending as
+    validate_draft.py "runs", then rejects with exit 1."""
+    job = _mkjob(tmp_path, kind="translate")
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    calls = []
+
+    def racing_gate(args, timeout):
+        calls.append(args[0])
+        if args[0] == "validate_draft.py":
+            os.unlink(job.pending)          # the straggler turn wins the race
+            return SimpleNamespace(returncode=1, stdout="FAIL: candidate missing", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(job, "_gate", racing_gate)
+
+    assert job.adopt_pending() is False
+    assert calls == ["draft_ready.py", "validate_draft.py"]
+    assert job.translate_content_rejected is False, (
+        "a candidate that stopped being the file the gates were pointed at was treated as a "
+        "permanent content verdict -- a concurrent write can now block a segment forever"
+    )
+
+
+def test_run_stops_before_launch_on_a_content_rejected_pending(tmp_path, monkeypatch):
+    """The behaviour #665 is filed for, at run() level: no fresh codex turn is launched, and
+    the terminal ledger write is taken. On the pre-#665 driver launch() IS reached."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    gate, calls = _gate_recorder_with_output({
+        "draft_ready.py": (0, "", ""),
+        "validate_draft.py": (1, "[c001] FAIL (quality)", ""),
+    })
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    monkeypatch.setattr(job, "_gate", gate)
+    recorded = {"v": False}
+
+    def spy_record():
+        recorded["v"] = True
+    monkeypatch.setattr(job, "_record_translate_rejected", spy_record)
+    launched = {"v": False}
+
+    def spy_launch():
+        launched["v"] = True
+        return True
+    monkeypatch.setattr(job, "launch", spy_launch)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert launched["v"] is False, "a content-rejected pending must not buy a fresh turn"
+    assert recorded["v"] is True
+    assert job.reason == "pending-rejected"
+
+
+def test_run_still_launches_when_the_pending_gate_could_not_run(tmp_path, monkeypatch):
+    """The control for the test above, driving the REAL adopt_pending() rather than
+    monkeypatching it away (which is what every existing launch-fallthrough test in this file
+    does, and why none of them can catch this): a gate that could not run at all leaves the
+    pending intact, launches fresh, and takes no terminal write."""
+    job = _mkjob(tmp_path, kind="translate", deadline=100)
+    Path(job.pending).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(job, "hygiene", lambda: None)
+    monkeypatch.setattr(job, "safe_adopt", lambda: False)
+    monkeypatch.setattr(job, "_gate", _gate_none)
+    recorded = {"v": False}
+
+    def spy_record():
+        recorded["v"] = True
+    monkeypatch.setattr(job, "_record_translate_rejected", spy_record)
+    launched = {"v": False}
+
+    def spy_launch():
+        launched["v"] = True
+        return False                 # stop right after: this test is about REACHING launch()
+    monkeypatch.setattr(job, "launch", spy_launch)
+
+    rc = job.run()
+
+    assert rc == 1
+    assert launched["v"] is True
+    assert recorded["v"] is False
+    assert job.reason == "launch-failed"
+    assert os.path.exists(job.pending), "an unvalidatable pending is recoverable work"
+
+
+def _seed_pending(root, seg, payload):
+    """Write the deterministic per-seg/kind pending slot a PRIOR run's _defer_attempt() would
+    have left behind -- the state #665 is about. The name is codex_job.py's own
+    `.att_pending.<seg>.<ext>.json`; nothing in hygiene(), safe_adopt() or the D8 claim guard
+    touches it before adopt_pending() runs."""
+    path = root / "segments" / (".att_pending.%s.draft.json" % seg)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_deferred_pending_rejected_on_content_is_not_replaced_by_a_fresh_job(tmp_path):
+    """End to end, through the shipped driver and the REAL ledger_update.py: a deferred
+    candidate whose content the gate rejects leaves a terminal fragment and buys no new turn."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    pending = _seed_pending(root, seg, {"dispatch_token": tok, "seg": seg,
+                                        "structure_ok": True, "quality_ok": False})
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="valid",
+                                   status_seq=["completed"]))
+    line = parse_line(proc)
+    assert proc.returncode == 1 and line["ok"] is False
+    assert line["reason"] == "pending-rejected"
+
+    assert [c for c in read_calls(root, "D1") if c["sub"] == "task"] == [], (
+        "a fresh codex turn was launched over a permanently rejected candidate -- the exact "
+        "unbounded spend #665 is filed for"
+    )
+    fragment = read_fragment(root, seg)
+    assert fragment["status"] == "blocked", fragment
+    assert fragment["reason"] == "translate-rejected", fragment
+    assert set(fragment) <= {"timestamp", "status", "reason"}, fragment
+
+    jl = json.loads((root / "segments" / (".codex_job.%s.json" % seg)).read_text())
+    assert jl["reason"] == "pending-rejected"
+    assert jl["ledger_write"] == "ok"
+    assert "validate_draft.py" in (jl["error_detail"] or "")
+    assert not pending.exists()
+    assert list((root / "segments").glob(".codex_ledger_payload.*")) == []
+
+
+@pytest.mark.parametrize("label,payload", [
+    # exit 2 from validate_draft.py: environment, not a verdict on the candidate.
+    ("validator_environment_failure",
+     {"dispatch_token": "RUN:c001", "seg": "c001", "structure_ok": True, "quality_ok": True,
+      "validator_env_fail": True}),
+    # A pending left by an OLDER run, whose dispatch_token no longer matches: draft_ready.py
+    # rejects it and the slot is recycled by a fresh turn. That is what the slot is FOR.
+    ("stale_cross_run_token",
+     {"dispatch_token": "OLDRUN:c001", "seg": "c001", "structure_ok": True,
+      "quality_ok": True}),
+])
+def test_a_non_content_pending_rejection_still_buys_a_fresh_job(tmp_path, label, payload):
+    """The two-sided half of the end-to-end row above. A `reason`-keyed implementation, or one
+    keyed on "any non-zero from any gate", blocks these segments and goes red here."""
+    root, companion, node = build_root(tmp_path)
+    seg, tok = "c001", "RUN:c001"
+    _seed_pending(root, seg, payload)
+    proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
+                        base_state(seg, tok, "translate", attempt_mode="valid",
+                                   status_seq=["completed"]))
+    line = parse_line(proc)
+
+    assert len([c for c in read_calls(root, "D1") if c["sub"] == "task"]) == 1, (
+        "%s: the rejected pending was recycled, so a fresh turn is exactly what must happen"
+        % label
+    )
+    assert line["reason"] == "promoted", line          # and that fresh turn succeeded
+    assert not fragment_path(root, seg).exists(), (
+        "%s: a recoverable rejection must never leave a terminal blocked fragment" % label
     )

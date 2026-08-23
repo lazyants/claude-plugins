@@ -318,9 +318,11 @@ class CodexJob:
         self.final_prompt = None
         # #398: "validate_draft.py ran on a TRANSLATE candidate and returned exit 1" -- its
         # contract for "the candidate's own content is defective" (see that script's own Exit
-        # codes section). Initialized once and deliberately never reset: _validate_candidate()
-        # has exactly one caller (validate_attempt()), itself called once per run(), so a
-        # per-call reset would be choreography for a reuse nothing performs.
+        # codes section). Two setters, both reading that one contract: _validate_candidate()
+        # for a FRESH attempt (#398) and adopt_pending() for a DEFERRED one (#665). Initialized
+        # once and deliberately never reset: each of those runs at most once per run(), and
+        # run() returns at the first of them to fire, so a per-call reset would be choreography
+        # for a reuse nothing performs.
         self.translate_content_rejected = False
         # #398: best-effort outcome of the terminal ledger write, surfaced in the terminal
         # joblog. None means "never attempted" -- the ordinary case for every job that did not
@@ -1514,6 +1516,34 @@ class CodexJob:
                 return False                       # could not validate -> keep pending, launch fresh
             if proc.returncode != 0:
                 self._capture_gate_rejection(name, proc)  # #399: capture before discarding
+                if (name == "validate_draft.py" and proc.returncode == 1
+                        and self._is_regular(self.pending, self.poll_remaining)):
+                    # #665: the SAME exit-1 contract _validate_candidate() reads for a fresh
+                    # attempt, read here for a DEFERRED one. That this is a same-token verdict
+                    # on CONTENT, and never a stale cross-run token, is guaranteed by the gate
+                    # ORDER _adoption_gates() owns: draft_ready.py carries --expect-token and
+                    # runs first, and this loop returns on its rejection -- so reaching
+                    # validate_draft.py at all proves the pending's own dispatch_token already
+                    # matched THIS run. run() acts terminally on the flag; every other rejection
+                    # here (draft_ready.py at any code, validate_draft.py exit 2, review_ready.py)
+                    # leaves it false and keeps the discard-and-relaunch this branch always did.
+                    #
+                    # The trailing _is_regular() is NOT a repeat of the one at the top of this
+                    # method -- it re-confirms the candidate AFTER the gates ran, and it is what
+                    # makes the terminal verdict safe. Each gate re-OPENS self.pending by PATH,
+                    # and unlike validate_attempt()'s candidate (self.attempt, an unguessable
+                    # per-invocation .att.<seg>.<inv>... name), this slot's name is deterministic
+                    # and persists across runs -- derivable by the codex process this driver
+                    # launches, which holds write access over segments/ and whose straggler turn
+                    # can outlive poll()'s best-effort cancel (see _record_translate_rejected()'s
+                    # own comment on that same actor). A candidate deleted, truncated, or replaced
+                    # by a symlink inside that window makes validate_draft.py exit 1 too -- its
+                    # contract puts a missing/malformed candidate there deliberately -- and
+                    # without this re-check that concurrent write, not a content verdict, would
+                    # block the segment permanently. On a False here the flag stays down and the
+                    # discard-and-relaunch below runs, exactly as it did before #665: a
+                    # recoverable outcome for a state nothing has actually judged.
+                    self.translate_content_rejected = True
                 _silent_remove(self.pending)       # gate ran & rejected -> discard stale/bad, launch fresh
                 return False
         if not self._canonical_replaceable(self.poll_remaining):
@@ -1893,8 +1923,9 @@ class CodexJob:
                 return 0
             if self.canonical_unreadable:
                 # adopt_pending() found a candidate that passed every gate, but its own
-                # canonical guard refused the promotion -- NOT "no usable pending", which
-                # is the only other reason adopt_pending() returns False. self.pending was
+                # canonical guard refused the promotion -- neither "no usable pending" nor
+                # #665's content rejection, the two other reasons adopt_pending() returns
+                # False (the content one is handled immediately below). self.pending was
                 # left untouched by that refusal (see adopt_pending()'s own comment), so
                 # there is nothing to lose by stopping here, and everything to lose by not
                 # stopping: falling through to launch() spends a fresh paid turn that can
@@ -1907,6 +1938,27 @@ class CodexJob:
                 # name, so the validated candidate still becomes unreachable to every later
                 # run and the work is still regenerated. Stopping here is therefore correct
                 # for exactly the same practical reason it always was.
+                return 1
+            if self.kind == "translate" and self.translate_content_rejected:
+                # The `kind` conjunct mirrors the #398 site below, for the same reason it
+                # gives: defence in depth, not load-bearing -- _adoption_gates() yields
+                # validate_draft.py only for translate, so only a translate can set the flag.
+                #
+                # #665: the deferred candidate adopt_pending() just discarded was refused by
+                # validate_draft.py exit 1 -- the same permanent content verdict #398 already
+                # acts on for a fresh attempt, reached by the other route. Falling through to
+                # launch() from here is what made that route unbounded: the segment kept its
+                # recoverable fragment, the next run re-dispatched it, and each pass paid for a
+                # full translation the shipped gate has already refused. Stop, and take #398's
+                # terminal write so select_segments.py escalates the segment instead
+                # (--only-segs still reaches it, as it does every other blocked fragment).
+                #
+                # A DISTINCT reason, unlike #398's site: that one kept "validate-failed"
+                # because an existing label was already being read; this path had no label of
+                # its own at all -- the reason it ended up reporting was whatever the FRESH job
+                # then produced, which is precisely what made the repeat invisible.
+                self.reason = "pending-rejected"
+                self._record_translate_rejected()
                 return 1
             if not self.launch():                     # False (incl. no-budget, pending kept) -> launch fresh
                 self.reason = "launch-failed"
