@@ -313,7 +313,7 @@ class SkepticReadyError(Exception):
     mirrors ``canon_validate.py``'s own ``CanonValidationError``. ``offending``,
     when not None, is folded into the failure payload as one string per
     offending item, so a caller never has to re-derive that from a bare
-    message -- BOUNDED, not verbatim (#360): a large failure reports the first
+    message -- BOUNDED, not verbatim (#360): a large failure reports up to
     ``_MAX_LISTED_MISSING`` items, each length-capped, plus one line naming how
     many were omitted. It never silently reports a smaller problem."""
 
@@ -1385,17 +1385,14 @@ def _bounded_missing(values, max_items: int = _MAX_LISTED_MISSING) -> list:
 # both branches sized (3 per side when both are populated, 7 when one is), no
 # shape is re-cut and every reported count equals the number actually dropped.
 _MAX_LISTED_SIDE = _MAX_LISTED_MISSING - 1
-_MAX_LISTED_SIDE_HALF = (_MAX_LISTED_MISSING - 1) // 2
+_MAX_LISTED_SIDE_HALF = _MAX_LISTED_SIDE // 2
 
 
 def _labelled_sides(missing, extra) -> list:
     """Label and COUNT-bound two genuinely different populations so neither can
     be evicted wholesale by the other -- the coverage-mismatch analogue of what
-    round 10 fixed for `run_verify_merged`'s pooled `missing[]`.
-
-    A single head-keeping cap over `missing + extra` reports nothing from the
-    second population once the first fills the budget, whichever way the
-    discrepancy is skewed. Reserving a slice per side keeps both visible.
+    round 10 fixed for `run_verify_merged`'s pooled `missing[]` -- see the
+    long-form version of the argument at `_MAX_LISTED_MISSING_HALF` above.
 
     Deliberately does NOT length-bound an entry: that is the constructor's job
     (`_bounded_missing`), applied once, to whatever any raise site hands it."""

@@ -2624,7 +2624,9 @@ def test_token_mismatch_payload_is_bounded_in_count_and_entry_length(
     tmp_path, records, source_form_chars
 ):
     """MUTATION this guards: dropping the bound from SkepticReadyError.__init__
-    puts one interpolated line per record back on stdout, each carrying that
+    puts one interpolated line per record back on stdout. The 40-record shapes
+    are the shipped DEFAULT_BATCH_SIZE, kept as the measured baseline #360 was
+    filed on; 500 exercises the same path harder, each carrying that
     record's own source_form verbatim -- 168 593 bytes at 40 records with a
     4 000-char source_form, relayed into the next agent's prompt."""
     frag_path, manifest_path, particle_config, lang_dir = _token_mismatch_fixture(
