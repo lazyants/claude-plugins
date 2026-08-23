@@ -2591,6 +2591,31 @@ def run_correct(
     }
 
 
+def _validate_and_enforce_batch(batch: list, registry: "Registry", research_mode: str) -> None:
+    """Every per-fragment gate, in the ONE order every batch path must run
+    them. THE single entry point -- `run_check_batch`, `run_merge_batches` and
+    the legacy `run_merge` all call this and nothing else.
+
+    It exists because they did NOT, and the divergence was invisible: the four
+    calls were open-coded three times, so #383's refusal was added to two of
+    them and the legacy `--batch PATH` path silently kept writing the forbidden
+    item into entries{}. Review caught it; nothing in the suite could, because
+    each path had its own tests and each passed. A fourth path added later
+    inherits every gate by construction rather than by whoever writes it
+    remembering all four.
+
+    Order is load-bearing and is documented at each step's own definition:
+    Pass 1 first, so a structurally broken item is reported as broken rather
+    than as something else; the citation-safety check before the offline
+    backstop, so an unsafe `source` is reported in BOTH research modes rather
+    than only in the one that would reject the item for another reason.
+    """
+    _validate_batch_items(batch, registry)
+    _enforce_no_truncated_accepted(batch)
+    _enforce_citation_source_safety(batch)
+    _enforce_offline_backstop(batch, research_mode)
+
+
 def run_merge(
     canon_path: Path,
     batch_path: str,
@@ -2611,9 +2636,7 @@ def run_merge(
     canon = _load_canon(canon_path)
     senses = _load_senses_or_raise(senses_path, allow_absent_senses)
 
-    _validate_batch_items(batch, registry)
-    _enforce_citation_source_safety(batch)
-    _enforce_offline_backstop(batch, research_mode)
+    _validate_and_enforce_batch(batch, registry, research_mode)
     merged = _merge_batch(canon, batch, senses)
 
     on_disk, restamped = _stamp_write_verify(
@@ -2668,14 +2691,7 @@ def run_check_batch(
         raw_bytes, batch = _load_batch_bytes(batch_path)
     else:
         batch = _load_batch(batch_path)
-    _validate_batch_items(batch, registry)
-    _enforce_no_truncated_accepted(batch)
-    # After Pass 1 (so a structurally broken item is reported as broken rather
-    # than as an unsafe citation) but before the offline backstop: an unsafe
-    # `source` is unsafe in BOTH research modes, so it must not be reportable
-    # only in the mode that happens to reject the item for another reason.
-    _enforce_citation_source_safety(batch)
-    _enforce_offline_backstop(batch, research_mode)
+    _validate_and_enforce_batch(batch, registry, research_mode)
     if manifest_path is not None:
         expected_forms = _load_source_forms_manifest(manifest_path)
         _assert_exact_source_form_coverage(batch, expected_forms)
@@ -2720,10 +2736,7 @@ def run_merge_batches(
     threaded through to `_stamp_write_verify`."""
     batches = [_load_batch(p) for p in batch_paths]
     for batch in batches:
-        _validate_batch_items(batch, registry)
-        _enforce_no_truncated_accepted(batch)
-        _enforce_citation_source_safety(batch)
-        _enforce_offline_backstop(batch, research_mode)
+        _validate_and_enforce_batch(batch, registry, research_mode)
 
     canon = _load_canon(canon_path)
     senses = _load_senses_or_raise(senses_path, allow_absent_senses)

@@ -229,3 +229,58 @@ def test_merge_batches_refuses_the_same_fragment(tmp_path):
     # even with the gate removed -- measured, not imagined.
     assert "inert canon entry" in str(excinfo.value), str(excinfo.value)
     assert not canon_path.exists(), "a refused batch must write no canon.json"
+
+
+def test_the_legacy_batch_path_refuses_it_too(tmp_path):
+    """The bypass review found. `--batch PATH` is a supported legacy mode with
+    its own `run_merge()`, and the refusal was originally added to the other
+    two paths only -- so this one went on writing the forbidden item into
+    entries{}. Each path had its own tests and each passed, which is why no
+    suite could see it.
+
+    All three now route through `_validate_and_enforce_batch`; this pins the
+    one that was missed."""
+    batch_path = _write(tmp_path, "out_0.json", [_accepted_item(_capped_form())])
+    canon_path = tmp_path / "canon.json"
+    registry = cv._build_schema_registry()
+
+    with pytest.raises(cv.CanonValidationError) as excinfo:
+        cv.run_merge(
+            canon_path,
+            str(batch_path),
+            "offline",
+            registry,
+            tmp_path / "canon_senses.json",
+            True,
+        )
+    assert "inert canon entry" in str(excinfo.value), str(excinfo.value)
+    assert not canon_path.exists(), "a refused batch must write no canon.json"
+
+
+def test_every_batch_entry_point_routes_through_one_validator():
+    """A structural pin, not a behavioural one. The three public batch paths
+    must call `_validate_and_enforce_batch` and must NOT open-code the
+    individual gates -- that open-coding is exactly how one path came to be
+    missing #383's refusal while the other two had it.
+
+    `run_correct` (#495) is deliberately NOT in this list and must not be
+    added: it refuses a `source_form` that is not already in `entries{}`, so it
+    cannot mint a marker-bearing key -- and gating it would instead BLOCK the
+    one path that can repair an inert entry that predates this rule.
+    """
+    source = (SCRIPTS_DIR / "canon_validate.py").read_text(encoding="utf-8")
+    for entry in ("def run_check_batch(", "def run_merge_batches(", "def run_merge("):
+        start = source.index(entry)
+        end = min(
+            (source.index(nxt) for nxt in ("\ndef ",) if source.find(nxt, start + 1) != -1),
+            default=len(source),
+        )
+        body = source[start:source.index("\ndef ", start + 1)]
+        assert "_validate_and_enforce_batch(" in body, (
+            f"{entry.strip()} no longer routes through _validate_and_enforce_batch"
+        )
+        assert "_enforce_no_truncated_accepted(" not in body, (
+            f"{entry.strip()} open-codes a gate instead of using "
+            f"_validate_and_enforce_batch -- that divergence is what let the "
+            f"legacy --batch path ship without #383's refusal"
+        )

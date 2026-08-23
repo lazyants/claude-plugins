@@ -92,11 +92,6 @@ Canon population is not "paste the whole book into context and ask for a glossar
    move is resume identity: the next run in a refreshed root is a fresh `RUN_ID` with
    `resume: false`.
 
-   In practice the trigger is not
-   hostile input but source boilerplate: measured over a live French Gutenberg book,
-   the single marker-bearing candidate was a 232-character all-caps run of the
-   licence block, extracted with `likely_name: true`.
-
    **The dispatch prompt says so too.** `glossary-pass-wf.template.js` builds the
    per-batch prompt, and both of its sentences about `name` now carry the caveat: the
    field gloss no longer claims `name` is simply "the surface form as it appears in
@@ -107,23 +102,9 @@ Canon population is not "paste the whole book into context and ask for a glossar
    is a bundle member), and the field is inside the machinery-only carve-out, so
    moving it re-translates nothing.
 
-   In practice the trigger is not
-   hostile input but source boilerplate: measured over a live French Gutenberg book,
+   In practice the trigger is not hostile input but source boilerplate: measured over a live French Gutenberg book,
    the single marker-bearing candidate was a 232-character all-caps run of the
    licence block, extracted with `likely_name: true`.
-
-   **The dispatch prompt itself is deliberately left un-caveated — TWO sentences of
-   it.** `glossary-pass-wf.template.js` still tells the adjudicator that `source_form`
-   is "the candidate's own `name` field, copied verbatim", and, in the same context
-   window, glosses the field as "`name` = the surface form as it appears in the source
-   text". The first is still true and is what the new bullet preserves; the second is
-   the one the new bullet now literally contradicts ("it is NOT always the surface form
-   as it stands in the source text"). Neither changes the outcome — the same prompt
-   orders the agent to read `glossary_TASK.md` **in full** first, so the rule reaches
-   it, and both roads end at copying the string verbatim. The reason to leave them is
-   cost: that file IS a `PLUGIN_BUNDLE_MEMBERS` entry, so editing its bytes moves
-   `plugin_bundle_hash` and re-stales every converged segment in every project. When a
-   future release moves that hash anyway, fix **both** sentences, not just the first.
 
    **Operator note for an EXISTING durable root — `glossary_preflight.py` HALTS you
    until you migrate.** `glossary_TASK.md` is seeded once and is never
