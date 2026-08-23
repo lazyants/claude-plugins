@@ -65,6 +65,29 @@ assert STYLE_BIBLE_TEMPLATE.is_file(), f"expected {STYLE_BIBLE_TEMPLATE} to exis
 
 INTAKE_MARKER_ID = "intake-proportionality-agreement"
 NAME_DISPLAY_MARKER_ID = "name-display-parentheses"
+FORMATTING_MARKER_ID = "formatting-conventions"
+
+# #500. Section D. Formatting shipped as pure operator instruction with no
+# required-fill span at all, so a durable root could carry it verbatim through
+# W1 with scaffold_validate.py exiting 0.
+#
+# The two headings that bound section D. `### E.` is section D's terminator,
+# not a section under test -- both strings are already closed-list-pinned by
+# tests/style_contract_markers.test.py:125-131.
+SECTION_D_HEADING = "### D. Formatting"
+SECTION_E_HEADING = "### E. Techniques and hard cases"
+
+# The apparatus facts deliberately left OUTSIDE the fill span, so that filling
+# the span in cannot delete them. Whitespace-normalized: the shipped file is
+# hard-wrapped and the wrap points are not part of the contract. This constant
+# is the only PROSE the section-D pin freezes -- the fill instruction itself
+# lives inside the span and is deliberately not asserted. Reword the paragraph
+# on purpose and update this literal with it.
+SECTION_D_FIXED_APPARATUS_PARAGRAPH = (
+    "Footnote numbering and marker style are NOT yours to set, whatever you choose below: the "
+    "apparatus is the source's own, and there is no translator-note namespace beside it. What "
+    "section D fixes is the FORM the gloss takes, and the unit it goes in."
+)
 
 # The six Step-0a-copied durable-root filenames mapped to their shipped
 # `*.template.md` source. Keyed by the .md name scaffold_validate.py scans.
@@ -153,6 +176,110 @@ def test_style_bible_template_ships_the_name_display_marker_unfilled():
     assert any(NAME_DISPLAY_MARKER_ID in f for f in findings), (
         f"expected the shipped style_bible.template.md to still carry an "
         f"unfilled '{NAME_DISPLAY_MARKER_ID}' marker span (findings: {findings})"
+    )
+
+
+def test_style_bible_template_ships_the_formatting_marker_unfilled():
+    """#500 pin 1 -- the span exists at all, proven through the REAL scanner."""
+    text = STYLE_BIBLE_TEMPLATE.read_text(encoding="utf-8")
+    findings = scaffold_validate.scan_markers(STYLE_BIBLE_TEMPLATE, text)
+    assert any(FORMATTING_MARKER_ID in f for f in findings), (
+        f"expected the shipped style_bible.template.md to still carry an "
+        f"unfilled '{FORMATTING_MARKER_ID}' marker span (findings: {findings})"
+    )
+
+
+def _find_or_fail(text: str, needle: str, start: int, what: str) -> int:
+    """Lower-bounded search that fails as a NAMED assertion, never a -1 slice.
+
+    Lower-bounded so each needle is located relative to the previous one, which
+    makes the returned offsets an ordering proof rather than four independent
+    lookups.
+    """
+    idx = text.find(needle, start)
+    assert idx != -1, f"style_bible.template.md: {what} not found (searched from offset {start})"
+    return idx
+
+
+def test_formatting_marker_span_owns_section_d():
+    """#500 pin 2 -- the span must OWN section D's fill instruction.
+
+    Pin 1 only proves a span with this id exists somewhere. That is not the
+    property W1 needs: ``scan_markers`` has no heading awareness whatsoever
+    (it pairs any BEGIN with the next END and never looks outside that pair),
+    so a span that exists but does not enclose section D's instruction leaves
+    the #500 defect fully intact while every gate reports green.
+
+    Every span boundary here is computed with scaffold_validate's OWN regexes
+    and its OWN pairing rule -- never a literal search for the marker text.
+    That is not a stylistic preference: ``MARKER_END_RE`` tolerates whitespace
+    variants, so ``<!--LT_REQUIRED_FILL_END-->`` is a real END to W1 and
+    invisible to a literal search. A hand-rolled slice can therefore select a
+    LATER end than W1 does and certify a region W1 never actually guards --
+    the same "second parser disagrees with the real one" trap this file's
+    docstring already warns about.
+    """
+    text = STYLE_BIBLE_TEMPLATE.read_text(encoding="utf-8")
+
+    contract_begin = _find_or_fail(text, scaffold_validate.STYLE_CONTRACT_BEGIN_MARKER, 0,
+                                   "STYLE_CONTRACT_BEGIN marker")
+    d_start = _find_or_fail(text, SECTION_D_HEADING, contract_begin, "the section D heading")
+    e_start = _find_or_fail(text, SECTION_E_HEADING, d_start, "the section E heading")
+    # Proves the whole section, and therefore the span, sits inside the hashed
+    # style contract. The offset itself is never needed again.
+    _find_or_fail(text, scaffold_validate.STYLE_CONTRACT_END_MARKER, e_start,
+                  "STYLE_CONTRACT_END marker after section E")
+
+    slice_text = text[d_start:e_start]
+
+    # (1) EXACTLY one BEGIN and one END inside section D, per the real regexes.
+    # This is what makes a decoy span unrepresentable rather than merely
+    # detected: no second marker pair can be smuggled in alongside the real one.
+    begins = list(scaffold_validate.MARKER_BEGIN_RE.finditer(slice_text))
+    ends = list(scaffold_validate.MARKER_END_RE.finditer(slice_text))
+    assert len(begins) == 1, (
+        f"expected exactly one LT_REQUIRED_FILL_BEGIN inside section D, found "
+        f"{len(begins)}: {[b.group('id') for b in begins]}"
+    )
+    assert len(ends) == 1, (
+        f"expected exactly one LT_REQUIRED_FILL_END inside section D, found {len(ends)}"
+    )
+
+    begin, end = begins[0], ends[0]
+    assert begin.group("id") == FORMATTING_MARKER_ID, (
+        f"expected section D's span to be '{FORMATTING_MARKER_ID}', got {begin.group('id')!r}"
+    )
+    # (2) scan_markers' OWN pairing rule -- the first END at or after this
+    # BEGIN's end. Recomputed rather than assumed, so the body asserted below is
+    # byte-identical to the body W1 inspects whatever the marker spelling. Every
+    # other ordering relation is already forced: _find_or_fail's lower bound
+    # chains the four section offsets, and both marker matches come from inside
+    # slice_text. END-preceding-BEGIN is the one case left, and this is it.
+    paired_end = next((e for e in ends if e.start() >= begin.end()), None)
+    assert paired_end is not None, (
+        "section D's LT_REQUIRED_FILL_END precedes its BEGIN -- scan_markers would pair "
+        "this BEGIN with an END outside section D"
+    )
+
+    # (3) The sentinel sits in the span W1 actually reads.
+    span_body = slice_text[begin.end():paired_end.start()]
+    assert scaffold_validate.SENTINEL in span_body, (
+        f"expected '{scaffold_validate.SENTINEL}' inside section D's span body, got {span_body!r}"
+    )
+
+    # (4) Nothing but the fixed apparatus paragraph may live outside the span.
+    # This is the half that refutes "empty span, instruction beside it": there
+    # is nowhere left in section D to put project-specific prose.
+    before = " ".join(slice_text[len(SECTION_D_HEADING):begin.start()].split())
+    after = " ".join(slice_text[paired_end.end():].split())
+    assert before == SECTION_D_FIXED_APPARATUS_PARAGRAPH, (
+        "section D's text between the heading and the required-fill span must be exactly the "
+        "fixed apparatus paragraph -- any other prose there is project-specific instruction "
+        f"escaping W1's gate.\n  got: {before!r}"
+    )
+    assert after == "", (
+        f"expected nothing between section D's LT_REQUIRED_FILL_END and the section E heading, "
+        f"got {after!r}"
     )
 
 
