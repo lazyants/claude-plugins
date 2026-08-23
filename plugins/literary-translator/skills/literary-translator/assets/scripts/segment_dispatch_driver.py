@@ -477,8 +477,9 @@ DRIVER_LOCK_NAME = ".driver.lock"
 # not glob the plugin's own install locations to find the newest installed
 # codex-companion.mjs". That reason was false: resolve_codex_companion.py
 # reads no `__file__` -- its own location never enters its search -- and
-# imports nothing plugin-specific; its entire search is rooted at
-# `os.path.expanduser("~")` against
+# imports nothing plugin-specific; its DEFAULT search is rooted at the
+# RUNNING Claude config profile (`$CLAUDE_CONFIG_DIR`, else `~/.claude`)
+# and then at `os.path.expanduser("~")` against
 # `~/.claude*/plugins/cache/openai-codex/**/codex-companion.mjs`, a
 # DIFFERENT plugin's own install cache, found identically regardless of
 # where resolve_codex_companion.py itself happens to be running from. This

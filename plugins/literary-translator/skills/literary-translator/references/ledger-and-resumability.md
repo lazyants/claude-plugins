@@ -310,7 +310,8 @@ bundle hash, and `resolve_codex_companion.py` itself is not a `PLUGIN_BUNDLE_MEM
 entry either — for the same environment-fact reason, not because of where it runs
 from. (This paragraph used to say it "is plugin-anchored and never copied to
 `durable_root`, so it cannot be a bundle member at all". The premise was false —
-the script reads no `__file__` and globs `~` — and the exclusion it justified left
+the script reads no `__file__`, and globs the running config profile and `~` rather
+than anything derived from its own location — and the exclusion it justified left
 the self-anchored driver launch unable to dispatch; Step 0a now copies it like
 every other self-anchored script. Non-membership is a deliberate allowlist
 decision, unchanged.) What DOES gate resume for the driver is `codex_job.py`'s own bytes

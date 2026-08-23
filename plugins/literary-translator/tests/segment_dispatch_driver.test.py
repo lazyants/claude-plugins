@@ -7335,7 +7335,8 @@ def test_the_bytes_node_executes_come_from_the_pinned_descriptor_not_a_reopened_
 # __file__ -- its own location never enters its search; see
 # tests/resolve_codex_companion.test.py::test_the_resolver_contains_no_executable_reference_to_dunder_file
 # for the mechanical proof, parsed with ast rather than grepped -- its
-# whole search is rooted at ~, independent of its own location, so a
+# DEFAULT search is rooted at the running config profile and then ~,
+# independent of its own location, so a
 # durable copy globs the identical paths and finds the identical
 # companions). Before this fix, a genuinely deployed, self-
 # anchored (no --plugin-root) driver invocation -- SKILL.md's own documented

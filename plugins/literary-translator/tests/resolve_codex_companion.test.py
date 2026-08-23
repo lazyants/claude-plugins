@@ -7,8 +7,9 @@ node/companion `status` failing OR hanging past the finite timeout -> nonzero; s
 path ACCEPTED, its json.dumps is a valid JS literal, and a single-quoted-bash round-trip
 recovers it exactly).
 
-The resolver is location-INDEPENDENT (it reads no `__file__`; its whole search is rooted at
-`~`), so Step 0a copies it to `${durable_root}/scripts/` like every other self-anchored
+The resolver is location-INDEPENDENT (it reads no `__file__`; its DEFAULT search is rooted at
+the running Claude config profile and then `~` -- environment facts, never its own path), so
+Step 0a copies it to `${durable_root}/scripts/` like every other self-anchored
 script and it runs correctly from either place -- see its own module docstring for why the
 older "plugin-anchored, never copied" claim was false. These tests drive it as a subprocess
 with an explicit --search-glob (so the real ~/.claude* store is never touched) and a fake
@@ -19,6 +20,7 @@ them independent of where the file sits, which is the property under test here.
 import ast
 import importlib.util
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -234,5 +236,270 @@ def test_the_resolver_contains_no_executable_reference_to_dunder_file():
     )
 
 
+
+# --------------------------------------------------------------------------- #
+# #287: the RUNNING config profile decides the binding
+#
+# The cases in this section drive the resolver with NO --search-glob (the two
+# override cases at the end of it are the deliberate exceptions, and the
+# white-box `running_profile_dir` cases call in directly), because that is the
+# only way to exercise the default tiers -- so isolation comes from the
+# ENVIRONMENT instead: HOME is pointed at tmp_path (posixpath.expanduser reads $HOME), and
+# CLAUDE_CONFIG_DIR is set or explicitly removed. The real ~/.claude* store is
+# unreachable from any of them. A case that forgot HOME would silently bind this
+# machine's own four-profile store and pass or fail for reasons unrelated to the
+# code, so `run_resolver_env` never lets a caller inherit it.
+# --------------------------------------------------------------------------- #
+def run_resolver_env(root: Path, node: str, home: Path, config_dir, timeout_sec: int = 15,
+                     search_globs=None):
+    """Drive the resolver under a controlled profile env.
+
+    `config_dir` None removes CLAUDE_CONFIG_DIR entirely (the CLI's own "absent"
+    case, which falls back to ~/.claude); a string is passed through VERBATIM,
+    including one that is empty or relative -- those are the cases under test.
+
+    `search_globs` defaults to NONE, i.e. no --search-glob at all, which is what
+    every default-tier case wants. Passing a list appends one --search-glob per
+    entry, for the override cases; HOME and CLAUDE_CONFIG_DIR are still pinned
+    there, so a preference that leaked PAST the override would have a controlled
+    profile to leak to rather than this machine's own store.
+    """
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    if config_dir is not None:
+        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    argv = [sys.executable, str(RESOLVER_SRC), "--durable-root", str(root)]
+    for pattern in search_globs or []:
+        argv += ["--search-glob", str(pattern)]
+    argv += ["--node", node, "--timeout-sec", str(timeout_sec)]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
+
+
+def chosen_path(proc):
+    assert proc.returncode == 0, f"resolver failed: {proc.stderr}"
+    return json.loads(proc.stdout)["companion_path"]
+
+
+def test_running_profile_wins_over_a_newer_foreign_version(tmp_path):
+    """The active profile's 1.0.6 beats a foreign 1.0.10. Newest-semver decides
+    WITHIN a tier, never across them -- an operator who pins an older companion
+    in the profile they are running in has made a decision, and a foreign
+    profile's contents are not one."""
+    home = tmp_path / "home"
+    make_companion(home, "1.0.6", ".claudeA")
+    make_companion(home, "1.0.10", ".claudeB")
+    node = write_fake_node(tmp_path, FAKE_NODE_OK)
+    got = chosen_path(run_resolver_env(tmp_path, node, home, home / ".claudeA"))
+    assert "/.claudeA/" in got and "/1.0.6/" in got, got
+
+
+@pytest.mark.parametrize("active,foreign", [(".claude2", ".claude9"), (".claude9", ".claude2")])
+def test_running_profile_wins_an_equal_version_lexical_tie(tmp_path, active, foreign):
+    """THE LIVE REPRODUCTION. #287 measured four 1.0.6 copies tying on version,
+    with `.claude3` winning purely on lexical path order while the session ran
+    under `.claude2`. Both orientations are driven because ONE of them is also
+    satisfied by "on a tie take the lexically smaller path", which implements no
+    profile ownership at all."""
+    home = tmp_path / "home"
+    make_companion(home, "1.0.6", active)
+    make_companion(home, "1.0.6", foreign)
+    node = write_fake_node(tmp_path, FAKE_NODE_OK)
+    got = chosen_path(run_resolver_env(tmp_path, node, home, home / active))
+    assert f"/{active}/" in got, got
+
+
+def test_unset_config_dir_prefers_home_dot_claude(tmp_path):
+    """CLAUDE_CONFIG_DIR absent is the CLI's own fallback case: `~/.claude`.
+    Pinned against a foreign `.claude3` holding a NEWER companion."""
+    home = tmp_path / "home"
+    make_companion(home, "1.0.6", ".claude")
+    make_companion(home, "1.0.10", ".claude3")
+    node = write_fake_node(tmp_path, FAKE_NODE_OK)
+    got = chosen_path(run_resolver_env(tmp_path, node, home, None))
+    assert "/.claude/" in got and "/1.0.6/" in got, got
+
+
+def test_falls_back_cross_profile_when_running_profile_has_none(tmp_path):
+    """A foreign companion is a FALLBACK -- available, not preferred."""
+    home = tmp_path / "home"
+    (home / ".claudeEmpty" / "plugins").mkdir(parents=True)
+    make_companion(home, "1.0.6", ".claudeA")
+    make_companion(home, "1.0.10", ".claudeB")
+    node = write_fake_node(tmp_path, FAKE_NODE_OK)
+    got = chosen_path(run_resolver_env(tmp_path, node, home, home / ".claudeEmpty"))
+    assert "/.claudeB/" in got and "/1.0.10/" in got, got
+
+
+@pytest.mark.parametrize("config_dir", ["", "relative/profile", "$NOPE/.claude"])
+def test_unusable_config_dir_values_skip_the_tier_without_binding(tmp_path, config_dir):
+    """A present-but-empty, relative, or unexpanded value is not an absolute
+    directory, so the profile tier is skipped fail-CLOSED and only the
+    cross-profile tier runs. None of them may crash, and none may bind a match
+    resolved against THIS script's cwd."""
+    home = tmp_path / "home"
+    make_companion(home, "1.0.10", ".claudeB")
+    node = write_fake_node(tmp_path, FAKE_NODE_OK)
+    got = chosen_path(run_resolver_env(tmp_path, node, home, config_dir))
+    assert "/.claudeB/" in got and "/1.0.10/" in got, got
+
+
+def test_nonexistent_config_dir_falls_back(tmp_path):
+    home = tmp_path / "home"
+    make_companion(home, "1.0.10", ".claudeB")
+    node = write_fake_node(tmp_path, FAKE_NODE_OK)
+    got = chosen_path(run_resolver_env(tmp_path, node, home, home / ".claudeGone"))
+    assert "/.claudeB/" in got, got
+
+
+@pytest.mark.parametrize("active,decoy", [
+    (".claude[1]", ".claude1"),     # bracket set
+    (".claudeX*", ".claudeXY"),     # star
+    (".claude?", ".claudeZ"),       # single-char wildcard
+])
+def test_glob_metacharacters_in_config_dir_are_literal(tmp_path, active, decoy):
+    """CLAUDE_CONFIG_DIR is an operator-authored PATH, not a pattern. All three
+    characters are legal in macOS filenames, and unescaped each one makes the
+    profile tier match a DIFFERENT profile's store -- the exact green
+    wrong-binary binding #287 is about. The bracket case alone is passed by a
+    hand-rolled `replace("[", "[[]")` that leaves `*` and `?` live, which is why
+    all three are driven."""
+    home = tmp_path / "home"
+    make_companion(home, "1.0.6", active)
+    make_companion(home, "1.0.10", decoy)
+    node = write_fake_node(tmp_path, FAKE_NODE_OK)
+    got = chosen_path(run_resolver_env(tmp_path, node, home, home / active))
+    assert f"/{active}/" in got and "/1.0.6/" in got, got
+
+
+def test_broken_active_companion_aborts_instead_of_falling_back(tmp_path):
+    """A tier falls through ONLY on zero candidates, never on a validation
+    failure. An implementation that caught the active profile's failing `status`
+    and quietly retried the cross-profile tier would return 0 with a FOREIGN
+    binary -- the defect under repair, one step later. Every other case here uses
+    a node stub that succeeds on any invocation and cannot tell the two
+    implementations apart; this stub fails only for the active profile's path,
+    so a fallback would visibly succeed."""
+    home = tmp_path / "home"
+    make_companion(home, "1.0.6", ".claudeBroken")
+    make_companion(home, "1.0.10", ".claudeOk")
+    node = write_fake_node(
+        tmp_path,
+        "import sys\nsys.exit(1 if '.claudeBroken' in sys.argv[1] else 0)\n",
+    )
+    proc = run_resolver_env(tmp_path, node, home, home / ".claudeBroken")
+    assert proc.returncode != 0, f"expected an abort, got: {proc.stdout}"
+    assert proc.stdout.strip() == "", proc.stdout
+
+
+def test_unsafe_active_companion_aborts_instead_of_falling_back(tmp_path):
+    """The SECOND abort branch, and it needs its own case. The status-failure
+    test above leaves the unsafe-path branch free to be turned into a `continue`
+    with the whole suite still green: the pre-existing unsafe-path test drives a
+    single override tier, so it would keep exiting nonzero for want of anywhere
+    to fall through TO. Here the active profile's path is unsafe (a single quote
+    -- one of the two carriers `path_is_safe` refuses) while a foreign profile
+    holds a perfectly good companion, so a fallthrough would visibly succeed."""
+    home = tmp_path / "home"
+    make_companion(home, "1.0.6", ".claude'quote")
+    make_companion(home, "1.0.10", ".claudeOk")
+    node = write_fake_node(tmp_path, FAKE_NODE_OK)
+    proc = run_resolver_env(tmp_path, node, home, home / ".claude'quote")
+    assert proc.returncode != 0, f"expected an abort, got: {proc.stdout}"
+    assert proc.stdout.strip() == "", proc.stdout
+    assert "single quote" in proc.stderr, proc.stderr
+
+
+def test_an_empty_override_does_not_leak_into_the_default_tiers(tmp_path):
+    """`--search-glob` is authoritative even when it matches NOTHING. The
+    override test below always hands it a real candidate, so an implementation
+    that consults the defaults "only when the override is empty" passes it -- and
+    that implementation binds a profile the operator explicitly searched past.
+    The pre-existing zero-candidate test cannot see this either: it inherits the
+    host environment, so on a machine with no profile store it exits nonzero for
+    the wrong reason."""
+    home = tmp_path / "home"
+    make_companion(home, "1.0.10", ".claudeA")          # would win a default tier
+    node = write_fake_node(tmp_path, FAKE_NODE_OK)
+    proc = run_resolver_env(
+        tmp_path, node, home, home / ".claudeA",
+        search_globs=[tmp_path / "nothing-here" / "**" / "codex-companion.mjs"],
+    )
+    assert proc.returncode != 0, f"the override leaked into the defaults: {proc.stdout}"
+    assert "claudeA" not in proc.stdout, proc.stdout
+
+
+def test_repeated_search_globs_stay_one_union_tier(tmp_path):
+    """Repeated --search-glob values are a UNION resolved by newest-semver, not a
+    priority order -- `action="append"` has always built one flat list. Both
+    orderings are driven: a reverse-priority implementation passes whichever
+    single fixture happens to put the newer companion in the losing position."""
+    node = write_fake_node(tmp_path, FAKE_NODE_OK)
+    older = tmp_path / "older"
+    newer = tmp_path / "newer"
+    make_companion(older, "1.0.6", "profO")
+    make_companion(newer, "1.0.10", "profN")
+    def pat(base):
+        return str(base / "*" / "plugins" / "cache" / "openai-codex" / "**"
+                   / "codex-companion.mjs")
+
+    for first, second in [(older, newer), (newer, older)]:
+        proc = run_resolver_env(
+            tmp_path, node, tmp_path / "no-such-home", None,
+            search_globs=[pat(first), pat(second)],
+        )
+        assert "/1.0.10/" in chosen_path(proc), (first, proc.stdout)
+
+
+def test_search_glob_override_ignores_the_profile_tier(tmp_path):
+    """The override is fully authoritative. This is the property the REST of this
+    file depends on for isolation: every pre-#287 test passes --search-glob so
+    the real ~/.claude* store is never touched, and a profile preference that
+    leaked past the override would bind this machine's own store instead."""
+    home = tmp_path / "home"
+    make_companion(home, "1.0.10", ".claudeA")          # would win any default tier
+    elsewhere = tmp_path / "elsewhere"
+    make_companion(elsewhere, "1.0.6", "profX")
+    node = write_fake_node(tmp_path, FAKE_NODE_OK)
+    proc = run_resolver_env(
+        tmp_path, node, home, home / ".claudeA",
+        search_globs=[elsewhere / "*" / "plugins" / "cache" / "openai-codex" / "**"
+                      / "codex-companion.mjs"],
+    )
+    got = chosen_path(proc)
+    assert "/profX/" in got and "/1.0.6/" in got, got
+
+
+# --------------------------------------------------------------------------- #
+# white-box: running_profile_dir() mirrors the CLI and normalizes NOTHING
+# --------------------------------------------------------------------------- #
+def test_running_profile_dir_absent_falls_back_to_home_dot_claude(monkeypatch, tmp_path):
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert rcc.running_profile_dir() == str(tmp_path / ".claude")
+
+
+@pytest.mark.parametrize("raw", ["/tmp/.claude ", "/tmp/.claude2/", "/tmp/a b/.claude"])
+def test_running_profile_dir_uses_a_present_value_verbatim(monkeypatch, raw):
+    """No strip, no normalization. The CLI uses the value as given, and a
+    directory whose name really does end in a space is a directory this must
+    still find -- trimming it names a DIFFERENT one."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", raw)
+    assert rcc.running_profile_dir() == raw
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "relative/dir", "~/.claude2"])
+def test_running_profile_dir_rejects_a_non_absolute_value(monkeypatch, raw):
+    """Fail-closed: the tier is skipped rather than globbed against this script's
+    cwd. `~/.claude2` is in this list deliberately -- the CLI does not expand a
+    tilde either, so a quoted literal is not a profile directory."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", raw)
+    assert rcc.running_profile_dir() is None
+
+
+# Kept at the TRUE END of the file. Mid-file it exits before every definition
+# below it, so `python tests/resolve_codex_companion.test.py` reported a green
+# run over only the tests that happened to be defined ABOVE it -- a false green
+# that reads exactly like a full pass.
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

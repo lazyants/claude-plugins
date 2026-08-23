@@ -431,14 +431,22 @@ def test_repeatable_overwrite_helper_actually_overwrites(tmp_path):
 
 def apply_resolve_codex_companion_migration(shipped_source: Path, dest_path: Path) -> str:
     """Literal transcription of SKILL.md's Step 0a migration note for
-    resolve_codex_companion.py: absent -> copy; a genuine regular file,
-    byte-identical -> copy (a no-op over itself); anything else -> HALT,
-    never a silent overwrite and never an automatic backup.
+    resolve_codex_companion.py: absent -> copy; ANY genuine regular file ->
+    copy (the ordinary managed overwrite every other bundle member gets);
+    anything NON-REGULAR -> HALT, never a silent overwrite and never an
+    automatic backup.
 
-    "Anything else" is deliberately broad: a genuine regular file with
-    DIFFERENT bytes, a symlink (regardless of what it points at -- its
-    target content is never even read), a directory, or any other
-    non-absent entry os.lstat() reports. Renaming a divergent file aside
+    The regular-file branch used to demand byte-identity to the shipped
+    source. That was the migration limb, and #287 -- the first release to
+    change the resolver's bytes -- retired it: identity was standing in for
+    "is this copy managed?", which held only while the shipped bytes were
+    frozen, so afterwards every ordinary project's own MANAGED copy reads as
+    divergent and halts on the majority path. Measured on both live books at
+    the time: two managed copies, zero hand adaptations.
+
+    "Anything non-regular" is still deliberately broad: a symlink (regardless
+    of what it points at -- its target content is never even read), a
+    directory, or any other non-absent, non-regular entry os.lstat() reports. Renaming a divergent file aside
     before copying over it is NOT what this does, because that shape has
     three real failure modes: a byte-identical symlink stays a symlink
     after a naive copy, since copying OVER a symlink writes THROUGH it
@@ -446,16 +454,17 @@ def apply_resolve_codex_companion_migration(shipped_source: Path, dest_path: Pat
     only a pointer, not the adapted bytes it points at; and two
     concurrent migrations can race on the same backup name -- see
     SKILL.md's own note for the full reasoning. A halt has none of them,
-    because it performs no automatic write to a divergent destination at
+    because it performs no automatic write to a non-regular destination at
     all.
 
     Classifies with os.lstat() -- NEVER Path.exists()/is_file(), which
     FOLLOW a symlink and would silently write through it, leaving
     whatever was actually there in place while reporting success.
 
-    Returns one of "copied-fresh" (was absent), "copied-noop" (was
-    already a genuine regular file, byte-identical), "halt" (anything
-    else) -- the three outcomes SKILL.md's own migration note names, so a
+    Returns one of "copied-fresh" (was absent), "copied-over" (was
+    already a genuine regular file, whatever its bytes -- so the copy may
+    replace DIFFERENT bytes; it is deliberately not called a no-op), "halt" (anything
+    non-regular) -- the three outcomes SKILL.md's own migration note names, so a
     test can assert on which one fired rather than only on the end
     state."""
     try:
@@ -464,9 +473,9 @@ def apply_resolve_codex_companion_migration(shipped_source: Path, dest_path: Pat
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(shipped_source, dest_path)
         return "copied-fresh"
-    if stat.S_ISREG(st.st_mode) and dest_path.read_bytes() == shipped_source.read_bytes():
+    if stat.S_ISREG(st.st_mode):
         shutil.copyfile(shipped_source, dest_path)
-        return "copied-noop"
+        return "copied-over"
     return "halt"
 
 
@@ -491,12 +500,15 @@ def test_resolve_codex_companion_migration_copies_freely_when_absent(tmp_path):
     assert dest.read_bytes() == shipped.read_bytes()
 
 
-def test_resolve_codex_companion_migration_is_a_noop_when_already_byte_identical(tmp_path):
-    """A project already on the corrected copy pass -- every re-scaffold
-    after a real deployment, or a project that adopted this correction's
-    shipped file some other way -- sees the byte-identical case forever
-    after and gets the ordinary unconditional-overwrite treatment,
-    matching every other bundle member."""
+def test_resolve_codex_companion_migration_copies_over_a_byte_identical_copy(tmp_path):
+    """A project already on the corrected copy pass gets the ordinary
+    unconditional-overwrite treatment, matching every other bundle member.
+    An earlier version of this docstring said such a project "sees the
+    byte-identical case forever after"; #287 falsified that -- it is the
+    first release to change the shipped resolver's bytes, after which the
+    same project presents a DIVERGENT managed copy. That case is now this
+    same branch (see the test below), which is why the classifier no longer
+    compares bytes at all."""
     shipped = _resolve_codex_companion_shipped_fixture(tmp_path)
     dest = tmp_path / "durable_root" / "scripts" / "resolve_codex_companion.py"
     dest.parent.mkdir(parents=True)
@@ -504,36 +516,37 @@ def test_resolve_codex_companion_migration_is_a_noop_when_already_byte_identical
 
     outcome = apply_resolve_codex_companion_migration(shipped, dest)
 
-    assert outcome == "copied-noop"
+    assert outcome == "copied-over"
     assert dest.read_bytes() == shipped.read_bytes()
 
 
-def test_resolve_codex_companion_migration_halts_rather_than_overwrite_a_hand_adapted_copy(tmp_path):
-    """THE property this whole migration note exists for: a project that
-    worked around the old defect by hand-adapting its own copy at this
-    exact, previously-documented-as-untouched destination must not lose
-    that work silently. Refuses rather than cleverly preserving it: the
-    divergent file is left EXACTLY as it was, untouched, and the shipped
-    source is never copied over it. This is a narrower guarantee than the
-    driver being immediately dispatch-ready after this one migration step
-    -- the operator has to act -- but it is the guarantee that does not
-    depend on Step 0a's copy pass (orchestrating-session prose, not
-    atomic code) getting a rename-then-copy sequence perfectly right."""
+def test_resolve_codex_companion_migration_overwrites_a_stale_managed_copy(tmp_path):
+    """The case that retired the byte-identity branch (#287). A project whose
+    durable root holds an OLDER managed copy -- the shape every ordinary
+    project has after any release that edits the resolver -- must get the
+    ordinary overwrite, not a halt. This test previously asserted the
+    opposite ("halts rather than overwrite a hand-adapted copy"): the
+    classifier could not distinguish a stale managed copy from a hand
+    adaptation, and telling them apart needs the prior-version digest this
+    design deliberately refuses to carry. Measured on the two live books
+    before the change: both held a plain regular file byte-identical to the
+    then-shipped resolver, so the population the halt would have caught was
+    two managed copies and zero adaptations.
+
+    What is NOT waved through is any non-regular entry -- see the symlink
+    and directory tests below, which are the limb that did not expire."""
     shipped = _resolve_codex_companion_shipped_fixture(tmp_path)
     dest = tmp_path / "durable_root" / "scripts" / "resolve_codex_companion.py"
     dest.parent.mkdir(parents=True)
-    hand_adapted_bytes = b"# a project's own hand-adapted workaround, pre-dating this release\n"
-    dest.write_bytes(hand_adapted_bytes)
+    dest.write_bytes(b"# an older MANAGED copy, from a previous release\n")
 
     outcome = apply_resolve_codex_companion_migration(shipped, dest)
 
-    assert outcome == "halt"
-    assert dest.read_bytes() == hand_adapted_bytes, (
-        "the hand-adapted file must be left completely untouched on a halt -- "
-        "no backup, no rename, no partial copy"
-    )
+    assert outcome == "copied-over"
+    assert dest.read_bytes() == shipped.read_bytes()
     assert not list(dest.parent.glob("resolve_codex_companion.py.*")), (
-        "a halt must create nothing extra -- no backup sibling of any name"
+        "still no backup sibling of any name -- the overwrite is the ordinary "
+        "managed one, not a preserving copy"
     )
 
 
@@ -541,12 +554,12 @@ def test_resolve_codex_companion_migration_halts_on_a_symlink_even_with_an_ident
     """codex's specific finding against the earlier backup-and-copy design,
     still worth pinning now that the design is refuse-only: a symlink
     whose TARGET happens to be byte-identical to the shipped source must
-    still halt, never be waved through as "copied-noop". os.lstat()
+    still halt, never be waved through as "copied-over". os.lstat()
     classifies the symlink itself (S_ISLNK), never resolving to compare
     the target's content -- the whole point is refusing to make ANY
     judgment about what a symlink at this path might mean, since a
-    symlink is not the "genuine regular file" the byte-identical fast
-    path is defined over at all."""
+    symlink is not the "genuine regular file" the copy branch is
+    defined over at all."""
     shipped = _resolve_codex_companion_shipped_fixture(tmp_path)
     dest = tmp_path / "durable_root" / "scripts" / "resolve_codex_companion.py"
     dest.parent.mkdir(parents=True)
@@ -596,14 +609,21 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
     own transcription also reverted.
 
     Checking only for the bare word
-    "HALT" is too weak -- a document saying "overwrite divergent regular
-    files; HALT only on directories" would pass it, which is a real,
-    narrower-than-intended contract regression this test could not catch.
-    Pins that the halt covers all THREE entry kinds the note's own
-    per-entry-kind instruction distinguishes (a divergent regular file, a
-    symlink, and a directory) -- that is what would actually have to
-    change in the prose for the contract to regress, not merely the
-    presence of one keyword."""
+    "HALT" is too weak -- a document saying "HALT only on directories"
+    would pass it while silently dropping the symlink case. Pins that the
+    halt covers BOTH non-regular entry kinds the note's own per-entry-kind
+    instruction distinguishes (a symlink and a directory).
+
+    It used to pin a THIRD kind, a divergent regular file, and #287 cut
+    that limb deliberately -- so this test now pins the opposite in that
+    slot: a genuine regular file, WHATEVER its bytes, copies normally. The
+    byte-identity test was standing in for "is this copy managed?", which
+    held only while the shipped resolver's bytes never changed; the first
+    release to edit them makes every ordinary project's own managed copy
+    read as divergent, so the halt fired on the majority path. Re-adding
+    that branch would re-break Step 0a for every existing project, which is
+    why it is pinned in the new direction rather than simply unasserted --
+    an unasserted contract is the one that quietly reverts."""
     skill_md = PLUGIN_ROOT / "skills" / "literary-translator" / "SKILL.md"
     text = skill_md.read_text(encoding="utf-8")
     start = text.find("Migration note, mandatory before")
@@ -627,7 +647,7 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
     # and still passes. Bind the verb to its OWN trigger clause instead of
     # scattering the check across the whole section: the note's
     # established style already writes each outcome as "<condition> ->
-    # <action>" (see the "Absent" and "byte-identical" bullets above this
+    # <action>" (see the "Absent" and regular-file bullets above this
     # one, both "-> copy normally"), so the one substring a negation like
     # "do not HALT" is forced to break is the arrow sitting directly
     # against the verb -- "→ HALT before copying anything." -- since
@@ -635,7 +655,7 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
     # exactly what a negation needs to do. A bag-of-words check over the
     # same span would not notice; this one does, because it pins the
     # ADJACENCY, not just the token.
-    trigger_clause_end = text.find("Divergent regular file", start)
+    trigger_clause_end = text.find("- **Symlink**", start)
     assert trigger_clause_end != -1 and start < trigger_clause_end < end, (
         "could not locate the start of the per-entry-kind recovery list "
         "to bound the 'Anything else' trigger clause"
@@ -644,7 +664,7 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
     assert "→ HALT before copying anything." in trigger_clause, (
         "the trigger clause must say the verb ADJACENT to its own arrow -- "
         "'→ HALT before copying anything.', exactly as the note's own "
-        "'Absent' and 'byte-identical' bullets say '→ copy normally.' "
+        "'Absent' and regular-file bullets say '→ copy normally.' "
         "-- not merely contain the word HALT somewhere in the section. "
         "'do not HALT before copying anything' keeps HALT present but "
         "breaks this exact adjacency, which is the property that actually "
@@ -652,7 +672,7 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
     )
     assert "HALT" in instruction_section, (
         "the migration note's ACTUAL INSTRUCTION must say HALT on a non-"
-        "absent, non-identical destination -- this is the operative safety "
+        "absent, NON-REGULAR destination -- this is the operative safety "
         "property, and its absence here means the documented contract "
         "reverted to something else"
     )
@@ -664,11 +684,64 @@ def test_skill_migration_note_actually_says_halt_not_backup_and_copy():
         "alone. (The explanatory paragraph AFTER this instruction may still "
         "name it historically -- that is not what this check bounds.)"
     )
-    assert "Divergent regular file" in instruction_section, (
-        "the HALT must explicitly cover a divergent REGULAR FILE -- a note "
-        "that only names symlinks and directories would silently narrow "
-        "the contract back toward overwriting the one case the migration "
-        "note exists for in the first place"
+    assert "**A genuine regular file** — whatever its bytes → copy" in instruction_section, (
+        "the note must say a genuine regular file copies normally WHATEVER "
+        "its bytes (#287). Re-introducing a byte-identity condition here "
+        "re-breaks Step 0a on every project that already holds a managed "
+        "copy from an earlier release -- the majority path, not the "
+        "exceptional one -- because a stale managed copy and a hand "
+        "adaptation are indistinguishable without the prior-version digest "
+        "this design refuses to carry"
+    )
+    # The assertion above pins a PREFIX, and a prefix is satisfied by a
+    # bullet that goes on to re-add the very condition #287 cut ("...→ copy
+    # normally. If its bytes differ from the shipped source → HALT."). Bound
+    # the regular-file bullet and pin that NOTHING inside it routes to a
+    # halt, using the same arrow-adjacency the trigger-clause check above
+    # relies on: a re-added byte-identity limb has to write its own
+    # "→ HALT" to be an instruction at all, while prose that merely
+    # NARRATES the cut limb ("the halt fired on the majority path") never
+    # puts the verb against an arrow.
+    reg_start = instruction_section.find("- **A genuine regular file**")
+    reg_end = instruction_section.find("- **Anything else**", reg_start)
+    assert reg_start != -1 and reg_start < reg_end, (
+        "could not bound the regular-file bullet between its own label and "
+        "the 'Anything else' bullet that follows it"
+    )
+    assert "→ HALT" not in instruction_section[reg_start:reg_end], (
+        "the regular-file bullet must not route ANY condition to a halt "
+        "(#287): re-adding 'if its bytes differ → HALT' after the required "
+        "'whatever its bytes → copy' prefix re-breaks Step 0a on every "
+        "project holding a managed copy from an earlier release, and a "
+        "prefix-only check would pass it"
+    )
+    # `trigger_clause` above is bounded at its END only -- it still opens
+    # at the note's first line, so it legitimately contains the "Absent"
+    # and regular-file bullets and their "→ copy normally.". Bound the
+    # halting bullet on BOTH sides to say what may not appear INSIDE it.
+    else_start = text.find("- **Anything else**", start)
+    assert else_start != -1 and else_start < trigger_clause_end, (
+        "could not locate the '- **Anything else**' bullet that carries "
+        "the HALT"
+    )
+    else_bullet = " ".join(text[else_start:trigger_clause_end].split())
+    assert "a symlink" in else_bullet and "a directory" in else_bullet, (
+        "both non-regular kinds must be named in the HALT's OWN bullet, "
+        "not merely somewhere in the section -- the later "
+        "'- **Symlink**' recovery label keeps the token present even when "
+        "the bullet has stopped halting on symlinks"
+    )
+    assert "copy normally" not in else_bullet and "copies normally" not in else_bullet, (
+        "nothing inside the halting bullet may be routed BACK to a copy: "
+        "'a symlink copies normally like any other entry; a directory ... "
+        "→ HALT' names both kinds and keeps the arrow adjacency, yet "
+        "reopens exactly the copy-through-a-symlink failure mode the "
+        "backup-and-copy design was rejected for"
+    )
+    assert "Divergent regular file" not in instruction_section, (
+        "the per-entry-kind recovery list must no longer instruct the "
+        "operator to move a divergent regular file aside -- that branch no "
+        "longer halts, so an instruction for it is unreachable prose"
     )
     assert "Symlink" in instruction_section, (
         "the HALT must explicitly cover a SYMLINK -- omitting it would "
