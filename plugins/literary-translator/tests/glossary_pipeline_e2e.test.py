@@ -488,6 +488,34 @@ def test_check_batch_and_verify_merged_commands_never_carry_plugin_root(tmp_path
     )
 
 
+# ---------------------------------------------------------------------------
+# #109 -- the background routing control, asserted on the prompt a real run
+# EMITS rather than on the source that builds it.
+#
+# tests/bounded_poll_present.test.py pins the same line by shape, across all
+# three templates, as batchDispatchPrompt()'s first `lines.push(...)`. That pin
+# is a claim about source text; this one closes the gap between the source and
+# the wire by reading the string the harness's own agent() mock received under
+# `glossary:dispatch:0`. A refactor that kept the push but stopped rendering it
+# first -- a reordered join, a second `lines` array, a builder that returns
+# early -- passes there and fails here.
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_prompt_opens_with_the_background_routing_line(tmp_path):
+    res = run(tmp_path=tmp_path, batches=[make_batch(0, ["Jean"])])
+    assert res["ok"], res["stderr"]
+    dispatch_prompt = res["out"]["promptByLabel"]["glossary:dispatch:0"]
+    first_line = dispatch_prompt.split("\n")[0]
+    assert first_line == "--background", (
+        "the codex dispatch prompt's FIRST rendered line must be the bare "
+        "routing control --background, so the codex:codex-rescue forwarder is "
+        "given an explicit choice instead of picking foreground by its own "
+        "heuristic and running the codex turn inside its single Bash call "
+        "(#109). First line was instead: " + repr(first_line)
+    )
+
+
 def test_plugin_root_guard_throws_on_unsafe_value(tmp_path):
     """The PLUGIN_ROOT_UNSAFE_RE guard runs at module top level, well before
     this template ever calls agent()/pipeline() -- so a value containing a
