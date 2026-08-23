@@ -1006,6 +1006,48 @@ remain**:
    reason:'cap', ...}` — full stop, human-escalation item exactly like
    `blocked`.
 
+### The fifth terminal write, and the only one NEITHER dispatch path makes (#398)
+
+The four sites above are all written by the Workflow template. `codex_job.py`
+makes a fifth, and it is the only terminal ledger write both dispatch paths
+inherit -- the Workflow `pipeline()` path and `segment_dispatch_driver.py`
+alike, neither of which is changed to get it:
+
+- **Translate-rejected** -- a `--kind translate` job whose candidate attempt
+  `validate_draft.py` RAN against and rejected with **exit 1**, its contract
+  for "the candidate's own content is defective" (see that script's own
+  *Exit codes* section). `codex_job.py` invokes `ledger_update.py` directly
+  with `{status:'blocked', reason:'translate-rejected'}`, so
+  `select_segments.py` classifies the segment `human_escalation` instead of
+  `recoverable` and stops auto-redispatching it. `--only-segs` still reaches
+  it, exactly as the `blocked`/`draft-missing` fragment at site 1 is retried.
+
+  Why the child and not either caller: neither caller can see the
+  distinction. The template has no filesystem access at all and launches
+  `codex_job.py` with `>/dev/null 2>&1`; the driver sees only the child's
+  `reason` string, which reads `validate-failed` for a sandbox-publish
+  failure and a non-regular attempt file as well as for a real rejection.
+  The exit code is visible in exactly one process.
+
+  **Exit 1 and nothing else.** Exit 2 (usage/environment/source
+  availability), a gate that could not run at all, and every `draft_ready.py`
+  rejection stay recoverable -- the segment keeps its `in_progress` fragment
+  and is re-dispatched next run, exactly as before. Widening that would turn
+  a transient hiccup into a segment an operator has to rescue by hand.
+
+  **Best effort.** A failed write never changes the job's exit code, stdout
+  line or `reason`; it leaves the segment in its pre-#398 recoverable state.
+  The outcome is reported in the terminal joblog's `ledger_write` field,
+  which is itself best-effort observability, not a guarantee.
+
+  **Residual, disclosed rather than fixed:** `ledger_update.py` is an
+  unconditional full replace with no fragment lock, while the per-segment
+  flock lives inside `codex_job.py`. Two OVERLAPPING invocations over one
+  `durable_root` that both preselected this segment can therefore publish a
+  later `in_progress` over this `blocked` fragment. Running two dispatchers
+  against one durable root is already unsupported (see SKILL.md), and
+  nothing guards it in either direction.
+
 ## Derivation-state gate — the four "flag-only, needs regeneration" fields
 
 `particle_config_hash`, `source_extraction_hash`, `source_input_hash`,

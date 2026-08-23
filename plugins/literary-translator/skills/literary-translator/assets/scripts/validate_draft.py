@@ -42,6 +42,28 @@ profile.yml's target.language.code):
      every recorded body_ref_markers[] string must still appear, same
      multiset count, in that block's translated text.
 
+## Exit codes (a CONTRACT since #398, not an incidental)
+
+  0 -- the candidate passes every check.
+  1 -- the CANDIDATE's own content is defective: any of the six checks above,
+       the structural self-check below, a SOURCE DEFECT finding (permanent
+       until the source is repaired, so still the candidate's problem for
+       dispatch purposes), or a missing/malformed candidate draft file. Every
+       exit-1 condition is one that re-running the identical translation
+       cannot clear.
+  2 -- usage, environment, or source availability: a malformed `seg`, PyYAML
+       absent, an unreadable/malformed ownership marker or profile.yml, a
+       missing or unreadable SEGPACK, and any otherwise-uncaught exception
+       (see `_main_or_exit_2()`).
+
+  This split is load-bearing: `codex_job.py` reads exit 1 -- and ONLY exit 1 --
+  as a permanent content rejection and writes a TERMINAL `blocked` ledger
+  fragment for the segment, which stops it being auto-redispatched. Widening
+  what exits 1 terminally blocks segments whose real problem was mechanical.
+  Existing consumers are unaffected: `codex_job.py`'s gate helper tests
+  `returncode == 0`, and `final_audit.py` calls `validate()` in process and
+  never reads an exit code at all.
+
 ## Structural self-check
 
 Also runs a hand-rolled (no `jsonschema` dependency, matching the real
@@ -307,8 +329,14 @@ def load_profile(durable_root=DURABLE_ROOT):
         )
     try:
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        _fatal(f"ownership marker at {marker_path} is not valid JSON: {exc}")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # #398: UnicodeDecodeError joins OSError here. read_text() raises it
+        # for a marker written in a foreign encoding, and it was previously
+        # uncaught -- escaping past _fatal()'s exit 2 and terminating the
+        # process at exit 1, the code this script now reserves for a
+        # candidate-content verdict a consumer may act on terminally.
+        _fatal(f"ownership marker at {marker_path} is not valid JSON, or could not be "
+               f"read: {exc}")
 
     owner_profile_path = marker.get("owner_profile_path") if isinstance(marker, dict) else None
     if not owner_profile_path:
@@ -319,8 +347,18 @@ def load_profile(durable_root=DURABLE_ROOT):
         _fatal(f"profile.yml not found at {profile_path} (per {marker_path})")
     try:
         profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        _fatal(f"profile.yml at {profile_path} is not valid YAML: {exc}")
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        # #398: same widening as the marker read above -- an unreadable or
+        # wrongly-encoded profile.yml is an ENVIRONMENT failure (exit 2), and
+        # was previously an uncaught exception landing at exit 1.
+        # The substring "is not valid YAML" is a CROSS-MODULE CONTRACT, not prose:
+        # tests/validate_assembled.test.py's
+        # test_green_load_profile_own_fatal_systemexit_still_reaches_exit_2 asserts this
+        # exact inner message reaches stderr, because its presence is what distinguishes a
+        # genuinely propagating SystemExit from a swallow-and-rewrap in THAT script's own
+        # broadened except. Widen the wording around it, never through it.
+        _fatal(f"profile.yml at {profile_path} is not valid YAML, or could not be "
+               f"read: {exc}")
     if not isinstance(profile, dict):
         _fatal(f"profile.yml at {profile_path} did not parse to a mapping")
     return profile
@@ -706,6 +744,38 @@ def build_arg_parser():
     return parser
 
 
+def _refuse_unless_segpack_available(seg, segments_dir) -> None:
+    """#398: the SOURCE must be readable before exit 1 can mean anything.
+
+    `validate()` reports a missing/unreadable/malformed segpack through its
+    ordinary `errs` list (see its own `_load_json()` call), which main() then
+    renders as exit 1 -- indistinguishable from a defect in the CANDIDATE the
+    translator just produced. That conflation is the whole of #398: a consumer
+    reading exit 1 as "this content is permanently unacceptable" would
+    terminally block a segment whose real problem is that its segpack was not
+    there to compare against.
+
+    Checked HERE, in main(), rather than inside validate(): `final_audit.py`
+    calls `vd.validate(seg, cfg)` in process and relies on today's signature and
+    its errs-list behaviour, so validate() is left exactly as it was and only
+    the CLI's exit-code mapping is narrowed.
+
+    Deliberately NOT closed: this probe and validate()'s own read are two
+    separate opens, so a segpack that disappears between them still exits 1.
+    Narrowing that further would mean moving the check into validate() and
+    changing the contract final_audit.py depends on."""
+    sp = segpack_path(seg, segments_dir)
+    if not sp.exists():
+        _fatal(f"segpack missing: {sp} -- the source this candidate is validated "
+               f"against is not available; this is an environment failure, not a "
+               f"defect in the candidate.")
+    try:
+        json.loads(sp.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _fatal(f"segpack at {sp} is not readable JSON: {exc} -- this is an "
+               f"environment failure, not a defect in the candidate.")
+
+
 def main():
     args = build_arg_parser().parse_args()
     seg = args.seg
@@ -719,6 +789,8 @@ def main():
 
     profile = load_profile(dirs["durable_root"])
     cfg = ProfileConfig(profile)
+
+    _refuse_unless_segpack_available(seg, dirs["segments_dir"])
 
     errs = validate(seg, cfg, draft_file=draft_file, segments_dir=dirs["segments_dir"])
     if errs:
@@ -737,5 +809,21 @@ def main():
     sys.exit(0)
 
 
+def _main_or_exit_2():
+    """#398 envelope: any exception main() does not handle itself is an
+    INTERNAL or ENVIRONMENT failure, never a verdict on the candidate's
+    content -- so it exits 2, not the 1 an uncaught traceback would otherwise
+    produce.
+
+    `except Exception`, deliberately narrower than `BaseException` and never a
+    bare `except`: both `_fatal()` and argparse signal through `SystemExit`,
+    which must pass through this envelope untouched, and a KeyboardInterrupt
+    must stay a KeyboardInterrupt."""
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001 -- see this function's own docstring
+        _fatal(f"internal error in validate_draft.py: {exc!r}")
+
+
 if __name__ == "__main__":
-    main()
+    _main_or_exit_2()

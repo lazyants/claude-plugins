@@ -402,7 +402,16 @@ and atomically promotes it.
    on containment via `mentionedAnywhere()` and cannot tell the two apart —
    the accepted, non-terminal cost of no longer missing a real report),
    `draft-missing`, or `cap` (non-converged after the final confirming
-   review). **1.3.6 (#131):** every reason above EXCEPT `draft-missing` and
+   review). **#398** adds one more terminal reason, `translate-rejected` --
+   but it is written by `codex_job.py`, NOT by the template, and so it is the
+   only terminal ledger write BOTH dispatch paths inherit: a translate
+   candidate that `validate_draft.py` ran against and rejected with exit 1
+   (its content verdict) becomes `{status:'blocked',
+   reason:'translate-rejected'}`, which is what stops a permanently-failing
+   segment from being paid for again on every subsequent run. Exit 2, a gate
+   that could not run, and every `draft_ready.py` rejection stay recoverable.
+   See `references/ledger-and-resumability.md`'s call-sites section.
+   **1.3.6 (#131):** every reason above EXCEPT `draft-missing` and
    `cap` is now recoverable rather than terminal — no ledger write happens
    for them at all (see `references/ledger-and-resumability.md`'s
    `recordLedgerPrompt` call-sites section), so the segment's `in_progress`

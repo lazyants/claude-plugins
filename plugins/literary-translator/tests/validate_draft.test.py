@@ -1550,3 +1550,138 @@ if __name__ == "__main__":
     import pytest
 
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# #398 -- the EXIT-CODE CONTRACT. codex_job.py reads exit 1, and only exit 1,
+# as "this candidate's content is permanently unacceptable" and writes a
+# TERMINAL `blocked` ledger fragment on the strength of it. Every condition
+# that a plain retry of the identical translation could clear, and every
+# environment or internal failure, must therefore exit 2 -- otherwise a
+# missing segpack or an unreadable profile.yml terminally blocks a segment
+# whose real problem was mechanical.
+#
+# These tests exist to defend that boundary from BOTH sides: the exit-2 group
+# below was exit 1 before this change (an ordinary defect line, or an uncaught
+# traceback), and the exit-1 group is the shipped meaning that must NOT drift
+# into 2 while the boundary is being moved.
+# ---------------------------------------------------------------------------
+def test_missing_segpack_exits_2_not_1(tmp_path):
+    """The source the candidate is validated AGAINST is absent. Nothing about
+    the candidate has been judged, so this must never read as a content
+    verdict."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+    (root / "segments" / "segpack_seg01.json").unlink()
+
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 2, (
+        f"a missing segpack is an environment failure (exit 2), not a content "
+        f"defect (exit 1)\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "segpack missing" in result.stderr
+
+
+def test_unreadable_segpack_exits_2_not_1(tmp_path):
+    """Same boundary via a different mechanism: the file is present but the
+    read itself fails (here: a directory in its place, which raises OSError
+    inside read_text)."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+    sp = root / "segments" / "segpack_seg01.json"
+    sp.unlink()
+    sp.mkdir()
+
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 2, (
+        f"an unreadable segpack is an environment failure (exit 2)\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+
+def test_malformed_segpack_json_exits_2_not_1(tmp_path):
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+    (root / "segments" / "segpack_seg01.json").write_text(
+        "{ not json at all", encoding="utf-8"
+    )
+
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 2, (
+        f"a malformed segpack is an environment failure (exit 2)\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "not readable JSON" in result.stderr
+
+
+def test_undecodable_profile_exits_2_not_1(tmp_path):
+    """load_profile() caught yaml.YAMLError but not the OSError /
+    UnicodeDecodeError that read_text itself can raise -- those escaped past
+    _fatal()'s exit 2 as an uncaught traceback, landing the process on exit 1.
+    Bytes that are not valid UTF-8 reproduce that exactly."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+    (root / "profile.yml").write_bytes(b"\xff\xfe\x00invalid utf-8 bytes")
+
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 2, (
+        f"an undecodable profile.yml is an environment failure (exit 2)\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "profile.yml" in result.stderr
+
+
+def test_an_unexpected_internal_exception_exits_2_not_1(tmp_path):
+    """A structurally odd SEGPACK reaches unguarded source accesses inside
+    validate() (b["id"] and friends) and raises. Before the envelope that was
+    an uncaught traceback -- exit 1, indistinguishable from a real content
+    verdict."""
+    root = make_durable_root(tmp_path)
+    segpack = clean_segpack()
+    segpack["blocks"] = ["not-an-object", 17]
+    write_segment(root, "seg01", segpack, clean_draft())
+
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 2, (
+        f"an internal error is an environment failure (exit 2), never a "
+        f"content verdict\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "internal error in validate_draft.py" in result.stderr
+
+
+def test_a_content_defect_still_exits_1(tmp_path):
+    """The other side of the boundary: narrowing exit 1 must not have taken
+    the real content verdict with it."""
+    root = make_durable_root(tmp_path)
+    draft = clean_draft()
+    draft["footnotes"]["1"] = ""
+    write_segment(root, "seg01", clean_segpack(), draft)
+
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 1, (
+        f"a genuine content defect must still exit 1\nstdout:\n{result.stdout}"
+    )
+    assert "[FN:1] empty translation" in result.stdout
+
+
+def test_a_missing_candidate_draft_still_exits_1(tmp_path):
+    """The CANDIDATE's own absence is the candidate's problem, not the
+    environment's -- it stays exit 1, unlike the segpack above. Pinning both
+    in one suite is what keeps the two `_load_json` call sites from being
+    "simplified" into one behaviour later."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+    (root / "segments" / "seg01.draft.json").unlink()
+
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 1, (
+        f"a missing candidate draft is a content-side failure (exit 1)\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
