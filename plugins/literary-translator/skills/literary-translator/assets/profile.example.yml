@@ -168,7 +168,7 @@ engine:
     # call at 600 s, so each of W5's two waits is spent as up to 8 bounded chunks plus one authoritative
     # non-polling re-check -- WAIT_CALLS = 9. Worst case is therefore
     # 1 + N*(8 + 2*WAIT_CALLS + max_fix_rounds*(8 + WAIT_CALLS)) = 1 + N*94 at the shipped max_fix_rounds:4.
-    # The normal-round term is 8 because 1.67.0 (#607) added the fix-scope audit AND the one retry a
+    # The normal-round term is 8 because 1.68.0 (#607) added the fix-scope audit AND the one retry a
     # CONTINUING round may spend on it; it was 6 (per-segment 86) between #348 and #607, and 1 + N*38 before
     # #348. READ THE CONSEQUENCE BEFORE SIZING A BATCH: at 94 the shipped 10000 admits at most 106 segments
     # (1 + 106*94 = 9965); 107 would need 10059 and the run would refuse to start. That is down from 116 at
