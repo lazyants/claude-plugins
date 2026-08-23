@@ -2373,11 +2373,10 @@ def test_a_non_enoent_lstat_error_is_ambiguous_not_absent(tmp_path):
     that same reader did not handle either. Measured on one and the same
     mode-000 path as a non-root uid: 3.10.21, 3.11.15, 3.12.14 and 3.13.15
     all raise EACCES out of `exists()`; 3.14.7 answers False. (The shipped
-    predicate's own docstring still dates that to 3.13, identically in all
-    five SENTINEL_SCRIPTS copies, and three further sites repeat it. The
-    byte-for-byte pin means correcting one means correcting all five, and
-    one of the five is a PLUGIN_BUNDLE_MEMBERS entry -- so the correction
-    moves plugin_bundle_hash and is parked on issue #679, not made here.)
+    predicate's own docstring carries that same 3.14 boundary, identically in
+    all five SENTINEL_SCRIPTS copies, as do the three further sites that
+    repeat it -- corrected in #679, which the byte-for-byte pin forced to
+    move all five copies in one commit.)
 
     The divergence from the shipped predicate is asserted here directly, on
     one and the same path, rather than described -- in the form every

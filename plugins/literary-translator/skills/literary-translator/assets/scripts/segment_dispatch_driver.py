@@ -5248,7 +5248,7 @@ def _rejection_record(seg: str, segments_dir: Path, review_obj: dict) -> "dict |
     # Path.is_file(), and never an lstat()/read_text() pair. Two separate
     # reasons, both real:
     #   - Path.exists()/is_file()/is_dir()/glob() SWALLOW OSError and answer
-    #     as if the thing were absent, and from Python 3.13 exists()
+    #     as if the thing were absent, and from Python 3.14 exists()
     #     swallows EVERY OSError while this plugin's floor is 3.10 -- so
     #     their answer differs by the operator's interpreter. Every refusal
     #     here happens to land in the same direction, but what authorizes an

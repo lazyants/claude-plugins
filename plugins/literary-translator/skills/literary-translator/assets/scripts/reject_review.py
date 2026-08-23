@@ -369,7 +369,7 @@ def classify_file(path: Path, *, follow_symlinks: bool):
     as if the thing were absent, so "the review is not there" and "the
     review is there and I was not allowed to look" come back
     indistinguishable -- and the swallowing is not even stable across
-    interpreters, since from Python 3.13 Path.exists() swallows EVERY
+    interpreters, since from Python 3.14 Path.exists() swallows EVERY
     OSError while this plugin's floor is 3.10. Absence is established ONLY
     by the two errors that mean it (ENOENT via FileNotFoundError, ENOTDIR
     via NotADirectoryError, i.e. a non-directory component in the path);
