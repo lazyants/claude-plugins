@@ -1,29 +1,43 @@
-"""tests/output_knobs_inert.test.py -- the new Phase-A `output.*` profile
-knobs (`output.target`, `output.v1_scope: assembled_book`,
-`output.name_display.parenthetical_originals`, `output.index.*`,
-`output.adapter_config`) are declared and shape-validated NOW, but the
-assembler/adapters that would actually act on them don't exist until later
-increments (Phase 0/1). This suite locks two things so that gap never
-silently drifts:
+"""tests/output_knobs_inert.test.py -- the DECLARED SHAPE of the `output.*`
+profile knobs (`output.target`, `output.v1_scope: assembled_book`,
+`output.name_display.parenthetical_originals`, `output.adapter_config`).
+
+The file name is historical. When it was written every one of those knobs
+really was inert; none is now -- `output.target` reaches
+`output_resolve.resolve_output_adapter` from `assemble.py`,
+`parenthetical_originals` and `adapter_config.obsidian` are read by
+`render_obsidian.py`, and `v1_scope: assembled_book` gates the assembly path
+at all. What this suite owns is their SHAPE at the Step-0 boundary; their
+BEHAVIOUR is pinned by `assemble.test.py` and the render suites, not here.
+Three things are locked:
 
 1. Schema-shape assertions read `profile.schema.json` directly and assert
-   every new knob's declared shape (enum members, boolean defaults,
-   sub-object presence) -- these knobs are inert only in the sense that
-   nothing downstream reads them yet; their SHAPE is real, enforced
-   contract from day one.
-2. The one place a new knob genuinely already changes validation behavior:
-   `output.index.person_grouping: true` requires `output.index.enabled:
-   true` (a grouped index with no index to group into is a validation
-   error, not merely a documentation note). Driven through the plugin's
-   own `profile_validate.py` validator (`validate_against_schema`), not
-   raw jsonschema against a bare schema fragment, so this proves real
-   Step-0 behavior -- exactly the same call
-   tests/profile_validate.test.py's own `schema_errors()` helper makes.
+   each knob's declared shape (enum members, sub-object presence).
+2. `output.index.{enabled,person_grouping}` -- a knob this file used to
+   pin as inert-but-declared, along with the `person_grouping: true =>
+   enabled: true` coupling that came with it -- was RETIRED (#235): zero
+   Python consumers ever read it, so an operator could set it, have it
+   schema-accepted, and get no index page. It is now refused loudly by
+   `additionalProperties: false` instead of accepted inertly. This file
+   locks the retirement: the schema declares no `index` key under
+   `output.properties`, the `output` schema object carries no `allOf`
+   (the coupling was its only entry), and a profile carrying `output.index`
+   under either spelling is REJECTED with an error naming `index`
+   specifically. Driven through the plugin's own `profile_validate.py`
+   validator (`validate_against_schema`), not raw jsonschema against a
+   bare schema fragment, so this proves real Step-0 behavior -- exactly
+   the same call tests/profile_validate.test.py's own `schema_errors()`
+   helper makes.
+
+3. Round-trip behaviour at that same boundary: each declared value of each
+   knob is ACCEPTED and each undeclared one is REJECTED, through the real
+   validator -- proving the shape assertions above describe what Step 0
+   actually enforces rather than only what the schema file says.
 
 This file deliberately does NOT re-test anything already covered by
 tests/profile_validate.test.py (unknown-key rejection, placeholder
 scanning, source/verse_policy conditionals, ...) -- scope here is strictly
-the new `output.*` knob set.
+the `output.*` knob set.
 """
 from __future__ import annotations
 
@@ -153,50 +167,45 @@ def test_name_display_parenthetical_originals_enum():
     assert set(parenthetical["enum"]) == {"never", "first_occurrence"}
 
 
-def test_index_enabled_and_person_grouping_are_booleans_defaulting_false():
-    index_props = _output_schema()["properties"]["index"]["properties"]
-    assert index_props["enabled"]["type"] == "boolean"
-    assert index_props["enabled"]["default"] is False
-    assert index_props["person_grouping"]["type"] == "boolean"
-    assert index_props["person_grouping"]["default"] is False
-
-
 def test_adapter_config_declares_all_three_target_sub_blocks():
     adapter_config = _output_schema()["properties"]["adapter_config"]
     assert set(adapter_config["properties"].keys()) == {"obsidian", "epub", "custom"}
 
 
 # ---------------------------------------------------------------------------
-# Behavioral: the person_grouping => enabled coupling, driven through the
-# plugin's own real validator, not a bare schema fragment.
+# Retirement lock (#235): `output.index.*` and its `person_grouping =>
+# enabled` coupling are gone -- zero Python consumers ever read them, so the
+# schema must refuse the block loudly instead of accepting it inertly.
 # ---------------------------------------------------------------------------
 
 
-def test_person_grouping_true_with_enabled_false_fails_validation():
+def test_index_key_no_longer_declared_under_output():
+    assert "index" not in _output_schema()["properties"]
+
+
+def test_output_schema_carries_no_allof():
+    """The retired person_grouping => enabled coupling was the `output`
+    schema object's only `allOf` entry -- with it gone, the key itself
+    should not linger."""
+    assert "allOf" not in _output_schema()
+
+
+def test_output_index_enabled_true_is_rejected():
     profile = make_base_profile()
-    profile["output"]["index"] = {"enabled": False, "person_grouping": True}
+    profile["output"]["index"] = {"enabled": True}
     errors = schema_errors(profile)
-    assert errors != [], "person_grouping:true with enabled:false must be a validation error"
-    assert any("enabled" in e for e in errors)
+    assert errors != [], "a retired output.index block must be rejected, not accepted inertly"
+    assert any("index" in e and "Additional properties" in e for e in errors), errors
 
 
-def test_person_grouping_true_with_enabled_true_passes():
+def test_output_index_enabled_false_person_grouping_false_is_rejected():
+    """The exact spelling the shipped example profile used to carry --
+    the block a real project most likely still has on disk."""
     profile = make_base_profile()
-    profile["output"]["index"] = {"enabled": True, "person_grouping": True}
-    assert schema_errors(profile) == []
-
-
-def test_person_grouping_false_with_enabled_true_passes():
-    profile = make_base_profile()
-    profile["output"]["index"] = {"enabled": True, "person_grouping": False}
-    assert schema_errors(profile) == []
-
-
-def test_all_default_case_with_no_index_block_at_all_passes():
-    """The all-default case: a profile that never even mentions `output.index`
-    (the base fixture) must pass -- the coupling rule must not force the
-    block to be present."""
-    assert schema_errors(make_base_profile()) == []
+    profile["output"]["index"] = {"enabled": False, "person_grouping": False}
+    errors = schema_errors(profile)
+    assert errors != [], "a retired output.index block must be rejected, not accepted inertly"
+    assert any("index" in e and "Additional properties" in e for e in errors), errors
 
 
 # ---------------------------------------------------------------------------

@@ -12,9 +12,6 @@ output:
   target: obsidian                    # obsidian | epub | custom
   name_display:
     parenthetical_originals: never    # never | first_occurrence
-  index:
-    enabled: false
-    person_grouping: false
   adapter_config:
     obsidian: {}
     epub: null
@@ -461,8 +458,11 @@ non-shipped historiettes-t3 provenance project referenced above.
 - **No bilingual-output layout logic.** A bilingual EPUB or other bilingual
   layout is a plausible later addition, but only once the `epub` target
   itself exists.
-- **No standalone occurrence index page.** `output.index.enabled` (the
-  aggregated person-index *page*) stays OPT-IN, gated, and a later phase.
+- **`output.index` retired, not deferred.** The knob is gone from
+  `profile.schema.json`; a profile still carrying an `output.index:` block is
+  now refused by `profile_validate.py` with an `additionalProperties` error
+  naming `index` — the remedy is to delete the block. Nothing ever read it,
+  so nothing in this increment loses a capability by its removal.
   **New in 1.8.0, ON BY DEFAULT since 1.10.0:** the `obsidian` target
   additionally supports a *per-entity* source-anchored `## Mentions`
   occurrence index
@@ -486,6 +486,23 @@ non-shipped historiettes-t3 provenance project referenced above.
   homonym collisions, which are de-linked (not misattributed) on that path
   too as of this release — see "Collision de-linking" in
   `references/output-target-adapters/obsidian.md`.
+- **A standalone index page is the project's own job, not this plugin's.**
+  Recorded here because `output.index` promised one from 1.8.0 until its
+  retirement and never built it. The shape that worked on a real book was
+  **four pages** — a chapters table-of-contents plus one page per `category`
+  present — not the single aggregated person page that knob named. Three
+  properties that book measured, for whoever builds one: source the rows from
+  the **rendered vault's own frontmatter**, never from canon, so the index
+  cannot disagree with what it indexes and cannot emit rows for notes a
+  downstream layer has since renamed or merged; list on each row every form
+  the note covers (its `aliases` minus the display name), or a reader
+  searching a variant spelling finds nothing; and emit no per-row count
+  unless it is re-derived from the artifact itself, an index page being where
+  a fabricated number is least likely to be checked. Step 0a copies
+  `PLAN.template.md` once and never refreshes it (`SKILL.md:393`), so a
+  project scaffolded before the retirement may still name
+  `output.index.enabled` in its hand-edited `PLAN.md` intake answer; drop
+  that phrase by hand — there is no automatic migration.
 - **No generic renderer-plugin framework above the three fixed presets**
   (`obsidian`/`epub`/`custom`) — see
   `references/output-target-adapters/README.md`'s "why only three" section

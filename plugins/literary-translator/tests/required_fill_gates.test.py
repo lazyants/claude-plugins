@@ -334,7 +334,7 @@ def _seed_durable_root(
     intake_body = (
         "LT_PLACEHOLDER_UNFILLED"
         if not intake_filled
-        else "Fast tier chosen: offline research, lightest apparatus, index off; "
+        else "Fast tier chosen: offline research, lightest apparatus; "
         "worth it because this is a plain translate+gloss job."
     )
     name_display_body = (

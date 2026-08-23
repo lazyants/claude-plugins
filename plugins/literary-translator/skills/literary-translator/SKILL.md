@@ -57,18 +57,16 @@ translate+gloss job ends up quietly provisioning apparatus it will never use.
    is expressed entirely through profile knobs that already exist:
    `glossary.research_mode` (`live` vs `offline`), `footnotes.apparatus_policy`,
    `verse_policy.mode` (the six-value enum in
-   `references/verse-policy.md`), and `engine.max_fix_rounds`. Two further
-   knobs decide how much *output* apparatus gets provisioned:
-   `output.target` (defaults `obsidian`) and `output.index.enabled` (defaults
-   `false`). Walk the user through what each knob currently resolves to for
-   this project before scaffolding proceeds.
+   `references/verse-policy.md`), and `engine.max_fix_rounds`. One further
+   knob decides how much *output* apparatus gets provisioned:
+   `output.target` (defaults `obsidian`). Walk the user through what that
+   knob currently resolves to for this project before scaffolding proceeds.
 3. **Default fast, offer thorough explicitly, through those same knobs.** The
    default posture for a new project is the lean end of every one of those
    knobs — offline research where live isn't required, the lightest
-   apparatus policy the source actually needs, index off. Present the
-   exhaustive alternative (live research, a fuller apparatus, index on) as an
-   explicit opt-in the user chooses through the same knobs, never as a
-   separate code path.
+   apparatus policy the source actually needs. Present the exhaustive
+   alternative (live research, a fuller apparatus) as an explicit opt-in the
+   user chooses through the same knobs, never as a separate code path.
 4. **Agree pipeline role assignment.** Translate and review are
    **hard-locked to codex** (R1, `references/engine-loop.md`) — codex is the
    sole translate/review engine, now LAUNCHED by the shipped, detached
@@ -90,8 +88,8 @@ translate+gloss job ends up quietly provisioning apparatus it will never use.
    useful, never in `profile.yml`.
 5. **State why the lean default is worth it.** A plain translate+gloss job
    that turns on every knob pays for machinery — live-research round-trips, a
-   heavier apparatus, an occurrence index — it will never read. Naming that
-   trade-off up front is cheaper than discovering it mid-project. Defer
+   heavier apparatus, a fuller fix-round budget — it will never read. Naming
+   that trade-off up front is cheaper than discovering it mid-project. Defer
    side-quests: a knob not required for THIS project's stated goal stays at
    its lean default, full stop — raise it later, from `PLAN.md` section 5, if
    the project's own scope genuinely grows to need it.
@@ -675,8 +673,8 @@ machinery it will never read (`references/assembly-and-output.md`).
 
 When `assembled_book` is selected, resolve the already-schema-validated
 `output.target` (`obsidian` | `epub` | `custom`) via `output_resolve.py`'s
-resolution logic, plus read `output.name_display`, `output.index`, and the
-one `output.adapter_config.<target>` sub-block matching the resolved
+resolution logic, plus read `output.name_display` and the one
+`output.adapter_config.<target>` sub-block matching the resolved
 target — the others sit inert. This step depends ONLY on the
 already-validated `profile.output` block (no manifest, no ledger, no draft
 required yet) — the same "resolve early, from validated shape alone"

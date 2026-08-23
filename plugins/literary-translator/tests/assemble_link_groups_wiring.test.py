@@ -116,7 +116,6 @@ def _profile(root: Path, output_target="obsidian", mentions=False):
             "v1_scope": "assembled_book", "destination": str(root / "out"),
             "target": output_target,
             "name_display": {"parenthetical_originals": "never"},
-            "index": {"enabled": False, "person_grouping": False},
             "adapter_config": {
                 # Explicitly OFF -- #588's own delivered vault had it off, and
                 # collision de-linking is decoupled from this flag (#206/#207).

@@ -7,7 +7,7 @@ schema entry, which carries no `pattern` at all) and `obsidian.folders`'s
 open category->folder catalog shape.
 
 This file deliberately does NOT re-test anything tests/output_knobs_inert.test.py
-already covers (the target/v1_scope/name_display/index knobs, the general
+already covers (the target/v1_scope/name_display knobs, the general
 three-sub-block adapter_config shape) -- scope here is strictly the two NEW
 per-target sub-fields Phase 0 adds underneath `adapter_config.custom` and
 `adapter_config.obsidian`.

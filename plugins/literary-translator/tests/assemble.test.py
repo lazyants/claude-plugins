@@ -274,7 +274,6 @@ def default_profile(verse_mode="full_rhymed_plus_literal", output_target="obsidi
             "destination": "/placeholder/out/",
             "target": output_target,
             "name_display": {"parenthetical_originals": "never"},
-            "index": {"enabled": False, "person_grouping": False},
             "adapter_config": {
                 "obsidian": obsidian_cfg, "epub": None,
                 "custom": {"renderer_path": custom_renderer_path} if custom_renderer_path else None,
