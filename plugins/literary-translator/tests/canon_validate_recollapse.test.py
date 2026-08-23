@@ -367,7 +367,19 @@ def write_json(path: Path, doc) -> Path:
 
 
 def run_cli(root: Path, args, timeout=30):
-    cmd = [sys.executable, str(root / "scripts" / "canon_validate.py")] + list(args)
+    """#412: the four `generation_hashes`-STAMPING modes (--init,
+    --restamp-derivation, --merge-batches, legacy bare --batch) now REFUSE to
+    run unless told which sibling `cache_key.py` to trust -- `--plugin-root
+    PATH` or the explicit `--allow-durable-sibling` escape hatch. Every root
+    this file builds is a self-anchored durable_root with no plugin install
+    tree, which IS the case the escape hatch exists for, so it is appended
+    here once. The NON-stamping modes ignore it (they resolve no sibling),
+    so this cannot change what any recollapse assertion below observes."""
+    cmd = (
+        [sys.executable, str(root / "scripts" / "canon_validate.py")]
+        + list(args)
+        + ["--allow-durable-sibling"]
+    )
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(root))
 
 

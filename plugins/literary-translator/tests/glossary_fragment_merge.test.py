@@ -177,6 +177,18 @@ def run_merge_batches(root, research_mode, fragment_paths, timeout=30):
         research_mode,
         "--merge-batches",
         *[str(p) for p in fragment_paths],
+        # #412: --merge-batches STAMPS canon.json's generation_hashes, so it now
+        # refuses to run without an explicit answer to "which cache_key.py may
+        # stamp this canon" -- either --plugin-root PATH or this opt-out. This
+        # fixture stages a self-anchored durable_root with its own scripts/ copy
+        # and NO plugin install tree beside it, which is exactly the case the
+        # opt-out exists for; passing --plugin-root here would point at a
+        # directory that does not exist. What every test below asserts is merge
+        # SEMANTICS (collision, idempotency, pass-1/pass-2 atomicity), never
+        # which cache_key.py ran, so the self-anchored sibling is the right
+        # choice rather than merely the convenient one -- the sibling-resolution
+        # question is owned by canon_validate_plugin_root.test.py.
+        "--allow-durable-sibling",
     ]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(root))
 

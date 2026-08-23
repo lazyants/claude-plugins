@@ -539,7 +539,9 @@ def test_full_classification_taxonomy_and_report(tmp_path):
             "W3/W3a (re-run bootstrap_names.py to regenerate name candidates, "
             "then the glossary pass to re-stamp canon.json's "
             "particle_config_hash -- or, on a project with no new candidates "
-            "left to merge, canon_validate.py --restamp-derivation -- then "
+            "left to merge, canon_validate.py --restamp-derivation "
+            "--plugin-root {{PLUGIN_ROOT}} (or, on a hand-run recovery with "
+            "no plugin root to name, --allow-durable-sibling) -- then "
             "segpack.py) "
             "before this segment can be reclassified"
         ),
@@ -1002,7 +1004,9 @@ def test_derivation_bundle_hash_regen_hint_names_glossary_pass(tmp_path):
             "then the glossary pass to re-stamp canon.json's "
             "derivation_bundle_hash -- or, on a project with no new "
             "candidates left to merge, canon_validate.py "
-            "--restamp-derivation -- then segpack.py) "
+            "--restamp-derivation --plugin-root {{PLUGIN_ROOT}} (or, on a "
+            "hand-run recovery with no plugin root to name, "
+            "--allow-durable-sibling) -- then segpack.py) "
             "before this segment can be reclassified"
         ),
     }
@@ -1057,6 +1061,17 @@ def test_w3_regen_hints_name_the_sanctioned_restamp_escape(tmp_path, field):
         "out (#193/#291)"
     )
     assert "canon_validate.py" in message, "the escape is named without its script"
+    # #412: naming the mode is no longer enough -- the command as SPELLED must
+    # be runnable. Every generation_hashes-stamping mode now exits 2 unless it
+    # is handed --plugin-root PATH or the explicit --allow-durable-sibling, so
+    # the bare spelling dead-ends on an argparse usage error at exactly the
+    # moment this hint exists to unblock the operator.
+    assert "--plugin-root" in message or "--allow-durable-sibling" in message, (
+        f"the {field} hint names --restamp-derivation without either "
+        "sibling-resolution flag, so the command it prints EXITS 2 as "
+        "spelled (#412) -- the operator is handed a dead end, not an escape:\n"
+        f"{message}"
+    )
     # Order is load-bearing, not cosmetic.
     assert message.index("--restamp-derivation") < message.index("segpack.py"), (
         "segpack.py must come AFTER the restamp -- it copies canon.json's "
@@ -1109,6 +1124,17 @@ def test_every_w3_regen_hint_names_the_restamp_escape():
             "glossary pass but never names canon_validate.py "
             "--restamp-derivation, so a mature zero-candidate project blocked "
             "on this field has no way out (#193)"
+        )
+        # #412, the rule rather than the two fields that exist today: the
+        # escape must be spelled RUNNABLY. --restamp-derivation is a
+        # generation_hashes-stamping mode and now exits 2 unless handed
+        # --plugin-root PATH or the explicit --allow-durable-sibling, so a
+        # hint carrying the bare spelling sends the operator into an argparse
+        # usage error instead of out of the block.
+        assert "--plugin-root" in step or "--allow-durable-sibling" in step, (
+            f"FIELD_TO_REGEN_STEP[{field!r}] names --restamp-derivation with "
+            "neither sibling-resolution flag -- the command it prints EXITS 2 "
+            "as spelled"
         )
         # Generated from the one shared template, not hand-maintained twice.
         assert step == module._w3_regen_step(field)

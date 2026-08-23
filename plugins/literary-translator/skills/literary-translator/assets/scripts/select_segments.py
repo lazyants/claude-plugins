@@ -1019,12 +1019,31 @@ def _w3_regen_step(field: str) -> str:
     Generated rather than spelled out per field because these were two
     hand-maintained strings -- which is exactly how the escape came to be
     added to one and forgotten on the other.
+
+    #412: the escape must be spelled with a sibling-resolution flag or it is
+    no longer a runnable command. `--restamp-derivation` is one of
+    `canon_validate.py`'s four `generation_hashes`-STAMPING modes, and #412
+    made every one of them EXIT 2 unless handed either `--plugin-root
+    PATH` (the trusted plugin install root the sibling `cache_key.py` is
+    resolved from) or the explicit `--allow-durable-sibling` escape hatch --
+    the self-anchored sibling is no longer a silent default, because
+    `${durable_root}/scripts/` is writable by the codex process the stamp
+    gates. An operator who pasted the old spelling would hit an argparse
+    usage error at exactly the moment this hint is supposed to unblock them,
+    which is the same dead-end #193 describes, one layer down.
     """
+    # `{{PLUGIN_ROOT}}` is the token SKILL.md's own fenced commands use for
+    # the plugin install root, so the hint reads as the documented command
+    # rather than as a second dialect. It MUST stay in a non-f-string
+    # segment: inside an f-string `{{` collapses to a single brace and the
+    # emitted hint would name a token nothing substitutes.
     return (
         "W3/W3a (re-run bootstrap_names.py to regenerate name candidates, "
         f"then the glossary pass to re-stamp canon.json's {field} -- or, on "
         "a project with no new candidates left to merge, canon_validate.py "
-        "--restamp-derivation -- then segpack.py)"
+        "--restamp-derivation --plugin-root {{PLUGIN_ROOT}} (or, on a "
+        "hand-run recovery with no plugin root to name, "
+        "--allow-durable-sibling) -- then segpack.py)"
     )
 
 
@@ -4599,8 +4618,8 @@ def run(args, dirs: dict) -> dict:
         # human_escalation, which is outside DEFAULT_ELIGIBLE_CATEGORIES, so
         # none of its ids reaches `segs` at all unless --only-segs names them.
         # A stalled unit is `in_progress`, which classify_segment() reports as
-        # `recoverable` (:1414) and DEFAULT_ELIGIBLE_CATEGORIES contains
-        # (:1432) -- so the subset direction is satisfied for free and the
+        # `recoverable` (:1433) and DEFAULT_ELIGIBLE_CATEGORIES contains
+        # (:1451) -- so the subset direction is satisfied for free and the
         # --only-segs requirement this profile's help text states was enforced
         # by nothing. Measured: --from-stalled over one id emitted a second,
         # unclaimed id for dispatch and reported success.

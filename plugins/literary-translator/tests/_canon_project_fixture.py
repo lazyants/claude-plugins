@@ -19,6 +19,7 @@ ships no `name_inventory`: `bootstrap_names.py`'s `Lu`-gated detector finds
 zero candidates there by construction, which is exactly the zero-candidate
 route #290 fixed and the state #291's restamp bypass is reachable from.
 """
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -142,7 +143,35 @@ def run_script(root: Path, name: str, *args, timeout=120):
     )
 
 
-def run_canon_validate(root: Path, *args, research_mode="offline", timeout=120):
+def run_canon_validate(
+    root: Path, *args, research_mode="offline", timeout=120, allow_durable_sibling=True
+):
+    """#412: every `generation_hashes`-STAMPING mode (--init,
+    --restamp-derivation, --merge-batches, legacy bare --batch) now REFUSES
+    to run unless it is told which `cache_key.py` to trust -- either
+    `--plugin-root PATH` or the explicit `--allow-durable-sibling` escape
+    hatch. This fixture stages a self-anchored durable_root holding the REAL
+    cache_key.py and no plugin install tree at all, which IS the case the
+    escape hatch exists for (a hand-run drive with no orchestrating session
+    to supply a plugin root), so the flag is appended by default and every
+    caller that only cares about some OTHER behaviour keeps working
+    unchanged.
+
+    Pass `allow_durable_sibling=False` when the invocation is ABOUT the #412
+    precondition itself -- the refusal battery in
+    canon_validate_plugin_root.test.py, and any call that supplies
+    `--plugin-root` of its own (the two flags are mutually exclusive, so a
+    silently appended one would turn such a call into an exit-2 usage error
+    that looks nothing like the property under test). The assertion below
+    turns that mistake into a named fixture failure instead of a puzzling
+    argparse error."""
+    if allow_durable_sibling:
+        assert "--plugin-root" not in args and "--allow-durable-sibling" not in args, (
+            "run_canon_validate() appends --allow-durable-sibling by default and "
+            "it is mutually exclusive with --plugin-root -- pass "
+            "allow_durable_sibling=False when supplying either flag yourself"
+        )
+        args = (*args, "--allow-durable-sibling")
     return run_script(
         root, "canon_validate.py", "--research-mode", research_mode, *args, timeout=timeout
     )
@@ -150,6 +179,30 @@ def run_canon_validate(root: Path, *args, research_mode="offline", timeout=120):
 
 def run_canon_init(root: Path, research_mode="offline"):
     return run_canon_validate(root, "--init", research_mode=research_mode)
+
+
+def load_canon_validate_module():
+    """In-process load of the REAL canon_validate.py, to read its own
+    declarative tables (MODE_SPECS, NON_MODE_DESTS) and its parser. Never
+    used to execute the CLI -- every behavioural test drives it as a
+    subprocess. The script's directory goes on sys.path for the load so its
+    sibling `from canon_senses import ...` resolves.
+
+    Shared here rather than copied per suite: two suites now read MODE_SPECS
+    to derive their own parameterization from the script's own table, and a
+    second copy of the loader is exactly the kind of hand-maintained
+    duplicate MODE_SPECS itself exists to remove."""
+    sys.path.insert(0, str(SCRIPTS_SRC))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "canon_validate_modes_under_test", SCRIPTS_SRC / "canon_validate.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(str(SCRIPTS_SRC))
 
 
 def run_segpack(root: Path):

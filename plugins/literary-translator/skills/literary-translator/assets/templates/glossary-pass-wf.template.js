@@ -163,6 +163,42 @@
 //                        codex model id does not thread to the glossary pass
 //                        (its agent call's own model: opt would set the
 //                        Claude forwarder's model, never codex's).
+//   {{PLUGIN_ROOT}}     -- #412: the plugin's own install root (NEVER
+//                        {{DURABLE_ROOT}}/scripts/, the Step-0a COPY the
+//                        codex processes this pass drives can write to).
+//                        REQUIRED for this template -- unlike
+//                        mass-translate-wf.template.js's own {{PLUGIN_ROOT}}
+//                        token, an empty string is NOT a valid opt-out here
+//                        and throws at instantiation (see the PLUGIN_ROOT
+//                        block below): that token predates #412 with real
+//                        legacy callers relying on the flagless default,
+//                        while this one is brand new, so there is no
+//                        existing caller an empty-is-required-here choice
+//                        would break, and this is exactly the pass where
+//                        codex holds --write over ${durable_root}/scripts/
+//                        -- the worst place to let a stamp silently
+//                        self-anchor there for want of a forgotten token. A
+//                        deliberately self-anchored merge is still possible
+//                        by running `canon_validate.py --merge-batches ...
+//                        --allow-durable-sibling` BY HAND, outside this
+//                        template. Substituted as a strict json.dumps JS
+//                        STRING LITERAL (WITH its own surrounding quotes,
+//                        sitting OUTSIDE quotes) in
+//                        `const PLUGIN_ROOT = {{PLUGIN_ROOT}};` below --
+//                        same splice-safety contract as
+//                        mass-translate-wf.template.js's own
+//                        {{PLUGIN_ROOT}} token (see that file's header
+//                        comment): the orchestrating session is responsible
+//                        for a value with no single quote / control char /
+//                        newline, safe to splice as a SINGLE-QUOTED bash
+//                        argument. Threaded ONLY into mergeBatchesPrompt()'s
+//                        --merge-batches command, as a --plugin-root
+//                        argument -- never into checkBatchCmd() or
+//                        glossaryVerifyPrompt(), because canon_validate.py's
+//                        own main() forwards --plugin-root to
+//                        run_merge_batches (and to legacy run_merge) but not
+//                        to run_check_batch or run_verify_merged, so the
+//                        flag would be silently ignored at either site.
 //
 // `args` shape this template expects (an array, or a JSON string of one):
 //   [ { index: 0, candidates: [ {name, freq, mid_sentence, multiword,
@@ -220,6 +256,45 @@ const BATCH_AGENT_CAP = {{BATCH_AGENT_CAP}}
 // and the batchStep codex:codex-rescue agent effort option below, always
 // from this one value. No model knob here (see the header token doc above).
 const EFFORT = "{{EFFORT}}"
+
+// #412 -- the plugin's own install root (see the header comment's
+// {{PLUGIN_ROOT}} entry). Same JS-string-literal substitution shape as the
+// other PLUGIN_ROOT block in mass-translate-wf.template.js, but that file
+// has no dedicated resolver script to lean on (COMPANION's own
+// resolve_codex_companion.py has no counterpart for this value), so this
+// file re-checks it itself before it ever reaches mergeBatchesPrompt()'s
+// SINGLE-QUOTED bash splice below.
+//
+// UNLIKE mass-translate-wf.template.js's own {{PLUGIN_ROOT}}, an empty
+// string is NOT a valid value here -- it throws, rather than silently
+// building a --merge-batches command with no --plugin-root that would only
+// fail later, mid-pass, after codex spend on this batch is already paid
+// (canon_validate.py's own --merge-batches refuses without --plugin-root or
+// --allow-durable-sibling; see the header comment's {{PLUGIN_ROOT}} entry
+// for the full reasoning and the by-hand --allow-durable-sibling escape).
+// The asymmetry with mass-translate-wf.template.js is deliberate, not a
+// drift to "fix": that token predates #412 with real legacy callers relying
+// on its flagless default, this one is brand new with no such caller to
+// preserve.
+const PLUGIN_ROOT = {{PLUGIN_ROOT}};
+if (PLUGIN_ROOT === "") {
+  // #412: this message deliberately names the concept ("plugin_root"),
+  // never the literal double-brace token spelling -- writing the token's
+  // own syntax into a runtime string here would make it a SECOND
+  // substitution site, silently corrupted by the very instantiation step
+  // this check exists to guard against.
+  throw new Error("plugin_root is required for the glossary pass (an empty value is not a valid --plugin-root opt-out here) -- the orchestrating session must substitute a real plugin install root");
+}
+const PLUGIN_ROOT_UNSAFE_RE = /['\x00-\x1f\x7f]/;
+if (PLUGIN_ROOT_UNSAFE_RE.test(PLUGIN_ROOT)) {
+  // Same reasoning as the empty-value throw above: name the concept, never
+  // the double-brace token spelling.
+  throw new Error("Unsafe plugin_root value " + JSON.stringify(PLUGIN_ROOT) + ": must not contain a single quote or control character");
+}
+// PLUGIN_ROOT is now guaranteed non-empty and safe, so this is always the
+// --plugin-root argument, single-quoted (see the header comment's
+// {{PLUGIN_ROOT}} entry for why it threads only into mergeBatchesPrompt()).
+const PLUGIN_ROOT_ARG = " --plugin-root '" + PLUGIN_ROOT + "'";
 
 // 1.16.1 -- glossary.citation_content_types. Comma-separated, because the
 // substitution contract is one plain quoted string per token. Empty means "use
@@ -1181,7 +1256,12 @@ function mergeBatchesPrompt(fragments) {
   const cmdParts = [PY, ROOT + "/scripts/canon_validate.py", "--merge-batches"]
   for (let i = 0; i < fragments.length; i++) cmdParts.push(fragments[i])
   cmdParts.push("--research-mode", RESEARCH_MODE)
-  lines.push("Run exactly this command and capture its single printed JSON line: " + cmdParts.join(" "))
+  // #412: --merge-batches is one of canon_validate.py's STAMPING modes (it
+  // calls _stamp_generation_hash via run_merge_batches), so it is the one
+  // command this template threads PLUGIN_ROOT_ARG into -- see the header
+  // comment's {{PLUGIN_ROOT}} entry for why checkBatchCmd() and
+  // glossaryVerifyPrompt() below do not get it.
+  lines.push("Run exactly this command and capture its single printed JSON line: " + cmdParts.join(" ") + PLUGIN_ROOT_ARG)
   lines.push("Return that printed line's content, as text, in your own response. Do not judge or re-decide anything yourself -- a separate, disk-independent step verifies this merge afterward and is what this run actually trusts.")
   return lines.join("\n")
 }

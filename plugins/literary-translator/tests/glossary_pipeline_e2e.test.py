@@ -49,9 +49,21 @@ FIXTURE_RUN_ID = "20260719T000000Z"
 FIXTURE_SOURCE_LANG = "French"
 FIXTURE_TARGET_LANG = "Russian"
 FIXTURE_RESEARCH_MODE = "offline"
+# #412 -- glossary-pass-wf.template.js's {{PLUGIN_ROOT}} is REQUIRED: unlike
+# mass-translate-wf.template.js's own {{PLUGIN_ROOT}} (a pre-#412 token with
+# real legacy callers relying on its flagless-default empty-string opt-out),
+# this one is brand new, and the template throws at instantiation for an
+# empty value -- there is no caller to preserve a silent flagless
+# --merge-batches default for, and this is exactly the pass where codex
+# holds --write over ${durable_root}/scripts/. So this file's DEFAULT must be
+# a real, non-empty, allowlist-legal path -- every test below that does not
+# care about PLUGIN_ROOT still gets a working run; the dedicated tests near
+# the end of this file override it with either another real path or the
+# empty string, to exercise the opt-in / throw explicitly.
+FIXTURE_PLUGIN_ROOT = "/fixture/plugin/root/skills/literary-translator"
 
 
-def instantiate(*, batch_agent_cap: int) -> str:
+def instantiate(*, batch_agent_cap: int, plugin_root: str = FIXTURE_PLUGIN_ROOT) -> str:
     """The exact one-time substitution the template's header documents
     (duplicated, not imported, so this file stays self-contained like every
     sibling harness)."""
@@ -68,6 +80,14 @@ def instantiate(*, batch_agent_cap: int) -> str:
     text = text.replace("{{EFFORT}}", "high")
     # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
     text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
+    # #412 -- json.dumps JS string literal, token OUTSIDE quotes
+    # (`const PLUGIN_ROOT = {{PLUGIN_ROOT}};`). See FIXTURE_PLUGIN_ROOT's own
+    # comment above -- empty is NOT a valid value for this template, so the
+    # default here is a real path; the PLUGIN_ROOT-specific tests below pass
+    # a different real value (to exercise --merge-batches carrying it) or
+    # the empty string (to exercise the instantiation-time throw) through
+    # this same parameter.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(plugin_root))
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
 
@@ -179,11 +199,12 @@ function log() {}
 
 
 def run(*, tmp_path: Path, batches: list, batch_agent_cap: int = 10_000,
-        plan: dict | None = None, timeout: int = 30) -> dict:
+        plan: dict | None = None, timeout: int = 30,
+        plugin_root: str = FIXTURE_PLUGIN_ROOT) -> dict:
     """Returns {ok, out, stderr}. ok=False (with stderr) when the template
     threw before producing stdout (the batch-index guard throw path)."""
     plan = plan or {}
-    src = instantiate(batch_agent_cap=batch_agent_cap)
+    src = instantiate(batch_agent_cap=batch_agent_cap, plugin_root=plugin_root)
     harness = (
         HARNESS.replace("__WRAPPED_SOURCE__", _wrap(src))
         .replace("__BATCHES_JSON__", json.dumps(batches))
@@ -397,6 +418,109 @@ def test_wait_non_terminal_quoted_ready_still_times_out(tmp_path):
     assert out["result"]["merged"] is False
     assert out["result"]["reason"] == "fragment-check-failed"
     assert out["result"]["notReady"] == [0]
+
+
+# ---------------------------------------------------------------------------
+# #412 -- PLUGIN_ROOT is threaded into mergeBatchesPrompt()'s --merge-batches
+# command ONLY, never checkBatchCmd() (precheck/dispatch/wait) or
+# glossaryVerifyPrompt() -- canon_validate.py's own main() forwards
+# --plugin-root to run_merge_batches but not to run_check_batch or
+# run_verify_merged, so the flag would be silently ignored at either site
+# (see the template's own {{PLUGIN_ROOT}} header-comment entry). This file is
+# the natural home for that assertion: it is the only harness in this plugin
+# that already drives the real template through a full happy-path run and
+# captures every agent() prompt by label, so the exact command text each
+# builder produced is directly inspectable rather than re-derived from a
+# static grep.
+# ---------------------------------------------------------------------------
+
+PINNED_PLUGIN_ROOT = "/Users/José García/.claude/plugins/literary-translator/skills/literary-translator"
+
+
+def test_glossary_template_declares_plugin_root_token():
+    raw = GLOSSARY_TEMPLATE.read_text(encoding="utf-8")
+    assert "{{PLUGIN_ROOT}}" in raw
+
+
+def test_merge_batches_command_carries_plugin_root_when_set(tmp_path):
+    res = run(
+        tmp_path=tmp_path,
+        batches=[make_batch(0, ["Jean"])],
+        plugin_root=PINNED_PLUGIN_ROOT,
+    )
+    assert res["ok"], res["stderr"]
+    merge_prompt = res["out"]["promptByLabel"]["glossary:merge"]
+    assert "--plugin-root '" + PINNED_PLUGIN_ROOT + "'" in merge_prompt, (
+        "mergeBatchesPrompt()'s --merge-batches command must carry "
+        "--plugin-root when PLUGIN_ROOT is set: " + merge_prompt
+    )
+
+
+def test_check_batch_and_verify_merged_commands_never_carry_plugin_root(tmp_path):
+    """canon_validate.py's main() forwards --plugin-root only to
+    run_merge_batches (`elif args.merge_batches is not None:`) -- never to
+    run_check_batch (`elif args.check_batch is not None:`) or
+    run_verify_merged (`elif args.verify_merged:`). Adding it to either site
+    would be silent decoration in the CLI and would grow the population of
+    the separate open #608 -- this pins the asymmetry so a future
+    "consistency" edit that widens it is a RED, not a quiet drift.
+    checkBatchCmd() is issued character-identically at all four call sites
+    (precheck, dispatch self-check, wait chunk poll, wait re-check); this
+    asserts on the precheck site, which the ordinary happy path already
+    reaches."""
+    res = run(
+        tmp_path=tmp_path,
+        batches=[make_batch(0, ["Jean"])],
+        plugin_root=PINNED_PLUGIN_ROOT,
+    )
+    assert res["ok"], res["stderr"]
+    precheck_prompt = res["out"]["promptByLabel"]["glossary:precheck:0"]
+    verify_prompt = res["out"]["promptByLabel"]["glossary:verify"]
+    assert "--plugin-root" not in precheck_prompt, (
+        "checkBatchCmd()'s --check-batch command must never carry "
+        "--plugin-root -- canon_validate.py's run_check_batch does not "
+        "accept it: " + precheck_prompt
+    )
+    assert "--plugin-root" not in verify_prompt, (
+        "glossaryVerifyPrompt()'s --verify-merged command must never carry "
+        "--plugin-root -- canon_validate.py's run_verify_merged does not "
+        "accept it: " + verify_prompt
+    )
+
+
+def test_plugin_root_guard_throws_on_unsafe_value(tmp_path):
+    """The PLUGIN_ROOT_UNSAFE_RE guard runs at module top level, well before
+    this template ever calls agent()/pipeline() -- so a value containing a
+    single quote must abort the whole run synchronously, the same
+    fail-closed shape as mass-translate-wf.template.js's own PLUGIN_ROOT
+    guard (and the same reason run_guard_harness-style tests in
+    tests/seg_safety_source_and_workflow.test.py never need a real
+    agent()/pipeline() mock to prove a top-level guard throws)."""
+    res = run(
+        tmp_path=tmp_path,
+        batches=[make_batch(0, ["Jean"])],
+        plugin_root="/fake/plugin'; touch pwned; echo '",
+    )
+    assert not res["ok"]
+    assert "Unsafe plugin_root value" in res["stderr"], res["stderr"]
+
+
+def test_plugin_root_empty_value_throws_at_instantiation(tmp_path):
+    """#412 follow-up decision: unlike mass-translate-wf.template.js's own
+    {{PLUGIN_ROOT}} (a pre-#412 token with real legacy callers relying on a
+    flagless-default empty-string opt-out), this template's {{PLUGIN_ROOT}}
+    is brand new -- so an empty value throws at instantiation instead of
+    silently building a --merge-batches command with no --plugin-root that
+    would only fail later, mid-pass, after codex spend on this batch is
+    already paid. Same top-level-guard shape as the unsafe-value throw
+    above -- runs before agent()/pipeline() are ever called."""
+    res = run(
+        tmp_path=tmp_path,
+        batches=[make_batch(0, ["Jean"])],
+        plugin_root="",
+    )
+    assert not res["ok"]
+    assert "plugin_root is required" in res["stderr"], res["stderr"]
 
 
 if __name__ == "__main__":

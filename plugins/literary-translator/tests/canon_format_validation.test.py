@@ -139,6 +139,19 @@ def write_batch(root, batch, name="batch.json"):
     return batch_path
 
 
+# #412: canon_validate.py's four `generation_hashes`-STAMPING modes (--init,
+# --restamp-derivation, --merge-batches, legacy bare --batch) now REFUSE to
+# run unless told which sibling `cache_key.py` to trust -- `--plugin-root
+# PATH` or the explicit `--allow-durable-sibling` escape hatch. This suite
+# stages a self-anchored durable_root with no plugin install tree at all,
+# which IS the case the escape hatch exists for, so both runners below append
+# it. Harmless on the NON-stamping modes (--check-batch, --verify-merged,
+# validate-only), which resolve no sibling and ignore the flag -- pinned by
+# canon_validate_plugin_root.test.py's own non-stamping battery, so appending
+# it here cannot mask a behaviour change.
+_DURABLE_SIBLING_ARGS = ["--allow-durable-sibling"]
+
+
 def run_canon_validate(root, research_mode, batch_path=None, canon_path=None, timeout=30):
     cmd = [
         sys.executable,
@@ -150,6 +163,7 @@ def run_canon_validate(root, research_mode, batch_path=None, canon_path=None, ti
         cmd += ["--batch", str(batch_path)]
     if canon_path is not None:
         cmd += ["--canon-path", str(canon_path)]
+    cmd += _DURABLE_SIBLING_ARGS
     return subprocess.run(
         cmd, capture_output=True, text=True, timeout=timeout, cwd=str(root)
     )
@@ -161,7 +175,11 @@ def run_canon_validate_cli(root, args, timeout=30):
     --research-mode [--batch]/[--canon-path] shape; #138's TP-1 lifecycle
     test (below) also needs --check-batch, --merge-batches, and
     --verify-merged, which that helper does not build."""
-    cmd = [sys.executable, str(root / "scripts" / "canon_validate.py")] + list(args)
+    cmd = (
+        [sys.executable, str(root / "scripts" / "canon_validate.py")]
+        + list(args)
+        + _DURABLE_SIBLING_ARGS
+    )
     return subprocess.run(
         cmd, capture_output=True, text=True, timeout=timeout, cwd=str(root)
     )
