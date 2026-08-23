@@ -100,9 +100,15 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _workflow_instantiation import (  # noqa: E402
+    instantiate_mass_translate as _shared_instantiate_mass_translate,
+)
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "templates"
@@ -132,35 +138,23 @@ def instantiate_mass_translate(
     target_lang: str = FIXTURE_TARGET_LANG,
     verse_policy_instruction_block: str = FIXTURE_VERSE_POLICY_INSTRUCTION_BLOCK,
 ) -> str:
-    """Re-implements the exact one-time substitution contract the template's
-    own header comment documents (same contract every sibling test file's
-    own `instantiate_mass_translate` implements -- duplicated here, not
-    imported, so this file stays self-contained like every other file in
-    this directory). Deliberately does NOT substitute {{RUN_ID}} -- this
-    file's mock never inspects prompt text (only opts.label), so RUN_ID's
-    exact value is irrelevant here and is left unresolved on purpose."""
-    text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("{{DURABLE_ROOT}}", durable_root)
-    text = text.replace("{{RUN_ID}}", "fixture-run-id")
-    text = text.replace("{{SOURCE_LANG}}", source_lang)
-    text = text.replace("{{TARGET_LANG}}", target_lang)
-    text = text.replace("{{MAX_FIX_ROUNDS}}", str(int(max_fix_rounds)))
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    text = text.replace("{{MAX_CODEX_JOBS_PER_BATCH}}", str(int(max_codex_jobs_per_batch)))
-    escaped_verse_block = json.dumps(verse_policy_instruction_block)[1:-1]
-    text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", escaped_verse_block)
-    text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps("/fixture/codex/codex-companion.mjs"))
-    text = text.replace("{{EFFORT}}", "high")
-    text = text.replace("{{MODEL}}", "")
-    # #412 -- PLUGIN_ROOT: empty USED TO mean "not opted into the redirect". This file
-    # exercises the codex-jobs preflight cap, not the opt-in dispatch shape.
-    # #607 -- a non-empty plugin root is now REQUIRED: the fix-scope audit
-    # runs only from the plugin install tree, so the W5 template refuses to
-    # start without one. This fixture used to substitute the empty value as
-    # the documented "redirect opt-out"; that opt-out no longer exists.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps("/fixture/plugin/literary-translator"))
-    assert "{{" not in text, "fixture instantiation left an unresolved token -- fix the fixture, not the assertion below"
-    return text
+    """Thin wrapper over _workflow_instantiation.py's instantiate_mass_translate
+    (#413) -- the token map itself now lives there. max_codex_jobs_per_batch
+    stays a REQUIRED keyword here (this file is the gate's own test).
+    RUN_ID/CODEX_COMPANION_PATH_JSON stay overridden to fixed literals: this
+    file's mock never inspects prompt text (only opts.label), so their exact
+    values only need to resolve, never asserted against."""
+    return _shared_instantiate_mass_translate(
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=batch_agent_cap,
+        max_codex_jobs_per_batch=max_codex_jobs_per_batch,
+        durable_root=durable_root,
+        source_lang=source_lang,
+        target_lang=target_lang,
+        verse_policy_instruction_block=verse_policy_instruction_block,
+        run_id="fixture-run-id",
+        codex_companion_path_json="/fixture/codex/codex-companion.mjs",
+    )
 
 
 def _wrap_for_execution(js_source: str) -> str:

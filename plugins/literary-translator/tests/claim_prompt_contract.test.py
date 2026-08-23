@@ -85,6 +85,9 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _workflow_instantiation import instantiate_mass_translate  # noqa: E402
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 SCRIPTS_DIR = ASSETS_DIR / "scripts"
@@ -1289,43 +1292,29 @@ _needs_node = pytest.mark.skipif(
     "dependency for this plugin otherwise)",
 )
 
-FIXTURE_DURABLE_ROOT = "/fixture/project/durable_root"
 FIXTURE_RUN_ID = "20260808T000000Z"
 FIXTURE_SOURCE_LANG = "he"
 FIXTURE_TARGET_LANG = "en"
-FIXTURE_VERSE_POLICY = "Render every verse literally, line by line."
 FIXTURE_COMPANION_PATH = "/opt/codex/1.0.10/codex-companion.mjs"
-FIXTURE_EFFORT = "high"
-FIXTURE_MODEL = ""
-# #607 -- was "" ("not opted into the redirect"). The W5 template now REFUSES
-# to start without a plugin root, because the fix-scope audit runs only from
-# the plugin install tree, so every fixture that executes the workflow needs a
-# real value. Tests that specifically exercise the opt-out/absent-redirect
-# shape pass plugin_root="" explicitly at their own call site.
-FIXTURE_PLUGIN_ROOT = "/fixture/plugin/literary-translator"
 
 
 def instantiate(*, max_fix_rounds: int, batch_agent_cap: int = 100000,
                  max_codex_jobs_per_batch: int = 100000) -> str:
-    """The exact one-time substitution the template's own header documents
-    -- duplicated, not imported, so this file stays self-contained like
-    every sibling test file (mass_translate_driver_smoke.test.py's own
-    instantiate() is the source of this pattern)."""
-    text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT)
-    text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
-    text = text.replace("{{SOURCE_LANG}}", FIXTURE_SOURCE_LANG)
-    text = text.replace("{{TARGET_LANG}}", FIXTURE_TARGET_LANG)
-    text = text.replace("{{MAX_FIX_ROUNDS}}", str(int(max_fix_rounds)))
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    text = text.replace("{{MAX_CODEX_JOBS_PER_BATCH}}", str(int(max_codex_jobs_per_batch)))
-    text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", json.dumps(FIXTURE_VERSE_POLICY)[1:-1])
-    text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH))
-    text = text.replace("{{EFFORT}}", FIXTURE_EFFORT)
-    text = text.replace("{{MODEL}}", FIXTURE_MODEL)
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(FIXTURE_PLUGIN_ROOT))
-    assert "{{" not in text, "fixture instantiation left an unresolved token"
-    return text
+    """The exact one-time substitution the template's own header documents;
+    the token map itself now lives in _workflow_instantiation.py (#413).
+    RUN_ID/SOURCE_LANG/TARGET_LANG/CODEX_COMPANION_PATH_JSON stay overridden
+    to this file's own he->en fixture values: Part 3's assertions echo
+    FIXTURE_RUN_ID on both dispatches, and the companion path differs from
+    the shared module's default."""
+    return instantiate_mass_translate(
+        run_id=FIXTURE_RUN_ID,
+        source_lang=FIXTURE_SOURCE_LANG,
+        target_lang=FIXTURE_TARGET_LANG,
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=batch_agent_cap,
+        max_codex_jobs_per_batch=max_codex_jobs_per_batch,
+        codex_companion_path_json=FIXTURE_COMPANION_PATH,
+    )
 
 
 def _wrap(js_source: str) -> str:

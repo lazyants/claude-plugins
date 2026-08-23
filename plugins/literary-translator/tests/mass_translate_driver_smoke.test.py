@@ -52,9 +52,13 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _workflow_instantiation import instantiate_mass_translate  # noqa: E402
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets" / "templates"
@@ -70,9 +74,6 @@ pytestmark = pytest.mark.skipif(
 
 FIXTURE_DURABLE_ROOT = "/fixture/project/durable_root"
 FIXTURE_RUN_ID = "20260716T000000Z"
-FIXTURE_SOURCE_LANG = "fr"
-FIXTURE_TARGET_LANG = "ru"
-FIXTURE_VERSE_POLICY = "Render every verse literally, line by line."
 FIXTURE_COMPANION_PATH = "/opt/codex/1.0.10/codex-companion.mjs"
 # #197 -- a non-default enum value (never the shipped "high" default) so a
 # template that silently dropped --effort (the exact "profile effort never
@@ -94,33 +95,27 @@ FIXTURE_PLUGIN_ROOT = "/fixture/plugin/literary-translator"
 def instantiate(*, max_fix_rounds: int, batch_agent_cap: int, max_codex_jobs_per_batch: int = 100000,
                  effort: str = FIXTURE_EFFORT, model: str = FIXTURE_MODEL,
                  plugin_root: str = FIXTURE_PLUGIN_ROOT) -> str:
-    """The exact one-time substitution the template's header documents
-    (duplicated, not imported, so this file stays self-contained like every
-    sibling). #409 stage 0 -- max_codex_jobs_per_batch defaults generously
-    (matching batch_agent_cap's own default below), same reasoning: this
-    file's smoke tests exercise the driver/convergence machinery, not either
-    preflight gate, so the new gate must never trip here."""
-    text = MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT)
-    text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
-    text = text.replace("{{SOURCE_LANG}}", FIXTURE_SOURCE_LANG)
-    text = text.replace("{{TARGET_LANG}}", FIXTURE_TARGET_LANG)
-    text = text.replace("{{MAX_FIX_ROUNDS}}", str(int(max_fix_rounds)))
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    text = text.replace("{{MAX_CODEX_JOBS_PER_BATCH}}", str(int(max_codex_jobs_per_batch)))
-    text = text.replace("{{VERSE_POLICY_INSTRUCTION_BLOCK}}", json.dumps(FIXTURE_VERSE_POLICY)[1:-1])
-    text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH))
-    text = text.replace("{{EFFORT}}", effort)
-    text = text.replace("{{MODEL}}", model)
-    # #412/#607 -- PLUGIN_ROOT: same json.dumps JS string literal contract as
-    # CODEX_COMPANION_PATH_JSON above (token sits OUTSIDE quotes in
-    # `const PLUGIN_ROOT = {{PLUGIN_ROOT}};`). Empty used to be the documented
-    # "not opted into the redirect" sentinel; since #607 it is a REFUSAL --
-    # the fix-scope audit has no trusted copy to run without a plugin root --
-    # so this fixture's default is a real path.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(plugin_root))
-    assert "{{" not in text, "fixture instantiation left an unresolved token"
-    return text
+    """The token map and its encoding now live in _workflow_instantiation.py
+    (#413). `RUN_ID` and `CODEX_COMPANION_PATH_JSON` are this file's own
+    values; `EFFORT` defaults to `FIXTURE_EFFORT` ("xhigh", never the shipped
+    "high" default) so a template that silently dropped `--effort` would be
+    caught -- an assertion below checks it. `DURABLE_ROOT`, `SOURCE_LANG`,
+    `TARGET_LANG` and `VERSE_POLICY_INSTRUCTION_BLOCK` already equal the
+    shared module's defaults and are left unset. `MODEL` and `PLUGIN_ROOT`
+    stay explicit passthroughs of this function's own parameters -- callers
+    exercising the opt-out/absent-redirect shape pass `plugin_root=""` at
+    their own call site (#412/#607), and a plain default here would mask
+    that override silently going nowhere."""
+    return instantiate_mass_translate(
+        run_id=FIXTURE_RUN_ID,
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=batch_agent_cap,
+        max_codex_jobs_per_batch=max_codex_jobs_per_batch,
+        codex_companion_path_json=FIXTURE_COMPANION_PATH,
+        effort=effort,
+        model=model,
+        plugin_root=plugin_root,
+    )
 
 
 def _wrap(js_source: str) -> str:

@@ -41,6 +41,8 @@ import sys
 import types
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+
 import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -208,21 +210,12 @@ CACHE_KEY_FIELDS = [
     "derivation_bundle_hash", "verse_map_hash", "note_map_hash", "plugin_bundle_hash",
 ]
 
-BASE_SUBST = {
-    "research_mode": "live",
-    "verse_policy": "skip",
-    "source_lang": "fr",
-    "target_lang": "en",
-    "max_fix_rounds": 3,
-    "batch_agent_cap": 5,
-    "max_codex_jobs_per_batch": 400,
-    "effort": "high",
-    # 1.16.1 (#347). Empty = fetch_citation.py's shipped default list. REQUIRED
-    # even when empty: the value is what the template actually burned in, and a
-    # digest that omitted it would let a resumed run reuse citation verdicts
-    # taken under a DIFFERENT retrieval policy.
-    "citation_content_types": "",
-}
+# #413 -- the `subst` payload resume_setup.py's SUBST_FIELDS requires. Kept in
+# tests/_resume_subst_fixture.py because this file and resume_integrity.test.py
+# carried byte-identical copies of it, comment included. That module explains
+# why it is NOT tests/_workflow_instantiation.py's token map, which is a
+# different contract on the other side of the same step.
+from _resume_subst_fixture import BASE_SUBST  # noqa: E402
 
 
 def _write_json(path: Path, obj) -> None:

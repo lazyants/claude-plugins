@@ -33,6 +33,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -46,24 +47,12 @@ assert MASS_TRANSLATE_WF_SRC.is_file(), f"template not found at {MASS_TRANSLATE_
 
 NODE_PATH = shutil.which("node")
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _workflow_instantiation import instantiate_mass_translate  # noqa: E402
+
 _JS_CUT_MARKER = "const estimatedCalls"
 _RUN_ID = "20260801T000000Z"
 _ROOT = "/fixture/durable_root"
-
-_SUBSTITUTIONS = {
-    "{{DURABLE_ROOT}}": _ROOT,
-    "{{RUN_ID}}": _RUN_ID,
-    "{{SOURCE_LANG}}": "fr",
-    "{{TARGET_LANG}}": "ru",
-    "{{MAX_FIX_ROUNDS}}": "3",
-    "{{BATCH_AGENT_CAP}}": "999",
-    "{{MAX_CODEX_JOBS_PER_BATCH}}": "999",
-    "{{VERSE_POLICY_INSTRUCTION_BLOCK}}": "Test verse policy instructions.",
-    "{{CODEX_COMPANION_PATH_JSON}}": json.dumps("/fake/codex-companion.mjs"),
-    "{{EFFORT}}": "high",
-    "{{MODEL}}": "",
-    "{{PLUGIN_ROOT}}": json.dumps(""),
-}
 
 
 def _instantiate_and_slice():
@@ -73,14 +62,25 @@ def _instantiate_and_slice():
         f"{_JS_CUT_MARKER!r} slice boundary -- update this test's harness"
     )
     head, _, _tail = raw.partition(_JS_CUT_MARKER)
-    for token, value in _SUBSTITUTIONS.items():
-        head = head.replace(token, value)
-    head = head.replace("export const meta", "const meta", 1)
-    leftover = re.search(r"\{\{[A-Z][A-Z0-9_]*\}\}", head)
-    assert leftover is None, (
-        f"an instantiation substitution token survived unresolved "
-        f"({leftover.group(0)!r}) -- update _SUBSTITUTIONS above"
+    # PLUGIN_ROOT is deliberately empty -- this harness only slices out
+    # function declarations and never reaches the #607 non-empty-plugin-root
+    # refusal.
+    head = instantiate_mass_translate(
+        source=head,
+        durable_root=_ROOT,
+        run_id=_RUN_ID,
+        source_lang="fr",
+        target_lang="ru",
+        max_fix_rounds=3,
+        batch_agent_cap=999,
+        max_codex_jobs_per_batch=999,
+        verse_policy_instruction_block="Test verse policy instructions.",
+        codex_companion_path_json="/fake/codex-companion.mjs",
+        effort="high",
+        model="",
+        plugin_root="",
     )
+    head = head.replace("export const meta", "const meta", 1)
     return head
 
 

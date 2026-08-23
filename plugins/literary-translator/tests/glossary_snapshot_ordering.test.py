@@ -79,6 +79,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,9 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 GLOSSARY_TEMPLATE = ASSETS_DIR / "templates" / "glossary-pass-wf.template.js"
 RESUME_SETUP = ASSETS_DIR / "scripts" / "resume_setup.py"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _workflow_instantiation import instantiate_glossary_pass  # noqa: E402
 
 assert GLOSSARY_TEMPLATE.is_file(), f"expected plugin template not found: {GLOSSARY_TEMPLATE}"
 assert RESUME_SETUP.is_file(), f"expected plugin script not found: {RESUME_SETUP}"
@@ -101,8 +105,6 @@ pytestmark = pytest.mark.skipif(
 
 FIXTURE_DURABLE_ROOT = "/fixture/project/durable_root"
 FIXTURE_RUN_ID = "20260726T000000Z"
-FIXTURE_SOURCE_LANG = "French"
-FIXTURE_TARGET_LANG = "Russian"
 
 RUN_DIR = f"{FIXTURE_DURABLE_ROOT}/glossary/runs/{FIXTURE_RUN_ID}"
 
@@ -216,31 +218,19 @@ def approve_cmd_for(check_cmd: str, index: int, attempt: int) -> str:
 
 
 def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000) -> str:
-    """The exact one-time substitution the template's header documents
-    (duplicated, not imported, so this file stays self-contained like every
-    sibling harness)."""
-    text = GLOSSARY_TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("{{DURABLE_ROOT}}", FIXTURE_DURABLE_ROOT)
-    text = text.replace("{{SOURCE_LANG}}", FIXTURE_SOURCE_LANG)
-    text = text.replace("{{TARGET_LANG}}", FIXTURE_TARGET_LANG)
-    text = text.replace("{{RESEARCH_MODE}}", research_mode)
-    text = text.replace("{{RUN_ID}}", FIXTURE_RUN_ID)
-    text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
-    text = text.replace("{{EFFORT}}", "high")
-    # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
-    text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
-    # #412 -- json.dumps JS string literal, token OUTSIDE quotes. Empty is NOT
-    # a valid value for the GLOSSARY template's {{PLUGIN_ROOT}}; the canonical
-    # explanation of why (and of why mass-translate-wf.template.js's own
-    # empty-string opt-out is deliberately NOT harmonised with it) lives once,
-    # on FIXTURE_GLOSSARY_PLUGIN_ROOT in workflow_template_instantiation
-    # .test.py and in the template's own header token entry -- not restated
-    # here. The real plugin skill root resolves a genuine cache_key.py, so the
-    # guard accepts it; this file's snapshot-ordering assertions inspect
-    # nothing else about it.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(str(PLUGIN_ROOT / "skills" / "literary-translator")))
-    assert "{{" not in text, "fixture instantiation left an unresolved token"
-    return text
+    """The token map and renderer now live in _workflow_instantiation.py
+    (#413); this stays a thin wrapper preserving this file's own
+    durable_root/run_id, which are spliced into RUN_DIR paths this file's
+    harnesses create and read on disk. Every other token this file cares
+    about (source/target lang, effort, citation content types, plugin root)
+    matches the shared module's own GLOSSARY_PASS_DEFAULTS, so it is left at
+    the default rather than re-stated here."""
+    return instantiate_glossary_pass(
+        durable_root=FIXTURE_DURABLE_ROOT,
+        run_id=FIXTURE_RUN_ID,
+        research_mode=research_mode,
+        batch_agent_cap=batch_agent_cap,
+    )
 
 
 def _wrap(js_source: str) -> str:
