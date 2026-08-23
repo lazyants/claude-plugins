@@ -21,6 +21,16 @@ whose own prose tag happens to be named e.g. `TITLE`). The DECLARED set is
 the only non-heuristic source of truth for the HARD gate; the broad
 allowlist survives only as a non-gating WARN (below).
 
+This gate's union invariant is heading KIND -- a declared heading surfaces
+as SOME non-empty node, full stop -- never heading LEVEL. A node's `level`
+was derived by `assemble.py` from `manifest.heading_levels`, so checking it
+here would only re-read the very map it came from and attest nothing
+independently of that derivation. The heading-LEVEL disclosure -- which
+cited tiers were declared vs. defaulted, and the outline they imply -- lives
+upstream at W2, in `validate_extraction.py`'s `heading_level_outline` NOTE
+and advisory (#233). It is report-only there too: a flattened or
+mis-nested outline still exits 0.
+
 ## The invariant
 
 Let `H = manifest.heading_types (or []) | {"HEAD"}`. **Source markers** are a

@@ -796,6 +796,7 @@ _TERMINAL_PUNCT = frozenset(
 _ADVISORY_SAMPLE_CAP = 8
 VISUAL_ORDER_SCAN_NAME = "visual_order_scan"
 BLOCK_SIZE_SCAN_NAME = "block_size_census"
+HEADING_LEVEL_SCAN_NAME = "heading_level_outline"
 
 # The label main()'s last-resort boundary prints when reporting itself failed.
 # Deliberately NOT one scan's name: that boundary now sits above several scans,
@@ -1247,6 +1248,154 @@ def _escape_block_id(block_id: str) -> str:
     return f'"{body}{marker}"'
 
 
+# Heading-level outline disclosure (issue #233). ``heading_levels`` is optional
+# and per-tier: a book can cite three heading-shaped block types and declare a
+# level for none, one, or all of them, and nothing in a schema-valid manifest
+# distinguishes "the operator meant level 2 for this tier" from "the operator
+# forgot to declare this tier" -- assemble.py:1949 resolves an undeclared tier
+# to level 2 exactly the same way it resolves a tier the operator deliberately
+# pinned there. That ambiguity is why this can only ever be a disclosure, never
+# a HARD check: there is no way to tell the two apart from the manifest alone,
+# and refusing every undeclared tier would refuse legal books that use the
+# default on purpose.
+#
+# The population is the CITED tiers, not the declared vocabulary: every block
+# type in H (``manifest.heading_types | {"HEAD"}``) that some segment's
+# ``block_ids`` actually names, not H itself. ``assemble.py:1849-1955`` builds
+# an outline node only for a block a segment cites -- a type an operator lists
+# in ``heading_types`` but this book never actually uses would inflate the
+# outline with a tier that never reaches the assembled book or the published
+# vault.
+#
+# Two tier names sharing an 80-character prefix render identically in the NOTE
+# and WARN below (``_escape_block_id`` truncates there, same as everywhere else
+# in this file) -- accepted: the NOTE is a disclosure, not an identity key, and
+# nothing downstream keys off this string.
+
+
+def _cited_heading_tiers(manifest: dict):
+    """The set U of heading-shaped block TYPES actually cited by some segment.
+
+    H = ``set(manifest.get("heading_types") or ()) | {"HEAD"}`` is the
+    vocabulary; membership in some segment's ``block_ids`` -- not H alone -- is
+    what bounds U (see the module-level comment above this function for why).
+    A block id a segment names that resolves to no ``blocks{}`` entry is
+    skipped here too: ``block_graph_integrity`` (``run_derivable_checks``) and
+    ``assemble.py`` both own that error, and this advisory must not raise on a
+    shape a mandatory check already rejects -- every access below is
+    ``.get()``, mirroring ``_segment_member_block_sizes``'s own reasoning."""
+    blocks = manifest.get("blocks")
+    segments = manifest.get("segments")
+    if not isinstance(blocks, dict) or not isinstance(segments, list):
+        return set()
+    declared_vocabulary = set(manifest.get("heading_types") or ()) | {"HEAD"}
+    cited = set()
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        for block_id in segment.get("block_ids") or []:
+            block = blocks.get(block_id)
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type in declared_vocabulary:
+                cited.add(block_type)
+    return cited
+
+
+def _resolved_heading_level(block_type: str, heading_levels: dict):
+    """``(level, is_declared)`` for one tier, mirroring
+    ``assemble.py:1949``'s ``heading_levels.get(raw_type, 2)`` exactly.
+
+    Precondition: the manifest is schema-valid (``main()`` exits 1 on schema
+    errors before any advisory runs), so a present value is an ``int`` 1..6.
+    The type/range check below is therefore DEFENSIVE ONLY and unreachable
+    through ``main()`` -- it must not be described as load-bearing, and it
+    exists so a caller importing this module directly (bypassing ``main()``'s
+    schema gate) still gets ``default`` instead of a malformed level rendered
+    as declared. ``bool`` is excluded explicitly because it is a subclass of
+    ``int`` in Python (``isinstance(True, int)`` is ``True``) and would
+    otherwise silently pass the range check."""
+    if block_type in heading_levels:
+        value = heading_levels[block_type]
+        if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 6:
+            return value, True
+    return 2, False
+
+
+def heading_level_tiers(manifest: dict) -> list:
+    """``(type, resolved_level, is_declared)`` for every tier in U, sorted by
+    ``(resolved_level, type)``."""
+    heading_levels = manifest.get("heading_levels")
+    if not isinstance(heading_levels, dict):
+        heading_levels = {}
+    tiers = [
+        (block_type,) + _resolved_heading_level(block_type, heading_levels)
+        for block_type in _cited_heading_tiers(manifest)
+    ]
+    return sorted(tiers, key=lambda tier: (tier[1], tier[0]))
+
+
+def format_heading_level_outline(manifest: dict):
+    """The NOTE payload, or ``None`` when U is empty -- a book that cites NO
+    block whose type is in H (``manifest.heading_types | {"HEAD"}``) at all,
+    i.e. no heading block of any kind. A book citing only a "HEAD" block still
+    has U = {"HEAD"}, which is NOT empty: the NOTE IS printed for it, one
+    tier, level 2, ``default`` -- only the WARN stays silent there (a single
+    tier has no nesting order to get wrong; see ``_heading_level_advisory``).
+
+    Building this may fail exactly as ``format_block_size_census``'s docstring
+    describes for the census: ``main()`` treats a raise here as a finding, not
+    a crash (see the call site)."""
+    tiers = heading_level_tiers(manifest)
+    if not tiers:
+        return None
+    rendered = ", ".join(
+        f"{_escape_block_id(block_type)}={level} "
+        f"({'declared' if is_declared else 'default'})"
+        for block_type, level, is_declared in tiers
+    )
+    return f"heading_level_outline: {len(tiers)} heading tier(s) cited: {rendered}"
+
+
+def _heading_level_advisory(manifest: dict):
+    """The #233 advisory, as ``[(name, detail)]`` -- empty when nothing fired.
+
+    Fires iff U has at least two tiers AND at least one of them defaulted: a
+    single-tier book has no nesting order to get wrong, and a book where every
+    tier was explicitly declared -- including two tiers the operator
+    deliberately pinned to the SAME level -- is a decision, not a gap."""
+    tiers = heading_level_tiers(manifest)
+    if len(tiers) < 2:
+        return []
+    defaulted = [tier for tier in tiers if not tier[2]]
+    if not defaulted:
+        return []
+    declared = [tier for tier in tiers if tier[2]]
+    n, d = len(tiers), len(defaulted)
+    defaulted_names = ", ".join(_escape_block_id(t[0]) for t in defaulted)
+    declared_sentence = (
+        f" Declared: {', '.join(f'{_escape_block_id(t[0])}={t[1]}' for t in declared)}."
+        if declared else ""
+    )
+    has_verb = "has" if d == 1 else "have"
+    render_clause = "it renders" if d == 1 else "they render"
+    detail = (
+        f"this book cites {n} heading tier(s) and {d} of them {has_verb} no "
+        f"level in manifest.heading_levels, so {render_clause} at level 2 by "
+        f"default: {defaulted_names}.{declared_sentence} A markdown outline "
+        f"whose tiers collapse into one level, or nest in the wrong order, "
+        f"reaches the assembled book and the published vault with every gate "
+        f"green -- nothing downstream re-derives a heading's level, and "
+        f"validate_assembled.py proves heading KIND completeness only. This "
+        f"is a SCREEN, not a verdict: an outline you meant to be flat looks "
+        f"identical here. Declare a level for every tier this book renders (a "
+        f"level of 2 states the default in writing), or leave it and carry "
+        f"on. Nothing here changes whether this gate passes."
+    )
+    return [(HEADING_LEVEL_SCAN_NAME, detail)]
+
+
 def run_advisory_scans(manifest: dict):
     """Report-only scans, as ``[(name, detail)]``. Never affects the exit code.
 
@@ -1261,6 +1410,7 @@ def run_advisory_scans(manifest: dict):
     for name, scan in (
         (VISUAL_ORDER_SCAN_NAME, _visual_order_advisory),
         (BLOCK_SIZE_SCAN_NAME, _block_size_advisory),
+        (HEADING_LEVEL_SCAN_NAME, _heading_level_advisory),
     ):
         try:
             results.extend(scan(manifest))
@@ -1344,7 +1494,7 @@ def main(argv=None):
             print(f"  - {err}", file=sys.stderr)
         sys.exit(1)
 
-    # --- (a2) report-only advisory scans (#489, #504) -------------------------
+    # --- (a2) report-only advisory scans (#489, #504, #233) -------------------
     # Runs BEFORE re-derivation on purpose. run_derivable_checks() has its own
     # structural-exception boundary that exits 1 immediately, and a SCHEMA-VALID
     # manifest can legitimately reach it (the count fields it indexes are not
@@ -1352,13 +1502,16 @@ def main(argv=None):
     # silently skipped on exactly the malformed inputs most likely to be
     # mangled.
     #
-    # FOUR steps, each inside its OWN boundary: scan, build the census, print
-    # the advisories, print the census. EMITTING is inside a boundary at all
+    # Every step below sits inside its OWN boundary: scan, build each NOTE
+    # payload, print the advisories, print each NOTE. Deliberately NOT counted
+    # here -- the count grew once already (#233 added a second NOTE) and a
+    # stale number inside the reasoning is worse than no number.
+    # EMITTING is inside a boundary at all
     # because it was once outside one, which quietly broke the promise that an
     # advisory can never change the exit decision in EITHER direction: stderr on
     # a closed pipe or a full filesystem raises OSError, and an ADVISORY would
     # then have refused an otherwise-valid ingestion -- the exact thing this
-    # feature is documented as unable to do. The four are SEPARATE because one
+    # feature is documented as unable to do. The steps are SEPARATE because one
     # shared boundary let a failure in the WARN loop skip the census entirely,
     # reproduced at exit 0 with `(1 ADVISORY)` and no NOTE on a run whose stdout
     # was healthy; a census that goes missing exactly when reporting is degraded
@@ -1366,7 +1519,7 @@ def main(argv=None):
     # what keeps the two census failures distinguishable: one that could not be
     # COMPUTED is a finding and becomes an advisory, while one that could not be
     # PRINTED is a reporting failure and stays silent rather than inventing one.
-    # None of the four may reach the exit decision: a scan that raises degrades
+    # None of them may reach the exit decision: a scan that raises degrades
     # to a named advisory and the mandatory checks proceed untouched, because
     # reporting is best-effort by design and the gate's verdict is not. Note
     # only Exception is caught, deliberately: KeyboardInterrupt and SystemExit
@@ -1377,11 +1530,15 @@ def main(argv=None):
     except Exception as exc:  # noqa: BLE001 -- an advisory may never gate a run
         advisories = [(ADVISORY_UNAVAILABLE_NAME, _advisories_unavailable_detail(exc))]
     census = None
+    heading_level_outline = None
     # Evaluated BEFORE the try, not inside its handler: the handler is the one
     # place a raise would escape every boundary in this block and crash a gate
     # whose whole premise is that reporting cannot reach the exit decision.
     block_size_already_reported = any(
         name == BLOCK_SIZE_SCAN_NAME for name, _ in advisories
+    )
+    heading_level_already_reported = any(
+        name == HEADING_LEVEL_SCAN_NAME for name, _ in advisories
     )
     try:
         census = format_block_size_census(manifest)
@@ -1391,6 +1548,14 @@ def main(argv=None):
         # twice in the status suffix, reading as two independent problems.
         if not block_size_already_reported:
             advisories.append((BLOCK_SIZE_SCAN_NAME, _scan_unavailable_detail(exc)))
+    try:
+        heading_level_outline = format_heading_level_outline(manifest)
+    except Exception as exc:  # noqa: BLE001 -- the outline may never gate a run
+        # Same de-duplication as the census above: _heading_level_advisory
+        # shares heading_level_tiers() with this formatter, so one broken
+        # helper must not be reported as two independent problems.
+        if not heading_level_already_reported:
+            advisories.append((HEADING_LEVEL_SCAN_NAME, _scan_unavailable_detail(exc)))
     try:
         for name, detail in advisories:
             print(f"WARN {name}: {detail}", file=sys.stderr)
@@ -1403,6 +1568,13 @@ def main(argv=None):
     if census is not None:
         try:
             print(f"NOTE {census}")
+        except Exception:  # noqa: BLE001 -- reporting may fail; it may not gate
+            pass
+    # A NOTE too, and printed immediately after the census for the same
+    # reason -- see format_heading_level_outline() and issue #233.
+    if heading_level_outline is not None:
+        try:
+            print(f"NOTE {heading_level_outline}")
         except Exception:  # noqa: BLE001 -- reporting may fail; it may not gate
             pass
 

@@ -267,6 +267,14 @@ validation gate — a raw `#` run must never reach 0 (which would silently
 demote a heading to bare prose with a stray leading space) or exceed 6
 (not a valid ATX heading).
 
+Assembly's own default-to-2 behavior is unchanged by #233: what's new
+is disclosure, not resolution. `validate_extraction.py` now prints the
+resolved outline at W2 — a `NOTE heading_level_outline:` naming every
+cited tier's resolved level and whether it came from `declared` or
+`default`, plus a `WARN` when a book citing two or more tiers took any
+of them at the default — and that scan is report-only, touching neither
+`derivable_ok` nor `region_ok`. See `SKILL.md`'s W2 Extract.
+
 #### Sentinel resolution — fail closed
 
 Two sentinel families appear byte-for-byte inside `draft.blocks[id]` strings:
