@@ -2443,18 +2443,27 @@ def run_correct(
             and _same_json_value(new_entry.get("source"), old_entry.get("source"))
         )
         if new_entry.get("basis") == "established" and not claim_unchanged:
-            # SCOPED TO THE DELTA, and the citation check above deliberately is
-            # NOT -- the asymmetry is measured, not aesthetic.
+            # SCOPED TO THE CLAIM, and the citation check above deliberately
+            # is not scoped at all -- the asymmetry is measured, not aesthetic.
             #
             # The backstop's own rule is "offline forbids basis:established for
-            # every NEW entry". A correction that leaves an already-established
-            # entry established introduces no new claim about the world, so
-            # firing on the absolute value would refuse an ordinary offline
-            # typo-fix to `canonical_target_form`. That is not a corner: 488 of
-            # the 999 frozen entries across the four live books are
-            # basis:"established", so an unscoped call would have put half the
-            # corpus out of reach of the mode built to repair it. Promotion INTO
-            # established is a new claim and still fires.
+            # every NEW entry", and the claim_unchanged test above is what
+            # decides "new" here. It compares the (canonical_target_form,
+            # source) pair rather than the `basis` label, because that pair IS
+            # the assertion an established row makes: "this rendering is the
+            # conventional one, and here is the citation". Restating either half
+            # offline is a new claim about the world whether or not the label
+            # moved -- an earlier revision keyed on the label alone and let a
+            # correction replace BOTH halves offline while keeping the exemption.
+            #
+            # What the scoping still admits, and why it exists: correcting
+            # note/confidence/category on an established row restates no claim
+            # and stays legal offline. That is not a corner -- 488 of the 999
+            # frozen entries across the four live books are basis:"established",
+            # so an unscoped call would put half the corpus out of reach of the
+            # mode built to repair it. Do NOT widen this back to the label to
+            # make an offline canonical_target_form edit legal again; that edit
+            # is a restated claim, and its answer is --research-mode live.
             #
             # The citation check stays absolute because the same measurement
             # runs the other way: 0 of 497 sourced entries in that corpus carry
@@ -2471,9 +2480,11 @@ def run_correct(
                 # admit -- following it is impossible. Re-raise naming the two
                 # moves that DO exist here.
                 raise CanonValidationError(
-                    f"{e} (correcting an entry INTO basis:\"established\" is a "
-                    f"new claim about the world, so it needs --research-mode "
-                    f"live; or correct it to an offline-legal basis instead. "
+                    f"{e} (this correction STATES an established claim -- a "
+                    f"canonical_target_form and its source -- that the frozen "
+                    f"row did not already carry, which is a new claim about "
+                    f"the world, so it needs --research-mode live; or correct "
+                    f"it to an offline-legal basis instead. "
                     f"disposition:\"review_queue\" is a BATCH disposition and "
                     f"is not available to --correct.)",
                     offending=e.offending,
