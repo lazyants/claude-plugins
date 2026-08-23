@@ -630,6 +630,126 @@ for (const s of SEGS) {
 // ledger-skip already makes recoverable (re-reviewed next run), never a
 // terminal escalation.
 const AUTHENTIC_LOC_RE = /^[^\s:]+:.+$/;
+// ---------------------------------------------------------------------------
+// #400 -- what the call ACTUALLY returned, in one short line.
+//
+// The runtime does not hand this script the underlying error text: agent()
+// returns null when the subagent dies on a terminal API error after retries,
+// and the message ("You've hit your session limit ...") lives only in the run
+// journal. So the reason strings below name a STAGE and could never name the
+// CAUSE. What IS observable is the reply, and that is enough for the
+// conclusion an operator needs: twenty-nine segments whose calls all returned
+// nothing is an outage to wait out, twenty-nine distinct replies are not.
+//
+// Every detail is source-labelled so the batch tally at the bottom of this
+// file groups identical failures across segments instead of leaving each
+// segment its own private string.
+const DETAIL_CAP = 160;
+// U+0085 NEL is deliberately in this class: JS trim() strips U+2028/U+2029
+// but NOT U+0085, so an LF-only collapse would let a reply keep smuggling
+// line breaks into the log.
+const DETAIL_BREAKS = /[\n\r\t\v\f\u0085\u2028\u2029]+/g;
+
+// Every MODEL-AUTHORED or otherwise dynamic string that reaches a detail goes
+// through here, not just an agent's raw reply: a schema-validated field is
+// still model-authored text under no length or charset restriction, so a
+// mismatch_detail or a relayed script error copied verbatim would carry its
+// own line breaks straight into the operator log and blow the cap that this
+// file promises. The handful of fixed fallback constants below do not go
+// through it -- they are short and single-line by construction.
+function flattenDetail(text) {
+  const flat = String(text).replace(DETAIL_BREAKS, " ").trim();
+  if (flat.length <= DETAIL_CAP) return flat;
+  return flat.slice(0, DETAIL_CAP - 6) + " [...]";
+}
+
+function replyDetail(reply) {
+  if (reply === null || reply === undefined) return "agent call returned null";
+  if (typeof reply === "string") {
+    const flat = flattenDetail(reply);
+    if (flat === "") return "agent call returned an empty reply";
+    return flat;
+  }
+  return "agent call returned no usable object";
+}
+
+// A source label is added ONLY where one reason string can be produced by two
+// different failing calls and the reason therefore cannot say which one it
+// was: review/translate dispatch versus the wait that follows it, and the
+// draft probe versus the fix call. Everywhere else the detail is left
+// unlabelled on purpose, so that an outage which killed calls at several
+// different stages still forms ONE bucket in the batch tally instead of
+// fragmenting into one per stage -- the per-row reason already names the
+// stage, and fragmenting the shared signal is the failure this exists to fix.
+function sourcedDetail(source, reply) {
+  // Re-flattened so the label counts against the cap rather than being
+  // appended past it.
+  return flattenDetail(source + ": " + replyDetail(reply));
+}
+
+// One model-authored string FIELD off a schema-validated reply, flattened.
+// Returns "" when the field is absent, wrong-typed, or whitespace-only --
+// three states that mean the same thing here, that there is no message, and
+// that a caller must not report as one: the schemas accept any string, so a
+// whitespace-only error would otherwise become an empty detail and an empty
+// bucket in the batch tally.
+function relayedDetail(reply, field) {
+  if (!reply || typeof reply[field] !== "string") return "";
+  return flattenDetail(reply[field]);
+}
+
+const WRITE_FAILED_DEFAULT_DETAIL = "ledger_update.py write did not report success";
+const MERGE_FAILED_DEFAULT_DETAIL = "ledger_merge.py completeness check did not report success";
+
+// The detail for a python-script call that did not report success. The
+// asymmetry is the point, and it is written once here rather than twice at
+// the two call sites: the default constant accuses the script of failing a
+// check, which is accurate when the script ANSWERED and was rejected, and
+// false when the CALL died -- there is then no reply at all, and replyDetail
+// says so instead.
+function scriptErrorDetail(reply, rejectedDetail) {
+  const relayed = relayedDetail(reply, "error");
+  if (relayed !== "") return relayed;
+  return reply ? rejectedDetail : replyDetail(reply);
+}
+
+// #400 -- the detail a bounded wait carries when it ends in a timeout.
+//
+// The DISPATCH reply outranks the wait reply, but only when the dispatch
+// reply was falsy. Rationale, in both directions:
+//   * If the dispatcher died, its reply is the shared observation across
+//     every segment in an outage, while the waits that follow may well be
+//     healthy per-segment PENDING text -- one private string per segment and
+//     no bucket at all, which is precisely the partial-outage case this
+//     whole change exists to make legible.
+//   * A falsy dispatch reply never CAUSES the timeout on its own. The
+//     dispatch command launches the detached codex job BEFORE relaying its
+//     acknowledgement, so the launch can succeed while only the ack is lost
+//     and the wait then legitimately reports READY -- this function is
+//     reached only once the wait has already failed.
+//   * Because the launch may in fact have succeeded, the dispatch
+//     observation must not be the timeout's only evidence: the proximate
+//     wait reply is preserved alongside it as waitDetail. The batch tally
+//     reads detail and nothing else, so the shared bucket survives without
+//     throwing the closer evidence away.
+function timeoutVerdict(reason, dispatchDetail, lastWaitReply) {
+  const waitDetail = replyDetail(lastWaitReply);
+  if (typeof dispatchDetail === "string") {
+    return { status: "blocked", reason: reason, detail: dispatchDetail, waitDetail: waitDetail };
+  }
+  return { status: "blocked", reason: reason, detail: waitDetail };
+}
+
+// #133's shape verdict is a content reason, not a failed call, but it reaches
+// failed[] through the same detail channel -- a constant, so it aggregates.
+const FABRICATED_LOC_DETAIL = "review verdict finding loc was not colon-delimited";
+
+// #400 -- the probe call itself died. draftPresentAndValid() returns null in
+// exactly one place, its `if (!raw) return null`, so this constant describes
+// that state precisely without widening the probe's documented tri-state
+// contract to carry its raw reply back out.
+const PROBE_NULL_DETAIL = "draft probe: agent call returned null";
+
 function findingsAuthentic(rev) {
   if (!rev || !Array.isArray(rev.findings)) return true; // clean/empty verdict -> authentic
   return rev.findings.every((f) => f && typeof f.loc === "string" && AUTHENTIC_LOC_RE.test(f.loc));
@@ -640,7 +760,7 @@ function findingsAuthentic(rev) {
 // below (DRY: keeps those two copies of the exact same check from
 // silently drifting apart from each other over time).
 function matchedVerdict(rev) {
-  if (!findingsAuthentic(rev)) return { status: "blocked", reason: "review-fabricated-loc" };
+  if (!findingsAuthentic(rev)) return { status: "blocked", reason: "review-fabricated-loc", detail: FABRICATED_LOC_DETAIL };
   return { status: "ok", rev: rev };
 }
 
@@ -1659,7 +1779,7 @@ async function recordLedgerCall(seg, fields, label) {
   });
 
   if (!ledgerWriteSucceeded(raw)) {
-    const detail = raw && typeof raw.error === "string" ? raw.error : "ledger_update.py write did not report success";
+    const detail = scriptErrorDetail(raw, WRITE_FAILED_DEFAULT_DETAIL);
     return {
       ok: false,
       failResult: { seg: seg, converged: false, reason: "ledger-write-failed", detail: detail },
@@ -1673,7 +1793,14 @@ async function recordLedgerCall(seg, fields, label) {
       ok: false,
       failResult: {
         seg: seg, converged: false, reason: "ledger-write-mismatch",
-        detail: "fragment_path=" + raw.fragment_path + " status=" + raw.status + " but expected seg=" + seg + " status=" + fields.status,
+        // #400 -- the EXPECTATION leads and the returned fragment_path trails,
+        // because this string is now capped: fragment_path carries the
+        // operator's durable_root and can be long on its own, and with the old
+        // order a long root pushed "but expected seg=... status=..." -- the
+        // entire diagnostic -- past the cap and out of the message. Truncation
+        // now eats the tail of the path instead, which is the part a reader can
+        // most afford to lose.
+        detail: flattenDetail("expected seg=" + seg + " status=" + fields.status + " but got status=" + raw.status + " fragment_path=" + raw.fragment_path),
       },
     };
   }
@@ -1690,12 +1817,28 @@ async function recordLedgerCall(seg, fields, label) {
 // off the anchored `DISPATCHED <seg> <DISP>` return with parseDisp (disp=""
 // on any mismatch -> fail-fast disabled, safe). Returns the captured disp
 // for getVerifiedReview to thread into reviewWaitPrompt.
+// #400 -- returns the parsed DISP *and* a detail for the case where the
+// dispatcher's reply was falsy. parseDisp keeps only the nonce, so without
+// this the death of a dispatch call is indistinguishable downstream from a
+// dispatch that worked. Computed eagerly rather than passing the raw reply
+// along: only a short capped string travels.
 async function callReviewDispatch(seg, roundLabel) {
   const label = "review-dispatch:" + seg + ":r" + roundLabel;
   const raw = await agent(reviewDrivePrompt(seg, roundLabel), {
     effort: "low", phase: "ReviewFix", label: label,
   });
-  return parseDisp(raw, seg);
+  const disp = parseDisp(raw, seg);
+  return {
+    disp: disp,
+    // Keyed on parseDisp REJECTING the reply, not on the reply being falsy.
+    // A dispatcher that answers with a truthy failure sentence -- the shape
+    // an outage actually produces, e.g. "could not launch the codex job:
+    // service unavailable" -- is rejected here exactly like a dead one, and
+    // it is the SHARED string across every segment in the batch. Keying on
+    // falsiness dropped it, leaving each segment its own per-segment PENDING
+    // wait text and no bucket at all: the very failure this exists to fix.
+    dispatchDetail: disp === "" ? sourcedDetail("review dispatch", raw) : null,
+  };
 }
 
 async function callReadReview(seg, roundLabel, isRetry) {
@@ -1836,7 +1979,8 @@ async function readAndCheck(seg, roundLabel, isRetry) {
 // bottom of this file carries the generalised arithmetic and reduces to the
 // old 6 when WAIT_CALLS = 1.
 async function getVerifiedReview(seg, roundLabel) {
-  const disp = await callReviewDispatch(seg, roundLabel);
+  const dispatch = await callReviewDispatch(seg, roundLabel);
+  const disp = dispatch.disp;
 
   // #348 -- the wait is CHUNKED across WAIT_CHUNKS agent calls (the Bash tool
   // clamps any single call at BASH_CALL_CAP_SEC), then backed by ONE
@@ -1847,10 +1991,16 @@ async function getVerifiedReview(seg, roundLabel) {
   // shared (waitChunkVerdict), which is where divergence would actually hurt.
   const waitLabel = "review-wait:" + seg + ":r" + roundLabel;
   let verdict = "pending";
+  // #400 -- the LAST reply seen at this site, chunk or re-check, is what the
+  // timeout detail describes. Never the first: a wait that polled nine times
+  // and then died says something different from one that answered PENDING
+  // nine times.
+  let lastWaitReply = null;
   for (let chunk = 1; chunk <= WAIT_CHUNKS; chunk++) {
     const chunkReply = await agent(reviewWaitPrompt(seg, roundLabel, disp, chunk), {
       effort: "low", phase: "ReviewFix", label: waitLabel,
     });
+    lastWaitReply = chunkReply;
     verdict = waitChunkVerdict(chunkReply, seg);
     if (verdict !== "pending") break;
   }
@@ -1862,6 +2012,7 @@ async function getVerifiedReview(seg, roundLabel) {
       effort: "low", phase: "ReviewFix",
       label: "review-wait-recheck:" + seg + ":r" + roundLabel,
     });
+    lastWaitReply = recheck;
     verdict = waitChunkVerdict(recheck, seg);
   }
   // Every reply at this site -- chunk or re-check -- is parsed by
@@ -1875,17 +2026,21 @@ async function getVerifiedReview(seg, roundLabel) {
   // "review-timeout". A false RED here still blocks the segment for this run --
   // the fail-safe direction, but not an in-run retry.
   if (verdict !== "ready") {
-    return { status: "blocked", reason: "review-timeout" };
+    return timeoutVerdict("review-timeout", dispatch.dispatchDetail, lastWaitReply);
   }
 
   const first = await readAndCheck(seg, roundLabel, false);
   if (artifactCheckMatched(first.art)) return matchedVerdict(first.rev);
 
   const retry = await readAndCheck(seg, roundLabel, true);
-  if (!retry.rev) return { status: "blocked", reason: "review-null" };
+  if (!retry.rev) return { status: "blocked", reason: "review-null", detail: replyDetail(retry.rev) };
   if (artifactCheckMatched(retry.art)) return matchedVerdict(retry.rev);
 
-  return { status: "blocked", reason: "review-artifact-mismatch" };
+  const relayedMismatch = relayedDetail(retry.art, "mismatch_detail");
+  return {
+    status: "blocked", reason: "review-artifact-mismatch",
+    detail: relayedMismatch !== "" ? relayedMismatch : replyDetail(retry.art),
+  };
 }
 
 // One review/fix round. isFinal marks the mandatory confirming review after
@@ -1907,7 +2062,13 @@ async function runRound(seg, round, isFinal) {
     // select_segments.py's own "any non-terminal/unrecognized status ->
     // recoverable" rule (references/ledger-and-resumability.md) picks the
     // segment back up and auto-redispatches it on the next run.
-    return { terminal: true, value: { seg: seg, converged: false, reason: verified.reason, rounds: round } };
+    // #400 -- detail and waitDetail are carried only when the verdict has
+    // them, so a reason that legitimately has nothing to add (or a future one)
+    // does not start emitting an undefined field into the batch tally.
+    const value = { seg: seg, converged: false, reason: verified.reason, rounds: round };
+    if (typeof verified.detail === "string") value.detail = verified.detail;
+    if (typeof verified.waitDetail === "string") value.waitDetail = verified.waitDetail;
+    return { terminal: true, value: value };
   }
 
   const rev = verified.rev;
@@ -2073,7 +2234,20 @@ async function runRound(seg, round, isFinal) {
       // classifies recoverable and auto-redispatches next run, same as
       // facets B/C above. Reuses the "fix-call-failed" reason rather than
       // adding a new one for the probe-failed sub-case.
-      return { terminal: true, value: { seg: seg, converged: false, reason: "fix-call-failed", rounds: round } };
+      // #400 -- the detail must name the call that actually failed. This
+      // return is reached from two different states and they are not
+      // interchangeable: present === true means the FIX reply was the
+      // unusable one, present === null means the fix reply was fine and the
+      // PROBE call died. Under a correlated outage the probe is the shared
+      // failure; stamping each segment with its own DRAFT_MISSING text
+      // instead would give every segment a private string and no bucket.
+      return {
+        terminal: true,
+        value: {
+          seg: seg, converged: false, reason: "fix-call-failed", rounds: round,
+          detail: present === null ? PROBE_NULL_DETAIL : sourcedDetail("fix call", fx),
+        },
+      };
     }
     // present === false: the probe genuinely ran and confirmed the draft is
     // absent/invalid after a translate that reported READY -- a real
@@ -2100,6 +2274,8 @@ async function reviewFixLoop(stage1Result, seg) {
   // #198 -- the DISP captured by translateStage's dispatcher (or "" if its
   // return was unparseable -- safe degradation, fail-fast simply disabled).
   const disp = stage1Result && typeof stage1Result.disp === "string" ? stage1Result.disp : "";
+  const dispatchDetail = stage1Result && typeof stage1Result.dispatchDetail === "string"
+    ? stage1Result.dispatchDetail : null;
   // #348 -- the deliberate twin of getVerifiedReview's chunked wait: the same
   // WAIT_CHUNKS bounded chunks under the same existing label, then ONE
   // authoritative non-polling re-check. Kept inline here rather than factored
@@ -2115,10 +2291,13 @@ async function reviewFixLoop(stage1Result, seg) {
   // translation and re-runs a 45-minute codex job. The chunk loop addresses
   // neither by itself; the re-check below is what closes the false RED.
   let verdict = "pending";
+  // #400 -- the deliberate twin of getVerifiedReview's own capture.
+  let lastWaitReply = null;
   for (let chunk = 1; chunk <= WAIT_CHUNKS; chunk++) {
     const chunkReply = await agent(waitPrompt(seg, disp, chunk), {
       effort: "low", phase: "ReviewFix", label: "wait:" + seg,
     });
+    lastWaitReply = chunkReply;
     verdict = waitChunkVerdict(chunkReply, seg);
     if (verdict !== "pending") break;
   }
@@ -2126,6 +2305,7 @@ async function reviewFixLoop(stage1Result, seg) {
     const recheck = await agent(waitRecheckPrompt(seg), {
       effort: "low", phase: "ReviewFix", label: "wait-recheck:" + seg,
     });
+    lastWaitReply = recheck;
     verdict = waitChunkVerdict(recheck, seg);
   }
   // Every reply at this site -- chunk or re-check -- is parsed by
@@ -2141,7 +2321,10 @@ async function reviewFixLoop(stage1Result, seg) {
     // record, and select_segments.py's own "any non-terminal/unrecognized
     // status -> recoverable" rule (references/ledger-and-resumability.md)
     // picks the segment back up and auto-redispatches it on the next run.
-    return { seg: seg, converged: false, reason: "translate-timeout" };
+    const timeout = timeoutVerdict("translate-timeout", dispatchDetail, lastWaitReply);
+    const value = { seg: seg, converged: false, reason: "translate-timeout", detail: timeout.detail };
+    if (typeof timeout.waitDetail === "string") value.waitDetail = timeout.waitDetail;
+    return value;
   }
 
   for (let round = 1; round <= MAXFIX; round++) {
@@ -2188,7 +2371,14 @@ async function translateStage(seg) {
   const raw = await agent(translateDrivePrompt(seg), {
     effort: "low", phase: "Translate", label: "translate:" + seg,
   });
-  return { disp: parseDisp(raw, seg) };
+  // #400 -- see callReviewDispatch, including why this is keyed on parseDisp
+  // rejecting the reply rather than on the reply being falsy: the parsed DISP
+  // alone cannot tell reviewFixLoop that this dispatch did not take.
+  const disp = parseDisp(raw, seg);
+  return {
+    disp: disp,
+    dispatchDetail: disp === "" ? sourcedDetail("translate dispatch", raw) : null,
+  };
 }
 
 
@@ -2383,6 +2573,47 @@ for (let i = 0; i < results.length; i++) {
 }
 log("Translate/review pass done: " + converged.length + "/" + SEGS.length + " converged, " + failed.length + " need attention.");
 
+// #400 -- what the failures have in COMMON, which the per-segment reason
+// strings above structurally cannot say. A run killed by an outage reports
+// content-flavoured reasons across several classes; the shared detail behind
+// them is the only thing that tells an operator to stop and resume rather
+// than to go looking for a broken reviewer.
+//
+// Deliberate properties:
+//   * a row counts only when its detail is a STRING -- this skips both the
+//     null rows pipeline() produces for a thrown stage and the genuinely
+//     detail-less reasons (draft-missing, cap), which would otherwise share
+//     one undefined bucket and could win the tally outright;
+//   * EVERY bucket of two or more is reported, not a single winner: on a
+//     mixed run the outage can be the runner-up, and a lone headline would
+//     name a content failure as the story while a tie broke arbitrarily;
+//   * a Map, not an object literal, so a reply whose detail is literally
+//     __proto__ is counted rather than silently dropped;
+//   * ordering is count descending, then the detail string, so two buckets of
+//     equal size come out the same way on every run.
+// Buckets of one are omitted by construction -- a per-segment verbatim
+// excerpt is not a pattern -- and no cap is needed, since a bucket takes two
+// rows and at most floor(failed.length / 2) buckets can exist.
+const detailCounts = new Map();
+for (let i = 0; i < failed.length; i++) {
+  const row = failed[i];
+  if (row && typeof row.detail === "string") {
+    detailCounts.set(row.detail, (detailCounts.get(row.detail) || 0) + 1);
+  }
+}
+const failureDetailTally = Array.from(detailCounts.keys())
+  .filter((d) => detailCounts.get(d) >= 2)
+  .sort((a, b) => {
+    const byCount = detailCounts.get(b) - detailCounts.get(a);
+    if (byCount !== 0) return byCount;
+    return a < b ? -1 : (a > b ? 1 : 0);
+  })
+  .map((d) => ({ detail: d, count: detailCounts.get(d) }));
+for (let i = 0; i < failureDetailTally.length; i++) {
+  log("Repeated failure detail (" + failureDetailTally[i].count + "/" + failed.length +
+      " failed): " + failureDetailTally[i].detail);
+}
+
 // Mandatory, blocking, batch-final completeness check -- a batch is not
 // complete until this passes (see references/ledger-and-resumability.md's
 // "mergeLedgerPrompt / ledger_merge.py" section). Never written through the
@@ -2392,12 +2623,13 @@ const mergeResult = await agent(mergeLedgerPrompt(SEGS), {
 });
 
 if (!ledgerMergeSucceeded(mergeResult)) {
-  const detail = mergeResult && typeof mergeResult.error === "string" ? mergeResult.error : "ledger_merge.py completeness check did not report success";
+  const detail = scriptErrorDetail(mergeResult, MERGE_FAILED_DEFAULT_DETAIL);
   log("Ledger merge/completeness check failed: " + detail);
   return {
     converged: converged, failed: failed,
     batchComplete: false, reason: "ledger-merge-failed", detail: detail,
     fixScopeHalts: fixScopeHalts,
+    failureDetailTally: failureDetailTally,
   };
 }
 
@@ -2409,10 +2641,12 @@ if (fixScopeHalts.length > 0) {
     converged: converged, failed: failed, batchComplete: false,
     reason: "fix-scope-halt", fixScopeHalts: fixScopeHalts,
     ledgerPath: mergeResult.ledger_path, staleSegments: mergeResult.stale_segments,
+    failureDetailTally: failureDetailTally,
   };
 }
 
 return {
   converged: converged, failed: failed, batchComplete: true,
   ledgerPath: mergeResult.ledger_path, staleSegments: mergeResult.stale_segments,
+  failureDetailTally: failureDetailTally,
 };

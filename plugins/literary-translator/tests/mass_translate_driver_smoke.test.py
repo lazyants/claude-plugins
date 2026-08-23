@@ -221,12 +221,16 @@ async function pipeline(items, stage1, stage2) {
   }
   return out;
 }
-function log() {}
+const logLines = [];
+function log(line) { logLines.push(line); }
 
 (async () => {
   try {
     const result = await __workflowMain__(agent, pipeline, log, SEGS_ARGS);
-    process.stdout.write(JSON.stringify({ result: result, calls: callsLog, promptByLabel: promptByLabel, pipelineCalled: pipelineCalled }));
+    process.stdout.write(JSON.stringify({
+      result: result, calls: callsLog, promptByLabel: promptByLabel,
+      pipelineCalled: pipelineCalled, logLines: logLines,
+    }));
   } catch (err) {
     process.stderr.write("HARNESS_ERROR: " + (err && err.message || String(err)) + "\n");
     process.exit(1);
@@ -708,7 +712,14 @@ def test_translate_wait_substring_collision_reports_timeout(tmp_path, reply):
     res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"wait:seg01": reply})
     assert res["ok"], res["stderr"]
     out = res["out"]
-    assert out["result"]["failed"] == [{"seg": "seg01", "converged": False, "reason": "translate-timeout"}]
+    # #400 -- the colliding reply never reaches the recorded detail: it loses
+    # every chunk (never READY), so the chunk loop exhausts and the ONE
+    # non-polling re-check runs last, unoverridden, answering this harness's
+    # own default "PENDING seg01" -- that becomes lastWaitReply, not the
+    # collision text itself.
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "translate-timeout", "detail": "PENDING seg01"}
+    ]
     assert out["result"]["converged"] == []
     labels = [c["label"] for c in out["calls"]]
     # A substring-collision bug proceeds straight into the review/fix cycle
@@ -728,8 +739,12 @@ def test_review_wait_substring_collision_reports_review_timeout(tmp_path, reply)
     res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"review-wait:seg01:r1": reply})
     assert res["ok"], res["stderr"]
     out = res["out"]
+    # #400 -- same reasoning as the translate-site twin above: the collision
+    # text never survives to the recorded detail, since it loses every chunk
+    # and the unoverridden re-check's own default "PENDING seg01" is the
+    # last reply seen.
     assert out["result"]["failed"] == [
-        {"seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1}
+        {"seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1, "detail": "PENDING seg01"}
     ]
     assert out["result"]["converged"] == []
     labels = [c["label"] for c in out["calls"]]
@@ -787,8 +802,13 @@ def test_fix_null_return_still_triggers_probe(tmp_path):
     out = res["out"]
     labels = [c["label"] for c in out["calls"]]
     assert "draft-probe:seg01" in labels, "a falsy fix-call return must still trigger the #131 draft probe"
+    # #400 -- the probe answered present:true (this harness's default), so the
+    # detail names the FIX call that actually died, not the probe.
     assert out["result"]["failed"] == [
-        {"seg": "seg01", "converged": False, "reason": "fix-call-failed", "rounds": 1}
+        {
+            "seg": "seg01", "converged": False, "reason": "fix-call-failed", "rounds": 1,
+            "detail": "fix call: agent call returned null",
+        }
     ]
     assert out["result"]["converged"] == []
 
@@ -885,8 +905,11 @@ def test_review_wait_fail_sentinel_wins_when_not_last_line(tmp_path, fail_sentin
     )
     assert res["ok"], res["stderr"]
     out = res["out"]
+    # #400 -- every chunk repeats this same non-ready reply, so the loop
+    # exhausts and the unoverridden re-check's own default "PENDING seg01"
+    # is the last reply seen -- same reasoning as the #228 collision tests.
     assert out["result"]["failed"] == [
-        {"seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1}
+        {"seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1, "detail": "PENDING seg01"}
     ]
     assert out["result"]["converged"] == []
     labels = [c["label"] for c in out["calls"]]
@@ -902,7 +925,10 @@ def test_translate_wait_fail_sentinel_wins_when_not_last_line(tmp_path, fail_sen
     )
     assert res["ok"], res["stderr"]
     out = res["out"]
-    assert out["result"]["failed"] == [{"seg": "seg01", "converged": False, "reason": "translate-timeout"}]
+    # #400 -- same reasoning as the review-site twin above.
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "translate-timeout", "detail": "PENDING seg01"}
+    ]
     assert out["result"]["converged"] == []
     labels = [c["label"] for c in out["calls"]]
     assert "review-dispatch:seg01:r1" not in labels
@@ -928,8 +954,13 @@ def test_fix_decorated_draft_missing_still_triggers_probe(tmp_path):
     out = res["out"]
     labels = [c["label"] for c in out["calls"]]
     assert "draft-probe:seg01" in labels, "a decorated DRAFT_MISSING must still trigger the #131 draft probe"
+    # #400 -- the flattened (LF -> space) fix reply itself is the detail: the
+    # probe answered present:true, so it never displaces the fix call's own.
     assert out["result"]["failed"] == [
-        {"seg": "seg01", "converged": False, "reason": "fix-call-failed", "rounds": 1}
+        {
+            "seg": "seg01", "converged": False, "reason": "fix-call-failed", "rounds": 1,
+            "detail": "fix call: I attempted the fix but could not locate the draft. DRAFT_MISSING seg01",
+        }
     ]
     assert out["result"]["converged"] == []
 
@@ -995,6 +1026,32 @@ FIX_GLUE_TRIM_PRESERVED = [
 ]
 FIX_GLUE_BOTH = FIX_GLUE_TRIM_STRIPPED + FIX_GLUE_TRIM_PRESERVED
 
+# #400 -- the exact `detail` each glued reply folds down to through
+# replyDetail()'s DETAIL_BREAKS regex, keyed by glue_name and confirmed
+# against the REAL template's output (this file's own run() harness), not
+# hand-simulated. DETAIL_BREAKS collapses a CONTIGUOUS run of break
+# characters (LF, U+2028, U+0085 among them) into exactly one ascii space; a
+# glue that is itself a break character folds together with the LF in front
+# of it in the "alone on its line" shape, while every other glue in this
+# file's set is not a break character and rides through verbatim. "fix
+# call: " is sourcedDetail()'s own label prefix.
+GLUED_TO_PROSE_DETAIL = {
+    "space": "fix call: " + FIX_PROSE + " " + DRAFT_MISSING_SEG01,
+    "nbsp_u00a0": "fix call: " + FIX_PROSE + chr(0xA0) + DRAFT_MISSING_SEG01,
+    "lsep_u2028": "fix call: " + FIX_PROSE + " " + DRAFT_MISSING_SEG01,
+    "nel_u0085": "fix call: " + FIX_PROSE + " " + DRAFT_MISSING_SEG01,
+    "zwsp_u200b": "fix call: " + FIX_PROSE + chr(0x200B) + DRAFT_MISSING_SEG01,
+    "letter_x": "fix call: " + FIX_PROSE + "x" + DRAFT_MISSING_SEG01,
+}
+ALONE_ON_LINE_DETAIL = {
+    "space": "fix call: " + FIX_PROSE + "  " + DRAFT_MISSING_SEG01,
+    "nbsp_u00a0": "fix call: " + FIX_PROSE + " " + chr(0xA0) + DRAFT_MISSING_SEG01,
+    "lsep_u2028": "fix call: " + FIX_PROSE + " " + DRAFT_MISSING_SEG01,
+    "nel_u0085": "fix call: " + FIX_PROSE + " " + DRAFT_MISSING_SEG01,
+    "zwsp_u200b": "fix call: " + FIX_PROSE + " " + chr(0x200B) + DRAFT_MISSING_SEG01,
+    "letter_x": "fix call: " + FIX_PROSE + " x" + DRAFT_MISSING_SEG01,
+}
+
 
 def _prose_shares_the_sentinels_line(glue: str) -> str:
     """prose + GLUE + sentinel -- the everyday shape. trim() only reaches a
@@ -1026,7 +1083,7 @@ def _run_with_fix_reply(tmp_path, reply) -> dict:
     return res["out"]
 
 
-def _assert_report_reached_the_draft_probe(out: dict, shape_desc: str) -> None:
+def _assert_report_reached_the_draft_probe(out: dict, shape_desc: str, expected_detail: str) -> None:
     labels = [c["label"] for c in out["calls"]]
     assert "fix:seg01:r1" in labels, (
         f"the run never reached round 1's fix call, so this case says nothing "
@@ -1044,8 +1101,13 @@ def _assert_report_reached_the_draft_probe(out: dict, shape_desc: str) -> None:
         f"answers clean, and the batch banks a draft that was never there. "
         f"Result: {out['result']}"
     )
+    # #400 -- the probe answers present:true (this harness's default), so the
+    # detail must name the FIX reply itself, flattened by replyDetail().
     assert out["result"]["failed"] == [
-        {"seg": "seg01", "converged": False, "reason": "fix-call-failed", "rounds": 1}
+        {
+            "seg": "seg01", "converged": False, "reason": "fix-call-failed", "rounds": 1,
+            "detail": expected_detail,
+        }
     ], (
         f"expected the transient fix-call-failed end for round 1 (this harness's "
         f"probe answers present:true, so a recognised report routes there and "
@@ -1069,7 +1131,8 @@ def test_fix_draft_missing_glued_to_prose_still_reaches_the_probe(tmp_path, glue
     plugin stays green under it."""
     out = _run_with_fix_reply(tmp_path, _prose_shares_the_sentinels_line(glue))
     _assert_report_reached_the_draft_probe(
-        out, f"prose on the sentinel's own line, glued by {glue_name}"
+        out, f"prose on the sentinel's own line, glued by {glue_name}",
+        GLUED_TO_PROSE_DETAIL[glue_name],
     )
 
 
@@ -1084,7 +1147,8 @@ def test_fix_draft_missing_alone_behind_unstrippable_glue_still_reaches_the_prob
     not strip sits in front of it, so the trimmed line still equals nothing."""
     out = _run_with_fix_reply(tmp_path, _sentinel_alone_on_its_line(glue))
     _assert_report_reached_the_draft_probe(
-        out, f"the sentinel alone on its line behind {glue_name}, which trim() does not strip"
+        out, f"the sentinel alone on its line behind {glue_name}, which trim() does not strip",
+        ALONE_ON_LINE_DETAIL[glue_name],
     )
 
 
@@ -1109,6 +1173,7 @@ def test_fix_draft_missing_alone_behind_trimmable_glue_reaches_the_probe_unaided
         out,
         f"the sentinel alone on its line behind {glue_name} -- which trim() DOES "
         f"strip, so this row must hold with no containment involved at all",
+        ALONE_ON_LINE_DETAIL[glue_name],
     )
 
 
@@ -1126,8 +1191,11 @@ def test_review_wait_non_terminal_quoted_ready_still_times_out(tmp_path):
     )
     assert res["ok"], res["stderr"]
     out = res["out"]
+    # #400 -- QUOTED_SUCCESS_DISAVOWED never reaches READY on any chunk, so the
+    # loop exhausts and the unoverridden re-check's own default "PENDING
+    # seg01" is the last reply seen -- same reasoning as the collision tests.
     assert out["result"]["failed"] == [
-        {"seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1}
+        {"seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1, "detail": "PENDING seg01"}
     ]
     assert out["result"]["converged"] == []
 
@@ -1140,7 +1208,9 @@ def test_translate_wait_non_terminal_quoted_ready_still_times_out(tmp_path):
     )
     assert res["ok"], res["stderr"]
     out = res["out"]
-    assert out["result"]["failed"] == [{"seg": "seg01", "converged": False, "reason": "translate-timeout"}]
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "translate-timeout", "detail": "PENDING seg01"}
+    ]
     assert out["result"]["converged"] == []
 
 
@@ -1568,27 +1638,812 @@ def test_artifact_check_result_trust_rests_on_shape_alone_not_independent_corrob
 
 
 @pytest.mark.parametrize(
-    "art",
+    "art,expected_detail",
     [
-        pytest.param({"match": True, "mismatch_detail": "expected sha1 a.. got b.."}, id="real-mismatch-detail"),
-        pytest.param({"match": True, "mismatch_detail": None}, id="wrong-typed-mismatch-detail"),
-        pytest.param({"match": False, "mismatch_detail": "artifact differs"}, id="honest-mismatch"),
-        pytest.param({"match": True, "verified": True}, id="undeclared-key"),
+        pytest.param(
+            {"match": True, "mismatch_detail": "expected sha1 a.. got b.."},
+            "expected sha1 a.. got b..", id="real-mismatch-detail",
+        ),
+        pytest.param(
+            {"match": True, "mismatch_detail": None},
+            "agent call returned no usable object", id="wrong-typed-mismatch-detail",
+        ),
+        pytest.param(
+            {"match": False, "mismatch_detail": "artifact differs"},
+            "artifact differs", id="honest-mismatch",
+        ),
+        pytest.param(
+            {"match": True, "verified": True},
+            "agent call returned no usable object", id="undeclared-key",
+        ),
     ],
 )
-def test_artifact_check_still_rejects(tmp_path, art):
+def test_artifact_check_still_rejects(tmp_path, art, expected_detail):
     """The anti-false-green half at the third site. A real mismatch_detail is
     still fatal even next to match:true; an unreadable (wrong-typed) one
     fails closed; an honest match:false is unchanged; and a key
     REVIEW_ARTIFACT_SCHEMA never declared is now rejected too -- the guard
-    gained the allowed-key check its two ledger siblings always had."""
+    gained the allowed-key check its two ledger siblings always had.
+
+    #400 -- the retry's own art object is where the detail comes from
+    (getVerifiedReview never trusts the first attempt's evidence once a
+    retry runs): a real STRING mismatch_detail is relayed verbatim even next
+    to match:true, while a wrong-typed or absent one falls through to
+    replyDetail() on the whole art object, which is truthy and not a string,
+    hence "agent call returned no usable object" for both the wrong-typed
+    and undeclared-key cases."""
     res = run(tmp_path=tmp_path, segs=["seg01"], overrides=_artifact_overrides(art))
     assert res["ok"], res["stderr"]
     out = res["out"]
     assert out["result"]["converged"] == []
     assert out["result"]["failed"] == [
-        {"seg": "seg01", "converged": False, "reason": "review-artifact-mismatch", "rounds": 1}
+        {
+            "seg": "seg01", "converged": False, "reason": "review-artifact-mismatch", "rounds": 1,
+            "detail": expected_detail,
+        }
     ]
+
+
+# ---------------------------------------------------------------------------
+# #400 -- direct coverage of the detail/waitDetail threading and the batch
+# failureDetailTally, beyond the strict-equality repairs above (which only
+# pin what the shipped template already produces, not the property that
+# makes each value correct). Every test below was watched RED against a
+# targeted /tmp mutation of the real template before being written here --
+# never claimed from reading the source alone; each docstring names its own
+# mutation and what went wrong under it.
+# ---------------------------------------------------------------------------
+
+def test_translate_wait_null_every_call_reports_null_detail(tmp_path):
+    """Every chunk AND the re-check at site E return null. RED before #400
+    against a mutant that reverts timeoutVerdict() to
+    `return { status: "blocked", reason: reason };` (no detail field at
+    all): the failed row then carries no "detail" key, and the equality
+    assertion below fails."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"wait:seg01": None, "wait-recheck:seg01": None},
+    )
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "translate-timeout", "detail": "agent call returned null"}
+    ]
+
+
+def test_review_wait_null_every_call_reports_null_detail(tmp_path):
+    """Site C's twin of the test above -- same mutant, same failure shape."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"review-wait:seg01:r1": None, "review-wait-recheck:seg01:r1": None},
+    )
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1,
+            "detail": "agent call returned null",
+        }
+    ]
+
+
+def test_translate_wait_timeout_detail_is_the_last_reply_not_the_first(tmp_path):
+    """The chunk (first reply seen) and the re-check (last reply seen)
+    answer DIFFERENTLY -- null, then an empty string -- so the two are
+    distinguishable in replyDetail()'s own output ("agent call returned
+    null" vs "agent call returned an empty reply"). RED before #400 against
+    a mutant that drops the `lastWaitReply = recheck;` assignment (freezing
+    lastWaitReply at whatever the chunk loop last set it to): the detail
+    then stays the chunk's null instead of the re-check's empty-string
+    value, and the assertion below fails."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"wait:seg01": None, "wait-recheck:seg01": ""},
+    )
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "translate-timeout",
+            "detail": "agent call returned an empty reply",
+        }
+    ]
+
+
+def test_review_wait_timeout_detail_is_the_last_reply_not_the_first(tmp_path):
+    """Site C's twin of the test above -- same mutant shape, applied to
+    getVerifiedReview's own `lastWaitReply = recheck;` assignment."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"review-wait:seg01:r1": None, "review-wait-recheck:seg01:r1": ""},
+    )
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1,
+            "detail": "agent call returned an empty reply",
+        }
+    ]
+
+
+def test_translate_dispatch_null_detail_survives_a_healthy_looking_wait(tmp_path):
+    """The DISPATCH reply died (null) but the waits that follow answer a
+    healthy-LOOKING per-segment PENDING -- the dispatch detail must still
+    be what is reported, with the wait's own text preserved as waitDetail
+    (timeoutVerdict()'s documented priority: dispatchDetail outranks
+    waitDetail only when the dispatch reply was falsy, and the wait's own
+    text is never thrown away). RED before #400 against a mutant that
+    hardcodes translateStage's own dispatchDetail to always null: the
+    detail then collapses to the wait's own "PENDING seg01" with no
+    waitDetail key at all, and the assertion below fails."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"translate:seg01": None, "wait:seg01": "PENDING seg01", "wait-recheck:seg01": "PENDING seg01"},
+    )
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "translate-timeout",
+            "detail": "translate dispatch: agent call returned null", "waitDetail": "PENDING seg01",
+        }
+    ]
+
+
+def test_review_dispatch_null_detail_survives_a_healthy_looking_wait(tmp_path):
+    """Site C's twin of the test above -- same mutant shape, applied to
+    callReviewDispatch's own dispatchDetail."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={
+            "review-dispatch:seg01:r1": None,
+            "review-wait:seg01:r1": "PENDING seg01", "review-wait-recheck:seg01:r1": "PENDING seg01",
+        },
+    )
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1,
+            "detail": "review dispatch: agent call returned null", "waitDetail": "PENDING seg01",
+        }
+    ]
+
+
+def test_translate_dispatch_null_alone_still_converges_when_wait_answers_ready(tmp_path):
+    """The counterexample that keeps the two tests above honest: a null
+    DISPATCH reply on its own, with the wait left at this harness's own
+    default READY, must still CONVERGE -- the dispatch command launches the
+    detached codex job BEFORE relaying its own acknowledgement, so the
+    launch can succeed while only the ack is lost (see timeoutVerdict()'s
+    own comment). Without this case, an implementation that times out on
+    ANY falsy dispatch reply -- never even polling the wait -- would pass
+    every other #400 test in this file. RED before #400 against exactly
+    that implementation, wired in as a mutant at reviewFixLoop's own wait
+    entry (an immediate timeoutVerdict() return whenever dispatchDetail is
+    non-null, before the chunk loop ever runs): the segment reports
+    translate-timeout instead of converging, and the assertion below
+    fails."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"translate:seg01": None})
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 1}]
+    assert res["out"]["result"]["failed"] == []
+
+
+def test_review_dispatch_null_alone_still_converges_when_wait_answers_ready(tmp_path):
+    """Site C's twin of the test above -- same mutant shape, applied at
+    getVerifiedReview's own wait entry."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"review-dispatch:seg01:r1": None})
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 1}]
+    assert res["out"]["result"]["failed"] == []
+
+
+# The four tests above only exercise a NULL dispatch reply, which is one
+# instance of parseDisp() rejecting it, not the general case: a dispatcher
+# that answers a truthy, fully-formed failure SENTENCE -- what an actual
+# outage produces, and the MR bot's own reproduction for this fix -- is
+# rejected by parseDisp() identically, and unlike null it is the SAME string
+# on every segment. dispatchDetail is keyed on `disp === ""` (the reply
+# rejected) rather than on `raw` being falsy specifically so this case is
+# also caught; before the fix, `raw` here is truthy, so dispatchDetail stayed
+# null, each segment fell back to its own per-segment "PENDING <seg>" wait
+# text, and failureDetailTally came back empty on the exact outage this PR
+# exists to surface.
+DISPATCH_REJECTED_SHARED_DETAIL = "Dispatcher could not launch the codex job: service unavailable"
+
+
+def test_failure_detail_tally_buckets_a_shared_translate_dispatch_rejection(tmp_path):
+    """Two segments' TRANSLATE dispatcher both answer the same truthy,
+    unparseable failure sentence; both waits then answer their own
+    per-segment PENDING. Both rows must carry the SAME "translate dispatch:
+    ..." detail with their own waitDetail preserved, and the tally must
+    bucket them as one entry of 2 with the matching log line. RED before
+    this fix against a mutant reverting both dispatchDetail sites to
+    `raw ? null : sourcedDetail(...)` (the pre-fix `raw`-falsy keying):
+    observed red was an EMPTY failureDetailTally and two per-segment
+    "PENDING seg0N" details instead of the shared dispatch sentence -- the
+    exact operator-facing failure this fix closes, confirmed by running both
+    the fixed and the reverted template through this harness."""
+    overrides = {}
+    for seg in ("seg01", "seg02"):
+        overrides["translate:" + seg] = DISPATCH_REJECTED_SHARED_DETAIL
+        overrides["wait:" + seg] = "PENDING " + seg
+        overrides["wait-recheck:" + seg] = "PENDING " + seg
+    res = run(tmp_path=tmp_path, segs=["seg01", "seg02"], overrides=overrides)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    expected_detail = "translate dispatch: " + DISPATCH_REJECTED_SHARED_DETAIL
+    assert out["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "translate-timeout",
+            "detail": expected_detail, "waitDetail": "PENDING seg01",
+        },
+        {
+            "seg": "seg02", "converged": False, "reason": "translate-timeout",
+            "detail": expected_detail, "waitDetail": "PENDING seg02",
+        },
+    ]
+    assert out["result"]["failureDetailTally"] == [{"detail": expected_detail, "count": 2}]
+    assert f"Repeated failure detail (2/2 failed): {expected_detail}" in out["logLines"]
+
+
+def test_failure_detail_tally_buckets_a_shared_review_dispatch_rejection(tmp_path):
+    """Site C's twin of the test above -- same overrides and mutant shape,
+    applied at callReviewDispatch/getVerifiedReview."""
+    overrides = {}
+    for seg in ("seg01", "seg02"):
+        overrides["review-dispatch:" + seg + ":r1"] = DISPATCH_REJECTED_SHARED_DETAIL
+        overrides["review-wait:" + seg + ":r1"] = "PENDING " + seg
+        overrides["review-wait-recheck:" + seg + ":r1"] = "PENDING " + seg
+    res = run(tmp_path=tmp_path, segs=["seg01", "seg02"], overrides=overrides)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    expected_detail = "review dispatch: " + DISPATCH_REJECTED_SHARED_DETAIL
+    assert out["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "review-timeout", "rounds": 1,
+            "detail": expected_detail, "waitDetail": "PENDING seg01",
+        },
+        {
+            "seg": "seg02", "converged": False, "reason": "review-timeout", "rounds": 1,
+            "detail": expected_detail, "waitDetail": "PENDING seg02",
+        },
+    ]
+    assert out["result"]["failureDetailTally"] == [{"detail": expected_detail, "count": 2}]
+    assert f"Repeated failure detail (2/2 failed): {expected_detail}" in out["logLines"]
+
+
+def test_translate_dispatch_rejected_reply_still_converges_when_wait_answers_ready(tmp_path):
+    """The counterexample that keeps the two tests above honest, mirroring
+    test_translate_dispatch_null_alone_still_converges_when_wait_answers_ready:
+    a truthy-but-unparseable dispatch reply, with the wait left at this
+    harness's own default READY, must still CONVERGE. A rejected DISP is
+    safe degradation -- the dispatch command launches the detached codex job
+    BEFORE relaying its own acknowledgement, so the launch can succeed while
+    only the ack comes back unparseable -- and must not become a timeout on
+    its own. Without this case, an implementation that widened the #400 fix
+    into short-circuiting to translate-timeout whenever dispatchDetail is
+    non-null (rather than merely recording it for a wait that actually times
+    out) would pass both tally tests above while breaking every healthy
+    dispatch whose acknowledgement merely came back garbled. RED against
+    exactly that mutant, wired in at reviewFixLoop's own wait entry right
+    after dispatchDetail is computed (an immediate return whenever it is
+    non-null, before the chunk loop ever runs): the segment reported
+    translate-timeout with converged: [] instead of converging."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"translate:seg01": DISPATCH_REJECTED_SHARED_DETAIL})
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 1}]
+    assert res["out"]["result"]["failed"] == []
+
+
+def test_review_dispatch_rejected_reply_still_converges_when_wait_answers_ready(tmp_path):
+    """Site C's twin of the test above -- same mutant shape (the immediate
+    return wired in at getVerifiedReview's own entry, right after the
+    dispatch call, whenever dispatch.dispatchDetail is non-null)."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"review-dispatch:seg01:r1": DISPATCH_REJECTED_SHARED_DETAIL},
+    )
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["converged"] == [{"seg": "seg01", "converged": True, "rounds": 1}]
+    assert res["out"]["result"]["failed"] == []
+
+
+def test_fix_call_failed_detail_is_the_fix_reply_when_probe_present_true(tmp_path):
+    """The probe genuinely ran and answered present:true -- the detail must
+    name the FIX call's own (flattened) reply, not the probe. RED before
+    #400 against a mutant that swaps the two branches of runRound's
+    `present === null ? PROBE_NULL_DETAIL : sourcedDetail("fix call", fx)`
+    ternary: the detail becomes the frozen PROBE_NULL_DETAIL constant even
+    though the probe answered present:true, and the assertion below
+    fails."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={
+            "review-read:seg01:r1": _non_clean_review(),
+            "artifact-check:seg01:r1": {"match": True},
+            "fix:seg01:r1": "The fix could not complete because the draft file vanished mid-run: DRAFT_MISSING seg01",
+            "draft-probe:seg01": {"present": True},
+        },
+    )
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "fix-call-failed", "rounds": 1,
+            "detail": (
+                "fix call: The fix could not complete because the draft file "
+                "vanished mid-run: DRAFT_MISSING seg01"
+            ),
+        }
+    ]
+
+
+def test_fix_call_failed_detail_is_the_probe_reply_when_probe_itself_died(tmp_path):
+    """The distinguishing counterpart: the PROBE call itself died (null),
+    which is inconclusive rather than proof the fix call's own (also null)
+    reply was the failure -- the detail must be the frozen PROBE_NULL_DETAIL
+    constant, never a re-derivation from the fix reply. RED before #400
+    against the same swapped-ternary mutant as the test above: the detail
+    becomes "fix call: agent call returned null" instead, and the assertion
+    below fails."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={
+            "review-read:seg01:r1": _non_clean_review(),
+            "artifact-check:seg01:r1": {"match": True},
+            "fix:seg01:r1": None,
+            "draft-probe:seg01": None,
+        },
+    )
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "fix-call-failed", "rounds": 1,
+            "detail": "draft probe: agent call returned null",
+        }
+    ]
+
+
+def test_failure_detail_tally_buckets_a_shared_translate_timeout_detail(tmp_path):
+    """Two segments failing on the SAME detail -- both wait sites, at seg01
+    and seg02, returning null on every call -- must land in one bucket with
+    count 2, and the batch log must report that bucket. RED before #400
+    against the same reverted timeoutVerdict() mutant as the null-detail
+    tests above: with no "detail" field on either failed row, the tally
+    loop's `typeof row.detail === "string"` guard admits neither row, and
+    failureDetailTally comes back empty instead of one bucket of 2."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01", "seg02"],
+        overrides={
+            "wait:seg01": None, "wait-recheck:seg01": None,
+            "wait:seg02": None, "wait-recheck:seg02": None,
+        },
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["failureDetailTally"] == [{"detail": "agent call returned null", "count": 2}]
+    assert "Repeated failure detail (2/2 failed): agent call returned null" in out["logLines"]
+
+
+def test_failure_detail_tally_orders_buckets_by_count_descending(tmp_path):
+    """Three segments share one detail, two share a different one -- the
+    3-count bucket must sort first. RED before #400 against a mutant that
+    reverses the primary sort comparator (`detailCounts.get(a) -
+    detailCounts.get(b)` in place of the shipped `get(b) - get(a)`): the
+    2-count bucket sorts first instead, and the assertion below fails."""
+    overrides = {}
+    for seg in ("seg01", "seg02", "seg03"):
+        overrides[f"wait:{seg}"] = None
+        overrides[f"wait-recheck:{seg}"] = None
+    for seg in ("seg04", "seg05"):
+        overrides[f"wait:{seg}"] = ""
+        overrides[f"wait-recheck:{seg}"] = ""
+    res = run(tmp_path=tmp_path, segs=["seg01", "seg02", "seg03", "seg04", "seg05"], overrides=overrides)
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["failureDetailTally"] == [
+        {"detail": "agent call returned null", "count": 3},
+        {"detail": "agent call returned an empty reply", "count": 2},
+    ]
+
+
+def test_failure_detail_tally_breaks_equal_counts_by_detail_ascending(tmp_path):
+    """Two buckets of equal size (2 and 2) must break the tie by the detail
+    STRING, ascending -- "agent call returned an empty reply" sorts before
+    "agent call returned null" (the 'e' in "an empty" precedes the 'n' in
+    "null" at the first differing character). RED before #400 against a
+    mutant that reverses the tie-break comparator (`a < b ? 1 : (a > b ?
+    -1 : 0)` in place of the shipped ascending form): the null bucket sorts
+    first instead, and the assertion below fails."""
+    overrides = {}
+    for seg in ("seg01", "seg02"):
+        overrides[f"wait:{seg}"] = None
+        overrides[f"wait-recheck:{seg}"] = None
+    for seg in ("seg03", "seg04"):
+        overrides[f"wait:{seg}"] = ""
+        overrides[f"wait-recheck:{seg}"] = ""
+    res = run(tmp_path=tmp_path, segs=["seg01", "seg02", "seg03", "seg04"], overrides=overrides)
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["failureDetailTally"] == [
+        {"detail": "agent call returned an empty reply", "count": 2},
+        {"detail": "agent call returned null", "count": 2},
+    ]
+
+
+def test_failure_detail_tally_ignores_detail_less_rows_but_counts_them_in_the_denominator(tmp_path):
+    """A run mixing two DETAIL-LESS reasons (draft-missing, cap -- neither
+    ever sets a `detail` field) with two rows sharing one detail: no
+    "undefined" bucket may appear for the detail-less rows, and the logged
+    numerator's DENOMINATOR is the FULL failed length (4), not just the 2
+    detail-carrying rows. Two mutants, both RED before #400 against this
+    same fixture: (1) counting every row via `String(row.detail)` instead
+    of gating on `typeof row.detail === "string"` produces a spurious
+    {"detail": "undefined", "count": 2} bucket, failing the tally equality
+    below; (2) tracking a separate detail-row-only counter and logging
+    against IT instead of `failed.length` prints "(2/2 failed)" in place of
+    "(2/4 failed)", failing the logLines assertion below."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01", "seg02", "seg03", "seg04"], max_fix_rounds=1,
+        overrides={
+            "wait:seg01": None, "wait-recheck:seg01": None,
+            "wait:seg02": None, "wait-recheck:seg02": None,
+            "review-read:seg03:r1": _non_clean_review(), "artifact-check:seg03:r1": {"match": True},
+            "fix:seg03:r1": "DRAFT_MISSING seg03", "draft-probe:seg03": {"present": False},
+            "review-read:seg04:r1": _non_clean_review(), "artifact-check:seg04:r1": {"match": True},
+            "review-read:seg04:rfinal": _non_clean_review(), "artifact-check:seg04:rfinal": {"match": True},
+        },
+    )
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "translate-timeout", "detail": "agent call returned null"},
+        {"seg": "seg02", "converged": False, "reason": "translate-timeout", "detail": "agent call returned null"},
+        {"seg": "seg03", "converged": False, "reason": "draft-missing", "rounds": 1},
+        {
+            "seg": "seg04", "converged": False, "reason": "cap", "rounds": 2,
+            "lastFindings": _non_clean_review()["findings"],
+        },
+    ], f"the overrides no longer land on the intended reasons/shapes: {out['result']['failed']}"
+    assert out["result"]["failureDetailTally"] == [{"detail": "agent call returned null", "count": 2}]
+    assert "Repeated failure detail (2/4 failed): agent call returned null" in out["logLines"]
+
+
+def test_ledger_in_progress_null_call_carries_its_own_null_detail(tmp_path):
+    """A falsy ledger:in_progress reply must carry replyDetail(raw), not the
+    "ledger_update.py write did not report success" constant -- that
+    constant accuses the script of answering and being rejected, and the
+    script never answered at all. RED before #400 against a mutant that
+    drops recordLedgerCall's `raw ?` branch and always uses the constant:
+    the detail becomes the constant string even though raw is null, and
+    the assertion below fails."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"ledger:in_progress:seg01": None})
+    assert res["ok"], res["stderr"]
+    assert res["out"]["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "ledger-write-failed",
+            "detail": "agent call returned null",
+        }
+    ]
+
+
+def test_ledger_merge_null_call_carries_its_own_null_detail(tmp_path):
+    """The merge-ledger twin of the test above -- same mutant shape, applied
+    to the batch-final completeness check's own `mergeResult ?` branch."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={"merge-ledger": None})
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["batchComplete"] is False
+    assert out["result"]["reason"] == "ledger-merge-failed"
+    assert out["result"]["detail"] == "agent call returned null"
+
+
+# DETAIL_CAP read directly out of the real template rather than hand-copied,
+# so the *derived* uses below stay correct if that constant is ever retuned
+# -- but a change to BOTH the constant AND the truncation behaviour together
+# would then sail through every test that only ever compares the value
+# against itself. test_detail_cap_constant_is_160 below is the belt: it pins
+# the LITERAL 160 as its own assertion, so retuning the constant fails
+# loudly there even though every derived-use test would stay green.
+_DETAIL_CAP_MATCH = re.search(r"const DETAIL_CAP = (\d+);", MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8"))
+assert _DETAIL_CAP_MATCH, "DETAIL_CAP constant not found in mass-translate-wf.template.js"
+DETAIL_CAP = int(_DETAIL_CAP_MATCH.group(1))
+
+
+def test_detail_cap_constant_is_160():
+    """The literal pin: every other test in this file uses the DERIVED
+    DETAIL_CAP (read out of the template's own source), which stays green
+    even if a future change retunes the constant -- correctly, for those
+    tests' own purpose. This one exists solely so a retuning is a visible,
+    deliberate act: it fails the moment DETAIL_CAP stops being 160,
+    independent of whatever the template's truncation code does with it."""
+    assert DETAIL_CAP == 160
+
+
+# Every break character DETAIL_BREAKS matches, plus CRLF (two of them back to
+# back, which still collapses to ONE space -- the regex is greedy). Built
+# with chr(), never pasted as the literal character, same discipline as
+# FIX_GLUE_TRIM_STRIPPED/FIX_GLUE_TRIM_PRESERVED above. TAB/VT/FF added
+# alongside the original six: DETAIL_BREAKS has always matched them --
+# its own class is r"[\n\r\t\v\f\u0085\u2028\u2029]+" -- but this matrix
+# did not exercise them until now.
+DETAIL_BREAK_CASES = [
+    ("LF", chr(0x0A)),
+    ("CR", chr(0x0D)),
+    ("CRLF", chr(0x0D) + chr(0x0A)),
+    ("TAB", chr(0x09)),
+    ("VT", chr(0x0B)),
+    ("FF", chr(0x0C)),
+    ("lsep_u2028", chr(0x2028)),
+    ("psep_u2029", chr(0x2029)),
+    ("nel_u0085", chr(0x85)),
+]
+
+
+@pytest.mark.parametrize("break_name,break_chars", DETAIL_BREAK_CASES, ids=[n for n, _ in DETAIL_BREAK_CASES])
+def test_wait_timeout_detail_flattens_line_breaks_without_truncation(tmp_path, break_name, break_chars):
+    """A short reply carrying one break character comes back single-line,
+    with the break collapsed to exactly one ascii space -- and, being well
+    under DETAIL_CAP, WITHOUT the " [...]" truncation marker. RED before
+    #400 against a mutant that neuters DETAIL_BREAKS to an unmatchable
+    regex (`/$^/g`): the raw break character survives verbatim into the
+    detail, and the `break_chars not in detail` assertion below fails."""
+    reply = "before the break" + break_chars + "after the break"
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"wait:seg01": "PENDING seg01", "wait-recheck:seg01": reply},
+    )
+    assert res["ok"], res["stderr"]
+    detail = res["out"]["result"]["failed"][0]["detail"]
+    assert break_chars not in detail, f"raw break character survived flattening into: {detail!r}"
+    assert detail == "before the break after the break"
+    assert not detail.endswith(" [...]")
+
+
+@pytest.mark.parametrize("break_name,break_chars", DETAIL_BREAK_CASES, ids=[n for n, _ in DETAIL_BREAK_CASES])
+def test_wait_timeout_detail_truncates_long_replies_at_detail_cap(tmp_path, break_name, break_chars):
+    """A reply well over DETAIL_CAP even after flattening comes back at
+    EXACTLY DETAIL_CAP characters, ending with the " [...]" marker. RED
+    before #400 against a mutant that drops replyDetail()'s truncation
+    branch entirely (returning the flattened string unbounded): the detail
+    comes back at its full flattened length (321 for the shipped
+    DETAIL_CAP=160) instead of 160, and the `len(detail) == DETAIL_CAP`
+    assertion below fails."""
+    reply = "A" * DETAIL_CAP + break_chars + "B" * DETAIL_CAP
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={"wait:seg01": "PENDING seg01", "wait-recheck:seg01": reply},
+    )
+    assert res["ok"], res["stderr"]
+    detail = res["out"]["result"]["failed"][0]["detail"]
+    assert len(detail) == DETAIL_CAP, f"expected exactly {DETAIL_CAP} chars, got {len(detail)}: {detail!r}"
+    assert detail.endswith(" [...]")
+    assert detail.startswith("A" * (DETAIL_CAP - 6))
+
+
+def test_failure_detail_tally_empty_on_a_fully_converged_run(tmp_path):
+    """THE NEGATIVE CONTROL for the tally tests above -- NOT a revert-red
+    case: a run with no failures at all logs no "Repeated failure detail"
+    line and returns an empty failureDetailTally. This is what proves the
+    tally tests above are asserting something real: a tally-emitting
+    implementation that fired unconditionally would still pass every OTHER
+    test in this file (none of them inspect logLines on a clean run). RED
+    before #400 against a mutant that appends one unconditional tally log
+    line right after the real (empty, correctly-guarded) loop: a "Repeated
+    failure detail" line then appears even though nothing failed, and the
+    assertion below fails."""
+    out = _happy_run(tmp_path)
+    assert out["result"]["failureDetailTally"] == []
+    assert not any(line.startswith("Repeated failure detail") for line in out["logLines"])
+
+
+# ---------------------------------------------------------------------------
+# #400 follow-up (codex MAJOR) -- flattenDetail() is the single normalizer
+# every STRING that reaches a detail goes through now, not just an agent's
+# raw reply. Before this fix, only replyDetail()'s own argument was
+# flattened/capped; three OTHER strings reached a detail verbatim: the
+# schema-validated `mismatch_detail` on the artifact check, the relayed
+# `error` on a ledger write and on the merge check, and sourcedDetail()'s own
+# label was appended AFTER the cap rather than counted against it. A schema
+# field is still model-authored text under no length or charset restriction,
+# so an oversized, multiline mismatch_detail/error used to reach the
+# operator log verbatim, falsifying the "one line, capped at DETAIL_CAP"
+# property this file and the docs both promise. Every fixture below is
+# deliberately BOTH oversized (over DETAIL_CAP even before the break
+# collapses) AND line-break-carrying, so a fix that restored only one half
+# would still show up; every test was watched RED against a /tmp mutant that
+# restores the pre-fix verbatim path at its own site.
+# ---------------------------------------------------------------------------
+
+# Built from already-chr()-safe pieces (LF from above) rather than a pasted
+# character. Deliberately not re-deriving flattenDetail()'s own transform in
+# Python: the expected values below are sliced directly from the SAME raw
+# strings the template flattens, using only "collapse one run of breaks to
+# one space" and "cut at DETAIL_CAP-6 chars plus ' [...]'" -- confirmed
+# against the real template's actual output, not assumed.
+LONG_BREAK_MISMATCH_DETAIL = "expected sha1 " + "a" * 90 + LF + "got sha1 " + "b" * 90
+_FLAT_MISMATCH_DETAIL = "expected sha1 " + "a" * 90 + " " + "got sha1 " + "b" * 90
+EXPECTED_FLATTENED_MISMATCH_DETAIL = _FLAT_MISMATCH_DETAIL[: DETAIL_CAP - 6] + " [...]"
+
+LONG_BREAK_LEDGER_ERROR = "ledger write failed: " + "x" * 90 + LF + "cause: " + "y" * 90
+_FLAT_LEDGER_ERROR = "ledger write failed: " + "x" * 90 + " " + "cause: " + "y" * 90
+EXPECTED_FLATTENED_LEDGER_ERROR = _FLAT_LEDGER_ERROR[: DETAIL_CAP - 6] + " [...]"
+
+
+def test_review_artifact_mismatch_detail_is_flattened_and_capped_across_the_batch(tmp_path):
+    """The artifact-check `mismatch_detail` is schema-validated shape, never
+    content -- an oversized, multiline one used to reach a failed row (and
+    the tally, and the log) verbatim. TWO segments share the identical
+    oversized reply so the property is pinned through the tally and the log
+    line too, reproducing where the reviewer actually found it. RED before
+    this fix against a mutant that restores getVerifiedReview's old
+    `typeof retry.art.mismatch_detail === "string" ? retry.art.
+    mismatch_detail : replyDetail(retry.art)` (mismatch_detail relayed
+    verbatim, no flattenDetail() call at all): the detail then carries the
+    raw LF and its full 203-character length, and the equality assertion
+    below fails."""
+    overrides = {}
+    for seg in ("seg01", "seg02"):
+        for suffix in ("r1", "r1:retry"):
+            overrides[f"artifact-check:{seg}:{suffix}"] = {
+                "match": False, "mismatch_detail": LONG_BREAK_MISMATCH_DETAIL,
+            }
+    res = run(tmp_path=tmp_path, segs=["seg01", "seg02"], overrides=overrides)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert "\n" not in EXPECTED_FLATTENED_MISMATCH_DETAIL and len(EXPECTED_FLATTENED_MISMATCH_DETAIL) <= DETAIL_CAP
+    assert out["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "review-artifact-mismatch", "rounds": 1,
+            "detail": EXPECTED_FLATTENED_MISMATCH_DETAIL,
+        },
+        {
+            "seg": "seg02", "converged": False, "reason": "review-artifact-mismatch", "rounds": 1,
+            "detail": EXPECTED_FLATTENED_MISMATCH_DETAIL,
+        },
+    ]
+    assert out["result"]["failureDetailTally"] == [
+        {"detail": EXPECTED_FLATTENED_MISMATCH_DETAIL, "count": 2}
+    ]
+    assert f"Repeated failure detail (2/2 failed): {EXPECTED_FLATTENED_MISMATCH_DETAIL}" in out["logLines"]
+    assert all("\n" not in line for line in out["logLines"]), (
+        f"a raw line break survived into the operator log: {out['logLines']}"
+    )
+
+
+def test_ledger_write_error_detail_is_flattened_and_capped_across_the_batch(tmp_path):
+    """The ledger-write site's twin of the test above: a relayed script
+    `error` is still arbitrary text, not a validated constant. RED before
+    this fix against a mutant that drops the `flattenDetail(raw.error)` call
+    in recordLedgerCall (reverted to bare `raw.error`): the detail carries
+    the raw LF and its full 209-character length, and the equality assertion
+    below fails."""
+    overrides = {}
+    for seg in ("seg01", "seg02"):
+        overrides[f"ledger:converged:{seg}"] = {"success": False, "error": LONG_BREAK_LEDGER_ERROR}
+    res = run(tmp_path=tmp_path, segs=["seg01", "seg02"], overrides=overrides)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "ledger-write-failed",
+            "detail": EXPECTED_FLATTENED_LEDGER_ERROR,
+        },
+        {
+            "seg": "seg02", "converged": False, "reason": "ledger-write-failed",
+            "detail": EXPECTED_FLATTENED_LEDGER_ERROR,
+        },
+    ]
+    assert out["result"]["failureDetailTally"] == [
+        {"detail": EXPECTED_FLATTENED_LEDGER_ERROR, "count": 2}
+    ]
+    assert f"Repeated failure detail (2/2 failed): {EXPECTED_FLATTENED_LEDGER_ERROR}" in out["logLines"]
+
+
+def test_ledger_merge_error_detail_is_flattened_and_capped(tmp_path):
+    """The merge-ledger twin -- a single batch-level call (one merge-ledger
+    check per run, never per-segment), so no tally/log angle here, just the
+    top-level `detail` field. RED before this fix against a mutant that
+    drops the `flattenDetail(mergeResult.error)` call at the batch-final
+    completeness check (reverted to bare `mergeResult.error`): the detail
+    carries the raw LF and its full 209-character length, and the equality
+    assertion below fails."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={
+        "merge-ledger": {"success": False, "error": LONG_BREAK_LEDGER_ERROR},
+    })
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["batchComplete"] is False
+    assert out["result"]["reason"] == "ledger-merge-failed"
+    assert out["result"]["detail"] == EXPECTED_FLATTENED_LEDGER_ERROR
+
+
+# Round 2 of the same #400 review: a schema-accepted but WHITESPACE-ONLY
+# `error` string flattens to "" (DETAIL_BREAKS only matches break characters,
+# never plain spaces, but a break collapses to one space and the surrounding
+# spaces then vanish under flattenDetail()'s own trim()) -- which used to
+# become detail:"" and form an empty-string bucket in the batch tally. Both
+# ledger sites now compute the flattened relayed error first and fall back to
+# the existing WRITE_FAILED_DEFAULT_DETAIL/MERGE_FAILED_DEFAULT_DETAIL
+# constant when it comes back empty, the same non-empty guard the
+# artifact-check site already carried. Built with chr(), never pasted glyphs:
+# space, tab, LF, tab, space -- whitespace-only, and the tab-LF-tab run is
+# one contiguous break-character sequence, not merely spaces.
+WHITESPACE_ONLY_ERROR = chr(0x20) + chr(0x09) + chr(0x0A) + chr(0x09) + chr(0x20)
+
+
+def test_ledger_write_whitespace_only_error_falls_back_to_the_constant(tmp_path):
+    """TWO segments share the identical whitespace-only error so the "no
+    empty-string bucket" property is pinned through the tally, not just the
+    per-row detail. RED before this fix against a mutant that drops the
+    `relayed !== ""` guard in recordLedgerCall (reverted to using
+    `flattenDetail(raw.error)` directly, unconditionally): the detail comes
+    back as "" on both rows, and failureDetailTally reports a bucket of
+    {"detail": "", "count": 2} instead of the constant, failing the
+    assertions below."""
+    overrides = {}
+    for seg in ("seg01", "seg02"):
+        overrides[f"ledger:converged:{seg}"] = {"success": False, "error": WHITESPACE_ONLY_ERROR}
+    res = run(tmp_path=tmp_path, segs=["seg01", "seg02"], overrides=overrides)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["failed"] == [
+        {"seg": "seg01", "converged": False, "reason": "ledger-write-failed", "detail": WRITE_FAILED_DEFAULT_DETAIL},
+        {"seg": "seg02", "converged": False, "reason": "ledger-write-failed", "detail": WRITE_FAILED_DEFAULT_DETAIL},
+    ]
+    assert out["result"]["failureDetailTally"] == [{"detail": WRITE_FAILED_DEFAULT_DETAIL, "count": 2}]
+
+
+def test_ledger_merge_whitespace_only_error_falls_back_to_the_constant(tmp_path):
+    """The merge-ledger twin -- single batch-level call, so just the
+    top-level `detail` field. RED before this fix against a mutant that
+    drops the equivalent `relayedMergeError !== ""` guard: detail comes back
+    as "" instead of MERGE_FAILED_DEFAULT_DETAIL, failing the assertion
+    below."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={
+        "merge-ledger": {"success": False, "error": WHITESPACE_ONLY_ERROR},
+    })
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["batchComplete"] is False
+    assert out["result"]["reason"] == "ledger-merge-failed"
+    assert out["result"]["detail"] == MERGE_FAILED_DEFAULT_DETAIL
+
+
+# A fix reply long enough that replyDetail() alone already caps it at
+# DETAIL_CAP (160): naively appending "fix call: " (10 chars) on top would
+# land at 170, over budget. Confirmed against the real template: the
+# combined "fix call: " + replyDetail(fx) is exactly 170 chars before
+# sourcedDetail()'s own re-flatten, and exactly DETAIL_CAP after it.
+LONG_FIX_REPLY_OVER_CAP = "A" * 150 + " DRAFT_MISSING seg01 " + "B" * 150
+
+
+def test_sourced_detail_keeps_the_source_label_inside_the_cap(tmp_path):
+    """sourcedDetail() re-flattens its own "source: " + replyDetail(reply)
+    concatenation, so the label counts against DETAIL_CAP rather than being
+    appended past it. RED before this fix against a mutant that reverts
+    sourcedDetail() to `return source + ": " + replyDetail(reply);` (no
+    re-flatten): the detail comes back at 170 characters instead of 160, and
+    the `len(detail) == DETAIL_CAP` assertion below fails."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={
+            "review-read:seg01:r1": _non_clean_review(),
+            "artifact-check:seg01:r1": {"match": True},
+            "fix:seg01:r1": LONG_FIX_REPLY_OVER_CAP,
+            "draft-probe:seg01": {"present": True},
+        },
+    )
+    assert res["ok"], res["stderr"]
+    detail = res["out"]["result"]["failed"][0]["detail"]
+    assert len(detail) == DETAIL_CAP, f"expected exactly {DETAIL_CAP} chars, got {len(detail)}: {detail!r}"
+    assert detail.endswith(" [...]")
+    assert detail.startswith("fix call: " + "A" * (DETAIL_CAP - 6 - len("fix call: ")))
+
+
+# Existing exact-detail pins for SHORT errors are unaffected by
+# flattenDetail() -- confirmed by re-running the whole file, not asserted
+# again here (duplicating them would just be a second copy to drift):
+# test_ledger_write_still_rejects_success_false ("boom") and the
+# "nonempty-error" case of test_ledger_write_still_rejects_real_failure_evidence
+# / test_ledger_merge_still_rejects_real_failure_evidence
+# ("runs/ledger.d is not writable" / "fragment dir missing") all still pass
+# untouched: a short, single-line string is already <= DETAIL_CAP and has
+# nothing for DETAIL_BREAKS to collapse, so flattenDetail() is a no-op on it.
 
 
 if __name__ == "__main__":
