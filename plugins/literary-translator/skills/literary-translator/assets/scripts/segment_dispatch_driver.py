@@ -4168,7 +4168,13 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
         terminal write if any of them moved in between (a cap must describe
         bytes a reviewer actually read, and a VERDICT a reviewer actually
         reached -- the digest is what makes the second half true).
-      {"action": "already_converged", "round_label": "1".."<max_fix_rounds>"|"final"}
+      {"action": "already_converged", "round_label": "1".."<max_fix_rounds>"|"final",
+        "reviewed_sha1": ..., "reviewed_token": ..., "reviewed_digest": ...}
+        -- the ordinary clean convergence. The three reviewed_* fields
+        travel for the same reason cap_reached and converged_by_rejection
+        carry them: process_segment() commits the ledger write in a LATER
+        step and must still be able to bind it to the verdict THIS
+        decision was made from.
       {"action": "invalid_post_fix_draft"} -- codex round-3 MAJOR, see the
         `if not draft_ok:` branch below for the full reasoning: an invalid
         draft is NOT always safe to re-translate.
@@ -4385,7 +4391,21 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
             # template.js:1757). Without this, a segment that converges on
             # the FINAL round -- an entirely ordinary outcome -- could never
             # be told apart from one that converged on a numbered round.
-            return {"action": "already_converged", "round_label": matched_round_label}
+            # reviewed_sha1/reviewed_token/reviewed_digest travel with this
+            # decision exactly as they do with cap_reached and
+            # converged_by_rejection below, and the digest is taken from the
+            # review_obj THIS function parsed -- a re-read here would accept a
+            # substitute on its own terms. WHAT the triple buys on this
+            # particular fork, which is narrower than on the cap fork, is
+            # argued once where the check is actually made: see
+            # process_segment()'s already_converged branch.
+            return {
+                "action": "already_converged",
+                "round_label": matched_round_label,
+                "reviewed_sha1": reviewed_sha1,
+                "reviewed_token": review_obj.get("dispatch_token"),
+                "reviewed_digest": _review_verdict_digest(review_obj),
+            }
         # codex #392-class MAJOR: a CLEAN review whose draft_sha1 no longer
         # matches the CURRENT draft (edited out-of-band since this review
         # was written -- or the sha1 simply could not be recomputed) must
@@ -5299,7 +5319,10 @@ def _terminal_write_still_binds_what_was_reviewed(
     """None if the terminal verdict in `action` still describes the review
     and the draft bytes it was derived from, or a human-readable reason
     string if either moved in between. `what` names the write in those
-    strings ("cap", or "convergence" for #527's operator-attested one) --
+    strings ("cap", or "convergence" for EITHER convergence route -- the
+    ordinary already_converged one and #527's operator-attested
+    converged_by_rejection, which share it because they share the refusal
+    reason and the operator's remedy) --
     the CHECK is identical for both, and that is the point of one helper
     rather than two: what has to hold before a terminal write is a property
     of the write being terminal, not of which verdict it records.
@@ -5487,20 +5510,43 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               reason, since the review beside
                                               it still says clean:false.
       outcome="failed", reason=
-        "converge-write-review-moved"     -- the #527 convergence above was
-                                              NOT recorded: the draft moved,
-                                              or the review artifact changed
-                                              -- its provenance OR its verdict
-                                              -- between
+        "converge-write-review-moved"     -- a convergence above was NOT
+                                              recorded: the draft moved, or
+                                              the review artifact changed --
+                                              its provenance OR its verdict --
+                                              between
                                               derive_next_action()'s decision
-                                              and the write. NO ledger write,
-                                              so the terminal fragment already
-                                              on disk (very likely the cap the
-                                              operator was looking at) simply
+                                              and the write. Shared by BOTH
+                                              convergence routes, the ordinary
+                                              already_converged one and #527's
+                                              operator-attested
+                                              converged_by_rejection, because
+                                              the refused write and the
+                                              operator's remedy are the same
+                                              on either; the `detail` names
+                                              which bound fact moved. NO
+                                              ledger write, so whatever
+                                              fragment is on disk simply
                                               stands, and the identical
                                               invocation re-derives from the
                                               record and review that are
-                                              actually there.
+                                              actually there. WHICH fragment
+                                              that is differs by route: on the
+                                              rejection route it is very
+                                              likely the cap the operator was
+                                              looking at, while on the
+                                              ordinary route it is absent or
+                                              the in_progress one a prior
+                                              invocation left -- both of which
+                                              select_segments.py admits by
+                                              default, so that route clears
+                                              itself. Neither is guaranteed:
+                                              a segment force-included by
+                                              --only-segs can carry a
+                                              `blocked` or `non_converged`
+                                              fragment, which survives the
+                                              refusal and needs the same
+                                              explicit override again.
       outcome="failed", reason="cap"      -- mandatory final review still
                                               not clean AND still judging
                                               the draft that is on disk
@@ -5871,6 +5917,46 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 # computed from the round_label derive_next_action() just
                 # reported (see _ledger_rounds_value()'s own docstring), never
                 # re-parsed from the review's own dispatch_token string.
+                # #622. The ordinary convergence is the THIRD terminal write in
+                # this function and was the only one that bound nothing: it goes
+                # through the same pre-write check the cap and the #527
+                # rejection convergence do, under the helper's own general name.
+                #
+                # DRIVER-SIDE HALF ONLY, deliberately, and this comment is where
+                # that is recorded rather than in a release note. The half that
+                # MOTIVATED it is the VERDICT: ledger_update.py's
+                # enrich_converged_fields() already re-reads review.json and
+                # refuses on a draft_sha1 mismatch or a dispatch_token that does
+                # not match the run/segment prefix, but it never reads whether
+                # the review declared the segment clean at all -- so a non-clean
+                # substitute at the same token over the same unread draft was
+                # accepted there. The provenance half is NOT merely mirrored
+                # either, and saying it was would be wrong: review_token_matches()
+                # is a PREFIX match that admits any ':r<roundLabel>' suffix
+                # (ledger_update.py:821), while the comparison here is against
+                # the EXACT token this decision was made from, round label
+                # included. A precondition
+                # THERE would close it for every caller, including the shipped
+                # Workflow template, and it is not bought: converged_by_rejection
+                # records convergence over a review whose `clean` is False by
+                # design, so a blanket clean check in ledger_update.py refuses
+                # that route outright, and discriminating the two needs either a
+                # caller-supplied flag (self-authorizing -- the calling agent is
+                # exactly who that file distrusts) or a second copy of
+                # _rejection_record()'s whole contract in a file that cannot see
+                # this one. The residual for a caller that is not this driver
+                # therefore stands, unclosed and stated.
+                #
+                # What a refusal leaves behind, and the one case that does not
+                # clear itself, are stated in this function's own return
+                # contract above under converge-write-review-moved rather than
+                # a second time here.
+                bind_failure = _terminal_write_still_binds_what_was_reviewed(
+                    seg, ctx, action, what="convergence"
+                )
+                if bind_failure is not None:
+                    return {"seg": seg, "converged": False, "outcome": "failed",
+                            "reason": "converge-write-review-moved", "detail": bind_failure}
                 rounds = _ledger_rounds_value(action["round_label"], ctx.translate_cfg["max_fix_rounds"])
                 rec = write_ledger(
                     ctx.dirs, seg, {"status": "converged", "rounds": rounds},
@@ -5906,16 +5992,22 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 # those three) over the same unread draft. enrich_converged_
                 # fields() re-reads review.json but binds only that token
                 # prefix and the draft hash, so such a V2 would be converged
-                # having never been attested. NOT closed here, deliberately:
-                # the ordinary already_converged branch above has the IDENTICAL
-                # window with the identical consequence and no binding check at
-                # all, so this fork is already the better-protected of the two,
-                # and closing it only here would buy inconsistent protection at
-                # the price of a new lease on the commit path. The real fix is
-                # a precondition inside ledger_update.py, where the
+                # having never been attested. NOT closed here, deliberately,
+                # and the reason is no longer an asymmetry with the branch
+                # above: since #622 all THREE terminal writes in this function
+                # -- the cap, this rejection convergence and the ordinary
+                # already_converged one -- go through the same pre-write
+                # binding check, so nothing would be evened out by adding a
+                # lease on this one fork. What remains is that the check is
+                # check-then-write in every one of the three. Closing THAT
+                # needs a precondition inside ledger_update.py, where the
                 # authoritative read happens -- a file this driver does not
-                # own, which is the same boundary the cap fork draws. Tracked
-                # in CHANGELOG.md's Known limitations.
+                # own, which is the same boundary the cap fork draws, and one
+                # this driver cannot cross for the further reason that a
+                # blanket clean-verdict precondition there would refuse this
+                # very fork (see the already_converged branch above for the
+                # whole argument). Tracked in CHANGELOG.md's Known
+                # limitations.
                 rounds = _ledger_rounds_value(action["round_label"], ctx.translate_cfg["max_fix_rounds"])
                 rec = write_ledger(
                     ctx.dirs, seg,
