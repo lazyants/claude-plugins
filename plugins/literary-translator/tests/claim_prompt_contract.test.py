@@ -4,8 +4,9 @@ own claim-aware --expect-token refusal.
 
 ## Why this file exists, and why it is split into parts
 
-D9 (PLAN.md) measured that the DEFAULT `mass-translate-wf.template.js`
-dispatch path has exactly ONE deterministic site that ever runs
+D9 (PLAN.md) measured that the `mass-translate-wf.template.js` dispatch path
+(W5's fallback launcher since #516) has exactly ONE deterministic site that
+ever runs
 `draft_ready.py --expect-token` (`translateAcceptCmd`, the translate wait
 poll) and it never runs again after a fix round -- `runRound` goes straight
 from `callFix()` to the NEXT `getVerifiedReview()`, whose own accept command

@@ -2492,9 +2492,9 @@ is a person: the fix turn is performed by hand from that prompt, which the
 fallback's automatic `agent()` fix call never gets. Nothing afterwards
 checks that only `segments/<seg>.draft.json` changed; closing that needs a
 digest handed out at `needs_fix` and required back on the next invocation,
-tracked separately and not shipped. (2) The batch-final completeness merge —
-see the step below, which is why it is a step of this loop and not an
-optional extra.
+tracked separately and not shipped. (2) The batch-final `batchComplete`
+merge: this path has no per-batch equivalent, deliberately — see below for
+what carries that guarantee instead.
 
 **#396:** this launch is one of the operations covered by the W5 rule above
 that verifies the bundle markers against the live plugin tree. When the
@@ -2610,13 +2610,13 @@ read its printed JSON → perform ONE Claude fix turn per `needs_fix` segment
 using the prompt that JSON carries → re-launch the driver, which re-derives
 each segment's state from durable disk facts (`derive_next_action()`) and
 picks up at the next review round → repeat until the summary reports
-neither `needs_fix` NOR `failed` → run the batch-final completeness check
-below. "No `needs_fix`" alone is not the completion condition: a segment
-whose translate or review FAILED produces no fix prompt to act on, and the
-driver still exits successfully carrying it in `summary.failed`. A batch
-holding a failure is unfinished, and that id belongs in no completeness
-claim. When a
-segment's review comes back not-clean, the driver stops at that segment and
+neither `needs_fix` NOR `failed`. What confirms the BOOK is W7's own audit,
+not a per-batch check — see below. "No `needs_fix`" alone is not the
+completion condition: a segment whose translate or review FAILED produces no
+fix prompt to act on, and the driver still exits successfully carrying it in
+`summary.failed`. A batch holding a failure is unfinished, and that id
+belongs in no completeness claim. When a segment's review comes back
+not-clean, the driver stops at that segment and
 returns `outcome: "needs_fix"` — the round label, the findings, and the exact
 rendered fix prompt — then moves on/exits without fixing it (applying
 findings to a draft is a real LLM content-editing turn a plain Python process
@@ -2646,21 +2646,32 @@ the tier is really carried beside it, as `callFix`'s own `agent()` option
 opener pins nothing — set the reasoning effort of the turn you dispatch
 yourself, to the same `engine.effort` value the line names.
 
-**Last step of the batch, and it is the caller's (#516).** The driver's only
-ledger write is the per-segment fragment; it does NOT perform the batch-final
-`ledger_merge.py --expected-segs … --run-token …` re-verification that
-`mass-translate-wf.template.js`'s `batchComplete` step performs on the
-fallback path (`segment_dispatch_driver.py`'s own docstring names it as the
-orchestrating session's call, not a driver capability). That check is what
-re-asserts, AFTER every segment has finished, that each named id has a ledger
-fragment at all and — for each one materialized `converged` — that its draft
-still carries this run's `<RUN_ID>:<seg>` dispatch token, that its review
-carries the matching `:r<round>` token, and that the draft's content sha1
-still equals the fragment's recorded `reviewed_draft_sha1`. It closes the
-race a per-segment write cannot: a straggler draft+review pair restored
-between one segment's convergence write and the end of the batch. So a
-driver run is not complete when the driver exits — it is complete when this
-passes:
+**What replaces the fallback's batch-final check here (#516).** The driver's
+only ledger write is the per-segment fragment; it does NOT perform the
+batch-final `ledger_merge.py --expected-segs … --run-token …`
+re-verification that `mass-translate-wf.template.js`'s `batchComplete` step
+performs (the driver's own docstring names that as the caller's). Do not try
+to reconstruct that check's roster out of driver output. A driver run is a
+repeated SUBSET invocation, not one batch: `--only-segs` is deliberately
+outside resume identity, so successive invocations under one `RUN_ID` each
+report only their own ids, and a unit that failed in an earlier invocation is
+simply absent from a later summary — any roster assembled from summaries is
+a claim about what you remembered to run, not about the book.
+
+**W7 carries it instead, and it is stronger.** `final_audit.py` runs over
+EVERY currently-converged segment in the project and recomputes each draft's
+content sha1 against that segment's own `reviewed_draft_sha1`; `assemble.py`
+refuses on the same identity before anything ships. That is whole-book and
+roster-free, and it is where "is the draft on disk the one the reviewer saw"
+is actually decided — on both launchers.
+
+You may still run the batch-final merge over a set you are explicitly
+claiming complete. If you do, read its OUTPUT rather than its exit status,
+because neither weak case is a refusal: an id you did not name is outside the
+check entirely, and an id the merge materializes `stale` has its token/sha
+re-assertion SKIPPED while the command still reports success, listing that id
+in `stale_segments`. A non-empty `stale_segments`, or an id you meant to
+claim and did not name, means NOT complete.
 
 ```
 python3 {durable_root}/scripts/ledger_merge.py \
@@ -2668,23 +2679,12 @@ python3 {durable_root}/scripts/ledger_merge.py \
     --expected-segs SEG1,SEG2,... --run-token RUN_ID
 ```
 
-Both values come out of the driver's own printed JSON: `run_id`, and its
-`summary.converged` ids. Two things follow from what the flags actually
-check. **Name the CONVERGED ids, not every id you dispatched.** The
-token/sha re-assertion runs ONLY for an entry the merge materializes as
-`converged`; for anything else it is skipped, while the completeness half is
-satisfied by whatever fragment happens to exist — so a `needs_fix` or
-`failed` id in the list can make an unfinished batch read as verified. The
-skip is not guaranteed either, and that is the second reason not to reach
-for `segs`: a unit stale on draft drift alone is still materialized
-`converged`, so a same-run re-review of one leaves the older fragment in
-place and the re-assertion RUNS and refuses on the sha. **Name only ids
-converged under THAT `run_id`.** The re-assertion reconstructs
-`<run_token>:<seg>` per id, so an id stamped by an earlier run fails it.
-Across `needs_fix` re-invocations that means the union of what those
-invocations reported converged under the SAME `run_id`; an invocation that
-printed a different `run_id` (`resume: false`) began a new batch, and the
-list starts over with it.
+`RUN_ID` is the driver's own printed `run_id`. Name only ids converged under
+THAT run: the re-assertion reconstructs `<run_token>:<seg>` per id, so an id
+stamped by an earlier run fails it. And name only ids you are claiming
+CONVERGED — the completeness half is satisfied by whatever fragment happens
+to exist, so a `needs_fix` or `failed` id in the list makes an unfinished
+batch read as verified.
 
 **When the finding is WRONG (#461) — rejecting a verdict instead of
 applying it.** Since #532 the fix turn refuses a finding it cannot substantiate
