@@ -58,9 +58,11 @@ call paths both ledger_merge.py AND select_segments.py itself make to
 `cache_key.py --seg <id>`.
 """
 import ast
+import errno
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -2564,6 +2566,560 @@ def test_an_oserror_with_no_errno_is_ambiguous_not_absent(tmp_path):
         "is -- it cannot be evidence that the segment never converged"
     )
     assert "no errno" in detail, detail
+
+
+# ---------------------------------------------------------------------------
+# #621 -- the census's own PARENT directory must be established before a
+# single `.ever_converged.<seg>` entry is read.
+#
+# Every per-entry lookup above resolves `{segments_dir}/.ever_converged.<seg>`
+# by pathname, and `classify_ever_converged_sentinel()`'s own ENOENT branch
+# cannot tell "this segment never converged" from "the whole directory that
+# would hold the sentinel does not resolve" -- a missing `segments/`, or a
+# symlink whose target is gone, makes EVERY per-entry lookup read
+# SENTINEL_ABSENT, `previously_converged` stays empty, and the #409 Step 1
+# gate above authorizes retranslating already-converged work while reporting
+# a clean run. select_segments.py now `os.stat()`s `segments_dir` itself
+# before the per-entry loop and, on FileNotFoundError only, cross-checks the
+# MATERIALIZED ledger (WAS_CONVERGED_STATUSES, ledger-wide, not restricted to
+# the selected `segs`) for surviving converged/stale evidence before letting
+# the run through.
+# ---------------------------------------------------------------------------
+
+
+def _build_two_segment_project(root, *, segB_status):
+    """segA: an `in_progress` fragment -- recoverable, exactly what a
+    re-dispatch leaves behind once it ERASES a segment's own convergence
+    history (ledger_update.py overwrites status to `in_progress` before
+    dispatch). segB: an ever-converged ledger record, parameterized on the
+    materialized status the #621 census has to catch BOTH shapes of
+    (WAS_CONVERGED_STATUSES = {"converged", "stale"}):
+
+      "converged" -- segB's stored cache_key matches the current one
+      exactly, so ledger_merge.py's own stale-detection leaves its
+      materialized status untouched at "converged".
+
+      "stale" -- segB's stored cache_key mismatches on one field
+      (style_contract_hash), so ledger_merge.py's stale-detection
+      RECOMPUTES the materialized status to "stale" at merge time -- never
+      written to the on-disk fragment, which still literally says
+      "converged" (see classify_converged_segment()'s own docstring). This
+      is the shape an implementation that checked only the literal string
+      "converged" against the fragment (or against the materialized entry
+      via `==` instead of membership in WAS_CONVERGED_STATUSES) would
+      silently miss.
+
+    segA keeps the default selection non-empty (`not_started`/`recoverable`/
+    `stale` are the only eligible categories, and `in_progress` lands in
+    `recoverable`), so these tests never have to reach for --allow-empty
+    just to get past the unrelated "emitted SEGS is empty" fatal -- which
+    runs BEFORE the #621 gate and would mask it if segs came up empty.
+    """
+    write_manifest(root, ["segA", "segB"])
+    write_fragment(root, "segA", in_progress_fragment())
+
+    current_key = make_cache_key("current")
+    sha1_b = write_draft(root, "segB", {"text": "segB-content"})
+    if segB_status == "converged":
+        stored_key = dict(current_key)
+    elif segB_status == "stale":
+        stored_key = with_field(current_key, "style_contract_hash", "style_contract_hash-OLD")
+    else:
+        raise ValueError(f"unknown segB_status: {segB_status!r}")
+    write_fragment(root, "segB", converged_fragment(stored_key, sha1_b))
+    write_fixture_cache_keys(root, {"segB": current_key})
+
+
+def test_missing_segments_dir_with_ledger_converged_evidence_refuses(tmp_path):
+    """segments/ removed ENTIRELY while the materialized ledger still records
+    a converged segment (segB) -> the new #621 refusal, naming segB exactly.
+
+    Fails on the unfixed code (segments/ absent -> pre-fix per-entry lookups
+    all read ENOENT -> SENTINEL_ABSENT -> previously_converged stays empty ->
+    dispatch is silently authorized) at `proc.returncode != 0`: pre-fix this
+    exits 0 with segB's converged work eligible for silent retranslation."""
+    root = setup_two_segment_project(tmp_path, segB_status="converged")
+    shutil.rmtree(root / "segments")
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0, (
+        "a missing segments/ directory must refuse rather than silently "
+        f"authorize retranslating segB's converged work\nstdout={proc.stdout!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert out["ledger_converged_without_segments_dir"] == ["segB"], out
+    assert "does not resolve" in out["error"]
+    # The remedy for a genuinely ABSENT directory, exact spelling (`--`
+    # before the quoted path): distinguishes it from the dangling-symlink
+    # remedy below, which also contains a "mkdir -p -- " fragment (inside
+    # its own `rm ... && mkdir -p -- ...` sentence) but is never introduced
+    # by "create it".
+    assert "mkdir -p -- " in out["error"], out["error"]
+    assert "--allow-retranslate-converged does NOT clear this" in out["error"]
+
+
+def test_dangling_symlink_at_segments_dir_with_ledger_converged_evidence_refuses(tmp_path):
+    """The ENOENT class is not just "the name is absent" -- a symlink at
+    `segments_dir` whose TARGET is gone (an unmounted volume, an interrupted
+    restore, a relocated bulk store) raises the identical FileNotFoundError
+    from `os.stat()` (which FOLLOWS the link) as a plain missing directory.
+
+    Fails on the unfixed code the same way as the missing-directory case:
+    every per-entry sentinel lookup also follows the dangling link via
+    `lstat` on the (unreachable) final component and reads ENOENT ->
+    SENTINEL_ABSENT, so the pre-fix gate authorizes the run.
+
+    The message assertions below are a SEPARATE, later fix: the two ENOENT
+    shapes need different remedies -- `mkdir -p` on a dangling symlink fails
+    with EEXIST (the NAME is already taken by the link itself), so this
+    shape's message must name the symlink/EEXIST problem and the
+    repoint-or-`rm`-then-`mkdir` remedy, never the bare absent-path phrasing
+    the missing-directory case uses."""
+    root = setup_two_segment_project(tmp_path, segB_status="converged")
+    segments_dir = root / "segments"
+    shutil.rmtree(segments_dir)
+    segments_dir.symlink_to(root / "no-such-target")
+    assert not segments_dir.exists(), (
+        "precondition: this must be a DANGLING symlink -- os.stat() has to "
+        "raise FileNotFoundError here, or the test is not exercising the "
+        "ENOENT-class defect the #621 fix targets"
+    )
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0, (
+        f"a dangling segments/ symlink must refuse the same way a missing "
+        f"directory does\nstdout={proc.stdout!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["ledger_converged_without_segments_dir"] == ["segB"], out
+    assert "does not resolve" in out["error"]
+    assert "SYMLINK" in out["error"], (
+        f"a dangling symlink is not the same shape as an absent directory, "
+        f"and the remedy has to say so\n{out['error']}"
+    )
+    assert "EEXIST" in out["error"], (
+        f"the message must say WHY plain `mkdir -p` cannot be the remedy "
+        f"here -- it collides with the link itself\n{out['error']}"
+    )
+    assert "create it -- `mkdir -p" not in out["error"], (
+        "the bare absent-path remedy must not be offered here -- `mkdir -p` "
+        f"on a dangling symlink's own path fails with EEXIST\n{out['error']}"
+    )
+
+
+@pytest.mark.parametrize("segB_status", ["converged", "stale"])
+def test_only_segs_cannot_bypass_the_ledger_wide_census_via_an_erased_segment(tmp_path, segB_status):
+    """THE decisive case: an operator retries only segA (its own convergence
+    history erased by a re-dispatch: status `in_progress`, no sentinel
+    evidence of its own either way) via --only-segs, while segB -- NOT
+    selected, NOT touched by this invocation at all -- still carries
+    converged evidence in the materialized ledger. segments/ is then removed
+    entirely.
+
+    An implementation that scanned only the SELECTED `segs` (rather than the
+    ledger WIDE, as #621 requires) would see segA's own ledger record
+    (status "in_progress", not in WAS_CONVERGED_STATUSES) and find nothing
+    to refuse on, silently authorizing segA's dispatch while segB's sentinel
+    is unreadable right alongside it -- reachable any time an operator
+    narrows a rerun to exactly the segments a re-dispatch just erased. This
+    is the ONE case that separates a correct implementation (ledger-wide
+    scan) from a wrong one (scan restricted to `segs`); every other test in
+    this section would pass a `segs`-scoped implementation too.
+
+    Parameterized over BOTH statuses WAS_CONVERGED_STATUSES covers: a
+    materialized "converged" (segB's stored cache_key matches, untouched by
+    ledger_merge.py's stale-detection) and a materialized "stale" (segB's
+    stored cache_key mismatches one field, so ledger_merge.py's OWN
+    stale-detection recomputes the materialized status to "stale" at merge
+    time -- never written to the on-disk fragment). An implementation
+    checking only the literal string "converged" passes the first case and
+    fails the second.
+
+    Fails on the unfixed code (and on a `segs`-scoped fix) at
+    `out["ledger_converged_without_segments_dir"] == ["segB"]`: pre-fix the
+    key is entirely absent from a successful payload; a `segs`-scoped fix
+    would either omit the key too (segA alone triggers nothing) or, if it
+    somehow still found segB, would fail differently -- but the point of
+    this test is that segA's own dispatch is authorized either way, which is
+    the actual loss."""
+    root = setup_two_segment_project(tmp_path, segB_status=segB_status)
+    shutil.rmtree(root / "segments")
+
+    proc = run_select(root, "--only-segs", "segA")
+
+    assert proc.returncode != 0, (
+        f"segB's surviving {segB_status!r} ledger record must refuse this "
+        f"dispatch even though segB was never named\nstdout={proc.stdout!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["ledger_converged_without_segments_dir"] == ["segB"], out
+
+
+def test_no_refusal_when_segments_dir_is_gone_and_no_converged_evidence_exists(tmp_path):
+    """FALSE-RED BOUND. This is a damaged/partial durable_root with no
+    converged evidence anywhere in the ledger, NOT "a first-ever run":
+    make_durable_root() and the plugin's own Step 0a both create segments/
+    unconditionally, so a genuine first-ever run always has the directory.
+    Nothing here should refuse, because the #621 gate exists to catch a
+    LEDGER claim the missing directory contradicts, and here the ledger
+    makes no such claim -- the KNOWN, documented one-way under-detection in
+    the fix's own comment: a project whose every converged segment was later
+    re-dispatched carries no converged/stale record at all, and this check
+    correctly does not fire for it.
+
+    Green both before and after the fix by design; it exists to catch a fix
+    that over-blocks (refuses on ANY missing segments/, not just one the
+    ledger contradicts), which the tests above cannot see."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["segA"])
+    # No ledger fragment at all for segA -> not_started, no WAS_CONVERGED
+    # status anywhere in the (empty) materialized ledger.
+    shutil.rmtree(root / "segments")
+
+    proc = run_select(root)
+
+    assert proc.returncode == 0, (
+        f"no ledger evidence contradicts the missing directory here -- this "
+        f"must proceed exactly as before #621\nstdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["segs"] == ["segA"]
+    assert "ledger_converged_without_segments_dir" not in out, out
+
+
+def test_classify_only_is_not_refused_by_the_missing_segments_dir_gate(tmp_path):
+    """The whole #621 block sits inside `if authorizes_dispatch:`, same as
+    every other #409 Step 1 gate -- final_audit.py's read-only classification
+    path must never be refused by a dispatch-only guard."""
+    root = setup_two_segment_project(tmp_path, segB_status="converged")
+    shutil.rmtree(root / "segments")
+
+    proc = run_select(root, "--classify-only")
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["authorizes_dispatch"] is False
+    assert "ledger_converged_without_segments_dir" not in out, out
+    assert out["previously_converged"] == [], (
+        "classify-only does not evaluate the gate at all, so it reports no "
+        "gate result"
+    )
+
+
+def test_a_plain_file_at_segments_dir_refuses_at_the_anchor_naming_enotdir(tmp_path):
+    """A plain FILE at `segments_dir` fails the census's own
+    `os.open(..., O_DIRECTORY)` with ENOTDIR, so it refuses AT THE ANCHOR
+    rather than one level down. Both shapes refuse and neither is clearable
+    by the flag; what this pins is that the refusal names the directory and
+    the errno, and that it is NOT the ledger-evidence refusal (nothing here
+    is about the ledger).
+
+    Earlier this shape reached the per-entry AMBIGUOUS refusal instead,
+    because the guard only stat'ed. That was changed deliberately: a census
+    that proceeds without an anchor can be answered by a directory swapped in
+    after the check, and 'the entry at that path is not a directory' is not a
+    reason to run one."""
+    root = setup_two_segment_project(tmp_path, segB_status="converged")
+    segments_dir = root / "segments"
+    shutil.rmtree(segments_dir)
+    segments_dir.write_text("not a directory\n", encoding="utf-8")
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0
+    out = parse_stdout(proc)
+    assert out["unestablished_segments_dir"]["path"] == str(segments_dir), out
+    assert "ENOTDIR" in out["unestablished_segments_dir"]["detail"], out
+    assert "ledger_converged_without_segments_dir" not in out, (
+        f"this is not the ledger-evidence refusal -- the directory could not "
+        f"be opened at all\n{out}"
+    )
+    assert "--allow-retranslate-converged does NOT clear this" in out["error"]
+    assert "unexpected error" not in out["error"], (
+        "it must refuse through fatal()'s payload, never through main()'s "
+        "generic catch-all"
+    )
+
+
+def test_a_self_referential_symlink_at_segments_dir_refuses_at_the_anchor(tmp_path):
+    """ELOOP is the other non-ENOENT open failure that is reachable without
+    special privileges. Same rule as every other one: the census refuses
+    because it could not establish the directory, carrying the path and the
+    errno -- never main()'s generic 'unexpected error', and never a
+    pathname-resolved census run without an anchor."""
+    root = setup_two_segment_project(tmp_path, segB_status="converged")
+    segments_dir = root / "segments"
+    shutil.rmtree(segments_dir)
+    segments_dir.symlink_to(segments_dir)
+    with pytest.raises(OSError):
+        segments_dir.stat()  # precondition: this must be ELOOP, not ENOENT
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0
+    out = parse_stdout(proc)
+    assert out["unestablished_segments_dir"]["path"] == str(segments_dir), out
+    assert "ELOOP" in out["unestablished_segments_dir"]["detail"], out
+    assert "ledger_converged_without_segments_dir" not in out, out
+    assert "unexpected error" not in out.get("error", ""), (
+        "an ELOOP here must refuse through fatal()'s payload, never be "
+        "allowed to propagate into main()'s generic catch-all"
+    )
+
+
+def test_allow_retranslate_converged_does_not_clear_the_missing_segments_dir_refusal(tmp_path):
+    """Deliberately NOT clearable by --allow-retranslate-converged, same as
+    the pre-existing ambiguous-sentinel refusal it sits beside: that flag
+    authorizes redoing segments THIS SCRIPT has established converged, and
+    here nothing has been established at all -- the escape is `mkdir -p`,
+    stated in the message, never a flag."""
+    root = setup_two_segment_project(tmp_path, segB_status="converged")
+    shutil.rmtree(root / "segments")
+
+    proc = run_select(root, "--allow-retranslate-converged")
+
+    assert proc.returncode != 0, (
+        f"--allow-retranslate-converged must NOT clear this refusal\n"
+        f"stdout={proc.stdout!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["ledger_converged_without_segments_dir"] == ["segB"], out
+    assert "--allow-retranslate-converged does NOT clear this" in out["error"]
+
+
+def setup_two_segment_project(tmp_path, *, segB_status):
+    root = make_durable_root(tmp_path)
+    _build_two_segment_project(root, segB_status=segB_status)
+    return root
+
+
+def test_a_valid_segments_dir_symlink_still_protects_the_ordinary_gate(tmp_path):
+    """FALSE-POSITIVE BOUND, the direction opposite every test above: the
+    #621 fix's own block comment claims `os.stat()` FOLLOWS the link, so a
+    `segments/` that is a symlink pointing at a REAL, present directory
+    keeps working exactly as before -- nothing in this section pins that
+    claim directly. Here `segments/` is replaced with a symlink to a real
+    directory that holds segB's real draft AND a genuine
+    `.ever_converged.segB` sentinel file, and the run must still refuse --
+    but through the ORDINARY previously_converged gate (the sentinel is
+    genuinely readable through the link), never through the new #621 key.
+
+    Uses segB_status="stale" rather than "converged" so segB's own
+    classification category is "stale" (dispatch-eligible by default,
+    unlike "reusable"), which is what puts segB into the per-entry sentinel
+    loop (`for seg in segs:`) at all -- a "reusable" segB would never reach
+    `classify_ever_converged_sentinel()` and this test would prove nothing
+    about the symlink-following claim.
+
+    Fails on an implementation that (wrongly) treats ANY symlink at
+    `segments_dir` as unresolvable: it would refuse via
+    `ledger_converged_without_segments_dir` instead of `previously_converged`,
+    or fail to refuse at all if it also mishandles the per-entry lookups the
+    same way."""
+    root = setup_two_segment_project(tmp_path, segB_status="stale")
+    segments_dir = root / "segments"
+    real_dir = tmp_path / "real_segments"
+    shutil.move(str(segments_dir), str(real_dir))
+    (real_dir / ".ever_converged.segB").write_text("converged\n", encoding="utf-8")
+    segments_dir.symlink_to(real_dir)
+    assert segments_dir.is_dir(), (
+        "precondition: os.stat() (which FOLLOWS symlinks) must see a real "
+        "directory at segments_dir through the link, or this test is not "
+        "exercising the claim it exists to pin"
+    )
+
+    proc = run_select(root)
+
+    assert proc.returncode != 0, (
+        f"segB really did converge (a genuine sentinel is readable through "
+        f"the symlink) -- the run must still refuse\nstdout={proc.stdout!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["previously_converged"] == ["segB"], (
+        f"a segments/ symlink resolving to a real directory must be read "
+        f"exactly like an ordinary directory -- the sentinel is genuinely "
+        f"present, so this must be the ORDINARY #409 Step 1 refusal, not "
+        f"the #621 one\n{out}"
+    )
+    assert "ledger_converged_without_segments_dir" not in out, (
+        f"the #621 branch must not fire at all here -- os.stat() on a "
+        f"symlink to a real directory raises nothing\n{out}"
+    )
+    assert "--allow-retranslate-converged" in out["error"]
+
+
+def test_an_open_failure_whose_lookups_would_still_succeed_refuses(tmp_path, monkeypatch):
+    """The failure mode that makes 'defer the open error to the per-entry
+    lookups' wrong: those lookups do NOT necessarily reproduce it. EMFILE
+    fails descriptor allocation while `lstat` still succeeds (an execute-only
+    directory is the other everyday one: it rejects O_RDONLY and still permits
+    named lookups). Deferring would run the census by pathname with no anchor
+    established -- exactly the replacement window the descriptor exists to
+    close -- and the ledger fallback cannot cover it, because a segment whose
+    convergence was erased by a re-dispatch has no converged record left.
+
+    Simulated at the syscall: `os.open` raises EMFILE for this one path while
+    everything else, including every sentinel `lstat`, works normally. The run
+    must refuse and name the errno, NOT proceed with a pathname census.
+
+    Fails on the deferring implementation at `unestablished_segments_dir`:
+    with segA `in_progress` and a readable `.ever_converged.segA`, that
+    version reads the sentinel by pathname, reports segA
+    `previously_converged`, and never raises this refusal at all -- and had
+    the directory been swapped in that window it would have emitted segA with
+    `success: true` instead, which is the loss."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["segA"])
+    write_fragment(root, "segA", in_progress_fragment())
+    segments_dir = root / "segments"
+    (segments_dir / ".ever_converged.segA").write_text("converged\n", encoding="utf-8")
+
+    real_os_open = os.open
+
+    def refusing_open(path, flags, *args, **kwargs):
+        if str(path) == str(segments_dir):
+            raise OSError(errno.EMFILE, os.strerror(errno.EMFILE), str(path))
+        return real_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", refusing_open)
+
+    mod = _load_script_module("select_segments.py")
+    args = mod.build_arg_parser().parse_args(["--durable-root", str(root)])
+    dirs = mod.resolve_dirs(args.durable_root, args.plugin_root)
+
+    with pytest.raises(mod.FatalError) as exc_info:
+        mod.run(args, dirs)
+    payload = json.loads(str(exc_info.value))
+
+    assert payload["unestablished_segments_dir"]["path"] == str(segments_dir), payload
+    assert "EMFILE" in payload["unestablished_segments_dir"]["detail"], payload
+    assert payload["success"] is False
+    assert "ledger_converged_without_segments_dir" not in payload, (
+        f"the ledger-evidence refusal is a different condition -- and here the "
+        f"ledger has nothing to say, which is the point\n{payload}"
+    )
+
+
+def test_segments_dir_replaced_after_the_check_cannot_reopen_the_fail_open(tmp_path, monkeypatch):
+    """THE INTERLEAVING WINDOW the reviewer reproduced: a check that only
+    STATS the directory establishes the pathname for one instant, and every
+    per-entry lookup then resolves `segments/` AFRESH. Rename the real
+    directory aside and drop an empty one in its place in that window, and
+    each sentinel read finds the replacement, answers ABSENT, and authorizes
+    dispatch over work whose marker is sitting intact in the original inode.
+    The ledger fallback cannot cover it: this segment's own convergence was
+    ERASED by a re-dispatch (`in_progress`), which is the exact state the
+    durable sentinel exists to answer for.
+
+    The census now OPENS the directory and passes that descriptor to
+    `classify_ever_converged_sentinel(dir_fd=...)`, so the reads name the
+    inode this run checked and a pathname swapped afterwards has nothing left
+    to act on -- the segment is reported `previously_converged` and refused.
+
+    Driven in-process rather than through the subprocess CLI because the swap
+    has to happen INSIDE the window: `os.open` is wrapped so that the moment
+    the census opens `segments/`, and only then, the replacement is installed.
+    A pathname-resolving implementation fails at the `previously_converged`
+    assertion with `success: true` and segA emitted -- the reviewer's exact
+    observation."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["segA"])
+    # `in_progress` -> category `recoverable`, dispatch-eligible, and NOT in
+    # WAS_CONVERGED_STATUSES: the ledger says nothing that could rescue this.
+    write_fragment(root, "segA", in_progress_fragment())
+    segments_dir = root / "segments"
+    (segments_dir / ".ever_converged.segA").write_text("converged\n", encoding="utf-8")
+
+    real_os_open = os.open
+    swapped = {"done": False}
+
+    def swapping_open(path, flags, *args, **kwargs):
+        fd = real_os_open(path, flags, *args, **kwargs)
+        if not swapped["done"] and str(path) == str(segments_dir):
+            swapped["done"] = True
+            # The window: the descriptor is already open on the ORIGINAL
+            # inode, and the pathname now names an empty replacement.
+            segments_dir.rename(tmp_path / "moved_aside")
+            (tmp_path / "durable_root" / "segments").mkdir()
+        return fd
+
+    monkeypatch.setattr(os, "open", swapping_open)
+
+    mod = _load_script_module("select_segments.py")
+    args = mod.build_arg_parser().parse_args(["--durable-root", str(root)])
+    dirs = mod.resolve_dirs(args.durable_root, args.plugin_root)
+
+    with pytest.raises(mod.FatalError) as exc_info:
+        mod.run(args, dirs)
+    payload = json.loads(str(exc_info.value))
+
+    assert swapped["done"], (
+        "precondition: the census must have opened segments/ -- if it never "
+        "did, this test proves nothing about the window"
+    )
+    assert payload["previously_converged"] == ["segA"], (
+        f"the sentinel was intact in the directory this run checked; a census "
+        f"bound to that descriptor must still see it after the pathname was "
+        f"swapped\n{payload}"
+    )
+
+
+def test_ledger_converged_without_segments_dir_is_sorted_not_insertion_order(tmp_path):
+    """The payload's sortedness is unpinned by every test above: each one
+    carries either one id, or two ids that happen to already be
+    alphabetical. A wrong implementation that emitted the census in
+    ledger-dict INSERTION order rather than `sorted(...)` would pass all of
+    them and be caught only here.
+
+    Driven at the Python level (loading the module and calling `run()`
+    directly) rather than through the subprocess CLI used everywhere else in
+    this file, because there is no reachable FIXTURE that hands
+    select_segments.py's `run()` a genuinely non-alphabetical
+    `ledger_segments` dict: ledger_merge.py's own `_read_fragments()` always
+    calls `sorted(ledger_d.iterdir())`, so the materialized `runs/ledger.json`
+    it writes -- and therefore `load_ledger_segments()`'s return value on any
+    real fixture -- is ALWAYS in alphabetical order regardless of manifest or
+    fragment-write order, making the `sorted()` call in the #621 branch
+    untestable from outside without this. `load_ledger_segments` is
+    monkeypatched on a throwaway module instance (`_load_script_module`
+    creates a fresh, uncached module object per call, so this cannot leak
+    into any other test) to return a hand-built dict literal whose insertion
+    order is reverse-alphabetical, proving the OUTPUT is sorted regardless of
+    the INPUT's order.
+
+    Fails on an implementation that drops the `sorted(...)` call (or replaces
+    it with, say, a plain list comprehension) at the final list-equality
+    assertion: it would see `["segC", "segB", "segA"]` instead."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["onlyseg"])
+    # No ledger fragment for "onlyseg" -> not_started, dispatch-eligible,
+    # keeping the default `segs` non-empty without needing --allow-empty.
+    shutil.rmtree(root / "segments")
+
+    mod = _load_script_module("select_segments.py")
+    reverse_order_ledger = {
+        "segC": {"status": "converged"},
+        "segB": {"status": "stale"},
+        "segA": {"status": "converged"},
+    }
+    assert list(reverse_order_ledger.keys()) == ["segC", "segB", "segA"], (
+        "precondition: this dict's own insertion order must be "
+        "reverse-alphabetical, or the test proves nothing"
+    )
+    mod.load_ledger_segments = lambda merge_result, durable_root: reverse_order_ledger
+
+    args = mod.build_arg_parser().parse_args(["--durable-root", str(root)])
+    dirs = mod.resolve_dirs(args.durable_root, args.plugin_root)
+
+    with pytest.raises(mod.FatalError) as exc_info:
+        mod.run(args, dirs)
+    payload = json.loads(str(exc_info.value))
+
+    assert payload["success"] is False
+    assert payload["ledger_converged_without_segments_dir"] == ["segA", "segB", "segC"], payload
 
 
 SENTINEL_SCRIPTS = (
