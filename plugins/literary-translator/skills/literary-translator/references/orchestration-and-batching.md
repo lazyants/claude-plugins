@@ -511,7 +511,9 @@ directory is logged in W8's status output.
 
 **Whether to resume at all is a separate decision from the `RUN_ID` value
 itself** — gated by the resume-integrity digest below, never by "a
-`resumeFromRunId` was supplied" alone.
+`resumeFromRunId` was supplied" alone. One MATCH case deliberately reuses the
+`RUN_ID` while passing no `resumeFromRunId` at all; see the exception under
+that gate.
 
 ### The resume-integrity gate and its digest inputs
 
@@ -574,14 +576,35 @@ value, and `plugin_bundle_hash` (in `version`, above) already covers "did
 the plugin's own content change" without making the digest non-portable
 across operators' checkouts.
 
-**MATCH** the prior run's own recorded digest → resume with
+**MATCH** the prior run's own recorded digest → normally resume with
 `resumeFromRunId` — every digest input is byte-identical, so every cached
 result (including the four unscoped-prompt calls above) is provably still
-valid. **MISMATCH, or no prior digest** → launch a **fresh run**, a fresh
-`RUN_ID`, and explicitly **no** `resumeFromRunId` — reuse nothing. This is
-the general principle the digest closes: cover *every* input that can change
-a cached agent output, not just the ones a naive "did the source text
-change" check would think to cover — a `research_mode: live→offline` flip,
+valid, **except for the `glossary-pass-null` failure below, where the
+Workflow must be invoked WITHOUT `resumeFromRunId`**. **MISMATCH, or no
+prior digest** → launch a **fresh run**, a fresh `RUN_ID`, and explicitly
+**no** `resumeFromRunId` — reuse nothing.
+
+**Exception — a MATCH whose cached result is a non-answer (#404).** The
+digest reasons about INPUTS; it cannot see that a cached result records a
+batch that never became ready. When the previous glossary pass returned
+`merged: false`, `reason: "fragment-check-failed"` with any batch at
+`reason: "glossary-pass-null"`, resuming replays that batch's cached precheck
+and wait replies instead of calling anything, so the identical verdict comes
+back — which reads as "it failed again" rather than "it never ran". Recover
+by offering the prior `RUN_ID` to `resume_setup.py` in `resume_from_run_ids`
+exactly as usual — the failed pass merged nothing, so the digest normally
+still matches, and `resume_setup.py`'s own `resume: true` answer is the
+authority — but invoke the Workflow WITHOUT `resumeFromRunId`. That re-runs
+each batch's precheck against what is actually on disk: a valid attempt-0
+fragment is resume-skipped, a missing or invalid one is dispatched again.
+Before re-invoking, confirm the previous run's codex jobs are terminal — a
+dispatch job outlives the `agent()` call that awaited it, so a late one can
+still rewrite its attempt path after `write_run_dir()`'s wipe.
+
+That two-branch rule is the general principle the digest closes: cover
+*every* input that can change a cached agent output, not just the ones a
+naive "did the source text change" check would think to cover — a
+`research_mode: live→offline` flip,
 for instance, changes agent policy and `--check-batch` validity without
 changing a single hashed content byte, which is exactly why `subst` is a
 first-class digest input alongside `args`/`domain`/`version`, not folded

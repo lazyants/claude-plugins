@@ -1018,7 +1018,10 @@ other four — is another roll of the same die and not a repair:
   `return` and not a `continue`. That batch is over for the run, and since the
   merge is all-or-nothing it takes the whole pass with it — `merged: false`,
   `reason: "fragment-check-failed"`, nothing merged at all. Recovery here is
-  an operator re-invoking the pass, not the template retrying.
+  an operator re-invoking the pass, not the template retrying — and that
+  re-invocation must NOT pass `resumeFromRunId`, or it replays this batch's
+  cached replies unchanged; see `references/orchestration-and-batching.md`'s
+  **Exception — a MATCH whose cached result is a non-answer (#404).**
 - **Mass-translate's three sites**, for completeness, since they carry the same
   containment test: its review wait blocks that segment for the run
   (`reason: "review-timeout"`); its translate wait returns the deliberately
