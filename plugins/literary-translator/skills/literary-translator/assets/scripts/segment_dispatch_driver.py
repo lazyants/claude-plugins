@@ -3849,6 +3849,108 @@ def _translate_redispatched_since(dirs: dict, seg: str, review_path: Path) -> bo
     return fragment_mtime_ns > review_mtime_ns
 
 
+def _translate_in_progress_since(dirs: dict, seg: str, review_path: Path) -> bool:
+    """True iff a runs/ledger.d/{seg}.json fragment written STRICTLY AFTER
+    `review_path` records status "in_progress" -- RAW #7 (#441): the
+    round-advance branch at the tail of derive_next_action() used to read
+    "the draft moved since the review" as proof a fix landed, even when
+    the move was a same-run RETRANSLATE. What this proves, exactly: a
+    translate was DISPATCHED after this review -- not that one produced
+    new prose. Both places that dispatch one write
+    `{"status": "in_progress"}` immediately BEFORE the dispatch: this
+    driver's own translate branch (see process_segment()'s
+    `if action["action"] == "translate":`, just before its codex
+    dispatch) and the shipped workflow's translateStage()
+    (mass-translate-wf.template.js:1856). A fix turn goes through neither,
+    so it writes no fragment at all -- which is what makes the discriminator
+    work at all.
+
+    Three states satisfy this predicate without a retranslate having
+    happened, and none of them is closed here. (1) A dispatch interrupted
+    between the ledger write and the job. (2) A job whose safe_adopt()
+    finds the canonical draft already valid and returns 0 without
+    launching (codex_job.py, the `self.adopted = True` return). (3) The
+    reopen-capped path, which writes `{"status": "in_progress", "note":
+    ...}` and then dispatches a REVIEW, not a translate. (3) CANNOT reach
+    this call site: the `matched_round_label == "final"` block above
+    returns on every path (verified structurally, not by reading), and the
+    reopen is only ever dispatched at `final`. (1) and (2) can.
+
+    They are accepted, and the reason is the asymmetry of the two
+    mistakes. A false hold costs one extra review at the same label, and a
+    review that COMPLETES clears it -- promoting or adopting a verdict
+    bound to the current draft makes review.json newer than the fragment,
+    so this function reads False on the next derivation. Do not read that
+    as unconditional, which an earlier revision of this docstring did: a
+    review that FAILS (no launch, a timeout, an attempt rejected by
+    validation) changes neither artifact, so a later invocation holds
+    again, and persistent review failure repeats it without a bound. Those
+    retries stay explicit failures -- the segment lands in summary.failed
+    and assemble.py refuses any manifest segment absent from the converged
+    population -- so the cost is dispatches, never prose that reaches the
+    book. A false ADVANCE, the behaviour this replaces, spends
+    a fix round the segment never got and at max_fix_rounds: 1 caps it.
+    Binding this to a completion record instead (the .codex_job.<seg>.json
+    terminal log) would buy that back at the price of advancing over a
+    GENUINE retranslate whose best-effort log was lost or overwritten,
+    which is the direction this fix exists to remove. Do not "harden" it
+    that way without re-deciding that trade.
+
+    Why _translate_redispatched_since()'s own mtime-only test above is NOT
+    reusable here, unmodified, at THIS call site: the workflow also writes
+    `{"status": "blocked", "reason": "draft-missing"}` AFTER a numbered
+    review (mass-translate-wf.template.js:1754), and a segment left
+    `blocked` is explicitly retried via `--only-segs` under the SAME
+    run_id (resume_setup.py resolves it to the same run by matching the
+    same input digest). A mtime-only guard would hold the round label for
+    that recovery too -- a paid same-label review dispatched over a draft
+    no translate actually produced. This was a codex review finding
+    against an earlier revision of this fix, not a hypothetical: reusing
+    the sibling helper as-is regresses exactly this case.
+
+    Why every doubt resolves to False: False is "advance", which is
+    today's existing behaviour, so a missing, unreadable, equal-mtime, or
+    differently-statused fragment changes nothing this function did not
+    already do before it existed. True is the only new outcome this
+    function can produce, and all it ever does is trade one round-advance
+    for a same-label re-review -- never the reverse, so it can never
+    manufacture the live-lock a wrongly-conservative guard would risk.
+
+    Why the fragment's status is read HERE but the sibling helper above is
+    deliberately left status-blind rather than narrowed the same way:
+    narrowing the sibling regresses a real case at ITS OWN call site (the
+    `if not draft_ok:` branch above) -- a `blocked`/`review-timeout`
+    fragment newer than the review, sitting over an invalid draft that
+    genuinely came from a translate, would flip from today's correct
+    `translate` outcome to a wrong `invalid_post_fix_draft` termination.
+    That is RAW #1, tracked separately (filed, not fixed here) precisely
+    because it needs "the last in_progress write is newer than the
+    review", not "the newest fragment is in_progress" -- a different,
+    larger change than this call site needs. Do not "fix" the sibling to
+    match this one.
+
+    The status spelling checked below is authoritative from
+    ledger-fragment.schema.json:13 / FRAGMENT_STATUS_FALLBACK_ENUM
+    (ledger_update.py:139-141): the on-disk FRAGMENT enum has exactly five
+    values -- pending, in_progress, converged, non_converged, blocked.
+    Never write or compare against "stale" here -- that is the
+    MATERIALIZED ledger's sixth value (ledger.schema.json), which
+    ledger_update.py never writes to a fragment at all."""
+    fragment_path = dirs["runs_dir"] / "ledger.d" / f"{seg}.json"
+    try:
+        fragment_mtime_ns = fragment_path.stat().st_mtime_ns
+        review_mtime_ns = review_path.stat().st_mtime_ns
+    except OSError:
+        return False
+    if fragment_mtime_ns <= review_mtime_ns:
+        return False
+    try:
+        fragment = json.loads(fragment_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(fragment, dict) and fragment.get("status") == "in_progress"
+
+
 def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
     """Returns exactly one of:
       {"action": "translate"}
@@ -4459,6 +4561,16 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
     # silently advancing.
     if draft_matches_review or current_sha1 is None or reviewed_sha1 is None:
         return {"action": "needs_fix", "round_label": matched_round_label, "findings": review_obj.get("findings") or []}
+
+    # RAW #7 (#441): the draft moved since this review, but that alone does
+    # not prove a fix was applied -- a same-run RETRANSLATE moves it too,
+    # and _translate_in_progress_since() is the only evidence that tells
+    # the two apart (see its own docstring). This makes the non-clean
+    # branch here agree with the CLEAN-but-stale branch above, which
+    # already re-reviews at `matched_round_label` rather than spending a
+    # round when the draft merely moved out from under a stale verdict.
+    if _translate_in_progress_since(dirs, seg, review_path):
+        return {"action": "review", "round_label": matched_round_label}
 
     return {"action": "review", "round_label": _next_round_label(matched_round_label, max_fix_rounds)}
 

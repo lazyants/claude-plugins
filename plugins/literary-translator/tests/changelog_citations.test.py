@@ -61,49 +61,65 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.34.1 (#547 -- the style-contract edit's price) per the
-# maintenance contract above: 1.34.0's single `resume_setup.py:528-531` entry
-# went with its entry, exactly as that contract says it must. It is not carried
-# forward and not re-resolved against this tree -- carrying it would be the
+# Rewritten for 1.50.0 (#441) per the maintenance contract above. The
+# previous rotation's four `cache_key.py:NNN` anchors went with their entry,
+# exactly as that contract says they must: not carried forward, and not
+# re-resolved against this tree. Carrying them would be the
 # renumber-preserves-the-wrongness failure this file exists to prevent, and
-# re-resolving it would pin a shipped entry to line numbers it never claimed.
+# re-resolving them would pin a shipped entry to line numbers it never
+# claimed.
 #
-# 1.40.0 (#529) cites NO `file.ext:NNN`, so this map is empty -- its documented
-# per-release state, not a lapse. The entry names `segpack.py`, `cache_key.py`,
-# `resume_setup.py`, `draft.schema.json` and `call_template_functions()`, but
-# every claim about them is BEHAVIOURAL -- which name a builder omits from
-# `canon_map` and why, what a marker move does to a resume identity, when a
-# template is copied -- and a behavioural claim is pinned by a test that
-# exercises it, not by a line number. Only the prompt-scoping claim is so
-# pinned, by `segment_dispatch_driver.test.py`'s three new regressions; the
-# migration-cost and copy-once claims are guarded by review alone, which is
-# exactly what the entry's own cost paragraph is. The one figure the entry
-# states about those files is a count (`17 PLUGIN_BUNDLE_MEMBERS`), pinned by
-# re-derivation in the sibling `changelog_figures.test.py`. A line citation
-# would pin WHERE a thing lives, which none of those sentences asserts.
+# AN EMPTY MAP IS THE DANGEROUS CASE, and this release is the second recorded
+# instance rather than a hypothetical. Both assertions still bite against an
+# empty map -- a citation with no anchors fails, and an anchor no citation
+# uses fails -- but NEITHER FIRES ON A STALE COMMENT. When the previous
+# declaration was also empty, a correct rotation and a skipped one are
+# byte-identical, nothing goes red, and only a reader comparing this prose
+# against the entry catches it. That is why the rewrite is a maintenance
+# contract and not an assertion.
 #
-# An empty map is exactly the case where a correct rotation and a SKIPPED one
-# look identical -- and 1.40.0 is the instance that proves it: the previous
-# release's declaration was ALSO empty, so nothing here went red when this entry
-# landed, and only a reviewer reading the comment caught that it still described
-# 1.35.0. The precedent runs further back for their own reasons (1.34.1 (#547)
-# and 1.33.1 were empty too). Both halves still bite against an empty map -- a
-# citation with no anchors fails and an anchor no citation uses fails -- but
-# neither half fires on a stale COMMENT, which is why the rewrite is a
-# maintenance contract rather than an assertion.
+# Two ways it has actually gone wrong, both worth knowing before the next
+# rotation:
+#   - 1.40.0 (#529) landed with this comment still describing 1.35.0. Caught
+#     by review, not by the suite.
+#   - This file arrived at 1.50.0 with the map holding a PREVIOUS entry's
+#     anchors under a comment announcing a rotation -- the half you edit and
+#     the half you inherit can contradict each other inside one file, and the
+#     comment is the half that looks authoritative to anyone skimming the
+#     diff. Rebasing is how they diverge: this file need not conflict for its
+#     declaration to go stale, so `git status` stays clean and only a full
+#     suite run reports it. Rotate BOTH halves, and read the declaration
+#     rather than the prose when judging what a tree actually declares.
+#
+# Why 1.50.0's own map is empty, specifically: the entry names a great deal of
+# source -- `derive_next_action()`, `_translate_in_progress_since()`,
+# `mark_ever_converged()`, `classify_ever_converged_sentinel()`,
+# `check_segments_dir_identity()` -- but names all of it by SYMBOL, and every
+# claim it makes about them is behavioural (which branch spends a round, what
+# a fragment proves, which directory a sync lands on). A behavioural claim is
+# pinned by a test that exercises it, not by a line number, and each of those
+# is. The one figure the entry states about those files is a count
+# (`17 PLUGIN_BUNDLE_MEMBERS`), pinned by re-derivation in the sibling
+# `changelog_figures.test.py`. A line citation would pin WHERE a thing lives,
+# which none of those sentences asserts -- and over this release's four review
+# rounds and four rebases every function in the diff was renumbered
+# repeatedly, so a line number authored early would have been false by the end
+# with nothing going red.
 CITATION_ANCHORS = {
-    # 1.44.0 (#458). The entry's "What it costs" section is the only place it
-    # cites source, and every citation there is load-bearing: each one is a
-    # link in the argument that this release re-stales converged work at the
-    # next Step 0a refresh. An operator reads that section to decide whether
-    # to refresh a live book, so a citation that drifts here misprices a
-    # decision about a whole corpus, not a docstring.
-    "cache_key.py:156": ["segment_dispatch_driver.py"],
-    "cache_key.py:193": ["plugin_bundle_hash"],
-    "cache_key.py:196-198": ["PER_SEGMENT_FIELDS", "input_sha1"],
-    "cache_key.py:563-569": [
-        "compute_plugin_bundle_hash", ".plugin_bundle_hash", "read_bytes",
-    ],
+    # 1.50.0 (#441) cites no `file:NNN` at all, so this map is empty and that
+    # is a deliberate rotation, not an oversight -- the previous entry's four
+    # cache_key.py anchors retire with it.
+    #
+    # The entry does name a lot of source, and names it by SYMBOL throughout:
+    # `derive_next_action()`, `_translate_in_progress_since()`,
+    # `mark_ever_converged()`, `classify_ever_converged_sentinel()`,
+    # `PLUGIN_BUNDLE_MEMBERS`, `check_segments_dir_identity()`. That is the
+    # choice this release made on purpose. Its own subject is a durability
+    # fix that took four review rounds and moved these functions repeatedly,
+    # and every rebase renumbered them again -- a line citation written at
+    # round one would have been wrong by round four with nothing going red in
+    # between, since this map only checks anchors the entry still contains.
+    # A symbol survives a rebase; a line number does not.
 }
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an

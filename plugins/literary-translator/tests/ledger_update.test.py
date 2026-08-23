@@ -1041,7 +1041,16 @@ def test_a_non_enoent_lstat_error_refuses_rather_than_recording_convergence(tmp_
     real_open = ledger_update.os.open
     real_stderr = ledger_update.sys.stderr
 
-    def eexist_open(path, flags, mode=0o777):
+    def eexist_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            # mark_ever_converged() now pins segments/ with its own
+            # os.open(O_RDONLY|O_DIRECTORY) BEFORE it touches the entry, and
+            # creates the sentinel relative to that descriptor. Only the
+            # dir_fd-relative call is the sentinel create this fake stands
+            # in for; the pin is passed through untouched. Keyed on dir_fd
+            # rather than on the flags so that a future edit dropping
+            # O_CREAT|O_EXCL cannot slip past by looking like the pin.
+            return real_open(path, flags, mode)
         # The fake ASSERTS on the flags rather than ignoring them: this test's
         # premise is that EEXIST can only arise from an exclusive create, so a
         # future edit that dropped O_EXCL (and with it the whole race-free
@@ -1056,19 +1065,37 @@ def test_a_non_enoent_lstat_error_refuses_rather_than_recording_convergence(tmp_
     captured_stderr = io.StringIO()
     ledger_update.os.open = eexist_open
     ledger_update.sys.stderr = captured_stderr
-    locked.chmod(0o000)
+    # 0o444, not 0o000: mark_ever_converged() now OPENS segments/ before it
+    # touches the entry, and 0o000 would fail that open with EACCES before
+    # the EEXIST branch this test exists for was ever reached -- the test
+    # would still see result False and "eacces" on stderr and pass for
+    # entirely the wrong reason. Read-without-search keeps the pin working
+    # and still denies the name lookup inside, which is the condition under
+    # test. Both halves are asserted below rather than assumed.
+    locked.chmod(0o444)
     try:
+        probe_pin = None
+        try:
+            probe_pin = os.open(str(locked), os.O_RDONLY | os.O_DIRECTORY)
+        except OSError:
+            pytest.skip(
+                "this platform refuses O_RDONLY|O_DIRECTORY on a mode-0444 "
+                "directory, so the pin cannot be made to succeed while the "
+                "lookup inside it fails"
+            )
         probe_blocked = True
         try:
-            (locked / f".ever_converged.{seg}").lstat()
+            os.lstat(f".ever_converged.{seg}", dir_fd=probe_pin)
             probe_blocked = False
         except PermissionError:
             pass
+        finally:
+            os.close(probe_pin)
         if not probe_blocked:
             pytest.skip(
-                "chmod 0o000 did not actually block lstat -- running as root "
-                "or in a sandbox that ignores permission bits; cannot induce "
-                "a non-ENOENT lookup error this way here"
+                "chmod 0o444 did not actually block the lookup -- running as "
+                "root or in a sandbox that ignores permission bits; cannot "
+                "induce a non-ENOENT lookup error this way here"
             )
         result = ledger_update.mark_ever_converged(seg, locked)
     finally:
@@ -1101,7 +1128,16 @@ def test_an_eexist_whose_entry_has_vanished_refuses_and_says_to_retry(tmp_path):
     real_open = ledger_update.os.open
     real_stderr = ledger_update.sys.stderr
 
-    def eexist_open(path, flags, mode=0o777):
+    def eexist_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            # mark_ever_converged() now pins segments/ with its own
+            # os.open(O_RDONLY|O_DIRECTORY) BEFORE it touches the entry, and
+            # creates the sentinel relative to that descriptor. Only the
+            # dir_fd-relative call is the sentinel create this fake stands
+            # in for; the pin is passed through untouched. Keyed on dir_fd
+            # rather than on the flags so that a future edit dropping
+            # O_CREAT|O_EXCL cannot slip past by looking like the pin.
+            return real_open(path, flags, mode)
         # The fake ASSERTS on the flags rather than ignoring them: this test's
         # premise is that EEXIST can only arise from an exclusive create, so a
         # future edit that dropped O_EXCL (and with it the whole race-free

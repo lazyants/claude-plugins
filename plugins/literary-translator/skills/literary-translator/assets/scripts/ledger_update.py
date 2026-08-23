@@ -329,6 +329,14 @@ def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
     )
 
 
+_SENTINEL_REMEDY_DISPLACED = (
+    "Find out what replaced the segments directory during the run -- a "
+    "concurrent backfill, an interrupted move, or a restore from backup -- "
+    "put the intended directory back at that path, then re-run. Convergence "
+    "was deliberately NOT recorded: the marker is durable under the "
+    "displaced directory, not under the path the dispatch gate reads."
+)
+
 _SENTINEL_REMEDY_OS = (
     "Retry once the underlying OS problem (permissions/quota/I/O) is fixed."
 )
@@ -375,6 +383,159 @@ def _report_sentinel_failure(path, exc, remedy=_SENTINEL_REMEDY_OS):
         f"untouched; only the ledger's own 'converged' verdict is "
         f"withheld. {remedy}\n"
     )
+
+
+# getattr, not a bare os.O_*: none of these three flags exists on every
+# platform Python runs on, and the same guarded idiom already spells
+# claim_record.py's, codex_job.py's and scaffold_setup.py's own constants.
+# Falling back to 0 keeps the open legal there; _fsync_one() below treats a
+# refusal as a durability failure either way, so a fallback can never turn
+# into a silent success.
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+
+def _fsync_fd(fd: int, label: str) -> "str | None":
+    """fsync an ALREADY-OPEN descriptor, naming `label` on failure. Separate
+    from _fsync_one() below because the caller that pins a directory must
+    keep that descriptor open across the file sync -- reopening the
+    directory by name is precisely the window this split exists to close."""
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        return f"could not fsync {label}: {exc}"
+    return None
+
+
+def _fsync_one(target: str, label: str, extra_flags: int = 0,
+               dir_fd: "int | None" = None) -> "str | None":
+    """fsync one already-published path, naming `label` in either error and
+    guarding the open with `extra_flags`. When `dir_fd` is given, `target` is
+    resolved RELATIVE to that descriptor rather than against the process cwd,
+    which is what binds the open to a directory the caller has pinned.
+    Returns None on success or a short error string.
+
+    The descriptor is closed in a `finally` so a failing fsync cannot leak
+    it, and the close's own OSError is swallowed on purpose -- the fsync
+    result already decided this call's outcome, and a close() failure after
+    a successful fsync reports nothing a caller can act on differently."""
+    try:
+        fd = os.open(target, os.O_RDONLY | extra_flags, dir_fd=dir_fd)
+    except OSError as exc:
+        return f"could not open {label} for fsync: {exc}"
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        return f"could not fsync {label}: {exc}"
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass  # best-effort close; the fsync result above already decided this call's outcome
+    return None
+
+
+def _sync_published_sentinel(path, *, dir_fd: int) -> "str | None":
+    """Make one ever-converged sentinel's publication durable, entirely
+    relative to `dir_fd` -- a descriptor on the directory that RECEIVED the
+    sentinel, opened by the caller before it touched the entry. fsync the
+    sentinel FILE, then fsync that directory, so the entry that makes the
+    file findable survives a crash too: fsync on a file commits its
+    contents, not its link. Same two-halves reasoning claim_record.py's
+    fsync_directory() docstring states for the claim record
+    (claim_record.py:565-577).
+
+    Returns None on success, or a short error string naming which half
+    failed. Deliberately does NOT import claim_record.fsync_directory():
+    this module does not import claim_record today, and reject_review.py /
+    select_segments.py both document why a bare `import claim_record` is
+    unsafe here -- sys.path[0] can resolve into a codex-writable tree (#412).
+
+    FAIL-CLOSED, unlike write_fragment_atomically()'s own directory sync
+    (which swallows its OSError as "best-effort ... not fatal"). That is the
+    right policy for a fragment already committed via os.replace(); it is
+    the wrong one here. A directory entry that is not durable is exactly the
+    one a crash can lose while the artifact it backs survives -- and for
+    THIS sentinel that artifact is the 'converged' fragment
+    mark_ever_converged() exists to protect. A best-effort sync would return
+    success having established nothing, which is the shape of the defect
+    this fold exists to close, not its fix.
+
+    THE `dir_fd` PARAMETER IS THE WHOLE POINT, and it is not a convenience.
+    Two MR review rounds reproduced the same class of defect against earlier
+    revisions that resolved `segments/` BY NAME -- first after the file
+    sync, then after the sentinel create. Both times a rename of `segments/`
+    mid-call redirected a sync onto whatever had taken the name, while the
+    directory that actually received the sentinel went unsynced and the
+    function reported success. Narrowing the window twice did not close it,
+    because the window is the pathname resolution itself. So this function
+    no longer resolves any part of `segments/`: the caller pins it once,
+    before the create, and every operation here is relative to that
+    descriptor. Do not add a path-based open back.
+
+    The sentinel's own open still guards the FINAL component with
+    O_NOFOLLOW | O_NONBLOCK -- it is never legitimately a symlink
+    (classify_ever_converged_sentinel() above requires S_ISREG on an LSTAT,
+    so a symlink-to-regular classifies AMBIGUOUS and never reaches here),
+    and a FIFO left at the path would otherwise block the ledger writer
+    forever. A symlinked `segments/` stays supported: it is resolved once by
+    the caller's open, and O_NOFOLLOW binds only the final component."""
+    failure = _fsync_one(
+        path.name, "the sentinel", _O_NOFOLLOW | _O_NONBLOCK, dir_fd=dir_fd,
+    )
+    if failure is not None:
+        return failure
+    return _fsync_fd(dir_fd, str(path.parent))
+
+
+def _pinned_dir_still_canonical(segments_dir, dir_fd: int) -> "str | None":
+    """None if `segments_dir` still NAMES the directory `dir_fd` is held on,
+    or an error string if the pathname has been displaced.
+
+    Why this is needed on top of the descriptor pin, which is a distinction
+    that took an MR round to see: the pin guarantees the create and both
+    fsyncs land on ONE directory -- the one that received the sentinel. It
+    does not guarantee that directory is still what `segments/` resolves to.
+    Rename it aside mid-call and the marker is durably written somewhere the
+    dispatch gate never looks: reproduced on this branch, with
+    classify_ever_converged_sentinel() returning SENTINEL_ABSENT at the
+    canonical path while this function returned success. The caller then
+    records convergence over a segment nothing protects, and the next
+    cache-key move retranslates it -- the exact loss the sentinel exists to
+    prevent. What the caller needs promised is "a marker is at the path the
+    reader reads", not "a marker is durable somewhere".
+
+    Modelled on backfill_ever_converged.py's check_segments_dir_identity(),
+    the same test the sibling writer of this artifact already performs, and
+    kept SEPARATE from the syncs for the reason that one gives: an unsynced
+    directory is settled by re-running and a displaced one is not, so an
+    operator acts on them differently and they must not share a message.
+
+    WHAT THIS DOES NOT PROVE, stated because the sibling's docstring records
+    three earlier versions that claimed otherwise and were wrong every time:
+    it samples identity ONCE. That detects a pathname displaced AT THAT
+    INSTANT and says nothing about any instant after it -- the dispatch gate
+    resolves `segments/` by pathname at its own, later time, and a
+    displacement in between is outside anything this call can observe. This
+    makes the function FAIL CLOSED on an observable displacement; it does not
+    make it race-free, and no check inside one process could."""
+    try:
+        held = os.fstat(dir_fd)
+        current = os.stat(str(segments_dir))
+    except OSError as exc:
+        return (
+            f"could not confirm that {segments_dir} still names the directory "
+            f"this call wrote the sentinel into: {exc}"
+        )
+    if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+        return (
+            f"{segments_dir} was replaced during this call: the sentinel was "
+            f"written durably into the directory that path named at the start, "
+            f"but that is no longer the directory the dispatch gate will read, "
+            f"so the segment is NOT protected at the canonical path"
+        )
+    return None
 
 
 def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
@@ -455,10 +616,63 @@ def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
     wrote, and returning True for them recorded convergence with no
     protection actually in place -- while the reader, which followed the
     link, called the same path absent and retranslated the segment. See that
-    branch's own comment for the full mechanism."""
+    branch's own comment for the full mechanism.
+
+    FOURTH POST-REVIEW CORRECTION (#441 RAW #8): the paragraph above stops
+    at "never raises past its own contract", and that stopping point
+    predates this correction and is no longer the whole story. Not raising
+    says nothing about SURVIVING A CRASH -- until now, neither the write nor
+    the create was ever fsynced, while the converged FRAGMENT this sentinel
+    protects (written by write_fragment_atomically(), elsewhere in this
+    file) always was. A crash between the two could keep the fragment and
+    lose the marker, and the next cache-key move would silently retranslate
+    already-converged work -- the same class of loss the EEXIST correction
+    above closes for a different cause. Both return-True paths below now
+    call _sync_published_sentinel() -- the fresh-create path after its own
+    os.close() succeeds, the already-present path before returning -- and a
+    sync failure on EITHER path returns False through the same
+    _report_sentinel_failure() contract as every other failure here,
+    fail-closed rather than best-effort (see that helper's own docstring for
+    why, citing claim_record.py:565-577). Covering the already-present path
+    too, not only fresh-create, is load-bearing: without it, a retry after a
+    failed sync would hit FileExistsError, classify SENTINEL_PRESENT, and
+    return True having synced nothing -- laundering the earlier failure into
+    a green result. `tests/backfill_ever_converged.test.py` pins this
+    directly against the shipped laundering test for the sibling writer
+    (`backfill_ever_converged.py:603-623`, test `:1644-1709`)."""
     path = ever_converged_path(seg, segments_dir)
+
+    # ONE pathname resolution of segments/, here, BEFORE the entry is
+    # touched. Everything below -- the create, the EEXIST classification and
+    # both fsyncs -- is relative to this descriptor, so a rename of
+    # segments/ during the call can no longer redirect any of them onto a
+    # directory that did not receive the sentinel. Two MR review rounds
+    # reproduced that redirection against revisions that pinned later; see
+    # _sync_published_sentinel()'s docstring for why narrowing the window
+    # was the wrong shape of fix.
     try:
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        seg_dir_fd = os.open(str(segments_dir), os.O_RDONLY | _O_DIRECTORY)
+    except OSError as exc:
+        _report_sentinel_failure(path, exc)
+        return False
+    try:
+        return _mark_ever_converged_within(path, seg_dir_fd, segments_dir)
+    finally:
+        try:
+            os.close(seg_dir_fd)
+        except OSError:
+            pass  # best-effort close; the return value above already decided this call
+
+
+def _mark_ever_converged_within(path, seg_dir_fd: int, segments_dir) -> bool:
+    """mark_ever_converged()'s body, with `segments/` already pinned as
+    `seg_dir_fd`. Split out purely so the descriptor's close can live in one
+    `finally` rather than on every one of this body's eight return paths."""
+    try:
+        fd = os.open(
+            path.name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644,
+            dir_fd=seg_dir_fd,
+        )
     except FileExistsError:
         # EEXIST is NOT proof that a previous run of this function published
         # a sentinel here. O_CREAT|O_EXCL reports it for ANY existing entry:
@@ -476,8 +690,23 @@ def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
         # (classify_ever_converged_sentinel, duplicated verbatim in both
         # scripts, drift-tested against each other), so there is no longer a
         # path where the writer says "marked" and the reader says "absent".
-        state, detail = classify_ever_converged_sentinel(path)
+        state, detail = classify_ever_converged_sentinel(path, dir_fd=seg_dir_fd)
         if state == SENTINEL_PRESENT:
+            # Sync here too, not just on the fresh-create path below: a
+            # retry landing on this branch is exactly what happens after an
+            # earlier call published the entry but failed its own sync (see
+            # this function's docstring, fourth post-review correction).
+            # Returning True unconditionally would launder that failure into
+            # a green result over a directory entry that was never made
+            # durable.
+            sync_error = _sync_published_sentinel(path, dir_fd=seg_dir_fd)
+            if sync_error is not None:
+                _report_sentinel_failure(path, sync_error)
+                return False
+            displaced = _pinned_dir_still_canonical(segments_dir, seg_dir_fd)
+            if displaced is not None:
+                _report_sentinel_failure(path, displaced, _SENTINEL_REMEDY_DISPLACED)
+                return False
             return True      # already marked -- idempotent, nothing to do
         if state == SENTINEL_ABSENT:
             # Raced: the entry existed at os.open() and was gone by the lstat
@@ -512,13 +741,47 @@ def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
         _report_sentinel_failure(path, exc)
         return False
 
+    # fsync the descriptor THIS call created, before closing it -- never a
+    # reopen by name. The fd is already bound to the inode that was just
+    # written, so nothing a concurrent rename does can redirect it.
+    sync_error = _fsync_fd(fd, "the sentinel")
+    if sync_error is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass  # best-effort cleanup; already reporting the fsync failure
+        _report_sentinel_failure(path, sync_error)
+        return False
+
     try:
         os.close(fd)
     except OSError as exc:
         # Some filesystems (notably NFS) defer reporting a write error until
         # close() -- caught here so it gets the SAME clean refusal as a
-        # failure at open() or write() would, never an uncaught exception.
+        # failure at open(), write() or the fsync above would, never an
+        # uncaught exception.
         _report_sentinel_failure(path, exc)
+        return False
+
+    # Durability, not just a non-raising write: fsync the sentinel and its
+    # segments/ directory entry before claiming success (see this function's
+    # docstring, fourth post-review correction). Fail-closed on either sync
+    # failure -- the write and close above succeeded, but a crash before the
+    # entry is durable can still lose it while the converged fragment it
+    # backs survives, which is the exact loss this sentinel exists to
+    # prevent.
+    sync_error = _fsync_fd(seg_dir_fd, str(path.parent))
+    if sync_error is not None:
+        _report_sentinel_failure(path, sync_error)
+        return False
+
+    # Durable is not the same as FINDABLE. Both fsyncs above landed on the
+    # pinned directory by construction; this asks the separate question of
+    # whether that directory is still what `segments/` resolves to, because
+    # that is the path the dispatch gate reads.
+    displaced = _pinned_dir_still_canonical(segments_dir, seg_dir_fd)
+    if displaced is not None:
+        _report_sentinel_failure(path, displaced, _SENTINEL_REMEDY_DISPLACED)
         return False
 
     return True

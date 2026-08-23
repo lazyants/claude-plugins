@@ -4625,6 +4625,110 @@ def test_derive_next_action_invalid_post_retranslate_draft_with_a_same_run_revie
     )
 
 
+def test_derive_next_action_reviews_again_at_same_label_when_a_translate_is_in_progress(tmp_path):
+    """RAW #7 (#441): the round-advance branch at the tail of
+    derive_next_action() -- reached when a review is not clean, not final,
+    and the draft moved since it was written -- used to read "the draft
+    moved" as proof a fix landed, unconditionally. It is not: a same-run
+    RETRANSLATE (select_segments.py's own --only-segs re-selection,
+    resolved to the SAME run_id by resume_setup.py) moves the draft too,
+    and produces the identical sha1-mismatch evidence a real fix does.
+    Here an `in_progress` fragment dated AFTER the review is exactly what
+    process_segment()'s own translate branch writes immediately before
+    dispatching that retranslate -- so the round must NOT be charged for a
+    fix that never happened; the same review label is re-dispatched
+    instead, against the fresh draft the retranslate actually produced.
+    RED today: with no notion of an in-flight translate, this advances to
+    round "2" instead of staying on "1"."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    base = int(time.time()) - 3600
+    _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True, draft_sha1="0" * 40)
+    os.utime(root / "segments" / "seg01.review.json", (base, base))
+    assert driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts") != "0" * 40, (
+        "setup check: the draft's real sha1 must genuinely differ from the review's recorded one"
+    )
+    _dna_write_ledger_fragment(root, mtime=base + 10, status="in_progress")
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "1"}
+
+
+def test_derive_next_action_still_advances_when_the_in_progress_fragment_predates_the_review(tmp_path):
+    """The two-sided mutation companion to the test above: an `in_progress`
+    fragment that predates the review is the ORIGINAL translate's own
+    dispatch write, not evidence of anything that happened AFTER this
+    review -- exactly the ordinary fix-turn shape
+    test_derive_next_action_advances_to_round_2_when_not_clean_but_fix_
+    already_applied already pins without any fragment on disk at all. The
+    guard must stay silent here and let the round advance normally."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    base = int(time.time()) - 3600
+    _dna_write_ledger_fragment(root, mtime=base - 10, status="in_progress")
+    _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True, draft_sha1="0" * 40)
+    os.utime(root / "segments" / "seg01.review.json", (base, base))
+    assert driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts") != "0" * 40, (
+        "setup check: the draft's real sha1 must genuinely differ from the review's recorded one"
+    )
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "2"}
+
+
+def test_derive_next_action_still_advances_over_a_blocked_fragment_newer_than_the_review(tmp_path):
+    """Codex's admitted MAJOR against an earlier revision of this fix,
+    reproduced directly: the shipped workflow writes `{"status": "blocked",
+    "reason": "draft-missing"}` AFTER a numbered review
+    (mass-translate-wf.template.js:1754), and a `blocked` segment is
+    retried via `--only-segs` under the SAME run_id. A guard that only
+    checked the fragment's mtime (reusing _translate_redispatched_since()
+    unmodified at this call site, as an earlier revision of this fix
+    proposed) would misread that recovery as "a translate is in progress"
+    and hold the round label -- a paid same-label review dispatched over a
+    draft no translate actually produced. Reading the status, not just the
+    mtime, is what keeps this fragment from tripping the guard: `blocked`
+    is not `in_progress`, so the round must still advance, exactly as if
+    no fragment existed."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    base = int(time.time()) - 3600
+    _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True, draft_sha1="0" * 40)
+    os.utime(root / "segments" / "seg01.review.json", (base, base))
+    assert driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts") != "0" * 40, (
+        "setup check: the draft's real sha1 must genuinely differ from the review's recorded one"
+    )
+    _dna_write_ledger_fragment(root, mtime=base + 10, status="blocked")
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "2"}
+
+
+def test_derive_next_action_still_advances_over_an_unparseable_fragment_newer_than_the_review(tmp_path):
+    """Every doubt this guard can have resolves toward "advance" -- today's
+    existing behaviour -- never toward holding the round label on evidence
+    it cannot actually read. A fragment that fails to parse as JSON is
+    exactly as inconclusive as one that does not exist at all, so the
+    round must still advance rather than treat unreadable bytes as proof
+    of an in-flight translate."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    base = int(time.time()) - 3600
+    _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True, draft_sha1="0" * 40)
+    os.utime(root / "segments" / "seg01.review.json", (base, base))
+    assert driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts") != "0" * 40, (
+        "setup check: the draft's real sha1 must genuinely differ from the review's recorded one"
+    )
+    ledger_dir = root / "runs" / "ledger.d"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    fragment_path = ledger_dir / "seg01.json"
+    fragment_path.write_text("{not valid json", encoding="utf-8")
+    os.utime(fragment_path, (base + 10, base + 10))
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "review", "round_label": "2"}
+
+
 def test_render_fix_prompt_never_inlines_poisoned_review_findings_text(tmp_path):
     """Pins (as a real assertion, not a comment) that fixPrompt's 3-argument
     signature (mass-translate-wf.template.js:1281, documented at :1232-1239
