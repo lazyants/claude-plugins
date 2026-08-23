@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.68.0 — 2026-08-23
+
+**PLACEHOLDER — body written before this release ships.** Closes #607.
+
 ## 1.67.0 — 2026-08-23
 
 **The style contract carries rules a machine could check, and nothing checks any of them.** A project's `style_bible.md` states deterministic, codepoint-decidable bans — the fr→ru book forbids a run of two or more adjacent asterisks, and says why: the project's own EPUB renderer prints such a run literally to the reader — while `assets/scripts/` contains no search for one, and neither `validate_draft.py` nor `validate_assembled.py` nor `assemble.py` looks. Every such rule is enforced by a reasoning model re-reading the bible on each job, and by reviewer attention. This release ships the mechanism for a project to declare those rules and have W7 report violations. Closes #520.
