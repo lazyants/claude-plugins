@@ -113,6 +113,9 @@ VERDICTS, all of them RED (see `audit()`):
                 blind spot, for the `languages/` class an orphan sweep cannot
                 cover without false-REDing a documented `fr.local.json`.
 
+  marker     -- a bundle marker whose stored value is not the one derivable
+                from the plugin tree.
+
 KNOWN, PINNED HOLE. `degenerate` fires only on WHOLESALE class loss, so
 PARTIAL loss in `languages/` is not detected: a plugin tree missing exactly
 `fr.json` while keeping the other presets drops the durable `fr.json` out of
@@ -125,9 +128,6 @@ hole -- their durable-side sweeps cover partial loss -- and closing it for
 a naming rule for legitimate overrides that SKILL.md does not fix. It ships
 open and stated, and `tests/fix_scope_audit.test.py` pins the clean result so
 that a later reader cannot mistake it for coverage.
-  marker     -- a bundle marker whose stored value is not the one derivable
-                from the plugin tree.
-
 `extra` is reported for `${durable_root}/scripts/*.py`, and `orphaned` for
 `${durable_root}/schemas/*.json` -- never for `languages/`. That asymmetry is
 not fastidiousness: SKILL.md's copy paragraph says the pass "never clobbers a
@@ -164,6 +164,17 @@ WHAT THIS CANNOT DO, stated here so no caller overstates it downstream:
     changes is that the tamper must now cover a second tree.
   * It sees nothing outside the compared set: another segment's draft,
     `runs/`, `$HOME`.
+  * **No `.pyc` is ever compared**, and `${durable_root}/scripts/__pycache__/`
+    is an EXECUTION surface: `codex_job.py` runs from the durable `scripts/`
+    on every translate and every review dispatch and imports the durable
+    `claim_record.py`, and CPython prefers a cached `.pyc` whose header
+    matches the source's mtime and size -- both forgeable by anything that can
+    write there. The exclusion is not optional (the interpreter writes that
+    directory itself on every ordinary batch, so counting it would fail every
+    batch), which is exactly why the gap is stated rather than closed here.
+    Against this release's adversary of record -- a compliant model widening
+    its edit -- forging a bytecode header is not the likely path; a
+    non-compliant writer is not covered.
   * A driver-mediated fix turn (`segment_dispatch_driver.py` returns the
     rendered fix prompt as `needs_fix` for an external Claude turn) is not
     audited at all -- that route truncates the Workflow template before
@@ -222,11 +233,6 @@ WORKFLOW_TEMPLATES = (
     "glossary-pass-wf.template.js",
     "skeptic-pass-wf.template.js",
 )
-
-# Excluded from the `extra` sweep over ${durable_root}/scripts/. The
-# interpreter writes here whenever a durable script imports a durable
-# sibling; it is not something any turn authored.
-EXTRA_SWEEP_EXCLUDED_DIRS = frozenset({"__pycache__"})
 
 MARKER_SPECS = (
     ("plugin_bundle_hash", ("runs", ".plugin_bundle_hash"), "PLUGIN_BUNDLE_MEMBERS"),
@@ -294,6 +300,11 @@ def load_member_tuples():
     here, because a restated membership list is a second authority that
     silently rots (`cache_key.py`'s own comment makes the same point about
     counts)."""
+    # This checker's authority is the plugin tree, and importing from it
+    # would otherwise write assets/scripts/__pycache__/*.pyc INTO that tree.
+    # Nothing hashes those, but a read-only check should not mutate the thing
+    # it is reading.
+    sys.dont_write_bytecode = True
     sys.path.insert(0, str(PLUGIN_SCRIPTS_DIR))
     try:
         import cache_key  # noqa: E402
@@ -321,9 +332,17 @@ def compared_pairs() -> list:
     # Flat only -- assets/schemas/registry/ is plugin-only and uncopied.
     for path in sorted(PLUGIN_SCHEMAS_DIR.glob("*.json")):
         pairs.append((path, Path("schemas") / path.name))
-    for path in sorted(PLUGIN_LANGUAGES_DIR.iterdir()):
-        if path.is_file():
-            pairs.append((path, Path("languages") / path.name))
+    # is_dir() first: unlike glob() above, iterdir() RAISES on an absent
+    # directory, and a traceback instead of a JSON line breaks fail()'s own
+    # invariant -- the relay would report nothing, the workflow would spend
+    # both attempts, and the segment would terminalize as if the RELAY were
+    # flaky, pointing the operator away from the broken install. Returning
+    # the class empty instead lets sweep_degenerate() render the verdict this
+    # state actually deserves.
+    if PLUGIN_LANGUAGES_DIR.is_dir():
+        for path in sorted(PLUGIN_LANGUAGES_DIR.iterdir()):
+            if path.is_file():
+                pairs.append((path, Path("languages") / path.name))
     return pairs
 
 
@@ -336,8 +355,13 @@ def sweep_extra(durable_root: Path, expected_script_names) -> list:
         return []
     extra = []
     for entry in sorted(scripts_dir.iterdir()):
-        if entry.name in EXTRA_SWEEP_EXCLUDED_DIRS:
-            continue
+        # The `.py` filter is what keeps `__pycache__/` and its `*.pyc` out of
+        # this sweep, and that exclusion is deliberate rather than incidental:
+        # the interpreter writes there whenever a durable script imports a
+        # durable sibling (reproduced -- `codex_job.py` imports the durable
+        # `claim_record.py` and runs on every translate and every review
+        # dispatch), so counting it would fail every batch. A `.pyc` is
+        # therefore never compared either -- stated in WHAT THIS CANNOT DO.
         if not entry.name.endswith(".py"):
             continue
         if entry.name in expected_script_names:
@@ -424,7 +448,12 @@ def audit(durable_root: Path) -> dict:
     unreadable = []
     n_checked = 0
 
-    for plugin_path, rel in compared_pairs():
+    # ONE call, reused everywhere below. Four separate calls would re-glob the
+    # plugin tree four times and -- worse -- would be the only way n_checked
+    # and n_expected could ever be computed over different populations.
+    pairs = compared_pairs()
+
+    for plugin_path, rel in pairs:
         durable_path = durable_root / rel
         rel_str = rel.as_posix()
         if not os.path.lexists(durable_path):
@@ -436,6 +465,14 @@ def audit(durable_root: Path) -> dict:
             irregular.append(rel_str)
             continue
         try:
+            # Size first. Different sizes ARE different bytes, so this is the
+            # same verdict without reading either file -- and it bounds what a
+            # planted multi-gigabyte scripts/*.py can make this process
+            # allocate. A size match still reads both and compares.
+            if durable_path.stat().st_size != plugin_path.stat().st_size:
+                n_checked += 1
+                differing.append(rel_str)
+                continue
             durable_bytes = durable_path.read_bytes()
             plugin_bytes = plugin_path.read_bytes()
         except OSError as exc:
@@ -446,11 +483,11 @@ def audit(durable_root: Path) -> dict:
             differing.append(rel_str)
 
     expected_script_names = {
-        rel.name for _, rel in compared_pairs() if rel.parent.as_posix() == "scripts"
+        rel.name for _, rel in pairs if rel.parent.as_posix() == "scripts"
     }
     extra = sweep_extra(durable_root, expected_script_names)
     expected_schema_names = {
-        rel.name for _, rel in compared_pairs() if rel.parent.as_posix() == "schemas"
+        rel.name for _, rel in pairs if rel.parent.as_posix() == "schemas"
     }
     orphaned = sweep_orphaned_schemas(durable_root, expected_schema_names)
     degenerate = sweep_degenerate(durable_root)
@@ -488,9 +525,9 @@ def audit(durable_root: Path) -> dict:
     # prints exactly like one that covered everything).
     #
     # What the pair does NOT prove is COVERAGE, and the reason is worth
-    # stating where the number is computed: both sides come from the same
-    # compared_pairs() call, so a plugin tree that lost members makes them
-    # shrink TOGETHER and still agree. That is why the two durable-side
+    # stating where the number is computed: both sides are read off the single
+    # `pairs` list above, so a plugin tree that lost members makes them shrink
+    # TOGETHER and still agree. That is why the two durable-side
     # cross-checks above exist -- sweep_orphaned_schemas() and
     # sweep_degenerate() read the population from the durable root instead,
     # which the plugin tree cannot shrink. Neither defends against a RELAY
@@ -499,7 +536,7 @@ def audit(durable_root: Path) -> dict:
     result = {
         "ok": ok,
         "n_checked": n_checked,
-        "n_expected": len(compared_pairs()) + len(MARKER_SPECS),
+        "n_expected": len(pairs) + len(MARKER_SPECS),
     }
     if not ok:
         result["verdict"] = "mismatch"

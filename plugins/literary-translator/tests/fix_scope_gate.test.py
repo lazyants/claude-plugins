@@ -39,7 +39,7 @@ run_workflow = _bse.run_workflow
 review_obj = _bse.review_obj
 match_true = _bse.match_true
 bucket_calls_by_segment = _bse.bucket_calls_by_segment
-pytestmark = _bse.NODE_REQUIRED if hasattr(_bse, "NODE_REQUIRED") else pytest.mark.skipif(
+pytestmark = pytest.mark.skipif(
     _bse.NODE is None, reason="node not found on PATH; this file executes the real template"
 )
 
@@ -188,7 +188,6 @@ def test_final_round_dispatches_no_audit(tmp_path):
     out = drive(tmp_path, plan, max_fix_rounds=1)
     scope_calls = [lb for lb in labels_of(out) if lb.startswith("fix-scope:")]
     assert scope_calls == [f"fix-scope:{SEG}:r1"], scope_calls
-    assert not any(lb.endswith(":rfinal") for lb in scope_calls)
 
 
 def test_clean_verdict_never_reaches_the_audit(tmp_path):
@@ -241,7 +240,7 @@ def test_a_halt_is_reported_at_batch_level_even_when_the_ledger_write_fails(tmp_
     out = drive(tmp_path, plan)
     result = out["result"]
     assert result["batchComplete"] is False
-    assert result["reason"] == "fix-scope-halt" or result.get("fixScopeHalts")
+    assert result["reason"] == "fix-scope-halt"
     halts = result["fixScopeHalts"]
     assert [h["seg"] for h in halts] == [SEG]
     assert halts[0]["reason"] == "fix-scope-violation"

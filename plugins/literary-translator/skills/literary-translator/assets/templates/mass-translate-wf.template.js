@@ -340,11 +340,13 @@ const DRAFT_PROBE_SCHEMA = {
   },
 };
 
-// #607 -- the fix-scope audit's relay return. `ok` is the whole verdict;
-// the rest is operator-facing detail folded into the ledger note on a
-// mismatch, never re-judged by this script. Deliberately permissive about
-// the detail arrays (they are absent on a clean run) and strict about `ok`,
-// because `ok` is the only field any branch below reads.
+// #607 -- the fix-scope audit's relay return. The script decides; this file
+// never re-judges the comparison. Deliberately permissive about the detail
+// arrays (they are absent on a clean run) and strict about the three fields
+// runRound actually BINDS on: `ok`, plus the two counts whose agreement is
+// what separates a pass from a walk that compared nothing. `verdict` and
+// `error` are read as well, on the checker's own error line; the remaining
+// arrays are operator-facing detail folded into the ledger note.
 const FIX_SCOPE_SCHEMA = {
   type: "object",
   additionalProperties: true,
@@ -361,6 +363,7 @@ const FIX_SCOPE_SCHEMA = {
     orphaned: { type: "array", items: { type: "string" } },
     degenerate: { type: "array", items: { type: "string" } },
     marker_mismatch: { type: "array", items: { type: "string" } },
+    unreadable: { type: "array", items: { type: "string" } },
     error: { type: "string" },
   },
 };
@@ -1718,11 +1721,6 @@ async function callFix(seg, round, revObj) {
   });
 }
 
-// #607 -- one fix-scope audit call. Returns the relayed object, or null when
-// the CALL itself failed (agent death / output-token ceiling / classifier
-// block) -- which is inconclusive and never a pass, so runRound retries once
-// and then treats a second failure as terminal rather than proceeding on an
-// unverified surface.
 // #607 -- the batch-level record of every fix-scope halt, kept in THIS
 // script's memory and returned in the batch result.
 //
@@ -1753,6 +1751,28 @@ function haltBatchOnFixScope(seg, reason, ledgerRecorded) {
   );
 }
 
+// The identical tail all four fix-scope halt branches had: write the terminal
+// blocked fragment, record the halt at BATCH level whether or not that write
+// landed, and return terminal either way. Kept as one function so the four
+// branches cannot drift -- the ledger key shape ("ledger:blocked:<reason>:
+// <seg>") and the order (ledger first, batch record second, return last) are
+// each asserted by tests/fix_scope_gate.test.py.
+async function haltSegmentOnFixScope(seg, round, reason, note) {
+  const rec = await recordLedgerCall(
+    seg,
+    { status: "blocked", reason: reason, note: note },
+    "ledger:blocked:" + reason + ":" + seg,
+  );
+  haltBatchOnFixScope(seg, reason, rec.ok);
+  if (!rec.ok) return { terminal: true, value: rec.failResult };
+  return { terminal: true, value: { seg: seg, converged: false, reason: reason, rounds: round } };
+}
+
+// #607 -- one fix-scope audit call. Returns the relayed object, or null when
+// the CALL itself failed (agent death / output-token ceiling / classifier
+// block) -- which is inconclusive and never a pass, so runRound retries once
+// and then treats a second failure as terminal rather than proceeding on an
+// unverified surface.
 async function callFixScopeAudit(seg, round, isRetry) {
   const label = "fix-scope:" + seg + ":r" + round + (isRetry ? ":retry" : "");
   return await agent(fixScopeAuditPrompt(seg), {
@@ -1934,15 +1954,8 @@ async function runRound(seg, round, isFinal) {
     // failures of a low-effort mechanical relay are far more likely infra
     // flakiness than tampering; one segment's re-translation is the price of
     // not guessing which.
-    const recUnverified = await recordLedgerCall(
-      seg,
-      { status: "blocked", reason: "fix-scope-unverified",
-        note: "the fix-scope audit relay failed twice; the durable root's plugin-installed copies could not be verified after this fix turn" },
-      "ledger:blocked:fix-scope-unverified:" + seg,
-    );
-    haltBatchOnFixScope(seg, "fix-scope-unverified", recUnverified.ok);
-    if (!recUnverified.ok) return { terminal: true, value: recUnverified.failResult };
-    return { terminal: true, value: { seg: seg, converged: false, reason: "fix-scope-unverified", rounds: round } };
+    return await haltSegmentOnFixScope(seg, round, "fix-scope-unverified",
+      "the fix-scope audit relay failed twice; the durable root's plugin-installed copies could not be verified after this fix turn");
   }
   // A clean verdict must also SHOW that it compared something. `ok` alone is
   // the classic false GREEN: a walk that covered nothing prints exactly like
@@ -1955,17 +1968,10 @@ async function runRound(seg, round, isFinal) {
   const scopeCountSound = Number.isInteger(scope.n_expected) && scope.n_expected > 0 &&
     scope.n_checked === scope.n_expected;
   if (scope.ok === true && !scopeCountSound) {
-    const recCount = await recordLedgerCall(
-      seg,
-      { status: "blocked", reason: "fix-scope-unverified",
-        note: "the fix-scope audit reported a clean verdict whose coverage count is missing, zero, or inconsistent (n_checked=" +
-              String(scope.n_checked) + ", n_expected=" + String(scope.n_expected) +
-              ") -- a pass that compared nothing is not a pass" },
-      "ledger:blocked:fix-scope-unverified:" + seg,
-    );
-    haltBatchOnFixScope(seg, "fix-scope-unverified", recCount.ok);
-    if (!recCount.ok) return { terminal: true, value: recCount.failResult };
-    return { terminal: true, value: { seg: seg, converged: false, reason: "fix-scope-unverified", rounds: round } };
+    return await haltSegmentOnFixScope(seg, round, "fix-scope-unverified",
+      "the fix-scope audit reported a clean verdict whose coverage count is missing, zero, or inconsistent (n_checked=" +
+      String(scope.n_checked) + ", n_expected=" + String(scope.n_expected) +
+      ") -- a pass that compared nothing is not a pass");
   }
   // The checker's own error line ({ok:false, verdict:"error"}) means it could
   // not perform the comparison -- a missing durable root, an unimportable
@@ -1973,15 +1979,8 @@ async function runRound(seg, round, isFinal) {
   // relay, not a detected divergence, and mislabelling it "violation" would
   // send the operator looking for a tampered file that does not exist.
   if (scope.ok !== true && scope.verdict === "error") {
-    const recError = await recordLedgerCall(
-      seg,
-      { status: "blocked", reason: "fix-scope-unverified",
-        note: "the fix-scope checker could not run: " + String(scope.error || "(no message relayed)") },
-      "ledger:blocked:fix-scope-unverified:" + seg,
-    );
-    haltBatchOnFixScope(seg, "fix-scope-unverified", recError.ok);
-    if (!recError.ok) return { terminal: true, value: recError.failResult };
-    return { terminal: true, value: { seg: seg, converged: false, reason: "fix-scope-unverified", rounds: round } };
+    return await haltSegmentOnFixScope(seg, round, "fix-scope-unverified",
+      "the fix-scope checker could not run: " + String(scope.error || "(no message relayed)"));
   }
   if (scope.ok !== true) {
     // A durable copy no longer matches the plugin it was installed from.
@@ -1992,22 +1991,15 @@ async function runRound(seg, round, isFinal) {
       ["differing", scope.differing], ["missing", scope.missing],
       ["irregular", scope.irregular], ["extra", scope.extra],
       ["orphaned", scope.orphaned], ["degenerate", scope.degenerate],
-      ["marker", scope.marker_mismatch],
+      ["marker", scope.marker_mismatch], ["unreadable", scope.unreadable],
     ].filter((pair) => Array.isArray(pair[1]) && pair[1].length > 0)
       .map((pair) => pair[0] + ": " + pair[1].join(", "))
       .join("; ");
-    const recViolation = await recordLedgerCall(
-      seg,
-      { status: "blocked", reason: "fix-scope-violation",
-        note: "durable plugin-installed copies diverge from the plugin install tree after this fix turn -- " +
-              (detail || "no detail reported") +
-              ". This is not by itself proof of tampering: a plugin upgraded mid-project gives the same signal. " +
-              "Re-run Step 0a's copy pass from the plugin path, then re-run this segment." },
-      "ledger:blocked:fix-scope-violation:" + seg,
-    );
-    haltBatchOnFixScope(seg, "fix-scope-violation", recViolation.ok);
-    if (!recViolation.ok) return { terminal: true, value: recViolation.failResult };
-    return { terminal: true, value: { seg: seg, converged: false, reason: "fix-scope-violation", rounds: round } };
+    return await haltSegmentOnFixScope(seg, round, "fix-scope-violation",
+      "durable plugin-installed copies diverge from the plugin install tree after this fix turn -- " +
+      (detail || "no detail reported") +
+      ". This is not by itself proof of tampering: a plugin upgraded mid-project gives the same signal. " +
+      "Re-run Step 0a's copy pass from the plugin path, then re-run this segment.");
   }
   // Line-oriented match via sentinelVerdict (#308) against the lone failure
   // sentinel (okSentinel is null -- there is no success sentinel to require

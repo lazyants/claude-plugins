@@ -186,6 +186,8 @@ def test_a_durable_only_schema_is_not_a_sanctioned_override(root):
     the run identity. An unexpected file there changes what validates a canon
     and what a resume compares against."""
     (root / "schemas" / "project-local.schema.json").write_text("{}", encoding="utf-8")
+    # Which is also the positive case for the sweep: an unexpected `.json`
+    # under `schemas/` is precisely what a widened fix turn would leave behind.
     out = audit(root)
     assert out["ok"] is False, out
     assert out["orphaned"] == ["project-local.schema.json"], out
@@ -360,16 +362,6 @@ def test_a_sanctioned_language_override_is_still_green_under_both_sweeps(tmp_pat
     assert out["ok"] is True, out
 
 
-def test_a_durable_only_schema_is_red(root):
-    """`${durable_root}/schemas/` has no sanctioned addition -- every durable
-    consumer only reads from it -- so a `.json` appearing there with no plugin
-    twin is exactly what a widened fix turn would leave behind."""
-    (root / "schemas" / "invented.schema.json").write_text("{}\n", encoding="utf-8")
-    out = audit(root)
-    assert out["ok"] is False
-    assert out["orphaned"] == ["invented.schema.json"], out
-
-
 def test_the_error_line_carries_the_counts_its_consumer_requires(tmp_path):
     """FIX_SCOPE_SCHEMA requires `n_checked` and `n_expected` on EVERY result,
     and the relay agent is told to repeat the printed line verbatim. An error
@@ -412,3 +404,21 @@ def test_partial_language_loss_is_a_known_hole_and_stays_clean(tmp_path, root):
     # verdict above comes from the lost authority, not from a check that cannot
     # see a languages/ edit at all.
     assert audit(root)["differing"] == ["languages/fr.json"]
+
+
+def test_a_plugin_tree_with_no_languages_directory_still_prints_a_verdict(tmp_path, root):
+    """`glob()` on an absent directory returns empty; `iterdir()` RAISES. The
+    languages walk used the second, so an incomplete install produced a
+    traceback and NO JSON line -- breaking this script's own stated invariant
+    that nothing raises past `main()`. The relay would then report nothing at
+    all, the workflow would spend both attempts, and the segment would
+    terminalize as if the RELAY were flaky, pointing the operator away from
+    the broken install.
+
+    The correct outcome is the verdict the script already had a name for."""
+    fake = build_fake_plugin(tmp_path)
+    shutil.rmtree(fake / "languages")
+    out = audit_from(fake, root)
+    assert out["ok"] is False, out
+    assert out["degenerate"] == ["languages"], out
+    assert out["n_checked"] == out["n_expected"], out

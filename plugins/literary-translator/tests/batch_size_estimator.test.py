@@ -34,7 +34,9 @@ exactly ONE call that returns immediately -- `review-wait:*` bounded poll of
 retry budget covering the (read, check) pair together -- never two
 independent retries. The #198 driver-dispatch reshape is call-count-neutral:
 the drive replaces the old dispatch 1:1 and the wait stays 1 call, so the
-`10 + 7*MAXFIX` per-segment term is UNCHANGED. The batch-level term dropped
+`10 + 7*MAXFIX` per-segment term is UNCHANGED. (That is a statement ABOUT
+#198, frozen at its date: #348 and then #607 have since moved the term to
+`10 + 9*MAXFIX` at WAIT_CALLS=1 -- see the derivation below.) The batch-level term dropped
 from N-dependent housekeeping to exactly **1** (the single `merge-ledger`/
 `mergeLedgerPrompt` call) now that `{{RUN_ID}}`-scoped `dispatch_token`s make
 every driver-promoted artifact fresh-by-construction, removing the old batch
@@ -69,7 +71,9 @@ directly above `estimatedCalls`):
     worst-case fixtures force.
   - each of the `max_fix_rounds` NORMAL rounds (`runRound(seg, round,
     isFinal=false)`, every round except the final confirming one) = review
-    point (6, worst case) + fix (1, `callFix`) = **7**, provided the
+    point (6, worst case) + fix (1, `callFix`) + the #607 fix-scope audit
+    and the one retry a CONTINUING round may spend on it (2, worst case)
+    = **9**, provided the
     review point's resulting verdict is NOT `clean && coverage_ok` (a clean
     verdict converges the segment immediately at that round instead,
     cheaper than the worst case and not what these fixtures exercise).
@@ -83,9 +87,10 @@ directly above `estimatedCalls`):
   - +1 terminal per-segment ledger write (`ledger:converged:*` /
     `ledger:blocked:{reason}:*` / `ledger:cap:*` / `ledger:timeout:*`,
     exactly one of these fires per segment).
-  - per-segment total: 3 + 8*max_fix_rounds + 6 + 1 == **10 + 8*max_fix_rounds**
-    (7*max_fix_rounds before #607 added the per-fix-round fix-scope audit),
-    exactly the `10 + 7*MAXFIX` term inside `estimatedCalls`.
+  - per-segment total: 3 + 9*max_fix_rounds + 6 + 1 == **10 + 9*max_fix_rounds**
+    at WAIT_CALLS=1 (7*max_fix_rounds before #607 added the per-fix-round
+    fix-scope audit and its retry), which is the WAIT_CALLS=1 reading of
+    `estimatedCalls`' own `8 + 2*WAIT_CALLS + MAXFIX*(8 + WAIT_CALLS)`.
   - batch-level: exactly **1** (`merge-ledger`, colon-free).
 
 Blocked-branch terminating sub-cases (same taxonomy as the pre-1.2.0 file,
@@ -1006,7 +1011,8 @@ def bucket_calls_by_segment(calls: list[dict]) -> tuple[dict[str, list[dict]], l
 def test_estimator_boundary_exactly_at_cap_permits_dispatch_and_converges(tmp_path):
     max_fix_rounds = 2
     segs = ["seg01", "seg02"]
-    # 1 + 2*(8 + 2*9 + 2*(6+9)) = 1 + 2*56 = 113
+    # 1 + 2*(8 + 2*9 + 2*(8+9)) = 1 + 2*60 = 121, re-derived rather than carried
+    # forward: #607's audit makes the per-round term 8 + WAIT_CALLS, not 6 + WAIT_CALLS.
     estimated = 1 + len(segs) * converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS, audit_calls=2)
 
     plan = {seg: converged_worst_case_plan(seg, max_fix_rounds, final_clean=True) for seg in segs}
@@ -1061,7 +1067,7 @@ def test_estimator_boundary_exactly_at_cap_permits_dispatch_and_converges(tmp_pa
 def test_estimator_one_below_boundary_blocks_dispatch_entirely(tmp_path):
     max_fix_rounds = 2
     segs = ["seg01", "seg02"]
-    estimated = 1 + len(segs) * converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS, audit_calls=2)  # 113
+    estimated = 1 + len(segs) * converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS, audit_calls=2)  # 121
 
     # Same configuration as the boundary-permits test above, but the cap is
     # one less -- deliberately reuse a plan that WOULD converge if pipeline()
@@ -1473,7 +1479,8 @@ def test_timeout_branch(tmp_path):
 # 7: dedicated case -- a review-artifact-mismatch segment's ACTUAL call
 # count, built from worst-case-recovered prior rounds (matching the
 # estimator's own per-round assumption), never exceeds the formula's own
-# per-segment bound (10 + 7*MAXFIX).
+# per-segment bound -- 10 + 9*MAXFIX at WAIT_CALLS=1, since #607 charges each
+# fix round the audit plus its one retry (audit_calls=2 below).
 # ---------------------------------------------------------------------------
 
 

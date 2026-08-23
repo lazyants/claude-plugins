@@ -26,7 +26,7 @@ The price of a halt is real and is stated rather than buried: it forfeits the `-
 
 ### Two shipped behaviours change
 
-**W5 refuses to start when `{{PLUGIN_ROOT}}` is unsubstituted** (`reason: "fix-scope-plugin-root-missing"`). The template's own token contract used to call the empty value a neutral "redirect opt-out"; `SKILL.md`'s #412 paragraph already said otherwise in prose ("Omitting this substitution is not a neutral default … Always substitute it"), and the template now agrees with it. There is no weaker fallback worth taking: running the checker from an auditable durable copy would report clean on exactly the tampering it exists to find. Scope is this template only — `segment_dispatch_driver.py` keeps its documented self-anchored mode. Eleven test files were migrated for this, eight of which execute the workflow.
+**W5 refuses to start when `{{PLUGIN_ROOT}}` is unsubstituted** (`reason: "fix-scope-plugin-root-missing"`). The template's own token contract used to call the empty value a neutral "redirect opt-out"; `SKILL.md`'s #412 paragraph already said otherwise in prose ("Omitting this substitution is not a neutral default … Always substitute it"), and the template now agrees with it. There is no weaker fallback worth taking: running the checker from an auditable durable copy would report clean on exactly the tampering it exists to find. Scope is this template only — `segment_dispatch_driver.py` keeps its documented self-anchored mode. Ten pre-existing test files were migrated for this, eight of which execute the workflow.
 
 **`fix_scope_audit.py` joins the never-copied scripts**, making that paragraph's enumerated list four. A durable copy would sit inside the tree it audits.
 
