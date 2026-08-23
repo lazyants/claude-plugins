@@ -54,8 +54,10 @@ Covered:
   7b. The content controls a SECOND write path into entries{} must not skip --
      #347's citation-source boundary and the offline basis:"established"
      backstop -- with their two scopes pinned in both directions: the citation
-     check fires on the absolute value, the backstop only on a correction that
-     NEWLY claims established, and `remove` is exempt from both.
+     check fires on the absolute value, the backstop on any correction that
+     STATES an established claim it did not already carry verbatim (the claim
+     being the canonical_target_form/source pair, not the basis label), and
+     `remove` is exempt from both.
   8. A correction can repair an entry that fails its OWN schema -- the case
      `old_entry` is deliberately not $ref-validated for.
 """
@@ -750,34 +752,89 @@ def test_correct_refuses_established_basis_under_offline_research_mode(tmp_path)
     )
 
 
-def test_offline_correction_of_an_already_established_entry_is_allowed(tmp_path):
+ESTABLISHED = _entry(
+    CORRECTED, "Jean Valjean", basis="established", source="https://example.org/valjean"
+)
+
+
+def freeze_established(root: Path) -> dict:
+    canon = read_canon(root)
+    canon["entries"][CORRECTED] = ESTABLISHED
+    (root / "canon.json").write_text(json.dumps(canon, ensure_ascii=False), encoding="utf-8")
+    return ESTABLISHED
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("confidence", "medium"), ("note", "register checked against the 1892 edition"),
+     ("category", "person")],
+    ids=["confidence", "note", "category"],
+)
+def test_offline_correction_of_a_non_claim_field_is_allowed(tmp_path, field, value):
     """The backstop is scoped to the DELTA, and this is the case that forced
-    it. Correcting a typo in an already-`established` entry's
-    `canonical_target_form` introduces no new claim about the world, so it must
-    stay legal offline.
+    it. An established entry asserts a `canonical_target_form` and cites a
+    `source`; correcting anything ELSE on the row restates no claim about the
+    world, so it must stay legal offline.
 
     Measured, not assumed: 488 of the 999 frozen entries across the four live
     books are basis:"established". An unscoped call would have put half the
     corpus out of reach of the very mode built to repair it."""
     root = make_french_project(tmp_path)
-    established = _entry(
-        CORRECTED, "Jean Valjean", basis="established", source="https://example.org/valjean"
-    )
-    canon = read_canon(root)
-    canon["entries"][CORRECTED] = established
-    (root / "canon.json").write_text(json.dumps(canon, ensure_ascii=False), encoding="utf-8")
+    established = freeze_established(root)
 
     doc = correction_doc(
         old_entry=established,
-        new_entry=dict(established, canonical_target_form="Jean Valljean"),
-        reason="typo in the target form; the established claim itself is unchanged",
+        new_entry=dict(established, **{field: value}),
+        reason=f"correcting {field}; the established claim itself is untouched",
     )
     proc = run_correct(root, write_correction(root, doc), research_mode="offline")
     assert proc.returncode == 0, (
-        f"the offline backstop fired on a correction that did not introduce a "
-        f"new established claim:\n{proc.stdout}\n{proc.stderr}"
+        f"the offline backstop fired on a correction that restated no claim:\n"
+        f"{proc.stdout}\n{proc.stderr}"
     )
-    assert read_canon(root)["entries"][CORRECTED]["canonical_target_form"] == "Jean Valljean"
+    assert read_canon(root)["entries"][CORRECTED][field] == value
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [{"canonical_target_form": "Entirely Different"},
+     {"source": "https://example.org/unrelated"},
+     {"canonical_target_form": "Entirely Different", "source": "https://example.org/unrelated"}],
+    ids=["target-form", "source", "both"],
+)
+def test_offline_correction_that_RESTATES_the_established_claim_is_refused(tmp_path, changed):
+    """The correction to the delta scoping, found on PR review and reproduced
+    before fixing: keying the exemption on `basis` alone let a correction
+    replace the target form AND its citation offline and keep the exemption
+    purely because the OLD row also said "established".
+
+    An established entry's claim is the (canonical_target_form, source) pair —
+    "this rendering is the conventional one, and here is the citation" — not the
+    basis label. Restating either half is a new claim about the world, and
+    offline research cannot have checked it. The operator's move is the same
+    command with `--research-mode live`, which is exactly the declaration that
+    flag exists to force."""
+    root = make_french_project(tmp_path)
+    established = freeze_established(root)
+    before = canon_bytes(root)
+
+    doc = correction_doc(
+        old_entry=established,
+        new_entry=dict(established, **changed),
+        reason="restating the established claim",
+    )
+    refused = run_correct(root, write_correction(root, doc), research_mode="offline")
+    assert_refused(refused, root, before, "offline", "established")
+
+    live = run_correct(
+        root,
+        write_correction(root, doc, name="live.json"),
+        research_mode="live",
+    )
+    assert live.returncode == 0, (
+        f"the same correction is refused even under --research-mode live, so the "
+        f"refusal above is not about the declaration:\n{live.stdout}\n{live.stderr}"
+    )
 
 
 def test_offline_correction_may_still_DEMOTE_an_uncitable_established_entry(tmp_path):

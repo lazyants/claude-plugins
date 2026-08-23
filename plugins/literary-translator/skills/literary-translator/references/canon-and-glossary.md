@@ -597,8 +597,14 @@ that a human adjudicated it.
 - **It is subject to the same content controls as the merge path.** A
   `disposition: "correct"` runs `new_entry` through `_enforce_citation_source_safety`
   (#347's static citation boundary — a loopback/private/non-public `source` is
-  refused before it can be frozen) and through the offline backstop (under
-  `--research-mode offline`, `basis: "established"` is refused). Being a second
+  refused before it can be frozen) and through the offline backstop. That
+  backstop is scoped to the CLAIM, which is the `canonical_target_form`/`source`
+  PAIR rather than the `basis` label: under `--research-mode offline` a
+  correction that states an established claim the row did not already carry
+  verbatim is refused, while correcting anything else on an established row
+  (`note`, `confidence`, `category`) stays legal. Scoping it on `basis` alone
+  would let a correction replace both the rendering AND its citation offline and
+  keep the exemption purely because the old row also said "established". Being a second
   write path into `entries{}` is exactly why: #347 calls itself "the only place
   such a `source` can be stopped before it is frozen into `canon.json`", and a
   route that skipped it would make that claim false. `remove` is exempt from

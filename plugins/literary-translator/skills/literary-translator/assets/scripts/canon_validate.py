@@ -2424,8 +2424,25 @@ def run_correct(
         # its values. So read `basis` off it defensively; a non-mapping simply
         # has no basis, which is the right answer here (any new established
         # claim over it IS new).
-        old_basis = old_entry.get("basis") if isinstance(old_entry, dict) else None
-        if new_entry.get("basis") == "established" and old_basis != "established":
+        old_is_dict = isinstance(old_entry, dict)
+        # WHAT THE CLAIM IS, and why keying this on `basis` alone was wrong.
+        # An established entry asserts "this canonical_target_form is the
+        # conventional one, and here is the citation". So the claim is the
+        # (canonical_target_form, source) PAIR, not the basis label. Scoping
+        # only on `basis` let a correction replace BOTH halves offline and
+        # keep the exemption purely because the old row also said
+        # "established" -- i.e. rewrite the claim without ever declaring that
+        # research was possible. Caught on PR review; reproduced before fixing.
+        claim_unchanged = (
+            old_is_dict
+            and old_entry.get("basis") == "established"
+            and _same_json_value(
+                new_entry.get("canonical_target_form"),
+                old_entry.get("canonical_target_form"),
+            )
+            and _same_json_value(new_entry.get("source"), old_entry.get("source"))
+        )
+        if new_entry.get("basis") == "established" and not claim_unchanged:
             # SCOPED TO THE DELTA, and the citation check above deliberately is
             # NOT -- the asymmetry is measured, not aesthetic.
             #
