@@ -61,6 +61,31 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
+# Rewritten for 1.67.0 (#520 -- a project may declare its own deterministic
+# style bans) per the maintenance contract above. This rotation inherited the
+# NON-empty 1.66.0 (#541) map -- three anchors, `cache_key.py:143-171`,
+# `cache_key.py:178-199` and `resume_setup.py:723-740` -- and RETIRED all three,
+# because 1.67.0 became the newest entry when this branch rebased onto a main
+# that had already shipped 1.66.0, and this guard checks the newest entry only.
+# The map is empty as a result, not by inheritance: the 1.67.0 entry cites no
+# `name.ext:NNN` anywhere. It names plenty of artefacts -- `final_audit.py`,
+# `validate_draft.py`, `draft.schema.json`, `profile.yml`,
+# `validate_conservation.py`, `style_bible.md` -- but every claim made about
+# them is BEHAVIOURAL: what the scan reads, which sections it walks, which hash
+# covers which file, what a malformed declaration produces. A behavioural claim
+# is pinned by a test that exercises it, and this release ships thirteen of them
+# in `final_audit.test.py` plus eight in `profile_validate.test.py` (28
+# collected cases, since two of the latter are parametrized), each watched
+# failing by mutating the shipped script or schema rather than the assertion. A
+# line citation would be the weaker instrument in every case.
+#
+# One claim in the entry is guarded by review alone and is named here so the gap
+# is recorded rather than implied away: that `assets/scripts/` contains no
+# existing search for a run of adjacent asterisks. That is a CENSUS -- an
+# absence over a directory -- and no test asserts it, because a test that did
+# would freeze the absence rather than the reason for it.
+#
+# The previous rotation, kept as its own record:
 # Rewritten for 1.65.0 (#510 -- the glossary agent's trap discovery is rerouted
 # out of style_bible.md's E-traps, and the durable prompt is gated on content)
 # per the maintenance contract above. This rotation inherited an already-empty
@@ -126,32 +151,14 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # behavioural claims in this entry (what the archiver keys on, what the prompt
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
-CITATION_ANCHORS = {
-    # 1.66.0 (#541). These two ranges carry the first half of the entry's cost
-    # claim: that both edited files sit in the bundle tuple, and that the hash
-    # they move is GLOBAL rather than per-segment. Either drifting would make
-    # the release's stated cost wrong in the direction operators plan around.
-    "cache_key.py:143-171": [
-        "PLUGIN_BUNDLE_MEMBERS = (",
-        '"codex_job.py"',
-        '"mass-translate-wf.template.js"',
-    ],
-    "cache_key.py:178-199": [
-        "CACHE_KEY_FIELD_ORDER = (",
-        '"plugin_bundle_hash"',
-        "PER_SEGMENT_FIELDS",
-        "GLOBAL_CACHE_KEY_FIELDS",
-    ],
-    # The resume-identity half of the same cost. A reader planning an upgrade
-    # around segment staleness alone would miss it, and nothing else in the
-    # suite pins that this marker reaches the digest.
-    "resume_setup.py:723-740": [
-        '"plugin_bundle_hash"',
-        ".plugin_bundle_hash",
-        '"version": version',
-        "_sha256_hex(_canonical_json_bytes(digest_input))",
-    ],
-}
+# The 1.66.0 (#541) rows this rotation retired, kept as their own record: three
+# ranges -- `cache_key.py:143-171`, `cache_key.py:178-199` and
+# `resume_setup.py:723-740` -- pinning that entry's two-part cost claim (both
+# edited files inside `PLUGIN_BUNDLE_MEMBERS`, the hash they move being global
+# rather than per-segment, and the same marker reaching the resume digest).
+# Retiring them is not optional bookkeeping: this file checks the NEWEST entry
+# only, so an anchor no current citation uses fails as stale.
+CITATION_ANCHORS = {}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
 # alphabetic extension are still required. Pinning a list of extensions was

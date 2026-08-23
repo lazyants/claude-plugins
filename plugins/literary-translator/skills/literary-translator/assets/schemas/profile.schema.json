@@ -612,6 +612,34 @@
           "type": "string",
           "minLength": 1
         },
+        "forbidden_patterns": {
+          "description": "OPT-IN, default absent (#520). A project's own deterministic, codepoint-decidable style bans, which the plugin ships NO defaults for -- the style contract lives in the project's style_bible.md and only the project knows which of its rules are mechanically decidable. Each entry is a Python `re` pattern tested by final_audit.py's WARN 5 against every string leaf of a converged draft's blocks/footnotes/verses, EXACTLY as the translator wrote it: sentinels are not stripped, markdown emphasis is not stripped, and no normalization is applied to the scanned text. Purely ADVISORY -- a hit is one WARN line, never a hard failure and never an exit-code change. A pattern that fails to compile is reported as its own WARN naming the id, never silently skipped, so an unenforced rule cannot read as a clean run -- that is the one rejection final_audit.py owns, because it is the only one THIS schema cannot make. Every question about SHAPE is settled here, at Step 0. The list is not size-capped and the patterns are not cost-bounded: profile.yml is operator-authored, the same trust footing on which validate_conservation.py already compiles operator-supplied line_patterns.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "pattern", "message"],
+            "properties": {
+              "id": {
+                "description": "Stable slug naming the rule, echoed in the WARN line so an operator can trace it back to the style_bible clause it enforces. The trailing (?![\\s\\S]) is a true end-of-string anchor, NOT decoration -- same pitfall the citation_content_types pattern above documents: jsonschema evaluates `pattern` with Python's `re`, whose `$` also matches before a trailing newline, so `...$` would admit \"rule\\n\" here. That id is then interpolated into the declaration WARN, where it is not covered by the whole-line normalization the HIT warnings get.",
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(?![\\s\\S])"
+              },
+              "pattern": {
+                "description": "Python `re` pattern. Matched with finditer, so the reported hit count is over NON-OVERLAPPING matches.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "message": {
+                "description": "What the operator should do about a hit. CR/LF are deliberately NOT forbidden here: PyYAML loads a folded `>` scalar with a trailing newline and a literal `|` scalar with its breaks intact, so a prohibition would refuse ordinary block authoring at Step 0. final_audit.py normalizes the whole emitted WARN line instead.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            }
+          }
+        },
         "admit_contract_only_stale": {
           "description": "OPT-IN, default false (#533). When true, the whole-project completeness gate (final_audit.py) and the assembly gate (assemble.py) admit an already-converged unit that went 'stale' ONLY because style_contract_hash moved -- a style-bible edit inside the STYLE_CONTRACT markers -- provided its .ever_converged sentinel is not absent, its on-disk draft still matches the recorded reviewed_draft_sha1, and every other moved cache-key field is machinery-only. This makes the tooling agree with the shipped rule R9 ('a style-contract edit applies FORWARD; a converged segment stays converged'), which the gates otherwise contradict by refusing to ship until every flipped unit is reviewed again. It does NOT widen SAFE_STALE_CARVEOUT_FIELDS, rewrite any ledger record or stamp any hash: the record keeps saying 'stale' and every admitted segment is named on stderr and in the run's structured stdout, so shipping them is a recorded operator act. It CANNOT distinguish a contract ADDITION from a contract REVERSAL -- a reversed rule genuinely demanded the defect in the earlier segments -- which is why it is a declaration and not a default. Only a literal true enables it; absent, null and false all mean refuse. Keep the value stable from W7 through delivery: every gate reads this same field, and toggling it mid-chain makes them disagree.",
           "type": "boolean",

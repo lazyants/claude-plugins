@@ -316,6 +316,32 @@ validation:
     # validate_draft.py reads THIS field rather than a hardcoded literal -- a target-language-
     # appropriate marker a translator agent uses/leaves behind for "not yet translated," which the false-green
     # gate scans for verbatim.
+  forbidden_patterns: []
+    # OPT-IN, default absent (#520). Your project's OWN deterministic style bans -- the plugin
+    # ships none and hardcodes none, because a style contract lives in YOUR style_bible.md and
+    # only you know which of its rules are codepoint-decidable. Each entry is an id/pattern/message
+    # triple; `pattern` is a Python `re` pattern. final_audit.py (W7) tests every string leaf of a
+    # converged draft's blocks/footnotes/verses against it and emits one advisory WARN line per
+    # (segment, field, pattern) -- never a hard failure, never an exit-code change.
+    #
+    # The text is scanned EXACTLY as the translator wrote it: sentinels (⟦FNREF_1⟧, ⟦VERSE_v1⟧) are
+    # NOT substituted out and markdown emphasis is NOT stripped. So a pattern that would only match
+    # after a placeholder became a space will not fire, and one that matches inside a placeholder
+    # will. Write the pattern against the draft, not against the rendered book.
+    #
+    # A pattern that fails to compile is reported as its own WARN naming the id -- never silently
+    # skipped, so a rule you thought was enforced can never read as a clean run. That is the only
+    # rejection W7 makes: everything about SHAPE -- a missing field, an unknown key, a bad id, a
+    # dropped list dash -- is refused earlier, by profile_validate.py at Step 0. There is no
+    # LIST-LENGTH cap and no execution-cost bound on a pattern: profile.yml is yours, on the same
+    # trust footing as the scripts themselves. Individual fields ARE capped, and Step 0 refuses a
+    # violation: `pattern` and `message` at 200 characters each, `id` at 64.
+    #
+    # Example -- a project whose own renderer prints a run of asterisks literally to the reader:
+    #   forbidden_patterns:
+    #     - id: adjacent-asterisks
+    #       pattern: '\*{2,}'
+    #       message: "two or more adjacent asterisks reach the reader verbatim -- separate the spans"
   admit_contract_only_stale: false
     # OPT-IN, default false (#533). Editing style_bible.md between the STYLE_CONTRACT markers moves
     # style_contract_hash, which flips EVERY already-converged segment to `stale` -- and both the W7

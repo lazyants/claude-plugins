@@ -940,6 +940,103 @@ def test_mentions_section_enabled_boolean_values_are_schema_valid():
         assert schema_errors(profile) == [], (value, schema_errors(profile))
 
 
+# ---------------------------------------------------------------------------
+# validation.forbidden_patterns (#520) -- the Step 0 schema gate.
+#
+# These belong HERE, not in the W7 suite. final_audit.py reaches profile.yml
+# through vd.load_profile(), which only yaml.safe_load()s -- it never
+# validates against profile.schema.json. So a W7-side assertion about what the
+# schema accepts passes whether or not the schema says so, and would stay
+# green if a constraint were reintroduced that Step 0 actually refuses. This
+# file runs the REAL validate_against_schema() pass main()'s step 5 runs.
+# ---------------------------------------------------------------------------
+
+
+def _with_patterns(patterns):
+    profile = make_base_profile()
+    profile["validation"]["forbidden_patterns"] = patterns
+    return profile
+
+
+def test_forbidden_patterns_absent_is_valid():
+    """Every project predating #520 has no such key; that must stay valid."""
+    assert schema_errors(make_base_profile()) == []
+
+
+def test_forbidden_patterns_empty_list_is_valid():
+    assert schema_errors(_with_patterns([])) == []
+
+
+def test_forbidden_patterns_well_formed_entry_is_valid():
+    assert schema_errors(_with_patterns([
+        {"id": "adjacent-asterisks", "pattern": r"\*{2,}", "message": "separate the spans"},
+    ])) == []
+
+
+def test_forbidden_patterns_unknown_property_rejected():
+    errors = schema_errors(_with_patterns([
+        {"id": "x", "pattern": "y", "message": "z", "severity": "blocker"},
+    ]))
+    assert len(errors) == 1
+    assert "severity" in errors[0]
+
+
+# "rule\n" is the case a `$`-anchored pattern silently ADMITS: jsonschema
+# evaluates `pattern` with Python's `re`, whose `$` also matches before a
+# trailing newline. A double-quoted YAML scalar carries that newline through to
+# Step 0, and the id is then interpolated into a declaration WARN without the
+# whole-line normalization the hit warnings get.
+@pytest.mark.parametrize(
+    "bad_id", ["Has-Capitals", "-leading-dash", "has space", "", "a" * 65, "rule\n"]
+)
+def test_forbidden_patterns_bad_id_rejected(bad_id):
+    assert schema_errors(_with_patterns([
+        {"id": bad_id, "pattern": "y", "message": "z"},
+    ])) != []
+
+
+@pytest.mark.parametrize("missing", ["id", "pattern", "message"])
+def test_forbidden_patterns_missing_required_key_rejected(missing):
+    entry = {"id": "x", "pattern": "y", "message": "z"}
+    del entry[missing]
+    errors = schema_errors(_with_patterns([entry]))
+    assert len(errors) == 1
+    assert missing in errors[0]
+
+
+def test_forbidden_patterns_message_may_carry_newlines():
+    """The load-bearing case behind NOT forbidding CR/LF in `message`.
+
+    PyYAML loads a folded `>` scalar with a trailing newline and a literal `|`
+    scalar with its breaks intact, so a CR/LF prohibition here would refuse
+    ordinary block authoring at Step 0 -- while W7 would never notice, since
+    it does not schema-validate. Both scalar styles are parsed for real
+    rather than hand-writing the resulting string, so the test fails if
+    PyYAML's own behaviour is not what this reasoning assumes."""
+    import yaml
+
+    loaded = yaml.safe_load(
+        "folded: >\n"
+        "  two or more adjacent asterisks reach\n"
+        "  the reader verbatim\n"
+        "literal: |\n"
+        "  first line\n"
+        "  second line\n"
+    )
+    assert loaded["folded"].endswith("\n"), repr(loaded["folded"])
+    assert "\n" in loaded["literal"], repr(loaded["literal"])
+
+    for style in ("folded", "literal"):
+        assert schema_errors(_with_patterns([
+            {"id": "adjacent-asterisks", "pattern": r"\*{2,}", "message": loaded[style]},
+        ])) == [], style
+
+
+def test_forbidden_patterns_must_be_a_list_of_objects():
+    assert schema_errors(_with_patterns({"id": "x"})) != []
+    assert schema_errors(_with_patterns(["just a string"])) != []
+
+
 if __name__ == "__main__":
     import sys
 
