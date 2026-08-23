@@ -404,11 +404,23 @@ def sentinel_body(seg, writer, evidence=None) -> bytes:
 
     BOUNDED, and by dropping evidence rather than by truncating it. A body
     that would exceed SENTINEL_BODY_MAX_BYTES is re-emitted with the identity
-    fields alone -- those are bounded by construction (`seg` is a validated
-    segment id, short enough to be a filename) -- because a truncated JSON body
-    is not shorter evidence, it is unparseable evidence, and the reader would
-    report the marker `unattributed` either way. Losing the evidence while
-    keeping a marker that still says WHO wrote it is the better half.
+    fields alone, because a truncated JSON body is not shorter evidence, it is
+    unparseable evidence, and the reader would report the marker `unattributed`
+    either way. Losing the evidence while keeping a marker that still says WHO
+    wrote it is the better half. All-or-nothing on purpose: choosing which
+    evidence to keep would put schema-specific priorities inside a serializer
+    that is duplicated across two scripts and knows nothing about either.
+
+    The identity fallback is not re-measured, and the claim that it fits is
+    OPERATIONAL rather than proven by this function: `validate_seg()` bounds a
+    segment id's CHARACTERS, not its length, and `writer` is an ordinary
+    argument. What actually holds is narrower -- both shipped writer names are
+    fixed and short, and a `seg` long enough to overflow 4096 bytes cannot
+    reach a published marker at all, because `.ever_converged.<seg>` would
+    exceed the filesystem's own component limit (255 on this project's
+    platform, so at most 239 bytes of segment id) and the publishing open or
+    link fails first. A third writer with an unbounded name would break that,
+    which is why SENTINEL_KNOWN_WRITERS is a closed set registered by hand.
 
     WHAT THIS BODY IS NOT: it is not authority. Nothing in this plugin gates
     on it, and classify_ever_converged_sentinel() above still decides

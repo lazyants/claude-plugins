@@ -3381,3 +3381,60 @@ def test_a_writer_can_never_publish_a_body_its_own_reader_would_refuse(tmp_path)
             "the oversized evidence must be DROPPED, not truncated into "
             "something unparseable"
         )
+
+
+def test_the_body_read_survives_a_short_os_read(tmp_path):
+    """A single `os.read()` on a regular file normally returns the whole
+    request, but it is NOT guaranteed to -- an interruption or a filesystem
+    implementation may hand back a short count. A short read that happened to
+    land on a complete JSON object is indistinguishable from EOF, so an
+    OVERSIZED body would be judged on its prefix and attributed to a known
+    writer: exactly what the read-one-past-the-maximum check exists to stop.
+
+    Forced deterministically by chunking `os.read`, because no ordinary file
+    on this host reproduces it -- a real-file fixture would pass whether or
+    not the loop exists, on the very interpreter and filesystem CI runs.
+
+    Two arms, and the second is the one with teeth. An in-bounds body split
+    across chunks must still be read whole; an over-long body must still be
+    caught even though its first chunk parses cleanly on its own."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_shortread")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    path = segments_dir / ".ever_converged.segSR"
+
+    real_read = backfill.os.read
+
+    def chunked_read(fd, count, _chunk=[64]):
+        return real_read(fd, min(count, _chunk[0]))
+
+    good = json.dumps({"marker": "ever_converged", "v": 1,
+                       "by": "ledger_update", "seg": "segSR",
+                       "pad": "p" * 500}).encode("utf-8")
+    assert len(good) > 64, "precondition: the body must span several chunks"
+    path.write_bytes(good)
+
+    backfill.os.read = chunked_read
+    try:
+        assert backfill.read_sentinel_attribution(path) == "ledger_update", (
+            "an in-bounds body split across short reads must still be read "
+            "whole -- a single os.read() would have parsed 64 bytes and "
+            "reported it unattributed"
+        )
+
+        stub = json.dumps({"marker": "ever_converged", "v": 1,
+                           "by": "ledger_update", "seg": "segSR",
+                           "pad": ""}).encode("utf-8")
+        over = backfill.SENTINEL_BODY_MAX_BYTES + 1
+        oversized = json.dumps({"marker": "ever_converged", "v": 1,
+                                "by": "ledger_update", "seg": "segSR",
+                                "pad": "p" * (over - len(stub))}).encode("utf-8")
+        assert len(oversized) == over
+        path.write_bytes(oversized)
+        assert backfill.read_sentinel_attribution(path) == "unattributed", (
+            "a body past the maximum was attributed because the read stopped "
+            "short of proving it was over -- the overflow check is only as "
+            "good as the read that feeds it"
+        )
+    finally:
+        backfill.os.read = real_read

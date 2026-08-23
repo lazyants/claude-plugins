@@ -109,7 +109,9 @@ ledger row's status, its source, and its ``reviewed_draft_sha1``), while
 ``ledger_update.py`` writes ``"by": "ledger_update"`` plus the reviewed draft
 sha1 of the convergence it just recorded, and its run token and round label
 when the recording call supplied a run token and a round label can be read off
-the review artifact. Before #443
+the review artifact. Evidence is all-or-nothing: a body that would exceed
+``SENTINEL_BODY_MAX_BYTES`` -- reachable through an unconstrained ``run_token``
+-- is published with the identity fields alone rather than truncated. Before #443
 both published the identical ten bytes ``converged\n``, so a marker this script
 retrofitted and a marker earned at a real convergence were indistinguishable,
 and the only thing separating them on the project that motivated the issue was
@@ -557,11 +559,23 @@ def sentinel_body(seg, writer, evidence=None) -> bytes:
 
     BOUNDED, and by dropping evidence rather than by truncating it. A body
     that would exceed SENTINEL_BODY_MAX_BYTES is re-emitted with the identity
-    fields alone -- those are bounded by construction (`seg` is a validated
-    segment id, short enough to be a filename) -- because a truncated JSON body
-    is not shorter evidence, it is unparseable evidence, and the reader would
-    report the marker `unattributed` either way. Losing the evidence while
-    keeping a marker that still says WHO wrote it is the better half.
+    fields alone, because a truncated JSON body is not shorter evidence, it is
+    unparseable evidence, and the reader would report the marker `unattributed`
+    either way. Losing the evidence while keeping a marker that still says WHO
+    wrote it is the better half. All-or-nothing on purpose: choosing which
+    evidence to keep would put schema-specific priorities inside a serializer
+    that is duplicated across two scripts and knows nothing about either.
+
+    The identity fallback is not re-measured, and the claim that it fits is
+    OPERATIONAL rather than proven by this function: `validate_seg()` bounds a
+    segment id's CHARACTERS, not its length, and `writer` is an ordinary
+    argument. What actually holds is narrower -- both shipped writer names are
+    fixed and short, and a `seg` long enough to overflow 4096 bytes cannot
+    reach a published marker at all, because `.ever_converged.<seg>` would
+    exceed the filesystem's own component limit (255 on this project's
+    platform, so at most 239 bytes of segment id) and the publishing open or
+    link fails first. A third writer with an unbounded name would break that,
+    which is why SENTINEL_KNOWN_WRITERS is a closed set registered by hand.
 
     WHAT THIS BODY IS NOT: it is not authority. Nothing in this plugin gates
     on it, and classify_ever_converged_sentinel() above still decides
@@ -609,6 +623,7 @@ def write_all(fd, data: bytes) -> None:
                 f"the sentinel body still unwritten"
             )
         view = view[written:]
+
 
 # The body reader. The ONLY one in the plugin, and it decides nothing: see
 # read_sentinel_attribution()'s own docstring.
@@ -686,7 +701,23 @@ def read_sentinel_attribution(path: Path, *, dir_fd=None, expected_seg=None) -> 
             **({"dir_fd": dir_fd} if dir_fd is not None else {}),
         )
         try:
-            raw = os.read(fd, SENTINEL_BODY_READ_CAP)
+            # A LOOP, not one os.read(). A single read on a regular file
+            # normally returns the whole request, but it is not guaranteed to:
+            # an interruption or a filesystem implementation may return a short
+            # count, and a short read that happened to land on a complete JSON
+            # object would be indistinguishable from EOF -- so an oversized body
+            # would be judged on its prefix, which is the very thing the +1 cap
+            # above exists to prevent. Bounded by SENTINEL_BODY_READ_CAP, so it
+            # terminates on EOF or at the cap and never on the file's own size.
+            chunks = []
+            remaining = SENTINEL_BODY_READ_CAP
+            while remaining > 0:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
         finally:
             os.close(fd)
     except OSError:
