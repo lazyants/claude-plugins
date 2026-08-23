@@ -49,7 +49,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python3 -m pip install --disable-pip-version-check pytest
+          python3 -m pip install --disable-pip-version-check pytest pytest-xdist
           python3 -m pip install --disable-pip-version-check -r plugins/literary-translator/requirements.txt
 
       - name: Toolchain
@@ -58,11 +58,18 @@ jobs:
           python3 -m pytest --version
           node -v
           git --version
+          echo "cores: $(nproc)"
 
+      # -n auto because the cost is spread, not concentrated: measured serially at
+      # 660s, the slowest 25 tests account for ~100s and the other ~6 285 average
+      # 89ms each — process-spawn overhead, with no hot spot worth rewriting.
+      # --dist loadfile keeps every test in a file on ONE worker: the slowest
+      # tests here are lease/flock/kill-the-driver concurrency cases, and
+      # splitting a file across workers would race them against each other.
       # Run from the plugin directory, never from the repo root: pytest only
       # reads plugins/literary-translator/pytest.ini when rootdir resolves into
       # that directory, and without it `python_files = *.test.py` never applies
       # — a repo-root run collects a small fraction of the suite and exits 0.
       - name: pytest
         working-directory: plugins/literary-translator
-        run: python3 -m pytest -q --durations=25
+        run: python3 -m pytest -q -n auto --dist loadfile --durations=25

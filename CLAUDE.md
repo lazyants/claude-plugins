@@ -60,8 +60,18 @@ directly comparable to what a local run would have produced, which is the point 
   `wait_chunking_batch_passes` tests resolve frozen baseline commits with `git show`/`git diff`;
   on the default depth-1 shallow clone all 67 of them fail with `bad object`, saying nothing
   about the code. History is ~14 MiB packed, so the full clone is cheap.
-- The pytest step passes `--durations=25`, so every run reports where its ~10 minutes went
-  instead of leaving the question open.
+- The pytest step runs `-n auto --dist loadfile` (pytest-xdist, CI-only — it is not in
+  `requirements.txt`). Measured serially at **660s for 6 310 tests**: the slowest 25 account for
+  ~100s and the other ~6 285 average **89ms each**. That is process-spawn overhead spread evenly,
+  not a hot spot — so parallelism is the fix and rewriting `subprocess` call sites is not.
+  `--dist loadfile` keeps a file on one worker: the slowest tests are lease/flock/kill-the-driver
+  concurrency cases and must not be raced against their own siblings.
+- The pytest step also passes `--durations=25`, so every run reports where its time went instead
+  of leaving the question to be re-investigated by hand.
+
+**Acceptance for any change to how the suite is invoked:** the counters must stay
+`6310 passed, 3 skipped, 2 xfailed`. A parallel or sharded run that collects fewer is not faster,
+it is quieter.
 
 ## Repo conventions
 
