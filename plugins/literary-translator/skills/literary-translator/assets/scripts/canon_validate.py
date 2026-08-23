@@ -2000,7 +2000,7 @@ def _enforce_citation_review_attestation(
             "research_mode=live admits basis:\"established\", but nothing here "
             "has been told a citation review approved these bytes, and an "
             "ACCEPTED row this merge freezes is revisable afterwards only by a "
-            "deliberate --correct-entry somebody has to know to run. No "
+            "deliberate --correct somebody has to know to run. No "
             "attestation was supplied for: " + ", ".join(_bounded_list(offenders))
             + ". The pre-merge citation review -- which retrieves each cited "
             "page through scripts/fetch_citation.py and rejects the batch "

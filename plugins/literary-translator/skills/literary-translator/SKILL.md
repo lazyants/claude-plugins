@@ -1590,7 +1590,7 @@ hand under `research_mode: live` is refused outright for any
 `basis:"established"` item unless you pass `canon_validate.py`'s
 `--citations-reviewed`, attesting such a review approved those exact bytes —
 the Workflow passes it itself on the reviewed path, and a merged row is frozen
-against any further merge (revisable only by a deliberate `--correct-entry`,
+against any further merge (revisable only by a deliberate `--correct`,
 `#495`), so an unaudited citation that reaches the merge stays until somebody
 notices it. The split is what makes that boundary an
 enforcement point rather than a rule the attacker can argue with — an agent

@@ -738,7 +738,7 @@ unusable, 4 of them well-formed product URLs on the publisher's real domain —
 came from exactly such a pass. A merged row is frozen by the merge and the
 downstream reviewer is forbidden to question a frozen canon form, so what
 reached the writer unaudited stayed — until somebody noticed and ran
-**#495**'s `--correct-entry`, which is exactly the point: that is an act
+**#495**'s `--correct`, which is exactly the point: that is an act
 somebody has to know to perform, and an unaudited citation announces nothing.
 
 Three properties worth stating exactly, because each is a limit:
