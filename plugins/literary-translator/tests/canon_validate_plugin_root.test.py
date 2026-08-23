@@ -395,6 +395,17 @@ NON_STAMPING_MODE_CASES = {
 }
 
 
+def _canon_bytes(root: Path):
+    """canon.json's exact bytes, or None when it does not exist.
+
+    The before/after pair around a REFUSED invocation has to distinguish
+    "unchanged" from "created" from "rewritten", so absence is a value here
+    rather than an error -- two of the four stamping modes run against a
+    project that has no canon.json yet."""
+    path = root / "canon.json"
+    return path.read_bytes() if path.exists() else None
+
+
 def _mode_ids(dest):
     return "legacy-batch" if dest is None else dest
 
@@ -454,7 +465,7 @@ def test_a_stamping_mode_refuses_when_neither_sibling_flag_is_given(tmp_path, de
     root = make_project(tmp_path)
     if needs_canon:
         assert run_canon_init(root).returncode == 0
-    canon_before = (root / "canon.json").read_bytes() if (root / "canon.json").exists() else None
+    canon_before = _canon_bytes(root)
 
     proc = run_canon_validate(root, *build_argv(root), allow_durable_sibling=False)
 
@@ -479,7 +490,7 @@ def test_a_stamping_mode_refuses_when_neither_sibling_flag_is_given(tmp_path, de
         f"which one to fix:\n{proc.stderr}"
     )
 
-    canon_after = (root / "canon.json").read_bytes() if (root / "canon.json").exists() else None
+    canon_after = _canon_bytes(root)
     assert canon_after == canon_before, (
         "a refused invocation must not have touched canon.json -- the refusal "
         "happens in argument parsing, before any mode runs"
@@ -576,7 +587,7 @@ def test_the_durable_sibling_opt_out_genuinely_runs_the_durable_copy(tmp_path, d
     root = make_project(tmp_path)
     if needs_canon:
         assert run_canon_init(root).returncode == 0
-    canon_before = (root / "canon.json").read_bytes() if (root / "canon.json").exists() else None
+    canon_before = _canon_bytes(root)
     poison_durable_root_cache_key(root)
 
     proc = run_canon_validate(root, *build_argv(root))  # appends --allow-durable-sibling
@@ -594,7 +605,7 @@ def test_the_durable_sibling_opt_out_genuinely_runs_the_durable_copy(tmp_path, d
         f"does not prove THAT file ran:\n{payload}"
     )
 
-    canon_after = (root / "canon.json").read_bytes() if (root / "canon.json").exists() else None
+    canon_after = _canon_bytes(root)
     assert canon_after == canon_before, (
         "a failed stamp attempt must write NOTHING -- generation_hashes are "
         "resolved before the atomic write, never patched in afterward"

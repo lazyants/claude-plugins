@@ -426,9 +426,11 @@ def test_glossary_pass_instantiation_mandates_plugin_root_token():
     # glossary-pass half, which is a SEPARATE template
     # (glossary-pass-wf.template.js) instantiated by a separate section.
     #
-    # Each fragment below sits fully on one line as of this writing, verified
-    # with grep -- never by eye, see this file's own docstring's hard-wrap
-    # warning:
+    # The needles below are matched against the WHITESPACE-NORMALIZED file, so
+    # a hard wrap through any of them is harmless -- which is why no
+    # "sits on one line" claim is made here, unlike this file's raw-text
+    # assertions further up. Composed with grep, never by eye, per this file's
+    # own docstring's hard-wrap warning:
     #   "**#412:** that same instantiation ALSO substitutes `{{PLUGIN_ROOT}}` into"
     #   "which is the wrong value: an installed plugin has no `assets/` at its root,"
     #   "not a neutral default: it leaves the pre-#412 vulnerability open** — a"
@@ -461,8 +463,9 @@ def test_skill_records_stamping_mode_plugin_root_refusal():
     # halt, so SKILL.md has to state it where the reader meets the canon
     # commands -- otherwise the halt reads as a bug in the documented command.
     #
-    # Each fragment sits fully on one line as of this writing, verified with
-    # grep -- never by eye, see this file's own docstring's hard-wrap warning:
+    # Matched against the WHITESPACE-NORMALIZED file, so a hard wrap through
+    # any needle is harmless. Composed with grep, never by eye, per this file's
+    # own docstring's hard-wrap warning:
     #   "**#412 — a stamping mode now REFUSES to guess which `cache_key.py` to"
     #   "them now halts with an argparse error (exit `2`) unless it is handed either"
     #   "`--allow-durable-sibling` is the sanctioned opt-out for a hand-run"
@@ -501,8 +504,9 @@ def test_canon_reference_cli_modes_section_records_stamping_mode_refusal():
     # the enumeration false by omission for four of the seven modes -- and the
     # reader meets the consequence as an unexplained exit-2 halt.
     #
-    # Each fragment sits fully on one line as of this writing, verified with
-    # grep -- never by eye, see this file's own docstring's hard-wrap warning:
+    # Matched against the WHITESPACE-NORMALIZED file, so a hard wrap through
+    # any needle is harmless. Composed with grep, never by eye, per this file's
+    # own docstring's hard-wrap warning:
     #   "**#412 — a second requirement, on the STAMPING modes only.** The four modes"
     #   "merge — additionally refuse to run, with an argparse error (exit `2`),"
     #   "validate-only — resolve no sibling and accept neither flag's obligation; do"

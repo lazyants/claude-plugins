@@ -67,8 +67,9 @@ SOURCE_FORM = "Sappho"
 TARGET_FORM = "Sapho"
 
 
-def instantiate(durable_root: str, *, research_mode: str = "live",
-                batch_agent_cap: int = 10_000, plugin_root: str = "") -> str:
+def instantiate(durable_root: str, *, plugin_root: str,
+                research_mode: str = "live",
+                batch_agent_cap: int = 10_000) -> str:
     """The template's documented one-time substitution -- but with DURABLE_ROOT
     bound to a REAL writable directory (unlike the sibling harnesses' fixed
     /fixture/... root), so the paths it emits can be created and the command it
@@ -83,15 +84,18 @@ def instantiate(durable_root: str, *, research_mode: str = "live",
     text = text.replace("{{EFFORT}}", "high")
     # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
     text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
-    # #412 -- json.dumps JS string literal, token OUTSIDE quotes. Empty
-    # string is the "not opted into the --plugin-root redirect" sentinel;
-    # test_the_emitted_approve_command_snapshots_byte_identically_against_the_real_script
-    # below passes the REAL skill root through this same parameter, because
-    # its --merge-batches command is run for real against the REAL
-    # canon_validate.py, which since #412 refuses every stamping mode
-    # (--merge-batches included) without either --plugin-root or
-    # --allow-durable-sibling -- so an empty PLUGIN_ROOT here would no
-    # longer be a no-op, it would make that real subprocess call fail.
+    # #412 -- json.dumps JS string literal, token OUTSIDE quotes. REQUIRED,
+    # with no default: unlike mass-translate-wf.template.js's own
+    # {{PLUGIN_ROOT}}, an empty string is not a "did not opt into the
+    # redirect" sentinel for THIS template -- it throws at instantiation, so
+    # a defaulted-empty call would surface as run()'s opaque "template threw
+    # under Node" rather than as a missing argument. Callers must name a
+    # root, and this harness's one caller
+    # (test_the_emitted_approve_command_snapshots_byte_identically_against_the_real_script)
+    # names the REAL skill root, because its --merge-batches command is run
+    # for real against the REAL canon_validate.py, which since #412 refuses
+    # every stamping mode without either --plugin-root or
+    # --allow-durable-sibling.
     text = text.replace("{{PLUGIN_ROOT}}", json.dumps(plugin_root))
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
@@ -201,9 +205,9 @@ function log(msg) { logLines.push(String(msg)); }
 """
 
 
-def run(*, tmp_path: Path, durable_root: str, batches: list,
+def run(*, tmp_path: Path, durable_root: str, batches: list, plugin_root: str,
         research_mode: str = "live", plan: dict | None = None,
-        timeout: int = 30, plugin_root: str = "") -> dict:
+        timeout: int = 30) -> dict:
     plan = plan or {}
     harness = (
         HARNESS.replace("__WRAPPED_SOURCE__", _wrap(instantiate(

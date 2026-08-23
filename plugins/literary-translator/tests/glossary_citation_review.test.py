@@ -170,15 +170,15 @@ def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000,
     text = text.replace("{{BATCH_AGENT_CAP}}", str(int(batch_agent_cap)))
     text = text.replace("{{EFFORT}}", "high")
     text = text.replace("{{CITATION_CONTENT_TYPES}}", citation_content_types)
-    # #412 -- json.dumps JS string literal, token OUTSIDE quotes. UNLIKE
-    # mass-translate-wf.template.js's own {{MODEL}}/{{PLUGIN_ROOT}} tokens,
-    # empty is NOT a valid value here -- the template throws at
-    # instantiation for a blank PLUGIN_ROOT (there is no legacy caller
-    # relying on a flagless --merge-batches default for this brand-new
-    # token). The real plugin skill root resolves a genuine cache_key.py, so
-    # this is a value the guard actually accepts; not inspected by this
-    # file's citation-review assertions beyond that, it only needs to
-    # resolve without throwing.
+    # #412 -- json.dumps JS string literal, token OUTSIDE quotes. Empty is NOT
+    # a valid value for the GLOSSARY template's {{PLUGIN_ROOT}}; the canonical
+    # explanation of why (and of why mass-translate-wf.template.js's own
+    # empty-string opt-out is deliberately NOT harmonised with it) lives once,
+    # on FIXTURE_GLOSSARY_PLUGIN_ROOT in workflow_template_instantiation
+    # .test.py and in the template's own header token entry -- not restated
+    # here. The real plugin skill root resolves a genuine cache_key.py, so the
+    # guard accepts it; this file's citation-review assertions inspect nothing
+    # else about it.
     text = text.replace("{{PLUGIN_ROOT}}", json.dumps(str(PLUGIN_ROOT / "skills" / "literary-translator")))
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text

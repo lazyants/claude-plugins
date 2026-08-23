@@ -2538,17 +2538,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "the tree it checks would let a tampered copy validate itself. "
             "cache_key.py is a LEAF and does not accept --plugin-root at "
             "all, so it is never forwarded to it; only a synthesized "
-            "--durable-root is. REQUIRED by the modes that write "
-            "(--init, --restamp-derivation, --merge-batches, legacy "
-            "--batch) unless --allow-durable-sibling is given instead; "
-            "ignored by every other mode, which resolves no sibling."
+            "--durable-root is. REQUIRED by the STAMPING modes -- the "
+            "four that WRITE generation_hashes (--init, "
+            "--restamp-derivation, --merge-batches, legacy --batch) -- "
+            "unless --allow-durable-sibling is given instead; ignored by "
+            "every other mode, which resolves no sibling. 'Stamping' and "
+            "'writing' name the SAME four modes here; the surrounding "
+            "docs still use the older 'writing' spelling."
         ),
     )
     parser.add_argument(
         "--allow-durable-sibling",
         action="store_true",
         help=(
-            "#412: run a WRITING mode with the self-anchored "
+            "#412: run a STAMPING mode with the self-anchored "
             "${durable_root}/scripts/cache_key.py, accepting that the "
             "sibling comes out of a directory the codex process this stamp "
             "gates can write to. The explicit escape hatch for the case "
@@ -2556,7 +2559,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "hand-run recovery, a fully self-anchored drive). Mutually "
             "exclusive with --plugin-root: naming a trusted root AND "
             "waiving the requirement at once states two different "
-            "intentions. Ignored by the non-writing modes, which resolve "
+            "intentions. Ignored by the non-stamping modes, which resolve "
             "no sibling at all."
         ),
     )
