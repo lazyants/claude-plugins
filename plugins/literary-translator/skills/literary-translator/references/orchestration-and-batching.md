@@ -164,14 +164,13 @@ this template specifically, but only as of that moment: the marker
 characterizes the DURABLE copies under `${durable_root}/scripts/` and is
 never recomputed, so by itself it cannot detect a plugin update landing
 between Step 0a and a later batch. SKILL.md's W5 rule (#396) — run
-`scaffold_setup.py --verify` before the session's first live-tree read of a
-bundle member — is what closes that gap, comparing the durable copies against
-the live plugin tree on demand, immediately before each such use rather than
-once per session — the install is shared, so a verdict is evidence about the
-tree as it was when the check ran and does not stay true for a later
-instantiation. Residual: the window is not closed, only narrowed to the gap
-between a verify and the use it guards; an update landing inside that gap is
-still masked. Prose enforcement is a weaker guarantee than a
+`scaffold_setup.py --verify` immediately before EACH live-tree read or
+execution of a bundle member — is what closes that gap, comparing the durable
+copies against the live plugin tree on demand. Each use, never once per
+session: the install is shared, so a verdict is evidence about the tree as it
+was when the check ran and does not stay true for a later instantiation.
+Residual: the window is not closed, only narrowed to the gap between a verify
+and the use it guards; an update landing inside that gap is still masked. Prose enforcement is a weaker guarantee than a
 code gate, and it was chosen for a maintenance reason rather than an
 impossibility one: the check has to fire ahead of MANY entry points — every
 script that redirects a bundle member's resolution with `--plugin-root` —
