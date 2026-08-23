@@ -1599,12 +1599,22 @@ def test_inventory_scan_pieces_never_joins_two_blocks():
 
 
 def test_inventory_census_tokenizes_elision_exactly_like_the_production_extractor():
-    # #284 parity: BOTH loaders accept has_elision:false beside a non-null,
-    # 2-group ELISION_RE. This file used to gate the elision split on
-    # has_elision, so that config tokenized differently here than in
-    # production -- and the census would have reported a form the production
-    # extractor finds as never occurring. Asserted against bootstrap_names.py's
-    # OWN output, never a hand-written expectation.
+    # #284 parity: _tokenize() splits on the compiled pattern ALONE, exactly
+    # like production. This file used to gate the split on has_elision too, so
+    # a has_elision:false + non-null 2-group ELISION_RE config tokenized
+    # differently here than in production -- and the census would have
+    # reported a form the production extractor finds as never occurring.
+    #
+    # #116 note: load_particle_config() now REFUSES that config, so it no
+    # longer arrives through THIS file's loader -- make_lang_dict below
+    # bypasses both loaders on purpose. The property still matters:
+    # bootstrap_names.py is deliberately not given the symmetric check (its
+    # bytes are cache-key material) and still accepts and tokenizes the shape,
+    # so the two tokenizers must keep agreeing on it. The loader refusal is a
+    # second, independent layer, not a substitute for this assertion.
+    #
+    # Asserted against bootstrap_names.py's OWN output, never a hand-written
+    # expectation.
     bn = _load_bootstrap_names_module()
     pattern = r"^([dl])['\u2019]([A-Z].*)$"
     text = "Il vit d'Effiat ce matin."
@@ -1671,6 +1681,117 @@ def test_inventory_census_adds_no_field_to_the_stored_report(tmp_path, root):
         "source_sample_selection",
         "source_sample_sha1",
     }
+
+
+# ---------------------------------------------------------------------------
+# #116: has_elision / ELISION_RE is an IFF, and only one half was enforced.
+#
+# assets/languages/README.md calls ELISION_RE "Required (non-null) iff
+# has_elision: true". true+missing was already fatal in both loaders;
+# false+pattern was accepted -- and since #284 both tokenizers split on the
+# compiled pattern ALONE, so that shape is not half-off but HALF-ON: elisions
+# still split while every has_elision-keyed guard switches off, giving a green
+# pass:true over names extracted with elision splitting and without the guard
+# built to check it. load_particle_config() now refuses it; bootstrap_names.py
+# deliberately does not, its bytes being cache-key material. Why, and what
+# that residual costs, is priced in the comment at the check itself.
+# ---------------------------------------------------------------------------
+
+
+def _write_particle_config(tmp_path, payload, name="lang.json"):
+    path = tmp_path / name
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def test_loader_rejects_has_elision_false_beside_non_null_elision_re(tmp_path, capsys):
+    # NEW behaviour. Watched RED before the fix: the loader accepted this and
+    # returned a compiled elision_re.
+    path = _write_particle_config(
+        tmp_path, particle_config_payload(has_elision=False, elision_re=FR_ELISION_RE)
+    )
+    with pytest.raises(SystemExit) as exc:
+        _lsr.load_particle_config(path)
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    # Names BOTH keys, so the operator is not left guessing which half to fix.
+    assert "has_elision" in err
+    assert "ELISION_RE" in err
+    # And names the remedy in both directions.
+    assert "Set ELISION_RE to null" in err
+
+
+def test_smoke_run_refuses_the_pairing_and_writes_no_report(tmp_path, root):
+    # NEW behaviour, at the GATE rather than at the helper: the W3 smoke test
+    # is what an operator actually runs, and a report is what W3 consumes.
+    # Watched RED before the fix: it exited 0 and wrote pass:true.
+    manifest = build_manifest([FEW_NAMES_TEXT])
+    config = particle_config_payload(has_elision=False, elision_re=FR_ELISION_RE)
+    proc, report, _ = run_smoke(
+        root, tmp_path, manifest, config,
+        checked_names=FEW_NAMES, low_name_density_confirmed=True,
+        no_particles_confirmed=True,
+    )
+    assert proc.returncode == 2
+    assert report is None
+    assert "has_elision is false but" in proc.stderr
+    assert "ELISION_RE is a non-empty pattern" in proc.stderr
+
+
+# Preservation: green before AND after. Each is mutation-checked against an
+# over-catching version of the new branch (see the mutation note).
+
+
+def test_loader_still_accepts_both_legal_pairings(tmp_path):
+    # The iff has two legal sides and neither may become collateral damage.
+    false_null = _lsr.load_particle_config(
+        _write_particle_config(tmp_path, particle_config_payload(), name="a.json")
+    )
+    assert false_null["has_elision"] is False
+    assert false_null["elision_re"] is None
+
+    true_pattern = _lsr.load_particle_config(
+        _write_particle_config(
+            tmp_path,
+            particle_config_payload(has_elision=True, elision_re=FR_ELISION_RE),
+            name="b.json",
+        )
+    )
+    assert true_pattern["has_elision"] is True
+    assert true_pattern["elision_re"] is not None
+    # Mutation check: a branch keyed on `has_elision is False` alone would
+    # reject a.json here; one keyed on `is not None` instead of truthiness
+    # leaves both of these green but rejects the empty string below.
+
+
+def test_loader_keeps_the_existing_message_for_a_wrong_TYPE_elision_re(tmp_path, capsys):
+    # The rejecting branch is a sibling elif AFTER the type check. The type
+    # error must still win for a non-string, non-null value -- otherwise a
+    # typo'd config gets told to "set ELISION_RE to null" when the real fault
+    # is its type.
+    path = _write_particle_config(
+        tmp_path, particle_config_payload(has_elision=False, elision_re=42)
+    )
+    with pytest.raises(SystemExit):
+        _lsr.load_particle_config(path)
+    err = capsys.readouterr().err
+    assert "ELISION_RE must be a string or null" in err
+    assert "has_elision is false but" not in err
+
+
+def test_loader_still_accepts_an_empty_elision_re_beside_has_elision_false(tmp_path):
+    # The branch is gated on TRUTHINESS, matching the compile below it, so it
+    # names exactly the configs that get a pattern. "" is inert -- nothing
+    # compiles, nothing splits, every obligation is consistently off -- and
+    # stays accepted, exactly as before this change. Pins that the check was
+    # not widened from "would split" to "is non-null" on the way in.
+    lang = _lsr.load_particle_config(
+        _write_particle_config(
+            tmp_path, particle_config_payload(has_elision=False, elision_re="")
+        )
+    )
+    assert lang["has_elision"] is False
+    assert lang["elision_re"] is None
 
 
 if __name__ == "__main__":
