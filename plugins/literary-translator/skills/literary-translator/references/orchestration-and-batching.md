@@ -159,9 +159,29 @@ hand-typed or re-derived list, and the same array becomes `mergeLedgerPrompt`'s
 
 `mass-translate-wf.template.js` is instantiated **fresh from the plugin's
 current copy every run** — never a stale generated copy reused across runs.
-`${durable_root}/runs/.plugin_bundle_hash` (computed by Step 0a) covers this
-template specifically, so a plugin update is never silently masked by an old
-generated script surviving in place.
+`${durable_root}/runs/.plugin_bundle_hash` (computed once, at Step 0a) covers
+this template specifically, but only as of that moment: the marker
+characterizes the DURABLE copies under `${durable_root}/scripts/` and is
+never recomputed, so by itself it cannot detect a plugin update landing
+between Step 0a and a later batch. SKILL.md's W5 rule (#396) — run
+`scaffold_setup.py --verify` immediately before EACH live-tree read or
+execution of a bundle member — is what closes that gap, comparing the durable
+copies against the live plugin tree on demand. Each use, never once per
+session: the install is shared, so a verdict is evidence about the tree as it
+was when the check ran and does not stay true for a later instantiation.
+Residual: the window is not closed, only narrowed to the gap between a verify
+and the use it guards; an update landing inside that gap is still masked. Prose enforcement is a weaker guarantee than a
+code gate, and it was chosen for a maintenance reason rather than an
+impossibility one: the check has to fire ahead of MANY entry points — every
+script that redirects a bundle member's resolution with `--plugin-root` —
+and most of those are themselves bundle members, so wiring the call into them
+would move the very hash the check protects and re-stale every converged
+segment (#482). Not all of them: `final_audit.py` is excluded from both
+bundles and could host the call at no hash cost. But a per-entry-point call
+is an enumeration that grows with every new `--plugin-root` consumer, and
+there is no single host all of them pass through. One rule stated over the
+class is the smaller thing to maintain and the harder thing to leave
+incomplete.
 
 Bundle membership stays split three ways. `plugin_bundle_hash` gates cache
 reuse and covers every entry of `cache_key.py`'s own `PLUGIN_BUNDLE_MEMBERS`

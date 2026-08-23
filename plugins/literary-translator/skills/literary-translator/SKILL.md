@@ -1260,7 +1260,10 @@ Otherwise run the codex-glossary-pass,
 instantiating `glossary-pass-wf.template.js` fresh from the plugin's current
 copy every time — batched over `${durable_root}/glossary_TASK.md`, feeding the
 planner's `args` into the Workflow tool and its `batches` into
-`resume_setup.py`'s payload. **#197:** the same instantiation substitutes
+`resume_setup.py`'s payload. **#396:** this instantiation is one of the
+operations covered by the W5 rule below that verifies the bundle markers
+against the live plugin tree — see that rule before instantiating here.
+**#197:** the same instantiation substitutes
 `{{EFFORT}}` (`profile.yml`'s `engine.effort`) alongside every other token —
 there is no `{{MODEL}}` token for this template, since a codex model id
 does not thread to the glossary pass. **1.16.1 (#347):** that token list gained
@@ -2066,6 +2069,50 @@ flags, since those govern Step 1's own gating and must not also gate
 resume. `segs` is likewise no longer read by
 `resume_setup.py` at all (accepted-but-ignored for one release only). See
 `resume_setup.py`'s own module docstring for the full payload contract.
+**#396:** IMMEDIATELY BEFORE EACH post-Step-0a operation that will READ OR
+EXECUTE a member of either verified bundle from the live plugin tree — a
+`mass-translate-wf.template.js` or `glossary-pass-wf.template.js`
+instantiation, a `segment_dispatch_driver.py` launch, W7's `final_audit.py`,
+or any other invocation that redirects a bundle member's resolution to the
+live install — run, with the SAME absolute `{{PLUGIN_ROOT}}` this session
+passes everywhere else:
+
+```
+python3 {{PLUGIN_ROOT}}/assets/scripts/scaffold_setup.py --verify \
+    --durable-root ${durable_root} --plugin-root {{PLUGIN_ROOT}}
+```
+
+ABORT on any non-zero exit. The markers `cache_key.py` and `resume_setup.py`
+read were written at Step 0a and characterize the durable copies, not
+whatever the live install now holds — not what this operation is about to
+read or execute. Read the `plugin_root=` value back off the success line and
+confirm it is the tree you are about to run from. This is Step 0a's writer
+in a read-only mode: it repairs nothing and rewrites no marker.
+
+**Each such operation, not once per session, and the difference is the whole
+point.** The install is SHARED: another session can update it while this one
+is still running, which is one of the producers #396 names. A verdict is
+therefore evidence about the tree as it was when the check ran, and it does
+not stay true merely because this session has not ended — a result carried
+forward across a later instantiation re-opens exactly the window this rule
+closes. The cost is one bundle hash per boundary, and there are a handful of
+those in a run; the marker exists to avoid re-hashing per SEGMENT, which this
+does not do.
+
+A success claims parity for the MEMBERS of the two tuples and nothing wider — an extra,
+non-member file under `${durable_root}/scripts/` is invisible to both bundles
+yet still importable, so do not read the pass as "this install is the one
+this project was scaffolded against".
+
+The predicate is narrower than "resolves anything from the live install" on
+purpose: Step 0 itself runs `profile_validate.py` from the live tree before
+a durable root exists, and Step 0a's own writer above is itself a live
+invocation, so that wider phrasing would demand verifying before there is
+anything yet to verify. It is also narrower than "any `--plugin-root`
+invocation": `backfill_resume_gate_ack.py` accepts that flag for uniformity
+and resolves nothing through it, so that proxy would block an unrelated
+migration tool for no reason.
+
 Only then is `mass-translate-wf.template.js` instantiated (fresh from the
 plugin's current copy every run — never reuse a stale generated copy),
 substituting the resolved `{{RUN_ID}}` alongside every other token, and
@@ -2207,6 +2254,14 @@ to, and never against the same `durable_root` as a concurrent `pipeline()`
 run — nothing in either path guards against that (the driver's own
 project-wide lock, `runs/.driver.lock`, only serializes two driver launches
 against each other, never a driver against a Workflow-driven run).
+
+**#396:** this launch is one of the operations covered by the W5 rule above
+that verifies the bundle markers against the live plugin tree. When the
+driver is launched with `--plugin-root R`, that same `R` is the value to pass
+to that rule's own `--plugin-root`:
+`segment_dispatch_driver.py` resolves the template and its sibling scripts
+from `R`, and resolves a relative `R` against its OWN runtime cwd, not the
+orchestrating session's.
 
 Launch it as an ORDINARY FOREGROUND Bash tool call — NEVER `run_in_background`
 (a recorded anti-pattern here: its poll gets harness-stopped mid-wait while
