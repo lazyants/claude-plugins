@@ -557,12 +557,61 @@ def load_particle_config(path):
             )
     elif elision_re_str is not None and not isinstance(elision_re_str, str):
         fatal(f"particle_config at {path}: ELISION_RE must be a string or null")
+    elif elision_re_str:
+        # #116: the shipped contract is an IFF -- assets/languages/README.md
+        # calls ELISION_RE "Required (non-null) iff has_elision: true" -- but
+        # only the true+missing half above was ever enforced. false+pattern
+        # is not half-off, it is HALF-ON: since #284 both tokenizers split on
+        # the compiled pattern ALONE, so elisions still split while every
+        # has_elision-keyed obligation silently stops -- the
+        # elision_test_cases requirement (below, and in
+        # language-smoke-report.schema.json), the elision telemetry, and
+        # bootstrap_names.py's own #91 elision-AMBIGUITY flag, the guard that
+        # exists to catch a stripped elision that is really part of a name.
+        # The operator gets a green pass:true over names extracted with
+        # elision splitting and without its guard. The producer is ordinary:
+        # references/language-pair-parameterization.md and
+        # assets/profile.example.yml both said "to change whether a language
+        # elides, edit that file directly" and named only has_elision, so
+        # forking fr.json/it.json and flipping the flag left the pattern
+        # behind. Both now name ELISION_RE too; this check is what makes
+        # ignoring them loud instead of silent.
+        #
+        # Gated on TRUTHINESS, not on `is not None`, so it names exactly the
+        # configs that reach the compile below: ELISION_RE "" is inert (no
+        # pattern, no split, every obligation consistently off) and stays
+        # accepted, as it is today.
+        #
+        # Deliberately NOT mirrored in bootstrap_names.py's
+        # load_language_config(). That file is a DERIVATION_BUNDLE_MEMBERS
+        # entry (cache_key.py), so its bytes feed derivation_bundle_hash, a
+        # cache_key field: editing it puts every converged segment of every
+        # in-flight project into blocked_needs_regeneration, clearable only
+        # by the W3/W3a restamp ceremony (canon_validate.py
+        # --restamp-derivation) and then, because that ceremony never
+        # updates the ledger fragment's own cache_key, by authorizing
+        # --allow-retranslate-converged. That is a permanent cost on every
+        # future upgrade to close a gap with a measured population of zero.
+        # The residual is therefore real and disclosed: bootstrap_names.py
+        # still ACCEPTS this config when invoked outside the W3 flow. Do not
+        # "restore symmetry" there without pricing that first.
+        fatal(
+            f"particle_config at {path}: has_elision is false but "
+            f"ELISION_RE is non-null ({elision_re_str!r}) -- the two keys are "
+            "an iff (assets/languages/README.md), and this pairing still "
+            "splits elisions while turning off every check that guards them. "
+            "Set ELISION_RE to null, or set has_elision to true and supply "
+            "--elision-test-file"
+        )
 
     # #284: compile on the PATTERN, never on has_elision -- byte-for-byte the
     # rule bootstrap_names.py's own load_language_config() applies
-    # (`elision_re = None; if elision_pattern: ...`). The two loaders both
-    # ACCEPT `has_elision:false` beside a non-null, 2-group ELISION_RE, and
-    # gating compilation on has_elision made this file tokenize that config
+    # (`elision_re = None; if elision_pattern: ...`). #116 above now refuses
+    # `has_elision:false` beside a non-null, 2-group ELISION_RE in THIS
+    # loader, but that refusal is deliberately not mirrored in
+    # bootstrap_names.py, which still ACCEPTS the shape -- so the compile rule
+    # here must keep matching bootstrap_names.py's, not the refusal's. Gating
+    # compilation on has_elision made this file tokenize that config
     # differently from the extractor it is required to mirror: production
     # splits "d'Effiat" into "d" + "Effiat", this file did not. Nothing
     # currently ships that shape (all five presets are true+pattern or
@@ -629,8 +678,10 @@ def _tokenize(text, elision_re):
     #284: the split is gated on ``elision_re`` ALONE, exactly like
     bootstrap_names.py's -- taking its signature too, so the two cannot drift
     back apart by one argument. It previously required ``has_elision`` as
-    well, which made a `has_elision:false` + non-null ELISION_RE config (a
-    shape BOTH loaders accept) tokenize differently here than in production.
+    well, which made a `has_elision:false` + non-null ELISION_RE config
+    tokenize differently here than in production. #116 now refuses that shape
+    in this file's own loader, but bootstrap_names.py still accepts it, so the
+    gating here must keep mirroring ITS rule, not the refusal's.
     ``has_elision`` keeps its other jobs: the elision-test-file obligation,
     the report field, and density_score()'s elision bonus -- that last one is
     smoke-only, has no production counterpart to be at parity with, and feeds

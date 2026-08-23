@@ -56,7 +56,14 @@ A language config file contains four required keys, plus an optional fifth:
   in the profile could drift out of sync with the file that's actually
   authoritative. To change whether a language elides, edit the resolved
   language file directly (or fork a `.local.json` override — see
-  "Remediation" below).
+  "Remediation" below) — and set `ELISION_RE` in the **same** edit. The two
+  keys are an iff (see `assets/languages/README.md`): `has_elision: false`
+  left beside a non-null `ELISION_RE` still splits elisions, because both
+  tokenizers gate the split on the compiled pattern alone, while every
+  `has_elision`-keyed check that guards them switches off. That pairing is
+  refused by `language_smoke_report.py`'s loader at the W3 gate (#116), so
+  flipping the flag without nulling the pattern fails the smoke test rather
+  than passing it quietly.
 - `name_inventory` — optional, `string[] | null`, absent/`null` by default
   and unset in every shipped preset (`fr.json`/`de.json`/`es.json`/`it.json`
   are unaffected). A **project-local** list of full native-script name forms
@@ -328,8 +335,12 @@ field at all) into the report itself, as a field. This is deliberate:
 see external profile or language-file state — it can only condition on
 data inside the document being validated. Its `if/then` rule reads: `if
 has_elision == true, then elision_test_cases required, minItems: 1`. When
-`has_elision: false`, `elision_test_cases` is simply absent (not a loophole
-— elision-miss risk doesn't apply there at all).
+`has_elision: false`, the producer (`language_smoke_report.py`) still writes
+the key, as an empty array, which the `if/then` above simply does not
+require. That is not a loophole: `has_elision: false` is only ever reachable
+alongside a null (or empty) `ELISION_RE`, since the loader refuses the
+non-null pairing (#116), so no elision can be split on that branch and
+elision-miss risk genuinely does not apply there.
 
 ### CLI inputs
 
