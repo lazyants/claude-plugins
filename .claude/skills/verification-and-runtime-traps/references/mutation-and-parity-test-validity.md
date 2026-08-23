@@ -19,8 +19,10 @@ Three ways the RED becomes worthless, all measured in one session:
 **How to apply:** after mutating, assert the mutant is still valid before reading the result — parse
 it (`node --input-type=module -e 'import(...)'`), or confirm the failure message names the assertion
 rather than the loader. Restore from a byte-identical copy and verify the digest, not from a second
-`replace`. And prefer `git stash push -- <file>` / `git stash pop` over `git checkout -- <file>` when
-other uncommitted work is in the same file — `checkout` silently discards it.
+`replace`. And when other uncommitted work is in the same file, restore from a backup taken
+outside the repo — `git checkout -- <file>` silently discards that work and `git stash` is
+repo-wide, so it takes every other session's too. See *Restoring the file after a mutation*
+below for the full sequence.
 
 ## The dual: a GREEN that proves nothing, because the mutant never landed
 
@@ -52,6 +54,128 @@ fails closed. Redirect to a file and read `$?` from the command itself.
 Why this one in particular slips through: a broken pipe that yields a false GREEN reads as noise and
 gets re-run, while "reports a problem, exits 0" reads as a FINDING — and a finding-shaped error is
 the one nobody verifies before acting on it.
+
+## Restoring the file after a mutation — the step that loses the work
+
+`mutate → run → restore` reads as three steps of equal risk. It is not: **the restore is the only
+one that can destroy work, and every one of its failure modes prints what success prints.**
+
+**The rule: commit before mutating.** Once the change under test is in a commit, the restore cannot
+cost anything. Everything below is what goes wrong when it is not — and one thing that goes wrong
+precisely *because* it is.
+
+### The two restores, and why "commit first" does not settle which to use
+
+Committing protects the work but **changes what a restore restores**, so the two rules must be
+applied together:
+
+| State of the change under test | Restore with | Failure if you use the other |
+| --- | --- | --- |
+| Uncommitted | a backup taken immediately before the mutation, outside the repo | `git checkout --` reverts the mutation *and the change*, exit 0, tree clean |
+| Committed | `git checkout <pre-change rev> -- <file>`, e.g. `origin/main` | a bare `git checkout -- <file>` restores the change, so the "mutation" is a **no-op** |
+
+The second row is the counter-intuitive one. **A mutation run after the change is committed is
+vacuous:** `git checkout -- <file>` brings the guard back, the mutant never lands, and the suite
+prints exactly the all-green a real restore prints. Measured (#370): the first backout printed
+`34 passed`, read as "the suite survives losing the guards"; re-running against `origin/main`
+produced the real `25 failed`. **Assert the mutation happened** — `grep -c GUARD_SYMBOL` must print
+`0` — before believing any result.
+
+### `git checkout -- <path>` restores from the INDEX, not from HEAD and not from what you wrote
+
+Verified directly: with HEAD at `v1`, `git add` staging `v2`, and `v3` in the working tree,
+`git checkout -- f.txt` yields **`v2`**. So any edit made after the last `git add` is silently
+discarded — no warning, no conflict, exit 0 — and `git diff` then shows nothing for the file,
+because the working tree now matches the index exactly.
+
+Two aggravations: `git checkout <tree-ish> -- <path>` (from a stash, say) **also updates the index**,
+so a later bare `git checkout -- <path>` restores *that* revision rather than yours; and when the
+lost edits were non-behavioural (a docstring fix, a hoisted call) **the suite stays green and
+nothing points at the loss.**
+
+**`git stash` is not the safe alternative here.** It is repo-wide: in a shared working tree it takes
+every other session's and teammate's uncommitted work with it, the reverted files read as CLEAN, and
+a failed `pop` restores nothing. Prefer it only in a checkout you are certain you are alone in.
+
+### `cp` is interactive in this environment — the restore hangs and leaves the mutant
+
+A loop doing `cp file backup` → mutate → run → `cp backup file` hits `overwrite <file>? (y/n [n])`
+on the restore and blocks until the Bash-tool timeout kills it — **with the mutant still in the
+tree** and the first mutant's RED already printed, so the output reads like a completed run.
+
+Restore with something that cannot prompt: `/bin/cp -f` (bypasses the alias), or a Python
+read/write that asserts its own result. Never bare `cp`, never `mv`.
+
+```python
+python3 -c "
+import pathlib, filecmp
+pathlib.Path(T).write_bytes(pathlib.Path(BACKUP).read_bytes())
+print('restored byte-identical:', filecmp.cmp(T, BACKUP, shallow=False))"
+```
+
+### A successful restore can still leave the mutant executing — `__pycache__`
+
+Python validates a cached `.pyc` against the source's **size and mtime in whole seconds** (the pyc
+header stores `int(st_mtime)` and the size — verified). A mutation that (a) does not change the
+file's byte length and (b) is restored inside the same second therefore leaves the **mutated**
+bytecode cached and valid. Every later run executes the mutation while `git diff --stat`, a
+byte-for-byte `diff` against the saved copy, and `grep` all show correct source.
+
+Byte-length-identical mutations are common precisely because they are the smallest: `r([1-9]...)` →
+`(r[1-9]...)`, `<` → `<=`, one renamed identifier.
+
+**Apply:** run every mutation cycle under `PYTHONDONTWRITEBYTECODE=1`, and when a test reds against
+source you have just verified correct, run
+`find . -name __pycache__ -prune -exec rm -rf {} +` **before forming any theory about the code.**
+
+### Confirming a restore — two reads, neither of which is the exit code
+
+A partially restored tree and a clean one print identically, so verify by content:
+
+- **Grep for a token that exists ONLY in your edit** — a marker you inserted. Grepping a string the
+  original file also contains returns a pre-existing line and reads as your work surviving.
+- **Read the COLLECTED total, not the pass line.** `41 deselected` becoming `39 deselected` is the
+  file having lost two tests. A pass count cannot show this.
+
+`git status --short` is not this check: clean means clean relative to the index, which is what you
+want only once HEAD already carries your work.
+
+### Both routes in — the vacuous one and the successful one
+
+- **Vacuous:** the harness asserts its anchor is present before writing, the assert fails, no
+  mutation is applied — and an `&&`-free script runs the test and the restore anyway. The test
+  passes vacuously (`1 passed, 41 deselected`) and the restore wipes the work. Nothing in the
+  output says so.
+- **Successful:** the mutation lands, the test goes RED for exactly the right reason and names the
+  right cases, and the trailing restore reverts every uncommitted edit in the file. **Nothing about
+  that transcript looks wrong — the finished RED is what stops you reading further.** So the
+  read-back above is not optional after a *successful* mutation either.
+
+### A hard-wrapped target blames the anchor for a tree the last restore already wiped
+
+Pinning prose in a hard-wrapped doc (a `SKILL.md`, a reference `.md`), the anchor phrase spans a
+newline in the raw bytes while the test that pins it normalizes whitespace first. The phrase reads
+as present, the raw-text mutation still fails `ANCHOR MISSING` — and that message accuses the
+anchor, which is exactly the wrong place to look. Build the matcher against wraps, then **re-read
+the tree before rewriting the anchor**:
+
+```python
+rx = re.compile(r"\s+".join(re.escape(w) for w in anchor.split()))
+```
+
+### Someone else's restore takes your edit, and its proof reads as success
+
+A teammate that mutates a shared file and restores it from **its own** backup reverts every edit
+anyone else made to that file while the mutation was in flight. The teammate compares the restored
+file against its own pre-mutation snapshot, so a byte-identical match is exactly what a clobber
+produces. Two-sided guard mutation is the right technique and worth asking for — but it makes the
+mutated file a WRITE target for the duration, even when the brief said "do not edit this file", and
+the lead's own contract file is the likeliest victim because that is the file worth mutating.
+
+**Apply:** the lead must not touch that file until the teammate reports; if it already did,
+re-verify the specific edit with a `grep` for the exact string — `git status` shows the file as
+modified either way. Prefer having the teammate mutate a COPY, or make the mutation the last thing
+anyone does to that file.
 
 ## A parity/differential test must construct the collaborator exactly as production does
 

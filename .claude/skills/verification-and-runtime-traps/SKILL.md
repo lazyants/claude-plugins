@@ -1,6 +1,6 @@
 ---
 name: verification-and-runtime-traps
-description: Use when writing or trusting tests/verification and a GREEN result could be masking a real defect — a suite that passes in isolation but fails in the full run, a test that hand-builds a fixture instead of driving the actual SHIPPED artifact (template/seed/scaffold/default config), a fix whose correctness hinges on a DEFAULT flag/mode, a durable-root plugin's resume/idempotency and preflight gating, or running `node --test`. Also whether a mutation RED or GREEN is actually valid, a parity test that hand-builds the OTHER module's collaborator, a hand-typed membership list inside a drift test that freezes what it should detect, a whole-set assertion catching what per-item assertions miss, an exhaustive sweep needing a count assertion, the wrong exception type escaping a catch or pinned-body contract, and pytest traps in literary-translator (repo-root rootdir, `-O`, an absolute suite total).
+description: Use when writing or trusting tests/verification and a GREEN result could be masking a real defect — a suite that passes in isolation but fails in the full run, a test that hand-builds a fixture instead of driving the actual SHIPPED artifact (template/seed/scaffold/default config), a fix whose correctness hinges on a DEFAULT flag/mode, a durable-root plugin's resume/idempotency and preflight gating, or running `node --test`. Also RESTORING a file after a mutation (`git checkout --` eats uncommitted work; stale `__pycache__` keeps the mutant live), whether a mutation RED or GREEN is actually valid, a parity test that hand-builds the OTHER module's collaborator, a hand-typed membership list inside a drift test that freezes what it should detect, a whole-set assertion catching what per-item assertions miss, an exhaustive sweep needing a count assertion, the wrong exception type escaping a catch or pinned-body contract, and pytest traps in literary-translator (repo-root rootdir, `-O`, an absolute suite total).
 ---
 
 The unifying failure: a green, well-covered suite proves nothing about the real defect because the **tested path diverges from the real path** — the fixture isn't the shipped file, the isolated run isn't the full run, the flagged invocation isn't the default one, and the dev runtime isn't the target runtime (a Homebrew bash on the dev box vs `/bin/bash` 3.2, a 3.13 dev interpreter vs a 3.10 floor, a raw `mkdtemp` string vs its symlink-resolved real path). Verify the property on the REAL artifact / REAL run / REAL default / REAL target runtime before trusting green.
@@ -205,7 +205,11 @@ never actually landed, or if the harness can't see the failure it's waiting for 
 stdout only). A parity/differential test that constructs the OTHER module's object itself is only as
 faithful as that constructor call — new optional kwargs on the real module default to the
 pre-change behaviour, so a hand-built collaborator freezes there forever. Full detail, measured
-cases and the fix for each shape → `references/mutation-and-parity-test-validity.md`.
+cases and the fix for each shape — plus the RESTORE step, the only one of `mutate → run → restore`
+that can destroy work, whose every failure mode prints what success prints (`git checkout --`
+restores from the INDEX; a restore after the commit makes the mutation a no-op; `cp` is interactive
+here; an equal-length same-second restore leaves the MUTATED bytecode cached) →
+`references/mutation-and-parity-test-validity.md`.
 
 ## 11. literary-translator pytest: collection scope and environment-dependent totals
 
