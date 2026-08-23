@@ -2027,19 +2027,41 @@ def test_ledger_merge_null_call_carries_its_own_null_detail(tmp_path):
 
 
 # DETAIL_CAP read directly out of the real template rather than hand-copied,
-# so this section stays correct if that constant is ever retuned.
+# so the *derived* uses below stay correct if that constant is ever retuned
+# -- but a change to BOTH the constant AND the truncation behaviour together
+# would then sail through every test that only ever compares the value
+# against itself. test_detail_cap_constant_is_160 below is the belt: it pins
+# the LITERAL 160 as its own assertion, so retuning the constant fails
+# loudly there even though every derived-use test would stay green.
 _DETAIL_CAP_MATCH = re.search(r"const DETAIL_CAP = (\d+);", MASS_TRANSLATE_TEMPLATE.read_text(encoding="utf-8"))
 assert _DETAIL_CAP_MATCH, "DETAIL_CAP constant not found in mass-translate-wf.template.js"
 DETAIL_CAP = int(_DETAIL_CAP_MATCH.group(1))
 
+
+def test_detail_cap_constant_is_160():
+    """The literal pin: every other test in this file uses the DERIVED
+    DETAIL_CAP (read out of the template's own source), which stays green
+    even if a future change retunes the constant -- correctly, for those
+    tests' own purpose. This one exists solely so a retuning is a visible,
+    deliberate act: it fails the moment DETAIL_CAP stops being 160,
+    independent of whatever the template's truncation code does with it."""
+    assert DETAIL_CAP == 160
+
+
 # Every break character DETAIL_BREAKS matches, plus CRLF (two of them back to
 # back, which still collapses to ONE space -- the regex is greedy). Built
 # with chr(), never pasted as the literal character, same discipline as
-# FIX_GLUE_TRIM_STRIPPED/FIX_GLUE_TRIM_PRESERVED above.
+# FIX_GLUE_TRIM_STRIPPED/FIX_GLUE_TRIM_PRESERVED above. TAB/VT/FF added
+# alongside the original six: DETAIL_BREAKS has always matched them --
+# its own class is r"[\n\r\t\v\f\u0085\u2028\u2029]+" -- but this matrix
+# did not exercise them until now.
 DETAIL_BREAK_CASES = [
     ("LF", chr(0x0A)),
     ("CR", chr(0x0D)),
     ("CRLF", chr(0x0D) + chr(0x0A)),
+    ("TAB", chr(0x09)),
+    ("VT", chr(0x0B)),
+    ("FF", chr(0x0C)),
     ("lsep_u2028", chr(0x2028)),
     ("psep_u2029", chr(0x2029)),
     ("nel_u0085", chr(0x85)),
@@ -2101,6 +2123,169 @@ def test_failure_detail_tally_empty_on_a_fully_converged_run(tmp_path):
     out = _happy_run(tmp_path)
     assert out["result"]["failureDetailTally"] == []
     assert not any(line.startswith("Repeated failure detail") for line in out["logLines"])
+
+
+# ---------------------------------------------------------------------------
+# #400 follow-up (codex MAJOR) -- flattenDetail() is the single normalizer
+# every STRING that reaches a detail goes through now, not just an agent's
+# raw reply. Before this fix, only replyDetail()'s own argument was
+# flattened/capped; three OTHER strings reached a detail verbatim: the
+# schema-validated `mismatch_detail` on the artifact check, the relayed
+# `error` on a ledger write and on the merge check, and sourcedDetail()'s own
+# label was appended AFTER the cap rather than counted against it. A schema
+# field is still model-authored text under no length or charset restriction,
+# so an oversized, multiline mismatch_detail/error used to reach the
+# operator log verbatim, falsifying the "one line, capped at DETAIL_CAP"
+# property this file and the docs both promise. Every fixture below is
+# deliberately BOTH oversized (over DETAIL_CAP even before the break
+# collapses) AND line-break-carrying, so a fix that restored only one half
+# would still show up; every test was watched RED against a /tmp mutant that
+# restores the pre-fix verbatim path at its own site.
+# ---------------------------------------------------------------------------
+
+# Built from already-chr()-safe pieces (LF from above) rather than a pasted
+# character. Deliberately not re-deriving flattenDetail()'s own transform in
+# Python: the expected values below are sliced directly from the SAME raw
+# strings the template flattens, using only "collapse one run of breaks to
+# one space" and "cut at DETAIL_CAP-6 chars plus ' [...]'" -- confirmed
+# against the real template's actual output, not assumed.
+LONG_BREAK_MISMATCH_DETAIL = "expected sha1 " + "a" * 90 + LF + "got sha1 " + "b" * 90
+_FLAT_MISMATCH_DETAIL = "expected sha1 " + "a" * 90 + " " + "got sha1 " + "b" * 90
+EXPECTED_FLATTENED_MISMATCH_DETAIL = _FLAT_MISMATCH_DETAIL[: DETAIL_CAP - 6] + " [...]"
+
+LONG_BREAK_LEDGER_ERROR = "ledger write failed: " + "x" * 90 + LF + "cause: " + "y" * 90
+_FLAT_LEDGER_ERROR = "ledger write failed: " + "x" * 90 + " " + "cause: " + "y" * 90
+EXPECTED_FLATTENED_LEDGER_ERROR = _FLAT_LEDGER_ERROR[: DETAIL_CAP - 6] + " [...]"
+
+
+def test_review_artifact_mismatch_detail_is_flattened_and_capped_across_the_batch(tmp_path):
+    """The artifact-check `mismatch_detail` is schema-validated shape, never
+    content -- an oversized, multiline one used to reach a failed row (and
+    the tally, and the log) verbatim. TWO segments share the identical
+    oversized reply so the property is pinned through the tally and the log
+    line too, reproducing where the reviewer actually found it. RED before
+    this fix against a mutant that restores getVerifiedReview's old
+    `typeof retry.art.mismatch_detail === "string" ? retry.art.
+    mismatch_detail : replyDetail(retry.art)` (mismatch_detail relayed
+    verbatim, no flattenDetail() call at all): the detail then carries the
+    raw LF and its full 203-character length, and the equality assertion
+    below fails."""
+    overrides = {}
+    for seg in ("seg01", "seg02"):
+        for suffix in ("r1", "r1:retry"):
+            overrides[f"artifact-check:{seg}:{suffix}"] = {
+                "match": False, "mismatch_detail": LONG_BREAK_MISMATCH_DETAIL,
+            }
+    res = run(tmp_path=tmp_path, segs=["seg01", "seg02"], overrides=overrides)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert "\n" not in EXPECTED_FLATTENED_MISMATCH_DETAIL and len(EXPECTED_FLATTENED_MISMATCH_DETAIL) <= DETAIL_CAP
+    assert out["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "review-artifact-mismatch", "rounds": 1,
+            "detail": EXPECTED_FLATTENED_MISMATCH_DETAIL,
+        },
+        {
+            "seg": "seg02", "converged": False, "reason": "review-artifact-mismatch", "rounds": 1,
+            "detail": EXPECTED_FLATTENED_MISMATCH_DETAIL,
+        },
+    ]
+    assert out["result"]["failureDetailTally"] == [
+        {"detail": EXPECTED_FLATTENED_MISMATCH_DETAIL, "count": 2}
+    ]
+    assert f"Repeated failure detail (2/2 failed): {EXPECTED_FLATTENED_MISMATCH_DETAIL}" in out["logLines"]
+    assert all("\n" not in line for line in out["logLines"]), (
+        f"a raw line break survived into the operator log: {out['logLines']}"
+    )
+
+
+def test_ledger_write_error_detail_is_flattened_and_capped_across_the_batch(tmp_path):
+    """The ledger-write site's twin of the test above: a relayed script
+    `error` is still arbitrary text, not a validated constant. RED before
+    this fix against a mutant that drops the `flattenDetail(raw.error)` call
+    in recordLedgerCall (reverted to bare `raw.error`): the detail carries
+    the raw LF and its full 209-character length, and the equality assertion
+    below fails."""
+    overrides = {}
+    for seg in ("seg01", "seg02"):
+        overrides[f"ledger:converged:{seg}"] = {"success": False, "error": LONG_BREAK_LEDGER_ERROR}
+    res = run(tmp_path=tmp_path, segs=["seg01", "seg02"], overrides=overrides)
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["failed"] == [
+        {
+            "seg": "seg01", "converged": False, "reason": "ledger-write-failed",
+            "detail": EXPECTED_FLATTENED_LEDGER_ERROR,
+        },
+        {
+            "seg": "seg02", "converged": False, "reason": "ledger-write-failed",
+            "detail": EXPECTED_FLATTENED_LEDGER_ERROR,
+        },
+    ]
+    assert out["result"]["failureDetailTally"] == [
+        {"detail": EXPECTED_FLATTENED_LEDGER_ERROR, "count": 2}
+    ]
+    assert f"Repeated failure detail (2/2 failed): {EXPECTED_FLATTENED_LEDGER_ERROR}" in out["logLines"]
+
+
+def test_ledger_merge_error_detail_is_flattened_and_capped(tmp_path):
+    """The merge-ledger twin -- a single batch-level call (one merge-ledger
+    check per run, never per-segment), so no tally/log angle here, just the
+    top-level `detail` field. RED before this fix against a mutant that
+    drops the `flattenDetail(mergeResult.error)` call at the batch-final
+    completeness check (reverted to bare `mergeResult.error`): the detail
+    carries the raw LF and its full 209-character length, and the equality
+    assertion below fails."""
+    res = run(tmp_path=tmp_path, segs=["seg01"], overrides={
+        "merge-ledger": {"success": False, "error": LONG_BREAK_LEDGER_ERROR},
+    })
+    assert res["ok"], res["stderr"]
+    out = res["out"]
+    assert out["result"]["batchComplete"] is False
+    assert out["result"]["reason"] == "ledger-merge-failed"
+    assert out["result"]["detail"] == EXPECTED_FLATTENED_LEDGER_ERROR
+
+
+# A fix reply long enough that replyDetail() alone already caps it at
+# DETAIL_CAP (160): naively appending "fix call: " (10 chars) on top would
+# land at 170, over budget. Confirmed against the real template: the
+# combined "fix call: " + replyDetail(fx) is exactly 170 chars before
+# sourcedDetail()'s own re-flatten, and exactly DETAIL_CAP after it.
+LONG_FIX_REPLY_OVER_CAP = "A" * 150 + " DRAFT_MISSING seg01 " + "B" * 150
+
+
+def test_sourced_detail_keeps_the_source_label_inside_the_cap(tmp_path):
+    """sourcedDetail() re-flattens its own "source: " + replyDetail(reply)
+    concatenation, so the label counts against DETAIL_CAP rather than being
+    appended past it. RED before this fix against a mutant that reverts
+    sourcedDetail() to `return source + ": " + replyDetail(reply);` (no
+    re-flatten): the detail comes back at 170 characters instead of 160, and
+    the `len(detail) == DETAIL_CAP` assertion below fails."""
+    res = run(
+        tmp_path=tmp_path, segs=["seg01"],
+        overrides={
+            "review-read:seg01:r1": _non_clean_review(),
+            "artifact-check:seg01:r1": {"match": True},
+            "fix:seg01:r1": LONG_FIX_REPLY_OVER_CAP,
+            "draft-probe:seg01": {"present": True},
+        },
+    )
+    assert res["ok"], res["stderr"]
+    detail = res["out"]["result"]["failed"][0]["detail"]
+    assert len(detail) == DETAIL_CAP, f"expected exactly {DETAIL_CAP} chars, got {len(detail)}: {detail!r}"
+    assert detail.endswith(" [...]")
+    assert detail.startswith("fix call: " + "A" * (DETAIL_CAP - 6 - len("fix call: ")))
+
+
+# Existing exact-detail pins for SHORT errors are unaffected by
+# flattenDetail() -- confirmed by re-running the whole file, not asserted
+# again here (duplicating them would just be a second copy to drift):
+# test_ledger_write_still_rejects_success_false ("boom") and the
+# "nonempty-error" case of test_ledger_write_still_rejects_real_failure_evidence
+# / test_ledger_merge_still_rejects_real_failure_evidence
+# ("runs/ledger.d is not writable" / "fragment dir missing") all still pass
+# untouched: a short, single-line string is already <= DETAIL_CAP and has
+# nothing for DETAIL_BREAKS to collapse, so flattenDetail() is a no-op on it.
 
 
 if __name__ == "__main__":

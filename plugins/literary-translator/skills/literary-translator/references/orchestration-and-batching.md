@@ -441,16 +441,25 @@ and atomically promotes it.
    (`translate-timeout`, `review-timeout`, `review-null`,
    `review-artifact-mismatch`, `fix-call-failed`, `ledger-write-failed`,
    `ledger-merge-failed`) `detail` describes what the call actually
-   returned, capped and collapsed to one line (`replyDetail()`,
-   `DETAIL_CAP = 160`). Two reasons read differently: `review-fabricated-loc`'s
+   returned, capped and collapsed to one line by `flattenDetail()`
+   (`DETAIL_CAP = 160`) — the single chokepoint every detail source runs
+   through: the agent reply via `replyDetail()`, the artifact check's
+   `mismatch_detail`, the relayed ledger/merge `error`, and the
+   `ledger-write-mismatch` string; `sourcedDetail()` re-flattens so a
+   source label counts against the same budget rather than being appended
+   past it. Two reasons read differently: `review-fabricated-loc`'s
    `detail` is the fixed `FABRICATED_LOC_DETAIL` constant naming the shape
    defect, never a returned reply, and `draft-missing`/`cap` carry no
    `detail` at all. A `source:` prefix (`review dispatch`, `translate
    dispatch`, `draft probe`, `fix call`) is added only where one `reason`
    can be produced by two different failing calls that it alone cannot
    distinguish; elsewhere `detail` is deliberately unlabelled, so an outage
-   that kills calls at several stages still forms one bucket in the batch
-   tally below instead of fragmenting per stage. `waitDetail` rides
+   that kills calls at several stages does not needlessly fragment into a
+   private string per stage (a labelled outage, e.g. both dispatchers dying
+   at once, still buckets separately by design — `translate dispatch:` and
+   `review dispatch:` are different strings). The tally below reports every
+   bucket of two or more, never a single winner, so a runner-up bucket is
+   never dropped. `waitDetail` rides
    alongside `detail` only on the two timeout reasons, and only when a
    dispatch-sourced `detail` displaced the wait reply — the proximate wait
    text is then kept rather than discarded.

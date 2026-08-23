@@ -650,13 +650,23 @@ const DETAIL_CAP = 160;
 // line breaks into the log.
 const DETAIL_BREAKS = /[\n\r\t\v\f\u0085\u2028\u2029]+/g;
 
+// EVERY string that reaches a detail goes through here, not just an agent's
+// raw reply: a schema-validated field is still model-authored text under no
+// length or charset restriction, so a mismatch_detail or a relayed script
+// error copied verbatim would carry its own line breaks straight into the
+// operator log and blow the cap that this file promises.
+function flattenDetail(text) {
+  const flat = String(text).replace(DETAIL_BREAKS, " ").trim();
+  if (flat.length <= DETAIL_CAP) return flat;
+  return flat.slice(0, DETAIL_CAP - 6) + " [...]";
+}
+
 function replyDetail(reply) {
   if (reply === null || reply === undefined) return "agent call returned null";
   if (typeof reply === "string") {
-    const flat = reply.replace(DETAIL_BREAKS, " ").trim();
+    const flat = flattenDetail(reply);
     if (flat === "") return "agent call returned an empty reply";
-    if (flat.length <= DETAIL_CAP) return flat;
-    return flat.slice(0, DETAIL_CAP - 6) + " [...]";
+    return flat;
   }
   return "agent call returned no usable object";
 }
@@ -670,7 +680,9 @@ function replyDetail(reply) {
 // fragmenting into one per stage -- the per-row reason already names the
 // stage, and fragmenting the shared signal is the failure this exists to fix.
 function sourcedDetail(source, reply) {
-  return source + ": " + replyDetail(reply);
+  // Re-flattened so the label counts against the cap rather than being
+  // appended past it.
+  return flattenDetail(source + ": " + replyDetail(reply));
 }
 
 // #133's shape verdict is a content reason, not a failed call, but it reaches
@@ -1746,7 +1758,7 @@ async function recordLedgerCall(seg, fields, label) {
     // happened. Only the falsy case is re-routed; a truthy-but-rejected
     // object keeps the constant.
     const detail = raw && typeof raw.error === "string"
-      ? raw.error
+      ? flattenDetail(raw.error)
       : (raw ? "ledger_update.py write did not report success" : replyDetail(raw));
     return {
       ok: false,
@@ -1761,7 +1773,7 @@ async function recordLedgerCall(seg, fields, label) {
       ok: false,
       failResult: {
         seg: seg, converged: false, reason: "ledger-write-mismatch",
-        detail: "fragment_path=" + raw.fragment_path + " status=" + raw.status + " but expected seg=" + seg + " status=" + fields.status,
+        detail: flattenDetail("fragment_path=" + raw.fragment_path + " status=" + raw.status + " but expected seg=" + seg + " status=" + fields.status),
       },
     };
   }
@@ -1991,8 +2003,8 @@ async function getVerifiedReview(seg, roundLabel) {
 
   return {
     status: "blocked", reason: "review-artifact-mismatch",
-    detail: retry.art && typeof retry.art.mismatch_detail === "string"
-      ? retry.art.mismatch_detail
+    detail: retry.art && typeof retry.art.mismatch_detail === "string" && flattenDetail(retry.art.mismatch_detail) !== ""
+      ? flattenDetail(retry.art.mismatch_detail)
       : replyDetail(retry.art),
   };
 }
@@ -2579,7 +2591,7 @@ if (!ledgerMergeSucceeded(mergeResult)) {
   // ledger_merge.py ANSWERED and was rejected, and false when the call itself
   // died. Only the falsy case is re-routed.
   const detail = mergeResult && typeof mergeResult.error === "string"
-    ? mergeResult.error
+    ? flattenDetail(mergeResult.error)
     : (mergeResult ? "ledger_merge.py completeness check did not report success" : replyDetail(mergeResult));
   log("Ledger merge/completeness check failed: " + detail);
   return {
