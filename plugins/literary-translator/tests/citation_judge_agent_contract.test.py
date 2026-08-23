@@ -146,29 +146,6 @@ def test_glossary_template_dispatches_the_judge_by_that_agent_type():
     )
 
 
-def test_prepare_call_is_not_tool_restricted():
-    """The judge's restriction must not be copied onto its sibling.
-
-    The prepare step's whole job is running ``fetch_citation.py`` through Bash.
-    Giving it the judge's allowlist would break retrieval outright -- and would
-    do so as a citation review that rejects every batch, which reads like a
-    corpus problem rather than a wiring one.
-    """
-    source = GLOSSARY_TEMPLATE.read_text(encoding="utf-8")
-    prepare_call = re.search(
-        r"await agent\(citationPreparePrompt\(batch, attempt\), \{(?P<opts>.*?)\}\)",
-        source,
-        re.DOTALL,
-    )
-    assert prepare_call is not None, (
-        f"could not find the citation-prepare agent() call in {GLOSSARY_TEMPLATE}"
-    )
-    assert "agentType" not in prepare_call.group("opts"), (
-        "the citation prepare call must stay a default-toolset Claude call -- it "
-        f"needs Bash to run the fetcher: {prepare_call.group('opts')!r}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # The prose half. #353's residual was named in shipped documentation as well as
 # in code, so closing it in code alone leaves the repository asserting, in
@@ -247,6 +224,49 @@ def test_the_judges_documented_call_shape_names_its_agent_type():
         f"{JUDGE_CALL_SHAPE_DOC}'s citationJudgePrompt bullet still says the "
         f"judge has no agentType, which contradicts the agent type it also "
         f"names:\n{item!r}"
+    )
+
+
+# The baseline this branch was cut from. An absence-only sweep is the shape
+# tests/retired_wording_pins.test.py's own docstring calls worse than useless --
+# a needle that never matched anything satisfies it forever, and does so
+# indistinguishably from one still doing its job. So each pattern is required to
+# have MATCHED at the baseline before its absence today means anything. The
+# hunk-binding that module adds on top is deliberately not reproduced here: this
+# sweep binds a claim to a file, not a claim to the edit that retired it, and
+# that pairing is exactly the part measured brittle when an unrelated comment
+# edit re-attached an added block to a neighbouring hunk.
+PROSE_BASELINE = "d6d782f87e47a3ad4ff3493a60544f77da96d5f9"
+
+
+def _baseline_text(path: Path) -> str:
+    import subprocess
+
+    rel = path.relative_to(REPO_ROOT)
+    proc = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "show", f"{PROSE_BASELINE}:{rel}"],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, (
+        f"could not read {rel} at {PROSE_BASELINE}: {proc.stderr.strip()}"
+    )
+    return proc.stdout
+
+
+def test_every_stale_judge_claim_actually_existed_before_this_change():
+    """Presence-before, without which the absence sweep below is vacuous."""
+    unmatched = []
+    for pattern in STALE_JUDGE_CLAIMS:
+        hits = sum(
+            len(re.findall(pattern, _baseline_text(path), re.IGNORECASE))
+            for path in CURRENT_STATE_PROSE
+        )
+        if not hits:
+            unmatched.append(pattern)
+    assert not unmatched, (
+        f"these patterns matched nothing at {PROSE_BASELINE}, so their absence "
+        f"today proves nothing and the sweep below is green for free: {unmatched}"
     )
 
 

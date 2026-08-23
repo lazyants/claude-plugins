@@ -888,8 +888,7 @@ pipeline(BATCHES, batchStep)
   script prints. It never reads a retrieved body.
 - `citationJudgePrompt(batch, attempt)` (**1.16.1**) — Claude, `effort:'high'`,
   `agentType:'literary-translator:citation-judge'` since **#353**, no schema,
-  `live` only; returns
-  `CITATIONS_OK`/`CITATIONS_REJECTED <index> ATTEMPT <n>`. It gates whether
+  `live` only; returns `CITATIONS_OK`/`CITATIONS_REJECTED <index> ATTEMPT <n>`. It gates whether
   the batch counts as ready at all. It audits the approved snapshot and the
   fetched evidence bodies, and performs no retrieval of its own — it is given no
   retrieval instruction and **no fragment path**. Stated narrowly, because an
@@ -899,11 +898,10 @@ pipeline(BATCHES, batchStep)
   URL at all. What the split removes is the *reason* to fetch and the
   *provenance* of every byte it judges — not URLs — which is why its prompt
   marks `source` and `source_form` UNTRUSTED explicitly rather than relying on
-  their absence. The tool went separately, in #353: the judge is dispatched as
-  `agentType: "literary-translator:citation-judge"`, a plugin agent whose
-  frontmatter grants `tools: Read` and nothing else, so an agent that could
-  once run a command while reading attacker-authored bodies now holds no tool
-  that can open a connection or run one.
+  their absence. The tool went separately, in #353: that `agentType` resolves
+  to a plugin agent whose frontmatter grants `tools: Read` and nothing else, so
+  an agent that could once run a command while reading attacker-authored bodies
+  now holds no tool that can open a connection or run one.
   The approval binds bytes rather than a path.
   **This pair costs one MORE `agent()` call per attempt than 1.16.0's single
   reviewer** — that is the whole reason the live ladder moved from

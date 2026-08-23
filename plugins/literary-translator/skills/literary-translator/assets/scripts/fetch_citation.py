@@ -30,10 +30,12 @@ So retrieval was moved OUT of the judging agent entirely:
 That is the exact claim this file is allowed to support, and no wider one. It
 does NOT make the pipeline SSRF-free: the resolver/generation agent still does
 open web research by design under `research_mode: live`. That exposure is
-accepted by design and documented rather than quietly covered (#353). The
-judge's own residual is closed: since #353 it is dispatched as the plugin agent
-`literary-translator:citation-judge`, whose frontmatter grants `tools: Read` and
-nothing else, so it no longer holds a tool that could fetch anything.
+accepted by design and documented rather than quietly covered (#353). What #353
+DID close is narrower than "the judge is safe": the judge is dispatched as the
+plugin agent `literary-translator:citation-judge`, whose frontmatter grants
+`tools: Read` and nothing else, so it no longer holds a tool that could fetch
+anything. Its SCOPE rules -- read only the evidence files the index names --
+are still prompt-level, and nothing here should be read as claiming otherwise.
 Overclaiming here would be worse than the original bug, because the next reader
 would stop looking.
 

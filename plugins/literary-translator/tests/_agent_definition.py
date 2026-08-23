@@ -17,6 +17,7 @@ refused rather than silently half-read.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -31,8 +32,6 @@ PLUGIN_MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 
 
 def _plugin_name() -> str:
-    import json
-
     return json.loads(PLUGIN_MANIFEST.read_text(encoding="utf-8"))["name"]
 
 

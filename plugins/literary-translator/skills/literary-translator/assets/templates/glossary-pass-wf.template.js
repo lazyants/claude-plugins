@@ -1795,8 +1795,7 @@ async function batchStep(batch) {
       // is a rule the attacker can argue with; the plugin agent it names holds
       // `tools: Read` and nothing else, which is a rule it cannot. Renaming
       // either side alone goes red in
-      // tests/citation_judge_agent_contract.test.py. It is NOT a codex
-      // dispatch -- batchDispatchPrompt() remains the only one in this file.
+      // tests/citation_judge_agent_contract.test.py.
       const verdict = await agent(citationJudgePrompt(batch, attempt), {
         agentType: "literary-translator:citation-judge",
         effort: "high", phase: "GlossaryPass", label: "glossary:citation-review:" + batch.index,

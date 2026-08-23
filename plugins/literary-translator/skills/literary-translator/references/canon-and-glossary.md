@@ -638,16 +638,15 @@ original bug, because the next reader would stop looking.
 split had removed the judge's REASON to fetch and its INPUT for fetching, and
 said so at exactly that width, because it had not removed the CAPABILITY: the
 judge could still run a command while reading attacker-authored page bodies.
-It is now dispatched as `agentType:
-"literary-translator:citation-judge"`, a plugin agent whose frontmatter grants
-`tools: Read` and nothing else, so the boundary is the harness's rather than
-the prompt's. An agentType that cannot be resolved is fail-closed — no
+It is now dispatched as `agentType: "literary-translator:citation-judge"`, a
+plugin agent whose frontmatter grants `tools: Read` and nothing else, so the
+boundary is the harness's rather than the prompt's. An agentType that cannot be resolved is fail-closed — no
 fallback to a full-tool agent, and a batch whose verdict never arrives is not
 approved.
 
 **Neither half is codex, and neither carries a schema** — the judge's
 `agentType` names the tool-restricted Claude agent above, never a codex
-dispatch; sentinel-verdict shaped exactly like the precheck
+dispatch, and both calls are sentinel-verdict shaped exactly like the precheck
 and wait steps (a schema-bearing call can wedge the Workflow if the
 forwarder detaches, #97). Codex is what PRODUCED the citation, so a reviewer
 running under a different model is a genuinely separate opinion rather than
