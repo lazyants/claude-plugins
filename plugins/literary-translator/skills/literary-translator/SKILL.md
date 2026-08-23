@@ -297,12 +297,30 @@ these files are never hand-edited" premise the rest of this copy pass rests on
 was NEVER true for this one path — a project that hit the exit-2 default-
 launch defect this correction fixes could have reasonably worked around it by
 placing its own adapted copy exactly there, on the explicit strength of that
-destination being documented as untouched. Copying over it unconditionally now
-would silently destroy that adaptation with no backup and no warning, and on a
-RESUMED project (outcome 2 above) this would happen with NO collision
-detection of any kind — collision detection exists only on outcome 3's
-ambiguous-adoption path, which a resumed project's own root marker match
-bypasses entirely.
+destination being documented as untouched. That window is CLOSED and its
+population was MEASURED at zero: Step 0a has been writing this exact path
+since the correction, so what sits there now is a managed copy on every
+project that has scaffolded since, and on the two live books checked before
+the regular-file limb was cut (`historiettes-fr-ru/tome1`, `ssk-he-en/vol2/run`)
+it was a managed copy in both — two managed copies, zero hand adaptations.
+
+**This is an ACCEPTED TRADEOFF, stated so it is not rediscovered as a bug.**
+An adapted regular file left over from that window is overwritten here with no
+backup and no warning, and on a RESUMED project (outcome 2 above) with NO
+collision detection of any kind — collision detection exists only on outcome
+3's ambiguous-adoption path, which a resumed project's own root marker match
+bypasses entirely. The check that used to stop that was byte-identity to the
+shipped source, and it could never actually separate the two populations: it
+asked "are these bytes the current shipped bytes?", which answers "is this
+copy MANAGED?" only while the shipped bytes never move. They move on any
+release that edits the resolver, so from that release onward the byte-identity
+halt fired on every ordinary project — the majority path — while still not
+identifying a single adaptation. Separating the populations for real needs a
+prior-version digest or a per-file managed marker, permanent machinery this
+design refuses to carry for a population measured at zero; see the paragraph
+below. A resumed project that DID adapt this file must re-apply its adaptation
+after the upgrade, which the launch fix this copy delivers makes unnecessary
+in the first place.
 
 So THIS ONE FILE, and only this one, gets a check before its copy, never the
 blanket unconditional overwrite the rest of the bundle gets. Classify the
