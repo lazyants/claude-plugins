@@ -589,10 +589,12 @@ def test_sampled_global_cap_tiebreak_and_sentinel_determinism():
     # broken by stratum key order: NO_CATEGORY_SENTINEL ("\x00...") sorts
     # before "beta", so the no-category stratum wins the single remaining
     # slot (remainder=1).
-    # Mutation: comparing stratum keys as an f-joined string instead of a
-    # plain tuple (or omitting NO_CATEGORY_SENTINEL entirely, leaving a
-    # bare None/"" key that sorts inconsistently against real categories)
-    # could flip this tie the other way.
+    # Mutation: breaking that remainder tie by anything other than the
+    # ascending stratum key -- reversing the sort, or falling back to the
+    # dict's insertion order -- awards the last slot to "beta" instead, and
+    # "Solo1" drops out. So does dropping NO_CATEGORY_SENTINEL and keying
+    # the missing category on a raw None, which is unorderable against the
+    # real category strings, so `sorted(keys)` raises outright.
     assert len(selected) == 3
     assert "Solo1" in selected
     assert len(selected & {"Alice1", "Alice2"}) == 1
@@ -628,12 +630,81 @@ def test_sampled_excludes_entries_already_flagged_by_earlier_classes():
     assert selected == {"Ulric"}
 
 
-def test_sampled_excludes_low_confidence():
+def test_sampled_includes_low_confidence():
     scope_in = {"Vera": make_entry("Vera", confidence="low")}
     selected = ss._sampled(scope_in, {}, sample_cap=50)
-    # Mutation: checking confidence "not in ('low',)" (inverted) instead of
-    # "in ('high','medium')" would wrongly include a low-confidence entry.
-    assert selected == set()
+    # Mutation: restoring any eligibility filter on `confidence` (the
+    # pre-#506 `not in ("high", "medium")` skip) empties this selection.
+    # The entry the producing model itself doubted is the one entry no
+    # structural class is guaranteed to flag, so it must stay eligible.
+    assert selected == {"Vera"}
+
+
+def test_sampled_includes_every_confidence_band_when_cap_not_binding():
+    scope_in = {
+        "Hedda": make_entry("Hedda", confidence="high", category="person"),
+        "Mirek": make_entry("Mirek", confidence="medium", category="person"),
+        "Lubo": make_entry("Lubo", confidence="low", category="person"),
+    }
+    selected = ss._sampled(scope_in, {}, sample_cap=50)
+    # WHOLE-SET equality, not per-item membership: an eligibility filter on
+    # ANY band -- not only the "low" one this issue found -- drops a member
+    # here, and a per-item assertion naming one band would miss a filter
+    # that dropped a different one.
+    assert selected == set(scope_in)
+
+
+def test_sampled_selection_is_unchanged_by_permuting_confidence_only():
+    # A BINDING cap (2 entries, cap 1) is what makes apportionment decide
+    # the outcome at all -- with a slack cap every eligible entry is chosen
+    # and any stratum bug is invisible.
+    #
+    # This exact fixture is load-bearing and was executed against the
+    # unfixed tree before being written: two entries of ONE category, one
+    # "high" and one "medium", each therefore alone in its own
+    # (category, confidence) stratum. Both strata get ideal 0.5 -> quota 0,
+    # and the single remainder slot is awarded on the stratum key's tuple
+    # order, where "high" precedes "medium" -- so swapping the two labels
+    # moved the selection {"Alpha"} -> {"Bravo"}. A LOOSER metamorphic
+    # fixture passes vacuously: with three same-category entries at cap 1
+    # ("D"/"B" high, "A" medium), swapping A's and B's confidence selects
+    # {"D"} both times while the confidence stratum is still live.
+    #
+    # Mutation: restoring `confidence` to the stratum tuple (even with the
+    # eligibility filter left deleted) makes the two selections differ and
+    # fails this assertion -- which is the ONLY test here that catches that
+    # partial fix; the two above stay green under it.
+    base = {
+        "Alpha": make_entry("Alpha", confidence="high", category="person"),
+        "Bravo": make_entry("Bravo", confidence="medium", category="person"),
+    }
+    permuted = {
+        "Alpha": make_entry("Alpha", confidence="medium", category="person"),
+        "Bravo": make_entry("Bravo", confidence="high", category="person"),
+    }
+    assert ss._sampled(base, {}, sample_cap=1) == ss._sampled(permuted, {}, sample_cap=1)
+
+
+def test_sampled_selection_is_unchanged_by_permuting_high_and_low():
+    # The high/medium swap above leaves ONE partition of the three bands
+    # unpinned: a stratum key of (category, confidence == "low") keeps high
+    # and medium together, so it survives that test and both non-binding
+    # tests while still letting the model's label move the selection. This
+    # second binding-cap swap closes it -- between them the two cover every
+    # nontrivial partition of {high, medium, low}.
+    #
+    # Mutation: any stratum key that distinguishes "low" from the other two
+    # bands puts these entries in separate one-member strata, so the cap-1
+    # remainder slot follows the label and the two selections differ.
+    base = {
+        "Alpha": make_entry("Alpha", confidence="high", category="person"),
+        "Bravo": make_entry("Bravo", confidence="low", category="person"),
+    }
+    permuted = {
+        "Alpha": make_entry("Alpha", confidence="low", category="person"),
+        "Bravo": make_entry("Bravo", confidence="high", category="person"),
+    }
+    assert ss._sampled(base, {}, sample_cap=1) == ss._sampled(permuted, {}, sample_cap=1)
 
 
 # ---------------------------------------------------------------------------
