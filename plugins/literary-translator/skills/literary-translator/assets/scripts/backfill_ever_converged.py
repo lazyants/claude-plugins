@@ -697,7 +697,24 @@ def check_segments_dir_identity(dir_fd: int, segments_dir: Path):
     compares equal, and the segment is still reported protected when it is
     not. That is the same silent-retranslation consequence, reached without
     ever touching the pathname, and it is disclosed in SKILL.md's upgrade
-    note and tracked as #442 rather than papered over here."""
+    note and tracked as #442 rather than papered over here.
+
+    WHAT NO LONGER FOLLOWS FROM IT, since #442's first narrowing landed. This
+    report going stale is still outside anything this process can observe --
+    everything above stands. What changed is downstream: the dispatch gate no
+    longer treats an absent marker as proof the segment never converged. A
+    selected segment whose MATERIALIZED ledger record says converged/stale
+    while its marker reads ABSENT is now refused by select_segments.py and
+    reported as `lost_sentinels`, because ledger_update.py cannot publish a
+    'converged' record without first writing that marker -- so the two can only
+    disagree that way if something outside the plugin removed it, or the
+    backfill this script performs was never run. So a marker deleted after this
+    census called it PRESENT is caught there rather than silently retranslated
+    HERE. The gate reads one witness this run cannot: a unit whose status has
+    ALSO moved off converged/stale (a convergence commit interrupted after the
+    marker was raised, or an interrupted re-dispatch) has neither witness left
+    and is still dispatched -- that residual is #442's remaining scope and
+    needs the marker provenance tracked as #443."""
     try:
         held = os.fstat(dir_fd)
         current = os.stat(str(segments_dir))

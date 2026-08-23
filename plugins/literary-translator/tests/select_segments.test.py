@@ -187,6 +187,19 @@ def write_fixture_cache_keys(root, mapping):
     )
 
 
+def _mark_ever_converged(root, seg):
+    """Raise the sentinel the way ledger_update.py does, by filename.
+
+    Hoisted above build_full_project() (originally defined much further down,
+    beside the tests that call it directly) so build_full_project() itself
+    can use it for #442's optional truthful-sentinel fixture rows -- see
+    `sentineled_segs` below.
+    """
+    p = root / "segments" / f".ever_converged.{seg}"
+    p.write_text("converged\n", encoding="utf-8")
+    return p
+
+
 def write_draft(root, seg, content: dict) -> str:
     """Writes segments/{seg}.draft.json as canonical JSON (sorted keys,
     compact separators -- byte-identical to what draft_content_sha1() in
@@ -295,7 +308,7 @@ SEG_IDS = [
 ]
 
 
-def build_full_project(root):
+def build_full_project(root, sentineled_segs=()):
     write_manifest(root, SEG_IDS)
 
     current_key = make_cache_key("current")
@@ -393,10 +406,24 @@ def build_full_project(root):
 
     write_fixture_cache_keys(root, fixture_keys)
 
+    # #442: every row above recorded with ledger status "converged" (seg01,
+    # seg02, seg03, seg04, seg06, seg07 -- see the converged_fragment() calls
+    # above) is a state ledger_update.py:enrich_converged_fields() never
+    # publishes without first writing this sentinel (a hard precondition,
+    # enforced before write_fragment_atomically() commits the fragment), so
+    # leaving it absent by default is untruthful for exactly those rows. This
+    # helper does NOT mark them unconditionally: several tests below (the
+    # sentinel-contract tests keyed on EVER_CONVERGED_SEG in particular) rely
+    # on the sentinel being the one thing that varies, and a default-on
+    # sentinel here would silently break every one of them. Callers that need
+    # a truthful, dispatchable fixture opt specific rows in explicitly.
+    for seg in sentineled_segs:
+        _mark_ever_converged(root, seg)
 
-def setup_full_project(tmp_path):
+
+def setup_full_project(tmp_path, sentineled_segs=()):
     root = make_durable_root(tmp_path)
-    build_full_project(root)
+    build_full_project(root, sentineled_segs=sentineled_segs)
     return root
 
 
@@ -413,6 +440,24 @@ ELIGIBLE_SEG_IDS = [
     "seg07_stale_draft_and_derivmismatch",
     "seg08_recoverable",
     "seg09_not_started",
+]
+
+# #442. The subset of ELIGIBLE_SEG_IDS whose ledger record carries status
+# "converged" (all five are classified "stale" only because their cache key
+# or draft sha1 has since moved -- see build_full_project()). Passed as
+# `sentineled_segs` by the generic successful-dispatch tests below so their
+# fixture stops asserting a state the plugin cannot itself produce; those
+# tests then pass --allow-retranslate-converged to authorize the dispatch
+# their own assertions still need. seg01/seg05 are excluded on purpose: both
+# also carry status "converged" but never reach `segs` (reusable and
+# blocked_needs_regeneration are excluded from the default and --only-segs
+# selections alike), so their sentinel state is unobserved by any test here.
+CONVERGED_STATUS_STALE_SEG_IDS = [
+    "seg02_stale_draftonly",
+    "seg03_stale_cachekey",
+    "seg04_stale_both",
+    "seg06_stale_regen_caughtup",
+    "seg07_stale_draft_and_derivmismatch",
 ]
 
 _DISCLOSURE_PREFIX = "select_segments.py: "
@@ -438,9 +483,13 @@ def _disclosure_lines(stderr: str) -> list:
 # ---------------------------------------------------------------------------
 
 def test_full_classification_taxonomy_and_report(tmp_path):
-    root = setup_full_project(tmp_path)
+    # #442: this default dispatch reaches every one of
+    # CONVERGED_STATUS_STALE_SEG_IDS, so the fixture must give them their
+    # truthful sentinel (or the run refuses before any of the assertions
+    # below are ever reached) and the dispatch must be explicitly authorized.
+    root = setup_full_project(tmp_path, sentineled_segs=CONVERGED_STATUS_STALE_SEG_IDS)
 
-    proc = run_select(root)
+    proc = run_select(root, "--allow-retranslate-converged")
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     payload = parse_stdout(proc)
 
@@ -465,6 +514,10 @@ def test_full_classification_taxonomy_and_report(tmp_path):
         # always present, so silently dropping it has to fail here.
         "authorizes_dispatch",
         "previously_converged",
+        # #442. Same exact-key reasoning as `previously_converged` above: a
+        # consumer must be able to trust the key is always present, on the
+        # success path included.
+        "lost_sentinels",
         # 1.19.1 fail-closed sentinel fix: sentinel paths that were neither
         # absent nor a regular file. Always [] on this path (a non-empty set
         # refuses above), but part of the contract for the same reason
@@ -642,9 +695,17 @@ def test_full_classification_taxonomy_and_report(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_only_segs_intersects_eligible_set(tmp_path):
-    root = setup_full_project(tmp_path)
+    # #442: seg02_stale_draftonly is one of CONVERGED_STATUS_STALE_SEG_IDS --
+    # see that constant for why the fixture needs the sentinel and the run
+    # needs the flag.
+    root = setup_full_project(tmp_path, sentineled_segs=CONVERGED_STATUS_STALE_SEG_IDS)
 
-    proc = run_select(root, "--only-segs", "seg02_stale_draftonly,seg09_not_started")
+    proc = run_select(
+        root,
+        "--only-segs",
+        "seg02_stale_draftonly,seg09_not_started",
+        "--allow-retranslate-converged",
+    )
     assert proc.returncode == 0, proc.stderr
     payload = parse_stdout(proc)
     assert payload["success"] is True
@@ -675,9 +736,17 @@ def test_only_segs_discloses_the_outstanding_remainder_on_stderr(tmp_path):
     stderr from reaching the DRIVER's operator -- so neither channel covers
     the other and both are asserted.
     """
-    root = setup_full_project(tmp_path)
+    # #442: seg02_stale_draftonly is one of CONVERGED_STATUS_STALE_SEG_IDS --
+    # see that constant for why the fixture needs the sentinel and the run
+    # needs the flag.
+    root = setup_full_project(tmp_path, sentineled_segs=CONVERGED_STATUS_STALE_SEG_IDS)
 
-    proc = run_select(root, "--only-segs", "seg02_stale_draftonly,seg09_not_started")
+    proc = run_select(
+        root,
+        "--only-segs",
+        "seg02_stale_draftonly,seg09_not_started",
+        "--allow-retranslate-converged",
+    )
     assert proc.returncode == 0, proc.stderr
 
     outstanding = [
@@ -721,9 +790,17 @@ def test_no_stderr_disclosure_when_the_whole_eligible_set_is_dispatched(tmp_path
     also fired on the other 36 would be noise on a run where there is nothing
     to say.
     """
-    root = setup_full_project(tmp_path)
+    # #442: ELIGIBLE_SEG_IDS holds all five CONVERGED_STATUS_STALE_SEG_IDS, so
+    # the fixture needs their truthful sentinel and the dispatch needs
+    # explicit authorization or it refuses before any assertion below runs.
+    root = setup_full_project(tmp_path, sentineled_segs=CONVERGED_STATUS_STALE_SEG_IDS)
 
-    proc = run_select(root, "--only-segs", ",".join(ELIGIBLE_SEG_IDS))
+    proc = run_select(
+        root,
+        "--only-segs",
+        ",".join(ELIGIBLE_SEG_IDS),
+        "--allow-retranslate-converged",
+    )
     assert proc.returncode == 0, proc.stderr
     payload = parse_stdout(proc)
     assert payload["segs"] == ELIGIBLE_SEG_IDS
@@ -742,12 +819,16 @@ def test_eligible_not_dispatched_never_reports_an_ineligible_category(tmp_path):
     `blocked_needs_regeneration` is self-clearing. Mutation that must turn
     this red: widen the census to ALL_CATEGORIES.
     """
-    root = setup_full_project(tmp_path)
+    # #442: seg02_stale_draftonly is one of CONVERGED_STATUS_STALE_SEG_IDS --
+    # see that constant for why the fixture needs the sentinel and the run
+    # needs the flag.
+    root = setup_full_project(tmp_path, sentineled_segs=CONVERGED_STATUS_STALE_SEG_IDS)
 
     proc = run_select(
         root,
         "--only-segs",
         "seg10_human_blocked,seg11_human_nonconverged,seg02_stale_draftonly",
+        "--allow-retranslate-converged",
     )
     assert proc.returncode == 0, proc.stderr
     payload = parse_stdout(proc)
@@ -815,12 +896,16 @@ def test_a_duplicate_manifest_entry_is_reported_once_in_the_remainder(tmp_path):
 
 
 def test_only_segs_dedups_and_trims_whitespace(tmp_path):
-    root = setup_full_project(tmp_path)
+    # #442: seg02_stale_draftonly is one of CONVERGED_STATUS_STALE_SEG_IDS --
+    # see that constant for why the fixture needs the sentinel and the run
+    # needs the flag.
+    root = setup_full_project(tmp_path, sentineled_segs=CONVERGED_STATUS_STALE_SEG_IDS)
 
     proc = run_select(
         root,
         "--only-segs",
         " seg09_not_started , seg09_not_started,seg02_stale_draftonly ",
+        "--allow-retranslate-converged",
     )
     assert proc.returncode == 0, proc.stderr
     payload = parse_stdout(proc)
@@ -829,12 +914,16 @@ def test_only_segs_dedups_and_trims_whitespace(tmp_path):
 
 
 def test_only_segs_is_sole_override_for_human_escalation(tmp_path):
-    root = setup_full_project(tmp_path)
+    # #442: seg02_stale_draftonly is one of CONVERGED_STATUS_STALE_SEG_IDS --
+    # see that constant for why the fixture needs the sentinel and the run
+    # needs the flag.
+    root = setup_full_project(tmp_path, sentineled_segs=CONVERGED_STATUS_STALE_SEG_IDS)
 
     proc = run_select(
         root,
         "--only-segs",
         "seg10_human_blocked,seg11_human_nonconverged,seg02_stale_draftonly",
+        "--allow-retranslate-converged",
     )
     assert proc.returncode == 0, proc.stderr
     payload = parse_stdout(proc)
@@ -1720,27 +1809,33 @@ def test_root_forward_args_never_forwards_a_relative_plugin_root(tmp_path, monke
 # ---------------------------------------------------------------------------
 
 EVER_CONVERGED_SEG = "seg03_stale_cachekey"   # converged, then cache-key stale
-
-
-def _mark_ever_converged(root, seg):
-    """Raise the sentinel the way ledger_update.py does, by filename."""
-    p = root / "segments" / f".ever_converged.{seg}"
-    p.write_text("converged\n", encoding="utf-8")
-    return p
+# _mark_ever_converged() now lives above build_full_project(), which needs it
+# too -- see the comment there.
 
 
 def test_gate_refuses_by_default_when_a_previously_converged_segment_is_selected(tmp_path):
+    # #442: EVER_CONVERGED_SEG's own ledger status is "converged" (see
+    # build_full_project()), so a real dispatch attempt against it BEFORE any
+    # sentinel is marked now refuses too -- through lost_sentinels, the #442
+    # bucket, not through the previously_converged gate this test is about.
+    # --classify-only establishes the "dispatch-eligible" precondition
+    # without ever running the census (authorizes_dispatch is False there),
+    # so it cannot trip either bucket; --only-segs isolates both calls to
+    # this one segment so the fixture's OTHER (also sentinel-less)
+    # stale-but-ledger-converged rows never enter the real dispatch attempt
+    # below. Rewritten from a bare default `run_select(root)` baseline, which
+    # #442 broke for exactly this reason.
     root = setup_full_project(tmp_path)
-    baseline = run_select(root)
-    assert baseline.returncode == 0
-    assert EVER_CONVERGED_SEG in parse_stdout(baseline)["segs"], (
+    baseline = run_select(root, "--only-segs", EVER_CONVERGED_SEG, "--classify-only")
+    assert baseline.returncode == 0, f"stderr={baseline.stderr!r}"
+    assert parse_stdout(baseline)["segs"] == [EVER_CONVERGED_SEG], (
         "precondition: the stale-cache-key segment must be dispatch-eligible by "
         "default, otherwise this test proves nothing"
     )
 
     _mark_ever_converged(root, EVER_CONVERGED_SEG)
 
-    proc = run_select(root)
+    proc = run_select(root, "--only-segs", EVER_CONVERGED_SEG)
     assert proc.returncode != 0, (
         "a previously-converged segment must NOT be silently re-translated\n"
         f"stdout={proc.stdout!r}"
@@ -1766,16 +1861,30 @@ def test_the_refusal_names_the_SECOND_loss_the_flag_does_not_ask_about(tmp_path)
     the refusal firing at all: the refusal already fired before this text
     existed, so a `returncode != 0` assertion here would be green whether or
     not the second loss is named. The `not_yet_converged` exact-list
-    assertion is what makes this a red attributable to THIS string."""
+    assertion is what makes this a red attributable to THIS string.
+
+    #442: restricted via --only-segs to EVER_CONVERGED_SEG plus one genuinely
+    never-converged id, so the OTHER stale-but-ledger-converged rows in
+    build_full_project() (sentinel-less here, deliberately) never enter the
+    census and inflate `not_yet_converged` with segments this test is not
+    about -- a bare default `run_select(root)` would now catch four of them
+    in `lost_sentinels` instead, which is a different bucket than the one
+    this test names."""
     root = setup_full_project(tmp_path)
     _mark_ever_converged(root, EVER_CONVERGED_SEG)
+    only = [EVER_CONVERGED_SEG, "seg09_not_started"]
 
-    proc = run_select(root)
+    proc = run_select(root, "--only-segs", ",".join(only))
 
     assert proc.returncode != 0
     out = parse_stdout(proc)
-    expected_second = [s for s in parse_stdout(run_select(root, "--allow-retranslate-converged"))["segs"]
-                       if s != EVER_CONVERGED_SEG]
+    expected_second = [
+        s
+        for s in parse_stdout(
+            run_select(root, "--only-segs", ",".join(only), "--allow-retranslate-converged")
+        )["segs"]
+        if s != EVER_CONVERGED_SEG
+    ]
     assert expected_second, (
         "precondition: the selection must hold at least one not-yet-converged "
         "segment, or this test proves nothing"
@@ -1869,6 +1978,264 @@ def test_gate_fires_even_though_the_ledger_status_is_no_longer_converged(tmp_pat
 
 
 # ---------------------------------------------------------------------------
+# #442 -- a LOST sentinel (materialized ledger status still says
+# converged/stale, durable marker reads ABSENT) refuses too, folded into the
+# SAME fatal as previously_converged and cleared by the SAME flag. See the
+# "#442" comment block at select_segments.py's "#409 Step 1" census for the
+# two-axis truth table this section pins: exactly the cell
+# (status in WAS_CONVERGED_STATUSES) x (sentinel ABSENT) moves from dispatch
+# to refusal. ledger_update.py:enrich_converged_fields() makes a successful
+# sentinel write a hard precondition of publishing 'converged' at all, so
+# this combination is not a state the plugin itself can produce -- either
+# something outside it removed/rewrote the marker, or the project converged
+# before the marker existed and its backfill never ran.
+# ---------------------------------------------------------------------------
+
+def test_absent_sentinel_on_was_converged_unit_refuses_dispatch(tmp_path):
+    """The moved cell itself: status `stale` (EVER_CONVERGED_SEG's
+    materialized ledger status, via a real cache-key mismatch -- see
+    build_full_project()), sentinel absent. Restricted to this one segment
+    via --only-segs so the fixture's OTHER sentinel-less converged/stale rows
+    do not also contribute to `lost_sentinels` and blur which segment this
+    test is about.
+
+    Red before the #442 fix: dispatches (returncode 0, segment in `segs`),
+    `lost_sentinels` not even a key on the payload."""
+    root = setup_full_project(tmp_path)
+    seg = EVER_CONVERGED_SEG
+
+    proc = run_select(root, "--only-segs", seg)
+
+    assert proc.returncode != 0, (
+        "a was-converged segment with no sentinel must not be silently "
+        f"re-translated\nstdout={proc.stdout!r}"
+    )
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert out["lost_sentinels"] == [seg], out
+    assert seg in out["error"], "the refusal must name the segment"
+    assert "backfill_ever_converged.py" in out["error"], (
+        "the non-destructive remedy must be named -- raising the marker "
+        "back, not passing --allow-retranslate-converged"
+    )
+
+
+def test_lost_sentinel_refuses_on_the_only_segs_human_escalation_override(tmp_path):
+    """#442's SECOND reachability route into the moved cell: a materialized
+    converged/stale record classified `human_escalation` via
+    `segpack_read_failed`, from classify_converged_segment()'s segpack-read
+    branch -- its derivation-state cache-key mismatch has no segpack to
+    consult at all -- rather than the ordinary `stale` route every other test
+    in this section uses.
+    `--only-segs` is the SOLE mechanism that ever dispatches a
+    human_escalation segment, so this is also the only way this particular
+    row ever reaches the census; a category-shaped implementation (keyed on
+    `stale` alone) would miss it entirely -- exactly the reason the
+    production predicate reads the MATERIALIZED status instead.
+
+    Red before the #442 fix: dispatches (returncode 0), `lost_sentinels`
+    absent from the payload."""
+    root = setup_blocked_regen_and_reusable_project(tmp_path)
+    # Deliberately no segpack for seg_blocked_regen (see
+    # setup_blocked_regen_and_reusable_project()'s own docstring) and no
+    # .ever_converged sentinel either.
+
+    proc = run_select(root, "--only-segs", "seg_blocked_regen")
+
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["success"] is False
+    assert out["classification"]["seg_blocked_regen"]["category"] == "human_escalation", (
+        "precondition: this must reach the moved cell via human_escalation, "
+        "not via the ordinary stale route every other test here uses"
+    )
+    assert out["classification"]["seg_blocked_regen"]["status"] == "segpack_read_failed"
+    assert out["lost_sentinels"] == ["seg_blocked_regen"], out
+
+
+def test_absent_sentinel_on_a_not_started_unit_still_dispatches(tmp_path):
+    """FALSE-RED GUARD, split per codex MAJOR 1 from the interrupted-
+    convergence case below. `not_started` is the only category guaranteed to
+    carry NO materialized ledger record at all, so it is the only valid
+    subject for "the census must not refuse a segment that never converged".
+    `in_progress` is deliberately NOT used here: it is not derivably "never
+    converged" (select_segments.py maps it to `recoverable`, and an
+    interrupted convergence commit can leave exactly that status with no
+    sentinel -- see the xfail immediately below) -- asserting it dispatches
+    would pin a real #442 residual as though it were correct behaviour.
+
+    Validated by MUTATION rather than red-before-green (this is green both
+    before and after the fix, by construction): widen the production
+    predicate at select_segments.py's #442 branch to fire on every ABSENT
+    sentinel regardless of status, confirm this test turns red, then restore
+    the file byte-for-byte."""
+    root = setup_full_project(tmp_path)
+
+    proc = run_select(root, "--only-segs", "seg09_not_started")
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["segs"] == ["seg09_not_started"]
+    assert out["lost_sentinels"] == []
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#442 leaves this residual OPEN by design (see the plan's non-goals: "
+        "exactly one cell of the truth table moves, not the whole class). "
+        "ledger_update.py:enrich_converged_fields() raises the sentinel "
+        "BEFORE write_fragment_atomically() commits the 'converged' fragment, "
+        "so a crash/kill/ENOSPC between the two leaves status `in_progress` "
+        "WITH the sentinel already present -- deleting that sentinel by any "
+        "of #442's mechanisms then leaves NEITHER witness, and `in_progress` "
+        "is not in WAS_CONVERGED_STATUSES, so this gate cannot see it at all. "
+        "Closing it needs sentinel PROVENANCE the marker does not carry "
+        "(#443) -- a SELECTOR-level closure. A #621 driver-only remedy (a "
+        "dispatch-time participant) will NOT flip this xfail: it can stop a "
+        "translate without changing what this direct selector test observes, "
+        "so a driver-level debt test belongs with #621, not here."
+    ),
+)
+def test_an_interrupted_convergence_with_no_sentinel_is_still_dispatched(tmp_path):
+    """Asserts the DESIRED refusal, not current behaviour, so a surviving
+    green here would silently endorse a real loss of converged work as a
+    contract, and a strict XPASS the moment #443 (or any successor that
+    gives this gate a witness) lands forces whoever closes it to come back
+    here.
+
+    Reachability, stated so nobody has to re-derive it: this needs NO prior
+    re-dispatch at all. `enrich_converged_fields()` raises the sentinel
+    before the fragment commit, so an INTERRUPTED FIRST convergence reaches
+    this state directly -- it shares its status/sentinel/missing-baseline
+    shape with the population #455's `--from-stalled` was built for."""
+    root = setup_full_project(tmp_path)
+    seg = "seg08_recoverable"  # in_progress fragment, no sentinel written
+
+    proc = run_select(root, "--only-segs", seg)
+
+    assert proc.returncode != 0, (
+        "DESIRED: an in_progress unit with no sentinel should refuse too, "
+        "once a selector-level closure (#443) gives this gate a witness for it"
+    )
+
+
+def test_allow_retranslate_converged_clears_lost_sentinel(tmp_path):
+    """#442 MINOR 1, admitted in review: a population that authorizes
+    destroying converged work must never be machine-invisible on the path
+    that actually destroys it. The flag clears the refusal, but the success
+    payload still reports the exact lost-marker id list.
+
+    Red before that fix: dispatches fine, but `lost_sentinels` is either
+    absent from the success payload or unconditionally []."""
+    root = setup_full_project(tmp_path)
+    seg = EVER_CONVERGED_SEG
+
+    proc = run_select(root, "--only-segs", seg, "--allow-retranslate-converged")
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["success"] is True
+    assert out["segs"] == [seg]
+    assert out["lost_sentinels"] == [seg], (
+        "a population that authorizes destroying converged work must not go "
+        "machine-invisible on the path that actually destroys it"
+    )
+
+
+def test_lost_sentinel_and_previously_converged_report_in_one_refusal(tmp_path):
+    """#442: two populations, ONE refusal -- both cleared by the SAME flag,
+    so reporting them as two consecutive fatals would send an operator to
+    pass --allow-retranslate-converged, rerun, and hit the other population
+    anyway (the same "two-step discovery of a one-step problem" the
+    ambiguity gate's own placement comment already refuses to create)."""
+    root = setup_full_project(tmp_path)
+    _mark_ever_converged(root, EVER_CONVERGED_SEG)
+    lost = "seg02_stale_draftonly"       # converged/stale, no sentinel
+    never_converged = "seg09_not_started"
+    only = [EVER_CONVERGED_SEG, lost, never_converged]
+
+    proc = run_select(root, "--only-segs", ",".join(only))
+
+    assert proc.returncode != 0
+    out = parse_stdout(proc)
+    assert out["previously_converged"] == [EVER_CONVERGED_SEG], out
+    assert out["lost_sentinels"] == [lost], out
+    assert out["not_yet_converged"] == [never_converged], (
+        "the union must exclude BOTH populations, not just previously_converged"
+    )
+    # ONE fatal, not two: both segments are named in the SAME error string.
+    assert EVER_CONVERGED_SEG in out["error"]
+    assert lost in out["error"]
+
+
+def test_classify_only_does_not_refuse_a_lost_sentinel(tmp_path):
+    """Skipping the census under --classify-only is ALREADY true today
+    (select_segments.py's own `authorizes_dispatch` guard, unchanged by
+    #442) -- the attributable new assertion is the one #442 actually adds:
+    `lost_sentinels` must be present as a key and empty, never omitted, even
+    though the scan that would populate it never ran.
+
+    final_audit.py's own use case: a finished book with real
+    previously-converged, sentinel-less rows (a pre-1.20.0 project) must
+    still classify without ever hitting either #409 Step 1 refusal."""
+    root = setup_full_project(tmp_path)
+    seg = EVER_CONVERGED_SEG
+
+    proc = run_select(root, "--only-segs", seg, "--classify-only")
+
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    out = parse_stdout(proc)
+    assert out["authorizes_dispatch"] is False
+    assert out["lost_sentinels"] == [], (
+        "present and empty -- the scan never ran, but the key must not be "
+        "missing (a caller cannot then tell 'found nothing' from 'never ran')"
+    )
+
+
+def test_ambiguous_sentinel_still_refuses_before_lost_sentinel(tmp_path):
+    """AMBIGUOUS already refuses ahead of the converged/lost-sentinel gate
+    today (select_segments.py's own placement comment), so ordering alone is
+    not an attributable #442 assertion. What #442 adds is that the ambiguity
+    fatal's OWN payload still carries the exact computed `lost_sentinels`
+    list even though the run refuses for the unrelated ambiguity reason --
+    the same reason it already carries `previously_converged`."""
+    root = setup_full_project(tmp_path)
+    ambiguous = EVER_CONVERGED_SEG
+    _sentinel_path(root, ambiguous).mkdir()  # a directory, not ENOENT/regular
+    lost = "seg02_stale_draftonly"           # converged/stale, no sentinel
+
+    proc = run_select(root, "--only-segs", f"{ambiguous},{lost}")
+
+    assert proc.returncode != 0
+    out = parse_stdout(proc)
+    assert out["ambiguous_sentinels"] == [
+        {"seg": ambiguous, "detail": "the entry is a directory, not a regular file"}
+    ], out
+    assert out["lost_sentinels"] == [lost], (
+        "the ambiguity fatal must still carry the OTHER population's exact "
+        "computed list, not an empty placeholder"
+    )
+
+
+def test_lost_sentinels_count_is_asserted_not_just_membership(tmp_path):
+    """An empty `lost_sentinels` loop prints exactly what a genuinely-empty
+    one prints -- this pins the COUNT for a selection holding more than one
+    was-converged, sentinel-less row, so a regression that silently stops
+    after the first match (or short-circuits the loop) cannot read as
+    clean."""
+    root = setup_full_project(tmp_path)
+    lost = CONVERGED_STATUS_STALE_SEG_IDS  # all five, all sentinel-less here
+
+    proc = run_select(root, "--only-segs", ",".join(lost))
+
+    assert proc.returncode != 0
+    out = parse_stdout(proc)
+    assert len(out["lost_sentinels"]) == len(lost), out
+    assert sorted(out["lost_sentinels"]) == sorted(lost), out
+
+
+# ---------------------------------------------------------------------------
 # 1.19.1 -- the sentinel predicate is FAIL-CLOSED.
 #
 # The bug these cover: the two halves of the sentinel contract disagreed about
@@ -1913,11 +2280,20 @@ def test_a_dangling_symlink_sentinel_is_not_read_as_absent(tmp_path):
 
     Fails on the unfixed code at `assert proc.returncode != 0`: the pre-fix
     reader classifies the dangling link as absent, no gate fires, and select
-    exits 0 with the segment in `segs`."""
+    exits 0 with the segment in `segs`.
+
+    #442: EVER_CONVERGED_SEG's own ledger status is "converged", so a real
+    dispatch attempt against it with no sentinel at all -- the state before
+    the dangling link is created below -- now also refuses, through
+    lost_sentinels, for a reason unrelated to this test. --classify-only
+    establishes the "dispatch-eligible" precondition without running the
+    census at all, and --only-segs isolates the actual dispatch attempt to
+    this one segment so the fixture's other sentinel-less converged rows
+    never contribute a second, unrelated refusal."""
     root = setup_full_project(tmp_path)
-    baseline = run_select(root)
-    assert baseline.returncode == 0
-    assert EVER_CONVERGED_SEG in parse_stdout(baseline)["segs"], (
+    baseline = run_select(root, "--only-segs", EVER_CONVERGED_SEG, "--classify-only")
+    assert baseline.returncode == 0, f"stderr={baseline.stderr!r}"
+    assert parse_stdout(baseline)["segs"] == [EVER_CONVERGED_SEG], (
         "precondition: the segment must be dispatch-eligible by default, "
         "otherwise this test proves nothing"
     )
@@ -1930,7 +2306,7 @@ def test_a_dangling_symlink_sentinel_is_not_read_as_absent(tmp_path):
     )
     assert link.is_symlink(), "precondition: the entry itself must be present"
 
-    proc = run_select(root)
+    proc = run_select(root, "--only-segs", EVER_CONVERGED_SEG)
 
     assert proc.returncode != 0, (
         "a dangling symlink at the sentinel path is NOT proof the segment "
@@ -2045,17 +2421,31 @@ def test_an_ordinary_regular_sentinel_still_protects_and_absence_still_dispatche
     still land in `previously_converged` -- not in `ambiguous_sentinels`.
 
     Green both before and after the fix by design; it exists to catch a fix
-    that over-blocks, which the discriminating tests above cannot see."""
+    that over-blocks, which the discriminating tests above cannot see.
+
+    #442: the "absence dispatches" arm is moved onto seg09_not_started -- a
+    segment with no ledger record at all, never in WAS_CONVERGED_STATUSES --
+    because EVER_CONVERGED_SEG's own ledger status is "converged"
+    (build_full_project()), so an absent sentinel on IT is no longer a state
+    that dispatches: that is precisely the #442 refusal pinned by the new
+    tests below, not the false-positive bound this test exists to check. The
+    "protects" arm keeps EVER_CONVERGED_SEG, restricted via --only-segs so
+    the fixture's other sentinel-less converged rows do not also refuse and
+    mask which gate actually fired."""
     root = setup_full_project(tmp_path)
 
-    permitted = run_select(root)
+    permitted = run_select(root, "--only-segs", "seg09_not_started")
     assert permitted.returncode == 0, f"stderr={permitted.stderr!r}"
     out = parse_stdout(permitted)
-    assert EVER_CONVERGED_SEG in out["segs"], "ENOENT must still mean 'dispatch'"
+    assert out["segs"] == ["seg09_not_started"], "ENOENT must still mean 'dispatch'"
     assert out["ambiguous_sentinels"] == []
+    assert out["lost_sentinels"] == [], (
+        "a segment with no ledger record at all is not a lost-sentinel "
+        "population either"
+    )
 
     _mark_ever_converged(root, EVER_CONVERGED_SEG)
-    refused = run_select(root)
+    refused = run_select(root, "--only-segs", EVER_CONVERGED_SEG)
     assert refused.returncode != 0
     refused_out = parse_stdout(refused)
     assert refused_out["ambiguous_sentinels"] == [], (

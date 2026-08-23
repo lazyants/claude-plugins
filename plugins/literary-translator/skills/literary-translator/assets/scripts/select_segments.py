@@ -219,6 +219,14 @@ Output: exactly one JSON object on stdout. Success:
  present, empty {} unless --from-converged/--from-cap/--from-stalled were
  given -- see the claim admission gate section below for its per-id shape
  and each profile's closed condition list.
+ `lost_sentinels` (#442) is the third #409 Step 1 bucket, beside
+ `previously_converged` and `ambiguous_sentinels`: the selected segments whose
+ `.ever_converged` marker reads ABSENT while their MATERIALIZED ledger record
+ still says converged/stale. It is ALWAYS present and ALWAYS a list, on the
+ success payload as well as on every Step 1 refusal shape -- with
+ `--allow-retranslate-converged` a non-empty population runs anyway, and the
+ path that actually destroys converged work is the last place this may go
+ unreported.
 Failure: {"success": false, "error": ...}. Exit 0 on success, 1 on any
 fatal condition -- callers should read stdout, not rely on the exit code
 alone.
@@ -4331,6 +4339,35 @@ def run(args, dirs: dict) -> dict:
     authorizes_dispatch = not args.classify_only
     previously_converged = []
     ambiguous_sentinels = []
+    # #442. The THIRD bucket, and the only one whose evidence is not the
+    # sentinel: a unit whose MATERIALIZED ledger record still says it converged
+    # while its durable marker reads ABSENT. The sentinel is the authority for
+    # "this converged", but it is a single file that nothing in this plugin
+    # owns after it is written -- a sync client rewriting entries in place, a
+    # restore, or a plain `rm` removes it, and #442's whole consequence is that
+    # its absence then reads exactly like "never converged" and the unit is
+    # dispatched. The ledger status is a SECOND witness to the same fact,
+    # written by a different writer into a different directory, and it is still
+    # intact at this moment: the driver overwrites a record with `in_progress`
+    # only AFTER this gate has authorized the dispatch.
+    #
+    # The two witnesses cannot legitimately disagree in this direction.
+    # ledger_update.py:enrich_converged_fields() makes a successful sentinel
+    # write a HARD PRECONDITION of publishing a 'converged' fragment at all,
+    # and every convergence write in the plugin -- including the driver's --
+    # routes through it. So `converged`/`stale` with no sentinel is not a state
+    # this plugin can produce; it is a state something OUTSIDE it produced, or
+    # a pre-1.20.0 corpus whose backfill was never run. Either way the unit
+    # holds finished work and dispatching it destroys that work silently.
+    #
+    # NOT a claim that the class is closed. This sees only the cell
+    # (status in WAS_CONVERGED_STATUSES) x (sentinel ABSENT). A unit whose
+    # status has ALSO moved off converged/stale -- an interrupted convergence
+    # commit leaves `in_progress` with the sentinel already raised, and an
+    # interrupted re-dispatch leaves it too -- has neither witness left, reads
+    # as `recoverable`, and is still dispatched. That residual needs provenance
+    # the marker does not carry (#443) or a dispatch-time participant (#621).
+    lost_sentinels = []
     if authorizes_dispatch:
         # resolve_dirs() exposes durable_root, not a segments_dir -- derive it
         # the same way draft_path_for/segpack_path do, so a --durable-root
@@ -4350,6 +4387,16 @@ def run(args, dirs: dict) -> dict:
                 previously_converged.append(seg)
             elif state == SENTINEL_AMBIGUOUS:
                 ambiguous_sentinels.append({"seg": seg, "detail": detail})
+            elif (ledger_segments.get(seg) or {}).get("status") in WAS_CONVERGED_STATUSES:
+                # #442. Reached only on SENTINEL_ABSENT -- the two branches
+                # above are exhaustive over the other two states. Keyed on the
+                # MATERIALIZED record, never on classification[seg]: a
+                # converged/stale row reaches this loop under more than one
+                # category (`stale` by default; `human_escalation` via either
+                # cache_key_recompute_failed or segpack_read_failed, emitted by
+                # --only-segs' override), and a category-shaped test here would
+                # cover one route and silently miss the others.
+                lost_sentinels.append(seg)
 
     # Refused BEFORE the previously-converged gate below, deliberately: this
     # one is not clearable by --allow-retranslate-converged, so reporting the
@@ -4391,6 +4438,10 @@ def run(args, dirs: dict) -> dict:
             # hit: a segment whose sentinel is ambiguous is, by definition,
             # not in it.
             previously_converged=previously_converged,
+            # #442: same key-set reason. Also computed BEFORE the ambiguous
+            # entries were hit, so it reports the lost-marker segments this
+            # selection holds even though the run refuses for the other cause.
+            lost_sentinels=lost_sentinels,
         )
 
     # ---- #409 Step 3: evidence scan -----------------------------------------
@@ -4755,6 +4806,7 @@ def run(args, dirs: dict) -> dict:
                     counts=counts,
                     ids_by_category=ids_by_category,
                     previously_converged=previously_converged,
+                    lost_sentinels=lost_sentinels,
                 )
 
         # #455: both kernel leases established here, and held here when they
@@ -4889,14 +4941,18 @@ def run(args, dirs: dict) -> dict:
         }
         previously_converged = [seg for seg in previously_converged if seg not in cleared]
 
-    if previously_converged and not args.allow_retranslate_converged:
-        detail = []
-        for seg in previously_converged:
-            mismatched = classification.get(seg, {}).get("mismatched_fields") or []
-            detail.append(f"{seg} (diverged: {', '.join(mismatched) or 'none recorded'})")
-
-        # #409: the flag authorizes ONE thing and costs TWO. Everything above
-        # is about converged work; but the same cache-key move that made those
+    # #442: `lost_sentinels` is deliberately NOT filtered through `cleared`.
+    # The intersection is unreachable -- --from-converged and --from-stalled
+    # both REQUIRE a PRESENT sentinel, and --from-cap requires
+    # non_converged/reason=cap, which is not in WAS_CONVERGED_STATUSES -- so a
+    # filter here would be dead branching inside the gate that protects
+    # finished work. The absence is a decision, not an oversight; add it only
+    # if a future profile makes the overlap reachable.
+    if (previously_converged or lost_sentinels) and not args.allow_retranslate_converged:
+        # #409: the flag authorizes ONE thing and costs TWO. Both clauses of
+        # this refusal are about converged work -- #442 added the second one,
+        # and "above" here means earlier in the emitted MESSAGE, not earlier in
+        # this function; but the same cache-key move that made those
         # segments stale also moves resume_setup.py's input_digest (the digest
         # domain is built FROM the per-segment cache keys), which mints a fresh
         # RUN_ID, which orphans the dispatch_token on every not-yet-converged
@@ -4911,7 +4967,12 @@ def run(args, dirs: dict) -> dict:
         # that is what made these segments stale -- but NOT when the flag is
         # passed for an unrelated reason against an unchanged bundle. A warning
         # that overstates is one operators learn to skip past.
-        not_yet_converged = [seg for seg in segs if seg not in set(previously_converged)]
+        # #442: the union, not previously_converged alone. A lost-sentinel
+        # segment is converged work too, so counting it as "not yet converged"
+        # would inflate the second number by exactly the segments the first
+        # half of this message is already about.
+        converged_work = set(previously_converged) | set(lost_sentinels)
+        not_yet_converged = [seg for seg in segs if seg not in converged_work]
         second_loss = ""
         if not_yet_converged:
             second_loss = (
@@ -4926,19 +4987,58 @@ def run(args, dirs: dict) -> dict:
                 f"and nothing else will."
             )
 
+        # #442: two populations, ONE refusal. Both are cleared by the same
+        # flag, so splitting them into two consecutive fatals would make an
+        # operator pass --allow-retranslate-converged, rerun, and hit the other
+        # one -- the "two-step discovery of a one-step problem" the ambiguity
+        # gate's own placement comment above already refuses to create. Each
+        # clause is emitted only when its population is non-empty, so neither
+        # shape ever reports a count of zero.
+        clauses = []
+        if previously_converged:
+            detail = []
+            for seg in previously_converged:
+                mismatched = classification.get(seg, {}).get("mismatched_fields") or []
+                detail.append(f"{seg} (diverged: {', '.join(mismatched) or 'none recorded'})")
+            clauses.append(
+                f"{len(previously_converged)} previously CONVERGED segment(s) would "
+                f"be translated again: {'; '.join(detail)}. A converged "
+                f"segment becomes dispatch-eligible as soon as any cache-key field "
+                f"moves (a plugin upgrade moves plugin_bundle_hash for every "
+                f"segment at once), so this would discard finished work without "
+                f"anyone asking for it."
+            )
+        if lost_sentinels:
+            clauses.append(
+                f"{len(lost_sentinels)} segment(s) carry a ledger record that says they "
+                f"CONVERGED while their .ever_converged marker is ABSENT: "
+                f"{', '.join(lost_sentinels)}. ledger_update.py cannot publish a "
+                f"'converged' record without first writing that marker, so this "
+                f"combination is not a state this plugin produces -- either the marker "
+                f"was removed or rewritten by something outside it (a sync client, a "
+                f"restore, an `rm`), or this project converged before the marker "
+                f"existed and its backfill was never run. Both mean the segment holds "
+                f"finished work that a dispatch would silently discard (#442). THE "
+                f"NON-DESTRUCTIVE REMEDY IS NOT THIS FLAG: run "
+                f"backfill_ever_converged.py --apply to raise the markers back, then "
+                f"rerun. Pass --allow-retranslate-converged only if you have decided "
+                f"these segments really are to be translated again."
+            )
+
         fatal(
-            f"{len(previously_converged)} previously CONVERGED segment(s) would "
-            f"be translated again: {'; '.join(detail)}. Refusing. A converged "
-            f"segment becomes dispatch-eligible as soon as any cache-key field "
-            f"moves (a plugin upgrade moves plugin_bundle_hash for every "
-            f"segment at once), so this would discard finished work without "
-            f"anyone asking for it. Pass --allow-retranslate-converged to "
-            f"authorize exactly this dispatch, or --classify-only if you only "
-            f"need the classification and will not translate." + second_loss,
+            "Refusing. "
+            + " ".join(clauses)
+            + " Pass --allow-retranslate-converged to "
+            "authorize exactly this dispatch, or --classify-only if you only "
+            "need the classification and will not translate."
+            + second_loss,
             classification=classification,
             counts=counts,
             ids_by_category=ids_by_category,
             previously_converged=previously_converged,
+            # #442. Machine-readable beside previously_converged, and carried
+            # on every failure shape below for the same key-set reason.
+            lost_sentinels=lost_sentinels,
             # Machine-readable counterpart to `second_loss` above, so a caller
             # (and its test) can assert the exact set rather than grep prose.
             not_yet_converged=not_yet_converged,
@@ -5306,6 +5406,14 @@ def run(args, dirs: dict) -> dict:
         # merely descriptive one without re-deriving which flags were passed.
         "authorizes_dispatch": authorizes_dispatch,
         "previously_converged": previously_converged,
+        # #442. Reported on SUCCESS too, not only on the refusal: with
+        # --allow-retranslate-converged a non-empty lost-marker population runs
+        # anyway, and a population that authorizes destroying converged work
+        # must never be machine-invisible on the path that actually destroys
+        # it. Always present, [] when empty -- same rule the two fields around
+        # it follow, so "none found" and "this script stopped reporting the
+        # field" stay distinguishable.
+        "lost_sentinels": lost_sentinels,
         # Sentinel paths that were neither absent nor a regular file. Reported
         # on the success path for the same reason runs_missing_digest is: a
         # consumer must be able to see the exact set, not merely that the run
