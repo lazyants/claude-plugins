@@ -526,6 +526,24 @@ def load_provenance(path, baseline_len):
             raise ConservationError(
                 f"provenance map {path}: spans[{i}].block_id must be a non-empty string"
             )
+        # #277 -- a block_id is the only operator-authored STRING from these
+        # artifacts that this script writes back out, and json.loads() accepts
+        # a lone surrogate escape (`"\ud800"`) that no UTF-8 stream can carry.
+        # A dangling one reaches the defects list, and json.dumps(...,
+        # ensure_ascii=False) at the end of run_wrapper_conservation() then
+        # raises UnicodeEncodeError on the way to stdout -- past every handler
+        # above, out through main(), traceback at exit 1. Rejected HERE rather
+        # than by wrapping the emission: the emission is this script's own
+        # output and a failure there should stay loud; an unencodable id is
+        # input. Reported with !r, which is ASCII-safe, so the diagnostic
+        # itself cannot hit the same wall on the way to stderr.
+        try:
+            block_id.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ConservationError(
+                f"provenance map {path}: spans[{i}].block_id is not UTF-8 "
+                f"encodable ({exc}): {block_id!r}"
+            )
         if (
             not isinstance(start, int) or isinstance(start, bool)
             or not isinstance(end, int) or isinstance(end, bool)
@@ -772,9 +790,11 @@ def run_wrapper_conservation(manifest):
     )
 
     # #277 -- UnicodeDecodeError, not just OSError: the baseline is the one
-    # artifact an operator preserves from some OTHER pre-wrap form (a
-    # `pdftotext` dump of a legacy-encoded source is the walkthrough's own
-    # example), so a cp1255/UTF-16 file here is ordinary, not adversarial.
+    # artifact an operator preserves by hand from some OTHER pre-wrap form
+    # (SKILL.md's own example is hand-split `pdftotext -layout` output), and
+    # this script reads it as UTF-8 without saying so anywhere the operator
+    # sees. A cp1255 or UTF-16 file here is an ordinary encoding slip, not an
+    # adversarial input.
     try:
         baseline_text = baseline_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:

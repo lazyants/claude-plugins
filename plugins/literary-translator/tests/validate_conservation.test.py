@@ -1461,7 +1461,7 @@ def test_default_min_source_words_band_excludes_short_blocks(tmp_path):
 # uncaught exception lands on 1, so a cp1255 baseline told the operator their
 # hand-wrap had dropped content when their file merely was not UTF-8.
 #
-# Every case below asserts THREE things, because exit-2-with-no-traceback is
+# Every FATAL case below asserts three things, because exit-2-with-no-traceback is
 # also exactly what an EARLIER, unrelated failure prints (manifest.json loads
 # before the mode runs, profile.yml before any conservation artifact is
 # touched): the exit code, the absence of a traceback, and the boundary's OWN
@@ -1495,8 +1495,8 @@ DEEP_GROUP_DEPTH = 2_000
 def _wrapper_fixture_green(root: Path) -> None:
     """A complete wrapper-conservation project that exits 0 as written.
 
-    Every #277 test below corrupts exactly ONE artifact in it, so a failure
-    can only be attributable to that artifact's own boundary -- and
+    Every corruption test below breaks exactly ONE artifact in it, so a
+    failure can only be attributable to that artifact's own boundary -- and
     `test_277_base_fixture_is_green` pins that this base really is clean, so
     none of them can pass by dying somewhere earlier."""
     baseline, offsets = build_baseline([
@@ -1523,7 +1523,11 @@ def _wrapper_fixture_green(root: Path) -> None:
          "block_ids": ["HEAD:seg01", "PARA:seg01:0001"], "word_count": 12}])
 
 
-def _assert_fatal_not_traceback(proc, needle: str) -> None:
+def _assert_fatal_not_traceback(proc, *needles: str) -> None:
+    """The three properties the exit-2 contract is made of, plus the prefix
+    `_fatal()` supplies. Asserting the needles on the SAME `ERROR: ` line is
+    what makes them attributable: exit-2-with-no-traceback is also what an
+    earlier, unrelated precondition failure prints."""
     assert proc.returncode == 2, (
         f"expected the documented exit-2 fatal path, got {proc.returncode} "
         f"(1 is the code SKILL.md assigns to 'the hand-wrap dropped content')\n"
@@ -1533,10 +1537,15 @@ def _assert_fatal_not_traceback(proc, needle: str) -> None:
         f"an operator-authored artifact must never surface as a raw Python "
         f"traceback\nstderr:\n{proc.stderr}"
     )
-    assert needle in proc.stderr, (
-        f"expected the boundary's own diagnostic {needle!r} -- without it this "
-        f"case may have died at an EARLIER gate and tested nothing\n"
+    error_lines = [ln for ln in proc.stderr.splitlines() if ln.startswith("ERROR: ")]
+    assert error_lines, (
+        f"the exit-2 path must report through _fatal()'s 'ERROR: ' line\n"
         f"stderr:\n{proc.stderr}"
+    )
+    assert any(all(n in ln for n in needles) for ln in error_lines), (
+        f"expected one ERROR line carrying all of {needles!r} -- without the "
+        f"boundary's OWN diagnostic this case may have died at an EARLIER gate "
+        f"and tested nothing\nstderr:\n{proc.stderr}"
     )
 
 
@@ -1586,16 +1595,41 @@ def test_277_unparseable_json_artifact_exits_2(tmp_path, artifact, needle, paylo
     (root / artifact).write_text(payload, encoding="utf-8")
 
     proc = run_validate_conservation(root, "wrapper-conservation")
-    _assert_fatal_not_traceback(proc, "is not valid JSON")
-    # ...and it is THIS artifact's loader that reported it, not the sibling's.
-    assert needle in proc.stderr, proc.stderr
+    # `needle` is the artifact's own name, so the pair also proves it was THIS
+    # loader's arm that reported, not the sibling's.
+    _assert_fatal_not_traceback(proc, needle, "is not valid JSON")
 
 
-@pytest.mark.parametrize("pattern,expected_family", [
-    ("a{" + "9" * 36 + "}", "OverflowError"),
-    ("(" * DEEP_GROUP_DEPTH + "a" + ")" * DEEP_GROUP_DEPTH, "RecursionError"),
+def test_277_unencodable_provenance_block_id_exits_2(tmp_path):
+    """A lone surrogate escape survives json.loads and passes the non-empty-
+    string check, then dies on the way OUT: json.dumps(ensure_ascii=False) ->
+    UTF-8 stdout raises UnicodeEncodeError, past every load-boundary handler,
+    through main(), traceback at exit 1. The id is deliberately one the
+    manifest does not carry, so it becomes a dangling-ref defect and therefore
+    reaches the emitted document."""
+    root = make_root(tmp_path)
+    _wrapper_fixture_green(root)
+    (root / "provenance_map.json").write_text(
+        '{"schema_version": 1, "spans": [{"block_id": "\\ud800", '
+        '"baseline_start": 0, "baseline_end": 12}]}',
+        encoding="utf-8",
+    )
+
+    proc = run_validate_conservation(root, "wrapper-conservation")
+    _assert_fatal_not_traceback(proc, "provenance map", "not UTF-8 encodable")
+
+
+@pytest.mark.parametrize("pattern", [
+    # raises OverflowError on this build...
+    "a{" + "9" * 36 + "}",
+    # ...and RecursionError on this one. Which family is deliberately NOT
+    # asserted: the handler is `except Exception` precisely because that is
+    # not a contract any version pins, and CI tracks a moving 3.14 series, so
+    # pinning the name here would false-RED on a patch release while the
+    # shipped behaviour stayed correct.
+    "(" * DEEP_GROUP_DEPTH + "a" + ")" * DEEP_GROUP_DEPTH,
 ])
-def test_277_uncompilable_line_pattern_exits_2(tmp_path, pattern, expected_family):
+def test_277_uncompilable_line_pattern_exits_2(tmp_path, pattern):
     """`re.compile` does not raise one family, and which one a given
     interpreter picks is not a contract any version pins -- both of these are
     legal JSON strings that pass the array-of-strings check and then raise
@@ -1608,9 +1642,6 @@ def test_277_uncompilable_line_pattern_exits_2(tmp_path, pattern, expected_famil
 
     proc = run_validate_conservation(root, "wrapper-conservation")
     _assert_fatal_not_traceback(proc, "invalid regex in 'line_patterns'")
-    # The family is reported rather than swallowed, so a future interpreter
-    # changing it is visible in the failure output instead of silent.
-    assert expected_family in proc.stderr, proc.stderr
 
 
 if __name__ == "__main__":
