@@ -188,8 +188,8 @@ def js_code_only(source: str) -> str:
     whole template. This is the complementary, cruder job -- decide per
     character whether it is code, and blank everything that is not.
 
-    Pinned by test_js_code_only_shapes below, which is the direct test table
-    this had no equivalent of when it first shipped."""
+    Pinned by ledger_confirmation_schema.test.py's test_js_code_only_shapes,
+    the direct test table this had no equivalent of when it first shipped."""
     out = list(source)
     n = len(source)
 
@@ -283,9 +283,15 @@ def from_declaration(mass_translate_source: str, needle: str) -> str:
     projection internally, so wrapping them here would only project twice."""
     code = js_code_only(mass_translate_source)
     idx = code.find(needle)
-    assert idx != -1, (
-        f"the template's CODE declares no {needle!r} -- it may exist only "
-        "inside a comment or a prompt string, which is exactly what this "
-        "projection-anchored lookup exists to refuse"
-    )
+    if idx == -1:
+        # Explicit raise, not a bare `assert`, matching every other failure
+        # path in this module: under `python -O` a stripped assert would let
+        # `find()`'s -1 through and return the source's LAST CHARACTER as if
+        # it were the declaration -- a silently wrong extraction, which is
+        # the exact class this module exists to make impossible.
+        raise AssertionError(
+            f"the template's CODE declares no {needle!r} -- it may exist only "
+            "inside a comment or a prompt string, which is exactly what this "
+            "projection-anchored lookup exists to refuse"
+        )
     return mass_translate_source[idx:]

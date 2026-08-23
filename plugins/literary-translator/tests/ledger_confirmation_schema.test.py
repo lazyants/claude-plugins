@@ -137,10 +137,11 @@ _extract_const_object_literal_raw = _drift.extract_const_object_literal
 
 
 def extract_const_object_literal(mass_translate_source: str, const_name: str) -> str:
-    """Projection-anchored wrapper -- see _from_declaration(). Kept, unlike
-    #306's unwrap of _extract_function_source/_extract_const_statement below:
+    """Projection-anchored wrapper -- see _from_declaration(). Load-bearing:
     this delegates to the drift module's OWN parser, which is not itself
-    projection-anchored, so the pre-slice here is still load-bearing."""
+    projection-anchored, so without the pre-slice a commented-out
+    declaration would win. (ledger_update.test.py's two extractors need no
+    such wrapper -- #306 anchored them on the projection internally.)"""
     return _extract_const_object_literal_raw(
         _from_declaration(mass_translate_source, f"const {const_name} "), const_name
     )
@@ -962,9 +963,8 @@ def _find_balanced_bracket_span(source: str, start: int) -> int:
 def extract_const_array_literal(source: str, const_name: str) -> str:
     # Projection-anchored for the same reason as extract_const_object_literal
     # above: a commented-out `const NAME = [...]` used to win this search.
-    # Kept, unlike #306's unwrap below: this delegates to
-    # _find_balanced_bracket_span, which is not itself projection-anchored,
-    # so the pre-slice here is still load-bearing.
+    # Load-bearing here too -- this delegates to _find_balanced_bracket_span,
+    # which is not itself projection-anchored.
     source = _from_declaration(source, f"const {const_name} ")
     m = re.search(r"const\s+" + re.escape(const_name) + r"\s*=\s*", source)
     if not m:
@@ -1294,7 +1294,7 @@ def test_extractors_ignore_a_commented_out_declaration(
     )
     # And the harness's own statement extractor, which the behavioural layer
     # splices into the node script it executes.
-    assert real_marker in _extract_const_statement(mutated, const_name)
+    assert real_marker in _extract_js_const(mutated, const_name)
 
 
 def test_flat_literals_still_declare_the_fields_289_fired_on_as_optional(mass_translate_source):
@@ -2190,22 +2190,6 @@ CONSUME_SITE_GUARDS = {
 }
 
 
-def _extract_function_source(mass_translate_source: str, signature_prefix: str) -> str:
-    """ledger_update.test.py's brace-balanced function extractor. #306 made
-    that extractor anchor on the code projection ITSELF (see
-    _js_source_projection.py), so this wrapper no longer needs to pre-slice
-    the source with _from_declaration() -- it just calls through."""
-    return _extract_js_function(mass_translate_source, signature_prefix)
-
-
-def _extract_const_statement(mass_translate_source: str, const_name: str) -> str:
-    """The same treatment for the single-line `const NAME = ...;` extractor.
-    That one used to terminate on the first raw `;`, doubly exposed to a
-    decoy comment (wrong start AND wrong end); #306 anchors it on the
-    projection too, so no pre-slice is needed here either."""
-    return _extract_js_const(mass_translate_source, const_name)
-
-
 def _guard_harness_preamble(mass_translate_source: str) -> str:
     """Every declaration a rostered guard needs, spliced verbatim from the
     real template in SOURCE order -- which is what keeps the dependency chain
@@ -2215,19 +2199,19 @@ def _guard_harness_preamble(mass_translate_source: str) -> str:
     rather than named, so a fourth schema's own key sets come along without
     editing this."""
     parts = [
-        _extract_function_source(mass_translate_source, "function isNonEmptyString("),
-        _extract_function_source(mass_translate_source, "function isEmptyString("),
-        _extract_function_source(mass_translate_source, "function isZeroExitCode("),
-        _extract_function_source(mass_translate_source, "function hasOnlyKeys("),
+        _extract_js_function(mass_translate_source, "function isNonEmptyString("),
+        _extract_js_function(mass_translate_source, "function isEmptyString("),
+        _extract_js_function(mass_translate_source, "function isZeroExitCode("),
+        _extract_js_function(mass_translate_source, "function hasOnlyKeys("),
     ]
     # Collected from the CODE PROJECTION, so a `const FOO_KEYS = ...` sitting
     # in a comment cannot add a name whose real declaration does not exist.
     key_consts = re.findall(r"^const ([A-Za-z_$][\w$]*_KEYS)\s*=",
                             _js_code_only(mass_translate_source), re.M)
     assert key_consts, "no `const *_KEYS` declarations found in the template"
-    parts += [_extract_const_statement(mass_translate_source, name) for name in key_consts]
-    parts.append(_extract_const_statement(mass_translate_source, "NO_FAILURE_EVIDENCE"))
-    parts.append(_extract_function_source(mass_translate_source, "function hasFailureEvidence("))
+    parts += [_extract_js_const(mass_translate_source, name) for name in key_consts]
+    parts.append(_extract_js_const(mass_translate_source, "NO_FAILURE_EVIDENCE"))
+    parts.append(_extract_js_function(mass_translate_source, "function hasFailureEvidence("))
     return "\n".join(parts)
 
 
@@ -2240,7 +2224,7 @@ def run_guard(tmp_path, mass_translate_source: str, guard: str, raws: list) -> l
     script = tmp_path / f"{guard}_probe.js"
     script.write_text(
         _guard_harness_preamble(mass_translate_source) + "\n"
-        + _extract_function_source(mass_translate_source, signature) + "\n"
+        + _extract_js_function(mass_translate_source, signature) + "\n"
         f"console.log(JSON.stringify(JSON.parse(process.argv[2]).map({guard})));\n",
         encoding="utf-8",
     )
