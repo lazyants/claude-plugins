@@ -358,11 +358,12 @@ LEDGER_WRITER_SRC = SCRIPTS_DIR / "ledger_update.py"
 LEDGER_SCHEMAS = ("ledger-record-base.schema.json", "ledger-fragment.schema.json")
 
 
-def stage_ledger_writer(root, scripts_dir=None):
-    """Stage ledger_update.py + its schemas + runs/ under `root`. `scripts_dir` defaults to
-    root/scripts, but is separable so a test can put the WRITER under a plugin root while the
-    DATA root stays elsewhere -- the only shape that can detect a missing --durable-root."""
-    scripts_dir = scripts_dir or (root / "scripts")
+def stage_ledger_writer(root):
+    """Stage ledger_update.py + its schemas + runs/ under `root`, in the durable-root layout
+    (scripts/ + schemas/). The separate-roots test below does NOT reuse this: a plugin
+    installation uses assets/scripts + assets/schemas, a different shape, so it stages its
+    own."""
+    scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(LEDGER_WRITER_SRC, scripts_dir / "ledger_update.py")
     schemas = root / "schemas"
@@ -4082,9 +4083,9 @@ def test_no_ledger_fragment_for_any_non_content_failure(
     implementation: keying the write on `reason == "validate-failed"` instead of on the
     content-gate flag. FIVE of these seven rows end with that reason -- every translate row
     except job_failed and launch_failed, plus the review row -- so such an implementation
-    writes a fragment in five of them and goes red five times. (An earlier revision of this
-    docstring claimed all seven; codex caught it against codex_job.py's own run(), where a
-    failed job reports `job-failed` and a failed dispatch reports `launch-failed`.)
+    writes a fragment in five of them and goes red five times. The other two are not
+    exempt by accident: run() reports `job-failed` for a failed job and `launch-failed`
+    for a failed dispatch, so those rows guard a different mistake.
 
     Each row also asserts the reason it actually reached, so a row cannot quietly pass by
     failing EARLIER than its advertised path and never exercising it -- absence of a
@@ -4118,7 +4119,7 @@ def test_a_gate_that_could_not_run_does_not_set_the_content_rejection_flag(tmp_p
     monkeypatch.setattr(job, "_gate", _gate_none)
 
     assert job.validate_attempt() is False
-    assert job.content_gate_rejected is False
+    assert job.translate_content_rejected is False
 
 
 def test_validate_draft_exit_2_does_not_set_the_content_rejection_flag(tmp_path, monkeypatch):
@@ -4131,7 +4132,7 @@ def test_validate_draft_exit_2_does_not_set_the_content_rejection_flag(tmp_path,
 
     assert job.validate_attempt() is False
     assert calls == ["draft_ready.py", "validate_draft.py"]
-    assert job.content_gate_rejected is False
+    assert job.translate_content_rejected is False
 
 
 def test_validate_draft_exit_1_sets_the_content_rejection_flag(tmp_path, monkeypatch):
@@ -4141,7 +4142,7 @@ def test_validate_draft_exit_1_sets_the_content_rejection_flag(tmp_path, monkeyp
     monkeypatch.setattr(job, "_gate", gate)
 
     assert job.validate_attempt() is False
-    assert job.content_gate_rejected is True
+    assert job.translate_content_rejected is True
 
 
 def test_a_rejected_review_candidate_never_sets_the_content_rejection_flag(tmp_path, monkeypatch):
@@ -4151,7 +4152,7 @@ def test_a_rejected_review_candidate_never_sets_the_content_rejection_flag(tmp_p
     monkeypatch.setattr(job, "_gate", gate)
 
     assert job.validate_attempt() is False
-    assert job.content_gate_rejected is False
+    assert job.translate_content_rejected is False
 
 
 def test_ledger_write_uses_a_fixed_timeout_not_the_finalize_budget(tmp_path, monkeypatch):
@@ -4162,7 +4163,6 @@ def test_ledger_write_uses_a_fixed_timeout_not_the_finalize_budget(tmp_path, mon
     remaining-budget implementation can still pass on a fast machine."""
     job = _mkjob(tmp_path, kind="translate")
     monkeypatch.setattr(job, "finalize_timeout", lambda: 0.0)
-    monkeypatch.setattr(job, "poll_timeout", lambda: 0.0)
     seen = []
 
     def _gate(args, timeout):
@@ -4192,8 +4192,11 @@ def test_a_failing_ledger_write_does_not_change_the_job_outcome(tmp_path):
     successful case -- the segment simply stays in its pre-#398 recoverable state, which is
     a return to the old behaviour, never a new failure mode."""
     root, companion, node = build_root(tmp_path)
+    # STDOUT, matching ledger_update.py's own emit_failure(): a stub that failed on stderr
+    # would bake in the stream-preference mistake _gate_output() exists to avoid.
     (root / "scripts" / "ledger_update.py").write_text(
-        "#!/usr/bin/env python3\nimport sys\nsys.stderr.write('boom\\n')\nsys.exit(3)\n",
+        "#!/usr/bin/env python3\nimport sys\nprint('{\"success\": false, \"error\": \"boom\"}')"
+        "\nsys.exit(3)\n",
         encoding="utf-8")
     seg, tok = "c001", "RUN:c001"
     proc = spawn_driver(root, companion, node, seg, tok, "translate", "D1",
@@ -4208,6 +4211,9 @@ def test_a_failing_ledger_write_does_not_change_the_job_outcome(tmp_path):
     # "not-confirmed", never "failed": ledger_update.py commits at an os.replace() and can
     # still fail AFTER that, so a non-zero exit does not prove the fragment is absent.
     assert jl["ledger_write"].startswith("not-confirmed:"), jl["ledger_write"]
+    # The writer's own structured error text is what lands there -- not the empty stderr a
+    # stderr-first harvest would have picked up.
+    assert "boom" in jl["ledger_write"], jl["ledger_write"]
     assert not fragment_path(root, seg).exists()
     assert list((root / "segments").glob(".codex_ledger_payload.*")) == []
 

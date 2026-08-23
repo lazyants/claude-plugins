@@ -330,11 +330,12 @@ def load_profile(durable_root=DURABLE_ROOT):
     try:
         marker = json.loads(marker_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        # #398: UnicodeDecodeError joins OSError here. read_text() raises it
-        # for a marker written in a foreign encoding, and it was previously
-        # uncaught -- escaping past _fatal()'s exit 2 and terminating the
-        # process at exit 1, the code this script now reserves for a
-        # candidate-content verdict a consumer may act on terminally.
+        # #398: OSError and UnicodeDecodeError join JSONDecodeError. read_text()
+        # raises them for an unreadable or foreign-encoded marker, and both were
+        # previously uncaught. With _main_or_exit_2() landing in the same commit
+        # an uncaught one would now reach exit 2 anyway, so what these clauses
+        # buy TODAY is the precise diagnostic rather than the exit code -- which
+        # is what tests/validate_draft.test.py's environment cases actually pin.
         _fatal(f"ownership marker at {marker_path} is not valid JSON, or could not be "
                f"read: {exc}")
 
@@ -348,9 +349,8 @@ def load_profile(durable_root=DURABLE_ROOT):
     try:
         profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
-        # #398: same widening as the marker read above -- an unreadable or
-        # wrongly-encoded profile.yml is an ENVIRONMENT failure (exit 2), and
-        # was previously an uncaught exception landing at exit 1.
+        # #398: same widening as the marker read above, and for the same reason --
+        # exit 2 either way now; the NAMED diagnostic is what is gained.
         # The substring "is not valid YAML" is a CROSS-MODULE CONTRACT, not prose:
         # tests/validate_assembled.test.py's
         # test_green_load_profile_own_fatal_systemexit_still_reaches_exit_2 asserts this
@@ -470,9 +470,11 @@ def _load_json(path, label):
     candidate written in a foreign encoding -- a defect in the CANDIDATE, which this
     script's exit-code contract puts on exit 1; previously it escaped uncaught and, once
     _main_or_exit_2() existed, would have been reported as an environment failure instead.
-    The SEGPACK side of this helper cannot be reached with an undecodable file: main()'s
-    own _refuse_unless_segpack_available() probe already routed that to exit 2 before
-    validate() runs."""
+    The SEGPACK side of this helper is not reached with an undecodable file ON THE CLI
+    PATH: main()'s own _refuse_unless_segpack_readable() probe already routed that to
+    exit 2 before validate() runs. final_audit.py calls validate() in process and skips
+    that probe, so it CAN surface such an error here -- harmlessly, since it reads the
+    errs list and never an exit code."""
     if not path.exists():
         return None, f"{label} missing: {path}"
     try:
@@ -752,7 +754,7 @@ def build_arg_parser():
     return parser
 
 
-def _refuse_unless_segpack_available(seg, segments_dir) -> None:
+def _refuse_unless_segpack_readable(seg, segments_dir) -> None:
     """#398: the SOURCE must be readable before exit 1 can mean anything.
 
     `validate()` reports a missing/unreadable/malformed segpack through its
@@ -798,7 +800,7 @@ def main():
     profile = load_profile(dirs["durable_root"])
     cfg = ProfileConfig(profile)
 
-    _refuse_unless_segpack_available(seg, dirs["segments_dir"])
+    _refuse_unless_segpack_readable(seg, dirs["segments_dir"])
 
     errs = validate(seg, cfg, draft_file=draft_file, segments_dir=dirs["segments_dir"])
     if errs:

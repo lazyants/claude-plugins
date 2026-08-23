@@ -402,15 +402,7 @@ and atomically promotes it.
    on containment via `mentionedAnywhere()` and cannot tell the two apart —
    the accepted, non-terminal cost of no longer missing a real report),
    `draft-missing`, or `cap` (non-converged after the final confirming
-   review). **#398** adds one more terminal reason, `translate-rejected` --
-   but it is written by `codex_job.py`, NOT by the template, and so it is the
-   only terminal ledger write BOTH dispatch paths inherit: a translate
-   candidate that `validate_draft.py` ran against and rejected with exit 1
-   (its content verdict) becomes `{status:'blocked',
-   reason:'translate-rejected'}`, which is what stops a permanently-failing
-   segment from being paid for again on every subsequent run. Exit 2, a gate
-   that could not run, and every `draft_ready.py` rejection stay recoverable.
-   See `references/ledger-and-resumability.md`'s call-sites section.
+   review).
    **1.3.6 (#131):** every reason above EXCEPT `draft-missing` and
    `cap` is now recoverable rather than terminal — no ledger write happens
    for them at all (see `references/ledger-and-resumability.md`'s
@@ -421,7 +413,22 @@ and atomically promotes it.
    `success:false` from `recordLedgerPrompt` returns
    `{ seg, converged: false, reason: 'ledger-write-failed', detail: <error> }`,
    while the JS-side fragment/status payload-intent mismatch returns
-   `reason: 'ledger-write-mismatch'`. A `dispatch_token`/sha mismatch at the
+   `reason: 'ledger-write-mismatch'`.
+
+   **A terminal reason from OUTSIDE this list (#398).** Everything enumerated
+   above is a value of the Workflow template's OWN returned `reason` field, and
+   the 1.3.6 recoverability rule applies to those and only those.
+   `translate-rejected` is a different kind of thing: a LEDGER reason, written
+   by `codex_job.py` rather than by the template, when `validate_draft.py` ran
+   against a translate candidate and rejected it with exit 1 -- its content
+   verdict. Because it is written by the child both dispatch paths launch, it
+   is the one terminal ledger write the Workflow path and
+   `segment_dispatch_driver.py` both inherit without either being changed, and
+   it is what stops a permanently-rejected segment from being paid for again on
+   every subsequent run. It is terminal; the 1.3.6 sentence above does not
+   reach it. Exit 2, a gate that could not run, and every `draft_ready.py`
+   rejection stay recoverable. See `references/ledger-and-resumability.md`'s
+   call-sites section. A `dispatch_token`/sha mismatch at the
    convergence ledger write (see `references/ledger-and-resumability.md`'s
    commit-gate chain) also surfaces as `reason: 'ledger-write-failed'` —
    never recorded `converged`.

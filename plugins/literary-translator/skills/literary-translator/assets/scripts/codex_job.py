@@ -316,15 +316,12 @@ class CodexJob:
         self.joblog = os.path.join(self.segdir, ".codex_job.%s.json" % seg)
         self.fail_sentinel = os.path.join(self.segdir, ".codex_failed.%s.%s" % (seg, disp))
         self.final_prompt = None
-        # #398: set ONLY by _validate_candidate()'s validate_draft.py site, and only when
-        # that gate RAN and returned exit 1 -- its contract for "the candidate's own content
-        # is defective" (see validate_draft.py's own Exit codes section). Nothing else in this
-        # file assigns it: adopt_pending() calls _capture_gate_rejection() directly rather than
-        # through _validate_candidate(), and the draft_ready.py / review_ready.py sites and
-        # every proc-is-None path leave it alone. Initialized once and never reset --
-        # _validate_candidate() has exactly one caller (validate_attempt()), itself called once
-        # per run(), so a per-call reset would be choreography for a reuse nothing performs.
-        self.content_gate_rejected = False
+        # #398: "validate_draft.py ran on a TRANSLATE candidate and returned exit 1" -- its
+        # contract for "the candidate's own content is defective" (see that script's own Exit
+        # codes section). Initialized once and deliberately never reset: _validate_candidate()
+        # has exactly one caller (validate_attempt()), itself called once per run(), so a
+        # per-call reset would be choreography for a reuse nothing performs.
+        self.translate_content_rejected = False
         # #398: best-effort outcome of the terminal ledger write, surfaced in the terminal
         # joblog. None means "never attempted" -- the ordinary case for every job that did not
         # end in a content rejection.
@@ -986,10 +983,15 @@ class CodexJob:
                 # than claiming a failure this process cannot establish.
                 self.ledger_write = "not-confirmed: ledger_update.py did not complete"
             elif proc.returncode != 0:
-                detail = ((getattr(proc, "stderr", None) or "")
-                          or (getattr(proc, "stdout", None) or "")).strip()
+                # _gate_rejection_text() (#399), not a second combine of the same two
+                # streams: this plugin's scripts are not uniform about which stream carries
+                # the diagnostic, and ledger_update.py in particular prints its structured
+                # error to STDOUT while only a sentinel WARNING goes to stderr -- so a
+                # stderr-first read of it records the warning and drops the error. It
+                # returns None when the writer printed nothing at all.
                 self.ledger_write = ("not-confirmed: ledger_update.py exit %d: %s"
-                                     % (proc.returncode, detail))[: self._GATE_OUTPUT_CAP]
+                                     % (proc.returncode,
+                                        self._gate_rejection_text("ledger_update.py", proc) or ""))
             else:
                 self.ledger_write = "ok"
         except Exception as exc:  # noqa: BLE001 -- see this method's own docstring
@@ -1022,7 +1024,7 @@ class CodexJob:
                         # availability (a missing segpack, an unreadable profile.yml, an
                         # internal error), which must stay recoverable; so must a gate that
                         # could not run at all, which is the proc-is-None branch above.
-                        self.content_gate_rejected = True
+                        self.translate_content_rejected = True
                 return False
             return True
         proc = self._gate(["review_ready.py", self.seg, "--expect-token", self.tok,
@@ -1763,17 +1765,22 @@ class CodexJob:
         # the ONLY record that a pre-existing canonical was refused, and it is emitted
         # whatever this run went on to do, including a run that finished ok.
         if self.holds_lock:
-            self._write_joblog({
+            joblog_record = {
                 "jobId": self.jobId, "kind": self.kind, "seg": self.seg, "token": self.tok,
                 "disp": self.disp, "inv": self.inv, "status": "terminal", "ok": self.ok,
                 "timed_out": self.timed_out, "job_status": self.job_status, "adopted": self.adopted,
                 "reason": self.reason, "error_detail": self.error_detail,
                 "adopt_rejection": self.adopt_rejection,
-                # #398: present only when a terminal ledger write was attempted at all, so an
-                # ordinary job's joblog shape is unchanged. Best-effort observability, not a
-                # guarantee -- _write_joblog() itself returns silently on an I/O failure.
-                **({"ledger_write": self.ledger_write} if self.ledger_write is not None else {}),
-            })
+            }
+            # #398: the ONE conditional key in this record -- present only when a terminal
+            # ledger write was actually attempted, so an ordinary job's joblog shape is
+            # unchanged (pinned by the negative table in codex_job_driver.test.py). Siblings
+            # `error_detail` and `adopt_rejection` are emitted unconditionally as None; the
+            # difference is deliberate. Best-effort observability either way --
+            # _write_joblog() returns silently on an I/O failure.
+            if self.ledger_write is not None:
+                joblog_record["ledger_write"] = self.ledger_write
+            self._write_joblog(joblog_record)
         line = {
             "ok": self.ok, "kind": self.kind, "seg": self.seg, "jobId": self.jobId,
             "job_status": self.job_status, "timed_out": self.timed_out,
@@ -1932,7 +1939,9 @@ class CodexJob:
                         return 0
                 else:
                     self.reason = "validate-failed"
-                    if self.kind == "translate" and self.content_gate_rejected:
+                    # The `kind` conjunct is defence in depth, not load-bearing: only the
+                    # translate branch of _validate_candidate() can set the flag.
+                    if self.kind == "translate" and self.translate_content_rejected:
                         # #398: the reason string stays exactly as it shipped -- the driver
                         # and every existing test read it unchanged. What is NEW is the
                         # durable consequence: a content rejection now leaves a TERMINAL

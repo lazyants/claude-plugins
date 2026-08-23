@@ -153,7 +153,6 @@ Existing consumers are unaffected by the split: `codex_job.py`'s gate helper
 tests `returncode == 0`, and `final_audit.py` calls `validate()` in process
 and never reads an exit code.
 
-
 ## Structural self-check against `draft.schema.json`
 
 `validate_draft.py` also runs a structural self-check of the draft file
