@@ -390,9 +390,9 @@ SENTINEL_WRITER_NAME = "ledger_update"
 def sentinel_body(seg, writer, evidence=None) -> bytes:
     """The marker's body: ONE line of UTF-8 JSON, sorted keys, trailing LF.
 
-    Byte-identical in spelling to backfill_ever_converged.py's own copy (the
-    two are pinned against each other by
-    `tests/backfill_ever_converged.test.py`), because a reader must be able to
+    Byte-identical in spelling to the sibling writer's copy -- ledger_update.py
+    and backfill_ever_converged.py each carry one, pinned against each other by
+    `tests/backfill_ever_converged.test.py` -- because a reader must be able to
     parse either writer's output with one rule. What differs, deliberately and
     for the first time, is `by`: #443 exists because the two writers were
     INDISTINGUISHABLE on disk.
@@ -420,7 +420,8 @@ def sentinel_body(seg, writer, evidence=None) -> bytes:
     exceed the filesystem's own component limit (255 on this project's
     platform, so at most 239 bytes of segment id) and the publishing open or
     link fails first. A third writer with an unbounded name would break that,
-    which is why SENTINEL_KNOWN_WRITERS is a closed set registered by hand.
+    which is why backfill_ever_converged.py's SENTINEL_KNOWN_WRITERS -- the
+    reader's closed set -- is registered by hand.
 
     WHAT THIS BODY IS NOT: it is not authority. Nothing in this plugin gates
     on it, and classify_ever_converged_sentinel() above still decides
@@ -457,9 +458,9 @@ def write_all(fd, data: bytes) -> None:
     treated whatever it returned as success. With a 10-byte body that was
     theoretical; the provenance body is an order of magnitude longer, so the
     loop is spelled out rather than left as an assumption. A zero-byte return
-    is RAISED rather than looped on -- spinning on it would hang the ledger
-    writer, which is strictly worse than the clean refusal
-    _report_sentinel_failure() gives every other write failure."""
+    is RAISED rather than looped on -- spinning on it would hang the writer,
+    which is strictly worse than the clean refusal each writer's own OSError
+    handler gives every other write failure."""
     view = memoryview(data)
     while view:
         written = os.write(fd, view)
