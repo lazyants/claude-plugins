@@ -1863,9 +1863,10 @@ input's bytes at all" — `_resolve_competitors()`'s fallback reads
 were never the gap this table closes, since they answer a different
 question (what is the competitor universe) than the one the table's H1
 comparison answers (did this frozen input change). `manifest.json`'s
-snapshot is captured through that same gate but, having no downstream
-parser in this module the way canon/senses do, is discarded once its own
-tamper comparison is done.
+snapshot is captured through that same gate and, since #268, returned like
+the other two: `run_verify_merged` parses it to re-authenticate every cited
+evidence record, so it needs the bytes the tamper comparison hashed rather
+than a second, independently read version of the file.
 
 That table (round 7) closed the read-side gap inside the verifier, but it
 was still, by itself, only ONE of three independent enumerations of the
@@ -2103,10 +2104,16 @@ divergence is deliberate, not a bug: they answer differently on a READ
 failure for a frozen input, as opposed to a hash MISMATCH, which both
 always treat as fatal. `--verify-merged` fails CLOSED on a read error — it
 raises raw — because degrading a frozen input it still needs to parse (the
-#243 competitors universe projects from `canon.json`/`canon_senses.json`)
-would silently empty that universe and let every ambiguous form sail
-through unflagged, exactly the fail-OPEN failure mode this release closes
-elsewhere. `--check-frozen-inputs` tolerates the same read error and
+#243 competitors universe projects from `canon.json`/`canon_senses.json`,
+and since #268 evidence re-authentication parses `manifest.json` off the
+same captured bytes) would silently empty that universe and let every
+ambiguous form sail through unflagged, exactly the fail-OPEN failure mode
+this release closes elsewhere. One qualification, added by #268: a read
+error still ends that run, but if a tamper on a *different* frozen input has
+already been detected by then, the run reports that mismatch instead of
+dying with an exception the result shape cannot carry — the mode's answer to
+an unreadable input is unchanged, only its answer to "unreadable AND already
+tampered" is. `--check-frozen-inputs` tolerates the same read error and
 degrades instead, because it never parses anything downstream — it only
 ever answers "did a frozen input change," and raising there would trade its
 own documented "never crashes" contract for a check that buys nothing in

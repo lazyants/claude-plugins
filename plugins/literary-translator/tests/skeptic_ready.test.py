@@ -2261,6 +2261,324 @@ def test_verify_merged_fails_on_manifest_tamper(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #268: the tamper the test above applies leaves manifest.json PARSEABLE.
+# Every tamper that does NOT was reported as an ordinary advisory failure
+# instead of the FATAL frozen-input signal: run_verify_merged parsed
+# manifest.json as a hard precondition BEFORE frozen_input_check() ever ran,
+# so the parse raised, main() printed {"success": false, "error": ...} with no
+# frozen_input_mismatch key at all, and skeptic-pass-wf.template.js bucketed
+# it as "verify-failed" rather than "frozen-input-mismatch" -- the one signal
+# SKILL.md's exit contract gates a pipeline HALT on. The same tamper on
+# canon.json/canon_senses.json was always reported correctly; manifest.json
+# was the last frozen input still parsed ahead of the check.
+# ---------------------------------------------------------------------------
+
+def _manifest_tamper_fixture(tmp_path):
+    """The shared clean fixture for the #268 cases below: one block, one
+    cited adverse record that byte-verifies, and an aggregate stamping
+    manifest_sha256 over the ORIGINAL manifest.json."""
+    lang_dir = tmp_path / "languages"
+    particle_config = write_particle_config(lang_dir)
+    lang = bn.load_language_config(particle_config, languages_dir=lang_dir)
+    text = "Jean walked home."
+    block_id, blk = block(text)
+    manifest_path = tmp_path / "manifest.json"
+    write_json(manifest_path, make_manifest((block_id, blk)))
+    manifest_sha256 = suspicion_scan.compute_frozen_input_hash(manifest_path)
+
+    evidence = evidence_for("Jean", block_id, "seg01", text, lang)
+    triage_path = tmp_path / "skeptic_triage.json"
+    write_json(triage_path, {
+        "schema_version": 1, "run_id": "run-1",
+        "records": [adverse_record("Jean", evidence)],
+    })
+    aggregate_path = tmp_path / "assignments.json"
+    write_json(aggregate_path, {
+        **make_aggregate_manifest("run-1", [make_assignment("Jean", [window_for(evidence)])]),
+        "manifest_sha256": manifest_sha256,
+    })
+    return {
+        "lang_dir": lang_dir, "particle_config": particle_config,
+        "block_id": block_id, "manifest_path": manifest_path,
+        "triage_path": triage_path, "aggregate_path": aggregate_path,
+    }
+
+
+def _run_verify(fx, **kwargs):
+    """Every #268 case drives run_verify_merged with the same four
+    positionals off the fixture; `kwargs` is where a case differs (only
+    `canon_path`, so far)."""
+    return sr.run_verify_merged(
+        fx["triage_path"], fx["aggregate_path"], fx["manifest_path"],
+        fx["particle_config"], languages_dir=fx["lang_dir"], **kwargs,
+    )
+
+
+def _apply_unparseable_tamper(manifest_path: Path, kind: str) -> None:
+    if kind == "invalid_json":
+        manifest_path.write_text("{ this is not JSON", encoding="utf-8")
+    elif kind == "invalid_utf8":
+        # A tamper is free to write bytes that are not text at all --
+        # `_read_json` decodes strictly as UTF-8, so this raises a
+        # UnicodeDecodeError rather than a JSONDecodeError.
+        manifest_path.write_bytes(b'{"blocks": "\xff\xfe not utf-8"}')
+    elif kind == "deep_nesting":
+        # Parseable as text, but `json.loads` raises RecursionError rather
+        # than JSONDecodeError -- neither is an OSError, and only one is a
+        # ValueError, which is why both readers name both.
+        #
+        # The depth is a MEASURED margin, not padding: on the pinned runtime
+        # (Python 3.14) 100 000 levels parse fine and the boundary sits
+        # somewhere above that, moving with C-stack headroom. Shrink this and
+        # the case parses, raises nothing, and stops testing the arm it names.
+        manifest_path.write_text("[" * 1000000 + "]" * 1000000, encoding="utf-8")
+    elif kind == "deleted":
+        manifest_path.unlink()
+    elif kind == "directory":
+        # `read_frozen_input_snapshot()` classifies this "irregular" and
+        # hashes that state, so H1 still answers; the parse cannot.
+        manifest_path.unlink()
+        manifest_path.mkdir()
+    else:  # pragma: no cover -- guards a typo in the parametrize list
+        raise AssertionError(f"unknown tamper kind {kind!r}")
+
+
+@pytest.mark.parametrize("kind", ["invalid_json", "invalid_utf8", "deep_nesting", "deleted", "directory"])
+def test_verify_merged_reports_a_tamper_that_leaves_manifest_unparseable(tmp_path, kind):
+    """RED before the #268 fix, for every one of these shapes: the pre-fix
+    parse ended run_verify_merged before frozen_input_mismatch existed, so
+    there was no result dict to carry it. Which exception got there differed
+    -- SkepticReadyError for invalid JSON, a deletion and a directory; a raw
+    UnicodeDecodeError/RecursionError (neither an OSError, and one not even a
+    ValueError) for the other two, straight past every `except
+    SkepticReadyError` into main()'s catch-all. Both routes printed a payload
+    with no frozen_input_mismatch key, which is the property under test."""
+    fx = _manifest_tamper_fixture(tmp_path)
+    clean = _run_verify(fx)
+    assert clean == {"verified": True, "missing": [], "frozen_input_mismatch": False}, (
+        "the fixture must verify cleanly before the tamper, or the assertions "
+        "below would pass for a reason that has nothing to do with #268"
+    )
+
+    _apply_unparseable_tamper(fx["manifest_path"], kind)
+
+    result = _run_verify(fx)
+    assert result["frozen_input_mismatch"] is True, (
+        "an unparseable manifest.json whose stamped hash no longer matches is a "
+        "frozen-input tamper -- reporting it as anything else downgrades a FATAL "
+        "pipeline halt to an advisory skeptic-pass failure"
+    )
+    assert result["verified"] is False
+    assert any("manifest.json" in m and "tamper" in m for m in result["missing"]), (
+        "the H1 tamper reason itself must survive into missing[]"
+    )
+    assert any(
+        "manifest.json" in m and (
+            "not valid JSON" in m or "could not be parsed as JSON" in m
+            or "not found" in m or "could not be read" in m
+        )
+        for m in result["missing"]
+    ), "the parse failure that ended the run early must be reported too, not silently swallowed"
+
+
+@pytest.mark.parametrize("kind", ["invalid_json", "deleted"])
+def test_main_prints_frozen_input_mismatch_for_an_unparseable_manifest(tmp_path, capsys, kind):
+    """The CLI is what the Workflow template's agent actually reads: it
+    copies `frozen_input_mismatch` verbatim off this printed line
+    (SKEPTIC_VERIFY_SCHEMA requires the field). RED before the fix -- the
+    line was main()'s error payload, which has no such field."""
+    fx = _manifest_tamper_fixture(tmp_path)
+    _apply_unparseable_tamper(fx["manifest_path"], kind)
+
+    exit_code = sr.main([
+        "--verify-merged", str(fx["triage_path"]), str(fx["aggregate_path"]),
+        "--manifest-path", str(fx["manifest_path"]),
+        "--particle-config", str(fx["particle_config"]),
+        "--languages-dir", str(fx["lang_dir"]),
+    ])
+    assert exit_code == 1
+
+    payload = json.loads(capsys.readouterr().out.rstrip("\n"))
+    assert payload.get("frozen_input_mismatch") is True, (
+        f"printed line {payload!r} carries no frozen_input_mismatch, so the template "
+        "cannot tell this tamper apart from an ordinary verify-failed"
+    )
+    assert payload.get("verified") is False
+
+
+@pytest.mark.parametrize("kind,expected", [
+    ("invalid_json", "is not valid JSON"),
+    ("invalid_utf8", "is not valid JSON"),
+    ("deep_nesting", "could not be parsed as JSON"),
+    ("deleted", "not found"),
+    ("directory", "could not be read"),
+])
+def test_verify_merged_still_raises_on_a_broken_manifest_with_no_stamp(tmp_path, kind, expected):
+    """With no manifest_sha256 to compare against there is no tamper signal,
+    and a manifest already broken at setup time stays exactly what it always
+    was -- a hard precondition failure, not a soft one. Pins that #268 did
+    not turn every broken manifest into an advisory result.
+
+    Also pins the fallback reader itself: this is the one manifest.json path
+    that still reaches a fresh `_read_json` after H1 (that function has
+    plenty of other callers), and two of these five states used to escape it
+    RAW (a non-UTF-8 `UnicodeDecodeError`, a deeply nested
+    `RecursionError`). Raw means past the caller's `except
+    SkepticReadyError` -- so with a canon/senses mismatch already standing,
+    the run would still have lost `frozen_input_mismatch` on its way to
+    main()'s catch-all."""
+    fx = _manifest_tamper_fixture(tmp_path)
+    aggregate = json.loads(fx["aggregate_path"].read_text(encoding="utf-8"))
+    del aggregate["manifest_sha256"]
+    write_json(fx["aggregate_path"], aggregate)
+
+    _apply_unparseable_tamper(fx["manifest_path"], kind)
+
+    with pytest.raises(sr.SkepticReadyError, match=expected):
+        _run_verify(fx)
+
+
+@pytest.mark.parametrize("kind", ["invalid_utf8", "deep_nesting", "invalid_json"])
+def test_verify_merged_keeps_a_standing_mismatch_when_the_unstamped_manifest_is_unreadable(tmp_path, kind):
+    """The reachable case the fallback reader owns: an aggregate carrying NO
+    manifest_sha256 (the schema allows it, and the aggregate lives in the
+    same durable root the tamper reaches) but a canon_sha256 that no longer
+    matches. H1 never read manifest.json, so the parse falls back to a fresh
+    `_read_json` -- and if that raises anything but SkepticReadyError, the
+    already-detected canon tamper is lost on the way out."""
+    fx = _manifest_tamper_fixture(tmp_path)
+    canon_path = tmp_path / "canon.json"
+    write_json(canon_path, {"entries": {}})
+    aggregate = json.loads(fx["aggregate_path"].read_text(encoding="utf-8"))
+    del aggregate["manifest_sha256"]
+    aggregate["canon_sha256"] = suspicion_scan.compute_frozen_input_hash(canon_path)
+    write_json(fx["aggregate_path"], aggregate)
+
+    write_json(canon_path, {"entries": {"INJECTED": {}}})
+    _apply_unparseable_tamper(fx["manifest_path"], kind)
+
+    result = _run_verify(fx, canon_path=canon_path)
+    assert result["frozen_input_mismatch"] is True, (
+        "the canon.json tamper was already detected before the manifest parse ran -- "
+        "an exception escaping that parse must not strip the field the caller HALTs on"
+    )
+    assert result["verified"] is False
+    assert any("canon.json" in m and "tamper" in m for m in result["missing"])
+
+
+def test_verify_merged_keeps_a_standing_mismatch_when_a_later_frozen_input_read_fails(tmp_path, monkeypatch):
+    """The same class one level up, inside frozen_input_check()'s own loop:
+    canon.json is stamped and tampered (row 1 records the mismatch), then
+    manifest.json's read raises (row 2). Letting that OSError out mid-loop
+    discarded every answer the loop had already collected, and discarded it
+    into main()'s catch-all -- the one payload with no frozen_input_mismatch
+    field. The read failure still ends the run; it just stops taking the
+    verdict with it.
+
+    test_verify_merged_still_raises_on_the_same_read_failure above pins the
+    OTHER half, unchanged: with NO mismatch standing the raw OSError still
+    propagates, because there is then nothing for the caller to lose."""
+    fx = _manifest_tamper_fixture(tmp_path)
+    canon_path = tmp_path / "canon.json"
+    write_json(canon_path, {"entries": {}})
+    aggregate = json.loads(fx["aggregate_path"].read_text(encoding="utf-8"))
+    aggregate["canon_sha256"] = suspicion_scan.compute_frozen_input_hash(canon_path)
+    write_json(fx["aggregate_path"], aggregate)
+    write_json(canon_path, {"entries": {"INJECTED": {}}})
+
+    real_read_frozen_input_snapshot = sr.read_frozen_input_snapshot
+
+    def _fail_on_manifest(path):
+        if Path(path) == fx["manifest_path"]:
+            raise OSError("simulated transient read failure")
+        return real_read_frozen_input_snapshot(path)
+
+    monkeypatch.setattr(sr, "read_frozen_input_snapshot", _fail_on_manifest)
+
+    result = _run_verify(fx, canon_path=canon_path)
+    assert result["frozen_input_mismatch"] is True, (
+        "canon.json's tamper was recorded before manifest.json's read failed -- "
+        "the read failure must not carry that verdict out through a payload shape "
+        "that cannot express it"
+    )
+    assert result["verified"] is False
+    assert any("canon.json" in m and "tamper" in m for m in result["missing"])
+    assert any("manifest.json" in m and "could not be read" in m for m in result["missing"]), (
+        "the read failure that ended the run must be reported, not just survived"
+    )
+
+
+def test_verify_merged_parses_manifest_from_h1s_own_snapshot(tmp_path, monkeypatch):
+    """The manifest analogue of
+    test_verify_merged_resolve_competitors_consumes_h1s_own_snapshot: #268
+    moved the manifest parse BELOW frozen_input_check(), which would have
+    reopened the round-5 race for this input had the parse re-read the path
+    instead of reusing the snapshot H1 already hashed -- H1 approving one
+    on-disk version (frozen_input_mismatch False) while evidence
+    re-authentication silently consumed another.
+
+    Not RED against pre-#268 source -- there the parse happened before the
+    mutation could land -- so it is a guard against the fix's own regression
+    shape rather than a reproduction of the shipped defect. It is not
+    vacuous: the second call below proves the injected mutation genuinely
+    breaks verification when it IS the version that gets parsed."""
+    fx = _manifest_tamper_fixture(tmp_path)
+    manifest_path = fx["manifest_path"]
+    mutated_manifest_bytes = json.dumps(
+        make_manifest((fx["block_id"], {"seg": "seg01", "plain_text": "Someone else walked home."})),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    real_read_frozen_input_snapshot = sr.read_frozen_input_snapshot
+
+    def _capture_then_mutate_manifest(path):
+        result = real_read_frozen_input_snapshot(path)
+        if Path(path) == manifest_path:
+            manifest_path.write_bytes(mutated_manifest_bytes)
+        return result
+
+    monkeypatch.setattr(sr, "read_frozen_input_snapshot", _capture_then_mutate_manifest)
+
+    result = _run_verify(fx)
+    assert result["frozen_input_mismatch"] is False, (
+        "the stamp describes the ORIGINAL manifest.json -- the captured snapshot "
+        "this run actually hashed -- so it must still match regardless of the "
+        "later on-disk mutation"
+    )
+    assert result["verified"] is True, (
+        "MUTATION CAUGHT: this record's citation was re-authenticated against the "
+        "MUTATED manifest.json, meaning the parse re-read the path after "
+        "frozen_input_check() had already hashed and approved the ORIGINAL bytes"
+    )
+    assert manifest_path.read_bytes() == mutated_manifest_bytes
+
+    # Potency check: parsed as the CURRENT on-disk version, that same
+    # mutation does break this record -- so the assertion above is about
+    # which bytes were parsed, not about a mutation that changes nothing.
+    # The aggregate is RE-STAMPED over the mutated bytes first: leaving the
+    # original stamp would fail this run on the hash mismatch alone, which
+    # `verified` cannot be told apart from a citation that stopped
+    # verifying -- a potency check that proves nothing.
+    monkeypatch.undo()
+    aggregate = json.loads(fx["aggregate_path"].read_text(encoding="utf-8"))
+    aggregate["manifest_sha256"] = suspicion_scan.compute_frozen_input_hash(manifest_path)
+    write_json(fx["aggregate_path"], aggregate)
+
+    after = _run_verify(fx)
+    assert after["frozen_input_mismatch"] is False, (
+        "re-stamped over the mutated bytes, so H1 has nothing to report -- this "
+        "call must isolate what the PARSE saw"
+    )
+    assert after["verified"] is False
+    assert any("no longer byte-verifies" in m for m in after["missing"]), (
+        f"the mutation must break this record's own CITATION specifically -- a looser "
+        f"matcher would also accept a source_form binding or coercion-delta entry, "
+        f"neither of which proves the parsed manifest bytes were the mutated ones. "
+        f"missing was {after['missing']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # codex round-2 High: the coerce-delta check (fix M2b) alone cannot catch a
 # PARTIAL propose_split referent tamper -- _coerce_record's own propose_split
 # branch drops a referent that fails to re-verify but leaves the record's

@@ -1092,8 +1092,9 @@ def compute_frozen_input_hash_from_state(state: str, content: bytes) -> str:
     though: since codex round 7 it calls `read_frozen_input_snapshot()`
     plus THIS function directly for canon.json/manifest.json/
     canon_senses.json alike -- the STAMPER's own shape, not
-    `compute_frozen_input_hash`'s -- because two of the three snapshots
-    also feed a downstream parse it needs to stay byte-consistent with
+    `compute_frozen_input_hash`'s -- because all three snapshots also feed
+    a downstream parse it needs to stay byte-consistent with (manifest.json
+    joined canon/senses there in #268)
     (see `skeptic_ready.py`'s own `frozen_input_check()` docstring). Its
     test suite remains the one caller left that still wants the
     read-fresh-and-hash-NOW convenience, to stamp fixtures.
