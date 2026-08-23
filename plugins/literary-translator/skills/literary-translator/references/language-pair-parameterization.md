@@ -58,7 +58,7 @@ A language config file contains four required keys, plus an optional fifth:
   language file directly (or fork a `.local.json` override — see
   "Remediation" below) — and set `ELISION_RE` in the **same** edit. The two
   keys are an iff (see `assets/languages/README.md`): `has_elision: false`
-  left beside a non-null `ELISION_RE` still splits elisions, because both
+  left beside a non-empty `ELISION_RE` still splits elisions, because both
   tokenizers gate the split on the compiled pattern alone, while every
   `has_elision`-keyed check that guards them switches off. That pairing is
   refused by `language_smoke_report.py`'s loader at the W3 gate (#116), so

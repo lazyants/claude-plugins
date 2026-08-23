@@ -59,8 +59,8 @@ source:
                                           # for this and every other language-specific behavior. To change whether
                                           # a language elides, edit that file directly (or fork a `.local.json`
                                           # override) -- and set `ELISION_RE` in the SAME edit: the two keys are an
-                                          # iff, and `has_elision: false` left beside a non-null `ELISION_RE` is
-                                          # refused by the W3 smoke gate (#116).
+                                          # iff, and `has_elision: false` left beside a non-empty `ELISION_RE` is
+                                          # refused by the W3 smoke gate (#116; `""` is inert and stays accepted).
     smoke_test:
       # Any NEW language preset -- even the proven, unmodified `fr.json` -- requires its own smoke test the FIRST
       # time it's used against a NEW source. `fr.json` is proven against Historiettes' own 17th-c. orthography and

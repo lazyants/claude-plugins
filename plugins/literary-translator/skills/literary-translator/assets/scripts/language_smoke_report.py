@@ -597,7 +597,7 @@ def load_particle_config(path):
         # "restore symmetry" there without pricing that first.
         fatal(
             f"particle_config at {path}: has_elision is false but "
-            f"ELISION_RE is non-null ({elision_re_str!r}) -- the two keys are "
+            f"ELISION_RE is a non-empty pattern ({elision_re_str!r}) -- the two keys are "
             "an iff (assets/languages/README.md), and this pairing still "
             "splits elisions while turning off every check that guards them. "
             "Set ELISION_RE to null, or set has_elision to true and supply "

@@ -1735,7 +1735,7 @@ def test_smoke_run_refuses_the_pairing_and_writes_no_report(tmp_path, root):
     assert proc.returncode == 2
     assert report is None
     assert "has_elision is false but" in proc.stderr
-    assert "ELISION_RE is non-null" in proc.stderr
+    assert "ELISION_RE is a non-empty pattern" in proc.stderr
 
 
 # Preservation: green before AND after. Each is mutation-checked against an
