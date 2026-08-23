@@ -71,7 +71,20 @@ Canon population is not "paste the whole book into context and ask for a glossar
    `occurrence_targets`' output, and nothing anywhere reports "this entry is inert" as
    such. It fails as a green run rather than a halt.
    `glossary_TASK.template.md` therefore instructs the adjudicator to route
-   any marker-bearing candidate to `review_queue`. In practice the trigger is not
+   any marker-bearing candidate to `review_queue`.
+
+   **This is an instruction, not a gate — know which.** `glossary_preflight.py`
+   guarantees the adjudicator is *told* the rule (step 6c halts a durable copy that
+   lacks it). Nothing checks the answer it gives back: `canon-batch.schema.json`
+   constrains `source_form` to `type: string`, so a marker-bearing item returned as
+   `accepted` still passes `canon_validate.py --check-batch` and still reaches
+   `_merge_batch()`. Closing that would put the refusal in `canon_validate.py`, a
+   `PLUGIN_BUNDLE_MEMBERS` entry — a `plugin_bundle_hash` flip, i.e. re-translating
+   every converged segment in every project, for a case that needs BOTH a >200-char
+   accepted run AND the model ignoring an instruction it was just handed. Parked as
+   **#659**, to be folded into the next release that moves that hash anyway.
+
+   In practice the trigger is not
    hostile input but source boilerplate: measured over a live French Gutenberg book,
    the single marker-bearing candidate was a 232-character all-caps run of the
    licence block, extracted with `likely_name: true`.
@@ -89,15 +102,24 @@ Canon population is not "paste the whole book into context and ask for a glossar
    `plugin_bundle_hash` and re-stales every converged segment in every project. When a
    future release moves that hash anyway, fix **both** sentences, not just the first.
 
-   **Operator note for an EXISTING durable root.** `glossary_TASK.md` is seeded once
-   and is never auto-overwritten, so a project scaffolded before this rule shipped
-   does not have it. This deliberately did **not** bump `PROMPT_CONTRACT_VERSION` to
-   force the migration: that constant is shared with `translate_TASK.md` and
-   `review_TASK.md`, which are `compute_prompt_hash` inputs, so bumping it would
-   re-stale every converged segment in every project — a cost far out of proportion
-   to this defect. To pick the rule up on a live root, copy the `source_form` and
-   `disposition` bullets from the current `glossary_TASK.template.md` into your
-   `glossary_TASK.md` by hand; nothing re-translates.
+   **Operator note for an EXISTING durable root — `glossary_preflight.py` HALTS you
+   until you migrate.** `glossary_TASK.md` is seeded once and is never
+   auto-overwritten, so a project scaffolded before this rule shipped does not have
+   it. Step 6c of the preflight refuses to dispatch a glossary pass whose durable
+   `glossary_TASK.md` lacks the refusal sentence, the same content-axis shape #510
+   uses — so the rule reaches existing roots, not only newly scaffolded ones. To
+   clear it, copy the `source_form` and `disposition` bullets from the current
+   `glossary_TASK.template.md` into your `glossary_TASK.md` by hand. Re-wrapping them
+   to your own line width is fine; the axis matches whitespace-flattened text.
+   Nothing re-translates: `glossary_preflight.py` is in neither bundle and
+   `glossary_TASK.md` is in no cache-key field.
+
+   This deliberately did **not** bump `PROMPT_CONTRACT_VERSION` to force the
+   migration, even though that would also have worked: the constant is shared with
+   `translate_TASK.md` and `review_TASK.md`, which are `compute_prompt_hash` inputs,
+   so bumping it would re-stale every converged segment in every project — a cost far
+   out of proportion to this defect. The preflight axis buys the same halt for
+   nothing.
 
    **Copying the bullets does not reach a glossary run that is already in flight.**
    `glossary_TASK.md`'s bytes are not one of the resume digest's inputs (those are

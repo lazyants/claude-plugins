@@ -189,6 +189,22 @@ SENSE_TRANSLATED = "sense_translated"
 # rather than a silently disabled axis.
 STYLE_BIBLE_PROHIBITION = "In particular never `style_bible.md`"
 
+# The clause the #383 truncation rule turns on, matched literally (step 6c) --
+# same contract and the same by-eye sync duty as STYLE_BIBLE_PROHIBITION above,
+# and pinned in the shipped template by
+# tests/glossary_truncated_name_rule.test.py.
+#
+# Deliberately WIDTH-FREE. The rule's full sentence names the digest width, and
+# tests/glossary_truncated_name_rule.test.py pins that width against a marker
+# `bootstrap_names._capped_candidate_name()` actually emitted. Repeating the
+# number here would make a producer-side width change a THREE-site edit whose
+# third site nothing points at, so this axis keys on the part of the sentence
+# that carries the refusal rather than on the part that carries the shape.
+TRUNCATED_NAME_REFUSAL = (
+    "marker described under `source_form` always gets "
+    "`disposition: \"review_queue\"`, never `\"accepted\"`"
+)
+
 # Same marker syntax/regex as profile_validate.py's own
 # PROMPT_CONTRACT_MARKER_RE (kept in sync by eye -- this gate's own concern,
 # durable-vs-plugin staleness at glossary pre-dispatch, is deliberately
@@ -659,6 +675,55 @@ def main(argv=None) -> int:
             f"glossary_TASK.template.md word-sense paragraph (the one ending "
             f"'never this pass's') before retrying the glossary pass. It is in "
             f"no cache-key field, so the edit re-translates nothing."
+        )
+
+    # --- Step 6c: prompt axis, CONTENT (#383) --------------------------------
+    # Same shape as 6b, and for the same reason: glossary_TASK.md is seeded
+    # ONCE and never auto-overwritten, so a rule added to the shipped template
+    # reaches an already-scaffolded project only if something refuses to
+    # dispatch until it is applied. Bumping PROMPT_CONTRACT_VERSION would do
+    # that too, but that constant is shared with translate_TASK.md and
+    # review_TASK.md -- both compute_prompt_hash inputs -- so it would re-stale
+    # every converged segment in every project. This file is in neither
+    # PLUGIN_BUNDLE_MEMBERS nor DERIVATION_BUNDLE_MEMBERS, and the operator's
+    # edit is to glossary_TASK.md, which is in no cache-key field either, so
+    # this axis costs no re-translation anywhere.
+    if TRUNCATED_NAME_REFUSAL not in _flatten(plugin_task_text):
+        _halt(
+            f"glossary_preflight: this plugin's own shipped "
+            f"{PLUGIN_GLOSSARY_TASK_TEMPLATE} no longer carries the literal "
+            f"{TRUNCATED_NAME_REFUSAL!r} -- either the shipped refusal of a "
+            f"machine-truncated candidate name was reworded without updating "
+            f"this script's TRUNCATED_NAME_REFUSAL constant, or the plugin "
+            f"install is damaged. This axis is never skipped silently; fix the "
+            f"constant (and tests/glossary_truncated_name_rule.test.py's "
+            f"matching pin) or reinstall the plugin."
+        )
+    durable_task_text, err = _read_text_guarded(durable_root / "glossary_TASK.md")
+    if err is not None:
+        reason = err
+    elif TRUNCATED_NAME_REFUSAL not in _flatten(durable_task_text):
+        reason = (
+            "it does not carry the refusal of a machine-truncated candidate "
+            "name that this plugin's own glossary_TASK.template.md ships"
+        )
+    else:
+        reason = None
+    if reason is not None:
+        _halt(
+            f"glossary_preflight: durable {durable_root / 'glossary_TASK.md'} "
+            f"is STALE, axis=prompt ({reason}) -- a copy seeded before this "
+            f"rule shipped still tells the glossary agent that a candidate's "
+            f"`name` is the surface form as it stands in the source. It is "
+            f"not: bootstrap_names.py bounds it and marks the cut, and "
+            f"occurrence lookup keys on the UNCAPPED text, so accepting a "
+            f"marked candidate freezes a canon entry that no occurrence of it "
+            f"can ever match -- zero occurrences, zero evidence, and a green "
+            f"run rather than a halt. glossary_TASK.md is NEVER "
+            f"auto-overwritten -- hand-apply this plugin's current "
+            f"glossary_TASK.template.md `source_form` and `disposition` "
+            f"bullets before retrying the glossary pass. They are in no "
+            f"cache-key field, so the edit re-translates nothing."
         )
 
     # --- Step 7: all clear ----------------------------------------------------
