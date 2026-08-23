@@ -2011,13 +2011,13 @@ flags, since those govern Step 1's own gating and must not also gate
 resume. `segs` is likewise no longer read by
 `resume_setup.py` at all (accepted-but-ignored for one release only). See
 `resume_setup.py`'s own module docstring for the full payload contract.
-**#396:** before this session's FIRST post-Step-0a operation that will READ
-OR EXECUTE a member of either verified bundle from the live plugin tree — a
+**#396:** IMMEDIATELY BEFORE EACH post-Step-0a operation that will READ OR
+EXECUTE a member of either verified bundle from the live plugin tree — a
 `mass-translate-wf.template.js` or `glossary-pass-wf.template.js`
 instantiation, a `segment_dispatch_driver.py` launch, W7's `final_audit.py`,
 or any other invocation that redirects a bundle member's resolution to the
-live install — run, ONCE, with the SAME absolute `{{PLUGIN_ROOT}}` this
-session passes everywhere else:
+live install — run, with the SAME absolute `{{PLUGIN_ROOT}}` this session
+passes everywhere else:
 
 ```
 python3 {{PLUGIN_ROOT}}/assets/scripts/scaffold_setup.py --verify \
@@ -2029,8 +2029,19 @@ read were written at Step 0a and characterize the durable copies, not
 whatever the live install now holds — not what this operation is about to
 read or execute. Read the `plugin_root=` value back off the success line and
 confirm it is the tree you are about to run from. This is Step 0a's writer
-in a read-only mode: it repairs nothing and rewrites no marker. A success
-claims parity for the MEMBERS of the two tuples and nothing wider — an extra,
+in a read-only mode: it repairs nothing and rewrites no marker.
+
+**Each such operation, not once per session, and the difference is the whole
+point.** The install is SHARED: another session can update it while this one
+is still running, which is one of the producers #396 names. A verdict is
+therefore evidence about the tree as it was when the check ran, and it does
+not stay true merely because this session has not ended — a result carried
+forward across a later instantiation re-opens exactly the window this rule
+closes. The cost is one bundle hash per boundary, and there are a handful of
+those in a run; the marker exists to avoid re-hashing per SEGMENT, which this
+does not do.
+
+A success claims parity for the MEMBERS of the two tuples and nothing wider — an extra,
 non-member file under `${durable_root}/scripts/` is invisible to both bundles
 yet still importable, so do not read the pass as "this install is the one
 this project was scaffolded against".
