@@ -122,6 +122,16 @@ GLOSSARY_PASS_TOKENS = (
     # working -- but the token must still be SUBSTITUTED, which is why it is
     # listed here rather than treated as optional.
     "{{CITATION_CONTENT_TYPES}}",
+    # #412 -- the plugin's own install root, threaded ONLY into
+    # mergeBatchesPrompt()'s --merge-batches command (never checkBatchCmd()
+    # or glossaryVerifyPrompt() -- canon_validate.py's main() does not
+    # forward --plugin-root to run_check_batch or run_verify_merged). Same
+    # json.dumps JS STRING LITERAL substitution shape as mass-translate-wf's
+    # own {{PLUGIN_ROOT}} token above, but UNLIKE that token an empty string
+    # is NOT a valid opt-out here -- it throws at instantiation, because this
+    # token is brand new with no legacy caller relying on a flagless
+    # --merge-batches default to preserve (see FIXTURE_GLOSSARY_PLUGIN_ROOT).
+    "{{PLUGIN_ROOT}}",
 )
 
 # A named-token shape (always {{UPPER_SNAKE_CASE}} in both templates) --
@@ -177,7 +187,20 @@ FIXTURE_MODEL = ""
 # FIXTURE_MODEL above). test_mass_translate_template_plugin_root_substitutes_
 # a_real_pinned_path below is the companion positive case, mirroring
 # test_mass_translate_template_model_substitutes_a_real_pinned_id.
+# MASS-TRANSLATE ONLY -- this token predates #412 with real legacy callers
+# relying on the flagless default, so its empty-string opt-out stays real.
+# glossary-pass-wf.template.js's OWN {{PLUGIN_ROOT}} is a separate, brand-new
+# token with no such caller, and deliberately does NOT share this sentinel
+# (see FIXTURE_GLOSSARY_PLUGIN_ROOT below) -- do not "harmonise" the two.
 FIXTURE_PLUGIN_ROOT = ""
+
+# #412 -- glossary-pass-wf.template.js's own {{PLUGIN_ROOT}}, unlike
+# mass-translate-wf's, throws at instantiation when empty (no legacy caller
+# to preserve a flagless-merge default for; see that template's own header
+# comment). This fixture is therefore a real, non-empty, allowlist-legal
+# path rather than FIXTURE_PLUGIN_ROOT's empty sentinel -- deliberately NOT
+# the same constant.
+FIXTURE_GLOSSARY_PLUGIN_ROOT = "/fixture/plugin/root/skills/literary-translator"
 
 # Deliberately includes a double quote, a backslash, and a real embedded
 # newline -- exactly the characters the template's own header comment warns
@@ -276,6 +299,7 @@ def instantiate_glossary_pass(
     batch_agent_cap: int = FIXTURE_BATCH_AGENT_CAP,
     effort: str = FIXTURE_EFFORT,
     citation_content_types: str = "",
+    plugin_root: str = FIXTURE_GLOSSARY_PLUGIN_ROOT,
 ) -> str:
     text = GLOSSARY_PASS_TEMPLATE.read_text(encoding="utf-8")
 
@@ -297,6 +321,14 @@ def instantiate_glossary_pass(
     # #347/1.16.1 -- also inside its own quotes. Comma-separated; empty means
     # the fetcher's shipped default list.
     text = text.replace("{{CITATION_CONTENT_TYPES}}", citation_content_types)
+    # #412 PLUGIN_ROOT -- same json.dumps JS string literal substitution
+    # shape as mass-translate-wf's own {{PLUGIN_ROOT}} token (token sits
+    # OUTSIDE its quotes: `const PLUGIN_ROOT = {{PLUGIN_ROOT}};`). UNLIKE
+    # that token, empty is NOT a valid value here -- the template throws at
+    # instantiation for a blank PLUGIN_ROOT, so the default above is
+    # FIXTURE_GLOSSARY_PLUGIN_ROOT, a real non-empty path, never
+    # FIXTURE_PLUGIN_ROOT's empty sentinel.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(plugin_root))
 
     return text
 
@@ -492,6 +524,20 @@ def test_glossary_pass_template_instantiates_with_zero_unresolved_tokens(researc
         "quoted string (matching mass-translate-wf.template.js's own token)"
     )
     assert f'const EFFORT = "{FIXTURE_EFFORT}"' in out
+    # #412 -- PLUGIN_ROOT, same json.dumps JS string literal contract as
+    # mass-translate-wf.template.js's own token, but UNLIKE that token this
+    # one is REQUIRED -- the template throws at instantiation for an empty
+    # value (see FIXTURE_GLOSSARY_PLUGIN_ROOT's own comment), so this test's
+    # default (deliberately not FIXTURE_PLUGIN_ROOT's empty sentinel) must be
+    # a real, non-empty path.
+    # test_glossary_pass_template_plugin_root_substitutes_a_real_pinned_path
+    # below is a second positive case with a different (space + non-ASCII)
+    # path, proving the substitution is not coincidentally tied to this one
+    # fixture's shape.
+    assert f"const PLUGIN_ROOT = {json.dumps(FIXTURE_GLOSSARY_PLUGIN_ROOT)};" in out, (
+        "PLUGIN_ROOT must substitute as a strict json.dumps JS string "
+        "literal (with its own surrounding quotes)"
+    )
 
 
 @pytest.mark.parametrize("research_mode", ["live", "offline"])
@@ -514,6 +560,34 @@ def test_glossary_pass_template_has_no_unresolved_named_token(research_mode):
 
     leftover = NAMED_TOKEN_RE.findall(out)
     assert leftover == [], f"unresolved named substitution token(s) remain: {leftover}"
+
+
+def test_glossary_pass_template_plugin_root_substitutes_a_real_pinned_path():
+    """A second, differently-shaped real plugin_root path (space + non-ASCII
+    character, same fixture shape as mass-translate-wf's own companion test)
+    also lands correctly in `const PLUGIN_ROOT = {{PLUGIN_ROOT}};` -- proving
+    the substitution above is not an artifact of FIXTURE_GLOSSARY_PLUGIN_ROOT's
+    particular (plain-ASCII) shape. Unlike mass-translate-wf.template.js,
+    there is no "empty/unset" companion case to pair this with here -- an
+    empty PLUGIN_ROOT is not a valid value for this template at all (see
+    FIXTURE_GLOSSARY_PLUGIN_ROOT's own comment)."""
+    pinned_plugin_root = (
+        "/Users/José García/.claude/plugins/literary-translator"
+        "/skills/literary-translator"
+    )
+    out = instantiate_glossary_pass(
+        durable_root=FIXTURE_DURABLE_ROOT,
+        run_id=FIXTURE_RUN_ID,
+        source_lang=FIXTURE_SOURCE_LANG,
+        target_lang=FIXTURE_TARGET_LANG,
+        research_mode="offline",
+        plugin_root=pinned_plugin_root,
+    )
+    _assert_no_double_brace(out, "glossary-pass-wf.template.js (plugin_root pinned)")
+    assert f"const PLUGIN_ROOT = {json.dumps(pinned_plugin_root)};" in out, (
+        "PLUGIN_ROOT must substitute as a strict json.dumps JS string "
+        "literal (with its own surrounding quotes)"
+    )
 
 
 # ---------------------------------------------------------------------------

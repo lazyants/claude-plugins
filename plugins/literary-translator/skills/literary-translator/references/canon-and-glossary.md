@@ -112,10 +112,11 @@ Canon population is not "paste the whole book into context and ask for a glossar
    naming which of the two fields actually differed.
 
    The deliberate way to advance provenance on an UNCHANGED canon is
-   `canon_validate.py --research-mode <mode> --restamp-derivation`. That matters for
-   a mature, zero-candidate project: it has no candidates left, so the glossary pass
-   never runs, so no merge exists to re-stamp — and after a plugin upgrade that
-   touches `bootstrap_names.py` or `segpack.py`, segment selection would otherwise
+   `canon_validate.py --research-mode <mode> --restamp-derivation --plugin-root
+   {{PLUGIN_ROOT}}`. That matters for a mature, zero-candidate project: it has no
+   candidates left, so the glossary pass never runs, so no merge exists to re-stamp —
+   and after a plugin upgrade that touches `bootstrap_names.py` or `segpack.py`,
+   segment selection would otherwise
    stay blocked with no recourse (issue #193, which records the pre-1.15.0
    `--merge-batches <empty-batch.json>` trick as its only, explicitly unsanctioned
    escape). The operation is unchanged; what changed is that it is now explicit,
@@ -396,6 +397,24 @@ the precondition. `--canon-path PATH` (every mode, optional) overrides the
 default `${durable_root}/canon.json` location. Every mode prints exactly one
 JSON line to stdout and exits 0 on success / 1 on failure — callers should
 read stdout, not rely on the exit code alone.
+
+**#412 — a second requirement, on the STAMPING modes only.** The four modes
+that write `canon.json`'s `generation_hashes` — `--init`,
+`--restamp-derivation`, `--merge-batches` and the legacy bare `--batch`
+merge — additionally refuse to run, with an argparse error (exit `2`),
+unless given either `--plugin-root PATH` or the explicit escape hatch
+`--allow-durable-sibling`; passing both is itself an error. Stamping shells
+out to a sibling `cache_key.py`, and left to self-anchor that sibling comes
+out of `${durable_root}/scripts/`, which the codex processes this pipeline
+launches hold `--write` over — so a silently self-anchored lookup could
+stamp through a tampered copy and forge the very hashes that later gate
+canon reuse. `--plugin-root` names the plugin's own install tree and
+resolves the sibling as `{PATH}/assets/scripts/cache_key.py`;
+`--allow-durable-sibling` accepts the durable sibling knowingly, for a
+hand-run recovery with no orchestrating session to supply a plugin root.
+The three NON-stamping modes below — `--check-batch`, `--verify-merged` and
+validate-only — resolve no sibling and accept neither flag's obligation; do
+not add either to them.
 
 1.2.0 adds three new modes to close #87 (schema-less glossary dispatch,
 `references/orchestration-and-batching.md`), #90 (concurrent-batch races),
@@ -1122,9 +1141,10 @@ NORMAL first-run outcome on an uncased-script source whose preset ships no
 find there, so the curated list is empty because there were never candidates,
 not because they were all resolved. Either way this branch skips the merge,
 and the merge is the only writer of `canon.json` — so the SKIP branch must
-run `canon_validate.py --research-mode <mode> --init` to bootstrap an
-empty-but-stamped canon before W3a, or `segpack.py` fatals with
-`canon.json not found` (#290). `--init` is create-only: it never re-stamps an
+run `canon_validate.py --research-mode <mode> --init --plugin-root
+{{PLUGIN_ROOT}}` to bootstrap an empty-but-stamped canon before W3a, or
+`segpack.py` fatals with `canon.json not found` (#290). `--init` is
+create-only: it never re-stamps an
 existing `canon.json`, since `select_segments.py`'s derivation-state gate
 reads exactly the two hashes it would overwrite.
 

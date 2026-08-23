@@ -1700,6 +1700,17 @@ def instantiate_glossary_pass(
     text = text.replace("{{EFFORT}}", "high")
     # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
     text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
+    # #412 -- json.dumps JS string literal, token OUTSIDE quotes. UNLIKE
+    # mass-translate-wf.template.js's own {{MODEL}}/{{PLUGIN_ROOT}} (see
+    # instantiate_mass_translate above, deliberately unchanged -- that
+    # token's empty-string opt-out is real and predates #412), empty is NOT
+    # a valid value for the GLOSSARY template's {{PLUGIN_ROOT}}: it throws
+    # at instantiation, since this token is brand new with no legacy caller
+    # relying on a flagless --merge-batches default. The real plugin skill
+    # root resolves a genuine cache_key.py, so the guard accepts it; not
+    # inspected by this file's batch-size-estimator assertions beyond that,
+    # it only needs to resolve without throwing.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(str(PLUGIN_ROOT / "skills" / "literary-translator")))
     assert "{{" not in text, (
         "glossary fixture instantiation left an unresolved token -- fix the "
         "fixture, not the assertion"

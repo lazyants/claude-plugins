@@ -136,18 +136,25 @@ canon-file.schema.json from ${durable_root}/schemas/ -- never the plugin's
 own assets/schemas/ (this script always runs from the durable, per-project
 copy).
 
-Usage:
-    python3 canon_validate.py --research-mode offline --init
-    python3 canon_validate.py --research-mode offline --restamp-derivation
+Usage. #412: every mode that STAMPS generation_hashes (--init,
+--restamp-derivation, --merge-batches, legacy --batch) refuses to run without
+either --plugin-root PATH or an explicit --allow-durable-sibling -- see
+--plugin-root's own help and main()'s trusted-sibling precondition. The
+non-stamping modes resolve no sibling and take neither flag's meaning, so they
+are spelled here without it. ${plugin_root} below is the plugin's own install
+root, i.e. SKILL.md's {{PLUGIN_ROOT}}:
+    python3 canon_validate.py --research-mode offline --init --plugin-root ${plugin_root}
+    python3 canon_validate.py --research-mode offline --init --allow-durable-sibling
+    python3 canon_validate.py --research-mode offline --restamp-derivation --plugin-root ${plugin_root}
     python3 canon_validate.py --research-mode live --check-batch out_0.json
     python3 canon_validate.py --research-mode live --check-batch out_0.json --expect-source-forms-file manifest_0.json
-    python3 canon_validate.py --research-mode live --merge-batches out_0.json out_1.json
+    python3 canon_validate.py --research-mode live --merge-batches out_0.json out_1.json --plugin-root ${plugin_root}
     python3 canon_validate.py --research-mode live --verify-merged --batch out_0.json --batch out_1.json --expect-source-forms-file manifest_all.json
-    python3 canon_validate.py --research-mode live --batch glossary_out.json
-    python3 canon_validate.py --research-mode offline --batch glossary_out.json
+    python3 canon_validate.py --research-mode live --batch glossary_out.json --plugin-root ${plugin_root}
+    python3 canon_validate.py --research-mode offline --batch glossary_out.json --plugin-root ${plugin_root}
     python3 canon_validate.py --research-mode live
     python3 canon_validate.py --research-mode live --canon-path /path/to/canon.json
-    python3 canon_validate.py --research-mode live --merge-batches out_0.json --senses-path /path/to/canon_senses.json
+    python3 canon_validate.py --research-mode live --merge-batches out_0.json --senses-path /path/to/canon_senses.json --plugin-root ${plugin_root}
 
 Exit code 0 on success, 1 on failure (for --verify-merged, "success" means
 `verified: true`). Exactly one JSON line is printed to stdout either way --
@@ -231,8 +238,10 @@ def resolve_cache_key_script(plugin_root_str) -> Path:
     as `{plugin_root}/assets/scripts/cache_key.py`, the SAME layout
     SKILL.md documents for the plugin-anchored scripts, NOT
     ${durable_root}/scripts/'s own flattened copy layout.
-    `plugin_root_str=None` reproduces today's self-anchored sibling lookup
-    unchanged. This script has no --durable-root of its own (its OWN data
+    `plugin_root_str=None` reproduces the self-anchored sibling lookup
+    unchanged -- but in a STAMPING mode reachable only behind an
+    explicit --allow-durable-sibling (main()'s trusted-sibling precondition),
+    never as a silent default. This script has no --durable-root of its own (its OWN data
     is always self-anchored), so there is only ever this one thing to
     resolve, unlike select_segments.py/ledger_merge.py/resume_setup.py/
     review_ready.py, each of which resolves BOTH a data root and a sibling."""
@@ -262,6 +271,15 @@ class ModeSpec(NamedTuple):
     source_forms_refusal -- None when --expect-source-forms-file is accepted
                 with this mode; otherwise the REASON it is refused, shown to
                 the operator verbatim.
+    stamps_generation_hashes -- does this mode shell out to the sibling
+                cache_key.py to WRITE canon.json's generation_hashes? #412:
+                only these modes resolve a sibling out of the codex-writable
+                ${durable_root}/scripts/, so only these require an explicit
+                answer to "which cache_key.py may stamp this canon" -- see
+                main()'s trusted-sibling precondition. Declared as a column
+                rather than as a hand-typed set in main() for the same reason
+                every other cross-flag fact is: a mode added later inherits
+                the guard instead of having to be remembered by it.
 
     That last field deliberately carries both the predicate and its
     explanation in one place. The earlier shape asked "does this mode read a
@@ -282,6 +300,7 @@ class ModeSpec(NamedTuple):
     batch_ok: bool
     source_forms_refusal: "str | None"
     approve_to_refusal: "str | None"
+    stamps_generation_hashes: bool
 
 
 # EVERY mode, declared exactly ONCE, carrying the per-mode facts main()'s
@@ -349,6 +368,7 @@ MODE_SPECS = (
         batch_ok=False,
         source_forms_refusal=_READS_NO_FRAGMENT,
         approve_to_refusal=_READS_NO_FRAGMENT,
+        stamps_generation_hashes=True,
     ),
     ModeSpec(
         "--restamp-derivation",
@@ -356,6 +376,7 @@ MODE_SPECS = (
         batch_ok=False,
         source_forms_refusal=_READS_NO_FRAGMENT,
         approve_to_refusal=_READS_NO_FRAGMENT,
+        stamps_generation_hashes=True,
     ),
     ModeSpec(
         "--check-batch",
@@ -363,6 +384,7 @@ MODE_SPECS = (
         batch_ok=False,
         source_forms_refusal=None,
         approve_to_refusal=None,
+        stamps_generation_hashes=False,
     ),
     ModeSpec(
         "--merge-batches",
@@ -370,6 +392,7 @@ MODE_SPECS = (
         batch_ok=False,
         source_forms_refusal=_COVERAGE_ENFORCED_ELSEWHERE,
         approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
+        stamps_generation_hashes=True,
     ),
     ModeSpec(
         "--verify-merged",
@@ -377,6 +400,7 @@ MODE_SPECS = (
         batch_ok=True,
         source_forms_refusal=None,
         approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
+        stamps_generation_hashes=False,
     ),
     # The legacy bare-`--batch` merge. batch_ok=True is load-bearing, not
     # cosmetic: `--batch` IS this mode's own selector, so a False here would
@@ -387,6 +411,7 @@ MODE_SPECS = (
         batch_ok=True,
         source_forms_refusal=_COVERAGE_ENFORCED_ELSEWHERE,
         approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
+        stamps_generation_hashes=True,
     ),
 )
 
@@ -422,6 +447,7 @@ NON_MODE_DESTS = frozenset(
         "canon_path",
         "senses_path",
         "plugin_root",
+        "allow_durable_sibling",
     }
 )
 
@@ -2512,10 +2538,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "the tree it checks would let a tampered copy validate itself. "
             "cache_key.py is a LEAF and does not accept --plugin-root at "
             "all, so it is never forwarded to it; only a synthesized "
-            "--durable-root is. Optional; omit for today's self-anchored "
-            "sibling lookup. Only consulted by the modes that write "
+            "--durable-root is. REQUIRED by the modes that write "
             "(--init, --restamp-derivation, --merge-batches, legacy "
-            "--batch); ignored otherwise."
+            "--batch) unless --allow-durable-sibling is given instead; "
+            "ignored by every other mode, which resolves no sibling."
+        ),
+    )
+    parser.add_argument(
+        "--allow-durable-sibling",
+        action="store_true",
+        help=(
+            "#412: run a WRITING mode with the self-anchored "
+            "${durable_root}/scripts/cache_key.py, accepting that the "
+            "sibling comes out of a directory the codex process this stamp "
+            "gates can write to. The explicit escape hatch for the case "
+            "with no orchestrating session to supply --plugin-root (a "
+            "hand-run recovery, a fully self-anchored drive). Mutually "
+            "exclusive with --plugin-root: naming a trusted root AND "
+            "waiving the requirement at once states two different "
+            "intentions. Ignored by the non-writing modes, which resolve "
+            "no sibling at all."
         ),
     )
     return parser
@@ -2607,6 +2649,42 @@ def main(argv=None) -> int:
                 "validate-only (no mode flag) does not accept --approve-to -- "
                 "it reviews no single fragment to snapshot. Pass --check-batch."
             )
+    # #412 -- the trusted-sibling precondition. A mode that STAMPS
+    # generation_hashes shells out to a sibling cache_key.py; left to
+    # self-anchor, that sibling comes out of ${durable_root}/scripts/, which
+    # the codex process this very stamp gates holds --write over. The flag
+    # used to be optional, with the self-anchored path as the silent
+    # default, so a call site that simply never learned about --plugin-root
+    # stamped through whatever cache_key.py happened to be on disk. That is
+    # the failure this refusal removes: it is deliberately NOT a check that
+    # the flag was spelled correctly everywhere -- #582 recorded that
+    # enumerating call sites does not converge -- but a refusal to proceed
+    # without an ANSWER, so a missed call site halts naming both flags
+    # instead of forging hashes that later gate canon reuse.
+    #
+    # A comprehension over MODE_SPECS, never a hand-typed set: a writing mode
+    # added later inherits this guard from its own row.
+    stamping_modes = [spec for spec in selected_modes if spec.stamps_generation_hashes]
+    if args.plugin_root is not None and args.allow_durable_sibling:
+        parser.error(
+            "--plugin-root and --allow-durable-sibling are mutually exclusive "
+            "-- naming a trusted plugin root and waiving the requirement to "
+            "name one state two different intentions. Pass exactly one."
+        )
+    if stamping_modes and args.plugin_root is None and not args.allow_durable_sibling:
+        parser.error(
+            "; ".join(
+                f"{spec.flag} stamps canon.json's generation_hashes and so "
+                f"requires either --plugin-root PATH (the trusted plugin "
+                f"install root to resolve the sibling cache_key.py from) or "
+                f"an explicit --allow-durable-sibling. #412: "
+                f"${{durable_root}}/scripts/ is writable by the codex process "
+                f"this stamp gates, so a silently self-anchored sibling could "
+                f"be a tampered cache_key.py forging the hashes that gate "
+                f"canon reuse"
+                for spec in stamping_modes
+            )
+        )
     if args.verify_merged and not args.batch:
         parser.error("--verify-merged requires one or more --batch PATH")
     if not args.verify_merged and args.batch is not None and len(args.batch) > 1:

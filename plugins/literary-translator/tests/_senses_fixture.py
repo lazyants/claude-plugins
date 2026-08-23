@@ -128,4 +128,26 @@ AUTHORITATIVE_FIXTURE_INVENTORY = (
             "names a consumer script."
         ),
     },
+    {
+        "file": "canon_validate_plugin_root.test.py",
+        "category": 2,
+        "note": (
+            "Does not isolate any canon_senses consumer either. Its ONE "
+            "shutil.copy* copies cache_key.py -- a LEAF with no sibling "
+            "imports of its own -- into a stand-in plugin install root, so "
+            "the #412 --plugin-root override can be pointed at an untampered "
+            "copy. The durable_root it drives is built by "
+            "_canon_project_fixture.make_project(), which routes "
+            "canon_validate.py through stage_consumer() and therefore stages "
+            "canon_senses.py alongside it; this file never stages a consumer "
+            "itself. It names canon_validate.py in CODE (not only in "
+            "comments) solely inside two assertion-failure messages that tell "
+            "a reader whose mode table drifted from whose. Verified "
+            "2026-08-23 by reading every shutil.copy*/spec_from_file_location "
+            "site in the file: the only copy target is cache_key.py, and the "
+            "only in-process load goes through the shared "
+            "_canon_project_fixture.load_canon_validate_module(), which uses "
+            "the sanctioned sys.path.insert(SCRIPTS_SRC) idiom."
+        ),
+    },
 )

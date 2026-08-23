@@ -473,7 +473,19 @@ def write_batch(root, batch, name="batch.json"):
 
 
 def run_cli(root, args, timeout=30):
-    cmd = [sys.executable, str(root / "scripts" / "canon_validate.py")] + list(args)
+    """#412: the four `generation_hashes`-STAMPING modes (--init,
+    --restamp-derivation, --merge-batches, legacy bare --batch) now REFUSE to
+    run unless told which sibling `cache_key.py` to trust -- `--plugin-root
+    PATH` or the explicit `--allow-durable-sibling` escape hatch. The roots
+    this file builds are self-anchored durable_roots with no plugin install
+    tree, which IS the case the escape hatch exists for, so it is appended
+    here once. It is ignored by --check-batch (this file's usual mode), which
+    resolves no sibling, so no citation-refusal assertion changes meaning."""
+    cmd = (
+        [sys.executable, str(root / "scripts" / "canon_validate.py")]
+        + list(args)
+        + ["--allow-durable-sibling"]
+    )
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=str(root))
 
 

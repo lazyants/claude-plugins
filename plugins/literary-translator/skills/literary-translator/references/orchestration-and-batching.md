@@ -961,8 +961,9 @@ depends on wholly and which is citation-reviewed either way.
 
 1. **Final merge** — Claude, `effort:'low'`, **no** `agentType`, **no**
    `schema`: runs `canon_validate.py --merge-batches <frag1> <frag2> …
-   --research-mode X` — the single serialized writer that closes #90 (see
-   `references/canon-and-glossary.md` for the merge algorithm). **1.16.0:**
+   --research-mode X --plugin-root {{PLUGIN_ROOT}}` — the single serialized
+   writer that closes #90 (see `references/canon-and-glossary.md` for the
+   merge algorithm). **1.16.0:**
    under `live` those `<frag>` paths are each batch's approved SNAPSHOT
    (`approved_{index}_attempt_{n}.json`), not the mutable attempt fragment, so
    within one run what merges is byte-identical to what the citation reviewer

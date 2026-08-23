@@ -1122,7 +1122,8 @@ or W3a below dies with `FATAL: canon.json not found`:
 
 ```
 python3 ${durable_root}/scripts/canon_validate.py \
-  --research-mode <profile's glossary.research_mode> --init
+  --research-mode <profile's glossary.research_mode> --init \
+  --plugin-root {{PLUGIN_ROOT}}
 ```
 
 That writes an empty-but-stamped `canon.json` (`entries: {}`,
@@ -1134,7 +1135,35 @@ already exists it leaves the file byte-untouched and reports
 hand-roll the file instead: `segpack.py` rejects a `canon.json` whose
 `generation_hashes` fields are absent, and invented values would propagate
 verbatim into every pack that `select_segments.py`'s derivation-state gate
-later reads. Otherwise run the codex-glossary-pass,
+later reads.
+
+**#412 — a stamping mode now REFUSES to guess which `cache_key.py` to
+trust.** `--init` is one of `canon_validate.py`'s four
+`generation_hashes`-STAMPING modes (`--init`, `--restamp-derivation`,
+`--merge-batches`, and the legacy bare `--batch` merge), and every one of
+them now halts with an argparse error (exit `2`) unless it is handed either
+`--plugin-root PATH` or the explicit escape hatch
+`--allow-durable-sibling`. Passing both is itself an error: naming a
+trusted plugin root and waiving the requirement to name one state two
+different intentions. That is why the command above carries `--plugin-root
+{{PLUGIN_ROOT}}` — stamping shells out to a sibling `cache_key.py`, and
+left to self-anchor that sibling comes out of `${durable_root}/scripts/`,
+which the codex processes this pipeline launches hold `--write` over. A
+tampered copy sitting there would forge the very hashes that later gate
+canon reuse, and the run would report green rather than halt. The refusal
+is deliberately NOT a check that every call site is spelled correctly —
+the #582 paragraph in W5 records that enumerating call sites does not
+converge — but a refusal to proceed without an ANSWER, so a call site that
+never learned about the flag halts naming both options instead of stamping
+through whatever `cache_key.py` happens to be on disk.
+`--allow-durable-sibling` is the sanctioned opt-out for a hand-run
+recovery with no orchestrating session to supply a plugin root: it accepts
+the durable sibling knowingly, on the operator's own judgement, rather
+than silently. `canon_validate.py`'s NON-stamping modes — `--check-batch`,
+`--verify-merged`, and validate-only (no mode flag) — resolve no sibling at
+all and are unaffected; do not add either flag to them.
+
+Otherwise run the codex-glossary-pass,
 instantiating `glossary-pass-wf.template.js` fresh from the plugin's current
 copy every time — batched over `${durable_root}/glossary_TASK.md`, feeding the
 planner's `args` into the Workflow tool and its `batches` into
@@ -1148,6 +1177,29 @@ string when the key is absent or empty, meaning `fetch_citation.py`'s shipped
 default. It is REQUIRED, not optional: leaving it unsubstituted throws at
 instantiation rather than silently falling back, because a profile setting that
 quietly did not take effect is the exact failure this release exists to close.
+
+**#412:** that same instantiation ALSO substitutes `{{PLUGIN_ROOT}}` into
+`glossary-pass-wf.template.js` — this skill's own directory, the SAME value
+Step 0 already defines (`${CLAUDE_PLUGIN_ROOT}/skills/literary-translator`),
+reused here, never redefined — and **not** `${CLAUDE_PLUGIN_ROOT}` itself,
+which is the wrong value: an installed plugin has no `assets/` at its root,
+so the sibling lookup would name a directory that does not exist. Unlike
+this skill's PROSE occurrences of `{{PLUGIN_ROOT}}` — which a reader
+substitutes on the fly when typing an example command — this one is a
+literal Workflow-template token, exactly like `{{EFFORT}}` and
+`{{CITATION_CONTENT_TYPES}}` above: it must be written into the
+instantiated `glossary-pass-wf.template.js` file itself. The template
+threads it onto the single serialized `canon_validate.py --merge-batches`
+call it builds — the one command in this pass that STAMPS
+`canon.json`'s `generation_hashes` — so it decides where that call resolves
+the sibling `cache_key.py` from: the plugin's own install tree, which the
+codex agents this pass dispatches cannot write to, instead of
+`${durable_root}/scripts/`, which they can. **Omitting this substitution is
+not a neutral default: it leaves the pre-#412 vulnerability open** — a
+codex-tampered `cache_key.py` in `${durable_root}/scripts/` would forge the
+provenance hashes that later gate canon reuse, and nothing downstream would
+catch it. Always substitute it.
+
 The resolved `effort` value also
 belongs in the `subst` object of the payload this session writes for
 `resume_setup.py` below — `resume_setup.py`'s own `SUBST_FIELDS` now
@@ -2805,6 +2857,33 @@ Runs at W7 over every converged segment:
   complete; `1` on any hard defect in a converged draft (unchanged, takes
   priority); `3` (new) when hard checks are clean but the project is not yet
   fully converged.
+
+Run it over the whole project, from the durable root's own copy:
+
+```
+python3 ${durable_root}/scripts/final_audit.py \
+  --plugin-root {{PLUGIN_ROOT}}
+```
+
+**#412 — the ENTRY POINT stays durable; only the sibling moves.** The
+command above deliberately runs `${durable_root}/scripts/final_audit.py`,
+not the plugin copy: `--plugin-root` moves only the CHECKER a script shells
+out to, and W5's own "#582 — why the ENTRY POINT stays
+`${durable_root}/scripts/`" paragraph records why relocating entry points
+was evaluated and not adopted. What the flag buys here is the
+whole-project completeness gate's sibling — that gate shells out to
+`select_segments.py`, and left to self-anchor that sibling comes out of the
+same writable `${durable_root}/scripts/` the audit is auditing.
+`final_audit.py` forwards the value verbatim, alongside a synthesized
+`--durable-root`, since the relocated `select_segments.py` no longer sits
+under the root it must classify. Unlike `canon_validate.py`, whose stamping
+modes REFUSE to run without an answer, `final_audit.py`'s `--plugin-root`
+stays OPTIONAL — and that asymmetry is a decision, not an oversight: it had
+no shipped call site at all before this command, so its caller set is
+closed by construction the moment this one exists, and a refusal would only
+break hand-run audits without closing anything a spelled-out call site
+leaves open.
+
 - **Frontback coverage report** (advisory, informational, never
   exit-code-gating on its own): reads `manifest.json`'s `frontback[]`
   inventory directly, emits one line per entry — `translate`-decision

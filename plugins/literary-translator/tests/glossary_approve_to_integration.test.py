@@ -68,7 +68,7 @@ TARGET_FORM = "Sapho"
 
 
 def instantiate(durable_root: str, *, research_mode: str = "live",
-                batch_agent_cap: int = 10_000) -> str:
+                batch_agent_cap: int = 10_000, plugin_root: str = "") -> str:
     """The template's documented one-time substitution -- but with DURABLE_ROOT
     bound to a REAL writable directory (unlike the sibling harnesses' fixed
     /fixture/... root), so the paths it emits can be created and the command it
@@ -83,6 +83,16 @@ def instantiate(durable_root: str, *, research_mode: str = "live",
     text = text.replace("{{EFFORT}}", "high")
     # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
     text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
+    # #412 -- json.dumps JS string literal, token OUTSIDE quotes. Empty
+    # string is the "not opted into the --plugin-root redirect" sentinel;
+    # test_the_emitted_approve_command_snapshots_byte_identically_against_the_real_script
+    # below passes the REAL skill root through this same parameter, because
+    # its --merge-batches command is run for real against the REAL
+    # canon_validate.py, which since #412 refuses every stamping mode
+    # (--merge-batches included) without either --plugin-root or
+    # --allow-durable-sibling -- so an empty PLUGIN_ROOT here would no
+    # longer be a no-op, it would make that real subprocess call fail.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(plugin_root))
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
 
@@ -193,10 +203,11 @@ function log(msg) { logLines.push(String(msg)); }
 
 def run(*, tmp_path: Path, durable_root: str, batches: list,
         research_mode: str = "live", plan: dict | None = None,
-        timeout: int = 30) -> dict:
+        timeout: int = 30, plugin_root: str = "") -> dict:
     plan = plan or {}
     harness = (
-        HARNESS.replace("__WRAPPED_SOURCE__", _wrap(instantiate(durable_root, research_mode=research_mode)))
+        HARNESS.replace("__WRAPPED_SOURCE__", _wrap(instantiate(
+            durable_root, research_mode=research_mode, plugin_root=plugin_root)))
         .replace("__BATCHES_JSON__", json.dumps(batches))
         .replace("__PLAN_JSON__", json.dumps(plan))
     )
@@ -332,9 +343,21 @@ def test_the_emitted_approve_command_snapshots_byte_identically_against_the_real
     init = run_canon_init(root)
     assert init.returncode == 0, f"canon init failed:\n{init.stdout}\n{init.stderr}"
 
+    # #412 -- the REAL plugin install root (this repo's own
+    # skills/literary-translator, which really does hold
+    # assets/scripts/cache_key.py), so the --merge-batches command the
+    # template emits below carries a --plugin-root that resolves against the
+    # genuine sibling script rather than the durable_root's own copy under
+    # {root}/scripts/ -- proving the #412 redirect works end to end, not
+    # just that its command STRING looks right.
+    real_plugin_root = str(PLUGIN_ROOT / "skills" / "literary-translator")
+
     # Drive the REAL template under Node with DURABLE_ROOT bound to this project,
     # so the command it emits names the real staged canon_validate.py.
-    out = run(tmp_path=tmp_path, durable_root=str(root), batches=[make_batch(0, [SOURCE_FORM])])
+    out = run(
+        tmp_path=tmp_path, durable_root=str(root),
+        batches=[make_batch(0, [SOURCE_FORM])], plugin_root=real_plugin_root,
+    )
     prepare = prompts_for(out, "glossary:citation-prepare:0")[0]
 
     # Lift the approve command the template ACTUALLY emitted. Cross-check it

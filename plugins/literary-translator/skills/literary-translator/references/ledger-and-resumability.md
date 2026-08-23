@@ -1025,7 +1025,8 @@ sanctioned escape is an explicit restamp, which re-records BOTH fields:
 
 ```
 python3 ${durable_root}/scripts/canon_validate.py \
-  --research-mode <profile's glossary.research_mode> --restamp-derivation
+  --research-mode <profile's glossary.research_mode> --restamp-derivation \
+  --plugin-root {{PLUGIN_ROOT}}
 ```
 
 then re-run `segpack.py` (in that order — segpack copies `canon.json`'s

@@ -229,6 +229,15 @@ def instantiate(*, research_mode: str = "live", batch_agent_cap: int = 10_000) -
     text = text.replace("{{EFFORT}}", "high")
     # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
     text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
+    # #412 -- json.dumps JS string literal, token OUTSIDE quotes. UNLIKE
+    # mass-translate-wf.template.js's own {{PLUGIN_ROOT}}, empty is NOT a
+    # valid value here -- the template throws at instantiation for a blank
+    # PLUGIN_ROOT (this token is brand new, with no legacy caller relying on
+    # a flagless --merge-batches default to preserve). The real plugin
+    # skill root resolves a genuine cache_key.py, so the guard accepts it;
+    # not inspected by this file's snapshot-ordering assertions beyond
+    # that, it only needs to resolve without throwing.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(str(PLUGIN_ROOT / "skills" / "literary-translator")))
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
 

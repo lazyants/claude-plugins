@@ -43,7 +43,6 @@ restamp path). `--restamp-derivation` is the sanctioned replacement, and is
 covered here too -- without it this fix would turn #193's latent brick into
 an unconditional one.
 """
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -54,9 +53,9 @@ TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 from _canon_project_fixture import (  # noqa: E402
-    SCRIPTS_SRC,
     accepted_item,
     live_generation_hashes,
+    load_canon_validate_module,
     make_project,
     perturb_derivation_bundle,
     queued_item,
@@ -316,25 +315,6 @@ def test_batch_alongside_another_mode_is_rejected(tmp_path, other_mode):
 # it); both express a requires-relation between two named flags, not a
 # per-mode property.
 # ---------------------------------------------------------------------------
-
-
-def load_canon_validate_module():
-    """In-process load of the REAL canon_validate.py, to read its own
-    MODE_SPECS table. Never used to execute the CLI -- every behavioural test
-    here drives it as a subprocess. The script's directory goes on sys.path
-    for the load so its sibling `from canon_senses import ...` resolves."""
-    scripts_dir = SCRIPTS_SRC
-    sys.path.insert(0, str(scripts_dir))
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "canon_validate_modes_under_test", scripts_dir / "canon_validate.py"
-        )
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        sys.path.remove(str(scripts_dir))
 
 
 def test_every_parser_mode_flag_is_declared_in_the_one_mode_table():
