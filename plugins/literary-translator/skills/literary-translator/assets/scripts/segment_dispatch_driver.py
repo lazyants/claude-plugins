@@ -4034,50 +4034,124 @@ def _matched_review_round_label(review_obj, run_id: str, seg: str, max_fix_round
     return None
 
 
-def _translate_redispatched_since(dirs: dict, seg: str, review_path: Path) -> bool:
-    """True iff THIS driver dispatched a fresh translate for `seg` --
-    process_segment()'s own `if action["action"] == "translate":` branch,
-    which writes runs/ledger.d/{seg}.json's status="in_progress" fragment
-    via ledger_update.py IMMEDIATELY BEFORE every translate dispatch, both
-    the very first one and any later retry -- STRICTLY AFTER `review_path`
-    was last written.
+# The ledger note the translate branch stamps AFTER codex_job.py promotes a
+# draft, and the only thing _translate_redispatched_since() below accepts as
+# proof that the draft currently on disk came out of a translate. BOTH halves
+# are behaviour, not prose: the prefix is compared byte for byte, and the sha1
+# that follows it is compared against a freshly computed hash of the current
+# draft. Rewording either is a behaviour change, not a copy edit. Written at
+# exactly one site (process_segment()'s translate branch) and never by the
+# workflow template -- see the helper's own docstring for why not.
+TRANSLATE_PROMOTION_NOTE_PREFIX = (
+    "translate promoted by segment_dispatch_driver.py (#620); promoted draft sha1: "
+)
 
-    Verification-round finding: derive_next_action()'s `if not draft_ok:`
-    branch used to assume the ONLY thing that ever edits a draft after a
-    review is a fix turn -- true only because a genuine RE-TRANSLATE under
-    the SAME run_id was assumed unreachable. It is reachable:
-    translate_dispatch_token(run_id, seg) is a PURE function of run_id and
-    seg, so a legitimately re-selected segment (select_segments.py's own
-    --only-segs retry of a human_escalation segment, resolved to the SAME
-    run_id by resume_setup.py matching the same input digest on a later
-    invocation) produces a byte-identical token to what a fix turn's "copy
-    dispatch_token exactly" instruction ALSO produces -- so the draft_sha1
-    comparison alone cannot tell "a fix edited this draft" apart from "a
-    fresh retranslate overwrote this draft", and misreading the second as
-    the first wrongly terminates a segment that merely needs retrying.
 
-    The ledger fragment is the durable evidence the sha1 alone is not: a
-    retranslate always writes a FRESH runs/ledger.d/{seg}.json (a new file
-    mtime, stamped by ledger_update.py's own now_iso8601() at write time,
-    ledger_update.py:930) strictly after the review it invalidates; a fix
-    turn edits the draft directly and never goes through process_segment()
-    at all, so it writes no ledger fragment -- the fragment's mtime stays
-    exactly where the LAST translate dispatch (the original one, or an
-    earlier retry) left it, older than the review.
+def _translate_promotion_note(draft_sha1: str) -> str:
+    """The full note text for a promoted draft's ledger fragment. One
+    function so the writer and the reader below cannot drift apart."""
+    return TRANSLATE_PROMOTION_NOTE_PREFIX + draft_sha1
 
-    Conservative on any doubt: a missing or unreadable fragment returns
-    False, the same direction the sha1 comparison's own "cannot prove it"
-    case already takes -- this function only ever ADDS a way to prove a
-    genuine retranslate, never a way to prove a fix. An unprovable case
-    still terminates as invalid_post_fix_draft, which errs toward
-    stopping rather than silently discarding real work."""
+
+def _translate_redispatched_since(dirs: dict, seg: str, review_path: Path,
+                                  current_sha1: str) -> bool:
+    """True iff runs/ledger.d/{seg}.json is durable evidence that a translate
+    THIS driver ran promoted the draft whose content hash is `current_sha1`,
+    and did so strictly after `review_path` was last written.
+
+    Used by derive_next_action()'s `if not draft_ok:` branch as the one thing
+    that can turn an invalid, moved draft back into a plain "translate": a
+    draft that differs from the review's own recorded draft_sha1 was either
+    edited by a fix turn (terminate, do not discard it) or produced by a
+    genuine same-run retranslate (retry it). translate_dispatch_token(run_id,
+    seg) is a pure function of run_id and seg, so a legitimately re-selected
+    segment produces the byte-identical token a fix turn's "copy dispatch_token
+    exactly" instruction also produces -- the sha1 comparison alone cannot tell
+    the two apart, which is why this evidence exists at all.
+
+    WHAT IT REQUIRES, and why each conjunct is load-bearing (#620; the mtime
+    comparison used to be the whole test, and each of the three cases below
+    defeated it):
+
+    1. The fragment is NEWER than the review. Cheap first gate, unchanged.
+       Necessary and nowhere near sufficient: process_segment() has five
+       write_ledger() sites and FOUR of them are not a translate dispatch
+       (converged, converged-by-rejection, cap, and the #432/#461
+       reopen-capped in_progress write that precedes a REVIEW). The cap in
+       particular is written after the very review it caps, so it is
+       necessarily newer -- a capped segment an operator then hand-repaired
+       into an invalid state was silently re-translated over.
+
+    2. status == "in_progress". Not sufficient EITHER, and narrowing to it
+       alone would not have closed the defect: the reopen-capped write is
+       itself `{"status": "in_progress", "note": ...}`, and when its review
+       dispatch fails process_segment() returns without a further write, so
+       that fragment stays the newest artifact over a draft no translate
+       produced. Never test the ABSENCE of a note instead -- that write
+       already carries one, and an absence test would silently re-break the
+       day any other in_progress write grows one.
+
+    3. The note is TRANSLATE_PROMOTION_NOTE_PREFIX followed by exactly
+       `current_sha1`. Two distinct properties in one comparison. The prefix
+       says a translate promoted a draft: it is stamped only AFTER
+       run_one_codex_job() returns and only when codex_job.py reports a
+       genuine promotion, never before the dispatch -- a fragment written
+       before the job proves intent, and a driver killed between the two, a
+       failed launch, or an adopt-without-launch would all leave "evidence"
+       over an untouched draft. And the sha1 says the promoted draft is the
+       one still on disk: a constant marker would say "a translate ran" while
+       the operator's later hand repair sat in the file, and re-translating
+       over that repair is the exact harm this function exists to prevent.
+
+    `current_sha1` is passed in rather than recomputed: derive_next_action()
+    has already computed it for its own draft_sha1 comparison, so the two
+    readings cannot disagree and the draft is hashed once. The call site only
+    reaches this function when that value is not None.
+
+    What the hash does and does not prove: draft_content_sha1() excludes
+    dispatch_token and canonicalises the JSON (draft_sha1.py), so this is
+    trusted ledger evidence about the translated-CONTENT projection, not byte
+    provenance. Rewriting only the token, the whitespace or the key order
+    keeps it valid, and a hand-authored or restored fragment that matches on
+    every conjunct passes too. Both sit outside this project's trust boundary
+    -- its standing operator rule is that the ledger is never hand-written --
+    and neither can silently lose DIFFERENT translated prose, because
+    different prose changes the hash.
+
+    Conservative on every doubt: missing, unreadable, unparseable, not an
+    object, equal or older mtime, wrong status, absent/unrelated/near-match
+    note, or a recorded hash that no longer matches the draft on disk all
+    return False. False routes to invalid_post_fix_draft, which stops and
+    hands the decision back rather than discarding work -- the same direction
+    the sha1 comparison's own "cannot prove it" case already takes. This
+    function only ever ADDS a way to prove a genuine retranslate.
+
+    The workflow template's translateStage() also writes a pre-translate
+    `{"status": "in_progress"}` fragment (mass-translate-wf.template.js) and is
+    deliberately NOT stamped, so a driver pickup of a template-written run
+    reads False here. Its translate is a DETACHED dispatch -- a returned DISP
+    proves a launch, never a promotion -- so a stamp there would reintroduce
+    exactly the "evidence written before the outcome" defect described under
+    conjunct 3, and it would have to route a machine-compared hash through an
+    LLM agent's payload that recordLedgerCall() never verifies. The cost is
+    stated where it belongs, in the CHANGELOG: that segment halts, and the
+    halt persists until the draft is made valid again."""
     fragment_path = dirs["runs_dir"] / "ledger.d" / f"{seg}.json"
     try:
         fragment_mtime_ns = fragment_path.stat().st_mtime_ns
         review_mtime_ns = review_path.stat().st_mtime_ns
     except OSError:
         return False
-    return fragment_mtime_ns > review_mtime_ns
+    if fragment_mtime_ns <= review_mtime_ns:
+        return False
+    try:
+        fragment = json.loads(fragment_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(fragment, dict) or fragment.get("status") != "in_progress":
+        return False
+    note = fragment.get("note")
+    return isinstance(note, str) and note == _translate_promotion_note(current_sha1)
 
 
 def _translate_in_progress_since(dirs: dict, seg: str, review_path: Path) -> bool:
@@ -4147,18 +4221,21 @@ def _translate_in_progress_since(dirs: dict, seg: str, review_path: Path) -> boo
     for a same-label re-review -- never the reverse, so it can never
     manufacture the live-lock a wrongly-conservative guard would risk.
 
-    Why the fragment's status is read HERE but the sibling helper above is
-    deliberately left status-blind rather than narrowed the same way:
-    narrowing the sibling regresses a real case at ITS OWN call site (the
-    `if not draft_ok:` branch above) -- a `blocked`/`review-timeout`
-    fragment newer than the review, sitting over an invalid draft that
-    genuinely came from a translate, would flip from today's correct
-    `translate` outcome to a wrong `invalid_post_fix_draft` termination.
-    That is RAW #1, tracked separately (filed, not fixed here) precisely
-    because it needs "the last in_progress write is newer than the
-    review", not "the newest fragment is in_progress" -- a different,
-    larger change than this call site needs. Do not "fix" the sibling to
-    match this one.
+    Why this helper reads status while the sibling above reads status AND a
+    draft-bound note, rather than the two sharing one predicate: they answer
+    different questions. This one asks "was a translate DISPATCHED after this
+    review", which is all its own call site needs to decline a round advance,
+    and its accepted false positives are listed above. The sibling has to
+    answer the strictly harder "is the draft ON DISK RIGHT NOW the output of a
+    translate", because a wrong True there re-translates over an operator's
+    hand repair. A status test cannot answer that -- the reopen-capped write
+    is itself `in_progress` -- and neither can a constant marker, which still
+    reads True once the operator has edited the promoted draft. That was RAW
+    #1; it is fixed (#620), by evidence stamped after codex_job.py reports a
+    promotion and naming that draft's own content hash. Do not collapse the
+    two helpers into one: widening THIS one to require the note would hold the
+    round label over a `blocked`/`review-timeout` recovery the note never
+    describes, which is the regression the paragraph above exists to prevent.
 
     The status spelling checked below is authoritative from
     ledger-fragment.schema.json:13 / FRAGMENT_STATUS_FALLBACK_ENUM
@@ -4327,7 +4404,9 @@ def derive_next_action(seg: str, ctx: "DispatchContext") -> dict:
                     current_sha1 is not None
                     and prior_draft_sha1 is not None
                     and current_sha1 != prior_draft_sha1
-                    and not _translate_redispatched_since(dirs, seg, prior_review_path)
+                    and not _translate_redispatched_since(
+                        dirs, seg, prior_review_path, current_sha1
+                    )
                 ):
                     return {"action": "invalid_post_fix_draft"}
         return {"action": "translate"}
@@ -6173,6 +6252,46 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                 if not result["ok"]:
                     return {"seg": seg, "converged": False, "outcome": "failed", "stage": "translate",
                              "reason": result["reason"], "error_detail": result["error_detail"]}
+                # #620: the promotion evidence _translate_redispatched_since()
+                # reads, and the reason it is written HERE rather than folded
+                # into the in_progress write above. That write happens before
+                # the dispatch, so it can only ever prove INTENT: a driver
+                # killed between the two, a launch that failed, or a
+                # codex_job.py that adopted an already-valid canonical without
+                # launching would all leave it standing over a draft no
+                # translate produced -- and an operator's later hand repair of
+                # that draft would then be re-translated over, which is the
+                # whole defect. `ok and not adopted` is exactly
+                # codex_job.py's own `promoted` (its finalize() sets
+                # ok = promoted or adopted), i.e. a candidate that passed its
+                # gates and REPLACED the canonical.
+                #
+                # The note names the promoted draft's content hash, not just
+                # the fact of a promotion: a constant marker still reads True
+                # after the operator has edited that draft, so the hash is
+                # what makes the evidence describe the file currently on disk.
+                # Hashing failure means NO evidence rather than wrong
+                # evidence -- this invocation simply records none, and the
+                # next one derives conservatively from whatever is then on
+                # disk.
+                if not result.get("adopted"):
+                    try:
+                        promoted_sha1 = current_draft_sha1(
+                            seg, ctx.dirs["durable_root"] / "segments", ctx.dirs["scripts_dir"]
+                        )
+                    except DriverError as exc:
+                        return {"seg": seg, "converged": False, "outcome": "failed",
+                                "stage": "translate", "reason": "promotion-hash-failed",
+                                "error_detail": str(exc)}
+                    rec = write_ledger(
+                        ctx.dirs, seg,
+                        {"status": "in_progress",
+                         "note": _translate_promotion_note(promoted_sha1)},
+                        durable_root_str=ctx.durable_root_str, plugin_root_str=ctx.plugin_root_str,
+                    )
+                    if not rec.get("success"):
+                        return {"seg": seg, "converged": False, "outcome": "failed",
+                                "reason": "ledger-write-failed", "detail": rec.get("error")}
                 continue  # re-derive: should now see "review round 1"
 
             if action["action"] == "review":

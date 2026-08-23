@@ -1010,6 +1010,27 @@ remain**:
    probe call itself fails and returns `null` — inconclusive, never treated
    as proof of absence) leaves behind — none of those write a terminal
    status anymore.
+
+   **#620 — `segment_dispatch_driver.py` writes this site TWICE, and only the
+   second write is evidence.** The pre-dispatch write above is unchanged and
+   still carries no `note`: it exists to make an interruption recoverable, and
+   because it happens *before* the job it can only ever prove intent — a
+   driver killed between the two, a failed launch, or a `codex_job.py` that
+   adopted an already-valid canonical without launching would all leave it
+   standing over a draft no translate produced. So once `run_one_codex_job()`
+   returns a genuine promotion (`ok` and not `adopted`, which is exactly
+   `codex_job.py`'s own `promoted`, since its `finalize()` sets
+   `ok = promoted or adopted`), the driver writes the fragment a second time
+   with `note` = a fixed prefix followed by the **promoted draft's own content
+   sha1**. `derive_next_action()`'s `if not draft_ok:` branch accepts nothing
+   else as proof that an invalid, moved draft came from a translate rather
+   than from an operator's hand repair — a constant marker would keep reading
+   true after that repair, which is the defect. Both halves are compared:
+   the prefix byte for byte, the hash against a fresh reading of the draft.
+   The workflow's `translateStage()` is deliberately NOT stamped (its
+   translate is a detached dispatch, so a returned DISP proves a launch and
+   never a promotion), which is why a driver pickup of a template-written run
+   halts there instead of re-translating.
 1. **Draft-missing** — a fix round's `DRAFT_MISSING` branch fires, AND
    (1.3.6/#131) the `draftPresentAndValid` probe confirms the draft is
    genuinely absent/invalid (`present === false`). **1.16.0:** that branch is

@@ -5452,21 +5452,29 @@ def test_derive_next_action_invalid_post_fix_draft_uses_the_plugin_root_scripts_
     )
 
 
-def _dna_write_ledger_fragment(root, seg="seg01", *, mtime, status="in_progress"):
+def _dna_write_ledger_fragment(root, seg="seg01", *, mtime, status="in_progress", note=None):
     """A minimal, realistic runs/ledger.d/{seg}.json fragment -- the same
     shape process_segment()'s own `if action["action"] == "translate":`
-    branch causes ledger_update.py to write immediately before every
-    translate dispatch -- with its mtime pinned via os.utime() rather
-    than real wall-clock ordering, so a test can place it deterministic
-    ticks before or after a review.json regardless of filesystem mtime
-    resolution."""
+    branch causes ledger_update.py to write -- with its mtime pinned via
+    os.utime() rather than real wall-clock ordering, so a test can place it
+    deterministic ticks before or after a review.json regardless of
+    filesystem mtime resolution.
+
+    `note` is the #620 promotion evidence. Omitted, this writes the
+    PRE-dispatch fragment (no note), which is what that branch writes before
+    it launches codex_job.py and what every other write_ledger() site
+    produces. Passing driver_mod._translate_promotion_note(<the draft's own
+    sha1>) writes the POST-promotion fragment -- the only shape
+    _translate_redispatched_since() accepts. A test that means "a genuine
+    retranslate happened and its output is still on disk" must pass the
+    second, because that is what the shipped branch writes."""
     ledger_dir = root / "runs" / "ledger.d"
     ledger_dir.mkdir(parents=True, exist_ok=True)
     fragment_path = ledger_dir / f"{seg}.json"
-    fragment_path.write_text(
-        json.dumps({"timestamp": "irrelevant-to-this-fixture", "status": status}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    fragment = {"timestamp": "irrelevant-to-this-fixture", "status": status}
+    if note is not None:
+        fragment["note"] = note
+    fragment_path.write_text(json.dumps(fragment, ensure_ascii=False), encoding="utf-8")
     os.utime(fragment_path, (mtime, mtime))
     return fragment_path
 
@@ -5626,7 +5634,15 @@ def test_derive_next_action_invalid_post_retranslate_draft_with_a_same_run_revie
     )
     retranslated_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
     assert retranslated_sha1 != pre_review_sha1, "setup check: the retranslate must genuinely change draft content"
-    _dna_write_ledger_fragment(root, mtime=base + 20)  # the RETRY's own in_progress write, after the review
+    # The RETRY's own post-promotion write, after the review. #620: this
+    # carries the promotion note naming the draft it just promoted, because
+    # that is what the shipped translate branch writes once codex_job.py
+    # reports a promotion -- a bare in_progress fragment here would model the
+    # PRE-dispatch write, which proves only intent.
+    _dna_write_ledger_fragment(
+        root, mtime=base + 20,
+        note=driver_mod._translate_promotion_note(retranslated_sha1),
+    )
 
     # This fresh retranslate itself came back invalid (its own translate
     # quality issue, unrelated to the discriminator).
@@ -5638,6 +5654,342 @@ def test_derive_next_action_invalid_post_retranslate_draft_with_a_same_run_revie
         f"like any other fresh invalid translate, never terminated as "
         f"invalid_post_fix_draft -- got {action}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #620 -- _translate_redispatched_since() used to compare mtimes ONLY, so any
+# fragment newer than the review read as "a translate was dispatched", and an
+# operator's hand-repaired (structurally invalid) draft was silently
+# re-translated over. The section below pins the three properties that
+# replaced the mtime-only test, and separates the cases that genuinely
+# distinguish fixed from broken code (watched RED against a reverted fix)
+# from the regression guards that pass either way and are here to prove the
+# fix breaks nothing.
+# ---------------------------------------------------------------------------
+
+
+def _dna_stage_post_fix_invalid_draft(root, driver_mod, *, round_label="final"):
+    """The shared shape every reader case below needs: a matching same-run
+    review whose recorded draft_sha1 is the PRE-edit draft's, a draft the
+    operator has since hand-edited (new bytes, dispatch_token preserved), and
+    validate_draft.py failing for that segment. Returns (base_mtime,
+    current_sha1). Nothing about the ledger fragment is written here -- that
+    is what each case varies."""
+    base = int(time.time()) - 3600
+    _dna_write_draft(root, driver_mod)
+    reviewed_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label=round_label, clean=False, coverage_ok=True,
+                       draft_sha1=reviewed_sha1,
+                       findings=[{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}])
+    os.utime(root / "segments" / "seg01.review.json", (base + 10, base + 10))
+    current_sha1 = _dna_edit_draft(root, driver_mod)
+    assert current_sha1 != reviewed_sha1, "setup check: the hand edit must move the draft's hash"
+    write_invalid_validate_draft_segs(root, ["seg01"])
+    return base, current_sha1
+
+
+@pytest.mark.parametrize("status,extra", [
+    ("converged", {"rounds": 3}),
+    ("non_converged", {"reason": "cap"}),
+])
+def test_derive_next_action_terminal_fragment_newer_than_review_does_not_retranslate(tmp_path, status, extra):
+    """#620, the reported defect. FOUR of process_segment()'s five
+    write_ledger() sites are not a translate dispatch, and a terminal one is
+    NECESSARILY newer than the review it records -- the cap is written after
+    the very review it caps. Under the mtime-only test that made
+    _translate_redispatched_since() return True for every finished segment,
+    so an operator who hand-repaired a capped/converged segment into a
+    structurally invalid state had that repair silently re-translated over.
+
+    Measured on the three live durable roots when this was filed: 208 of 208
+    fragments were terminal AND newer than their own review, i.e. every
+    finished segment carried the artifact shape that made the old test say
+    yes."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    base, _ = _dna_stage_post_fix_invalid_draft(root, driver_mod)
+
+    ledger_dir = root / "runs" / "ledger.d"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    fragment_path = ledger_dir / "seg01.json"
+    fragment_path.write_text(
+        json.dumps({"timestamp": "2026-01-01T00:00:00Z", "status": status, **extra}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.utime(fragment_path, (base + 20, base + 20))  # newer than the review
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "invalid_post_fix_draft"}, (
+        "a terminal fragment is not evidence of a translate dispatch, however new it is"
+    )
+    assert driver_mod.process_segment("seg01", ctx) == {
+        "seg": "seg01", "converged": False, "outcome": "failed", "reason": "invalid-post-fix-draft",
+    }
+    assert _dna_dispatch_count(root) == 0, "nothing may be dispatched over the operator's edit"
+    assert _dna_read_fragment(root)["status"] == status, (
+        "invalid_post_fix_draft writes no ledger entry of its own"
+    )
+
+
+def test_derive_next_action_reopen_capped_fragment_is_not_translate_evidence(tmp_path):
+    """The counterexample that rules out the obvious narrowing. Requiring
+    only `status == "in_progress"` would NOT have closed #620: the
+    #432/#461 reopen-capped write is itself
+    `{"status": "in_progress", "note": ...}` and it precedes a REVIEW
+    dispatch, not a translate. When that review dispatch fails
+    process_segment() returns with no further write, so the reopen fragment
+    stays the newest artifact -- over a draft no translate produced."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    base, _ = _dna_stage_post_fix_invalid_draft(root, driver_mod)
+    reopen_note = (
+        "reopened for a fresh final review: the review this segment was capped on "
+        "no longer describes the draft on disk (#432)"
+    )
+    _dna_write_ledger_fragment(root, mtime=base + 20, status="in_progress", note=reopen_note)
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "invalid_post_fix_draft"}, (
+        "an in_progress fragment written before a REVIEW dispatch is not translate evidence"
+    )
+
+
+def test_derive_next_action_promotion_note_naming_a_previous_draft_does_not_retranslate(tmp_path):
+    """The sharpest case, and the reason the note carries a hash at all. A
+    constant marker would say "a translate ran" and stay true forever. Here
+    a translate genuinely DID run and promote a draft -- the fragment's note
+    is well-formed and names that draft's sha1 -- but the operator has since
+    repaired the segment by hand. The evidence no longer describes the file
+    on disk, so it must not authorize re-translating over that repair."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    base, current_sha1 = _dna_stage_post_fix_invalid_draft(root, driver_mod)
+    superseded_sha1 = "a" * 40
+    assert superseded_sha1 != current_sha1
+    _dna_write_ledger_fragment(
+        root, mtime=base + 20,
+        note=driver_mod._translate_promotion_note(superseded_sha1),
+    )
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "invalid_post_fix_draft"}, (
+        "promotion evidence naming a draft that is no longer on disk proves nothing "
+        "about the draft that is"
+    )
+
+
+def test_derive_next_action_promotion_note_with_one_extra_byte_does_not_retranslate(tmp_path):
+    """Forces the comparison to be equality, not a prefix test. A reader
+    written as note.startswith(PREFIX) passes every other case in this
+    section and then accepts a note whose trailing hash has been appended
+    to."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    base, current_sha1 = _dna_stage_post_fix_invalid_draft(root, driver_mod)
+    _dna_write_ledger_fragment(
+        root, mtime=base + 20,
+        note=driver_mod._translate_promotion_note(current_sha1) + "0",
+    )
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "invalid_post_fix_draft"}
+
+
+def test_derive_next_action_correct_promotion_note_on_a_terminal_status_does_not_retranslate(tmp_path):
+    """Forces the status and the note to be a CONJUNCTION. A reader that
+    checks only the note passes every other case in this section, and then
+    accepts a converged fragment that happens to carry a correct-looking
+    note -- a shape a restored or hand-written ledger can produce."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    base, current_sha1 = _dna_stage_post_fix_invalid_draft(root, driver_mod)
+    _dna_write_ledger_fragment(
+        root, mtime=base + 20, status="converged",
+        note=driver_mod._translate_promotion_note(current_sha1),
+    )
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "invalid_post_fix_draft"}
+
+
+def test_derive_next_action_promotion_note_naming_the_current_draft_still_retranslates(tmp_path):
+    """REGRESSION GUARD (passes with or without the fix, by design). The
+    control case for the three above: when the promoted draft is STILL the
+    one on disk -- a genuine same-run retranslate whose own output came back
+    invalid, nothing hand-edited since -- the segment must keep retrying
+    exactly as before, never terminate. Without this the fix would deadlock
+    a legitimate retry.
+
+    Reachable, not hypothetical: codex_job.py validates the candidate it
+    promotes with the PLUGIN tree's gate scripts (its _trusted_scripts_dir()
+    under --plugin-root), while derive_next_action() re-validates with the
+    DURABLE ROOT's copies. A durable root whose Step 0a copies are stale --
+    an ordinary post-upgrade state, and the divergence fix_scope_audit.py
+    exists to detect -- makes the two disagree, so a promoted draft really
+    can read invalid here."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    base = int(time.time()) - 3600
+    pre_review_draft = _dna_write_draft(root, driver_mod)
+    pre_review_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    _dna_write_review(root, driver_mod, round_label="1", clean=False, coverage_ok=True,
+                       draft_sha1=pre_review_sha1,
+                       findings=[{"loc": "p1:1", "severity": "major", "issue": "x", "suggest": "y"}])
+    os.utime(root / "segments" / "seg01.review.json", (base + 10, base + 10))
+
+    retranslated = dict(pre_review_draft, blocks={"p1": "hola RETRANSLATED FROM SCRATCH"})
+    (root / "segments" / "seg01.draft.json").write_text(
+        json.dumps(retranslated, ensure_ascii=False), encoding="utf-8"
+    )
+    retranslated_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    assert retranslated_sha1 != pre_review_sha1
+    _dna_write_ledger_fragment(
+        root, mtime=base + 20,
+        note=driver_mod._translate_promotion_note(retranslated_sha1),
+    )
+    write_invalid_validate_draft_segs(root, ["seg01"])
+
+    assert driver_mod.derive_next_action("seg01", ctx) == {"action": "translate"}
+
+
+def _dna_promoting_translate(root, driver_mod, *, text):
+    """A run_one_codex_job stand-in that models a REAL promotion: for a
+    translate it replaces the canonical draft with gate-valid content
+    carrying this run's own dispatch_token -- exactly what codex_job.py's
+    promotion leaves behind -- clears the fixture's invalid-draft list so the
+    next derivation sees a valid draft, and returns codex_job.py's genuine
+    success shape, ok True with adopted FALSE.
+
+    For the review the loop then derives, it FAILS. That is what terminates
+    process_segment() and leaves the promotion fragment on disk to inspect;
+    a fake that kept returning success would never terminate."""
+    def _fake(ctx_arg, *, kind, seg, round_label=None):
+        if kind == "translate":
+            draft = {"seg": seg, "blocks": {"p1": text},
+                     "dispatch_token": driver_mod.translate_dispatch_token(_DNA_RUN_ID, seg)}
+            (root / "segments" / f"{seg}.draft.json").write_text(
+                json.dumps(draft, ensure_ascii=False), encoding="utf-8"
+            )
+            write_invalid_validate_draft_segs(root, [])
+            return {"kind": kind, "seg": seg, "round_label": None, "disp": "d",
+                    "ok": True, "reason": None, "error_detail": None,
+                    "job_status": "completed", "adopted": False}
+        return {"kind": kind, "seg": seg, "round_label": round_label, "disp": "d",
+                "ok": False, "reason": "review-timeout",
+                "error_detail": "fixture stops the loop here",
+                "job_status": "failed", "adopted": False}
+    return _fake
+
+
+def test_process_segment_stamps_the_promoted_drafts_hash_after_a_real_translate(tmp_path, monkeypatch):
+    """The WRITER, at the real production call site. Drives the shipped
+    process_segment() translate branch and reads the fragment the real
+    ledger_update.py wrote -- asserting through write_ledger() instead would
+    prove nothing, since that helper copies whatever fields its caller hands
+    it and would stay green with the production call site left note-less.
+
+    Two properties in one assertion: the note exists at all (so the branch
+    really stamps it), and its hash is the PROMOTED draft's, not the
+    pre-dispatch one (so the evidence describes what the translate produced).
+
+    Scope, stated honestly: the production writer and ledger_update.py are
+    real; the readiness/validation gates are this file's staged fixture
+    scripts, as in every other test here."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    # A stale, structurally invalid draft with no review: derive_next_action()
+    # returns "translate" for it, which is the realistic way this branch is
+    # entered on a retry. It also gives the assertion below a DIFFERENT hash
+    # to distinguish the promoted draft from the one it replaced.
+    _dna_write_draft(root, driver_mod)
+    pre_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    write_invalid_validate_draft_segs(root, ["seg01"])
+    monkeypatch.setattr(
+        driver_mod, "run_one_codex_job",
+        _dna_promoting_translate(root, driver_mod, text="hola TRANSLATED"),
+    )
+
+    result = driver_mod.process_segment("seg01", ctx)
+    assert result["outcome"] == "failed" and result["stage"] == "review", result
+
+    promoted_sha1 = driver_mod.current_draft_sha1("seg01", root / "segments", root / "scripts")
+    assert promoted_sha1 != pre_sha1, "setup check: the fake translate must move the draft"
+    fragment = _dna_read_fragment(root)
+    assert fragment["status"] == "in_progress"
+    assert fragment["note"] == driver_mod._translate_promotion_note(promoted_sha1), fragment
+    assert pre_sha1 not in fragment["note"], (
+        "the evidence must name the draft the translate PRODUCED, not the one it replaced"
+    )
+
+
+@pytest.mark.parametrize("outcome_overrides,why", [
+    ({"ok": False, "reason": "translate-timeout", "job_status": "failed"},
+     "a dispatch that never produced a draft"),
+    ({"adopted": True, "reason": "adopted"},
+     "codex_job.py adopting an already-valid canonical without launching"),
+])
+def test_process_segment_writes_no_promotion_evidence_without_a_promotion(tmp_path, monkeypatch,
+                                                                          outcome_overrides, why):
+    """REGRESSION GUARDS (pass with or without the fix, by design). They pin
+    that the second write is genuinely gated on codex_job.py's own
+    `promoted` -- `ok and not adopted`, since finalize() sets
+    ok = promoted or adopted. Evidence written for either of these would be
+    evidence over a draft no translate produced, which is precisely why the
+    stamp is not folded into the in_progress write that PRECEDES the
+    dispatch."""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    write_invalid_validate_draft_segs(root, ["seg01"])  # so the first action is "translate"
+
+    def _fake(ctx_arg, *, kind, seg, round_label=None):
+        base = {"kind": kind, "seg": seg, "round_label": round_label, "disp": "d",
+                "ok": True, "reason": None, "error_detail": None,
+                "job_status": "completed", "adopted": False}
+        base.update(outcome_overrides)
+        return base
+
+    monkeypatch.setattr(driver_mod, "run_one_codex_job", _fake)
+    driver_mod.process_segment("seg01", ctx)
+
+    fragment = _dna_read_fragment(root)
+    assert fragment["status"] == "in_progress", fragment
+    assert "note" not in fragment, (
+        f"no promotion evidence may be written for {why} -- got {fragment}"
+    )
+
+
+def test_process_segment_reports_a_failed_promotion_evidence_write(tmp_path, monkeypatch):
+    """A failed SECOND ledger write is reported like the first one's, and
+    costs no translated work: the promoted draft is on disk either way and
+    whichever fragment survives is still in_progress, which
+    select_segments.py classifies recoverable, so the next invocation picks
+    the segment up. (ledger_update.py replaces the fragment before computing
+    its confirmation hash, so a post-commit failure can leave the note in
+    place -- both outcomes are recoverable and both are draft-bound, so
+    neither can mislead the reader.)"""
+    root = phase2_project(tmp_path, n=1)
+    driver_mod, ctx = _dna_setup(root)
+    _dna_write_draft(root, driver_mod)
+    write_invalid_validate_draft_segs(root, ["seg01"])  # so the first action is "translate"
+    monkeypatch.setattr(
+        driver_mod, "run_one_codex_job",
+        _dna_promoting_translate(root, driver_mod, text="hola TRANSLATED"),
+    )
+
+    real_write_ledger = driver_mod.write_ledger
+    calls = {"n": 0}
+
+    def _fail_second(dirs, seg, fields, **kwargs):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            return {"success": False, "error": "fixture: promotion-evidence write refused"}
+        return real_write_ledger(dirs, seg, fields, **kwargs)
+
+    monkeypatch.setattr(driver_mod, "write_ledger", _fail_second)
+    result = driver_mod.process_segment("seg01", ctx)
+
+    assert result["outcome"] == "failed" and result["reason"] == "ledger-write-failed", result
+    assert calls["n"] == 2, "the promotion-evidence write must actually have been attempted"
+    assert _dna_read_fragment(root)["status"] == "in_progress", (
+        "the surviving fragment must keep the segment recoverable"
+    )
+    assert (root / "segments" / "seg01.draft.json").is_file(), "no translated work is discarded"
 
 
 def test_derive_next_action_reviews_again_at_same_label_when_a_translate_is_in_progress(tmp_path):
