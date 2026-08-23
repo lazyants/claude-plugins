@@ -44,6 +44,7 @@ the real one at the only interface ledger_merge.py actually depends on:
 `--seg <id>` prints a JSON object to stdout.
 """
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -999,6 +1000,308 @@ def test_relative_plugin_root_resolves_against_the_invokers_cwd_not_the_childs(t
         "the real mismatch) -- a poisoned durable-root copy running instead "
         f"would report NO staleness: {payload}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. #463 -- a merge never reports "empty" for a directory it could not read,
+#    and never publishes an empty ledger over a populated one.
+#
+#    Two independent guards, tested independently. _read_fragments()' errno
+#    split makes an unreadable ledger.d LOUD (two tests below fire with no
+#    outgoing ledger at all, where the many-to-zero guard cannot reach).
+#    merge()'s many-to-zero refusal constrains the OUTCOME whatever the cause,
+#    including causes not enumerated here.
+#
+#    The refusal tests are the red-before-green witnesses: each was watched
+#    failing against the unfixed script. The rest are controls -- green before
+#    AND after -- and exist to pin that neither guard over-catches.
+# ---------------------------------------------------------------------------
+
+requires_non_root = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="mode bits do not deny root, so chmod 000 cannot make a path unreadable",
+)
+
+
+def write_ledger_json(root, segments):
+    """Writes an outgoing runs/ledger.json directly, as a prior merge would
+    have left it. Returns its path."""
+    path = root / "runs" / "ledger.json"
+    path.write_text(
+        json.dumps({"segments": segments}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_empty_fragment_dir_refuses_to_erase_a_populated_ledger(tmp_path):
+    """RED witness. The many-to-zero guard in its simplest form: ledger.d is
+    genuinely readable and genuinely empty, but ledger.json holds real
+    segments. Nothing in this plugin deletes a fragment, so this transition
+    cannot come from a legitimate merge -- it must not publish."""
+    root = make_durable_root(tmp_path)
+    write_fixture_cache_keys(root, {})
+    ledger_path = write_ledger_json(
+        root, {"seg01": {"status": "converged"}, "seg02": {"status": "pending"}}
+    )
+    before = ledger_path.read_bytes()
+
+    proc = run_merge(root)
+
+    assert proc.returncode == 1, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "2" in payload["error"], payload["error"]
+    assert "ledger.json" in payload["error"], payload["error"]
+    assert ledger_path.read_bytes() == before, (
+        "the refusal must happen BEFORE the atomic replace -- the outgoing "
+        "ledger has to be byte-for-byte untouched"
+    )
+
+
+@requires_non_root
+def test_unreadable_populated_fragment_dir_refuses_and_leaves_the_ledger_intact(tmp_path):
+    """RED witness, and the bug #463 actually reports. ledger.d holds a real
+    fragment but cannot be read. Measured on the interpreter this ships
+    against: at mode 0o000 `is_dir()` still answers True and `glob("*.json")`
+    still answers [], so the old code saw a populated directory as empty and
+    published {} over live state."""
+    root = make_durable_root(tmp_path)
+    key_a = make_cache_key("A")
+    write_fixture_cache_keys(root, {"seg01": key_a})
+    write_fragment(root, "seg01", converged_fragment(key_a))
+    ledger_path = write_ledger_json(root, {"seg01": {"status": "converged"}})
+    before = ledger_path.read_bytes()
+
+    ledger_d = root / "runs" / "ledger.d"
+    os.chmod(ledger_d, 0o000)
+    try:
+        proc = run_merge(root)
+    finally:
+        os.chmod(ledger_d, 0o700)
+
+    assert proc.returncode == 1, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert ledger_path.read_bytes() == before
+
+
+@requires_non_root
+def test_unreadable_fragment_dir_refuses_even_with_no_outgoing_ledger(tmp_path):
+    """RED witness for the errno split ALONE. There is no ledger.json here, so
+    the many-to-zero guard cannot fire and the refusal can only come from
+    _read_fragments(). This is what keeps the two guards independent: the
+    split reports the failure at the layer that saw it, whether or not
+    anything downstream would have caught the outcome."""
+    root = make_durable_root(tmp_path)
+    write_fixture_cache_keys(root, {})
+    assert not (root / "runs" / "ledger.json").exists()
+
+    ledger_d = root / "runs" / "ledger.d"
+    os.chmod(ledger_d, 0o000)
+    try:
+        proc = run_merge(root)
+    finally:
+        os.chmod(ledger_d, 0o700)
+
+    assert proc.returncode == 1, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "could not be listed" in payload["error"], payload["error"]
+    assert not (root / "runs" / "ledger.json").exists(), (
+        "a refusal must not leave a materialized ledger behind"
+    )
+
+
+@requires_non_root
+def test_unsearchable_parent_refuses_rather_than_reading_as_absent(tmp_path):
+    """Control, and deliberately NOT labelled a witness: measured GREEN against
+    the unfixed script too. It covers the is_dir() leg of the swallow -- an
+    unsearchable PARENT makes the stat of ledger.d fail with EACCES, so
+    `is_dir()` answered False and the old code read that as the documented
+    'not written yet'. WHY it was already green is the part worth keeping: the
+    same unsearchable runs/ also defeats _atomic_write_json(), so that leg
+    could never produce a SILENT empty publish, only a noisier failure one
+    step later. Which is why the docstring of _read_fragments() names the glob
+    leg, not this one, as the swallow that actually reaches production.
+    iterdir() now raises it at the layer that saw it, and this test pins the
+    outcome property that holds either way."""
+    root = make_durable_root(tmp_path)
+    write_fixture_cache_keys(root, {})
+    runs_dir = root / "runs"
+
+    os.chmod(runs_dir, 0o000)
+    try:
+        proc = run_merge(root)
+    finally:
+        os.chmod(runs_dir, 0o700)
+
+    assert proc.returncode == 1, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert not (root / "runs" / "ledger.json").exists(), (
+        "no ledger may be materialized when the run directory could not even "
+        "be searched"
+    )
+
+
+@requires_non_root
+def test_unreadable_outgoing_ledger_refuses_when_the_merge_is_empty(tmp_path):
+    """RED witness. The single-fault form of a case a plan review constructed:
+    ledger.d is legitimately empty, but the existing ledger.json cannot be
+    read, so whether segments are about to be erased is UNKNOWN. Ignoring that
+    read failure would leave the identical swallow one file over --
+    could-not-look is not nobody-is-there here too."""
+    root = make_durable_root(tmp_path)
+    write_fixture_cache_keys(root, {})
+    ledger_path = write_ledger_json(root, {"seg01": {"status": "converged"}})
+    before = ledger_path.read_bytes()
+
+    os.chmod(ledger_path, 0o000)
+    try:
+        proc = run_merge(root)
+    finally:
+        os.chmod(ledger_path, 0o600)
+
+    assert proc.returncode == 1, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert ledger_path.read_bytes() == before
+
+
+def test_unparseable_outgoing_ledger_refuses_when_the_merge_is_empty(tmp_path):
+    """RED witness. Same principle as the unreadable case: a ledger.json that
+    does not parse cannot be shown to be empty, so an empty merge must not
+    replace it."""
+    root = make_durable_root(tmp_path)
+    write_fixture_cache_keys(root, {})
+    ledger_path = root / "runs" / "ledger.json"
+    ledger_path.write_text("{ this is not json", encoding="utf-8")
+    before = ledger_path.read_bytes()
+
+    proc = run_merge(root)
+
+    assert proc.returncode == 1, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert ledger_path.read_bytes() == before
+
+
+def test_a_populated_merge_still_overwrites_a_populated_ledger(tmp_path):
+    """Control, green before and after. The guard fires only on the
+    many-to-zero transition; an ordinary re-materialization is untouched."""
+    root = make_durable_root(tmp_path)
+    key_a = make_cache_key("A")
+    write_fixture_cache_keys(root, {"seg01": key_a})
+    write_fragment(root, "seg01", converged_fragment(key_a))
+    write_ledger_json(root, {"seg99": {"status": "pending"}})
+
+    proc = run_merge(root)
+
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    doc = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    assert set(doc["segments"].keys()) == {"seg01"}
+
+
+@requires_non_root
+def test_an_unreadable_outgoing_ledger_never_blocks_a_merge_that_has_fragments(tmp_path):
+    """Control, green before and after -- and the reason the outgoing-ledger
+    read cannot over-catch. That read happens ONLY when the merge produced
+    zero segments, so a corrupt or unreadable ledger.json is irrelevant to a
+    merge that has real fragments to publish."""
+    root = make_durable_root(tmp_path)
+    key_a = make_cache_key("A")
+    write_fixture_cache_keys(root, {"seg01": key_a})
+    write_fragment(root, "seg01", converged_fragment(key_a))
+    ledger_path = write_ledger_json(root, {"seg99": {"status": "pending"}})
+
+    os.chmod(ledger_path, 0o000)
+    try:
+        proc = run_merge(root)
+    finally:
+        os.chmod(ledger_path, 0o600)
+
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert parse_stdout(proc)["success"] is True
+
+
+def test_deleting_the_ledger_is_the_escape_hatch_for_a_deliberate_reset(tmp_path):
+    """Control. A genuine reset is an operator act and has to say so -- by
+    deleting runs/ledger.json. No flag exists for it, deliberately: a flag
+    would let the accident through as well."""
+    root = make_durable_root(tmp_path)
+    write_fixture_cache_keys(root, {})
+    ledger_path = write_ledger_json(root, {"seg01": {"status": "converged"}})
+
+    refused = run_merge(root)
+    assert refused.returncode == 1, refused.stdout
+
+    ledger_path.unlink()
+    proc = run_merge(root)
+
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["n_segments"] == 0
+    doc = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert doc == {"segments": {}}
+
+
+def test_an_already_empty_outgoing_ledger_is_republished_not_refused(tmp_path):
+    """Control. The guard is many-to-ZERO, not any-to-zero: an outgoing ledger
+    that is ALREADY empty has nothing to lose, so a repeat merge of an empty
+    project must keep succeeding -- that is the steady state of a project
+    scaffolded but not yet translated."""
+    root = make_durable_root(tmp_path)
+    write_fixture_cache_keys(root, {})
+    write_ledger_json(root, {})
+
+    proc = run_merge(root)
+
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert parse_stdout(proc)["success"] is True
+
+
+def test_a_ledger_d_that_is_a_plain_file_still_reads_as_not_written_yet(tmp_path):
+    """Control. ENOTDIR stays on the DEFINITIVE side of the split, exactly as
+    the old `if not ledger_d.is_dir()` had it -- dropping the explicit S_ISDIR
+    check loses nothing, because iterdir() raises NotADirectoryError for it."""
+    root = make_durable_root(tmp_path)
+    write_fixture_cache_keys(root, {})
+    ledger_d = root / "runs" / "ledger.d"
+    ledger_d.rmdir()
+    ledger_d.write_text("not a directory", encoding="utf-8")
+
+    proc = run_merge(root)
+
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is True
+    assert payload["n_segments"] == 0
+
+
+def test_non_json_names_in_the_fragment_dir_are_ignored_exactly_as_glob_did(tmp_path):
+    """Control for the construct swap. The suffix filter has to select what
+    glob("*.json") selected: ledger_update.py stages `{seg}.json.tmp.{pid}`
+    and publishes `{seg}.json`, so a staged temp file left behind by an
+    interrupted write must not be picked up as a fragment."""
+    root = make_durable_root(tmp_path)
+    key_a = make_cache_key("A")
+    write_fixture_cache_keys(root, {"seg01": key_a})
+    write_fragment(root, "seg01", converged_fragment(key_a))
+    ledger_d = root / "runs" / "ledger.d"
+    (ledger_d / "seg02.json.tmp.4242").write_text('{"status": "pending"}', encoding="utf-8")
+    (ledger_d / "README").write_text("notes", encoding="utf-8")
+
+    proc = run_merge(root)
+
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["n_segments"] == 1
+    doc = json.loads((root / "runs" / "ledger.json").read_text(encoding="utf-8"))
+    assert set(doc["segments"].keys()) == {"seg01"}
 
 
 if __name__ == "__main__":

@@ -329,13 +329,56 @@ def _read_fragments(ledger_d: Path = LEDGER_D) -> dict:
     """Reads every runs/ledger.d/*.json fragment. The filename stem (minus
     the .json suffix) IS the segment id, by construction of
     ledger_update.py's own write path (runs/ledger.d/{seg}.json). Returns
-    {seg: record_dict}. A missing ledger.d directory means "no fragments
-    written yet" -- not an error; merges to an empty ledger.
+    {seg: record_dict}.
+
+    An ABSENT ledger.d -- ENOENT, or ENOTDIR because the name is a plain
+    file -- means "no fragments written yet". That is not an error and it
+    merges to an empty ledger. #463: that benign reading is correct for
+    those two errnos and WRONG for every other one, and the two constructs
+    this function used to ask with could not tell them apart. `is_dir()`
+    answers False on any suppressed OSError, and `glob()` returns an empty
+    iterator for a directory it cannot read; neither raises. Measured on
+    the interpreter this ships against, a ledger.d at mode 0o000 gives
+    `is_dir() -> True` and `glob("*.json") -> []`, so the swallow that
+    actually reaches production here is the glob one -- a populated
+    fragment directory reporting itself empty, which merge() then
+    publishes over a populated ledger.json.
+
+    One `iterdir()` inside one try answers all of it: ENOENT/ENOTDIR are
+    the definitive not-there, and every other OSError is a could-not-look
+    that REFUSES rather than reporting emptiness -- the same split, and
+    deliberately the same shape, as select_segments.py:2062-2074. The
+    .json filter replaces the glob pattern exactly, name for name (see the
+    endswith() comment in the loop): ledger_update.py stages
+    `{seg}.json.tmp.{pid}` and publishes `{seg}.json`, so a staged temp file
+    is excluded by both.
     """
-    if not ledger_d.is_dir():
+    try:
+        entries = sorted(ledger_d.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        # DEFINITIVELY nothing written yet: the directory is not there, or
+        # the name is not a directory at all. Both are the documented
+        # first-run state; neither is a suppressed error.
         return {}
+    except OSError as exc:
+        raise LedgerMergeError(
+            f"the ledger fragment directory {ledger_d} exists but could not "
+            f"be listed ({exc}) -- refusing to report it as empty, because "
+            f"could-not-look is not nothing-is-there and an empty read here "
+            f"is what merge() would publish over runs/ledger.json"
+        ) from exc
     fragments = {}
-    for frag_path in sorted(ledger_d.glob("*.json")):
+    for frag_path in entries:
+        # endswith(), NOT Path.suffix: the two disagree on a name that is
+        # ALL suffix (".json", "..json"), which glob("*.json") did select and
+        # `suffix` does not. No writer in this plugin can produce such a name
+        # -- validate_seg() allows only (FRONTBACK:)?[A-Za-z0-9_]+ -- so this
+        # is not a reachability fix. It is here so that swapping the
+        # enumeration construct changes ONLY the errno behaviour this issue
+        # is about, and leaves which names count as a fragment exactly as it
+        # found them.
+        if not frag_path.name.endswith(".json"):
+            continue
         seg = frag_path.stem
         try:
             record = json.loads(frag_path.read_text(encoding="utf-8"))
@@ -660,6 +703,83 @@ def _atomic_write_json(path: Path, doc: dict) -> None:
     os.replace(tmp_path, path)
 
 
+def _refuse_to_empty_a_populated_ledger(ledger_json_path: Path, materialized_segments: dict) -> None:
+    """#463. A merge that would take a populated runs/ledger.json to ZERO
+    segments refuses instead of publishing.
+
+    This constrains the OUTCOME rather than the failure mode, which is why
+    it is here in addition to _read_fragments()' errno split and not
+    instead of it. The errno split is enumerative -- it closes EACCES,
+    ELOOP, EIO and whatever else the listing can raise. This one closes
+    every cause, including causes nobody has enumerated, because no
+    legitimate merge produces this transition at all: nothing in this
+    plugin ever deletes a ledger fragment (fragments are created or
+    overwritten by ledger_update.py and only ever read here), so a
+    many-fragment ledger going to zero can only come from outside the
+    plugin -- a hand-cleared directory, a partial restore, or a swallowed
+    read. The first of those is a deliberate operator act and gets the
+    deliberate operator escape hatch: delete runs/ledger.json. There is no
+    flag, because a flag would let the accident pass too.
+
+    The check is CONDITIONAL ON `materialized_segments` BEING EMPTY, and
+    that ordering is the whole reason it cannot over-catch: a merge that
+    has real fragments to publish never reads the outgoing ledger at all,
+    so a corrupt or unreadable ledger.json can never block one.
+
+    Only ENOENT passes: a ledger.json that is not there is a first run and
+    has nothing to lose. Every other outcome of the read -- the file exists
+    but raises, or does not parse, or does not carry a `segments` object --
+    is a REFUSAL, because could-not-look is not nobody-is-there. Exempting
+    this read while splitting the fragment read would leave the identical
+    hole one file over: a populated-but-unreadable ledger.json overwritten
+    with {} by a green run.
+    """
+    if materialized_segments:
+        return
+
+    def _unknown_state(reason: str) -> LedgerMergeError:
+        """BUILDS (does not raise) the refusal for the three could-not-
+        establish branches below. They differ only in WHY the outgoing ledger
+        could not be shown to be empty, and three copies of a sentence this
+        long is three places to keep in sync. Returning the exception rather
+        than raising it inside the helper keeps every `raise` visible at the
+        branch it belongs to, so the control flow still reads straight down.
+        """
+        return LedgerMergeError(
+            f"this merge produced ZERO segments and the existing "
+            f"{ledger_json_path} {reason}, so whether it holds segments that "
+            f"are about to be erased cannot be established -- refusing rather "
+            f"than assume it is empty. If the ledger really is to be reset, "
+            f"delete {ledger_json_path} first"
+        )
+
+    try:
+        raw = ledger_json_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # DEFINITIVELY a first materialization: there is no prior ledger,
+        # so publishing an empty one loses nothing.
+        return
+    except OSError as exc:
+        raise _unknown_state(f"could not be read ({exc})") from exc
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise _unknown_state(f"does not parse as JSON ({exc})") from exc
+    segments = doc.get("segments") if isinstance(doc, dict) else None
+    if not isinstance(segments, dict):
+        raise _unknown_state("carries no 'segments' object")
+    if segments:
+        raise LedgerMergeError(
+            f"this merge produced ZERO segments while {ledger_json_path} "
+            f"currently holds {len(segments)} -- refusing to publish, because "
+            f"no legitimate merge empties a populated ledger: nothing in this "
+            f"plugin deletes a ledger fragment, so a many-to-zero transition "
+            f"means the fragment directory was cleared outside the plugin or "
+            f"could not be read. Investigate the fragment directory first; if "
+            f"the ledger really is to be reset, delete {ledger_json_path}"
+        )
+
+
 def merge(args, registry: "Registry", dirs: dict) -> dict:
     """Runs the full merge and returns the SUCCESS confirmation dict, or
     raises LedgerMergeError (caller turns that into the FAILURE dict).
@@ -769,6 +889,10 @@ def merge(args, registry: "Registry", dirs: dict) -> dict:
         raise LedgerMergeError(
             f"materialized ledger.json failed schema validation: {detail}"
         )
+
+    # #463: last thing before the replace, and after schema validation, so a
+    # refusal here means nothing was written at all.
+    _refuse_to_empty_a_populated_ledger(dirs["ledger_json_path"], materialized_segments)
 
     _atomic_write_json(dirs["ledger_json_path"], ledger_doc)
 
