@@ -668,7 +668,7 @@ below yielded `1 + N*86` at `max_fix_rounds:4`, and the SAME 3500 cap admitted
 at most **40 segments** (`1 + 40*86 = 3441`; 41 segments would need 3527 and the
 run refuses to start). A 40-segment book batch therefore sat just under that
 ceiling, where before #348 the same batch carried roughly 2000 calls of margin
-(`1 + 40*38 = 1521`). **1.52.0 (#607) added two more calls to every continuing
+(`1 + 40*38 = 1521`). **1.67.0 (#607) added two more calls to every continuing
 fix round** — the fix-scope audit and the one retry a continuing round may
 spend on it — so the per-segment term is now **94**, and the figures above are
 history rather than current arithmetic. At 94 the same 3500 cap admits **37**

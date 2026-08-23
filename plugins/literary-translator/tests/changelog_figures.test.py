@@ -321,21 +321,23 @@ def _local_dict_len(filename, funcname, varname):
 # deliberately NOT declared, because re-deriving it means expanding the
 # `@pytest.mark.parametrize` argument lists, and a row hardcoding it would pass
 # every assertion below while proving nothing (a `lambda` returning 39). The two
-# numbers sit together in the prose precisely so a reader can see which one is
-# guarded.
-#
-# The entry's other numerals are not measurements: version and issue numbers, the
-# release date, and the round labels of the oscillation it reproduces (rounds 9,
-# 10 and 11 on the fr->ru book). Those are field observations from an
-# operator-owned durable root outside this repository and could not be re-derived
-# here in any case -- the accepted residual the docstring above names.
-# The 1.66.0 (#541) row this rotation retired, kept as its own record: "30 new
-# test functions across three files", derived by summing `_test_function_count`
-# over prev_review_archive.test.py, fix_prompt_prior_round.test.py and
-# prev_review_driver_handoff.test.py. This file checks the NEWEST entry only, so
-# that phrase -- absent from a 1.67.0 entry that never claimed it -- fails as
-# stale, which is why retiring it is part of the rotation rather than cleanup.
-FIGURES = []
+# The 1.67.0 (#607) entry's one re-derivable figure. Its other numerals are not
+# measurements in this file's sense: version and issue numbers, the release date,
+# and the estimator arithmetic (86 -> 94 calls, 106 and 37 segments at the two
+# caps), which is re-derived in tests/batch_size_estimator.test.py against the
+# template's own formula rather than restated here -- declaring it a second time
+# would make this file the third copy of one number, which is the shape #580 was
+# filed about.
+FIGURES = [
+    Figure(
+        phrase="36 new test functions across two files",
+        value=36,
+        derive=lambda: sum(_test_function_count(f) for f in (
+            "fix_scope_audit.test.py",
+            "fix_scope_gate.test.py",
+        )),
+    ),
+]
 
 
 def _newest_entry():

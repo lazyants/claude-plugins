@@ -2191,33 +2191,6 @@ async function translateStage(seg) {
   return { disp: parseDisp(raw, seg) };
 }
 
-// ---------------------------------------------------------------------------
-// #607 fix-scope preflight -- MUST run before pipeline(), and refuses rather
-// than degrading. Every dispatched fix turn is audited by
-// fix_scope_audit.py, which lives ONLY in the plugin install tree (it is one
-// of SKILL.md's never-copied scripts, for the same reason
-// validate_extraction.py is: a checker inside the tree it audits can be
-// rewritten by the party being checked). With PLUGIN_ROOT empty there is no
-// trusted copy to run and no weaker fallback worth taking -- running the
-// check from an auditable durable copy would report clean on exactly the
-// tampering it exists to find. So the batch does not start.
-//
-// This IS a behaviour change: the PLUGIN_ROOT token contract above used to
-// call the empty value a neutral "redirect opt-out". SKILL.md's #412
-// paragraph already said otherwise in prose ("Omitting this substitution is
-// not a neutral default ... Always substitute it"); this makes the template
-// agree with it. Scope is exactly this template -- segment_dispatch_driver.py
-// keeps its documented self-anchored mode, and a driver-mediated fix turn is
-// therefore UNAUDITED (see SKILL.md's #607 note).
-// ---------------------------------------------------------------------------
-if (PLUGIN_ROOT === "") {
-  log(
-    "Refusing to start: the plugin-root token was not substituted, so the " +
-    "#607 fix-scope audit has no trusted copy to run. Re-instantiate this " +
-    "workflow with the plugin root substituted."
-  );
-  return { converged: [], failed: [], reason: "fix-scope-plugin-root-missing" };
-}
 
 // ---------------------------------------------------------------------------
 // batch_agent_cap preflight -- see references/orchestration-and-batching.md's
@@ -2278,6 +2251,7 @@ if (PLUGIN_ROOT === "") {
 // formula already sizes against (a full MAXFIX rounds then the final
 // review), so the ceiling this preflight enforces stays sound.
 // ---------------------------------------------------------------------------
+
 const estimatedCalls = 1 + SEGS.length * (8 + 2 * WAIT_CALLS + MAXFIX * (8 + WAIT_CALLS));
 if (estimatedCalls > BATCH_AGENT_CAP) {
   log(
@@ -2286,6 +2260,43 @@ if (estimatedCalls > BATCH_AGENT_CAP) {
     " for " + SEGS.length + " segment(s) at max_fix_rounds=" + MAXFIX + "."
   );
   return { converged: [], failed: [], reason: "batch-too-large", estimatedCalls: estimatedCalls, cap: BATCH_AGENT_CAP };
+}
+
+// Placed HERE, below the batch_agent_cap preflight, on purpose -- do not
+// hoist it back up to the token declaration. Several sibling test files probe
+// this template by slicing it at the estimator declaration and loading the
+// HEAD half under node to call one function (fixPrompt, reviewPrompt)
+// directly; a top-level log() and return ABOVE that slice point execute
+// during the load and break every such probe. Nothing dispatches between the
+// declaration and here, so this is still the first thing that happens to a
+// batch. Keep the slice marker's own literal text out of this comment, too:
+// the probes partition on its FIRST occurrence.
+// ---------------------------------------------------------------------------
+// #607 fix-scope preflight -- MUST run before pipeline(), and refuses rather
+// than degrading. Every dispatched fix turn is audited by
+// fix_scope_audit.py, which lives ONLY in the plugin install tree (it is one
+// of SKILL.md's never-copied scripts, for the same reason
+// validate_extraction.py is: a checker inside the tree it audits can be
+// rewritten by the party being checked). With PLUGIN_ROOT empty there is no
+// trusted copy to run and no weaker fallback worth taking -- running the
+// check from an auditable durable copy would report clean on exactly the
+// tampering it exists to find. So the batch does not start.
+//
+// This IS a behaviour change: the PLUGIN_ROOT token contract above used to
+// call the empty value a neutral "redirect opt-out". SKILL.md's #412
+// paragraph already said otherwise in prose ("Omitting this substitution is
+// not a neutral default ... Always substitute it"); this makes the template
+// agree with it. Scope is exactly this template -- segment_dispatch_driver.py
+// keeps its documented self-anchored mode, and a driver-mediated fix turn is
+// therefore UNAUDITED (see SKILL.md's #607 note).
+// ---------------------------------------------------------------------------
+if (PLUGIN_ROOT === "") {
+  log(
+    "Refusing to start: the plugin-root token was not substituted, so the " +
+    "#607 fix-scope audit has no trusted copy to run. Re-instantiate this " +
+    "workflow with the plugin root substituted."
+  );
+  return { converged: [], failed: [], reason: "fix-scope-plugin-root-missing" };
 }
 
 // ---------------------------------------------------------------------------

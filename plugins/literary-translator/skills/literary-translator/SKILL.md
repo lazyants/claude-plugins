@@ -255,7 +255,7 @@ this paragraph's total exclusion count):
     `extract.py`'s self-check region by hash against the plugin's own shipped
     value, which only works if the checker itself is never a durable, hand-reachable
     copy (see `references/false-green-gate.md`).
-  - `fix_scope_audit.py` (1.52.0, #607) is kept plugin-only for the same shape
+  - `fix_scope_audit.py` (1.67.0, #607) is kept plugin-only for the same shape
     of reason as `validate_extraction.py`, one step further out: it is the
     check that asks whether this durable root's copied files still match the
     plugin they came from. A durable copy of it would sit inside the very tree
@@ -2240,7 +2240,7 @@ The durable root holding one project's data, and a human reading the
 deliverable, limit the expected blast radius of the DELIVERABLE — they do not
 bound the fix turn's filesystem write reach.
 
-**What 1.52.0 (#607) did about it, and what it deliberately did not.** Two
+**What 1.67.0 (#607) did about it, and what it deliberately did not.** Two
 halves shipped. `fixPrompt` now tells that turn it has exactly ONE write
 target, `segments/<seg>.draft.json`, and that a finding whose remedy would
 require editing any other file is refused on that ground alone — a gate
@@ -2276,7 +2276,7 @@ whole residual:
   for an external Claude turn and truncates this template before every
   top-level preflight, so no audit call site fires on that route. Bracketing
   it needs a digest handed out at `needs_fix` and required back on the next
-  invocation; that is tracked separately and is not in 1.52.0.
+  invocation; that is tracked separately and is not in 1.67.0.
 
 **Halt contract.** A mismatch ends the segment with reason
 `fix-scope-violation`; two consecutive failures of the audit relay end it as

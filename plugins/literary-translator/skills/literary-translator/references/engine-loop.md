@@ -70,7 +70,7 @@ path that KEEPS the direct `codex:codex-rescue` call — it is out of #198's sco
 - **Claude (the orchestrating session) ONLY applies fixes — or refuses one it cannot
   substantiate (#532) — to exactly ONE file, and is checked afterwards (#607).**
   It never originates translated content and never grades its own
-  output; refusing a reviewer's finding is neither of those. Since 1.52.0 the
+  output; refusing a reviewer's finding is neither of those. Since 1.67.0 the
   prompt also names its single write target, `segments/<seg>.draft.json`, and
   refuses on that ground alone any finding whose remedy needs another file —
   editing a gate script so it accepts a draft is never a fix. The instruction
