@@ -2756,6 +2756,50 @@ one of those.
 **R9 governs a promotion into the style contract**: it binds the segments still
 to come, never a re-review of the ones already converged.
 
+**A round whose findings pile up on one rule is evidence about a CLASS, not only
+about the loci it names — and sweeping that class is yours, because nothing in
+the loop does it (#534).** Convergence is per-segment and one-way: a reviewer
+sees one segment, so *"is this wrong anywhere else?"* is a question it cannot
+ask, and once a unit is `converged` no automated step reopens it or compares it
+against another segment — this pass is the one that does, and nothing has ever
+told you to point it at a class. Since 1.62.0 the fix turn reports the round's
+shape as `<rule>: N of M findings this round` in its reply — that report is the
+only thing that will ever tell you a
+class is live, and it grants the fix turn no authority over loci no finding
+named. Acting on it is this pass's job, under one rule:
+
+> **Enumerate the class, then adjudicate every site individually. Never close an
+> enumeration by applying the rule across it.**
+
+The enumeration and the defect set are different objects, and measured on a live
+book the ratio ran better than ten to one — 109 occurrences of strings the book
+italicises somewhere, about ten of them actually wrong. Four things decide a
+site, and skipping any of them is how a sweep does its damage:
+
+- **The site's own source and role.** Membership in the enumeration is not a
+  verdict on the site.
+- **Whether a DIFFERENT rule in the contract already accounts for it as
+  written.** Two rules can each be correct while one rule's enumerated class is
+  mostly instances of the other: of 98 sites in one rendered-quotation class,
+  86 were already correct and 66 of those were compliant with the
+  *quotation-inside-a-quotation* rule instead. Normalising them would have
+  destroyed every one.
+- **What the book already does with the same string elsewhere.** And never read
+  frequency as guilt — to a rule read alone, a book's strongest convention is
+  indistinguishable from its most widespread violation. 93 roman occurrences
+  against 2 italic was the strongest convention in one corpus and would have
+  been the sweep's biggest target.
+- **The draft's own `notes[]`.** The apparatus is load-bearing evidence for a
+  later sweep, not commentary beside it: one over-correction was stopped only by
+  a note written rounds earlier recording that those two occurrences are a man's
+  byname and that an earlier finding wanting them italicised was wrong.
+
+Reviewer concentration in one segment is evidence of reading order **or** of a
+real local defect, and nothing tells them apart except measuring the class.
+Report what you find rather than fixing it reflexively: a converged unit goes
+stale the moment you touch it, and that is the operator's call to make
+deliberately.
+
 **Where a decision goes is a question nothing asks today, and the destinations
 are not interchangeable.** Ask it while you are writing the item down. There
 are five outcomes:
