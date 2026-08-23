@@ -159,9 +159,19 @@ hand-typed or re-derived list, and the same array becomes `mergeLedgerPrompt`'s
 
 `mass-translate-wf.template.js` is instantiated **fresh from the plugin's
 current copy every run** — never a stale generated copy reused across runs.
-`${durable_root}/runs/.plugin_bundle_hash` (computed by Step 0a) covers this
-template specifically, so a plugin update is never silently masked by an old
-generated script surviving in place.
+`${durable_root}/runs/.plugin_bundle_hash` (computed once, at Step 0a) covers
+this template specifically, but only as of that moment: the marker
+characterizes the DURABLE copies under `${durable_root}/scripts/` and is
+never recomputed, so by itself it cannot detect a plugin update landing
+between Step 0a and a later batch. SKILL.md's W5 rule (#396) — run
+`scaffold_setup.py --verify` before the session's first live-tree read of a
+bundle member — is what closes that gap, comparing the durable copies against
+the live plugin tree on demand. Residual: that verify runs once per
+session, so an update landing mid-session, after it runs, stays masked until
+the next session's own verify. Prose enforcement is a weaker guarantee than a
+code gate; it was chosen because every script that runs at the point the
+check would need to fire is itself a bundle member, and editing it would move
+the very hash the check is meant to protect (#482).
 
 Bundle membership stays split three ways. `plugin_bundle_hash` gates cache
 reuse and covers every entry of `cache_key.py`'s own `PLUGIN_BUNDLE_MEMBERS`

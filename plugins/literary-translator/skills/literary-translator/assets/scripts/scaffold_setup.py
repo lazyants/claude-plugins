@@ -17,6 +17,21 @@ project?". This script is that writer. (derivation_bundle_hash is computed
 live -- no marker -- so this script writes only the two.)
 
     python3 scaffold_setup.py --durable-root PATH
+    python3 scaffold_setup.py --verify --durable-root PATH [--plugin-root PATH]
+
+`--verify` (#396) is the same computation in a READ-ONLY mode, run later in a
+session rather than at Step 0a. The markers this script writes characterise the
+DURABLE copies as of the moment they were written, but the workflow templates
+and several bundle-member gate scripts are read from the LIVE plugin install on
+every run (SKILL.md's W5/W3a instantiations; codex_job.py's `--plugin-root`
+redirect). So a plugin update landing between Step 0a and a later batch swaps
+the executing code without moving the recorded hash, and every gate downstream
+stays green over a run that is no longer homogeneous. `--verify` re-checks the
+two things that make a marker's claim true -- that it still matches a recompute
+over ${durable_root}/scripts/, and that those durable bytes are the bytes the
+live tree holds -- and REFUSES on either mismatch. It writes nothing and
+repairs nothing: refreshing a marker on drift is exactly the silent masking it
+exists to refuse.
 
 PLUGIN-PATH-ONLY -- NEVER copied into a durable_root, and NOT a bundle
 member. Two consequences worth stating outright so a later reader does not
@@ -51,7 +66,29 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
+# Set before the `import cache_key` below, which is the only point where it
+# still has any effect (verbatim_census.py:109 sets it for the same reason).
+# A plain sibling import leaves assets/scripts/__pycache__/*.pyc behind in the
+# PLUGIN tree this script runs from -- a real mutation of the very tree
+# `--verify` reports on, and one that makes "this mode writes nothing" false.
+sys.dont_write_bytecode = True
+
 import cache_key
+
+# Where a bundle member physically ships in a plugin install: the *.template.js
+# workflow templates under assets/templates/, everything else under
+# assets/scripts/. This is the LIVE-tree layout only -- inside a durable_root
+# every member lands flat under scripts/ (see the module docstring), and the
+# two must never be conflated.
+LIVE_SCRIPTS_SUBPATH = ("assets", "scripts")
+LIVE_TEMPLATES_SUBPATH = ("assets", "templates")
+
+# This file's own install tree: assets/scripts/scaffold_setup.py -> the plugin
+# root two levels up. Correct as the DEFAULT checked tree precisely because
+# this script is never copied into a durable_root (see the module docstring),
+# and SKILL.md invokes it as {{PLUGIN_ROOT}}/assets/scripts/scaffold_setup.py
+# -- the same {{PLUGIN_ROOT}} the W5/W3a instantiations resolve from.
+SELF_PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 
 
 # The orchestration-bundle scripts -- the tuple below is the authority on how
@@ -233,13 +270,177 @@ def compute_bundle_hash(durable_root: Path, members, what: str) -> str:
     return cache_key.sha1_hex(blob)
 
 
+# ---------------------------------------------------------------------------
+# --verify (#396): the marker's claim, re-checked against the live install
+# ---------------------------------------------------------------------------
+
+
+def live_member_path(plugin_root: Path, name: str) -> Path:
+    """Where `name` sits in a plugin INSTALL tree -- not in a durable_root,
+    where every member lands flat under scripts/. assets/scripts/ holds no
+    *.js at all, so the suffix is the whole rule."""
+    if name.endswith(".template.js"):
+        return plugin_root.joinpath(*LIVE_TEMPLATES_SUBPATH, name)
+    return plugin_root.joinpath(*LIVE_SCRIPTS_SUBPATH, name)
+
+
+def regular_file_problem(path: Path):
+    """None when `path` is a genuine, non-symlink regular file; otherwise a
+    short phrase naming what it is instead.
+
+    Byte equality at a SYMLINKED member path is not evidence about the tree
+    that member's own siblings resolve in: review_ready.py runs the
+    draft_sha1.py sitting beside its RESOLVED __file__, and codex_job.py
+    invokes it without forwarding --plugin-root. So a member symlinked to a
+    byte-identical copy in a directory holding a divergent sibling would
+    compare EQUAL here while executing code from outside the checked tree.
+    Refusing every non-regular member closes that, and covers the ordinary
+    case it shares a shape with -- a member missing from one tree because the
+    install was downgraded. os.lstat, never Path.is_file(), which FOLLOWS the
+    symlink and would report the target's type."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return "missing"
+    except OSError as exc:
+        return f"unreadable ({exc.strerror or exc})"
+    if stat.S_ISLNK(st.st_mode):
+        return "a symlink"
+    if not stat.S_ISREG(st.st_mode):
+        return "not a regular file"
+    return None
+
+
+def read_marker(durable_root: Path, marker_rel, what: str) -> str:
+    """The marker's recorded value, `.strip()`ed exactly as cache_key.py's
+    compute_plugin_bundle_hash and resume_setup.py's compute_input_digest
+    read it -- never a second parsing convention."""
+    path = durable_root.joinpath(*marker_rel)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        fail(f"could not read {what} at {path}: {exc} -- has Step 0a run for this project?")
+    value = raw.decode("utf-8", errors="replace").strip()
+    if not value:
+        fail(f"{path} is empty -- has Step 0a run for this project?")
+    return value
+
+
+def run_verify(durable_root: Path, plugin_root: Path, scripts_dir: Path) -> int:
+    """--verify's body. Three checks, in this order, each one a precondition
+    of the next, each with its own reason code so the label is exactly true:
+
+      1. member_not_regular -- every member, in BOTH trees, is a genuine
+         non-symlink regular file. Nothing below can be trusted otherwise:
+         compute_bundle_hash would fail with its own generic message on the
+         first unreadable member, and a byte comparison through a symlink
+         compares the target, not the member.
+      2. marker_stale -- each marker still equals a recompute over
+         ${durable_root}/scripts/. Checked BEFORE the live comparison
+         deliberately: a durable copy edited in place (the #412 vector, where
+         the durable tree is codex-writable) differs from the live tree too,
+         and reporting THAT as a plugin drift would name the wrong culprit.
+      3. live_plugin_drift -- the durable bytes are the bytes `plugin_root`
+         holds. Only reachable once the marker is known truthful about the
+         durable copies, which is what makes this the plugin's drift.
+
+    Writes nothing and repairs nothing on any path."""
+    bundles = (
+        (
+            "plugin_bundle_hash",
+            PLUGIN_BUNDLE_MARKER,
+            cache_key.PLUGIN_BUNDLE_MEMBERS,
+            "a plugin-bundle member",
+        ),
+        (
+            "orchestration_bundle_hash",
+            ORCHESTRATION_BUNDLE_MARKER,
+            ORCHESTRATION_BUNDLE_MEMBERS,
+            "an orchestration-bundle member",
+        ),
+    )
+
+    # Deduped by member NAME, not by tuple: claim_record.py is deliberately
+    # registered in both bundles, and reporting it twice would misrepresent
+    # one offending file as two. The dedup is a REPORTING device only -- the
+    # hashes below are each computed over their own full tuple.
+    checked = []
+    seen = set()
+    for _field, _marker_rel, members, _what in bundles:
+        for name in members:
+            if name not in seen:
+                seen.add(name)
+                checked.append(name)
+
+    shape = []
+    for name in checked:
+        for label, path in (
+            ("durable", durable_root / "scripts" / name),
+            ("plugin", live_member_path(plugin_root, name)),
+        ):
+            problem = regular_file_problem(path)
+            if problem is not None:
+                shape.append(f"{name}: {label} copy is {problem} ({path})")
+    if shape:
+        fail(
+            "refusing to verify: a bundle member is not a plain file in both "
+            "trees, so neither the recomputed hash nor a byte comparison "
+            "would mean what it claims (reason=member_not_regular)\n  - "
+            + "\n  - ".join(shape)
+        )
+
+    computed = {}
+    stale = []
+    for field, marker_rel, members, what in bundles:
+        recomputed = compute_bundle_hash(durable_root, members, what)
+        computed[field] = recomputed
+        recorded = read_marker(durable_root, marker_rel, f"the {field} marker file")
+        if recorded != recomputed:
+            marker_path = durable_root.joinpath(*marker_rel)
+            stale.append(
+                f"{field}: {marker_path} records {recorded}, but "
+                f"{scripts_dir} now hashes to {recomputed}"
+            )
+    if stale:
+        fail(
+            "refusing: a Step 0a marker no longer describes the durable copies "
+            "it was computed over -- re-run the Step 0a copy pass and this "
+            "script's write mode only if that is a change you intend "
+            "(reason=marker_stale)\n  - " + "\n  - ".join(stale)
+        )
+
+    drift = [
+        f"{name}: durable copy differs from {live_member_path(plugin_root, name)}"
+        for name in checked
+        if (durable_root / "scripts" / name).read_bytes()
+        != live_member_path(plugin_root, name).read_bytes()
+    ]
+    if drift:
+        fail(
+            f"refusing: the live install at {plugin_root} no longer holds the "
+            "bytes the Step 0a markers characterise, so this run would execute "
+            "orchestration code the recorded hashes do not describe "
+            "(reason=live_plugin_drift)\n  - " + "\n  - ".join(drift)
+        )
+
+    print(
+        "scaffold_setup: verified "
+        f"plugin_bundle_hash={computed['plugin_bundle_hash']} "
+        f"orchestration_bundle_hash={computed['orchestration_bundle_hash']} "
+        f"plugin_root={plugin_root}"
+    )
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Step 0a's final action: compute and atomically write the "
             "plugin_bundle_hash / orchestration_bundle_hash marker files into "
             "${durable_root}/runs/. Run from the plugin path, after the Step "
-            "0a copy pass has populated ${durable_root}/scripts/."
+            "0a copy pass has populated ${durable_root}/scripts/. With "
+            "--verify, re-checks those markers against the durable copies AND "
+            "against a live plugin install, and writes nothing."
         )
     )
     parser.add_argument(
@@ -249,7 +450,53 @@ def main(argv=None) -> int:
         help="The project's durable_root (its scripts/ already populated by "
         "the Step 0a copy pass).",
     )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Read-only mode (#396): refuse if either marker disagrees with a "
+        "recompute over ${durable_root}/scripts/, or if any bundle member's "
+        "durable bytes differ from the live plugin install's. Writes nothing.",
+    )
+    parser.add_argument(
+        "--plugin-root",
+        default=None,
+        metavar="PATH",
+        help="--verify only: the plugin install whose bytes the durable copies "
+        "are checked against ({{PLUGIN_ROOT}}, i.e. the directory holding "
+        "assets/scripts/). Omitted, this script's own install tree is used.",
+    )
     args = parser.parse_args(argv)
+
+    if args.plugin_root is not None and not args.verify:
+        # Refused rather than ignored: silently accepting it would let an
+        # operator believe a WRITE was checked against a named tree.
+        fail("--plugin-root is only meaningful with --verify")
+
+    plugin_root = SELF_PLUGIN_ROOT
+    if args.plugin_root is not None:
+        if not args.plugin_root.strip():
+            # An unsubstituted {{PLUGIN_ROOT}} token renders as the empty
+            # string, not as the flag being omitted, and Path("").resolve()
+            # is the CWD -- silently making wherever this happens to be
+            # launched from the tree the verdict is about. codex_job.py and
+            # segment_dispatch_driver.py refuse the same input by name.
+            fail(
+                "--plugin-root was given but is empty/whitespace-only -- this "
+                "usually means a {{PLUGIN_ROOT}} template substitution did not "
+                "happen. Omit the flag to check this script's own install tree, "
+                "or pass a real path."
+            )
+        # .resolve() to an ABSOLUTE path, and echoed on the success line
+        # below: a relative value names a different tree from a different
+        # cwd, and segment_dispatch_driver.py resolves its own --plugin-root
+        # against ITS runtime cwd -- so "pass the same string" is not by
+        # itself enough to bind the verified tree to the executed one.
+        plugin_root = Path(args.plugin_root).resolve()
+        if not (plugin_root / "assets" / "scripts").is_dir():
+            fail(
+                f"--plugin-root {args.plugin_root} does not resolve to a "
+                f"directory containing assets/scripts/ (resolved: {plugin_root})"
+            )
 
     durable_root = Path(args.durable_root)
     if not durable_root.is_dir():
@@ -309,6 +556,14 @@ def main(argv=None) -> int:
             f"refusing to hash bundle members: {scripts_dir} is not a "
             "stable real directory right now (reason=scripts_dir_swapped)"
         )
+
+    if args.verify:
+        # Branches BEFORE the write path's own hashing: compute_bundle_hash
+        # goes through concat_sorted_bytes, which fails loudly on the first
+        # unreadable member -- correct when a marker is about to be written,
+        # but it would pre-empt run_verify()'s whole job of naming EVERY
+        # offending member in one run.
+        return run_verify(durable_root, plugin_root, scripts_dir)
 
     plugin_bundle_hash = compute_bundle_hash(
         durable_root, cache_key.PLUGIN_BUNDLE_MEMBERS, "a plugin-bundle member"

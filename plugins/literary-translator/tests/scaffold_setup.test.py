@@ -44,6 +44,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -86,8 +87,10 @@ def _load_module(name, path):
 cache_key = _load_module("cache_key", CACHE_KEY_SRC)
 resume_setup = _load_module("resume_setup", RESUME_SETUP_SRC)
 
-# The 14 plugin-bundle members (12 *.py + 2 *.template.js) and the 4
-# orchestration-bundle members. The plugin set is the AUTHORITATIVE constant
+# The plugin-bundle members (the *.py scripts plus the *.template.js workflow
+# templates) and the orchestration-bundle members -- named, never counted, so
+# this comment cannot go stale the next time a member joins either tuple.
+# The plugin set is the AUTHORITATIVE constant
 # from cache_key.py itself (drift-catcher: if scaffold_setup.py ever hashes a
 # different set, the independent-recompute assertions below diverge). The
 # orchestration set is pinned here as plain data -- mirrored, never imported
@@ -176,6 +179,52 @@ def run_scaffold_setup(durable_root, timeout=60):
         text=True,
         timeout=timeout,
     )
+
+
+def make_plugin_copy(tmp_path, name="plugin_copy"):
+    """A COPY of the plugin's whole assets/ tree under tmp_path -- byte-
+    identical to the shipped one, and the tree the --verify tests point at (and,
+    where a test cares about writes, INVOKE) instead of mutating the real
+    install. `__pycache__` is excluded deliberately: scaffold_setup.py's
+    `import cache_key` would otherwise find a valid pre-existing .pyc and
+    produce no observable mutation, so a no-write assertion could not tell
+    `sys.dont_write_bytecode` from its absence."""
+    root = tmp_path / name
+    shutil.copytree(
+        ASSETS_DIR, root / "assets", ignore=shutil.ignore_patterns("__pycache__")
+    )
+    return root
+
+
+def run_scaffold_verify(durable_root, plugin_root=None, script=None, timeout=60):
+    """Invoke --verify. `script` defaults to the shipped scaffold_setup.py;
+    a test that snapshots for writes passes the COPY's own scaffold_setup.py,
+    because the bytecode a sibling import leaves behind lands beside the
+    EXECUTED file, not beside the one --plugin-root names."""
+    cmd = [
+        sys.executable,
+        str(script if script is not None else SCAFFOLD_SETUP_SRC),
+        "--verify",
+        "--durable-root",
+        str(durable_root),
+    ]
+    if plugin_root is not None:
+        cmd += ["--plugin-root", str(plugin_root)]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def tree_snapshot(root):
+    """Every path under `root` -> (file type, mtime_ns, bytes-or-None). Uses
+    lstat so a symlink is never followed, and records CONTENT as well as
+    mtime so an in-place rewrite that preserves mtime is still caught."""
+    snap = {}
+    for path in sorted(Path(root).rglob("*")):
+        st = path.lstat()
+        content = None
+        if stat.S_ISREG(st.st_mode):
+            content = path.read_bytes()
+        snap[str(path.relative_to(root))] = (stat.S_IFMT(st.st_mode), st.st_mtime_ns, content)
+    return snap
 
 
 def run_cache_key_field(durable_root, field, timeout=60):
@@ -362,7 +411,7 @@ def test_scaffold_member_set_matches_cache_key(tmp_path):
 
 def test_orchestration_members_pinned():
     """scaffold_setup.py's locally-declared ORCHESTRATION_BUNDLE_MEMBERS must
-    exactly equal the four-tuple resume_setup.py's resume-integrity digest
+    exactly equal the tuple resume_setup.py's resume-integrity digest
     depends on -- guards the local tuple against a silent desync (no shared
     constant exists to import)."""
     assert SCAFFOLD_SETUP_SRC.is_file(), (
@@ -702,3 +751,264 @@ def test_atomic_write_text_happy_path(tmp_path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ===========================================================================
+# #396 -- `--verify`: the markers are Step 0a evidence about code that is
+# read LIVE from the plugin install on every later run, and nothing ever
+# re-checked that the two still agree.
+#
+# RED-before-GREEN: with `--verify` absent from the parser, argparse exits 2
+# ("unrecognized arguments: --verify") and every test below fails on the exit
+# code or the reason it asserts. The one deliberate exception is
+# test_write_mode_output_is_unchanged, a CHARACTERIZATION test that passes on
+# the unfixed writer by design -- that is its whole point.
+# ===========================================================================
+
+
+def _rewrite_markers(root):
+    """Re-run the writer so the markers describe scripts/ AS IT IS NOW. What
+    separates the two legs: without this, a durable mutation trips
+    `marker_stale` and the live comparison is never reached at all."""
+    result = run_scaffold_setup(root)
+    assert result.returncode == 0, f"writer failed: {result.stderr}"
+    assert _read_marker(root, "plugin").strip() == _independent_bundle_hash(
+        root, PLUGIN_BUNDLE_MEMBERS
+    ), "marker must agree with the durable copies before the live leg is exercised"
+
+
+def test_verify_passes_on_a_freshly_scaffolded_root(tmp_path):
+    """Both legs hold on a root the copy pass just populated from the real
+    shipped members. Guards a false RED: every test below asserting a refusal
+    is worthless if the check refuses a correct project too."""
+    root = _make_scaffold_root(tmp_path)
+    assert run_scaffold_setup(root).returncode == 0
+    result = run_scaffold_verify(root)
+    assert result.returncode == 0, f"stdout={result.stdout} stderr={result.stderr}"
+    assert "scaffold_setup: verified" in result.stdout
+    assert f"plugin_bundle_hash={_independent_bundle_hash(root, PLUGIN_BUNDLE_MEMBERS)}" in result.stdout
+    assert (
+        f"orchestration_bundle_hash={_independent_bundle_hash(root, EXPECTED_ORCHESTRATION_BUNDLE_MEMBERS)}"
+        in result.stdout
+    )
+
+
+def test_write_mode_output_is_unchanged(tmp_path):
+    """Characterization pin: adding --verify must not disturb the write mode's
+    exact stdout, which Step 0a's operator reads back. Deliberately GREEN
+    before the fix."""
+    root = _make_scaffold_root(tmp_path)
+    result = run_scaffold_setup(root)
+    assert result.returncode == 0
+    assert result.stdout == (
+        "scaffold_setup: wrote "
+        f"plugin_bundle_hash={_independent_bundle_hash(root, PLUGIN_BUNDLE_MEMBERS)} "
+        f"orchestration_bundle_hash={_independent_bundle_hash(root, EXPECTED_ORCHESTRATION_BUNDLE_MEMBERS)}\n"
+    )
+
+
+def test_verify_detects_a_stale_marker(tmp_path):
+    """A durable copy edited in place without re-running the writer -- the
+    #412 shape, where ${durable_root}/scripts/ is codex-writable. Reported as
+    marker_stale, NOT as a plugin drift: the durable tree moved, not the
+    install, and naming the wrong culprit would send the operator to the
+    wrong tree."""
+    root = _make_scaffold_root(tmp_path)
+    assert run_scaffold_setup(root).returncode == 0
+    (root / "scripts" / ORCHESTRATION_ONLY_MEMBER).write_bytes(
+        (root / "scripts" / ORCHESTRATION_ONLY_MEMBER).read_bytes() + b"\n# tampered\n"
+    )
+    result = run_scaffold_verify(root)
+    assert result.returncode == 1, f"stdout={result.stdout} stderr={result.stderr}"
+    assert "reason=marker_stale" in result.stderr
+    assert "orchestration_bundle_hash" in result.stderr
+
+
+def test_verify_detects_live_plugin_drift(tmp_path):
+    """THE #396 CASE. The marker agrees with the durable copies (leg 1 holds,
+    asserted before verify runs), and the live tree has moved underneath --
+    exactly what a mid-run `claude plugin update` produces. Only leg 2 can
+    catch it, and today nothing does."""
+    root = _make_scaffold_root(tmp_path)
+    plugin_copy = make_plugin_copy(tmp_path)
+    _rewrite_markers(root)
+    live_template = plugin_copy / "assets" / "templates" / "mass-translate-wf.template.js"
+    live_template.write_bytes(live_template.read_bytes() + b"\n// a later release\n")
+    result = run_scaffold_verify(root, plugin_root=plugin_copy)
+    assert result.returncode == 1, f"stdout={result.stdout} stderr={result.stderr}"
+    assert "reason=live_plugin_drift" in result.stderr
+    assert "mass-translate-wf.template.js" in result.stderr
+    assert "reason=marker_stale" not in result.stderr
+
+
+def test_verify_detects_orchestration_drift(tmp_path):
+    """The second marker is really covered. draft_ready.py is an
+    ORCHESTRATION member -- outside plugin_bundle_hash entirely -- yet
+    codex_job.py resolves it from the live tree via --plugin-root, so
+    .orchestration_bundle_hash is frozen evidence over live code in exactly
+    the same way."""
+    root = _make_scaffold_root(tmp_path)
+    plugin_copy = make_plugin_copy(tmp_path)
+    _rewrite_markers(root)
+    live = plugin_copy / "assets" / "scripts" / "draft_ready.py"
+    live.write_bytes(live.read_bytes() + b"\n# a later release\n")
+    result = run_scaffold_verify(root, plugin_root=plugin_copy)
+    assert result.returncode == 1, f"stdout={result.stdout} stderr={result.stderr}"
+    assert "reason=live_plugin_drift" in result.stderr
+    assert "draft_ready.py" in result.stderr
+
+
+def test_verify_reports_every_drifted_member(tmp_path):
+    """Every offender in ONE run, not the first -- and claim_record.py, the
+    member deliberately registered in BOTH tuples, named EXACTLY once. That
+    single count is what pins the dedup: reporting it twice would present one
+    drifted file as two."""
+    root = _make_scaffold_root(tmp_path)
+    plugin_copy = make_plugin_copy(tmp_path)
+    _rewrite_markers(root)
+    for name in ("claim_record.py", PLUGIN_ONLY_MEMBER):
+        live = plugin_copy / "assets" / "scripts" / name
+        live.write_bytes(live.read_bytes() + b"\n# a later release\n")
+    result = run_scaffold_verify(root, plugin_root=plugin_copy)
+    assert result.returncode == 1, f"stdout={result.stdout} stderr={result.stderr}"
+    assert "reason=live_plugin_drift" in result.stderr
+    reported = [
+        line.strip()[2:].split(":", 1)[0]
+        for line in result.stderr.splitlines()
+        if line.startswith("  - ")
+    ]
+    assert PLUGIN_ONLY_MEMBER in reported, result.stderr
+    # Counted over the REPORTED-MEMBER column, never over the whole message:
+    # every bullet also spells the member name inside its path, so a raw
+    # substring count is 2 for a correctly deduped report and cannot
+    # distinguish that from a genuine double entry.
+    assert reported.count("claim_record.py") == 1, result.stderr
+
+
+def test_verify_refuses_a_non_regular_member(tmp_path):
+    """Byte equality at a SYMLINKED member path is not evidence about the
+    tree that member's own siblings resolve in: review_ready.py executes the
+    draft_sha1.py beside its RESOLVED __file__, and codex_job.py invokes it
+    without forwarding --plugin-root. The symlink here points at a
+    BYTE-IDENTICAL copy, so a bytes-only check would pass. The same predicate
+    covers the ordinary case of a member missing from one tree."""
+    root = _make_scaffold_root(tmp_path)
+    assert run_scaffold_setup(root).returncode == 0
+
+    symlinked = make_plugin_copy(tmp_path, name="plugin_symlinked")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    member = symlinked / "assets" / "scripts" / "review_ready.py"
+    identical = elsewhere / "review_ready.py"
+    identical.write_bytes(member.read_bytes())
+    member.unlink()
+    member.symlink_to(identical)
+    assert member.read_bytes() == (root / "scripts" / "review_ready.py").read_bytes()
+    result = run_scaffold_verify(root, plugin_root=symlinked)
+    assert result.returncode == 1, f"stdout={result.stdout} stderr={result.stderr}"
+    assert "reason=member_not_regular" in result.stderr
+    assert "review_ready.py" in result.stderr
+    assert "is a symlink" in result.stderr
+
+    absent = make_plugin_copy(tmp_path, name="plugin_absent")
+    (absent / "assets" / "scripts" / "draft_sha1.py").unlink()
+    result = run_scaffold_verify(root, plugin_root=absent)
+    assert result.returncode == 1, f"stdout={result.stdout} stderr={result.stderr}"
+    assert "reason=member_not_regular" in result.stderr
+    assert "draft_sha1.py" in result.stderr
+    assert "is missing" in result.stderr
+
+
+def test_verify_writes_nothing(tmp_path):
+    """The contract: --verify NEVER repairs. Asserts the intended refusal
+    FIRST -- an unfixed tree exits 2 having touched nothing, so a bare
+    no-write assertion is green before the flag exists. Snapshots the plugin
+    tree too, which is here both the INVOKED and the CHECKED tree, so a
+    stray __pycache__/ has nowhere else to land: removing
+    sys.dont_write_bytecode must turn this RED."""
+    root = _make_scaffold_root(tmp_path)
+    plugin_copy = make_plugin_copy(tmp_path)
+    _rewrite_markers(root)
+    live = plugin_copy / "assets" / "scripts" / "draft_ready.py"
+    live.write_bytes(live.read_bytes() + b"\n# a later release\n")
+
+    before_root = tree_snapshot(root)
+    before_plugin = tree_snapshot(plugin_copy)
+    result = run_scaffold_verify(
+        root,
+        plugin_root=plugin_copy,
+        script=plugin_copy / "assets" / "scripts" / "scaffold_setup.py",
+    )
+    assert result.returncode == 1, f"stdout={result.stdout} stderr={result.stderr}"
+    assert "reason=live_plugin_drift" in result.stderr
+    assert tree_snapshot(root) == before_root, "durable_root was mutated by --verify"
+    assert tree_snapshot(plugin_copy) == before_plugin, "the plugin tree was mutated by --verify"
+
+
+def test_verify_plugin_root_binds_the_checked_tree(tmp_path):
+    """Leg 3, pinned against the REAL consumer rather than asserted in prose.
+    --plugin-root decides which tree the verdict is about, and
+    segment_dispatch_driver.resolve_dirs() -- the documented alternative W5
+    path -- must resolve its template and sibling scripts inside that same
+    tree, or the verified tree and the executed tree are different trees."""
+    root = _make_scaffold_root(tmp_path)
+    clean = make_plugin_copy(tmp_path, name="plugin_clean")
+    updated = make_plugin_copy(tmp_path, name="plugin_updated")
+    _rewrite_markers(root)
+
+    live_template = updated / "assets" / "templates" / "mass-translate-wf.template.js"
+    live_template.write_bytes(live_template.read_bytes() + b"\n// a later release\n")
+
+    ok = run_scaffold_verify(root, plugin_root=clean)
+    assert ok.returncode == 0, f"stdout={ok.stdout} stderr={ok.stderr}"
+    assert f"plugin_root={clean.resolve()}" in ok.stdout, ok.stdout
+
+    bad = run_scaffold_verify(root, plugin_root=updated)
+    assert bad.returncode == 1, f"stdout={bad.stdout} stderr={bad.stderr}"
+    assert "reason=live_plugin_drift" in bad.stderr
+
+    driver = _load_module(
+        "segment_dispatch_driver", SCRIPTS_DIR / "segment_dispatch_driver.py"
+    )
+    dirs = driver.resolve_dirs(str(root), str(clean))
+    assert dirs["template_script"] == clean / "assets" / "templates" / "mass-translate-wf.template.js"
+    assert dirs["scripts_dir"] == clean / "assets" / "scripts"
+
+
+def test_verify_refuses_a_bad_plugin_root(tmp_path):
+    """An unsubstituted {{PLUGIN_ROOT}} token renders as the EMPTY STRING, not
+    as the flag being omitted, and Path("").resolve() is the CWD -- which
+    would silently make wherever the session happens to be launched from the
+    tree the verdict is about. Refused by name, like codex_job.py's and
+    segment_dispatch_driver.py's identical guards. --plugin-root without
+    --verify is refused rather than ignored: accepting it would let an
+    operator believe a WRITE had been checked against a named tree."""
+    root = _make_scaffold_root(tmp_path)
+    assert run_scaffold_setup(root).returncode == 0
+
+    empty = run_scaffold_verify(root, plugin_root="   ")
+    assert empty.returncode == 1
+    assert "empty/whitespace-only" in empty.stderr
+    assert "{{PLUGIN_ROOT}}" in empty.stderr
+
+    not_a_plugin = tmp_path / "not_a_plugin"
+    not_a_plugin.mkdir()
+    shapeless = run_scaffold_verify(root, plugin_root=not_a_plugin)
+    assert shapeless.returncode == 1
+    assert "assets/scripts/" in shapeless.stderr
+
+    without_verify = subprocess.run(
+        [
+            sys.executable,
+            str(SCAFFOLD_SETUP_SRC),
+            "--durable-root",
+            str(root),
+            "--plugin-root",
+            str(PLUGIN_ROOT / "skills" / "literary-translator"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert without_verify.returncode == 1
+    assert "only meaningful with --verify" in without_verify.stderr
