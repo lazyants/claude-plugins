@@ -2793,6 +2793,15 @@ SENTINEL_NON_PARTICIPANTS = (
     # the case this roster exists for; the ROLE check below re-verifies that
     # it reads no marker, builds no sentinel path, and binds no sentinel API.
     "validate_assembled.py",
+    # #551's stderr relay. This driver forwards select_segments.py's own
+    # stderr verbatim, and names `.ever_converged` exactly once, in the relay
+    # helper's docstring, to say WHAT the two relayed disclosures are -- one
+    # of them being #537's `--from-cap` admission over a PRESENT sentinel.
+    # It never reads, writes, or builds a sentinel path: the only script in
+    # this driver's process tree that touches the marker is the selector it
+    # shells out to, whose participation is pinned above. Re-verified by the
+    # ROLE check below rather than taken on the strength of this comment.
+    "segment_dispatch_driver.py",
 )
 
 
@@ -2825,8 +2834,8 @@ def test_exactly_these_five_scripts_participate_in_the_sentinel_contract():
     builds the path as `".ever_converged." + seg` still trips it.
 
     A FOURTH, deliberately loose needle scans for the bare token
-    `ever_converged` and pins the two files that legitimately mention it
-    without participating (SENTINEL_NON_PARTICIPANTS). Those two are checked
+    `ever_converged` and pins the files that legitimately mention it
+    without participating (SENTINEL_NON_PARTICIPANTS). Those are checked
     BY ROLE, not trusted by name: each is re-asserted every run to carry
     none of the executable signals. Trusting a name is how a listed file
     quietly becomes a participant -- the listing that excused its prose
@@ -2842,8 +2851,8 @@ def test_exactly_these_five_scripts_participate_in_the_sentinel_contract():
     rationale for leaving the hole open did not survive being checked.
 
     The non-participant exemptions are checked at OCCURRENCE granularity, not
-    file granularity. Both listed files already appear in every file-level
-    token set, because their docstrings discuss the marker -- so a file-level
+    file granularity. Every listed file already appears in the file-level
+    token set, because its docstring discusses the marker -- so a file-level
     role check cannot tell "discusses the convention" from "builds it", and a
     real participant added inline to a listed file passed this whole census.
     Measured, not hypothetical. The role check therefore re-scans each listed
