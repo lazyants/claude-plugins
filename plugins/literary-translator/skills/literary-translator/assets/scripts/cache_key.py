@@ -73,11 +73,18 @@ except ImportError:  # pragma: no cover - exercised only when PyYAML is absent
 
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 
-# The sixteen scripts (+ two workflow templates) that make up plugin_bundle_hash.
+# What makes up plugin_bundle_hash is the PLUGIN_BUNDLE_MEMBERS tuple below --
+# read the membership and the count off that tuple, never off a number or a
+# name list restated here. Both kinds of restatement drift silently as the
+# tuples grow: this comment's own count went stale once (#591), and
+# orchestration-and-batching.md's copy of the orchestration list went stale
+# twice, the second time under a warning telling the reader to read the tuple.
 # NEVER bootstrap_names.py/segpack.py (their own derivation_bundle_hash) and
-# NEVER draft_ready.py/ledger_merge.py/language_smoke_report.py (their own
-# orchestration_bundle_hash). The other two entries of that tuple,
-# claim_record.py and select_segments.py, are registered in BOTH.
+# NEVER the orchestration-ONLY scripts (orchestration_bundle_hash) -- meaning
+# the members of scaffold_setup.py's ORCHESTRATION_BUNDLE_MEMBERS that are
+# absent from the tuple below. The two tuples are not disjoint and being an
+# orchestration member is not by itself a reason to be missing here, so
+# compare them rather than assuming either.
 # review_ready.py and resume_setup.py (1.2.0) join this list rather than
 # orchestration_bundle_hash's bucket, which is non-gating for convergence but
 # gating for resume (its marker is folded into resume_setup.py's
