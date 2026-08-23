@@ -53,12 +53,19 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 BACKFILL_ACK_SRC = ASSETS_DIR / "scripts" / "backfill_resume_gate_ack.py"
+CODEX_JOB_SRC = ASSETS_DIR / "scripts" / "codex_job.py"
 
 assert BACKFILL_ACK_SRC.is_file(), f"backfill_resume_gate_ack.py not found at {BACKFILL_ACK_SRC}"
 
 spec = importlib.util.spec_from_file_location("backfill_resume_gate_ack_uut", str(BACKFILL_ACK_SRC))
 BACKFILL = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(BACKFILL)
+
+assert CODEX_JOB_SRC.is_file(), f"codex_job.py not found at {CODEX_JOB_SRC}"
+
+_cj_spec = importlib.util.spec_from_file_location("codex_job_uut", str(CODEX_JOB_SRC))
+CODEX_JOB = importlib.util.module_from_spec(_cj_spec)
+_cj_spec.loader.exec_module(CODEX_JOB)
 
 
 def make_root(tmp_path, dispatched=None, digested=(), workflows=()):
@@ -415,3 +422,60 @@ def test_a_write_failure_never_leaves_a_partial_marker_and_is_retryable(tmp_path
         f"just non-crashing: {retry_outcome}"
     )
     assert json.loads(marker.read_text(encoding="utf-8"))["run_id"] == "OLDRUN"
+
+
+# ===========================================================================
+# #428 -- this script's own copy of `scan_dispatching_run_ids()` must ignore
+# `codex_job.py`'s private per-segment slot files. Its loop globs
+# `segments/*.draft.json`, and `pathlib.Path.glob` matches DOT-PREFIXED
+# names, so `.att.<seg>.<INV>.draft.json` and `.att_pending.<seg>.draft.json`
+# were both read as canonical drafts and attributed by their own
+# `dispatch_token`.
+#
+# The reader's identical copy is covered in tests/resume_gate_skip_detection
+# .test.py, including a drift pin over both. This test exists so the WRITER
+# cannot regress alone: each script owns its own copy, and a fix landing in
+# only one of them is exactly the divergence that let this defect sit in
+# both (the reader had already been rewritten from `glob` to `iterdir`
+# without either copy changing what it admitted).
+# ===========================================================================
+
+
+def test_slot_files_are_not_counted_or_attributed_as_drafts(tmp_path):
+    """One real draft plus BOTH slot files for the same seg, all carrying
+    the SAME valid token. Pre-fix: `drafts_scanned=3` and the seg listed
+    three times under one run id.
+
+    Slot names are built by constructing the REAL producer rather than typed
+    here, so a rename of either slot moves this fixture with it."""
+    root = make_root(tmp_path, dispatched={"seg01": "RUN20260804T090001Z"})
+    job = CODEX_JOB.CodexJob(
+        kind="translate",
+        seg="seg01",
+        tok="RUN20260804T090001Z:seg01",
+        disp="d1",
+        root=str(root),
+        companion=str(root / "companion.mjs"),
+        prompt_text="p",
+        prompt_file=str(root / "prompt.txt"),
+        deadline_sec=100,
+        poll_sec=1,
+        effort="high",
+        node="node",
+    )
+    slot_doc = json.dumps({"seg": "seg01", "dispatch_token": "RUN20260804T090001Z:seg01"})
+    for slot in (Path(job.attempt), Path(job.pending)):
+        assert slot.name.startswith("."), f"fixture precondition: {slot.name}"
+        assert slot.name.endswith(".draft.json"), (
+            "fixture precondition: the slot must collide with the globbed "
+            f"suffix, otherwise this test proves nothing. {slot.name}"
+        )
+        slot.write_text(slot_doc, encoding="utf-8")
+
+    scan = BACKFILL.scan_dispatching_run_ids(root / "segments")
+
+    assert scan == {
+        "by_run_id": {"RUN20260804T090001Z": ["seg01"]},
+        "drafts_scanned": 1,
+        "drafts_untokened": 0,
+    }, scan

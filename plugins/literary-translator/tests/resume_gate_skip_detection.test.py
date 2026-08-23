@@ -167,11 +167,13 @@ ASSETS_DIR = PLUGIN_ROOT / "skills" / "literary-translator" / "assets"
 SELECT_SCRIPT_SRC = ASSETS_DIR / "scripts" / "select_segments.py"
 LEDGER_MERGE_SRC = ASSETS_DIR / "scripts" / "ledger_merge.py"
 BACKFILL_ACK_SRC = ASSETS_DIR / "scripts" / "backfill_resume_gate_ack.py"
+CODEX_JOB_SRC = ASSETS_DIR / "scripts" / "codex_job.py"
 SCHEMAS_SRC = ASSETS_DIR / "schemas"
 
 assert SELECT_SCRIPT_SRC.is_file(), f"select_segments.py not found at {SELECT_SCRIPT_SRC}"
 assert LEDGER_MERGE_SRC.is_file(), f"ledger_merge.py not found at {LEDGER_MERGE_SRC}"
 assert BACKFILL_ACK_SRC.is_file(), f"backfill_resume_gate_ack.py not found at {BACKFILL_ACK_SRC}"
+assert CODEX_JOB_SRC.is_file(), f"codex_job.py not found at {CODEX_JOB_SRC}"
 assert SCHEMAS_SRC.is_dir(), f"schemas dir not found at {SCHEMAS_SRC}"
 
 # Minimal stand-in for cache_key.py. None of these fixtures classify a
@@ -201,6 +203,7 @@ def _load(name, path):
 
 SELECT = _load("select_segments_under_test", SELECT_SCRIPT_SRC)
 BACKFILL_ACK = _load("backfill_resume_gate_ack_under_test", BACKFILL_ACK_SRC)
+CODEX_JOB = _load("codex_job_under_test", CODEX_JOB_SRC)
 
 
 def make_durable_root(tmp_path):
@@ -1098,3 +1101,176 @@ def test_workflow_scan_folds_an_unstattable_entry_into_evidence(tmp_path):
         f"the unstattable entry's effect. {payload}"
     )
     assert "UNSTATTABLE_RUN (0 draft(s), evidence: workflow_dir)" in payload["error"], payload["error"]
+
+
+# ===========================================================================
+# #428 fix -- codex_job.py's private per-segment SLOT files must never be
+# read as canonical segment drafts. `.att.<seg>.<INV>.draft.json` and
+# `.att_pending.<seg>.draft.json` both end in exactly the `.draft.json`
+# suffix both dispatch scans admit, and both `pathlib.Path.glob("*.draft.json")`
+# and a `name.endswith(".draft.json")` test over `iterdir()` match a
+# DOT-PREFIXED name -- so a slot carried its own `dispatch_token` into the
+# evidence mapping as if a real draft stood behind it.
+#
+# The slot NAMES here are never hand-typed: every fixture builds them by
+# constructing the real producer (`codex_job.CodexJob`), so a rename of
+# either slot moves these tests with it instead of leaving them asserting
+# against a shape the shipped driver no longer writes.
+#
+# What licenses the filter: a seg id is `(?:FRONTBACK:)?[A-Za-z0-9_]+` in
+# every copy of `_SEG_ID_RE` (codex_job.py, validate_draft.py, draft_sha1.py,
+# ...), so a canonical `{seg}.draft.json` can never begin with a dot and the
+# filter has no false-reject case any shipped writer can reach.
+# ===========================================================================
+
+
+def _slot_paths(root, seg, kind="translate"):
+    """`(attempt, pending)` for `seg`, built by the REAL producer.
+
+    `CodexJob.__init__` is pure state setup -- it does no filesystem I/O and
+    validates neither `companion` nor `prompt_file` -- so constructing one
+    with placeholder paths is enough to read the two slot names off it. Its
+    own docstring anticipates a direct construction by a test; several
+    sibling suites already do it (codex_job_driver.test.py, claim_end_to_end
+    .test.py)."""
+    job = CODEX_JOB.CodexJob(
+        kind=kind,
+        seg=seg,
+        tok=f"RUN:{seg}",
+        disp="d1",
+        root=str(root),
+        companion=str(root / "companion.mjs"),
+        prompt_text="p",
+        prompt_file=str(root / "prompt.txt"),
+        deadline_sec=100,
+        poll_sec=1,
+        effort="high",
+        node="node",
+    )
+    return Path(job.attempt), Path(job.pending)
+
+
+def _write_slot(path, seg, dispatch_token):
+    """A slot file carrying the SAME shape a real candidate draft has --
+    which is the whole reason the scans attributed it: `codex_job.py`
+    re-runs the candidate gates against the candidate's own
+    `dispatch_token`, so a slot holds one."""
+    path.write_text(
+        json.dumps(
+            {
+                "seg": seg,
+                "dispatch_token": dispatch_token,
+                "blocks": [],
+                "footnotes": [],
+                "verses": [],
+                "names": [],
+                "notes": [],
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_slot_files_are_not_counted_or_attributed_as_drafts(tmp_path):
+    """PROOF, reader copy. One real draft plus BOTH slot files for the same
+    seg, all three carrying the SAME valid token.
+
+    Pre-fix this returned `drafts_scanned=3` and
+    `{'RUN20260804T090001Z': ['seg01', 'seg01', 'seg01']}` -- the list is
+    sorted but never deduped, and `drafts_scanned` exists precisely so a
+    reader can tell "clean project" from "scanned nothing", so inflating it
+    defeats its purpose. Asserts the exact expected dict rather than a
+    truthiness or an inequality: a count of 2 would also differ from 3."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01"])
+    write_draft(root, "seg01", dispatch_token="RUN20260804T090001Z:seg01")
+    attempt, pending = _slot_paths(root, "seg01")
+    _write_slot(attempt, "seg01", "RUN20260804T090001Z:seg01")
+    _write_slot(pending, "seg01", "RUN20260804T090001Z:seg01")
+    assert attempt.name.startswith("."), f"fixture precondition: {attempt.name}"
+    assert pending.name.startswith("."), f"fixture precondition: {pending.name}"
+    assert attempt.name.endswith(".draft.json"), (
+        "fixture precondition: the attempt slot must collide with the scanned "
+        f"suffix, otherwise this test proves nothing. {attempt.name}"
+    )
+    assert pending.name.endswith(".draft.json"), (
+        "fixture precondition: the pending slot must collide with the scanned "
+        f"suffix, otherwise this test proves nothing. {pending.name}"
+    )
+
+    scan = SELECT.scan_dispatching_run_ids(root / "segments")
+
+    assert scan["drafts_scanned"] == 1, (
+        "only the canonical draft is a draft; the two slot files are "
+        f"codex_job.py's private staging state. {scan}"
+    )
+    assert scan["by_run_id"] == {"RUN20260804T090001Z": ["seg01"]}, scan
+    assert scan["drafts_untokened"] == 0, scan
+
+
+def test_a_stale_pending_slot_does_not_inject_a_run_id_into_the_gate(tmp_path):
+    """PROOF, and the half that reaches a VERDICT rather than a count. A
+    pending slot left by an EARLIER run carries that run's token, so pre-fix
+    it added a `run_id` key with no real draft behind it -- and those keys
+    feed `runs_missing_digest`, which is what the Step 3 gate refuses on.
+
+    Driven through the script with NO extra flags on purpose. `--classify-only`
+    sets `authorizes_dispatch = False`, and the refusal needs BOTH a missing
+    digest and an authorizing invocation, so a `--classify-only` variant of
+    this test would assert its data fields while never exercising the verdict
+    it names. The current run is digested, so the ONLY thing that could
+    refuse here is the stale slot's injected id."""
+    root = make_durable_root(tmp_path)
+    write_manifest(root, ["seg01"])
+    write_in_progress_fragment(root, "seg01")
+    write_draft(root, "seg01", dispatch_token="RUN20260804T090001Z:seg01")
+    write_digest(root, "RUN20260804T090001Z")
+    _, pending = _slot_paths(root, "seg01")
+    _write_slot(pending, "seg01", "RUN20260801T000009Z:seg01")
+
+    proc = run_select(root)
+
+    payload = parse_stdout(proc)
+    assert payload["runs_missing_digest"] == [], (
+        "a stale pending slot is not dispatch evidence -- no real draft "
+        f"stands behind it. {payload}"
+    )
+    assert list(payload["run_id_evidence"]) == ["RUN20260804T090001Z"], payload
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+def test_both_copies_of_the_dispatch_scan_ignore_slot_files(tmp_path):
+    """COMPONENT & CONSISTENCY PIN -- the reader (`select_segments.py`) and
+    the writer (`backfill_resume_gate_ack.py`) each keep their own copy of
+    `scan_dispatching_run_ids()`, per this project's no-shared-lib
+    convention, and the two had already DIVERGED in mechanism: the reader
+    enumerates with `iterdir()` plus an `endswith` test (the #460 fix), the
+    writer still globs. Both admitted dotfiles, which is why the divergence
+    was invisible.
+
+    Asserts the EXPECTED FILTERED result in each copy BEFORE asserting the
+    two agree. A bare cross-copy equality assertion is GREEN on the unfixed
+    tree -- both copies are wrong in exactly the same way -- so equality
+    alone would pin nothing."""
+    segments = tmp_path / "segments"
+    segments.mkdir()
+    (segments / "seg01.draft.json").write_text(
+        json.dumps({"seg": "seg01", "dispatch_token": "RUN20260804T090001Z:seg01"}),
+        encoding="utf-8",
+    )
+    attempt, pending = _slot_paths(tmp_path, "seg01")
+    _write_slot(attempt, "seg01", "RUN20260804T090001Z:seg01")
+    _write_slot(pending, "seg01", "RUN20260801T000009Z:seg01")
+
+    expected = {
+        "by_run_id": {"RUN20260804T090001Z": ["seg01"]},
+        "drafts_scanned": 1,
+        "drafts_untokened": 0,
+    }
+    reader = SELECT.scan_dispatching_run_ids(segments)
+    writer = BACKFILL_ACK.scan_dispatching_run_ids(segments)
+
+    assert reader == expected, reader
+    assert writer == expected, writer
+    assert reader == writer, (reader, writer)

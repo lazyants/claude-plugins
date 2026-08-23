@@ -220,8 +220,15 @@ and from the resume-integrity digest:
   `draft_path(seg)`/`review_path(seg)` (deleted if unpromoted, with one deliberate
   exception: a canonical-unreadable refusal keeps it rather than destroying validated
   bytes. It is then unreachable by any later run — the name embeds a per-invocation
-  random component — but it is NOT inert, since it still matches the `*.draft.json`
-  glob the dispatch scans use and can perturb their counts until removed),
+  random component — and it is inert: since #428 the dispatch scans skip the whole
+  dot-prefixed namespace, so a surviving attempt no longer perturbs their counts),
+- `.att_pending.<seg>.<draft|review>.json` — the deterministic per-seg/kind PENDING
+  slot `_defer_attempt()` writes when a job runs out of budget mid-flight, consumed by
+  the next run's `adopt_pending()` (which re-validates it through the same candidate
+  gates before promoting anything). Same suffix collision, same resolution: it is
+  skipped by the dispatch scans, which matters more here than for `.att.*`, because a
+  pending left by an EARLIER run carries that run's `dispatch_token` and used to inject
+  a run id with no real draft behind it into the resume-integrity gate's evidence,
 - `.codex_job.<seg>.json` — the driver's HYGIENE control state (overwritten per
   dispatch; read ONLY by the driver, never by the Workflow),
 - `.codex_job.<seg>.lock` — the never-unlinked kernel-`flock` sentinel that

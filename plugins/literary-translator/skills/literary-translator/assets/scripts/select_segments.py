@@ -719,6 +719,23 @@ def scan_dispatching_run_ids(segments_dir: Path) -> dict:
     # the more locally consistent move than importing a different script's
     # pattern.
     for path in entries:
+        # #428: codex_job.py's private staging slots live in this same
+        # directory and END IN `.draft.json` too -- `.att.<seg>.<INV>.draft.json`
+        # and `.att_pending.<seg>.draft.json` (codex_job.py's own __init__).
+        # Neither `Path.glob("*.draft.json")` nor an `endswith` test over
+        # `iterdir()` excludes a dot-prefixed name, so a slot used to be
+        # counted here and attributed by the candidate's own dispatch_token
+        # -- inflating `drafts_scanned`, duplicating a seg inside
+        # `by_run_id`, and, for a slot left by an EARLIER run, injecting a
+        # run id with no real draft behind it into the evidence this gate
+        # refuses on. Skipping the whole dot-prefixed namespace is safe in
+        # BOTH directions: every private entry the driver writes here is
+        # dot-prefixed (.att/.att_pending/.codex_job/.codex_failed/
+        # .codex_task/.ever_converged), and a canonical draft never can be,
+        # since a seg id is `(?:FRONTBACK:)?[A-Za-z0-9_]+` in every copy of
+        # _SEG_ID_RE and so cannot begin with a dot.
+        if path.name.startswith("."):
+            continue
         if not path.name.endswith(".draft.json"):
             continue
         scanned += 1
