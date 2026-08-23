@@ -2108,6 +2108,19 @@ point you type here is itself the durable copy, so a tampered
 `ledger_merge.py` never consults the trusted checker at all. See the #582
 paragraph above for why that asymmetry stands.
 
+**Getting the value WRONG is refused, not skipped (#608).** Omitting
+`--plugin-root` is still the deliberate self-anchored path and behaves as it always
+has. But passing it a path that does not resolve to a directory containing
+`assets/scripts/` — a typo, or a `{{PLUGIN_ROOT}}` that never got substituted and
+arrived empty — used to fall through to a per-segment *"cache_key.py not found —
+skipping stale-check"* warning for **every** segment: the merge then printed its
+ordinary success line and materialized a ledger in which nothing had been checked.
+That merge now fails before any fragment is read, with `success: false` — and for a
+value that did resolve to something, the error names both what you passed and the
+path it looked for. (The empty case cannot name a path, and says so instead.) If you see it, fix the
+value — do not drop the flag to make it go away, because that swaps a loud refusal
+for the self-anchored checker this flag exists to bypass.
+
 Do NOT reach for `--expected-from-manifest`/`--expected-segs` here, and never
 add `--run-token` to them. Either expected-segment flag turns on the
 missing-fragment completeness check, which REFUSES outright for a manifest id

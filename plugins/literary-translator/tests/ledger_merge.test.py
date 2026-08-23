@@ -723,6 +723,128 @@ def test_plugin_root_flag_omitted_preserves_todays_behavior(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #608: a GIVEN --plugin-root that does not resolve is a WHOLE-RUN refusal,
+# not a per-segment stale-check skip.
+#
+# Before this, resolve_dirs() validated neither branch, so a mistyped
+# --plugin-root reached _compute_stale_segments()'s deliberately non-fatal
+# "cache_key.py not found -- skipping stale-check" branch once PER SEGMENT.
+# Every converged segment was therefore left unchecked while the merge printed
+# its ordinary success line and materialized runs/ledger.json -- a silent false
+# green, and precisely the state the flag exists to make impossible. The
+# per-segment policy is unchanged; only the whole-run precondition is new.
+#
+# The BEHAVIOURAL red (that today's code reports success) and the ORDERING red
+# (that the refusal precedes any fragment read) are deliberately kept in
+# SEPARATE tests. A single test carrying both fixtures would be red on
+# unpatched code for the ordering fixture's reason and could never witness the
+# false green it exists for.
+# ---------------------------------------------------------------------------
+
+def test_plugin_root_that_does_not_resolve_refuses(tmp_path):
+    """The REFUSE direction, behavioural. A converged fragment whose stored
+    key MATCHES what the fixture stub reports -- so with a WORKING checker
+    this merge succeeds and reports no staleness, and the only thing under
+    test is the unresolvable root itself.
+
+    Pre-fix this exits 0 with success=True and writes runs/ledger.json, having
+    skipped the stale-check for every segment. That false green is this test's
+    red."""
+    root = make_durable_root(tmp_path)
+    key = make_cache_key("stored")
+    write_fixture_cache_keys(root, {"seg01": key})
+    write_fragment(root, "seg01", converged_fragment(key))
+    missing_plugin_root = tmp_path / "nonexistent_plugin_install"
+
+    proc = run_merge(root, "--plugin-root", str(missing_plugin_root))
+
+    assert proc.returncode == 1, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    error = payload["error"]
+    assert "--plugin-root" in error, error
+    assert str(missing_plugin_root) in error, (
+        f"the error must name the root the operator actually passed: {error}"
+    )
+    assert str(missing_plugin_root / "assets" / "scripts") in error, (
+        f"the error must name the RESOLVED path it looked for: {error}"
+    )
+    assert not (root / "runs" / "ledger.json").exists(), (
+        "the merge must refuse without materializing a ledger -- a ledger "
+        "written here is the false green this refusal exists to prevent"
+    )
+
+
+def test_plugin_root_refusal_precedes_any_fragment_read(tmp_path):
+    """The ORDERING pin, and the reason the test above is not enough: a guard
+    placed ANYWHERE before the ledger write leaves runs/ledger.json absent, so
+    the absent file cannot distinguish "refused first" from "refused after
+    reading every fragment and running every checker".
+
+    The tripwire is a second fragment file holding invalid JSON.
+    _read_fragments() must parse EVERY fragment before it returns, so the
+    tripwire raises `invalid JSON in fragment ...` wherever its name happens to
+    sort -- the name below is arbitrary. So the assertion is on WHICH error
+    comes back: a guard at or below _read_fragments() yields the fragment
+    error; only a guard above it yields the --plugin-root error.
+
+    Its red on unpatched code is therefore the FRAGMENT error, not the false
+    green -- a different red from the behavioural test above, by design."""
+    root = make_durable_root(tmp_path)
+    key = make_cache_key("stored")
+    write_fixture_cache_keys(root, {"seg01": key})
+    write_fragment(root, "seg01", converged_fragment(key))
+    tripwire = root / "runs" / "ledger.d" / "000_tripwire.json"
+    tripwire.write_text("{ this is not json", encoding="utf-8")
+    missing_plugin_root = tmp_path / "nonexistent_plugin_install"
+
+    proc = run_merge(root, "--plugin-root", str(missing_plugin_root))
+
+    assert proc.returncode == 1, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    error = payload["error"]
+    assert "--plugin-root" in error, (
+        "the --plugin-root refusal must come back, NOT the tripwire fragment's "
+        f"parse error -- getting the fragment error means the guard runs at or "
+        f"below _read_fragments(): {error}"
+    )
+    assert "invalid JSON in fragment" not in error, (
+        f"a fragment was read before the refusal: {error}"
+    )
+
+
+def test_plugin_root_empty_string_refuses_even_when_cwd_has_assets_scripts(tmp_path):
+    """The empty/whitespace leg, which a bare is_dir() check would let
+    through: Path("").resolve() is the CURRENT WORKING DIRECTORY, and
+    run_merge() runs with cwd=root. Planting assets/scripts/cache_key.py under
+    that cwd makes the naive check PASS and silently run the cwd copy.
+
+    That planted copy is the FAKE stub, which reports the fixture's `current`
+    key -- deliberately mismatching the fragment's stored key -- so pre-fix
+    this merge exits 0, succeeds, and reports seg01 stale off a checker the
+    operator never pointed at. The refusal is what this test pins."""
+    root = make_durable_root(tmp_path)
+    stored_key = make_cache_key("stored")
+    current_key = make_cache_key("current")
+    write_fixture_cache_keys(root, {"seg01": current_key})
+    write_fragment(root, "seg01", converged_fragment(stored_key))
+    cwd_scripts = root / "assets" / "scripts"
+    cwd_scripts.mkdir(parents=True)
+    (cwd_scripts / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
+
+    proc = run_merge(root, "--plugin-root", "")
+
+    assert proc.returncode == 1, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "empty/whitespace-only" in payload["error"], payload["error"]
+    assert not (root / "runs" / "ledger.json").exists(), (
+        "an empty --plugin-root must refuse without materializing a ledger"
+    )
+
+
+# ---------------------------------------------------------------------------
 # A RELATIVE --durable-root must be resolved exactly ONCE (LT-409 post-review
 # fix, third instance of this shape -- resume_setup.py and select_segments.py
 # each had the identical bug in their own forward to cache_key.py).
