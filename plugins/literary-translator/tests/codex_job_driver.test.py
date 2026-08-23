@@ -4049,48 +4049,65 @@ def test_content_gate_exit_1_writes_a_terminal_blocked_ledger_fragment(tmp_path)
     assert leftovers == [], leftovers
 
 
-@pytest.mark.parametrize("label,kind,state_kw", [
+@pytest.mark.parametrize("label,kind,expected_reason,state_kw", [
     # validate_draft.py RAN but reported usage/environment/source-availability, not a
     # verdict on the candidate. This is the row that makes exit 1 a discriminator rather
     # than "any non-zero".
-    ("validator_environment_failure", "translate",
+    ("validator_environment_failure", "translate", "validate-failed",
      dict(attempt_mode="validator_env_failure", status_seq=["completed"])),
     # draft_ready.py rejects first and returns before validate_draft.py runs at all.
-    ("draft_ready_rejection", "translate",
+    ("draft_ready_rejection", "translate", "validate-failed",
      dict(attempt_mode="invalid_token", status_seq=["completed"])),
     # Nothing was produced to validate.
-    ("no_attempt_written", "translate",
+    ("no_attempt_written", "translate", "validate-failed",
      dict(attempt_mode="none", status_seq=["completed"])),
     # A non-regular sandbox output: refused by the publish primitive, before any gate.
-    ("non_regular_attempt", "translate",
+    ("non_regular_attempt", "translate", "validate-failed",
      dict(attempt_mode="symlink", status_seq=["completed"])),
     # The job itself failed -- no candidate, no gate, nothing about content.
-    ("job_failed", "translate", dict(attempt_mode="none", status_seq=["failed"])),
+    ("job_failed", "translate", "job-failed",
+     dict(attempt_mode="none", status_seq=["failed"])),
     # The dispatch never launched.
-    ("launch_failed", "translate", dict(attempt_mode="none", task_returncode=1)),
+    ("launch_failed", "translate", "launch-failed",
+     dict(attempt_mode="none", task_returncode=1)),
     # A rejected REVIEW candidate is explicitly out of scope: the fragment belongs to the
     # translate stage, and blocking a segment over a review candidate would strand work
     # that already has a good draft.
-    ("review_kind_rejection", "review",
+    ("review_kind_rejection", "review", "validate-failed",
      dict(attempt_mode="invalid_token", status_seq=["completed"])),
 ])
-def test_no_ledger_fragment_for_any_non_content_failure(tmp_path, label, kind, state_kw):
+def test_no_ledger_fragment_for_any_non_content_failure(
+        tmp_path, label, kind, expected_reason, state_kw):
     """The two-sided half of #398, and the one that would catch the tempting wrong
     implementation: keying the write on `reason == "validate-failed"` instead of on the
-    content-gate flag. EVERY row here ends with that same reason, so such an
-    implementation writes a fragment in all of them and goes red seven times.
+    content-gate flag. FIVE of these seven rows end with that reason -- every translate row
+    except job_failed and launch_failed, plus the review row -- so such an implementation
+    writes a fragment in five of them and goes red five times. (An earlier revision of this
+    docstring claimed all seven; codex caught it against codex_job.py's own run(), where a
+    failed job reports `job-failed` and a failed dispatch reports `launch-failed`.)
+
+    Each row also asserts the reason it actually reached, so a row cannot quietly pass by
+    failing EARLIER than its advertised path and never exercising it -- absence of a
+    fragment is not evidence when the run never got where the row says it went.
 
     build_root() stages the REAL ledger_update.py and its schemas, so "no fragment" cannot
     pass merely because the writer was missing."""
     root, companion, node = build_root(tmp_path)
     seg, tok = "c001", "RUN:c001"
-    spawn_driver(root, companion, node, seg, tok, kind, "D1",
-                 base_state(seg, tok, kind, **state_kw))
+    proc = spawn_driver(root, companion, node, seg, tok, kind, "D1",
+                        base_state(seg, tok, kind, **state_kw))
 
+    assert parse_line(proc)["reason"] == expected_reason, (
+        f"{label}: this row must reach its advertised failure path"
+    )
     assert not fragment_path(root, seg).exists(), (
         f"{label}: a non-content failure must leave the segment recoverable, but a terminal "
         f"blocked fragment was written"
     )
+    # An ordinary job never attempted a write, so its joblog shape is unchanged -- the new
+    # key is present only when there is something to report.
+    jl = json.loads((root / "segments" / (".codex_job.%s.json" % seg)).read_text())
+    assert "ledger_write" not in jl, jl
 
 
 def test_a_gate_that_could_not_run_does_not_set_the_content_rejection_flag(tmp_path, monkeypatch):

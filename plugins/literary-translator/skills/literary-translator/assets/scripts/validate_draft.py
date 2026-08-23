@@ -464,12 +464,20 @@ def check_draft_structure(draft):
 
 
 def _load_json(path, label):
-    """Returns (obj, error_message_or_None)."""
+    """Returns (obj, error_message_or_None).
+
+    #398: UnicodeDecodeError joins the caught set. It is raised by read_text() for a
+    candidate written in a foreign encoding -- a defect in the CANDIDATE, which this
+    script's exit-code contract puts on exit 1; previously it escaped uncaught and, once
+    _main_or_exit_2() existed, would have been reported as an environment failure instead.
+    The SEGPACK side of this helper cannot be reached with an undecodable file: main()'s
+    own _refuse_unless_segpack_available() probe already routed that to exit 2 before
+    validate() runs."""
     if not path.exists():
         return None, f"{label} missing: {path}"
     try:
         return json.loads(path.read_text(encoding="utf-8")), None
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return None, f"{label} at {path} is not valid JSON: {exc}"
 
 

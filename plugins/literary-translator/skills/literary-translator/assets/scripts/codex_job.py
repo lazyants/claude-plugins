@@ -963,7 +963,19 @@ class CodexJob:
         payload_path = os.path.join(
             self.segdir, ".codex_ledger_payload.%s.%s.json" % (self.seg, self.inv))
         try:
-            with open(payload_path, "w", encoding="utf-8") as fh:
+            # O_EXCL|O_NOFOLLOW|O_NONBLOCK, not a plain open(..., "w"): this file is
+            # created inside segments/, a directory the codex process this driver launches
+            # holds write access over, and a straggler turn can outlive poll()'s
+            # best-effort cancel (see finalize()'s own comment). A plain truncating open
+            # would FOLLOW a symlink planted at this exact name, and would BLOCK
+            # indefinitely on a FIFO -- before _gate()'s timeout starts, so the bound
+            # below would not cover it, in a method whose entire contract is that it
+            # cannot disturb the job. The name already carries a fresh per-invocation
+            # random component, so O_EXCL cannot collide with this driver's own work.
+            fd = os.open(payload_path,
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump({"status": "blocked", "reason": "translate-rejected"}, fh)
             proc = self._gate(["ledger_update.py", self.seg, "--payload-file", payload_path],
                               self._LEDGER_WRITE_TIMEOUT_SEC)

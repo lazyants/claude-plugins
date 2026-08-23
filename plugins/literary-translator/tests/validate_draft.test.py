@@ -1685,3 +1685,47 @@ def test_a_missing_candidate_draft_still_exits_1(tmp_path):
         f"a missing candidate draft is a content-side failure (exit 1)\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+def test_undecodable_candidate_draft_exits_1_not_2(tmp_path):
+    """The candidate's own encoding is the candidate's problem. read_text() raises
+    UnicodeDecodeError here, which _load_json must catch as an ordinary defect -- left
+    uncaught it would reach _main_or_exit_2() and be reported as an ENVIRONMENT failure,
+    the opposite side of the boundary from where it belongs."""
+    root = make_durable_root(tmp_path)
+    write_segment(root, "seg01", clean_segpack(), clean_draft())
+    (root / "segments" / "seg01.draft.json").write_bytes(b'{"seg": "\xff\xfe bad bytes"}')
+
+    result = run_validate(root, "seg01")
+
+    assert result.returncode == 1, (
+        f"an undecodable CANDIDATE is a content-side failure (exit 1), unlike an "
+        f"undecodable segpack\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "Traceback" not in result.stderr
+
+
+def test_the_envelope_lets_systemexit_through_untouched(tmp_path, monkeypatch):
+    """_main_or_exit_2 catches Exception, deliberately NOT BaseException: _fatal() and
+    argparse both signal through SystemExit, and rewrapping one would turn a precise
+    diagnostic into a generic internal-error report. Injected directly, because every
+    other test here proves it only in passing via an exit code that both paths share."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("vd_envelope", str(SCRIPT_SRC))
+    vd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vd)
+
+    def _boom():
+        raise SystemExit(7)
+
+    monkeypatch.setattr(vd, "main", _boom)
+    try:
+        vd._main_or_exit_2()
+    except SystemExit as exc:
+        assert exc.code == 7, (
+            "SystemExit must propagate with its own code, never be caught and re-reported "
+            f"as the envelope's own exit 2 -- got {exc.code!r}"
+        )
+    else:
+        raise AssertionError("SystemExit did not propagate at all")
