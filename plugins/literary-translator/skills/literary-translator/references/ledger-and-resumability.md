@@ -1104,10 +1104,13 @@ alike, neither of which is changed to get it:
 
   **What the gates judge changed with it.** `adopt_pending()` used to point
   each gate's `--candidate-file` straight at the pending slot. That name is
-  deterministic and persists across runs, it lives in `segments/` -- which the
-  codex process this driver launches can write, and whose straggler turn can
-  outlive `poll()`'s best-effort cancel -- and every gate re-OPENS it by path,
-  so there is a writable window between the two opens. That was tolerable
+  deterministic and persists across runs, and every gate re-OPENS it by path,
+  so there is a writable window between the two opens. (Who can write it is
+  narrower than it looks: since #409 the codex process runs in a sandbox
+  `_setup_sandbox()` refuses to dispatch into unless it is proved confined, so
+  it cannot reach `segments/`. What remains is the operator's own hand and a
+  second dispatcher over one `durable_root`, already unsupported.) That was
+  tolerable
   while every rejection was recoverable; it stopped being tolerable once a
   `validate_draft.py` exit 1 became terminal, because that script answers a
   missing or malformed candidate with exit 1 too. An ordinary truncate-and-

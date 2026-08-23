@@ -1513,15 +1513,24 @@ class CodexJob:
         # #665: gate an IMMUTABLE SNAPSHOT, never the deterministic slot itself.
         #
         # Every gate re-OPENS its --candidate-file BY PATH, so gating self.pending directly
-        # means two independent opens of a name that persists across runs and is trivially
-        # derivable -- inside segments/, a directory the codex process this driver launches
-        # holds write access over, and whose straggler turn can outlive poll()'s best-effort
-        # cancel (see _record_translate_rejected()'s own comment on that same actor). That
-        # was tolerable while every rejection was recoverable. It stopped being tolerable
-        # when a validate_draft.py exit 1 became TERMINAL: that script answers a missing or
-        # malformed candidate with exit 1 as well, so an ordinary truncate-and-rewrite
-        # between the two opens is indistinguishable from a content verdict and would block
-        # the segment permanently.
+        # means two independent opens, with a window in between, of a name that persists
+        # across runs and is trivially derivable. That was tolerable while every rejection
+        # was recoverable. It stopped being tolerable when a validate_draft.py exit 1 became
+        # TERMINAL: that script answers a MISSING OR MALFORMED candidate with exit 1 as
+        # well, so an ordinary truncate-and-rewrite in that window is indistinguishable from
+        # a content verdict and would block the segment permanently.
+        #
+        # WHO could write it, stated precisely, because the obvious answer is wrong. NOT the
+        # codex process this driver launches: since #409 it runs in a mkdtemp sandbox that
+        # _setup_sandbox() REFUSES to dispatch into unless _sandbox_is_confined() has proved
+        # its workspace root resolves to itself, so a confined turn -- straggler or not --
+        # cannot reach segments/ at all. (_record_translate_rejected()'s own comment names
+        # that actor for its O_EXCL|O_NOFOLLOW; over-caution is free there and this is not a
+        # licence to repeat the claim as fact.) What remains is the operator's own hand, and
+        # a second dispatcher over one durable_root -- already unsupported, and the flock
+        # only serializes runs that reach it. Neither is a strong adversary, which is why
+        # this is one copy rather than a new staging model: the cost of being wrong about
+        # the actor is a segment blocked forever, and the cost of the copy is one read.
         #
         # Re-checking the slot after the fact cannot close that -- neither a type re-check
         # (an in-place overwrite leaves a perfectly regular file) nor a before/after digest
