@@ -192,13 +192,14 @@ def _local_dict_len(filename, funcname, varname):
     raise AssertionError(f"{funcname} is no longer defined in {filename}")
 
 
-# Rewritten for 1.47.0 (#498), per the maintenance contract above. 1.46.0's row
-# -- the test-function count of the suite that entry adds -- retires with it, as
-# 1.45.0's and 1.42.0's rows did before it. `_files_defining`, `_local_dict_len`,
+# Rewritten for 1.51.0 (#498), per the maintenance contract above. There are no
+# rows to retire: 1.49.0's declaration was already empty, for its own reason
+# (that entry's cost paragraph argues from set membership, which its sibling
+# citation guard pins instead). `_files_defining`, `_local_dict_len`,
 # `_tuple_len` and `_test_function_count` are kept unused, as earlier releases
 # kept them, for the next entry that cites their class.
 #
-# ZERO rows, because 1.47.0 is a documentation release that states no figure
+# ZERO rows, because 1.51.0 is a documentation release that states no figure
 # this file's tokenizer can see. Its actual NUMERALS are of three kinds, and
 # none of them is a measurement: the version and issue numbers, the heading's
 # release date, and the pipeline stage labels (W3a/W5/W6, R4/R9, D6).

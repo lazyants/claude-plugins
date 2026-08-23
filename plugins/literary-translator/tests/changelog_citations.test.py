@@ -61,15 +61,15 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # range, the first and last load-bearing lines are both anchored: one anchor
 # only pins where the range STARTS, and a claim can slide out of the far end.
 #
-# Rewritten for 1.47.0 (#498 -- which channel a settled W6 decision goes to) per
-# the maintenance contract above. The comment this replaces described 1.34.1 and
-# had been describing it for many releases: every entry since shipped an empty
-# declaration and left it standing. None of them could have been failed for that
-# -- a comment describing a different release is the one half of this file
-# nothing mechanical can catch -- so it is replaced here rather than carried
-# forward.
+# Rewritten for 1.51.0 (#498 -- which channel a settled W6 decision goes to) per
+# the maintenance contract above. The four `cache_key.py` rows this replaces go
+# with their entry, exactly as that contract says. They were labelled 1.44.0 and
+# were still standing under 1.49.0's entry, while the prose above them announced
+# itself as "Rewritten for 1.34.1" -- rows, comment and newest entry each naming
+# a different release. Nothing here could have caught that: a comment describing
+# the wrong release is the one half of this file no assertion reaches.
 #
-# 1.47.0 cites NO `file.ext:NNN`, so this map is empty -- its documented
+# 1.51.0 cites NO `file.ext:NNN`, so this map is empty -- its documented
 # per-release state, not a lapse. The entry names `canon_validate.py`,
 # `compute_used_terms_hash()`, `compute_prompt_hash()`, `compute_schema_hash()`,
 # `resume_setup.py`, `PLUGIN_BUNDLE_MEMBERS` and D6's fresh-segpack precondition,
@@ -89,28 +89,15 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # look identical, and 1.40.0 is the instance that proved it: the previous
 # release's declaration was ALSO empty, so nothing here went red when that entry
 # landed, and only a reviewer reading the comment caught that it still described
-# 1.35.0. It has happened on every release since, unnoticed each time. The
-# precedent runs further back for their own reasons (1.34.1 (#547) and 1.33.1
-# were empty too). Both halves still bite against an empty map
+# 1.35.0. Do not read that as "it happens on every release" -- 1.44.0 declared
+# four real rows, and they were still standing under 1.49.0's entry, which is the
+# OTHER failure and equally invisible here. Two instances are known, and both are
+# a stale COMMENT rather than a stale assertion. The empty-map precedent runs
+# further back for its own reasons (1.34.1 (#547) and 1.33.1 were empty too). Both halves still bite against an empty map
 # -- a citation with no anchors fails and an anchor no citation uses fails -- but
 # neither half fires on a stale COMMENT, which is why the rewrite is a
 # maintenance contract rather than an assertion.
-CITATION_ANCHORS = {
-    # 1.50.0 (#441) cites no `file:NNN` at all, so this map is empty and that
-    # is a deliberate rotation, not an oversight -- the previous entry's four
-    # cache_key.py anchors retire with it.
-    #
-    # The entry does name a lot of source, and names it by SYMBOL throughout:
-    # `derive_next_action()`, `_translate_in_progress_since()`,
-    # `mark_ever_converged()`, `classify_ever_converged_sentinel()`,
-    # `PLUGIN_BUNDLE_MEMBERS`, `check_segments_dir_identity()`. That is the
-    # choice this release made on purpose. Its own subject is a durability
-    # fix that took four review rounds and moved these functions repeatedly,
-    # and every rebase renumbered them again -- a line citation written at
-    # round one would have been wrong by round four with nothing going red in
-    # between, since this map only checks anchors the entry still contains.
-    # A symbol survives a rebase; a line number does not.
-}
+CITATION_ANCHORS = {}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
 # alphabetic extension are still required. Pinning a list of extensions was
