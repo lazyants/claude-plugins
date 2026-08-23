@@ -2298,11 +2298,20 @@ def _manifest_tamper_fixture(tmp_path):
         "manifest_sha256": manifest_sha256,
     })
     return {
-        "lang_dir": lang_dir, "particle_config": particle_config, "text": text,
+        "lang_dir": lang_dir, "particle_config": particle_config,
         "block_id": block_id, "manifest_path": manifest_path,
         "triage_path": triage_path, "aggregate_path": aggregate_path,
-        "evidence": evidence,
     }
+
+
+def _run_verify(fx, **kwargs):
+    """Every #268 case drives run_verify_merged with the same four
+    positionals off the fixture; `kwargs` is where a case differs (only
+    `canon_path`, so far)."""
+    return sr.run_verify_merged(
+        fx["triage_path"], fx["aggregate_path"], fx["manifest_path"],
+        fx["particle_config"], languages_dir=fx["lang_dir"], **kwargs,
+    )
 
 
 def _apply_unparseable_tamper(manifest_path: Path, kind: str) -> None:
@@ -2317,6 +2326,11 @@ def _apply_unparseable_tamper(manifest_path: Path, kind: str) -> None:
         # Parseable as text, but `json.loads` raises RecursionError rather
         # than JSONDecodeError -- neither is an OSError, and only one is a
         # ValueError, which is why both readers name both.
+        #
+        # The depth is a MEASURED margin, not padding: on the pinned runtime
+        # (Python 3.14) 100 000 levels parse fine and the boundary sits
+        # somewhere above that, moving with C-stack headroom. Shrink this and
+        # the case parses, raises nothing, and stops testing the arm it names.
         manifest_path.write_text("[" * 1000000 + "]" * 1000000, encoding="utf-8")
     elif kind == "deleted":
         manifest_path.unlink()
@@ -2340,10 +2354,7 @@ def test_verify_merged_reports_a_tamper_that_leaves_manifest_unparseable(tmp_pat
     SkepticReadyError` into main()'s catch-all. Both routes printed a payload
     with no frozen_input_mismatch key, which is the property under test."""
     fx = _manifest_tamper_fixture(tmp_path)
-    clean = sr.run_verify_merged(
-        fx["triage_path"], fx["aggregate_path"], fx["manifest_path"],
-        fx["particle_config"], languages_dir=fx["lang_dir"],
-    )
+    clean = _run_verify(fx)
     assert clean == {"verified": True, "missing": [], "frozen_input_mismatch": False}, (
         "the fixture must verify cleanly before the tamper, or the assertions "
         "below would pass for a reason that has nothing to do with #268"
@@ -2351,10 +2362,7 @@ def test_verify_merged_reports_a_tamper_that_leaves_manifest_unparseable(tmp_pat
 
     _apply_unparseable_tamper(fx["manifest_path"], kind)
 
-    result = sr.run_verify_merged(
-        fx["triage_path"], fx["aggregate_path"], fx["manifest_path"],
-        fx["particle_config"], languages_dir=fx["lang_dir"],
-    )
+    result = _run_verify(fx)
     assert result["frozen_input_mismatch"] is True, (
         "an unparseable manifest.json whose stamped hash no longer matches is a "
         "frozen-input tamper -- reporting it as anything else downgrades a FATAL "
@@ -2427,10 +2435,7 @@ def test_verify_merged_still_raises_on_a_broken_manifest_with_no_stamp(tmp_path,
     _apply_unparseable_tamper(fx["manifest_path"], kind)
 
     with pytest.raises(sr.SkepticReadyError, match=expected):
-        sr.run_verify_merged(
-            fx["triage_path"], fx["aggregate_path"], fx["manifest_path"],
-            fx["particle_config"], languages_dir=fx["lang_dir"],
-        )
+        _run_verify(fx)
 
 
 @pytest.mark.parametrize("kind", ["invalid_utf8", "deep_nesting", "invalid_json"])
@@ -2452,10 +2457,7 @@ def test_verify_merged_keeps_a_standing_mismatch_when_the_unstamped_manifest_is_
     write_json(canon_path, {"entries": {"INJECTED": {}}})
     _apply_unparseable_tamper(fx["manifest_path"], kind)
 
-    result = sr.run_verify_merged(
-        fx["triage_path"], fx["aggregate_path"], fx["manifest_path"],
-        fx["particle_config"], languages_dir=fx["lang_dir"], canon_path=canon_path,
-    )
+    result = _run_verify(fx, canon_path=canon_path)
     assert result["frozen_input_mismatch"] is True, (
         "the canon.json tamper was already detected before the manifest parse ran -- "
         "an exception escaping that parse must not strip the field the caller HALTs on"
@@ -2493,10 +2495,7 @@ def test_verify_merged_keeps_a_standing_mismatch_when_a_later_frozen_input_read_
 
     monkeypatch.setattr(sr, "read_frozen_input_snapshot", _fail_on_manifest)
 
-    result = sr.run_verify_merged(
-        fx["triage_path"], fx["aggregate_path"], fx["manifest_path"],
-        fx["particle_config"], languages_dir=fx["lang_dir"], canon_path=canon_path,
-    )
+    result = _run_verify(fx, canon_path=canon_path)
     assert result["frozen_input_mismatch"] is True, (
         "canon.json's tamper was recorded before manifest.json's read failed -- "
         "the read failure must not carry that verdict out through a payload shape "
@@ -2540,10 +2539,7 @@ def test_verify_merged_parses_manifest_from_h1s_own_snapshot(tmp_path, monkeypat
 
     monkeypatch.setattr(sr, "read_frozen_input_snapshot", _capture_then_mutate_manifest)
 
-    result = sr.run_verify_merged(
-        fx["triage_path"], fx["aggregate_path"], manifest_path,
-        fx["particle_config"], languages_dir=fx["lang_dir"],
-    )
+    result = _run_verify(fx)
     assert result["frozen_input_mismatch"] is False, (
         "the stamp describes the ORIGINAL manifest.json -- the captured snapshot "
         "this run actually hashed -- so it must still match regardless of the "
@@ -2568,10 +2564,7 @@ def test_verify_merged_parses_manifest_from_h1s_own_snapshot(tmp_path, monkeypat
     aggregate["manifest_sha256"] = suspicion_scan.compute_frozen_input_hash(manifest_path)
     write_json(fx["aggregate_path"], aggregate)
 
-    after = sr.run_verify_merged(
-        fx["triage_path"], fx["aggregate_path"], manifest_path,
-        fx["particle_config"], languages_dir=fx["lang_dir"],
-    )
+    after = _run_verify(fx)
     assert after["frozen_input_mismatch"] is False, (
         "re-stamped over the mutated bytes, so H1 has nothing to report -- this "
         "call must isolate what the PARSE saw"

@@ -363,6 +363,29 @@ class SkepticReadyError(Exception):
 # JSON I/O helpers
 # ---------------------------------------------------------------------------
 
+def _parse_json_text(raw: str, path: Path, label: str) -> dict:
+    """The ONE place this module classifies a ``json.loads`` failure, shared
+    by ``_read_json`` and ``_read_json_from_snapshot`` -- the latter's
+    docstring promises the two agree about what "not valid JSON" means, and
+    a promise held by two copies staying in sync is the shape round 7
+    already argued against elsewhere in this file.
+
+    #268: the non-``JSONDecodeError`` arm is the point. Deeply nested input
+    raises ``RecursionError`` (not even a ``ValueError``) and a
+    syntactically valid integer over CPython's digit limit raises a plain
+    ``ValueError``; both used to escape RAW, past every caller's ``except
+    SkepticReadyError``, into main()'s catch-all -- whose payload carries no
+    mode-specific field, so ``--verify-merged`` lost ``frozen_input_mismatch``
+    on a run that had already detected a tamper. Neither input is malformed
+    JSON, so it does not claim they are."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SkepticReadyError(f"{label} is not valid JSON: {path} ({exc})")
+    except (ValueError, RecursionError) as exc:
+        raise SkepticReadyError(f"{label} could not be parsed as JSON: {path} ({exc})")
+
+
 def _read_json(path: Path, label: str) -> dict:
     path = Path(path)
     try:
@@ -372,26 +395,11 @@ def _read_json(path: Path, label: str) -> dict:
     except OSError as exc:
         raise SkepticReadyError(f"{label} could not be read: {path} ({exc})")
     except UnicodeDecodeError as exc:
-        # #268: a `UnicodeDecodeError` is a `ValueError`, NOT an `OSError`,
-        # so bytes that are not UTF-8 at all used to escape this function
-        # RAW -- past every caller's `except SkepticReadyError`, into
-        # main()'s catch-all, printing a payload with no mode-specific
-        # field in it. For --verify-merged that stripped
-        # `frozen_input_mismatch` off a run where a tamper had ALREADY been
-        # detected, which is the exact fail-open this file closes elsewhere.
+        # A `UnicodeDecodeError` is a `ValueError`, NOT an `OSError`, so
+        # bytes that are not UTF-8 at all used to escape RAW here for the
+        # same reason the parse failures above it did (#268).
         raise SkepticReadyError(f"{label} is not valid JSON: {path} ({exc})")
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise SkepticReadyError(f"{label} is not valid JSON: {path} ({exc})")
-    except (ValueError, RecursionError) as exc:
-        # Everything json.loads can refuse that is NOT a syntax error:
-        # deeply nested input raises `RecursionError` (not even a
-        # `ValueError`), and a syntactically valid integer over CPython's
-        # digit limit raises a plain `ValueError`. Neither is malformed JSON,
-        # so the wording stays honest -- what matters for #268 is only that
-        # both leave through `SkepticReadyError` instead of raw.
-        raise SkepticReadyError(f"{label} could not be parsed as JSON: {path} ({exc})")
+    return _parse_json_text(raw, path, label)
 
 
 class FrozenInputHalt(SkepticReadyError):
@@ -407,7 +415,16 @@ class FrozenInputHalt(SkepticReadyError):
     frozen input changed. The accumulated ``reasons`` travel on this exception
     so the caller can report the FATAL outcome it already knows about instead
     of losing it -- when no mismatch stands there is nothing to lose, and the
-    original ``OSError`` propagates raw exactly as before."""
+    original ``OSError`` propagates raw exactly as before.
+
+    A distinct TYPE rather than a plain ``SkepticReadyError`` with its
+    ``offending`` list, which would carry the same payload: the caller's
+    ``except`` must mean "this exact halt", not "anything this function might
+    ever raise". ``frozen_input_check()`` raises nothing else of this type
+    today, so the two are equivalent now and would silently stop being so the
+    first time it does. ``reasons`` is also deliberately UNBOUNDED here --
+    ``_frozen_input_halt_result`` bounds once, after merging, the way every
+    other ``missing[]`` entry is bounded."""
 
     def __init__(self, message, reasons):
         super().__init__(message)
@@ -445,12 +462,7 @@ def _read_json_from_snapshot(snapshot: tuple, path: Path, label: str) -> dict:
         raw = content.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise SkepticReadyError(f"{label} is not valid JSON: {path} ({exc})")
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise SkepticReadyError(f"{label} is not valid JSON: {path} ({exc})")
-    except (ValueError, RecursionError) as exc:
-        raise SkepticReadyError(f"{label} could not be parsed as JSON: {path} ({exc})")
+    return _parse_json_text(raw, path, label)
 
 
 def _read_json_or_none(path: Path, missing: list, label: str):
@@ -1339,12 +1351,13 @@ def frozen_input_check(
             except OSError as exc:
                 if read_error is None:
                     read_error = (label, path, exc)
-            else:
-                if snapshot is not None:
-                    reason = _frozen_input_tamper_reason(label, path, snapshot[0], snapshot[1], stamp)
-                    if reason:
-                        reasons.append(reason)
-                        frozen_input_mismatch = True
+            # No `else`: when the read raised, the assignment never happened
+            # and `snapshot` is still None, which this guard already excludes.
+            if snapshot is not None:
+                reason = _frozen_input_tamper_reason(label, path, snapshot[0], snapshot[1], stamp)
+                if reason:
+                    reasons.append(reason)
+                    frozen_input_mismatch = True
         snapshots[key] = snapshot
 
     if read_error is not None:
@@ -1850,8 +1863,7 @@ def run_verify_merged(
                 # downstream consumer of a None snapshot falls back to a
                 # FRESH read of the same path, which would fail the same way
                 # and lose the signal one step later.
-                missing.extend(halt.reasons)
-                return _frozen_input_halt_result(missing)
+                return _frozen_input_halt_result(missing + halt.reasons)
             missing.extend(reasons)
             frozen_input_mismatch = frozen_input_mismatch or mismatch
 
@@ -1893,8 +1905,7 @@ def run_verify_merged(
     except SkepticReadyError as exc:
         if not frozen_input_mismatch:
             raise
-        missing.append(str(exc))
-        return _frozen_input_halt_result(missing)
+        return _frozen_input_halt_result(missing + [str(exc)])
 
     # #243: project the ambiguity-competitors universe -- AFTER the H1
     # byte-level tamper checks above, never before (see their own comment).
