@@ -810,18 +810,18 @@ here, follow the linked doc:
   `segments/.codex_job.<seg>.lock` covers a codex job in its promoting phase;
   **neither covers a fix turn**, which writes `segments/<seg>.draft.json`
   directly — as the `--from-stalled` disclosure below states. That paragraph is
-  cited for that fact alone and not for its own race's outcome. Two things go wrong, and both are silent. A **lost update**:
-  a fixer copies the token it read and rewrites the WHOLE draft, so two fixers
-  off the same predecessor end with the later one's text, a finding the earlier
-  one already applied simply gone, and the next review may not rediscover it
-  inside `engine.max_fix_rounds`. Worse, a fixer **still live when W9 runs**:
-  `assemble.py` compares the draft against `reviewed_draft_sha1` while loading
-  the ledger and reopens that same file afterwards to build the NodeStream, so
-  bytes landing between those two reads are rendered into the book and the
-  Obsidian vault having been reviewed by nobody, and `validate_assembled.py`
-  checks the built NodeStream without consulting the ledger. Do not read the
-  hash chain as a backstop for either: it rejects a late write it happens to
-  observe and proves nothing about quiescence. **This corollary, unlike the
+  cited for that fact alone and not for its own race's outcome. What goes wrong is a **lost update**, and it is silent: a fixer
+  copies the token it read and rewrites the WHOLE draft, so two fixers off the
+  same predecessor end with the later one's text and a finding the earlier one
+  already applied is simply gone. **No gate recovers it, and do not expect one
+  to.** The reviewed-SHA rebind that `ledger_update.py`, `final_audit.py`,
+  `assemble.py` and `validate_assembled.py` each run compares a draft against
+  the sha1 the REVIEWER saw; it is a good gate and it does force a fresh review
+  once the draft has moved. But a fresh review is a new model pass over the
+  surviving text, and nothing carries the earlier round's finding into it — so
+  the erased fix may simply not be found again inside `engine.max_fix_rounds`.
+  Every gate here proves the reviewer saw the current bytes. None proves that a
+  finding already applied to them survived. **This corollary, unlike the
   spawn economics above, DOES bind the `pipeline()` path** — inside ONE
   `pipeline()` invocation it is already handled, since #198's SEGS uniqueness
   guard gives each segment one branch whose fix calls are serial, but nothing

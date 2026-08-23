@@ -18,12 +18,15 @@ The dangerous failure is a HALF-remembered version, exactly as in
 `skill_doc_class_sweep_rule.test.py`: "use two executors" is the memorable half and
 "never on the same segment" is the half that does the work.
 
-Two consequences are pinned rather than one, because they have different shapes and
-a rewrite that keeps only the first understates the stakes by a category. The lost
-update erases an applied finding; the assembly race puts never-reviewed bytes into
-the delivered book. Both were established by opening the code, and the second was
-found only in review round 2 -- an earlier draft of this paragraph asserted the
-hash chain ruled it out, which is false.
+What is pinned about the CONSEQUENCE is deliberately narrow, and three review
+rounds are the reason. Each round caught this paragraph characterising the
+downstream gates, and each characterisation was wrong in a different direction:
+that the hash chain rules a late write out; that it does not; that
+`validate_assembled.py` never consults the ledger (it does -- its reviewed-SHA
+rebind exists precisely to catch a draft edited after the audit). So R8 no longer
+describes what any gate guarantees. It states the one property that was verified
+and that no gate covers: every gate here proves the reviewer saw the CURRENT
+bytes, and none proves a finding already applied to them SURVIVED.
 
 Also pinned: R8 must NOT be readable as forbidding `mass-translate-wf.template.js`'s
 `callFix()`, which dispatches one `agent()` per dirty round by design. "Fix turn" is
@@ -150,44 +153,47 @@ def test_r8_says_why_nothing_enforces_it():
     )
 
 
-def test_r8_carries_both_silent_consequences():
-    """Two shapes, not one -- a rewrite keeping only the first understates the
-    stakes by a category."""
+def test_r8_states_the_lost_update_consequence():
+    """The consequence that was actually verified, and the reason it is
+    silent."""
     r8 = _r8_block()
     assert "lost update" in r8, (
-        "consequence 1: the later whole-draft write erases a finding the "
-        "earlier fixer already applied"
+        "the later whole-draft write erases a finding the earlier fixer "
+        "already applied -- name the failure, so a reader can recognise it"
     )
-    assert "may not rediscover it inside" in r8, (
-        "and why that is silent -- the erased finding is not re-reported for "
-        "free; the next review may simply miss it within the round budget"
-    )
-    assert "still live when W9 runs" in r8, (
-        "consequence 2, the one that reaches the reader's deliverable: a "
-        "fixer that has not stopped by assembly time. Pinned separately "
-        "because a rewrite keeping only the lost-update case understates the "
-        "stakes by a category"
-    )
-    assert "reviewed by nobody" in r8, (
-        "and it must say plainly that those bytes were never reviewed -- "
-        "assemble.py hashes the draft when it loads the ledger and reopens "
-        "the file afterwards to build the NodeStream"
-    )
-
-
-def test_r8_does_not_claim_the_hash_chain_is_a_backstop():
-    """A different property from the two consequences above: the ABSENCE of a
-    false claim, which is the one a review round actually falsified. Split out
-    so a red run names which class broke."""
-    r8 = _r8_block()
     assert (
-        "Do not read the hash chain as a backstop for either: it rejects a "
-        "late write it happens to observe and proves nothing about quiescence."
-        in r8
+        "two fixers off the same predecessor end with the later one's text" in r8
     ), (
-        "R8 must NOT be rewritten into a claim that the hash chain blocks a "
-        "late write. It rejects one it happens to observe. An earlier draft "
-        "of this paragraph asserted the stronger version and it was false"
+        "and the MECHANISM, with its subject: a bare 'lost update' names a "
+        "category and pins nothing about how this one happens"
+    )
+    assert "may simply not be found again inside" in r8, (
+        "and why it is silent -- the erased finding is not re-reported for "
+        "free; the fresh review is a new model pass over the surviving text "
+        "and may miss it within the round budget"
+    )
+
+
+def test_r8_does_not_claim_a_gate_recovers_the_lost_fix():
+    """The ABSENCE of a false claim -- a different property from the
+    consequence above, and the one three review rounds kept falsifying. Split
+    out so a red run names which class broke."""
+    r8 = _r8_block()
+    assert "**No gate recovers it, and do not expect one to.**" in r8, (
+        "R8 must say plainly that no gate recovers the erased fix. Three "
+        "rounds each caught a DIFFERENT wrong characterisation of the "
+        "downstream gates here; this sentence is what replaced them"
+    )
+    assert (
+        "Every gate here proves the reviewer saw the current bytes. None "
+        "proves that a finding already applied to them survived." in r8
+    ), (
+        "and it must draw the line at the exact place it falls, as one "
+        "clause carrying both halves. The rebind gates are REAL -- "
+        "validate_assembled.py's exists precisely to catch a draft edited "
+        "after the audit -- so a rewrite that says they do nothing is as "
+        "false as one that says they cover this. What they do not cover is "
+        "SURVIVAL of an applied finding, and that is the whole claim"
     )
 
 
