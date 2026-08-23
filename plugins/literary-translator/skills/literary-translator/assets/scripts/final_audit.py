@@ -1167,11 +1167,11 @@ def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
          converged that the gate then sees as unprotected and retranslates.
          Verified on this project's Python (3.14.6): `exists()` -> False,
          `os.open` -> FileExistsError, for one and the same dangling link.
-      2. Since Python 3.13 `exists()` swallows EVERY OSError and returns
+      2. Since Python 3.14 `exists()` swallows EVERY OSError and returns
          False, so an EACCES/ESTALE/EIO on the lookup is reported as "this
          segment never converged". Verified on 3.14.6: with an unreadable
          parent directory `exists()` returns False while `lstat()` raises
-         EACCES. (On 3.8-3.12 the same call re-raised for EACCES but still
+         EACCES. (On 3.10-3.13 the same call re-raised for EACCES but still
          swallowed ELOOP/ENOTDIR/EBADF -- so no supported version answers
          this correctly, and the version-dependence is itself a reason not
          to route a data-loss guard through `exists()`.)
