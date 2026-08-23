@@ -254,8 +254,24 @@ def test_engine_loop_index_does_not_state_a_weaker_rule_than_r8():
     assert "nothing locks a fix turn" in entry, (
         "and the reason, so the constraint does not read as optional care"
     )
-    assert "HAND-DRIVEN" in entry, (
-        "and the scope, for the same reason SKILL.md carries it"
+    assert "the SPAWN rule is hand-driven only" in entry, (
+        "and the scope -- but attached to the SPAWN rule specifically, which "
+        "is the only half it applies to"
+    )
+    assert "while segment ownership binds BOTH" in entry, (
+        "R8's two halves scope DIFFERENTLY, and the index is where a reader "
+        "meets them first. An index that scopes the whole rule to the "
+        "hand-driven path lets a reader exempt two concurrent pipeline() "
+        "invocations from segment ownership -- recreating the lost update "
+        "this rule exists to prevent, which is exactly what the authoritative "
+        "R8 paragraph says DOES bind that path"
+    )
+    assert (
+        "a second `pipeline()` invocation can hold a segment the first one is "
+        "still fixing" in entry
+    ), (
+        "with the reason, so the binding does not read as an arbitrary "
+        "asymmetry a reader may talk themselves out of"
     )
 
 
