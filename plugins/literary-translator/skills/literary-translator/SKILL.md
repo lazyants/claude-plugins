@@ -454,6 +454,16 @@ explains why that is the exact wording and "zero filesystem writes" is not):
 python3 ${durable_root}/scripts/backfill_ever_converged.py
 ```
 
+Run it with no W5 dispatch in flight against this durable root. This is a
+standing operating condition, not a one-time warning: `select_segments.py`'s
+Step 1 gate takes its `.ever_converged` census once, at selection time, and
+nothing rechecks it when the translate work it authorized is actually
+dispatched — so a sentinel this backfill raises in between does not revoke
+an authorization already granted, and the dispatch proceeds anyway,
+retranslating the very work the sentinel was meant to protect. That is why
+this note sequences the backfill strictly before the first W5 dispatch,
+never alongside one.
+
 **Check `$?` first, then** read the printed JSON's
 `missing_sentinels`/`counts` fields — a non-empty `missing_sentinels` means
 this project needs backfilling before W5 runs; a genuinely fresh project
@@ -2284,6 +2294,24 @@ called. It:
   without this gate a routine upgrade would silently re-translate
   finished, paid-for work. Passing the flag authorizes exactly that
   dispatch; it does not delete the sentinel.
+- **#621:** a THIRD refusal, ahead of the per-segment sentinel lookups above
+  — `select_segments.py` FATALs if `${durable_root}/segments` itself does
+  not resolve (missing, or a symlink whose target is gone) while the
+  project's materialized ledger still records segments that converged at
+  least once. An unresolvable parent directory would otherwise make every
+  sentinel lookup read ENOENT — "never converged" — so this would silently
+  authorize retranslating finished work while reporting a clean run.
+  `--allow-retranslate-converged` does NOT clear this refusal: that flag
+  authorizes redoing segments this script has ESTABLISHED converged, and
+  here it has established nothing. The operator restores or remounts the
+  directory (a volume that is not mounted, a moved durable root, an
+  interrupted restore); if it is genuinely gone and empty and retranslating
+  is accepted, say so explicitly at the path rather than with a flag. The
+  refusal names the remedy for the shape it actually found, because the two
+  differ: an absent path is `mkdir -p -- '${durable_root}/segments'`, while
+  a symlink whose target is gone already holds the name — `mkdir -p` fails
+  on it with `EEXIST`, so that one is repointed at the real directory, or
+  removed and replaced by a directory.
 - **#409 Step 3:** a SECOND, independent refusal gate — `select_segments.py`
   also FATALs if any prior `RUN_ID` this project's own evidence shows
   (a draft's `dispatch_token`, or a `runs/workflows/` directory) dispatched

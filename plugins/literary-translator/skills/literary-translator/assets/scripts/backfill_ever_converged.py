@@ -18,6 +18,16 @@ sail through ungated. This script closes that gap for an EXISTING project:
 it determines, from the project's own ledger, which segments have converged
 at least once, and raises the missing sentinels for them.
 
+Run this script only when no W5 dispatch is in flight against the same
+durable root -- this script takes no lock, and neither does the read it
+protects. ``select_segments.py`` takes its ``.ever_converged`` census ONCE,
+at selection time, and nothing rechecks it when the translate work it
+authorized is actually dispatched. A sentinel this script raises in between
+does not revoke an authorization already granted: the dispatch proceeds
+anyway and retranslates the very work the sentinel exists to guard. That is
+why the caller sequences this script strictly before the first W5 dispatch,
+never alongside one.
+
 ## How "ever converged" is determined
 
 This script never re-implements ledger merging -- when it needs a fresh
@@ -451,15 +461,19 @@ def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
     WITH `dir_fd` there are no parent components left to resolve, because
     the caller already resolved them once, when it opened the descriptor.
 
-    `dir_fd` -- OPTIONAL, and today exactly one caller passes it:
-    backfill_ever_converged.py's census. Omitted (every other caller), the
+    `dir_fd` -- OPTIONAL, and today TWO callers pass it:
+    backfill_ever_converged.py's census and select_segments.py's #409 Step 1
+    dispatch gate, each of which opens `segments/` once and reads every
+    entry through that descriptor. Omitted (every other caller), the
     lookup resolves the whole pathname afresh, which is the right thing for
     a reader that holds nothing open. Passed, the BASENAME is looked up
     relative to that descriptor instead, and `segments/` is not resolved by
     pathname at all. The difference matters only for a caller that already
     HOLDS the directory open and acts on its census afterwards, which is
-    exactly that one: it opens `segments/` once, does every write relative
-    to the descriptor, and samples directory identity at the end. A census
+    what both of those do: the backfill opens `segments/` once, does every
+    write relative to the descriptor, and samples directory identity at the
+    end; the dispatch gate opens it before the census and refuses outright
+    when it cannot (#621). A census
     resolving the pathname afresh could therefore classify entries in a
     DIFFERENT directory than the one being written to -- re-point
     `segments/` at B for the length of the census and back to A before the

@@ -264,6 +264,7 @@ import json
 # branch would raise NameError instead of the OSError its contract promises.
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -538,15 +539,19 @@ def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
     WITH `dir_fd` there are no parent components left to resolve, because
     the caller already resolved them once, when it opened the descriptor.
 
-    `dir_fd` -- OPTIONAL, and today exactly one caller passes it:
-    backfill_ever_converged.py's census. Omitted (every other caller), the
+    `dir_fd` -- OPTIONAL, and today TWO callers pass it:
+    backfill_ever_converged.py's census and select_segments.py's #409 Step 1
+    dispatch gate, each of which opens `segments/` once and reads every
+    entry through that descriptor. Omitted (every other caller), the
     lookup resolves the whole pathname afresh, which is the right thing for
     a reader that holds nothing open. Passed, the BASENAME is looked up
     relative to that descriptor instead, and `segments/` is not resolved by
     pathname at all. The difference matters only for a caller that already
     HOLDS the directory open and acts on its census afterwards, which is
-    exactly that one: it opens `segments/` once, does every write relative
-    to the descriptor, and samples directory identity at the end. A census
+    what both of those do: the backfill opens `segments/` once, does every
+    write relative to the descriptor, and samples directory identity at the
+    end; the dispatch gate opens it before the census and refuses outright
+    when it cannot (#621). A census
     resolving the pathname afresh could therefore classify entries in a
     DIFFERENT directory than the one being written to -- re-point
     `segments/` at B for the length of the census and back to A before the
@@ -3144,6 +3149,14 @@ def draft_dispatch_token_for(run_id: str, seg: str) -> str:
 # dangling or not), so O_NOFOLLOW is the explicit statement of an intent
 # O_EXCL enforces anyway, not the only thing enforcing it.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+# #621. Same getattr treatment, same reason, for the flag the sentinel census
+# opens `segments/` with. O_DIRECTORY is what makes a PLAIN FILE at that path
+# fail the open with ENOTDIR instead of handing back a descriptor no
+# directory-relative lookup can use -- and the census REFUSES on that ENOTDIR
+# like on every other non-ENOENT open failure, naming the path and the errno in
+# `unestablished_segments_dir`, because a census that proceeds without an
+# established anchor can be answered by whatever the pathname names next.
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 
 def _unlink_quietly(path: Path) -> None:
@@ -4405,30 +4418,248 @@ def run(args, dirs: dict) -> dict:
         # the same way draft_path_for/segpack_path do, so a --durable-root
         # redirect moves the sentinel lookup with everything else.
         segments_dir = dirs["durable_root"] / "segments"
-        for seg in segs:
-            # classify_ever_converged_sentinel(), NOT `.exists()`: the writer
-            # and this reader have to answer one question the same way, and
-            # `exists()` answered it wrongly in the one direction that costs
-            # finished work -- see that function's docstring for the two
-            # mechanisms (a dangling symlink reads as absent while the writer
-            # calls it marked; every OSError reads as absent since 3.14).
-            state, detail = classify_ever_converged_sentinel(
-                ever_converged_path(seg, segments_dir)
+        # #621: establish the census's PARENT before reading a single entry.
+        # Every lookup below resolves `{segments_dir}/.ever_converged.<seg>` by
+        # pathname, and an unresolvable PARENT raises the same ENOENT a missing
+        # sentinel does -- so one absent directory reads as "no segment in this
+        # project ever converged", `previously_converged` stays empty, and the
+        # refusal this whole block exists to raise never fires. That is the
+        # false ABSENT classify_ever_converged_sentinel()'s own docstring calls
+        # the unacceptable answer everywhere, reached with no race at all: a
+        # `segments/` that is missing, or a symlink whose target is gone
+        # (an unmounted volume, an interrupted restore, a relocated bulk
+        # store). Reproduced end to end -- with `segments/` removed, a segment
+        # holding a real sentinel was emitted for dispatch with `success: true`
+        # and exit 0, and segment_dispatch_driver.py RECREATES the missing
+        # parent on its way to the translate job, so nothing downstream turns
+        # it back into an error either.
+        #
+        # `os.open`, not `os.stat` and not `Path.is_dir()`: the open FOLLOWS
+        # the link, so a `segments/` symlink pointing at a real directory keeps
+        # working while a dangling one is the ENOENT this catches; `lstat`
+        # would see the link itself and let the per-entry collapse survive;
+        # `is_dir()` swallows every OSError into a bare False, the trap this
+        # file documents at _independent_lock_attempt() and refuses to reuse.
+        # A stat would answer the same question, but only as a fact about one
+        # instant -- and this census needs an ANCHOR it can keep reading
+        # through, which is the next paragraph.
+        #
+        # Exactly two outcomes leave this block without a refusal: the open
+        # SUCCEEDED, or it raised ENOENT on a project whose ledger records no
+        # convergence at all. Every other failure refuses at the open (see its
+        # own comment below), so the census never runs against a directory this
+        # process could not establish. O_DIRECTORY is what makes "not a
+        # directory at all" one of those failures rather than a descriptor the
+        # lookups could not use.
+        #
+        # What separates a first-ever run from a damaged one is the LEDGER, not
+        # the directory: a `stat` that raises ENOENT proves only that the
+        # pathname does not resolve NOW. WAS_CONVERGED_STATUSES is the same
+        # predicate backfill_ever_converged.py uses to decide which segments
+        # SHOULD carry a sentinel, so a materialized record in it is this
+        # project's own evidence that finished work exists for the missing
+        # directory to have protected. Read ledger-WIDE rather than over `segs`
+        # deliberately: the sentinel exists precisely because ledger
+        # convergence is ERASED on re-dispatch (status -> in_progress), so a
+        # selected segment's own record cannot answer "did this ever converge",
+        # while any surviving converged/stale record anywhere still answers it
+        # for the project. The cost is a deliberate conservative refusal on a
+        # narrow --only-segs run whose own ids never converged; the benefit is
+        # that a selection made entirely of erased ids cannot walk past it.
+        #
+        # KNOWN, one-way under-detection: a project whose every converged
+        # segment was later re-dispatched carries no converged/stale record at
+        # all, and this check does not fire for it. It under-detects rather
+        # than refusing a genuinely fresh project it cannot distinguish -- the
+        # same direction scan_dispatching_run_ids() takes for its own
+        # top-level directory access.
+        #
+        # Not clearable by --allow-retranslate-converged, following the
+        # ambiguous refusal below rather than the converged one: that flag
+        # authorizes redoing segments this script has ESTABLISHED converged,
+        # and here it has established nothing. The escape needs no flag and is
+        # in the message: creating the directory is the operator asserting that
+        # the real `segments/` is present and empty.
+        #
+        # OPENED, not merely stat'ed, and every lookup below is then resolved
+        # RELATIVE TO THAT DESCRIPTOR. A stat establishes the pathname for one
+        # instant only: if `segments/` is renamed aside and replaced by an
+        # empty directory (or a mount disappears) between the check and the
+        # per-entry reads, each read resolves the pathname AFRESH, finds the
+        # replacement, and reports ABSENT for sentinels that are sitting intact
+        # in the original inode -- a fail-open the review reproduced
+        # deterministically, and one the ledger fallback above cannot catch
+        # when the segment's own convergence has been erased by a re-dispatch
+        # (`in_progress`), which is exactly the state the sentinel exists for.
+        # The descriptor removes the re-resolution entirely: it names the inode
+        # this run checked, so a pathname swapped afterwards has nothing left
+        # in this census to act on. This is the same correction
+        # backfill_ever_converged.py already took for its own census -- the
+        # predicate's `dir_fd` parameter exists for precisely this caller
+        # shape, and passing it needs no locking protocol.
+        #
+        # It settles WHICH DIRECTORY is read and nothing about the ENTRIES in
+        # it: a sentinel deleted after this loop classified it leaves the inode
+        # untouched, so that window stays open and stays tracked as #442.
+        segments_dir_fd = None
+        try:
+            segments_dir_fd = os.open(
+                str(segments_dir), os.O_RDONLY | _O_DIRECTORY | _O_CLOEXEC
             )
-            if state == SENTINEL_PRESENT:
-                previously_converged.append(seg)
-            elif state == SENTINEL_AMBIGUOUS:
-                ambiguous_sentinels.append({"seg": seg, "detail": detail})
-            elif (ledger_segments.get(seg) or {}).get("status") in WAS_CONVERGED_STATUSES:
-                # #442. Reached only on SENTINEL_ABSENT -- the two branches
-                # above are exhaustive over the other two states. Keyed on the
-                # MATERIALIZED record, never on classification[seg]: a
-                # converged/stale row reaches this loop under more than one
-                # category (`stale` by default; `human_escalation` via either
-                # cache_key_recompute_failed or segpack_read_failed, emitted by
-                # --only-segs' override), and a category-shaped test here would
-                # cover one route and silently miss the others.
-                lost_sentinels.append(seg)
+        except FileNotFoundError:
+            # The two shapes ENOENT covers need DIFFERENT remedies, and naming
+            # the wrong one sends an operator to a command that cannot work:
+            # `mkdir -p` on a dangling symlink fails with EEXIST, because the
+            # NAME is already taken by the link. `is_symlink()` lstat's, so it
+            # answers for the link itself rather than its missing target.
+            #
+            # shlex.quote(), not hand-written quotes: a durable root may
+            # legitimately contain a space, and a path holding a single quote
+            # would END the hand-written quoting mid-word and turn the rest of
+            # its own name into shell syntax. The operator owns this path, so
+            # this is not a trust boundary -- it is a remedy that has to stay
+            # PASTEABLE for the paths people actually have.
+            quoted_dir = shlex.quote(str(segments_dir))
+            if segments_dir.is_symlink():
+                deliberate_remedy = (
+                    f"that path is a SYMLINK whose target does not exist, so `mkdir -p` "
+                    f"cannot be the answer there -- it would fail with EEXIST on the link "
+                    f"itself. Repoint the link at the real directory, or remove the link "
+                    f"and create a directory in its place (`rm {quoted_dir} && mkdir "
+                    f"-p -- {quoted_dir}`)"
+                )
+            else:
+                deliberate_remedy = f"create it -- `mkdir -p -- {quoted_dir}`"
+            ever_converged_in_ledger = sorted(
+                seg
+                for seg, record in ledger_segments.items()
+                if isinstance(record, dict)
+                and record.get("status") in WAS_CONVERGED_STATUSES
+            )
+            if ever_converged_in_ledger:
+                fatal(
+                    f"the ever-converged sentinel directory {segments_dir} does not "
+                    f"resolve (missing, or a symlink whose target is gone), while this "
+                    f"project's materialized ledger still records "
+                    f"{len(ever_converged_in_ledger)} segment(s) that converged at "
+                    f"least once: {', '.join(ever_converged_in_ledger)}. Refusing to "
+                    f"dispatch. Every sentinel lookup resolves that directory by "
+                    f"pathname, so with it gone EVERY segment would read 'never "
+                    f"converged' and this gate would authorize retranslating finished "
+                    f"work while reporting a clean run -- the one direction that costs "
+                    f"a finished book. Nothing here says the work is lost: restore or "
+                    f"remount the directory (a volume that is not mounted, a moved "
+                    f"durable root, an interrupted restore) and rerun, and the sentinels "
+                    f"come back with it. If you can establish the directory is genuinely "
+                    f"gone and empty and you accept retranslating what it held, say so "
+                    f"explicitly at the path rather than with a flag: {deliberate_remedy}. "
+                    f"--allow-retranslate-converged does NOT clear "
+                    f"this, on purpose, because it authorizes redoing segments this "
+                    f"script has ESTABLISHED converged and here it has established "
+                    f"nothing.",
+                    classification=classification,
+                    counts=counts,
+                    ids_by_category=ids_by_category,
+                    # Machine-readable counterpart to the prose, the same reason
+                    # `ambiguous_sentinels` below carries one: a caller (and its test)
+                    # asserts the exact evidence set rather than grepping an error
+                    # string. These ids are LEDGER-derived, never sentinel-derived, and
+                    # are deliberately NOT folded into `previously_converged` -- that
+                    # list is built from sentinel state ALONE and D5.2's claim-clearing
+                    # below reads it that way.
+                    ledger_converged_without_segments_dir=ever_converged_in_ledger,
+                )
+        except OSError as exc:
+            # ANY other failure to open REFUSES here rather than falling
+            # through to a pathname census. Deferring it to the per-entry
+            # lookups was the earlier shape and it was wrong: it assumed those
+            # lookups reproduce this error, and two ordinary ones do not.
+            # EMFILE fails descriptor allocation while `lstat` still succeeds;
+            # an execute-only directory rejects O_RDONLY while still permitting
+            # named lookups through it. In both, the census would run by
+            # pathname with the anchor never established -- reopening exactly
+            # the replacement window the descriptor exists to close, and the
+            # ledger fallback above does not cover it, because a segment whose
+            # convergence was erased by a re-dispatch has no ledger record left
+            # to fall back on. Reproduced by review, not theorised.
+            #
+            # This ALSO takes the two shapes the per-entry loop used to refuse
+            # for us -- a plain FILE at the path (ENOTDIR, which O_DIRECTORY
+            # raises here) and a symlink loop (ELOOP). They still refuse, and
+            # still cannot be waved through with --allow-retranslate-converged;
+            # what changes is which refusal names them. One rule -- the census
+            # runs only against a directory this process holds open -- is worth
+            # more than two payload shapes, and the errno is carried either way.
+            code = (
+                errno.errorcode.get(exc.errno, f"errno {exc.errno}")
+                if exc.errno is not None
+                else "no errno"
+            )
+            detail = f"{code}: {exc.strerror or exc}"
+            fatal(
+                f"could not open the ever-converged sentinel directory "
+                f"{segments_dir} to read it ({detail}). Refusing to dispatch. This "
+                f"census only reads sentinels through a descriptor it holds on that "
+                f"directory: resolving each `.ever_converged.<seg>` by pathname "
+                f"instead would let a directory replaced, re-pointed or unmounted "
+                f"mid-run answer for the real one, and every segment would then read "
+                f"'never converged' -- authorizing a retranslation of finished work "
+                f"while reporting a clean run. Nothing here says the work is lost, "
+                f"and nothing here was written: fix what stopped the open (a "
+                f"permissions mode that forbids reading the directory, a descriptor "
+                f"limit, a mount or filesystem error, or an entry at that path that "
+                f"is not a directory at all) and rerun. "
+                f"--allow-retranslate-converged does NOT clear this, on purpose: that "
+                f"flag authorizes redoing segments this script has ESTABLISHED "
+                f"converged, and here it could not establish anything.",
+                classification=classification,
+                counts=counts,
+                ids_by_category=ids_by_category,
+                # Same reason `ambiguous_sentinels` and
+                # `ledger_converged_without_segments_dir` carry one: a caller and its
+                # test assert the exact condition rather than grepping a string.
+                unestablished_segments_dir={"path": str(segments_dir), "detail": detail},
+            )
+        try:
+            for seg in segs:
+                # classify_ever_converged_sentinel(), NOT `.exists()`: the writer
+                # and this reader have to answer one question the same way, and
+                # `exists()` answered it wrongly in the one direction that costs
+                # finished work -- see that function's docstring for the two
+                # mechanisms (a dangling symlink reads as absent while the writer
+                # calls it marked; every OSError reads as absent since 3.14).
+                #
+                # `dir_fd` is the descriptor opened above. It is None on exactly
+                # one path that reaches this loop: `segments/` was absent and the
+                # ledger recorded no convergence anywhere, so there is nothing for
+                # a swapped pathname to hide -- every lookup answers ABSENT for a
+                # project that has never converged a segment. Every OTHER failure
+                # to open refused above.
+                state, detail = classify_ever_converged_sentinel(
+                    ever_converged_path(seg, segments_dir), dir_fd=segments_dir_fd
+                )
+                if state == SENTINEL_PRESENT:
+                    previously_converged.append(seg)
+                elif state == SENTINEL_AMBIGUOUS:
+                    ambiguous_sentinels.append({"seg": seg, "detail": detail})
+                elif (ledger_segments.get(seg) or {}).get("status") in WAS_CONVERGED_STATUSES:
+                    # #442. Reached only on SENTINEL_ABSENT -- the two branches
+                    # above are exhaustive over the other two states. Keyed on
+                    # the MATERIALIZED record, never on classification[seg]: a
+                    # converged/stale row reaches this loop under more than one
+                    # category (`stale` by default; `human_escalation` via either
+                    # cache_key_recompute_failed or segpack_read_failed, emitted
+                    # by --only-segs' override), and a category-shaped test here
+                    # would cover one route and silently miss the others.
+                    lost_sentinels.append(seg)
+        finally:
+            # Closed as soon as the census is over: this descriptor is the
+            # census's own anchor and nothing below reads through it, so
+            # holding it any longer would only pin an inode for the rest of
+            # the run. `finally` because a fatal() inside the loop (the #442
+            # and ambiguous refusals both raise) must not leak it either.
+            if segments_dir_fd is not None:
+                os.close(segments_dir_fd)
 
     # Refused BEFORE the previously-converged gate below, deliberately: this
     # one is not clearable by --allow-retranslate-converged, so reporting the
