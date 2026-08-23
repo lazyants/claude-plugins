@@ -4342,21 +4342,26 @@ def test_adopt_pending_non_content_rejection_leaves_the_flag_false(
 
 
 @pytest.mark.parametrize("race", ["unlink", "overwrite", "aba"])
-def test_a_straggler_writing_the_pending_cannot_change_what_the_gates_judge(
+def test_a_concurrent_write_to_the_pending_cannot_change_what_the_gates_judge(
         tmp_path, monkeypatch, race):
     """The terminal verdict must rest on an artifact no other process can write.
 
-    `self.pending` is a DETERMINISTIC name that persists across runs, inside segments/ --
-    a directory the codex process this driver launches holds write access over, and whose
-    straggler turn can outlive poll()'s best-effort cancel. Every gate re-OPENS its
-    --candidate-file BY PATH, so gating that name directly means two independent opens with
-    a writable window between them. validate_draft.py answers a MISSING OR MALFORMED
-    candidate with exit 1, the same code its contract reserves for a content verdict, so a
-    write landing in that window is indistinguishable from one -- and since #665 acts on it
-    TERMINALLY, it would block the segment permanently.
+    `self.pending` is a DETERMINISTIC name that persists across runs, and every gate
+    re-OPENS its --candidate-file BY PATH, so gating that name directly means two
+    independent opens with a writable window between them. validate_draft.py answers a
+    MISSING OR MALFORMED candidate with exit 1, the same code its contract reserves for a
+    content verdict, so a write landing in that window is indistinguishable from one -- and
+    since #665 acts on it TERMINALLY, it would block the segment permanently.
+
+    WHO can write it, per adopt_pending()'s own comment: NOT the codex process this driver
+    launches -- since #409 it runs in a mkdtemp sandbox that _setup_sandbox() refuses to
+    dispatch into unless _sandbox_is_confined() proves it standalone, so it cannot reach
+    segments/. The reachable writers are the operator's own hand, a second dispatcher over
+    one durable_root (already unsupported), and a pre-#409 straggler. This test does not
+    depend on which: it simulates the write at the seam, whoever performs it.
 
     The three rows are a history of guards that did not hold, kept because each still
-    describes a real straggler and the design has to survive all three:
+    describes a real concurrent write and the design has to survive all three:
       * `unlink`    -- caught by any re-check at all;
       * `overwrite` -- still a perfectly regular readable file, only its bytes changed, so a
                        type-only re-check passes it through;
