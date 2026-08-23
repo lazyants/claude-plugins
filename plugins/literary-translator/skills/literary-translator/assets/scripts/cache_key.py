@@ -73,9 +73,11 @@ except ImportError:  # pragma: no cover - exercised only when PyYAML is absent
 
 DURABLE_ROOT = Path(__file__).resolve().parents[1]
 
-# The thirteen scripts (+ two workflow templates) that make up plugin_bundle_hash.
+# The sixteen scripts (+ two workflow templates) that make up plugin_bundle_hash.
 # NEVER bootstrap_names.py/segpack.py (their own derivation_bundle_hash) and
-# NEVER the four orchestration-only scripts (orchestration_bundle_hash).
+# NEVER draft_ready.py/ledger_merge.py/language_smoke_report.py (their own
+# orchestration_bundle_hash). The other two entries of that tuple,
+# claim_record.py and select_segments.py, are registered in BOTH.
 # review_ready.py and resume_setup.py (1.2.0) join this list rather than
 # orchestration_bundle_hash's bucket, which is non-gating for convergence but
 # gating for resume (its marker is folded into resume_setup.py's
@@ -135,11 +137,21 @@ DURABLE_ROOT = Path(__file__).resolve().parents[1]
 # was authorized for re-review at all, so a bug in it either hands a
 # re-review authorization to a segment nobody named, or silently drops one
 # the operator did. Both are decisions a durable root scaffolded before the
-# fix would go on trusting. Note the criterion is not applied uniformly
-# today -- select_segments.py owns the existing dispatch gate and is NOT a
-# member; that asymmetry predates #438 and is recorded in OPEN.md rather
-# than changed here, because adding it would move plugin_bundle_hash for a
-# reason unrelated to this release.
+# fix would go on trusting.
+# select_segments.py (#446) closes the last gap in that criterion. It owns the
+# EXISTING dispatch gate -- the Step 1 ever-converged refusal, the claim
+# admission arms, the classification every one of those decisions is taken
+# from -- which is the same authority segment_dispatch_driver.py and
+# claim_record.py are registered under, applied to the script that decides
+# first. Its exclusion was never a decision: it predates #438 and was carried
+# in OPEN.md as a deferral, because registering it moves plugin_bundle_hash
+# for a reason unrelated to whichever release noticed it. Until this
+# registration an edit to that gate moved no cache-key field at all, so no
+# converged segment's record registered that the gate authorizing it had
+# changed -- while select_segments.py's own sentinel-predicate docstring argued
+# that a weakened copy of that guard MUST move this hash. The script is also
+# an ORCHESTRATION_BUNDLE_MEMBERS entry and stays one: a change to it now
+# moves two hashes, exactly as claim_record.py's does.
 PLUGIN_BUNDLE_MEMBERS = (
     "validate_draft.py",
     "canon_validate.py",
@@ -166,6 +178,7 @@ PLUGIN_BUNDLE_MEMBERS = (
     # already moves this hash through segment_dispatch_driver.py, so it costs
     # no reclassification beyond what that release pays anyway.
     "reject_review.py",
+    "select_segments.py",
     "mass-translate-wf.template.js",
     "glossary-pass-wf.template.js",
 )

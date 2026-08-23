@@ -1133,14 +1133,14 @@ def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
     scripts" convention, which is already false here (canon_validate.py and
     glossary_batch_plan.py import canon_senses.py; scaffold_setup.py imports
     cache_key.py). The real reason: ledger_update.py is a
-    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:100-107 records that that
+    PLUGIN_BUNDLE_MEMBERS entry, and cache_key.py:102-109 records that that
     tuple is a literal byte-hash allowlist to which a TRANSITIVE IMPORT IS
     INVISIBLE -- which is why canon_senses.py had to be registered
     explicitly once two members imported it. A shared module would put this
     predicate's bytes outside the hash meant to cover them, so WEAKENING
     this guard would no longer move plugin_bundle_hash, and every durable
     root scaffolded beforehand would go on trusting it: the exact
-    false-green cache_key.py:114-118 names. Consolidation stays possible --
+    false-green cache_key.py:116-120 names. Consolidation stays possible --
     it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the
     same commit.
 
@@ -1483,12 +1483,14 @@ def admit_contract_only_stale(profile):
     and NOT hoisted into validate_draft.py -- which all three already import
     as `vd`, and which already owns load_profile(), so it is the obvious home.
     It is the wrong one: `validate_draft.py` is the first member of
-    cache_key.py's PLUGIN_BUNDLE_MEMBERS and these four gate scripts are not
+    cache_key.py's PLUGIN_BUNDLE_MEMBERS and these three gate scripts are not
     members at all, so hosting the reader there would move
     plugin_bundle_hash for every project -- mass-invalidating every converged
     segment, which is the exact cost #533 exists to relieve. select_segments.py
     holds the fourth SAFE_STALE_CARVEOUT_FIELDS copy and does not import `vd`
-    either, for the same reason. The three copies are behaviourally identical
+    either -- since #446 it is itself a PLUGIN_BUNDLE_MEMBERS entry, so hosting
+    the reader there would move the hash for exactly the same reason
+    validate_draft.py would. The three copies are behaviourally identical
     (the signature and this docstring differ) and are driven over one shared
     table by tests/contract_stale_admission.test.py, which pins behaviour, not
     source identity."""

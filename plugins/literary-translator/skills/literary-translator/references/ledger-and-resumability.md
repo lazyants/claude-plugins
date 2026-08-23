@@ -577,7 +577,7 @@ Exact byte-scope per field:
   catches a footnote-apparatus re-extraction change for this segment
   specifically.
 - **`plugin_bundle_hash`** (global) — sha1 of sorted,
-  filename-concatenated bytes of the fifteen generic scripts that directly
+  filename-concatenated bytes of the sixteen generic scripts that directly
   shape translate/review content (`ledger_update.py` included — its
   `reviewed_draft_sha1` binding-check logic directly determines
   correctness) plus the two workflow templates
@@ -631,7 +631,7 @@ membership.
 
 - **`plugin_bundle_hash`** (global, read from
   `${durable_root}/runs/.plugin_bundle_hash` — a marker file Step 0a writes
-  once per run, not recomputed per segment) — covers exactly **fifteen
+  once per run, not recomputed per segment) — covers exactly **sixteen
   scripts** (six pre-1.2.0, plus `review_ready.py` and `resume_setup.py`,
   new in 1.2.0, `glossary_batch_plan.py`, new in 1.3.5, `codex_job.py`,
   new in 1.4.7, `canon_senses.py`, added for RFC #215's homonym-split
@@ -645,13 +645,17 @@ membership.
   `claim_record.py`, added in #438 as the re-review claim predicate: it
   decides whether a segment was authorized for re-review at all, so a bug
   in it either grants an authorization nobody named or drops one the
-  operator did) plus the two
+  operator did, and `select_segments.py`, added in #446 as the script that
+  owns the EXISTING dispatch gate: the Step 1 ever-converged refusal, the
+  claim admission arms, and the classification every one of those decisions
+  reads — `cache_key.py`'s own comment block holds why it was left out until
+  then) plus the two
   workflow templates: `validate_draft.py`, `canon_validate.py`,
   `cache_key.py`, `draft_sha1.py`, `review_artifact_check.py`,
   `ledger_update.py`, `review_ready.py`, `resume_setup.py`,
   `glossary_batch_plan.py`, `codex_job.py`, `canon_senses.py`,
   `fetch_citation.py`, `segment_dispatch_driver.py`, `claim_record.py`,
-  `reject_review.py`, plus
+  `reject_review.py`, `select_segments.py`, plus
   `mass-translate-wf.template.js`/`glossary-pass-wf.template.js`. These are
   scripts that directly shape extraction/translation/review/validation
   content, or determine whether a convergence verdict was correctly
@@ -700,12 +704,16 @@ membership.
 The orchestration list above is a restatement: `scaffold_setup.py`'s own
 `ORCHESTRATION_BUNDLE_MEMBERS` tuple is the authority, and its
 `test_orchestration_members_pinned` holds that tuple byte-for-byte. Read the
-tuple if the two ever disagree. Note `claim_record.py` sits in **both** it and
-`PLUGIN_BUNDLE_MEMBERS`, deliberately, since #438: it gates dispatch, which
-earns it the plugin bundle, and `select_segments.py` — an orchestration member
-that is deliberately NOT a plugin-bundle member — imports it, so its bytes must
-move this marker too. A change to that one file therefore moves **two** hashes:
-it re-stales converged segments AND forces a no-resume run.
+tuple if the two ever disagree. Note that **two** of its five entries sit in
+`PLUGIN_BUNDLE_MEMBERS` as well, deliberately, so a change to either one moves
+**two** hashes: it re-stales converged segments AND forces a no-resume run.
+`claim_record.py` since #438 — it gates dispatch, which earns it the plugin
+bundle, and `select_segments.py` imports it, so its bytes must move this marker
+too. And `select_segments.py` itself since #446 — it was always an
+orchestration member, and it owns the dispatch gate `claim_record.py` merely
+supplies the claim predicate for, so the same criterion had always applied to
+it. The remaining three (`draft_ready.py`, `ledger_merge.py`,
+`language_smoke_report.py`) are orchestration-only.
 
 `profile_validate.py` is excluded from **all three** bundles — it is never
 copied to `durable_root` at all; it's always invoked from the plugin's own

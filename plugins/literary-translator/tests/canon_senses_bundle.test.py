@@ -445,9 +445,11 @@ def test_canon_senses_py_bundle_hash_mismatch_flips_segment_direct_stale(tmp_pat
 
 
 # ===========================================================================
-# (c) Doc-count guard: ledger-and-resumability.md's "eleven scripts"
+# (c) Doc-count guard: ledger-and-resumability.md's "<N> scripts"
 #     enumeration matches PLUGIN_BUNDLE_MEMBERS exactly (scripts only, the
-#     two workflow templates are documented/counted separately).
+#     two workflow templates are documented/counted separately). The count
+#     word is PARSED, never written here -- an earlier version of this
+#     header hard-coded "eleven" and was still saying it at fifteen.
 # ===========================================================================
 
 

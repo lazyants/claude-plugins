@@ -138,21 +138,27 @@ def test_orchestration_bundle_hash_never_a_cache_key_field(cache_key_module):
 
 # #538. Which SIDE of this split a script sits on is what a release entry's
 # "nothing re-translates" sentence rests on, and it is not something a reader
-# can tell by looking at the file: select_segments.py and resume_setup.py sit
-# on opposite sides of it despite being the two halves of one W5 preflight,
-# invoked one after the other on every claim run. 1.38.0's first draft claimed
-# the orchestration-only cost for BOTH, and a docstring-sized edit to
-# resume_setup.py would therefore have moved plugin_bundle_hash and re-staled
-# every converged segment in every project -- a whole-book retranslation, paid
-# for a comment. Pinned here, on both sides, so the claim is checked rather
-# than restated.
-def test_select_segments_is_orchestration_only_never_a_plugin_bundle_member(
+# can tell by looking at the file: select_segments.py and resume_setup.py sat
+# on opposite sides of it until #446, despite being the two halves of one W5
+# preflight invoked one after the other on every claim run. 1.38.0's first
+# draft claimed the orchestration-only cost for BOTH, and a docstring-sized
+# edit to resume_setup.py would therefore have moved plugin_bundle_hash and
+# re-staled every converged segment in every project -- a whole-book
+# retranslation, paid for a comment. Pinned here, on both sides, so the claim
+# is checked rather than restated.
+#
+# #446 moved select_segments.py to the OTHER side, and this pin moved with it
+# rather than being deleted: its purpose was never to keep the script out of
+# the plugin bundle, it was to make a release state the true price of touching
+# it. The price it now names is the dual one.
+def test_select_segments_is_registered_in_BOTH_bundles(
     cache_key_module, orchestration_bundle_members
 ):
-    assert "select_segments.py" not in cache_key_module.PLUGIN_BUNDLE_MEMBERS, (
-        "a release that changes select_segments.py prices itself as moving "
-        "orchestration_bundle_hash ONLY -- if this script joins the plugin "
-        "bundle, that price is wrong and every converged segment re-stales"
+    assert "select_segments.py" in cache_key_module.PLUGIN_BUNDLE_MEMBERS, (
+        "#446 registered the dispatch-gate owner in the plugin bundle -- a "
+        "release that changes select_segments.py must price itself as moving "
+        "plugin_bundle_hash AND orchestration_bundle_hash, so every converged "
+        "segment reclassifies stale and the next run is a fresh RUN_ID"
     )
     assert "select_segments.py" in orchestration_bundle_members
 

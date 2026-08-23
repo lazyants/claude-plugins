@@ -104,17 +104,25 @@ SELF_PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 # tests/scaffold_setup.test.py::test_orchestration_members_pinned against a
 # silent desync of resume_setup.py's resume-integrity digest.
 #
-# #438: claim_record.py is registered in BOTH bundles, deliberately. It is a
-# PLUGIN_BUNDLE_MEMBERS entry (it gates dispatch), and it is ALSO here because
-# select_segments.py -- an orchestration member that is deliberately NOT a
-# plugin-bundle member -- now imports it. Without that a change to
-# claim_record.py's bytes would move plugin_bundle_hash but leave
+# TWO of the five below are registered in BOTH bundles, deliberately, and a
+# change to either moves two hashes at once. Kept HERE rather than inside the
+# tuple so the justification survives a rewrite of the literal, and so a
+# reader meets it before the names -- a double registration is never to be
+# inferred from the list alone.
+#
+# #438: claim_record.py is a PLUGIN_BUNDLE_MEMBERS entry (it gates dispatch),
+# and it is ALSO here because select_segments.py imports it. Without that a
+# change to claim_record.py's bytes would move plugin_bundle_hash but leave
 # orchestration_bundle_hash unchanged, even though the orchestration member's
 # behavior changed. Same transitive-import invisibility that forced
-# canon_senses.py to be registered once two members imported it. Kept HERE
-# rather than inside the tuple so the justification survives a rewrite of the
-# literal, and so a reader meets it before the names -- a double registration
-# moves two hashes at once and is never to be inferred from the list alone.
+# canon_senses.py to be registered once two members imported it.
+#
+# #446: select_segments.py was always here, and is now a
+# PLUGIN_BUNDLE_MEMBERS entry as well. It owns the dispatch gate itself --
+# the Step 1 ever-converged refusal and the claim admission arms, of which
+# claim_record.py supplies only the predicate -- so the criterion that
+# registered claim_record.py had always applied to it too. Its exclusion was
+# a deferral, never a decision (see cache_key.py's own comment block).
 ORCHESTRATION_BUNDLE_MEMBERS = (
     "claim_record.py",
     "draft_ready.py",

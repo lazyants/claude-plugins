@@ -346,7 +346,7 @@ def test_review_artifact_check_is_the_only_function_body_exemption():
 #    SAFETY copy; PLUGIN_BUNDLE_MEMBERS is the gating-hash membership tuple in
 #    cache_key.py (which includes non-copy-carriers like canon_validate.py /
 #    resume_setup.py + the two workflow templates, and EXCLUDES copy-carriers
-#    like select_segments.py). A named assertion here -- parsed from
+#    like draft_ready.py). A named assertion here -- parsed from
 #    cache_key.py SOURCE, never a doc/test-list echo that could drift in
 #    lockstep -- catches the failure mode where codex_job.py is added to
 #    ALL_SCRIPTS but never registered as a bundle member, so an edit to the W5
@@ -406,8 +406,11 @@ def test_all_scripts_and_plugin_bundle_members_are_distinct_lists():
         "ALL_SCRIPTS and PLUGIN_BUNDLE_MEMBERS unexpectedly became identical "
         "-- they encode different contracts and must stay distinct lists."
     )
-    assert "select_segments.py" in all_scripts and "select_segments.py" not in members, (
-        "select_segments.py carries the seg-safety copy (ALL_SCRIPTS) but is an "
+    # The witness was select_segments.py until #446 registered it in the
+    # plugin bundle. draft_ready.py carries the same contract shape: it is a
+    # seg-safety-copy carrier and an orchestration-bundle member only.
+    assert "draft_ready.py" in all_scripts and "draft_ready.py" not in members, (
+        "draft_ready.py carries the seg-safety copy (ALL_SCRIPTS) but is an "
         "orchestration-bundle member, not a plugin-bundle member -- witness stale."
     )
     assert "canon_validate.py" in members and "canon_validate.py" not in all_scripts, (
