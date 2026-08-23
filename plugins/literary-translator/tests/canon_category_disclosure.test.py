@@ -40,12 +40,6 @@ fails half 1. Teaching either shipped template to mention `category` fails half
 2 -- the moment all four disclosures need revising, and the only reason half 2
 is in this file at all.
 
-Each half-1 assertion is LOCATION-SCOPED, never a whole-file membership test: a
-whole-file needle stays green after the sentence is moved out of the property /
-section / comment block a reader consults on the way to authoring a gate, which
-is precisely the defect #406 records. The two Markdown/YAML sites are matched
-against WHITESPACE-COLLAPSED text, because both files hard-wrap and a needle
-spanning a wrap point would otherwise miss while the content is fully intact.
 """
 from __future__ import annotations
 
@@ -73,9 +67,6 @@ for path in (
     GLOSSARY_WF_TEMPLATE,
 ):
     assert path.is_file(), f"expected {path} to exist"
-
-CATEGORY_TOKEN_RE = re.compile(r"categor", re.IGNORECASE)
-
 
 def _collapse(text: str) -> str:
     """Every run of whitespace to one space -- so a needle is independent of
@@ -111,10 +102,9 @@ def test_profile_schema_discloses_on_the_folders_catalog_itself():
     operator maintaining an ALREADY-CREATED profile reaches (Step 0 copies
     profile.example.yml only when the profile is absent, while every validation
     loads the plugin's own profile.schema.json)."""
-    folders = (
-        _load(PROFILE_SCHEMA)["properties"]["output"]["properties"]["adapter_config"]
-        ["properties"]["obsidian"]["properties"]["folders"]
-    )
+    output = _load(PROFILE_SCHEMA)["properties"]["output"]
+    obsidian = output["properties"]["adapter_config"]["properties"]["obsidian"]
+    folders = obsidian["properties"]["folders"]
     collapsed = _collapse(folders["description"])
     assert (
         "The shipped glossary pass never asks for 'category', so a catalog "
@@ -151,7 +141,7 @@ def test_profile_example_discloses_in_the_folders_comment_block():
         f"expected exactly one 'folders: {{}}' line in {PROFILE_EXAMPLE.name}, "
         f"found {len(folders_idx)} -- this test's anchor is stale"
     )
-    block: list[str] = []
+    block = []
     for line in lines[folders_idx[0] + 1 :]:
         if not line.strip().startswith("#"):
             break
@@ -175,10 +165,11 @@ def test_shipped_glossary_templates_do_not_mention_category():
     already false: a prompt forbidding the field trips this scan and leaves
     them true."""
     for template in (GLOSSARY_TASK_TEMPLATE, GLOSSARY_WF_TEMPLATE):
+        lines = template.read_text(encoding="utf-8").splitlines()
         hits = [
             f"{template.name}:{n}: {line.strip()}"
-            for n, line in enumerate(template.read_text(encoding="utf-8").splitlines(), 1)
-            if CATEGORY_TOKEN_RE.search(line)
+            for n, line in enumerate(lines, 1)
+            if "categor" in line.lower()
         ]
         assert not hits, (
             "a shipped glossary template now mentions `category`. Re-read it "
