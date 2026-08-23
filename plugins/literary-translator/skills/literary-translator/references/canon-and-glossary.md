@@ -377,12 +377,50 @@ Every item REQUIRES `source_form`, `is_proper_name`, and `disposition:
       particle_config_hash: { type: "string" },
       derivation_bundle_hash: { type: "string" }
     }
-  }
+  },
+  corrections: { type: "array", items: <canon-correction.schema.json shape> }
 }
 ```
 
 `entries{}`, `review_queue`, AND `generation_hashes` are ALL THREE required
-unconditionally at the top level.
+unconditionally at the top level. `corrections[]` (**#495**) is the one
+OPTIONAL key: it is created on the first `--correct` call and absent from every
+`canon.json` written before that mode existed, so absence must stay valid. The
+merge path never creates or touches it.
+
+### `canon-correction.schema.json` — one adjudicated correction (#495)
+
+The document `--correct` reads, and — verbatim — the record it appends to
+`corrections[]`. One shape for both on purpose: two shapes for one decision
+drift apart, and the record's whole job is to show the next operator what was
+adjudicated.
+
+```
+{
+  source_form: { type: "string", minLength: 1 },   // must already be in entries{}
+  disposition: { enum: ["correct", "remove"] },
+  old_entry:   { type: "object" },                 // the value the caller says is on disk
+  new_entry:   <canon-entry.schema.json shape>,    // required iff correct, forbidden iff remove
+  reason:      { type: "string", pattern: "\\S" }
+}
+```
+
+Two asymmetries carry real weight:
+
+- **`old_entry` is a plain object, `new_entry` is `$ref`-validated.**
+  `old_entry`'s job is EQUALITY against what is on disk, not shape — and the
+  entry most in need of correcting is the one that fails its own schema. A
+  hand-edited `canon.json` (the only repair route that existed before this
+  mode) can hold exactly that, and VALIDATE-ONLY exists to find it; requiring
+  the OLD value to validate would leave those entries with no route at all.
+  `new_entry` is what gets frozen, so it validates.
+- **`old_entry` is not an open channel, despite its loose type.** It must EQUAL
+  what is on disk, so the only value that can ever be recorded through it is one
+  `canon.json` already held. `reason` is required and non-blank but NOT
+  length-capped — `canon-entry.schema.json`'s own `note` is unbounded and rides
+  in the same document via `new_entry`, so capping `reason` would bound one
+  field while leaving the record exactly as open as every other operator-authored
+  free text in `canon.json`.
 
 ## `canon_validate.py`'s CLI modes
 
@@ -412,9 +450,12 @@ canon reuse. `--plugin-root` names the plugin's own install tree and
 resolves the sibling as `{PATH}/assets/scripts/cache_key.py`;
 `--allow-durable-sibling` accepts the durable sibling knowingly, for a
 hand-run recovery with no orchestrating session to supply a plugin root.
-The three NON-stamping modes below — `--check-batch`, `--verify-merged` and
-validate-only — resolve no sibling and accept neither flag's obligation; do
-not add either to them.
+The NON-stamping modes below — `--check-batch`, `--correct`,
+`--verify-merged` and validate-only — resolve no sibling and accept neither
+flag's obligation; do
+not add either to them. `--correct` is the one that makes "stamping" narrower
+than "writing": it writes `canon.json` but carries its existing stamp forward
+verbatim and computes no hash at all.
 
 1.2.0 adds three new modes to close #87 (schema-less glossary dispatch,
 `references/orchestration-and-batching.md`), #90 (concurrent-batch races),
@@ -504,6 +545,82 @@ Pass 1 instead validates every EXISTING `entries{}` value against
 `canon-entry.schema.json` directly, and every existing `review_queue[]`
 item against the QUEUED shape; Pass 2 is unchanged — the loaded document is
 validated against `canon-file.schema.json`.
+
+### `--correct PATH` — the one sanctioned route to change a FROZEN entry (#495)
+
+`canon.json` used to be write-once in practice. `_merge_batch` raises on a
+genuine cross-run collision (two different resolutions for one `source_form`),
+`--init` is create-only, `--restamp-derivation` touches provenance only, and
+VALIDATE-ONLY writes nothing — so a batch carrying a CORRECTED resolution was
+rejected *precisely because it was a correction*. That refusal is right as a
+defence against a re-adjudication silently overwriting a frozen decision, but it
+left no route for the case where the frozen decision is simply WRONG. And a
+canon that contradicts the text is not inert: it keeps generating false review
+findings, and the cheapest way to clear those is to revert correct prose to
+match a wrong canon. The guard pushed toward corrupting the deliverable.
+
+The only available move was to replace `canon.json` by hand — a hand-edit of
+exactly the artifact the whole gate chain treats as frozen, performed outside
+every validation the tool owns, with nothing capturing what changed, why, or
+that a human adjudicated it.
+
+`--correct` is that route, deliberately OUT-OF-BAND rather than a relaxed merge:
+
+- **`_merge_batch` is untouched, and there is no `--force`.** An ordinary
+  re-adjudication batch carrying a differing resolution still raises the
+  collision error, unchanged. Correction is a separate, explicitly named mode.
+- **One entry per call, and it must state what it is changing FROM.**
+  `old_entry` is refused, naming BOTH the on-disk value and the stated one, when
+  it does not match — so the mode cannot be used blind against a `canon.json`
+  that moved since it was read.
+- **A `reason` is required.** The correction document is appended verbatim to
+  `corrections[]`, so the next operator meets an adjudicated change rather than
+  an unexplained diff.
+- **`disposition: "correct"`** replaces the record under the same key
+  (`new_entry`'s own `source_form` field must equal that key — a record filed
+  under an unrelated map key is a defect `canon_adjudication_audit.py` exists to
+  catch), and is REFUSED when the form is an adjudicated homonym split, through
+  the same `is_split` predicate `_merge_batch`'s recollapse guard uses.
+- **`disposition: "remove"`** deletes the record, and is deliberately NOT
+  split-refused. `canon_adjudication_audit.py`'s BLOCKING `collapsed_split` is
+  "never satisfied by an adjudication record — the underlying `canon.json` entry
+  must actually be corrected", and no substituted bare entry can satisfy it, so
+  removal is its only repair. Removal is also what an interpolated name with
+  zero source occurrences needs. A key RENAME is a `remove` followed by an
+  ordinary `--merge-batches` under the new key, never a third disposition.
+- **It is subject to the same content controls as the merge path.** A
+  `disposition: "correct"` runs `new_entry` through `_enforce_citation_source_safety`
+  (#347's static citation boundary — a loopback/private/non-public `source` is
+  refused before it can be frozen) and through the offline backstop (under
+  `--research-mode offline`, `basis: "established"` is refused). Being a second
+  write path into `entries{}` is exactly why: #347 calls itself "the only place
+  such a `source` can be stopped before it is frozen into `canon.json`", and a
+  route that skipped it would make that claim false. `remove` is exempt from
+  both — they constrain what may be FROZEN, and refusing a removal over the
+  outgoing entry's own bad `source` would trap the record most worth deleting.
+- **It WRITES but does not STAMP.** The existing `generation_hashes` are carried
+  forward verbatim. `_content_view` excludes only the stamp, so a corrected
+  entry reads as a changed document and #291's rule would restamp it — which
+  would advance the particle-config/derivation-bundle provenance claim and clear
+  `select_segments.py`'s derivation-state gate with nothing regenerated. Nothing
+  is lost: the re-stale signal for a corrected entry is `cache_key.py`'s
+  per-segment `used_terms_hash`, not these hashes. A `canon.json` whose stamp is
+  absent or malformed is REFUSED rather than stamped fresh, pointing at
+  `--restamp-derivation` — the one mode that may advance provenance, by name.
+
+**What a correction costs.** `compute_used_terms_hash` hashes only the entries a
+segment actually references, so correcting one entry re-stales exactly the
+segments carrying that form and no others. Those units are admissible for
+bounded re-review via `--from-converged` (since **1.25.0**), and re-review cannot
+reach translate — so a correction costs bounded re-review, never
+re-translation. It does change `canon.json`'s BYTES, which is a frozen input of
+the skeptic pass (`canon_sha256`) and of `suspicion_scan.py`'s worklist
+freshness gate: run a correction BETWEEN passes, not into a live one. (That was
+equally true of the hand-edit it replaces.)
+
+stdout: `{"success":true,"mode":"correct","canon_path":…,"research_mode":…,
+"source_form":…,"disposition":…,"entries_count":N,"review_queue_count":N,
+"corrections_count":N,"generation_hashes_restamped":false}`.
 
 ### Shared machinery across every mode
 
@@ -1059,11 +1176,17 @@ that could plausibly change it is closed:
 
 - `canon_validate.py` is the only script in the plugin that writes
   `canon.json` at all, and the merge is the only one of its modes that can
-  write an `entries{}` row. There is no amend, override, or correct mode. The
-  two other writing modes reach the same single `_atomic_write_json` call
-  site but cannot touch a resolved entry: `--init` is create-only (an
-  existing canon.json is left byte-untouched and is not even read), and
-  `--restamp-derivation` moves only the two `generation_hashes` fields.
+  write an `entries{}` row through the ordinary glossary pass. Since **#495**
+  there is exactly one other way, and it is deliberately out-of-band:
+  `--correct` (see its own section above) changes or deletes ONE frozen entry,
+  requires the caller to state the old value, and records the change with its
+  reason in `corrections[]`. It is not an override of anything below — the
+  collision refusal in the next bullet is untouched by it, and a correction
+  cannot be reached from a batch at all. The other writing modes reach the same
+  single `_atomic_write_json` call site but cannot touch a resolved entry:
+  `--init` is create-only (an existing canon.json is left byte-untouched and is
+  not even read), and `--restamp-derivation` moves only the two
+  `generation_hashes` fields.
 - **A conflicting re-merge is fatal, not a fix.** `_merge_batch` raises on a
   genuine cross-run collision — two different resolutions claimed for the
   same `source_form` — naming both the old and the new value, and the whole
@@ -1098,11 +1221,15 @@ that could plausibly change it is closed:
   `skeptic_triage.json`, and its verdict schema cannot express a
   confirmation, let alone a repair.
 
-What remains is a hand edit of `canon.json` outside every shipped tool. That
-is a real option for a human, and it is exactly the expensive one this stage
-exists to avoid — see **Retroactive canon edits invalidate precisely** below
-for what it costs: every segment whose `used_terms_hash` covers that term
-goes stale and is re-translated.
+What remains is `--correct` (**#495**) — an explicit, recorded, out-of-band
+correction, one entry at a time, stating the old value. It is a real option for
+a human and it is exactly the one this stage exists to avoid needing: see
+**Retroactive canon edits invalidate precisely** below for what it costs. Every
+segment whose `used_terms_hash` covers that term goes stale — bounded re-review
+via `--from-converged`, since **1.25.0**, rather than the re-translation it
+would have cost before that. Before #495 the only move here was a hand edit
+outside every shipped tool, which cost the same invalidation and recorded
+nothing.
 
 **Why in-batch, rather than "after all batches, before the merge".** There
 is no such window. `glossary-pass-wf.template.js` runs
@@ -1186,15 +1313,18 @@ in `canon.json`'s `entries{}`. A name a segment's own translator only ever
 improvised, never yet locked, still counts as "used" by that segment for
 invalidation purposes the moment it is later canonized.
 
-Such an edit is a HAND edit, outside every shipped script — no plugin tool
-rewrites an existing `entries{}` row (see **Pre-merge citation review**
-above: the merge fatals on a conflicting re-resolution, `--retry` cannot
-reinstate a resolved entry, and `--verify-merged` and
-`canon_adjudication_audit.py` are both read-only about the verdict). What
-this section describes is therefore the COST of correcting a frozen
-decision, not a supported correction path: the invalidation is precise, but
-every segment it reaches is re-translated. That cost is why an accuracy
-decision is reviewed BEFORE it is merged, never after.
+Since **#495** such an edit has a supported spelling: `canon_validate.py
+--correct` (above). Everything else here still holds — the merge fatals on a
+conflicting re-resolution, `--retry` cannot reinstate a resolved entry, and
+`--verify-merged` and `canon_adjudication_audit.py` are both read-only about
+the verdict — so a correction remains out-of-band and explicitly adjudicated,
+never something a batch can reach. What this section describes is the COST of
+correcting a frozen decision: the invalidation is precise, and since **1.25.0**
+every segment it reaches is admissible for bounded RE-REVIEW via
+`--from-converged`, which cannot reach translate. Before that release the same
+edit stranded those units, which is why the older prose here called it
+re-translation. It is still a real cost, and still why an accuracy decision is
+reviewed BEFORE it is merged rather than after.
 
 **Two obligations come with that hand edit, and skipping either can let wrong
 text ship under a correct-looking hash.**

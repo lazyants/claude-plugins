@@ -392,7 +392,37 @@ NON_STAMPING_MODE_CASES = {
             str(write_fragment(root, [accepted_item("אברהם", "Abraham")], "vm_frag.json")),
         ]
     ),
+    # #495. --correct WRITES canon.json but does not STAMP it -- it carries the
+    # existing generation_hashes forward verbatim and computes no hash -- so it
+    # resolves no sibling cache_key.py and belongs on this side of the table.
+    # This fixture has no canon.json, so both invocations fail identically on
+    # that; the property under test is that the escape hatch changes NOTHING,
+    # which exact-equality asserts regardless of which outcome they share.
+    "correct": (
+        lambda root: [
+            "--correct",
+            str(
+                write_fragment(
+                    root,
+                    {
+                        "source_form": "אברהם",
+                        "disposition": "remove",
+                        "old_entry": {
+                            "source_form": "אברהם",
+                            "is_proper_name": True,
+                            "canonical_target_form": "Abraham",
+                            "basis": "transliterated",
+                            "confidence": "high",
+                        },
+                        "reason": "fixture correction for the #412 no-op battery",
+                    },
+                    "correction.json",
+                )
+            ),
+        ]
+    ),
 }
+
 
 
 def _canon_bytes(root: Path):
@@ -614,14 +644,15 @@ def test_the_durable_sibling_opt_out_genuinely_runs_the_durable_copy(tmp_path, d
 
 @pytest.mark.parametrize("dest", list(NON_STAMPING_MODE_CASES), ids=str)
 def test_a_non_stamping_mode_is_untouched_by_the_precondition(tmp_path, dest):
-    """The guard must not widen. --check-batch and --verify-merged resolve no
-    sibling at all, so neither may acquire a new refusal, and the escape
+    """The guard must not widen. --check-batch, --correct and --verify-merged
+    resolve no sibling at all, so none may acquire a new refusal, and the escape
     hatch must be a genuine no-op for them rather than quietly changing what
     they do.
 
     Asserted as EXACT equality of the two invocations rather than as "both
-    exit 0": these two modes legitimately differ in outcome on this fixture
-    (--check-batch succeeds; --verify-merged reports a missing canon.json),
+    exit 0": these modes legitimately differ in outcome on this fixture
+    (--check-batch succeeds; --verify-merged and --correct both report a
+    missing canon.json),
     and a same-rc assertion would pass even if the flag had changed the
     payload. Comparing rc, stdout AND stderr is what makes "ignored" mean
     ignored."""

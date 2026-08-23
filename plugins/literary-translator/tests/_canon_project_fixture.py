@@ -53,6 +53,11 @@ CANON_SCHEMA_FILES = (
     "canon-entry.schema.json",
     "canon-batch.schema.json",
     "canon-file.schema.json",
+    # #495. Hand-maintained, unlike canon_validate._build_schema_registry()'s
+    # glob over the staged schemas/ dir -- so a schema left out HERE is
+    # simply absent from every staged root, and canon-file.schema.json's
+    # $ref to it fails to resolve on the first write, in every suite at once.
+    "canon-correction.schema.json",
 )
 
 PARTICLE_CONFIG = "he.json"
