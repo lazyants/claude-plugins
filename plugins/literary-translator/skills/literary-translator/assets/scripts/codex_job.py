@@ -2144,6 +2144,11 @@ class CodexJob:
                 # cost is bounded to zero paid turns by refusing right here, with a reason
                 # of its own so the wedge is diagnosable in the joblog rather than
                 # presenting as a mystery refusal after a spent turn.
+                #
+                # The flag is write-only on this path too (this branch returns before the
+                # only reader is reached) and is set for the same reason the promote site
+                # gives: it means "an authorization refusal happened", and it must not be
+                # true after some of them and false after others.
                 self.authorization_moved = True
                 self.reason = "authorization-unestablished"
                 self.error_detail = (
@@ -2300,6 +2305,16 @@ class CodexJob:
                             # canonical, so keeping them at a per-invocation random path
                             # no later run consults would be storage with no consumer.
                             # finalize() removes them on the ordinary not-promoted path.
+                            #
+                            # WRITE-ONLY HERE, deliberately. The flag's only reader sits
+                            # above launch(), so nothing in this run consults it after
+                            # this point -- finalize() gates on canonical_unreadable, and
+                            # the joblog carries reason/error_detail. It is still set,
+                            # because the flag means "an authorization refusal happened",
+                            # and a field that were true after one refusal site and false
+                            # after another is a trap for the next reader who gives it a
+                            # consumer (a joblog field being the obvious one). Consistency
+                            # costs one assignment; the asymmetry would cost a bug.
                             self.authorization_moved = True
                         else:
                             self._archive_outgoing_review(self.finalize_timeout)  # #541
