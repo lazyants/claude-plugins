@@ -797,10 +797,10 @@ def _instantiate_and_slice_js(durable_root_str):
         # resolve so the no-leftover-token assertion below stays meaningful.
         "{{EFFORT}}": "high",
         "{{MODEL}}": "",
-        # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. This
-        # file's charter is the draft_path/review_path invariant, not the
-        # #412 dispatch opt-in, so the empty value reproduces the pre-#412
-        # dispatch shape it was written against; it only needs to resolve.
+        # #412/#607 -- PLUGIN_ROOT must be a real path: since #607 the
+        # template refuses an empty one before dispatch. This file's charter
+        # is the draft_path/review_path invariant, not the #412 dispatch
+        # opt-in, so the value is arbitrary; it only needs to resolve.
         "{{PLUGIN_ROOT}}": json.dumps("/fixture/plugin/literary-translator"),
     }
     for token, value in substitutions.items():

@@ -120,7 +120,7 @@ def instantiate(*, max_fix_rounds: int, batch_agent_cap: int, max_codex_jobs_per
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH))
     text = text.replace("{{EFFORT}}", effort)
     text = text.replace("{{MODEL}}", model)
-    # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. This file
+    # #412 -- PLUGIN_ROOT: empty USED TO mean "not opted into the redirect". This file
     # exercises the wait/chunk machinery, not the opt-in dispatch shape.
     # #607 -- a non-empty plugin root is now REQUIRED: the fix-scope audit
     # runs only from the plugin install tree, so the W5 template refuses to

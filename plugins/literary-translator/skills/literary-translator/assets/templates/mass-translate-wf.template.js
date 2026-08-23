@@ -358,7 +358,10 @@ const FIX_SCOPE_SCHEMA = {
     missing: { type: "array", items: { type: "string" } },
     irregular: { type: "array", items: { type: "string" } },
     extra: { type: "array", items: { type: "string" } },
+    orphaned: { type: "array", items: { type: "string" } },
+    degenerate: { type: "array", items: { type: "string" } },
     marker_mismatch: { type: "array", items: { type: "string" } },
+    error: { type: "string" },
   },
 };
 
@@ -416,8 +419,10 @@ const VERSE_POLICY_INSTRUCTION_BLOCK = "{{VERSE_POLICY_INSTRUCTION_BLOCK}}";
 const COMPANION = {{CODEX_COMPANION_PATH_JSON}};
 
 // #412 -- the plugin's own install root (see the header comment's
-// {{PLUGIN_ROOT}} entry), or "" when this dispatch does not opt into the
-// redirect. Same JS-string-literal substitution shape as COMPANION above,
+// {{PLUGIN_ROOT}} entry). It used to be allowed to arrive as "" meaning
+// "this dispatch does not opt into the redirect"; since #607 that is a
+// refusal, not a mode -- see the paragraph below.
+// Same JS-string-literal substitution shape as COMPANION above,
 // but unlike COMPANION there is no dedicated resolver script
 // (resolve_codex_companion.py's own counterpart) to lean on, so this file
 // re-checks it itself -- mirroring EFFORT_RE/MODEL_RE above -- before it
@@ -446,6 +451,19 @@ if (PLUGIN_ROOT !== "" && PLUGIN_ROOT_UNSAFE_RE.test(PLUGIN_ROOT)) {
 // with no value is never emitted (codex_job.py's own argparse default,
 // None, is reserved for "flag omitted entirely", not an empty string).
 const PLUGIN_ROOT_ARG = PLUGIN_ROOT ? " --plugin-root '" + PLUGIN_ROOT + "'" : "";
+
+// #607 -- POSIX single-quote escaping for a path spliced into a shell
+// command. PLUGIN_ROOT is validated above to carry no single quote, but
+// ROOT is not: project.durable_root is only required to be a non-empty,
+// writable path (profile.schema.json + profile_validate.py check location
+// and writability, never shell characters), so a perfectly legitimate
+// /Users/.../O'Brien Book would either split into several arguments if
+// spliced bare or terminate the quote early if spliced naively. Both cost
+// the segment a false fix-scope-unverified and a re-translation. The
+// '\'' idiom needs no validation and refuses no legitimate path.
+function shq(value) {
+  return "'" + String(value).split("'").join("'\\''") + "'";
+}
 
 // #198 -- driver/poll timing constants, mirroring codex_job.py's own
 // constants (documented in the header comment's W5 dispatch model). Only the
@@ -1532,15 +1550,15 @@ function fixScopeAuditPrompt(seg) {
   const lines = [];
   lines.push("Effort: low. Mechanical verification only -- do not judge the comparison yourself, and do not repair anything you are told about.");
   lines.push("Segment: " + seg + ". Durable root: " + ROOT + ".");
-  // Both paths SINGLE-QUOTED, the same splice contract every codex_job.py
-  // launch line above uses. PLUGIN_ROOT is already validated to contain no
-  // single quote or control character; ROOT comes from the same operator
-  // config. Interpolating either bare would split a perfectly legitimate
-  // install path like /Users/First Last/... into several shell arguments,
-  // the checker would print no JSON, and two such attempts would spend the
-  // segment on fix-scope-unverified -- a false RED this diff would have
-  // introduced on a plugin-root shape the template explicitly supports.
-  lines.push("Run exactly: " + PY + " '" + PLUGIN_ROOT + "/assets/scripts/fix_scope_audit.py' --verify-copies --durable-root '" + ROOT + "'");
+  // Both paths go through shq(). Interpolating either bare would split a
+  // legitimate install path like /Users/First Last/... into several shell
+  // arguments; interpolating ROOT inside naive single quotes would break on
+  // an equally legitimate /Users/.../O'Brien Book, since durable_root --
+  // unlike PLUGIN_ROOT -- is never validated for shell characters. Either
+  // way the checker prints no JSON, two attempts spend the segment on
+  // fix-scope-unverified, and the operator pays a re-translation for a false
+  // RED this diff would have introduced.
+  lines.push("Run exactly: " + PY + " " + shq(PLUGIN_ROOT + "/assets/scripts/fix_scope_audit.py") + " --verify-copies --durable-root " + shq(ROOT));
   lines.push("Relay that command's single printed JSON line verbatim as your own structured result. The script already did the comparison. If it exits non-zero, that is a verdict, not a failure to report -- relay the line exactly as printed.");
   return lines.join("\n");
 }
@@ -1949,6 +1967,22 @@ async function runRound(seg, round, isFinal) {
     if (!recCount.ok) return { terminal: true, value: recCount.failResult };
     return { terminal: true, value: { seg: seg, converged: false, reason: "fix-scope-unverified", rounds: round } };
   }
+  // The checker's own error line ({ok:false, verdict:"error"}) means it could
+  // not perform the comparison -- a missing durable root, an unimportable
+  // plugin bundle declaration. That is the same epistemic state as a failed
+  // relay, not a detected divergence, and mislabelling it "violation" would
+  // send the operator looking for a tampered file that does not exist.
+  if (scope.ok !== true && scope.verdict === "error") {
+    const recError = await recordLedgerCall(
+      seg,
+      { status: "blocked", reason: "fix-scope-unverified",
+        note: "the fix-scope checker could not run: " + String(scope.error || "(no message relayed)") },
+      "ledger:blocked:fix-scope-unverified:" + seg,
+    );
+    haltBatchOnFixScope(seg, "fix-scope-unverified", recError.ok);
+    if (!recError.ok) return { terminal: true, value: recError.failResult };
+    return { terminal: true, value: { seg: seg, converged: false, reason: "fix-scope-unverified", rounds: round } };
+  }
   if (scope.ok !== true) {
     // A durable copy no longer matches the plugin it was installed from.
     // The note carries FILENAMES only, never file contents: this record is
@@ -1957,6 +1991,7 @@ async function runRound(seg, round, isFinal) {
     const detail = [
       ["differing", scope.differing], ["missing", scope.missing],
       ["irregular", scope.irregular], ["extra", scope.extra],
+      ["orphaned", scope.orphaned], ["degenerate", scope.degenerate],
       ["marker", scope.marker_mismatch],
     ].filter((pair) => Array.isArray(pair[1]) && pair[1].length > 0)
       .map((pair) => pair[0] + ": " + pair[1].join(", "))

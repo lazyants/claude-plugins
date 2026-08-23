@@ -176,9 +176,19 @@ def test_project_local_language_override_stays_green(root):
     assert audit(root)["ok"] is True
 
 
-def test_project_local_schema_stays_green(root):
+def test_a_durable_only_schema_is_not_a_sanctioned_override(root):
+    """The symmetry with `fr.local.json` LOOKS right and is wrong, so it is
+    pinned in the direction the code actually supports. Nothing in SKILL.md
+    or the references sanctions a project-local schema, and a `.json`
+    appearing under `${durable_root}/schemas/` is not inert: canon_validate.py
+    loads every `*.schema.json` there into the validation registry, and
+    skeptic_setup.py (mirroring resume_setup.py) hashes every one of them into
+    the run identity. An unexpected file there changes what validates a canon
+    and what a resume compares against."""
     (root / "schemas" / "project-local.schema.json").write_text("{}", encoding="utf-8")
-    assert audit(root)["ok"] is True
+    out = audit(root)
+    assert out["ok"] is False, out
+    assert out["orphaned"] == ["project-local.schema.json"], out
 
 
 def test_pycache_in_scripts_stays_green(root):
@@ -269,3 +279,107 @@ def test_mismatch_carries_the_upgrade_reading_not_just_tampering(root):
     assert "not by itself proof of tampering" in out["remedy"].lower() or \
            "NOT by itself proof of tampering" in out["remedy"]
     assert "Step 0a" in out["remedy"]
+
+
+# --- The shared blind spot the count binding cannot see (#607 review round 2)
+#
+# `n_checked` and `n_expected` are BOTH derived from `compared_pairs()`, which
+# reads the PLUGIN tree. A plugin tree that has lost members therefore shrinks
+# the two together, they still agree, and a walk covering almost nothing prints
+# exactly like one covering everything. These fixtures run the audit from a
+# COPY of the plugin tree so that loss can actually be staged -- which is the
+# only way to demonstrate that the durable-side cross-checks, not the counts,
+# are what close it.
+
+def build_fake_plugin(tmp_path: Path) -> Path:
+    """A byte-identical copy of the plugin's own `assets/`, so an audit run
+    from it is clean until the fixture damages it."""
+    fake = tmp_path / "fake_plugin" / "assets"
+    shutil.copytree(ASSETS, fake)
+    return fake
+
+
+def audit_from(fake_assets: Path, root: Path):
+    proc = subprocess.run(
+        [sys.executable, str(fake_assets / "scripts" / "fix_scope_audit.py"),
+         "--verify-copies", "--durable-root", str(root)],
+        capture_output=True, text=True,
+    )
+    payload = json.loads(proc.stdout)
+    assert proc.returncode == (0 if payload["ok"] else 1)
+    return payload
+
+
+def test_a_copy_of_the_plugin_tree_audits_clean(tmp_path, root):
+    """The control. Without it, every RED below could come from the copy
+    itself rather than from the damage the fixture stages."""
+    out = audit_from(build_fake_plugin(tmp_path), root)
+    assert out["ok"] is True, out
+    assert out["n_checked"] == out["n_expected"] and out["n_checked"] > 50
+
+
+def test_a_plugin_tree_missing_schemas_is_red_though_the_counts_agree(tmp_path, root):
+    """Partial loss. The durable root still holds the schemas Step 0a copied;
+    the plugin no longer declares them, so `compared_pairs()` never compares
+    them and both counts shrink in step. Only the durable-side orphan sweep
+    can see it."""
+    fake = build_fake_plugin(tmp_path)
+    dropped = sorted(p.name for p in (fake / "schemas").glob("*.json"))[:3]
+    assert len(dropped) == 3
+    for name in dropped:
+        (fake / "schemas" / name).unlink()
+    out = audit_from(fake, root)
+    assert out["ok"] is False, out
+    assert sorted(out["orphaned"]) == dropped, out
+    # The counts are self-consistent throughout -- which is precisely why they
+    # cannot be the thing that catches this.
+    assert out["n_checked"] == out["n_expected"], out
+
+
+def test_a_plugin_tree_with_no_languages_left_is_red(tmp_path, root):
+    """Wholesale loss of the one class an orphan sweep must not cover: a
+    documented `fr.local.json` project-local override would read as an orphan
+    there. Reporting the empty AUTHORITY needs no guess about which durable
+    filenames are legitimate."""
+    fake = build_fake_plugin(tmp_path)
+    for path in (fake / "languages").iterdir():
+        if path.is_file():
+            path.unlink()
+    out = audit_from(fake, root)
+    assert out["ok"] is False, out
+    assert out["degenerate"] == ["languages"], out
+    assert out["n_checked"] == out["n_expected"], out
+
+
+def test_a_sanctioned_language_override_is_still_green_under_both_sweeps(tmp_path, root):
+    """The false-RED trap the orphan sweep is deliberately scoped away from.
+    `fr.local.json` is created by an operator following SKILL.md; neither new
+    sweep may fire on it."""
+    (root / "languages" / "fr.local.json").write_text('{"local": true}\n', encoding="utf-8")
+    out = audit_from(build_fake_plugin(tmp_path), root)
+    assert out["ok"] is True, out
+
+
+def test_a_durable_only_schema_is_red(root):
+    """`${durable_root}/schemas/` has no sanctioned addition -- every durable
+    consumer only reads from it -- so a `.json` appearing there with no plugin
+    twin is exactly what a widened fix turn would leave behind."""
+    (root / "schemas" / "invented.schema.json").write_text("{}\n", encoding="utf-8")
+    out = audit(root)
+    assert out["ok"] is False
+    assert out["orphaned"] == ["invented.schema.json"], out
+
+
+def test_the_error_line_carries_the_counts_its_consumer_requires(tmp_path):
+    """FIX_SCOPE_SCHEMA requires `n_checked` and `n_expected` on EVERY result,
+    and the relay agent is told to repeat the printed line verbatim. An error
+    object without them cannot be relayed exactly: the workflow would spend a
+    retry and lose the real diagnostic, or the relay would invent fields."""
+    proc = subprocess.run(
+        [sys.executable, str(AUDIT), "--verify-copies",
+         "--durable-root", str(tmp_path / "nope")],
+        capture_output=True, text=True,
+    )
+    payload = json.loads(proc.stdout)
+    assert payload["ok"] is False and payload["verdict"] == "error"
+    assert payload["n_checked"] == 0 and payload["n_expected"] == 0

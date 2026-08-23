@@ -104,17 +104,30 @@ VERDICTS, all of them RED (see `audit()`):
                 a COPY is never a link, and a link's target can change
                 afterwards outside anything this script looks at.
   extra      -- a `${durable_root}/scripts/*.py` with no plugin twin.
+  orphaned   -- a `${durable_root}/schemas/*.json` with no plugin twin. The
+                durable-side half of the check: `n_checked`/`n_expected` both
+                come from `compared_pairs()`, so a plugin tree missing schema
+                files shrinks both and still agrees.
+  degenerate -- a plugin-side class (scripts/schemas/languages) that yields
+                nothing while the durable root still holds files of it. Same
+                blind spot, for the `languages/` class an orphan sweep cannot
+                cover without false-REDing a documented `fr.local.json`.
   marker     -- a bundle marker whose stored value is not the one derivable
                 from the plugin tree.
 
-`extra` is reported for `${durable_root}/scripts/*.py` ONLY, and never for
-`languages/` or `schemas/`. That is not fastidiousness: SKILL.md's copy
-paragraph says it "never clobbers a project-local override coexisting under
-a different filename (e.g. `fr.local.json`)", and SKILL.md walks an operator
-through creating exactly such a preset, so an `extra` verdict over
-`languages/` would fire on a legitimate, documented file. `scripts/` has no
-sanctioned addition, and an unexpected `.py` there is precisely what a
-widened fix turn would leave behind. `scripts/__pycache__/` is excluded from
+`extra` is reported for `${durable_root}/scripts/*.py`, and `orphaned` for
+`${durable_root}/schemas/*.json` -- never for `languages/`. That asymmetry is
+not fastidiousness: SKILL.md's copy paragraph says the pass "never clobbers a
+project-local override coexisting under a different filename (e.g.
+`fr.local.json`)", and SKILL.md walks an operator through creating exactly
+such a preset, so a sweep over `languages/` would fire on a legitimate,
+documented file. `scripts/` and `schemas/` have no sanctioned addition, and
+the schema case is not inert either: `canon_validate.py` loads every
+`*.schema.json` under the durable `schemas/` into the validation registry and
+`skeptic_setup.py` (mirroring `resume_setup.py`) hashes all of them into the
+run identity, so a file dropped there changes what validates a canon and what
+a resume compares against. An unexpected `.py` or `.json` in those two
+directories is precisely what a widened fix turn would leave behind. `scripts/__pycache__/` is excluded from
 `extra` because it belongs to the interpreter, not to any turn: reproduced
 directly, running `codex_job.py` from a durable `scripts/` writes
 `claim_record.cpython-<N>.pyc` there, and `codex_job.py` runs on every
@@ -217,7 +230,17 @@ def fail(message: str) -> NoReturn:
     raises past main(): a relay agent that gets a traceback instead of a
     JSON line cannot report anything useful, and the workflow would read the
     call as an infrastructure failure rather than as a verdict."""
-    print(json.dumps({"ok": False, "verdict": "error", "error": message}, sort_keys=True))
+    # n_checked/n_expected are 0 here and are emitted anyway: FIX_SCOPE_SCHEMA
+    # in mass-translate-wf.template.js REQUIRES both on every result, and the
+    # relay agent is told to repeat this line verbatim. Omitting them would
+    # make an exact relay of a real diagnostic ("durable root not found")
+    # schema-invalid -- so the workflow would spend a retry and lose the
+    # message, or the relay would have to invent fields. `ok: false` is what
+    # blocks; the zeros only keep the shape reportable.
+    print(json.dumps(
+        {"ok": False, "verdict": "error", "error": message, "n_checked": 0, "n_expected": 0},
+        sort_keys=True,
+    ))
     raise SystemExit(1)
 
 
@@ -310,6 +333,75 @@ def sweep_extra(durable_root: Path, expected_script_names) -> list:
     return extra
 
 
+def sweep_orphaned_schemas(durable_root: Path, expected_schema_names) -> list:
+    """`${durable_root}/schemas/*.json` with no plugin twin.
+
+    This is the DURABLE-side half of the comparison, and it exists because
+    `n_checked` and `n_expected` are BOTH derived from `compared_pairs()`:
+    a plugin tree that has lost schema files makes the two shrink together
+    and still agree, so the count binding alone cannot see it. The durable
+    root is an independent population -- it holds what Step 0a actually
+    copied -- so an orphan here is exactly the signal the counts cannot
+    carry.
+
+    Schemas ONLY. `languages/` is excluded for the reason the module
+    docstring gives (`fr.local.json`: a documented, operator-created
+    project-local override would read as an orphan); `${durable_root}/
+    schemas/` has no such sanctioned addition -- every durable consumer
+    (`canon_validate.py`, `ledger_update.py`, `glossary_preflight.py`,
+    `canon_senses.py`, `canon_link_groups.py`) only ever READS from it.
+    """
+    schemas_dir = durable_root / "schemas"
+    if not schemas_dir.is_dir():
+        return []
+    orphaned = []
+    for entry in sorted(schemas_dir.iterdir()):
+        if not entry.is_file():
+            continue
+        if not entry.name.endswith(".json"):
+            continue
+        if entry.name in expected_schema_names:
+            continue
+        orphaned.append(entry.name)
+    return orphaned
+
+
+def sweep_degenerate(durable_root: Path) -> list:
+    """A plugin-side class that yields NOTHING while the durable root still
+    holds files of that class.
+
+    The other half of the same blind spot, for the class an orphan sweep
+    cannot cover. Wholesale loss of `assets/languages/` (or of the schemas,
+    or of the copied scripts) shrinks `compared_pairs()` to a set that
+    excludes it, and `n_checked == n_expected` still holds -- with the two
+    markers alone, both would read 2. Reporting the empty AUTHORITY needs no
+    guess about which durable filenames are legitimate, so it costs no false
+    RED on a documented override.
+    """
+    degenerate = []
+    classes = (
+        ("scripts", PLUGIN_SCRIPTS_DIR.glob("*.py"), durable_root / "scripts", ".py"),
+        ("schemas", PLUGIN_SCHEMAS_DIR.glob("*.json"), durable_root / "schemas", ".json"),
+        ("languages", PLUGIN_LANGUAGES_DIR.glob("*"), durable_root / "languages", ""),
+    )
+    for label, plugin_entries, durable_dir, suffix in classes:
+        plugin_names = {
+            path.name for path in plugin_entries
+            if path.is_file() and path.name not in NEVER_COPIED
+        }
+        if plugin_names:
+            continue
+        if not durable_dir.is_dir():
+            continue
+        durable_names = [
+            entry.name for entry in durable_dir.iterdir()
+            if entry.is_file() and entry.name.endswith(suffix)
+        ]
+        if durable_names:
+            degenerate.append(label)
+    return degenerate
+
+
 def audit(durable_root: Path) -> dict:
     """The whole check. Returns the result object main() prints; raises
     nothing the caller has to catch."""
@@ -344,6 +436,11 @@ def audit(durable_root: Path) -> dict:
         rel.name for _, rel in compared_pairs() if rel.parent.as_posix() == "scripts"
     }
     extra = sweep_extra(durable_root, expected_script_names)
+    expected_schema_names = {
+        rel.name for _, rel in compared_pairs() if rel.parent.as_posix() == "schemas"
+    }
+    orphaned = sweep_orphaned_schemas(durable_root, expected_schema_names)
+    degenerate = sweep_degenerate(durable_root)
 
     marker_mismatches = []
     member_tuples = load_member_tuples()
@@ -367,14 +464,25 @@ def audit(durable_root: Path) -> dict:
         if stored != expected:
             marker_mismatches.append(label)
 
-    ok = not (differing or missing or irregular or extra or marker_mismatches or unreadable)
+    ok = not (
+        differing or missing or irregular or extra or orphaned or degenerate
+        or marker_mismatches or unreadable
+    )
     # n_expected is the size of the set this run was SUPPOSED to compare --
     # len(compared_pairs()) plus the two markers. The caller binds
-    # n_checked == n_expected and n_expected > 0, so a walk that silently
-    # covered nothing can no longer print exactly like a walk that covered
-    # everything (a loop that runs zero times is the classic false GREEN).
-    # It does not defend against a RELAY that fabricates the pair; that
-    # residual is disclosed in SKILL.md rather than papered over here.
+    # n_checked == n_expected and n_expected > 0, which catches a walk that
+    # ABORTED part-way (the classic false GREEN: a loop that runs zero times
+    # prints exactly like one that covered everything).
+    #
+    # What the pair does NOT prove is COVERAGE, and the reason is worth
+    # stating where the number is computed: both sides come from the same
+    # compared_pairs() call, so a plugin tree that lost members makes them
+    # shrink TOGETHER and still agree. That is why the two durable-side
+    # cross-checks above exist -- sweep_orphaned_schemas() and
+    # sweep_degenerate() read the population from the durable root instead,
+    # which the plugin tree cannot shrink. Neither defends against a RELAY
+    # that fabricates the whole line; that residual is disclosed in SKILL.md
+    # rather than papered over here.
     result = {
         "ok": ok,
         "n_checked": n_checked,
@@ -386,6 +494,8 @@ def audit(durable_root: Path) -> dict:
         result["missing"] = missing
         result["irregular"] = irregular
         result["extra"] = extra
+        result["orphaned"] = orphaned
+        result["degenerate"] = degenerate
         result["marker_mismatch"] = marker_mismatches
         result["unreadable"] = unreadable
         result["remedy"] = (

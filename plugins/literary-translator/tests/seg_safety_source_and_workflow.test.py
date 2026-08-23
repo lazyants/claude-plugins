@@ -378,7 +378,7 @@ def instantiate_mass_translate(*, batch_agent_cap: int, max_codex_jobs_per_batch
     # override them with allowlist-violating values to prove the guard throws.
     text = text.replace("{{EFFORT}}", effort)
     text = text.replace("{{MODEL}}", model)
-    # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. This file's
+    # #412 -- PLUGIN_ROOT: empty USED TO mean "not opted into the redirect". This file's
     # charter is seg-id shell-injection safety, not the opt-in; the
     # SEG-guard tests below never read this value, only need it to resolve.
     # #607 -- a non-empty plugin root is now REQUIRED: the fix-scope audit

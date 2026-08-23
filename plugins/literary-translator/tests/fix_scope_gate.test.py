@@ -25,6 +25,7 @@ different file than it claims to.
 """
 
 import importlib.util
+import shlex
 from pathlib import Path
 
 import pytest
@@ -74,13 +75,17 @@ def one_round_plan(*, fix_reply=f"FIXED {SEG} r1", fix_scopes=None, present=None
     return {SEG: plan}
 
 
-def drive(tmp_path, plan, max_fix_rounds=2):
+def drive(tmp_path, plan, max_fix_rounds=2, durable_root=None):
+    kwargs = {}
+    if durable_root is not None:
+        kwargs["durable_root"] = durable_root
     return run_workflow(
         tmp_path=tmp_path,
         max_fix_rounds=max_fix_rounds,
         batch_agent_cap=10_000,
         segs=[SEG],
         plan=plan,
+        **kwargs,
     )
 
 
@@ -249,3 +254,73 @@ def test_a_successful_halt_still_marks_the_batch_incomplete(tmp_path):
     assert result["batchComplete"] is False
     assert result["reason"] == "fix-scope-halt"
     assert result["fixScopeHalts"][0]["ledgerRecorded"] is True
+
+
+def test_a_checker_error_is_unverified_not_a_violation(tmp_path):
+    """`{ok: false, verdict: "error"}` means the checker could not perform the
+    comparison -- an absent durable root, an unimportable bundle declaration.
+    That is the epistemic state of a failed relay, not a detected divergence.
+    Labelling it `fix-scope-violation` would send the operator looking for a
+    tampered file that does not exist; both are terminal either way, so the
+    only thing at stake is whether the record tells the truth."""
+    err = {"ok": False, "verdict": "error", "error": "durable root not found: /nope",
+           "n_checked": 0, "n_expected": 0}
+    out = drive(tmp_path, one_round_plan(fix_scopes=[err]))
+    failed = out["result"]["failed"][0]
+    assert failed["reason"] == "fix-scope-unverified", failed
+    ledger = [lb for lb in labels_of(out) if lb.startswith("ledger:")]
+    assert f"ledger:blocked:fix-scope-unverified:{SEG}" in ledger, ledger
+    note = [c for c in out["calls"]
+            if c["label"].startswith("ledger:blocked:fix-scope-unverified")][0]
+    assert "durable root not found: /nope" in note.get("prompt", "")
+
+
+def test_the_new_verdict_classes_reach_the_operator_by_name(tmp_path):
+    """`orphaned` and `degenerate` are the two durable-side cross-checks; a
+    ledger note that dropped them would tell an operator a mismatch fired and
+    not which files to look at."""
+    mismatch = {
+        "ok": False, "verdict": "mismatch", "n_checked": 79, "n_expected": 79,
+        "differing": [], "missing": [], "irregular": [], "extra": [],
+        "orphaned": ["invented.schema.json"], "degenerate": ["languages"],
+        "marker_mismatch": [],
+    }
+    out = drive(tmp_path, one_round_plan(fix_scopes=[mismatch]))
+    assert out["result"]["failed"][0]["reason"] == "fix-scope-violation"
+    note = [c for c in out["calls"]
+            if c["label"].startswith("ledger:blocked:fix-scope-violation")][0]
+    rendered = note.get("prompt", "")
+    assert "invented.schema.json" in rendered and "languages" in rendered
+
+
+@pytest.mark.parametrize("root_path,case", [
+    ("/fixture/plugin/First Last/book", "a space"),
+    ("/fixture/plugin/O'Brien Book", "an apostrophe"),
+])
+def test_the_audit_command_survives_a_legitimate_durable_root(tmp_path, root_path, case):
+    """`project.durable_root` is only required to be a non-empty writable path
+    -- profile.schema.json and profile_validate.py check location and
+    writability, never shell characters -- so all three of these are valid
+    configurations. Splicing the path bare would split it into several shell
+    arguments; splicing it inside naive single quotes would terminate the
+    quote early on the apostrophe. Either way the checker prints no JSON, two
+    attempts spend the segment, and the operator pays a re-translation for a
+    false RED.
+
+    The assertion is made with `shlex.split` rather than by eyeballing the
+    quoting: the question is what the SHELL will pass to the script, and a
+    rendered string that merely looks quoted is exactly the thing that fails
+    in the field."""
+    # MISMATCH, so the segment terminates in round 1 -- the rendered audit
+    # command is what this test reads, and a continuing round would need a
+    # second review point this plan does not supply.
+    out = drive(tmp_path, one_round_plan(fix_scopes=[MISMATCH]), durable_root=root_path)
+    prompt = [c for c in out["calls"] if c["label"].startswith("fix-scope:")][0]["prompt"]
+    line = [ln for ln in prompt.splitlines() if ln.startswith("Run exactly: ")][0]
+    argv = shlex.split(line[len("Run exactly: "):])
+    assert argv[-2] == "--durable-root", (case, argv)
+    assert argv[-1] == root_path, (case, argv)
+    # The script path is one argument too -- a plugin root with a space is the
+    # shape #412's own token contract explicitly supports.
+    assert argv[1].endswith("/assets/scripts/fix_scope_audit.py"), (case, argv)
+    assert "--verify-copies" in argv, (case, argv)

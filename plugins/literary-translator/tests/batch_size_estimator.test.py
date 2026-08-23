@@ -599,9 +599,14 @@ def run_workflow(
     segs: list[str],
     plan: dict,
     timeout: int = 30,
+    durable_root: str = FIXTURE_DURABLE_ROOT,
 ) -> dict:
     assert NODE is not None, "node executable not found on PATH -- required to run this test file"
-    js_source = instantiate_mass_translate(max_fix_rounds=max_fix_rounds, batch_agent_cap=batch_agent_cap)
+    js_source = instantiate_mass_translate(
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=batch_agent_cap,
+        durable_root=durable_root,
+    )
     harness_text = build_harness(js_source, segs, plan)
     harness_path = tmp_path / "harness.js"
     harness_path.write_text(harness_text, encoding="utf-8")
@@ -1489,8 +1494,11 @@ def test_review_artifact_mismatch_actual_calls_never_exceed_formula_bound(tmp_pa
 
     per_seg, _ = bucket_calls_by_segment(out["calls"])
     actual_calls = len(per_seg[seg])
-    # the exact term estimatedCalls sizes per segment (#348: 8 + 2*WAIT_CALLS
-    # + MAXFIX*(6 + WAIT_CALLS), which at WAIT_CALLS=1 is the old 10 + 7*MAXFIX)
+    # the exact term estimatedCalls sizes per segment. #348 made it
+    # 8 + 2*WAIT_CALLS + MAXFIX*(6 + WAIT_CALLS); #607 charges each fix round
+    # the audit plus its one retry, so the per-round term is now
+    # 8 + WAIT_CALLS -- which is what audit_calls=2 below asks for. The
+    # pre-#348 identity 10 + 7*MAXFIX no longer holds at any WAIT_CALLS.
     per_segment_bound = converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS, audit_calls=2)
 
     assert actual_calls == blocked_branch_total(max_fix_rounds, terminating_cost=6, ledger_write=False)

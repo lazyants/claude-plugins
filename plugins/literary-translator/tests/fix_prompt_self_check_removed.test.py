@@ -76,8 +76,9 @@ _SUBSTITUTIONS = {
     "{{CODEX_COMPANION_PATH_JSON}}": json.dumps("/fake/codex-companion.mjs"),
     "{{EFFORT}}": "high",
     "{{MODEL}}": "",
-    # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. fixPrompt's
-    # self-check text is unaffected by the opt-in; only needs to resolve.
+    # #412/#607 -- PLUGIN_ROOT must be a real path: since #607 the template
+    # refuses an empty one before dispatch. fixPrompt's self-check text does
+    # not depend on the value; it only needs to resolve to something valid.
     "{{PLUGIN_ROOT}}": json.dumps("/fixture/plugin/literary-translator"),
 }
 

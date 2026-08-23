@@ -80,9 +80,10 @@ path that KEEPS the direct `codex:codex-rescue` call — it is out of #198's sco
   any file Step 0a copied into the durable root no longer matches the plugin
   bytes it came from — or if the check's own `n_checked`/`n_expected` do not
   agree, since a clean verdict over nothing checked is not a pass. A halt is
-  recorded in the ledger AND in the batch return (`batchComplete: false`,
-  `fixScopeHalts`), because the ledger write goes through the tree the audit
-  just rejected. The placement is load-bearing — after the
+  ATTEMPTED in the ledger and always recorded in the batch return
+  (`batchComplete: false`, plus a `fixScopeHalts` entry whose
+  `ledgerRecorded` flag says whether the durable write landed), because the
+  ledger write goes through the tree the audit just rejected. The placement is load-bearing — after the
   falsy/`DRAFT_MISSING` branch instead, a turn could mutate the copies and
   then return the sentinel to leave unaudited. What it does NOT cover (files
   with no plugin twin, confinement of the turn itself, the driver's own

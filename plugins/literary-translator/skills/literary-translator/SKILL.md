@@ -2289,21 +2289,38 @@ That durable fragment, though, is written by `ledger_update.py` FROM the tree
 the audit has just reported as diverging, so the write can fail for the very
 reason the halt fired — and the `in_progress` fragment already on disk
 classifies `recoverable`. So the halt is ALSO recorded where the audited tree
-cannot reach it: a `FIX-SCOPE HALT` log line, and a batch result of
-`batchComplete: false`, `reason: "fix-scope-halt"`, with one `fixScopeHalts`
-entry per halted segment carrying `ledgerRecorded`. **Read the batch return
-before dispatching another batch** — that entry, not the ledger, is what
-survives a failed write. It does not make the durable record bulletproof; it
+cannot reach it: a `FIX-SCOPE HALT` log line, and a batch result carrying
+`batchComplete: false` and one `fixScopeHalts` entry per halted segment, each
+with a `ledgerRecorded` flag. The `fixScopeHalts` array is the invariant, not
+the `reason` string: `reason` reads `"fix-scope-halt"` on the ordinary path,
+but a batch whose FINAL ledger merge also failed returns
+`"ledger-merge-failed"` — still `batchComplete: false`, still carrying the
+halts. **Read `fixScopeHalts` before dispatching another batch** — that
+array, not the ledger and not the reason, is what survives a failed write. It does not make the durable record bulletproof; it
 makes a batch that halted unable to end looking clean.
 
 **A clean verdict is honoured only if it counted something.** The script
 reports both `n_checked` and the `n_expected` it derives from the same walk;
 W5 honours `ok: true` only when they are equal and non-zero, and otherwise
 takes the `fix-scope-unverified` path. `ok` alone was a false GREEN — a walk
-that runs zero times prints exactly like one that covered everything. The
-residual is stated rather than closed: the audit reaches W5 through a model
-relay, and a relay that fabricates its reply can fabricate BOTH numbers.
-Nothing here prevents that.
+that runs zero times prints exactly like one that covered everything.
+
+**What the counts prove is self-consistency, not coverage**, and the check
+does not pretend otherwise: both sides come from the same walk over the
+PLUGIN tree, so a plugin tree that has lost members shrinks them together and
+they still agree. Two verdicts read the population from the DURABLE root
+instead, which the plugin tree cannot shrink — `orphaned`, a
+`${durable_root}/schemas/*.json` with no plugin twin (that directory has no
+sanctioned addition, and a file dropped there is loaded into
+`canon_validate.py`'s registry and hashed into the run identity), and
+`degenerate`, a plugin-side class that yields nothing while the durable root
+still holds files of it. `languages/` is deliberately covered only by the
+second, because the documented `fr.local.json` override would read as an
+orphan.
+
+The relay residual is stated rather than closed: the audit reaches W5 through
+a model relay, and a relay that fabricates its reply can fabricate BOTH
+numbers. Nothing here prevents that.
 
 Clearing a halt costs that segment a re-translation — name it under
 `--only-segs`, and for a previously converged segment add

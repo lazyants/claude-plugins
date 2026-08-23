@@ -306,8 +306,13 @@ def instantiate() -> str:
         ("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH)),
         ("{{EFFORT}}", "high"),
         ("{{MODEL}}", ""),
-        # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. This file
-        # exercises sentinel/glue-character containment, not the opt-in.
+        # #412 -- PLUGIN_ROOT: empty USED TO mean "not opted into the
+        # redirect". This file exercises sentinel/glue-character
+        # containment, not the opt-in.
+        # #607 -- a non-empty plugin root is now REQUIRED: the fix-scope
+        # audit runs only from the plugin install tree, so the W5 template
+        # refuses to start without one. The value below is arbitrary; it
+        # only has to be non-empty and to resolve.
         ("{{PLUGIN_ROOT}}", json.dumps("/fixture/plugin/literary-translator")),
     ):
         text = text.replace(token, value)
