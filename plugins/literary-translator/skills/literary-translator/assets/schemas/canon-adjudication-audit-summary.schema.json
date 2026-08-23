@@ -19,6 +19,10 @@
           "type": "string",
           "description": "The resolved canon_senses.json path (default or --senses-path override) -- always present, even when the sidecar is absent/empty."
         },
+        "senses_enumerated": {
+          "type": "boolean",
+          "description": "False iff canon_senses.json was absent or schema-valid-empty, so category 5 (homonym_split) enumerated NOTHING and totals.by_kind.homonym_split is a vacuous 0 rather than an enumerated-clean 0 -- the two are otherwise indistinguishable to a reader of the counts. The human report prints that row as 'NOT ENUMERATED (...)' instead of '0' in this case. Purely descriptive: gate semantics, blocking_count, gate_passed and the exit code are identical either way."
+        },
         "canon_present": {
           "type": "boolean",
           "description": "False iff canon.json does not exist -- canon *presence* is canon_validate.py's job, never a silent green. When the sidecar is also empty, totals are all-zero and gate_passed is true; when the sidecar is non-empty, this is instead a canon_absent_with_senses blocking finding (totals.canon_absent_with_senses:1, gate_passed:false, never masked by advisory) -- a split cannot be meaningfully reconciled against a canon that does not exist. collapsed_split cannot run in this branch (it needs canon.json's entries{} to reconcile against) and stays 0, but evidence verification AND category 5 (homonym_split)'s own required-item cross-check both depend only on canon_senses.json (never canon.json) and DO still run here, so blocking_count in this case is 1 + totals.evidence_unverified + category 5's own missing_verdict/adverse/invalid_verdict_class, not a flat 1."
@@ -124,6 +128,7 @@
         "adjudications_path",
         "senses_path",
         "canon_present",
+        "senses_enumerated",
         "pair_review_cap",
         "advisory",
         "totals",

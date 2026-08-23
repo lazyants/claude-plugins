@@ -1381,7 +1381,10 @@ collapsed split, even on a project that has never opted into the
 categories-1-4 gate. On a project whose `canon_senses.json` is absent or
 schema-valid-empty, this call is a no-op pass-through (`gate_passed: true`)
 — run it unconditionally rather than special-casing whether the sidecar
-exists.
+exists. It says so explicitly rather than reporting a bare zero: the
+report's `homonym_split` row reads `NOT ENUMERATED` and the summary carries
+`senses_enumerated: false`, so a vacuous zero is never mistaken for an
+enumerated-clean one.
 
 **Skeptic pass (RFC #215 Phase 2, opt-in + advisory)** — if
 `glossary.skeptic_pass.enabled` is true in `profile.yml`, run the

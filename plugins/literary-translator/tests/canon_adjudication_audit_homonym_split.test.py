@@ -249,6 +249,36 @@ def assert_fatal(proc):
     assert proc.stderr.strip() != "", "a fatal run must print a named stderr error"
 
 
+# ---------------------------------------------------------------------------
+# #403: the category-5 row must distinguish "not enumerated" from "enumerated
+# and clean". Assertions read proc.stderr.splitlines() and compare whole lines
+# -- never a regex over the whole multi-line blob, where an unanchored (or
+# non-MULTILINE) pattern silently misses an embedded row.
+# ---------------------------------------------------------------------------
+NOT_ENUMERATED_PREFIX = "  homonym_split: NOT ENUMERATED"
+VACUOUS_ZERO_ROW = "  homonym_split: 0"
+
+
+def assert_split_row_not_enumerated(proc):
+    lines = proc.stderr.splitlines()
+    assert any(ln.startswith(NOT_ENUMERATED_PREFIX) for ln in lines), (
+        f"expected a {NOT_ENUMERATED_PREFIX!r} row on stderr; got:\n{proc.stderr}"
+    )
+    assert VACUOUS_ZERO_ROW not in lines, (
+        f"a vacuous category-5 zero must never be printed as {VACUOUS_ZERO_ROW!r} "
+        f"(it reads as enumerated-and-clean); got:\n{proc.stderr}"
+    )
+
+
+def assert_split_row_enumerated(proc, expected_count):
+    lines = proc.stderr.splitlines()
+    assert f"  homonym_split: {expected_count}" in lines, (
+        f"expected an enumerated homonym_split: {expected_count} row; got:\n{proc.stderr}"
+    )
+    assert not any("NOT ENUMERATED" in ln for ln in lines), (
+        f"an ENUMERATED category 5 must never claim NOT ENUMERATED; got:\n{proc.stderr}"
+    )
+
 # ===========================================================================
 # 1. homonym_split category wiring
 # ===========================================================================
@@ -270,6 +300,10 @@ def test_homonym_split_enumerated_and_missing_verdict_when_senses_nonempty(tmp_p
     assert summary["totals"]["evidence_unverified"] == 0
     assert summary["blocking_count"] == 1 and summary["gate_passed"] is False
     assert proc.returncode == 1
+    # #403: a NON-empty sidecar really did enumerate category 5 -- the row carries the
+    # count and the summary says so.
+    assert summary["senses_enumerated"] is True
+    assert_split_row_enumerated(proc, 1)
 
 
 def test_homonym_split_confirmed_ok_clears_gate(tmp_path):
@@ -370,6 +404,10 @@ def test_homonym_split_freshness_emptying_sidecar_orphans_the_verdict(tmp_path):
     assert summary["totals"]["by_kind"]["homonym_split"] == 0
     assert summary["totals"]["orphaned_records"] == 1
     assert summary["blocking_count"] == 0 and proc.returncode == 0
+    # #403: the sidecar is PRESENT but schema-valid-EMPTY -- the other of the two states
+    # the NOT ENUMERATED message names, and the one an absent-file-only test would miss.
+    assert summary["senses_enumerated"] is False
+    assert_split_row_not_enumerated(proc)
 
 
 # ===========================================================================
@@ -453,6 +491,10 @@ def test_canon_absent_with_senses_blocks_never_masked_by_advisory(tmp_path):
     assert summary["totals"]["canon_absent_with_senses"] == 1
     assert summary["totals"]["evidence_unverified"] == 0
     assert summary["totals"]["by_kind"]["homonym_split"] == 1, "cat5 must be computed even without canon.json"
+    # #403: this branch DOES compute category 5, so its own summary must say enumerated.
+    # Schema validation only proves the field is a boolean, so a wrong literal here would
+    # otherwise pass every other assertion while falsely reporting non-enumeration.
+    assert summary["senses_enumerated"] is True
     assert summary["totals"]["confirmed_ok"] == 1
     assert summary["blocking_count"] == 1 and summary["gate_passed"] is False
     assert proc.returncode == 1
@@ -566,6 +608,10 @@ def test_canon_absent_with_empty_senses_is_still_the_ordinary_green(tmp_path):
     assert summary["totals"]["canon_absent_with_senses"] == 0
     assert summary["blocking_count"] == 0 and summary["gate_passed"] is True
     assert proc.returncode == 0
+    # #403: this branch returns early and never calls print_human_report, so it prints
+    # the category-5 row itself -- the every-branch half of the contract.
+    assert summary["senses_enumerated"] is False
+    assert_split_row_not_enumerated(proc)
 
 
 # ===========================================================================
@@ -663,6 +709,32 @@ def test_senses_path_no_flag_no_default_file_is_empty_ok(tmp_path):
     assert_summary_schema_valid(summary)
     assert summary["totals"]["by_kind"]["homonym_split"] == 0
     assert proc.returncode == 0
+    # #403: the DEFAULT state of every project that never hand-built the sidecar -- the
+    # by_kind zero above is vacuous, and must not print as an enumerated zero. gate_passed
+    # and the exit code stay pinned right here, so "no gate-semantics change" is asserted
+    # on this path rather than merely claimed in prose.
+    assert summary["senses_enumerated"] is False
+    assert summary["gate_passed"] is True
+    assert_split_row_not_enumerated(proc)
+
+
+def test_summary_schema_requires_senses_enumerated(tmp_path):
+    """`senses_enumerated` must be REQUIRED by the check branch, not merely
+    ALLOWED by it: a positive jsonschema.validate() passes whether the key
+    sits in `required` or only in `properties`, so only removing it and
+    demanding a ValidationError tells the two apart. `.pop(..., None)` --
+    never `del` -- keeps the pre-fix red honest: against a script that does
+    not emit the key at all this must fail as DID NOT RAISE, never as a
+    KeyError thrown by the removal itself."""
+    root = make_durable_root(tmp_path)
+    write_canon(root, [entry("Marie", "Marie")])
+    proc = run_audit(root, "--check")
+    summary = parse_stdout(proc)
+    assert_summary_schema_valid(summary)
+
+    summary.pop("senses_enumerated", None)
+    with pytest.raises(jsonschema.ValidationError):
+        assert_summary_schema_valid(summary)
 
 
 def test_senses_path_explicit_missing_path_is_fatal(tmp_path):

@@ -243,7 +243,11 @@ HOMONYM-SPLIT SIDECAR + MANDATORY EVIDENCE VERIFICATION (canon_senses.json)
 `canon_senses.json` (schema: `canon-senses.schema.json`) is read via the
 ONE shared runtime-validating loader, `canon_senses.py::load_senses` --
 never a private partial read. Absent at the implicit default path is
-treated as empty; an EXPLICIT `--senses-path` that does not exist, or any
+treated as empty -- and that non-enumeration is STATED, never printed as a
+bare `homonym_split: 0`: the report's category-5 row reads `NOT ENUMERATED
+(canon_senses.json absent or empty at ...)` and the summary carries
+`senses_enumerated: false` (#403), so a vacuous zero cannot be read as an
+enumerated-clean one; an EXPLICIT `--senses-path` that does not exist, or any
 non-regular path (directory, dangling symlink, ...), is a load failure and
 therefore FATAL here too (folded into `CanonAdjudicationAuditError`, exit
 2) -- see `load_senses`'s own docstring for the full path-state/schema-
@@ -328,7 +332,10 @@ OUTPUT / EXIT CODE
 Exactly ONE JSON line to stdout -- `canon-adjudication-audit-summary.
 schema.json`-shaped (a check summary, or the distinct --init-only summary
 when --init is given without --check) -- all human-readable detail to
-stderr. Exit 0 = gate clean (or `--init`-only success), 1 = blocking
+stderr. Every check summary carries `senses_enumerated` (false iff
+canon_senses.json was absent or schema-valid-empty, so category 5
+enumerated nothing); it is purely descriptive and feeds neither
+blocking_count, gate_passed, nor the exit code. Exit 0 = gate clean (or `--init`-only success), 1 = blocking
 findings (categories 1-4, `homonym_split`'s missing/stale verdict,
 `collapsed_split`, `evidence_unverified`, or `canon_absent_with_senses` --
 unless `--advisory`, which forces 0 for the categories-1-4 component only
@@ -1256,10 +1263,25 @@ def _print_evidence_failures(label: str, failures: list, file) -> None:
         print(f"  {f.source_form!r} sense {f.sense_id!r} block {f.block!r}: {f.reason}", file=file)
 
 
+def _not_enumerated_split_row(senses_path: Path) -> str:
+    """The ONE spelling of category 5's non-enumeration row (#403), shared by
+    `print_human_report`'s per-kind loop and by the canon-absent/empty-sidecar
+    early return that never reaches it -- so the two branches cannot drift
+    into two different messages. Deliberately names BOTH states `is_empty`
+    conflates (absent, and present-but-schema-valid-empty): the distinction is
+    invisible here and irrelevant to the operator, who only needs to know that
+    nothing was enumerated."""
+    return (
+        f"  {KIND_SPLIT}: NOT ENUMERATED (canon_senses.json absent or empty "
+        f"at {senses_path})"
+    )
+
+
 def print_human_report(canon_path: Path, adjudications_path: Path, totals: dict,
                         buckets: dict, unaccepted_items: list, collapsed_split_findings: list,
                         evidence_failures: list, blocking_count: int,
-                        gate_passed: bool, advisory: bool, warnings: list) -> None:
+                        gate_passed: bool, advisory: bool, warnings: list,
+                        senses_path: Path, senses_enumerated: bool) -> None:
     print("=" * 70, file=sys.stderr)
     print("canon_adjudication_audit.py -- --check summary", file=sys.stderr)
     print("=" * 70, file=sys.stderr)
@@ -1267,7 +1289,14 @@ def print_human_report(canon_path: Path, adjudications_path: Path, totals: dict,
     print(f"adjudications_path: {adjudications_path}", file=sys.stderr)
     print(f"required items (all 5 categories): {totals['required_items']}", file=sys.stderr)
     for kind in ALL_KINDS:
-        print(f"  {kind}: {totals['by_kind'][kind]}", file=sys.stderr)
+        # #403: a vacuous category-5 zero (no sidecar to enumerate) is otherwise
+        # indistinguishable from an enumerated-clean zero, and the natural reading of a
+        # bare 0 is the reassuring one. Stated in the row itself, in the position an
+        # operator already scans -- not as a note elsewhere in the report.
+        if kind == KIND_SPLIT and not senses_enumerated:
+            print(_not_enumerated_split_row(senses_path), file=sys.stderr)
+        else:
+            print(f"  {kind}: {totals['by_kind'][kind]}", file=sys.stderr)
     print(f"  confirmed_ok:                 {totals['confirmed_ok']}", file=sys.stderr)
     print(f"  MISSING verdict (BLOCKING):   {totals['missing_verdict']}", file=sys.stderr)
     print(f"  adverse (BLOCKING):           {totals['adverse']}", file=sys.stderr)
@@ -1373,10 +1402,18 @@ def run_check(canon_path: Path, adjudications_path: Path, senses_path: Path,
                 f"canon_present:false rather than a silent green.",
                 file=sys.stderr,
             )
+            # #403: this branch returns before print_human_report, so it states category
+            # 5's non-enumeration itself -- otherwise its "0 required items" above is the
+            # only thing an operator sees, and reads as covering all five categories.
+            print(_not_enumerated_split_row(senses_path), file=sys.stderr)
             summary = {
                 "success": True, "mode": mode,
                 "canon_path": str(canon_path), "adjudications_path": str(adjudications_path),
                 "senses_path": str(senses_path), "canon_present": False,
+                # Literal False, not `not senses.is_empty`: this branch is reachable ONLY
+                # under `if senses.is_empty` above, and a derived expression would invite a
+                # reader to think it could be True here.
+                "senses_enumerated": False,
                 "pair_review_cap": pair_review_cap, "advisory": advisory,
                 "totals": empty_totals(), "blocking_count": 0, "gate_passed": True,
                 "warnings": warnings, "generated_at": now_iso(),
@@ -1449,6 +1486,10 @@ def run_check(canon_path: Path, adjudications_path: Path, senses_path: Path,
             "success": True, "mode": mode,
             "canon_path": str(canon_path), "adjudications_path": str(adjudications_path),
             "senses_path": str(senses_path), "canon_present": False,
+            # Literal True for the mirror reason: this branch is reachable only when the
+            # sidecar is non-empty, and it genuinely computes cat5 (see compute_cat5_items
+            # above) -- only collapsed_split is skipped here.
+            "senses_enumerated": True,
             "pair_review_cap": pair_review_cap, "advisory": advisory,
             "totals": totals, "blocking_count": blocking_count, "gate_passed": False,
             "warnings": warnings, "generated_at": now_iso(),
@@ -1564,6 +1605,7 @@ def run_check(canon_path: Path, adjudications_path: Path, senses_path: Path,
         "success": True, "mode": mode,
         "canon_path": str(canon_path), "adjudications_path": str(adjudications_path),
         "senses_path": str(senses_path), "canon_present": True,
+        "senses_enumerated": not senses.is_empty,
         "pair_review_cap": pair_review_cap, "advisory": advisory,
         "totals": totals, "blocking_count": blocking_count, "gate_passed": gate_passed,
         "warnings": warnings, "generated_at": now_iso(),
@@ -1573,6 +1615,7 @@ def run_check(canon_path: Path, adjudications_path: Path, senses_path: Path,
         canon_path, adjudications_path, totals, buckets, unaccepted_items,
         collapsed_split_findings, evidence_failures,
         blocking_count, gate_passed, advisory, warnings,
+        senses_path, not senses.is_empty,
     )
 
     return summary, exit_code
