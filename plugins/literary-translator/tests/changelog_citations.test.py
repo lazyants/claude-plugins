@@ -109,7 +109,49 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # anchors fails and an anchor no citation uses fails -- but neither half fires on
 # a stale COMMENT, which is why the rewrite is a maintenance contract rather than
 # an assertion.
-CITATION_ANCHORS = {}
+# Rewritten for 1.66.0 (#541 -- the fix turn gets the previous round's verdict)
+# per the maintenance contract above. This rotation inherited an EMPTY map and
+# declared three rows: the two halves of this entry's COST claim (that the two
+# edited files are bundle members and the hash they move is global rather than
+# per-segment) and the resume-identity half (that the SAME marker reaches
+# resume_setup.py's digest, so a refreshed root also mints a fresh RUN_ID).
+# Stated in the past tense about what this rotation inherited rather than about
+# what the base holds, because the latter expires on the next rebase and nothing
+# here can catch it -- this branch has been rebased six times and the note had
+# to be rewritten with it each time.
+#
+# The resume half is anchored THROUGH the digest input rather than through the
+# marker read alone: deleting the `"version": version` key would make the marker
+# irrelevant to resume identity while a read-only anchor stayed green. The
+# behavioural claims in this entry (what the archiver keys on, what the prompt
+# says) are each exercised by a test instead, which is why they are cited by name
+# rather than by line.
+CITATION_ANCHORS = {
+    # 1.66.0 (#541). These two ranges carry the first half of the entry's cost
+    # claim: that both edited files sit in the bundle tuple, and that the hash
+    # they move is GLOBAL rather than per-segment. Either drifting would make
+    # the release's stated cost wrong in the direction operators plan around.
+    "cache_key.py:143-171": [
+        "PLUGIN_BUNDLE_MEMBERS = (",
+        '"codex_job.py"',
+        '"mass-translate-wf.template.js"',
+    ],
+    "cache_key.py:178-199": [
+        "CACHE_KEY_FIELD_ORDER = (",
+        '"plugin_bundle_hash"',
+        "PER_SEGMENT_FIELDS",
+        "GLOBAL_CACHE_KEY_FIELDS",
+    ],
+    # The resume-identity half of the same cost. A reader planning an upgrade
+    # around segment staleness alone would miss it, and nothing else in the
+    # suite pins that this marker reaches the digest.
+    "resume_setup.py:723-740": [
+        '"plugin_bundle_hash"',
+        ".plugin_bundle_hash",
+        '"version": version',
+        "_sha256_hex(_canonical_json_bytes(digest_input))",
+    ],
+}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
 # alphabetic extension are still required. Pinning a list of extensions was

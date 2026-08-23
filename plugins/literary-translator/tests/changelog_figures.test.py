@@ -262,7 +262,38 @@ def _local_dict_len(filename, funcname, varname):
 # Declaring any of the rest would mean hardcoding an answer, which passes every
 # assertion below while proving nothing (`lambda: 4`). This is the accepted
 # residual the docstring above names, not an oversight.
-FIGURES = []
+# Rewritten for 1.66.0 (#541), per the maintenance contract above. This rotation
+# inherited an EMPTY map -- 1.65.0 (#510) and 1.63.0 (#526) each declared none,
+# and 1.62.0 (#534) had already retired the last row before them -- and declared
+# one row of its own: the count of `def test_*` FUNCTIONS this release adds,
+# which `_test_function_count` re-derives from the tree. Past tense about what
+# was inherited, never about what the base holds: this branch has been rebased
+# six times and the sentence had to be rewritten against a different base each
+# time.
+#
+# The entry also states the COLLECTED case count in parentheses; that one is
+# deliberately NOT declared, because re-deriving it means expanding the
+# `@pytest.mark.parametrize` argument lists, and a row hardcoding it would pass
+# every assertion below while proving nothing (a `lambda` returning 39). The two
+# numbers sit together in the prose precisely so a reader can see which one is
+# guarded.
+#
+# The entry's other numerals are not measurements: version and issue numbers, the
+# release date, and the round labels of the oscillation it reproduces (rounds 9,
+# 10 and 11 on the fr->ru book). Those are field observations from an
+# operator-owned durable root outside this repository and could not be re-derived
+# here in any case -- the accepted residual the docstring above names.
+FIGURES = [
+    Figure(
+        phrase="30 new test functions across three files",
+        value=30,
+        derive=lambda: sum(_test_function_count(f) for f in (
+            "prev_review_archive.test.py",
+            "fix_prompt_prior_round.test.py",
+            "prev_review_driver_handoff.test.py",
+        )),
+    ),
+]
 
 
 def _newest_entry():
