@@ -78,15 +78,17 @@ human summary on stderr, and both take the same independent
      uniform across the plugin's entrypoints (an operator pasting the same
      two flags everywhere must not hit an "unrecognized argument"), and it
      is reported back in the output so a run's own provenance is legible.
-  3. **The marker carries a timestamped JSON body**, where
-     ``.ever_converged.{seg}`` is deliberately fixed-content. That file's
-     own comment gives the reason -- it sits in ``segments/``, where a
-     varying body would make an otherwise identical project directory
-     compare unequal. This marker sits in ``runs/<RUN_ID>/``, which already
-     holds per-run varying content (``input.digest``, timestamped
-     ``ledger.d`` fragments), so that reason does not apply -- and unlike a
-     mechanical sentinel, this file records a HUMAN DECISION to proceed
-     without proof. A decision with no date is not auditable.
+  3. **The marker carries a timestamped JSON body.** ``.ever_converged.{seg}``
+     used to be deliberately fixed-content, on the stated grounds that it sits
+     in ``segments/`` where a varying body would make an otherwise identical
+     project directory compare unequal. #443 removed that: no digest, diff,
+     cache key, resume identity or attestation in this plugin ever read those
+     bytes, while the fixed body made a retrofitted marker indistinguishable
+     from an earned one, so both writers now stamp their provenance. The two
+     markers still differ in one way that matters here -- this file records a
+     HUMAN DECISION to proceed without proof, so it carries a TIMESTAMP, where
+     the sentinel's body is derived entirely from the convergence it records
+     and stays re-derivable. A decision with no date is not auditable.
 
 ## The two evidence halves, and why this script must union both
 

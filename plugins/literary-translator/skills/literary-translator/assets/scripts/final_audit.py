@@ -1916,8 +1916,11 @@ def main():
             f"so the completeness verdict above is not blocked by an "
             f"unreadable file, but nothing verified them. Repair the paths: "
             f"if the segment really did converge, replace the entry with a "
-            f"regular file containing the single line 'converged'; only if it "
-            f"did NOT converge is removing the entry correct.",
+            f"regular file containing the single line 'converged' -- that "
+            f"protects it, and backfill_ever_converged.py's census will report "
+            f"it as 'unattributed', because a hand-written marker carries none "
+            f"of the evidence a real convergence records in the marker's body; "
+            f"only if it did NOT converge is removing the entry correct.",
             file=sys.stderr,
         )
         for entry in ambiguous_sentinels:

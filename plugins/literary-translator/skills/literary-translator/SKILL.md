@@ -588,6 +588,26 @@ census established nothing read as a healthy project:
   must be inventoried by hand — the script makes no claim about them, and
   `success: true` does not cover them.
 
+**`sentinel_attribution` is not on that list, and deliberately so.** The
+report also names, for every marker it found ALREADY present, which writer
+the marker SAYS published it — `ledger_update` (earned at a real convergence,
+carrying that convergence's reviewed draft sha1, plus its run token, and the
+round label when the recording call supplied a run token and a non-empty label
+could be read off the review artifact — evidence is all-or-nothing, so a
+marker whose evidence would not fit records the identity fields alone), `backfill_ever_converged`
+(retrofitted from a ledger row by a run of this script), `unattributed`, or
+`unreadable`. It is a DIAGNOSTIC: it moves no bucket, no count and not
+`success`, and no gate anywhere reads a marker's body. It is also
+**self-reported, not authenticated** — nothing signs the marker, so the value
+is that the plugin's own writers now record their evidence for you to check,
+not that a claim of authorship proves anything on its own. **`unattributed` does not mean unprotected.** Every marker written
+before this field existed is unattributed and protects exactly as it always
+did — that is what makes the change safe to adopt on a project mid-flight,
+and reading it as a defect would invert it. What the field is FOR is the
+question that previously had no answer on disk at all: when a segment's
+ledger row and its marker disagree, whether anything ever observed that
+convergence, or whether the marker was merely asserted.
+
 See `backfill_ever_converged.py`'s own module docstring for the full
 mechanism and CLI contract.
 

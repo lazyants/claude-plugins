@@ -262,6 +262,29 @@ def parse_stdout(proc):
 
 PRESENTINEL_CONTENT = b"LEGACY-SENTINEL-DO-NOT-TOUCH"
 
+# #443. The marker's body carries the writer's own provenance, so "the marker
+# this run left is the real thing and not the empty file a torn write would
+# have left" is now checkable directly instead of by comparing against ten
+# fixed bytes. Parsing it here rather than pinning a byte string on purpose:
+# a test that pinned the exact JSON would have to be re-edited for every field
+# ever added, and would pin field ORDER, which is not part of the contract.
+def assert_marker_written_by(path, writer, seg):
+    """The body at `path` is a complete marker published by `writer` for `seg`."""
+    raw = path.read_bytes()
+    assert raw.endswith(b"\n"), (
+        f"a complete marker body ends in a newline; a torn write is exactly "
+        f"what this checks for -- got {raw!r}"
+    )
+    body = json.loads(raw.decode("utf-8"))
+    assert body["marker"] == "ever_converged", body
+    assert body["v"] == 1, body
+    assert body["by"] == writer, (
+        f"the marker at {path} claims to have been written by {body['by']!r}, "
+        f"not {writer!r} -- #443's whole point is that these are now distinct"
+    )
+    assert body["seg"] == seg, body
+    return body
+
 
 def build_mixed_project(root):
     current_key = make_cache_key("current")
@@ -553,7 +576,7 @@ def test_apply_creates_exactly_the_missing_sentinels(tmp_path):
     for seg in MISSING_BEFORE_APPLY:
         p = sentinel_path(root, seg)
         assert p.is_file(), f"sentinel for {seg} was not created"
-        assert p.read_bytes() == b"converged\n"
+        assert_marker_written_by(p, "backfill_ever_converged", seg)
 
     assert sentinel_files(root) == [
         ".ever_converged.seg_conv_match",
@@ -760,10 +783,39 @@ def _assert_writers_agree(tmp_path):
         "by the real reader/writer"
     )
 
-    assert path_a.read_bytes() == path_b.read_bytes(), (
-        "sentinel CONTENT has drifted between ledger_update.py's own writer "
-        "and backfill_ever_converged.py's"
+    # #443 INVERTED THIS ASSERTION, and the inversion is the release. It used
+    # to require the two writers' bytes to be EQUAL; that equality WAS the
+    # defect. Both published `b"converged\n"`, so a marker retrofitted from a
+    # ledger row and a marker earned at a real convergence were the same ten
+    # bytes, and the only thing that separated them on the project that
+    # surfaced the issue was sentinel mtime at microsecond resolution.
+    #
+    # What must still agree is the FORMAT -- one line of parseable marker JSON
+    # from the shared sentinel_body(), so one reader rule covers both writers.
+    # What must now DIFFER is `by`. A future edit that makes either writer
+    # anonymous, or makes both claim the same name, reintroduces #443 and is
+    # caught here.
+    body_a = assert_marker_written_by(path_a, "ledger_update", seg)
+    body_b = assert_marker_written_by(path_b, "backfill_ever_converged", seg)
+    assert body_a["by"] != body_b["by"], (
+        "the two writers are indistinguishable on disk again -- that is #443"
     )
+    assert path_a.read_bytes() != path_b.read_bytes(), (
+        "the bodies are byte-identical, so nothing downstream can tell an "
+        "earned marker from a retrofitted one"
+    )
+
+    import inspect
+
+    for fn in ("sentinel_body", "write_all"):
+        assert inspect.getsource(getattr(writer, fn)) == inspect.getsource(
+            getattr(backfill, fn)
+        ), (
+            f"{fn}() has drifted between the two writers. It is duplicated "
+            f"rather than imported for the PLUGIN_BUNDLE_MEMBERS reason "
+            f"classify_ever_converged_sentinel()'s docstring gives, so nothing "
+            f"but this pin keeps the two bodies parseable by one rule"
+        )
     mode_a = path_a.stat().st_mode & 0o777
     mode_b = path_b.stat().st_mode & 0o777
     assert mode_a == mode_b, (
@@ -772,9 +824,13 @@ def _assert_writers_agree(tmp_path):
     )
 
     # And: never overwritten by either writer, on a second call.
+    before_a, before_b = path_a.read_bytes(), path_b.read_bytes()
     assert writer.mark_ever_converged(seg, dir_a) is True
     assert call_mark(backfill, seg, dir_b) == "already_present"
-    assert path_a.read_bytes() == path_b.read_bytes()
+    assert (path_a.read_bytes(), path_b.read_bytes()) == (before_a, before_b), (
+        "create-only idempotence covers the BODY too: a second call must not "
+        "rewrite provenance over a marker that is already there"
+    )
 
 
 def test_both_writers_refuse_a_non_regular_entry_at_the_sentinel_path(tmp_path):
@@ -1143,7 +1199,7 @@ def test_a_directory_fsync_failure_makes_mark_ever_converged_return_false(tmp_pa
         "be relying on it -- same reasoning as the sibling writer's own "
         "directory-fsync-failure test"
     )
-    assert sentinel_path.read_bytes() == b"converged\n"
+    assert_marker_written_by(sentinel_path, "ledger_update", seg)
 
 
 def test_a_failed_sentinel_sync_does_not_launder_into_true_on_retry(tmp_path):
@@ -1762,7 +1818,7 @@ def test_a_failed_create_does_not_launder_into_a_successful_retry(tmp_path):
     # write would have left -- which is what makes this test able to tell a
     # true retry from a laundered one.
     path = backfill.ever_converged_path(seg, segments_dir)
-    assert path.read_bytes() == b"converged\n"
+    assert_marker_written_by(path, "backfill_ever_converged", seg)
 
 
 def test_a_failed_create_never_destroys_another_writers_sentinel(tmp_path):
@@ -2026,7 +2082,7 @@ def test_a_directory_fsync_failure_keeps_the_sentinels_and_still_fails_the_run(t
             f"{seg}'s sentinel must NOT be removed: the link already "
             f"published the name, so another reader may be relying on it"
         )
-        assert path.read_bytes() == b"converged\n"
+        assert_marker_written_by(path, "backfill_ever_converged", seg)
     strays = [q.name for q in segments_dir.iterdir() if "staging" in q.name]
     assert strays == [], f"staging files left behind: {strays}"
 
@@ -2918,3 +2974,467 @@ def test_read_json_reports_invalid_utf8_as_a_fatal_not_an_unexpected_error(tmp_p
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# #443. The marker carries its own justification now, and this script is the
+# only thing that reads it. These pin BOTH halves: what the writer records,
+# and that the reader it feeds decides nothing.
+# ---------------------------------------------------------------------------
+
+def test_the_backfill_writer_records_the_ledger_row_it_retrofitted_from(tmp_path):
+    """What THIS script can honestly claim is weaker than what
+    ledger_update.py claims, and the asymmetry is the whole point: a backfill
+    never observed a convergence, so it records no run token and no round
+    label -- only the ledger row that put the segment in scope.
+
+    Fails on the pre-#443 writer at the json.loads(): the body was the ten
+    bytes `converged\n`, identical to the one a real convergence wrote, which
+    is the defect #443 names."""
+    root = setup_mixed_project(tmp_path)
+
+    proc = run_backfill(root, "--apply")
+
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}"
+    body = assert_marker_written_by(
+        sentinel_path(root, "seg_conv_match"), "backfill_ever_converged", "seg_conv_match"
+    )
+    assert body["ledger_status"] == "converged", body
+    assert body["ledger_source"] in ("existing", "freshly_merged"), body
+    assert body["reviewed_draft_sha1"] == "0" * 40, (
+        f"the row's own reviewed_draft_sha1 must be carried across, not "
+        f"invented: {body!r}"
+    )
+    assert "run_token" not in body and "round" not in body, (
+        f"a backfill has neither, and recording one would be exactly the "
+        f"empty assertion this issue is about: {body!r}"
+    )
+
+
+def test_the_census_reports_who_published_each_already_present_marker(tmp_path):
+    """The report #443 exists to make possible. Before it, an operator asking
+    "was this marker earned or asserted?" had nothing on disk to read and fell
+    back to separating the two by sentinel MTIME at microsecond resolution.
+
+    Every value in the map is exercised by a marker the test actually put
+    there, including the legacy body every live project carries today."""
+    root = setup_mixed_project(tmp_path)
+    prime_materialized_ledger(root)
+    writer = _load_module(LEDGER_UPDATE_SRC, "ledger_update_attrib")
+
+    # seg_conv_presentinel already carries PRESENTINEL_CONTENT -> unattributed.
+    # Give the other two markers a real writer each, so nothing is created by
+    # this run and the census reports on three pre-existing markers.
+    writer.mark_ever_converged("seg_conv_match", root / "segments", {"run_token": "R1"})
+    call_mark(
+        _load_module(BACKFILL_SCRIPT_SRC, "backfill_attrib"),
+        "seg_conv_mismatch",
+        root / "segments",
+    )
+
+    payload = parse_stdout(run_backfill(root))
+
+    assert payload["already_sentineled"] == EVER_CONVERGED
+    assert payload["sentinel_attribution"] == {
+        "seg_conv_match": "ledger_update",
+        "seg_conv_mismatch": "backfill_ever_converged",
+        "seg_conv_presentinel": "unattributed",
+    }, payload["sentinel_attribution"]
+
+
+def test_attribution_moves_no_bucket_no_count_and_not_the_exit_status(tmp_path):
+    """THE PIN THAT KEEPS #443 SAFE. Provenance is a DIAGNOSTIC: an
+    unattributed marker must protect its segment exactly as much as an
+    attributed one, or every marker written before this change -- all of them,
+    on every project -- becomes unprotected the day it ships.
+
+    Compares a run over three provenance-free markers against the same run
+    over the same project with real provenance in place, and requires every
+    decision-bearing field to be identical."""
+    def run_over(root):
+        payload = parse_stdout(run_backfill(root))
+        return {k: payload[k] for k in (
+            "success", "already_sentineled", "missing_sentinels",
+            "ambiguous_sentinels", "counts", "not_evaluated",
+        )}
+
+    legacy_root = setup_mixed_project(tmp_path / "legacy")
+    prime_materialized_ledger(legacy_root)
+    for seg in ("seg_conv_match", "seg_conv_mismatch"):
+        sentinel_path(legacy_root, seg).write_bytes(b"converged\n")
+
+    attributed_root = setup_mixed_project(tmp_path / "attributed")
+    prime_materialized_ledger(attributed_root)
+    writer = _load_module(LEDGER_UPDATE_SRC, "ledger_update_parity")
+    for seg in ("seg_conv_match", "seg_conv_mismatch"):
+        writer.mark_ever_converged(seg, attributed_root / "segments", {"run_token": "R1"})
+
+    assert run_over(legacy_root) == run_over(attributed_root), (
+        "a marker's provenance changed a bucket, a count or the run's verdict "
+        "-- #443 must not be able to reclassify anything"
+    )
+
+
+HOSTILE_BODIES = [
+    ("legacy ten bytes", b"converged\n", "unattributed"),
+    ("empty file", b"", "unattributed"),
+    ("torn JSON", b'{"marker":"ever_conv', "unattributed"),
+    ("invalid UTF-8", b"\xff\xfe\x00", "unattributed"),
+    ("JSON scalar", b'"converged"\n', "unattributed"),
+    ("JSON list", b'["ever_converged"]\n', "unattributed"),
+    ("object, wrong marker", b'{"marker":"resume_gate_ack","by":"x"}\n', "unattributed"),
+    ("object, no by", b'{"marker":"ever_converged","v":1}\n', "unattributed"),
+    ("object, non-string by", b'{"marker":"ever_converged","by":7}\n', "unattributed"),
+    ("object, empty by", b'{"marker":"ever_converged","by":""}\n', "unattributed"),
+]
+
+
+@pytest.mark.parametrize("label,raw,expected", HOSTILE_BODIES,
+                         ids=[case[0] for case in HOSTILE_BODIES])
+def test_the_body_reader_answers_rather_than_raising(tmp_path, label, raw, expected):
+    """The marker's body is the one thing at this path an operator or an
+    unrelated tool can author, and this reader is the plugin's only consumer
+    of it. Every malformed shape must produce an ANSWER -- never an exception,
+    never a halt -- because a diagnostic that can crash the census would make
+    a repair tool refuse to run over exactly the projects that need it."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, f"backfill_hostile_{abs(hash(label))}")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    path = segments_dir / ".ever_converged.segH"
+    path.write_bytes(raw)
+
+    assert backfill.read_sentinel_attribution(path) == expected, label
+
+
+def test_the_body_reader_stops_at_its_cap_and_reports_an_unreadable_entry(tmp_path):
+    """Two ends of the same contract.
+
+    The CAP: a body is well under 300 bytes, and the reader must not let a
+    file at this path decide how much it reads. A megabyte of JSON that would
+    parse perfectly is truncated and therefore unattributed -- the safe
+    answer, since the reader vouches for nothing it did not fully read.
+
+    UNREADABLE is kept separate from unattributed on purpose: "I could not
+    look" and "I looked and found no provenance" are different facts for an
+    operator, and folding them is how a diagnostic starts lying."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_cap")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+
+    huge = segments_dir / ".ever_converged.segBig"
+    padding = "x" * (backfill.SENTINEL_BODY_READ_CAP * 4)
+    huge.write_text(
+        json.dumps({"marker": "ever_converged", "by": "ledger_update", "pad": padding}),
+        encoding="utf-8",
+    )
+    assert backfill.read_sentinel_attribution(huge) == "unattributed"
+
+    missing = segments_dir / ".ever_converged.segGone"
+    assert backfill.read_sentinel_attribution(missing) == "unreadable"
+
+    a_dir = segments_dir / ".ever_converged.segDir"
+    a_dir.mkdir()
+    assert backfill.read_sentinel_attribution(a_dir) in ("unreadable", "unattributed")
+
+
+def test_the_body_reader_is_strict_about_the_shape_it_will_vouch_for(tmp_path):
+    """The body is UNTRUSTED: anyone who can write the marker can write any
+    `by` they like. So attribution is granted only to a body that matches what
+    sentinel_body() actually emits, and the answer comes from a CLOSED set --
+    echoing an arbitrary `by` back would put a value outside this script's own
+    documented output contract into its JSON and dress a foreign file up as
+    provenance.
+
+    The `expected_seg` arm is the one with teeth beyond tidiness: a marker
+    copied from another segment is real, well-formed, plugin-written
+    provenance -- for a DIFFERENT segment -- and reporting it as this one's is
+    precisely the empty authority #443 is about."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_strict")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    path = segments_dir / ".ever_converged.segS"
+
+    def attribution(body, **kw):
+        path.write_text(json.dumps(body), encoding="utf-8")
+        return backfill.read_sentinel_attribution(path, **kw)
+
+    good = {"marker": "ever_converged", "v": 1, "by": "ledger_update", "seg": "segS"}
+    assert attribution(good) == "ledger_update"
+    assert attribution(good, expected_seg="segS") == "ledger_update"
+
+    assert attribution({**good, "by": "some_other_tool"}) == "unattributed"
+    assert attribution({**good, "v": 2}) == "unattributed"
+    assert attribution({k: v for k, v in good.items() if k != "v"}) == "unattributed"
+    assert attribution({k: v for k, v in good.items() if k != "seg"}) == "unattributed"
+    assert attribution({**good, "seg": ""}) == "unattributed"
+    assert attribution({**good, "seg": 7}) == "unattributed"
+    assert attribution(good, expected_seg="a_different_segment") == "unattributed"
+
+
+def test_the_body_reader_answers_even_when_json_raises_a_non_value_error(tmp_path):
+    """`json.loads()` raises RecursionError -- which is NOT a ValueError -- on
+    deeply nested input, and the reader's contract is that it never raises.
+
+    Reproduced deterministically by making the parse raise, rather than by
+    nesting brackets: measured, a body deep enough to trip CPython's own
+    recursion does NOT fit under the 4096-byte cap on this project's 3.14.7,
+    where the C scanner does not recurse in Python frames -- so a nesting
+    fixture would pass here whether or not the arm exists, on the very
+    interpreter CI runs. This plugin's floor is 3.10, where it does raise."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_recursion")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    path = segments_dir / ".ever_converged.segR"
+    path.write_bytes(b'{"marker":"ever_converged"}\n')
+
+    real_loads = backfill.json.loads
+
+    def raising_loads(*args, **kwargs):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    backfill.json.loads = raising_loads
+    try:
+        assert backfill.read_sentinel_attribution(path) == "unattributed"
+    finally:
+        backfill.json.loads = real_loads
+
+
+def test_the_body_reader_is_safe_on_both_branches_a_symlink_and_a_fifo(tmp_path):
+    """The census reads relative to the run's directory descriptor; every test
+    above exercises the PATHNAME branch, which nothing in production uses. Both
+    are pinned here, over the two entries that make the open flags load-bearing.
+
+    A symlink at the marker name must not be followed -- an entry the writers
+    never publish, and following one reads a file outside `segments/` and
+    attributes it to this segment. A FIFO must not BLOCK: without O_NONBLOCK
+    the open waits forever for a writer, and the repair tool hangs on exactly
+    the project that needs it. Neither is reachable from the census today,
+    because classify_ever_converged_sentinel() has already rejected both as
+    AMBIGUOUS -- but that ordering is the caller's, not this function's, and a
+    reader whose safety depends on its caller having checked first is one
+    refactor from being unsafe."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_branches")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    dir_fd = os.open(str(segments_dir), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        target = tmp_path / "elsewhere.json"
+        target.write_text(
+            json.dumps({"marker": "ever_converged", "v": 1,
+                        "by": "ledger_update", "seg": "segL"}),
+            encoding="utf-8",
+        )
+        link = segments_dir / ".ever_converged.segL"
+        link.symlink_to(target)
+        assert backfill.read_sentinel_attribution(link) == "unreadable"
+        assert backfill.read_sentinel_attribution(link, dir_fd=dir_fd) == "unreadable"
+
+        fifo = segments_dir / ".ever_converged.segF"
+        os.mkfifo(fifo)
+        # No reader/writer is ever attached: without O_NONBLOCK these two
+        # calls never return, so the test hanging IS the failure signal.
+        assert backfill.read_sentinel_attribution(fifo) in ("unreadable", "unattributed")
+        assert backfill.read_sentinel_attribution(
+            fifo, dir_fd=dir_fd
+        ) in ("unreadable", "unattributed")
+
+        real = segments_dir / ".ever_converged.segOK"
+        real.write_text(
+            json.dumps({"marker": "ever_converged", "v": 1,
+                        "by": "backfill_ever_converged", "seg": "segOK"}),
+            encoding="utf-8",
+        )
+        assert backfill.read_sentinel_attribution(
+            real, dir_fd=dir_fd, expected_seg="segOK"
+        ) == "backfill_ever_converged", (
+            "the descriptor branch is the one production uses; a positive "
+            "control keeps the two assertions above from passing because the "
+            "branch refuses everything"
+        )
+    finally:
+        os.close(dir_fd)
+
+
+def test_an_oversized_body_is_refused_rather_than_judged_on_its_prefix(tmp_path):
+    """The cap alone was not an overflow check. Reading exactly the maximum
+    cannot tell a body that ENDS at the limit from one that runs past it, so a
+    file whose first bytes parse as a valid attributed marker -- with anything
+    at all after them -- was reported as a known writer's.
+
+    The fixture is deliberately the hostile shape rather than a truncated
+    string: valid, complete, attributed JSON that fits inside the maximum,
+    followed by trailing bytes. On the pre-fix reader this returned
+    `ledger_update`."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_overflow")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    path = segments_dir / ".ever_converged.segO"
+
+    body = json.dumps({"marker": "ever_converged", "v": 1,
+                       "by": "ledger_update", "seg": "segO"}).encode("utf-8")
+    padding = b" " * (backfill.SENTINEL_BODY_MAX_BYTES - len(body))
+    assert len(body + padding) == backfill.SENTINEL_BODY_MAX_BYTES
+
+    path.write_bytes(body + padding)
+    assert backfill.read_sentinel_attribution(path) == "ledger_update", (
+        "a body exactly AT the maximum must still be read -- the check is an "
+        "overflow detector, not an off-by-one that rejects the largest legal "
+        "marker"
+    )
+
+    path.write_bytes(body + padding + b"X")
+    assert backfill.read_sentinel_attribution(path) == "unattributed"
+
+    # The case the length check exists for, and the one a trailing-garbage
+    # fixture does NOT reach: a body that is one byte over the maximum and is
+    # still perfectly valid attributed JSON. The parse cannot refuse it -- only
+    # the length can -- so without the explicit overflow test the reader
+    # attributes a body no writer can emit. Built by padding INSIDE a JSON
+    # string so the result stays parseable at exactly CAP+1 bytes.
+    over = backfill.SENTINEL_BODY_MAX_BYTES + 1
+    stub = json.dumps({"marker": "ever_converged", "v": 1, "by": "ledger_update",
+                       "seg": "segO", "pad": ""}).encode("utf-8")
+    exact = json.dumps({"marker": "ever_converged", "v": 1, "by": "ledger_update",
+                        "seg": "segO", "pad": "p" * (over - len(stub))}).encode("utf-8")
+    assert len(exact) == over, len(exact)
+    assert json.loads(exact.decode("utf-8"))["by"] == "ledger_update", (
+        "precondition: the oversized body must be VALID JSON, or the parse "
+        "refuses it and the length check is never the thing under test"
+    )
+    path.write_bytes(exact)
+    assert backfill.read_sentinel_attribution(path) == "unattributed", (
+        "a body one byte past what any writer publishes was attributed to a "
+        "known writer on the strength of parsing cleanly"
+    )
+
+
+VERSION_CASES = [
+    ("a real integer", 1, "ledger_update"),
+    # bool is a SUBCLASS of int and True == 1, so an equality-only check
+    # accepts this; neither writer can emit it.
+    ("JSON true", True, "unattributed"),
+    ("a float that compares equal", 1.0, "unattributed"),
+    ("the version as a string", "1", "unattributed"),
+    ("a future version", 2, "unattributed"),
+]
+
+
+@pytest.mark.parametrize("label,version,expected", VERSION_CASES,
+                         ids=[case[0] for case in VERSION_CASES])
+def test_the_version_must_be_the_integer_the_writers_emit(tmp_path, label, version, expected):
+    """The strict-shape check pins what sentinel_body() ACTUALLY emits, and
+    Python's numeric equality is looser than that: `True == 1` and `1.0 == 1`
+    both hold. A foreign body carrying either was attributed to a known
+    writer."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, f"backfill_v_{abs(hash(label))}")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    path = segments_dir / ".ever_converged.segV"
+    path.write_text(
+        json.dumps({"marker": "ever_converged", "v": version,
+                    "by": "ledger_update", "seg": "segV"}),
+        encoding="utf-8",
+    )
+    assert backfill.read_sentinel_attribution(path) == expected, label
+
+
+def test_a_writer_can_never_publish_a_body_its_own_reader_would_refuse(tmp_path):
+    """THE WRITER/READER ROUND TRIP, and the seam #443 could have failed at
+    silently. `run_token` is a free-form string with no length constraint
+    anywhere in the payload schema, and it is copied into the marker -- so an
+    unbounded evidence field produced a marker that was GENUINELY EARNED and
+    read back `unattributed`, defeating the feature on exactly the markers it
+    exists for. No hostile actor is needed; a long run id suffices.
+
+    sentinel_body() answers by dropping the evidence rather than truncating
+    it: a truncated JSON body is not shorter evidence, it is unparseable
+    evidence. The marker still says who wrote it, which is the half worth
+    keeping. Both writers are checked, because the bound lives in the shared
+    function and a divergence there is exactly what the source pin exists for."""
+    writer = _load_module(LEDGER_UPDATE_SRC, "ledger_update_roundtrip")
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_roundtrip")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+
+    huge = "R" * (backfill.SENTINEL_BODY_MAX_BYTES * 3)
+    for module, name, seg in (
+        (writer, "ledger_update", "segRT1"),
+        (backfill, "backfill_ever_converged", "segRT2"),
+    ):
+        body = module.sentinel_body(seg, name, {
+            "run_token": huge, "reviewed_draft_sha1": huge, "ledger_status": huge,
+        })
+        assert len(body) <= backfill.SENTINEL_BODY_MAX_BYTES, (
+            f"{name} published {len(body)} bytes, past the maximum its own "
+            f"reader accepts"
+        )
+        path = segments_dir / f".ever_converged.{seg}"
+        path.write_bytes(body)
+        assert backfill.read_sentinel_attribution(
+            path, expected_seg=seg
+        ) == name, (
+            "an earned marker read back as unattributed -- the writer emitted "
+            "a body its reader refuses, which is #443 defeated on the markers "
+            "it exists for"
+        )
+        assert "run_token" not in json.loads(body.decode("utf-8")), (
+            "the oversized evidence must be DROPPED, not truncated into "
+            "something unparseable"
+        )
+
+
+def test_the_body_read_survives_a_short_os_read(tmp_path):
+    """A single `os.read()` on a regular file normally returns the whole
+    request, but it is NOT guaranteed to -- an interruption or a filesystem
+    implementation may hand back a short count. A short read that happened to
+    land on a complete JSON object is indistinguishable from EOF, so an
+    OVERSIZED body would be judged on its prefix and attributed to a known
+    writer: exactly what the read-one-past-the-maximum check exists to stop.
+
+    Forced deterministically by chunking `os.read`, because no ordinary file
+    on this host reproduces it -- a real-file fixture would pass whether or
+    not the loop exists, on the very interpreter and filesystem CI runs.
+
+    Two arms, and the second is the one with teeth. An in-bounds body split
+    across chunks must still be read whole; an over-long body must still be
+    caught even though its first chunk parses cleanly on its own."""
+    backfill = _load_module(BACKFILL_SCRIPT_SRC, "backfill_shortread")
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    path = segments_dir / ".ever_converged.segSR"
+
+    real_read = backfill.os.read
+
+    def chunked_read(fd, count, _chunk=[64]):
+        return real_read(fd, min(count, _chunk[0]))
+
+    good = json.dumps({"marker": "ever_converged", "v": 1,
+                       "by": "ledger_update", "seg": "segSR",
+                       "pad": "p" * 500}).encode("utf-8")
+    assert len(good) > 64, "precondition: the body must span several chunks"
+    path.write_bytes(good)
+
+    backfill.os.read = chunked_read
+    try:
+        assert backfill.read_sentinel_attribution(path) == "ledger_update", (
+            "an in-bounds body split across short reads must still be read "
+            "whole -- a single os.read() would have parsed 64 bytes and "
+            "reported it unattributed"
+        )
+
+        stub = json.dumps({"marker": "ever_converged", "v": 1,
+                           "by": "ledger_update", "seg": "segSR",
+                           "pad": ""}).encode("utf-8")
+        over = backfill.SENTINEL_BODY_MAX_BYTES + 1
+        oversized = json.dumps({"marker": "ever_converged", "v": 1,
+                                "by": "ledger_update", "seg": "segSR",
+                                "pad": "p" * (over - len(stub))}).encode("utf-8")
+        assert len(oversized) == over
+        path.write_bytes(oversized)
+        assert backfill.read_sentinel_attribution(path) == "unattributed", (
+            "a body past the maximum was attributed because the read stopped "
+            "short of proving it was over -- the overflow check is only as "
+            "good as the read that feeds it"
+        )
+    finally:
+        backfill.os.read = real_read

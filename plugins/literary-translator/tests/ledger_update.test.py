@@ -1278,7 +1278,11 @@ def test_an_existing_regular_sentinel_is_still_idempotently_accepted(tmp_path):
         "still be an idempotent no-op"
     )
     sentinel = segments_dir / ".ever_converged.segFresh"
-    assert sentinel.is_file() and sentinel.read_text(encoding="utf-8") == "converged\n"
+    body = json.loads(sentinel.read_text(encoding="utf-8"))
+    assert sentinel.is_file()
+    assert (body["marker"], body["v"], body["by"]) == ("ever_converged", 1, "ledger_update"), (
+        f"#443: the marker must name the writer that earned it, got {body!r}"
+    )
 
 
 def test_a_dangling_symlink_sentinel_refuses_the_whole_converged_write(tmp_path):
@@ -1361,3 +1365,267 @@ if __name__ == "__main__":
     import pytest as _pytest
 
     sys.exit(_pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# #443. The sentinel used to be ten fixed bytes, identical whoever wrote it.
+# These lock the provenance it carries now -- and, first, that carrying it
+# changed nothing about what the marker PROTECTS.
+# ---------------------------------------------------------------------------
+
+SENTINEL_LEGACY_BODY = b"converged\n"
+
+
+def _sentinel_body_of(root, seg):
+    return (root / "segments" / f".ever_converged.{seg}").read_bytes()
+
+
+def _converged_run(tmp_path, seg, *, run_token=None, round_label="2"):
+    """Drive the REAL script through a genuine convergence and return
+    (root, draft_sha1, completed_process). Not a hand-built marker: the whole
+    point of #443 is what the writer records about a convergence it actually
+    performed, so a fixture that wrote the body itself would measure the
+    fixture."""
+    root = make_durable_root(tmp_path)
+    write_segpack_fixture(root, seg)
+    draft_token = f"{run_token}:{seg}" if run_token is not None else None
+    draft_sha1_value = write_draft_fixture(root, seg, dispatch_token=draft_token)
+    review = {"draft_sha1": draft_sha1_value}
+    if draft_token is not None:
+        review["dispatch_token"] = f"{draft_token}:r{round_label}"
+    (root / "segments" / f"{seg}.review.json").write_text(
+        json.dumps(review), encoding="utf-8"
+    )
+    payload = {"status": "converged", "cache_key": FULL_CACHE_KEY, "rounds": 1}
+    if run_token is not None:
+        payload["run_token"] = run_token
+    payload_path = write_payload(root, f"p{seg}", payload)
+    return root, draft_sha1_value, run_ledger_update(root, seg, payload_path)
+
+
+def test_the_sentinel_records_the_evidence_this_convergence_actually_had(tmp_path):
+    """#443's central pin. The marker must carry the run token, the round
+    label and the reviewed draft sha1 of the convergence that wrote it.
+
+    Each expected value is taken from what THIS run used -- the sha1 the
+    fixture computed independently of the script, and the round label spelled
+    into review.json's own dispatch_token -- rather than from a constant, so
+    the test cannot pass by agreeing with a body the script invented.
+
+    Fails on the pre-#443 writer at the json.loads(): the body was the ten
+    bytes `converged\n`."""
+    seg = "segProv"
+    run_id = "RUN-20260823-abcdef"
+    root, draft_sha1_value, result = _converged_run(
+        tmp_path, seg, run_token=run_id, round_label="3"
+    )
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    body = json.loads(_sentinel_body_of(root, seg).decode("utf-8"))
+    assert body == {
+        "marker": "ever_converged",
+        "v": 1,
+        "by": "ledger_update",
+        "seg": seg,
+        "run_token": run_id,
+        "round": "3",
+        "reviewed_draft_sha1": draft_sha1_value,
+    }, body
+    assert read_fragment(root, seg)["reviewed_draft_sha1"] == draft_sha1_value, (
+        "the marker must agree with the fragment written in the same call -- "
+        "a provenance that disagrees with the ledger is worse than none"
+    )
+
+
+def test_a_call_without_a_run_token_records_nothing_it_cannot_prove(tmp_path):
+    """The pre-1.2.0 call shape carries no run_token, so there is no anchor to
+    read a round label off. The marker must then record the one thing this run
+    DID verify -- the reviewed draft sha1 -- and stay silent about the rest
+    rather than inventing a token or splitting review.json's dispatch_token on
+    a ':r' that could occur inside a run id or a segment id."""
+    seg = "segNoToken"
+    root, draft_sha1_value, result = _converged_run(tmp_path, seg, run_token=None)
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    body = json.loads(_sentinel_body_of(root, seg).decode("utf-8"))
+    assert body == {
+        "marker": "ever_converged",
+        "v": 1,
+        "by": "ledger_update",
+        "seg": seg,
+        "reviewed_draft_sha1": draft_sha1_value,
+    }, body
+
+
+def test_a_legacy_provenance_free_marker_still_protects_and_is_never_rewritten(tmp_path):
+    """THE BACKWARD-COMPATIBILITY PIN, and the one that decides whether #443
+    was safe to ship at all. Every marker on every live project predates this
+    change and is the ten bytes `converged\n` -- 42 of them on the book that
+    surfaced the issue. The convergence path must accept such a marker exactly
+    as before (the sentinel write is a hard precondition, so a refusal here
+    would refuse the whole converged write) and must not rewrite its body:
+    create-only idempotence covers the content, not just the entry."""
+    seg = "segLegacy"
+    root = make_durable_root(tmp_path)
+    legacy = root / "segments" / f".ever_converged.{seg}"
+    legacy.write_bytes(SENTINEL_LEGACY_BODY)
+
+    write_segpack_fixture(root, seg)
+    draft_sha1_value = write_draft_fixture(root, seg)
+    write_review_fixture(root, seg, draft_sha1_value)
+    payload_path = write_payload(
+        root, "pLegacy", {"status": "converged", "cache_key": FULL_CACHE_KEY, "rounds": 1}
+    )
+
+    result = run_ledger_update(root, seg, payload_path)
+
+    assert result.returncode == 0, (
+        f"a provenance-free marker must still satisfy the sentinel "
+        f"precondition -- refusing here would make #443 reclassify every "
+        f"marker in existence; stderr={result.stderr!r}"
+    )
+    assert json.loads(result.stdout.strip())["status"] == "converged"
+    assert legacy.read_bytes() == SENTINEL_LEGACY_BODY, (
+        "the existing marker was rewritten -- mark_ever_converged() has never "
+        "replaced or overwritten an entry it found, and adding a body must "
+        "not change that"
+    )
+
+
+def test_evidence_cannot_forge_the_writer_owned_identity_fields(tmp_path):
+    """`provenance` is the CALLER's evidence, and a direct in-process caller
+    is a supported shape. It must not be able to sign the marker as the other
+    writer, rename the marker, move the version, or claim a different segment
+    -- otherwise the attribution #443 adds is forgeable by the very code path
+    it exists to tell apart."""
+    module = _load_module("ledger_update_forge", SCRIPT_SRC)
+    segments_dir = tmp_path / "segments"
+    segments_dir.mkdir()
+    seg = "segForge"
+
+    assert module.mark_ever_converged(seg, segments_dir, {
+        "by": "backfill_ever_converged",
+        "marker": "something_else",
+        "v": 99,
+        "seg": "a_different_segment",
+        "reviewed_draft_sha1": "deadbeef",
+    }) is True
+
+    body = json.loads(
+        (segments_dir / f".ever_converged.{seg}").read_text(encoding="utf-8")
+    )
+    assert (body["by"], body["marker"], body["v"], body["seg"]) == (
+        "ledger_update", "ever_converged", 1, seg
+    ), body
+    assert body["reviewed_draft_sha1"] == "deadbeef", (
+        "the evidence fields themselves are still the caller's to supply"
+    )
+
+
+def test_write_all_finishes_a_short_write_and_refuses_a_zero_length_one(tmp_path):
+    """The body is an order of magnitude longer than the ten bytes the old
+    single `os.write()` published, so a short write stops being a theoretical
+    concern about a value the call site ignored.
+
+    Both directions are pinned. A short write must be RESUMED until the body
+    is out; a zero-byte return must RAISE rather than be looped on, because
+    spinning there would hang the ledger writer -- strictly worse than the
+    clean refusal every other write failure gets."""
+    module = _load_module("ledger_update_write_all", SCRIPT_SRC)
+
+    written = []
+    real_write = module.os.write
+
+    def short_write(fd, data):
+        # One byte at a time: if write_all() trusted a single call's return
+        # value the body would be truncated to one byte.
+        written.append(len(data))
+        return real_write(fd, bytes(data[:1]))
+
+    target = tmp_path / "out.bin"
+    payload = b'{"marker":"ever_converged"}\n'
+    fd = os.open(str(target), os.O_CREAT | os.O_WRONLY, 0o644)
+    module.os.write = short_write
+    try:
+        module.write_all(fd, payload)
+    finally:
+        module.os.write = real_write
+        os.close(fd)
+
+    assert target.read_bytes() == payload
+    assert len(written) == len(payload), (
+        f"write_all() must keep going until the body is out; it made "
+        f"{len(written)} call(s) for {len(payload)} byte(s)"
+    )
+
+    module.os.write = lambda fd, data: 0
+    try:
+        fd = os.open(str(tmp_path / "zero.bin"), os.O_CREAT | os.O_WRONLY, 0o644)
+        try:
+            with pytest.raises(OSError):
+                module.write_all(fd, payload)
+        finally:
+            os.close(fd)
+    finally:
+        module.os.write = real_write
+
+
+ROUND_LABEL_CASES = [
+    ("numeric", "RUN-1", "segA", "RUN-1:segA:r3", "3"),
+    ("the terminal label", "RUN-1", "segA", "RUN-1:segA:rfinal", "final"),
+    # ':r' occurring INSIDE the run id and inside the segment id. A reader
+    # that searched for ':r' instead of splitting by the length of the token
+    # already accepted would cut here and record a label never dispatched.
+    ("':r' inside the run id", "RUN:right", "segA", "RUN:right:segA:r2", "2"),
+    ("':r' inside the segment id", "RUN-1", "seg:rear", "RUN-1:seg:rear:r2", "2"),
+    ("a token for another segment", "RUN-1", "segA", "RUN-1:segB:r2", None),
+    ("no round suffix at all", "RUN-1", "segA", "RUN-1:segA", None),
+    ("not a string", "RUN-1", "segA", 7, None),
+    ("absent", "RUN-1", "segA", None, None),
+]
+
+
+@pytest.mark.parametrize("label,run,seg,token,expected", ROUND_LABEL_CASES,
+                         ids=[case[0] for case in ROUND_LABEL_CASES])
+def test_the_round_label_is_split_by_length_not_by_searching_for_a_marker(
+    label, run, seg, token, expected
+):
+    """#443 records the round a segment converged at, read off review.json's
+    own `'<draft_token>:r<roundLabel>'`. The split is by the LENGTH of the
+    token review_token_matches() already accepted -- these cases are why. Two
+    of them put ':r' inside the run id and inside the segment id, where a
+    search-based split records a label that was never dispatched; recording a
+    wrong round in the marker is worse than recording none, because the whole
+    value of the field is that it can be checked against the run."""
+    module = _load_module("ledger_update_round_" + label.replace(" ", "_"), SCRIPT_SRC)
+    review = {} if token is None else {"dispatch_token": token}
+    expected_token = module.expected_draft_token(run, seg)
+    assert module._review_round_label(review, expected_token) == expected
+
+
+def test_the_round_label_is_bounded_so_the_marker_cannot_be_grown_through_it(tmp_path):
+    """The label is the one field whose LENGTH is not fixed by this script.
+    It reaches the marker only through a token the checks above accepted, so
+    the cap is a bound on the marker's SIZE rather than a validation -- the
+    census reads one body per segment and nothing downstream should have to
+    defend against an unbounded one."""
+    module = _load_module("ledger_update_round_cap", SCRIPT_SRC)
+    expected_token = module.expected_draft_token("RUN-1", "segA")
+    long_label = "9" * 500
+    got = module._review_round_label(
+        {"dispatch_token": f"{expected_token}:r{long_label}"}, expected_token
+    )
+    assert got == "9" * module._MAX_ROUND_LABEL
+    assert module._review_round_label({"dispatch_token": expected_token + ":r"},
+                                      expected_token) is None, (
+        "an EMPTY label is not a label -- recording '' would put a field in "
+        "the marker that says nothing while looking like evidence"
+    )
+
+
+def test_no_run_token_means_no_round_label_even_with_a_review_token_present(tmp_path):
+    """The pre-1.2.0 call shape has no anchor to split against. A review
+    artifact may still carry a dispatch_token, and guessing where the prefix
+    ends is exactly the search-based split the cases above rule out."""
+    module = _load_module("ledger_update_round_noanchor", SCRIPT_SRC)
+    assert module._review_round_label({"dispatch_token": "RUN-1:segA:r3"}, None) is None

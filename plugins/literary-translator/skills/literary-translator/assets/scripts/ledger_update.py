@@ -347,7 +347,10 @@ _SENTINEL_REMEDY_OCCUPIED = (
     "whatever occupies it came from somewhere else. Resolve it at the path "
     "before retrying -- if you can establish that this segment really did "
     "converge, replace the entry with a regular sentinel file whose contents "
-    "are the single line 'converged'; if it did not, remove the entry and let "
+    "are the single line 'converged' -- that still protects the segment, and "
+    "backfill_ever_converged.py's census reports it as 'unattributed', "
+    "because an operator assertion carries none of the evidence a real "
+    "convergence writes into the marker; if it did not, remove the entry and let "
     "the next convergence publish the sentinel itself. Do NOT simply delete "
     "it to make this message go away: select_segments.py's dispatch gate "
     "reads the same path, and deleting a sentinel is what makes a converged "
@@ -358,6 +361,115 @@ _SENTINEL_REMEDY_VANISHED = (
     "The filesystem is fine; just retry -- the next attempt's own "
     "O_CREAT|O_EXCL open will create the sentinel."
 )
+
+
+# The marker's own self-identification. A reader that finds some other JSON
+# object at the path must be able to say "this is not one of ours" rather than
+# guessing, so both fields are checked before any other field is believed.
+SENTINEL_MARKER_NAME = "ever_converged"
+SENTINEL_BODY_VERSION = 1
+
+# The marker's body never exceeds this, BY CONSTRUCTION rather than by
+# convention -- sentinel_body() drops the evidence and emits identity alone
+# rather than publish a body its reader would have to truncate. The reader
+# (backfill_ever_converged.py's read_sentinel_attribution()) refuses anything
+# longer, so an unbounded writer field would have produced markers that are
+# genuinely earned and REPORT AS `unattributed`, defeating #443 on exactly the
+# markers it exists for. Reachable without anything hostile: `run_token` is a
+# free-form string with no length constraint anywhere in the payload schema.
+SENTINEL_BODY_MAX_BYTES = 4096
+
+# Written by THIS script's mark_ever_converged(); backfill_ever_converged.py
+# writes its own name here. #443: the two writers used to publish the identical
+# fixed bytes `b"converged\n"`, so nothing on disk could tell a marker earned at
+# a real convergence from one a backfill or an operator asserted -- the marker
+# was strong enough to BLOCK and too empty to AUTHORISE.
+SENTINEL_WRITER_NAME = "ledger_update"
+
+
+def sentinel_body(seg, writer, evidence=None) -> bytes:
+    """The marker's body: ONE line of UTF-8 JSON, sorted keys, trailing LF.
+
+    Byte-identical in spelling to the sibling writer's copy -- ledger_update.py
+    and backfill_ever_converged.py each carry one, pinned against each other by
+    `tests/backfill_ever_converged.test.py` -- because a reader must be able to
+    parse either writer's output with one rule. What differs, deliberately and
+    for the first time, is `by`: #443 exists because the two writers were
+    INDISTINGUISHABLE on disk.
+
+    `evidence` is the caller's justification -- whatever it can actually
+    prove. It is merged FIRST and the writer-owned identity fields are
+    assigned AFTER it, so no caller can forge `by`, `marker`, `v` or `seg`;
+    a direct in-process caller supplying `{"by": "..."}` moves nothing.
+
+    BOUNDED, and by dropping evidence rather than by truncating it. A body
+    that would exceed SENTINEL_BODY_MAX_BYTES is re-emitted with the identity
+    fields alone, because a truncated JSON body is not shorter evidence, it is
+    unparseable evidence, and the reader would report the marker `unattributed`
+    either way. Losing the evidence while keeping a marker that still says WHO
+    wrote it is the better half. All-or-nothing on purpose: choosing which
+    evidence to keep would put schema-specific priorities inside a serializer
+    that is duplicated across two scripts and knows nothing about either.
+
+    The identity fallback is not re-measured, and the claim that it fits is
+    OPERATIONAL rather than proven by this function: `validate_seg()` bounds a
+    segment id's CHARACTERS, not its length, and `writer` is an ordinary
+    argument. What actually holds is narrower -- both shipped writer names are
+    fixed and short, and a `seg` long enough to overflow 4096 bytes cannot
+    reach a published marker at all, because `.ever_converged.<seg>` would
+    exceed the filesystem's own component limit (255 on this project's
+    platform, so at most 239 bytes of segment id) and the publishing open or
+    link fails first. A third writer with an unbounded name would break that,
+    which is why backfill_ever_converged.py's SENTINEL_KNOWN_WRITERS -- the
+    reader's closed set -- is registered by hand.
+
+    WHAT THIS BODY IS NOT: it is not authority. Nothing in this plugin gates
+    on it, and classify_ever_converged_sentinel() above still decides
+    protection from the entry's TYPE alone. A marker written before this
+    field existed -- every marker on every live project today -- carries no
+    body this parses, keeps classifying SENTINEL_PRESENT, and keeps blocking
+    dispatch exactly as it did. That is the whole reason the provenance went
+    into the body rather than into the predicate."""
+    def encode(fields):
+        return (
+            json.dumps(fields, sort_keys=True, ensure_ascii=False,
+                       separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+
+    identity = {
+        "marker": SENTINEL_MARKER_NAME,
+        "v": SENTINEL_BODY_VERSION,
+        "by": writer,
+        "seg": seg,
+    }
+    fields = {k: v for k, v in dict(evidence or {}).items() if v is not None}
+    fields.update(identity)
+    body = encode(fields)
+    if len(body) > SENTINEL_BODY_MAX_BYTES:
+        return encode(identity)
+    return body
+
+
+def write_all(fd, data: bytes) -> None:
+    """`os.write()` until every byte is out, or raise.
+
+    A single `os.write()` may return a SHORT count, and the old call site
+    treated whatever it returned as success. With a 10-byte body that was
+    theoretical; the provenance body is an order of magnitude longer, so the
+    loop is spelled out rather than left as an assumption. A zero-byte return
+    is RAISED rather than looped on -- spinning on it would hang the writer,
+    which is strictly worse than the clean refusal each writer's own OSError
+    handler gives every other write failure."""
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError(
+                f"os.write() returned {written} with {len(view)} byte(s) of "
+                f"the sentinel body still unwritten"
+            )
+        view = view[written:]
 
 
 def _report_sentinel_failure(path, exc, remedy=_SENTINEL_REMEDY_OS):
@@ -538,8 +650,16 @@ def _pinned_dir_still_canonical(segments_dir, dir_fd: int) -> "str | None":
     return None
 
 
-def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
-    """Create the sentinel for `seg`, idempotently. Called ONLY from
+def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR, provenance=None):
+    """Create the sentinel for `seg`, idempotently.
+
+    `provenance` (#443) is the evidence this convergence actually had, and it
+    is OPTIONAL: omitted, the marker still carries `marker`/`v`/`by`/`seg` and
+    simply claims nothing further. The real caller -- enrich_converged_fields()
+    below, the single site in the plugin where convergence is fixed -- passes
+    the run token, the review's round label and the reviewed draft sha1 it is
+    about to write into the fragment. See sentinel_body() for what the body is
+    and, more importantly, for what it is NOT: no gate reads it. Called ONLY from
     enrich_converged_fields, after every convergence precondition has passed
     -- that function is the single place in the whole plugin where
     convergence is recorded.
@@ -588,11 +708,17 @@ def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
     `.resume_gate_ack` -- that script needed it because ITS marker's JSON
     BODY is read later (by a human or a future consumer, per its own
     docstring), so a torn write there corrupts information someone will
-    parse. This sentinel's body is fixed, decorative, and never parsed by
-    anything -- all four consumers (select_segments.py, final_audit.py,
-    backfill_ever_converged.py and this function itself) ask only whether a
+    parse. This sentinel's body is no longer fixed -- #443 put this
+    convergence's own justification in it -- but it is still not AUTHORITY,
+    and that is the property this paragraph rests on. Every one of the five
+    consumers (assemble.py, select_segments.py, final_audit.py,
+    backfill_ever_converged.py and this function itself) asks only whether a
     regular file is there, through the one shared
-    classify_ever_converged_sentinel() predicate above. And
+    classify_ever_converged_sentinel() predicate above; the only reader of
+    the body is backfill_ever_converged.py's census, which REPORTS what it
+    finds and gates on nothing. So a torn body costs a diagnostic line, never
+    a protection decision -- which is why the create-then-fill order still
+    does not need to become an atomic publish. And
     a torn write here can never represent a FALSE fact -- with the scope of
     that claim now stated, because leaving it implicit is what made the old
     FileExistsError branch look safe. It holds only for an entry THIS
@@ -656,7 +782,10 @@ def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
         _report_sentinel_failure(path, exc)
         return False
     try:
-        return _mark_ever_converged_within(path, seg_dir_fd, segments_dir)
+        return _mark_ever_converged_within(
+            path, seg_dir_fd, segments_dir,
+            sentinel_body(seg, SENTINEL_WRITER_NAME, provenance),
+        )
     finally:
         try:
             os.close(seg_dir_fd)
@@ -664,7 +793,8 @@ def mark_ever_converged(seg, segments_dir=SEGMENTS_DIR):
             pass  # best-effort close; the return value above already decided this call
 
 
-def _mark_ever_converged_within(path, seg_dir_fd: int, segments_dir) -> bool:
+def _mark_ever_converged_within(path, seg_dir_fd: int, segments_dir,
+                                body: bytes) -> bool:
     """mark_ever_converged()'s body, with `segments/` already pinned as
     `seg_dir_fd`. Split out purely so the descriptor's close can live in one
     `finally` rather than on every one of this body's eight return paths."""
@@ -728,11 +858,20 @@ def _mark_ever_converged_within(path, seg_dir_fd: int, segments_dir) -> bool:
         _report_sentinel_failure(path, exc)
         return False
 
-    # Content is deliberately fixed, with no timestamp: this file sits in
-    # segments/ and a varying body would make an otherwise identical
-    # project directory compare unequal.
+    # #443: the body carries this convergence's own justification. It used to
+    # be the fixed bytes `b"converged\n"`, on the stated grounds that a varying
+    # body would make an otherwise identical project directory compare unequal
+    # -- but nothing in this plugin ever compared them: no digest, diff, cache
+    # key, resume identity or attestation reads these bytes, and every gate
+    # classifies on the entry's TYPE, which is what makes the change safe.
+    # What the fixed body DID buy was that a marker asserted by a backfill or
+    # by an operator was indistinguishable from one earned here, which is the
+    # defect #443 names.
+    #
+    # Still no timestamp: the body is derived entirely from the convergence it
+    # records, so re-deriving it produces the same bytes.
     try:
-        os.write(fd, b"converged\n")
+        write_all(fd, body)
     except OSError as exc:
         try:
             os.close(fd)
@@ -829,6 +968,35 @@ def review_token_matches(review_token, draft_token):
     ledger_merge.py's own copy of this function.
     """
     return isinstance(review_token, str) and review_token.startswith(f"{draft_token}:r")
+
+
+_MAX_ROUND_LABEL = 32
+
+
+def _review_round_label(review_obj, expected_token):
+    """The `<roundLabel>` out of review.json's `'<draft_token>:r<roundLabel>'`,
+    or None when it cannot be read off with certainty.
+
+    Split by LENGTH against the token review_token_matches() already accepted,
+    never by searching for ':r' -- a segment id or run id containing that pair
+    would otherwise cut the string in the wrong place and record a round label
+    that was never dispatched. `expected_token` is None on the pre-1.2.0 path,
+    where there is no anchor at all and the honest answer is to record nothing.
+
+    Truncated at _MAX_ROUND_LABEL. The label reaches this only through a token
+    the checks above accepted, so this is a bound on the marker's SIZE rather
+    than a validation: the census reads at most one small body per segment and
+    nothing downstream should have to defend against an unbounded one."""
+    if expected_token is None:
+        return None
+    token = review_obj.get("dispatch_token") if isinstance(review_obj, dict) else None
+    if not isinstance(token, str):
+        return None
+    prefix = f"{expected_token}:r"
+    if not token.startswith(prefix):
+        return None
+    label = token[len(prefix):]
+    return label[:_MAX_ROUND_LABEL] or None
 
 
 def draft_content_sha1(path):
@@ -1105,7 +1273,19 @@ def enrich_converged_fields(seg, fragment, run_token=None, segments_dir=SEGMENTS
     # fail open in: a fragment written as 'converged' without its sentinel is
     # invisible to the one check that refuses to re-select and retranslate an
     # already-converged segment.
-    if not mark_ever_converged(seg, segments_dir):
+    # #443. The evidence this convergence actually had, recorded INSIDE the
+    # marker. Every field is one this function has already VERIFIED above --
+    # never something the calling agent's payload supplied and never a
+    # re-derivation: `reviewed_draft_sha1` is the sha1 whose equality with the
+    # reviewer's own was just enforced, and the round label is read off the
+    # very dispatch_token review_token_matches() just accepted. A pre-1.2.0
+    # call (no run_token) records neither token nor round rather than
+    # guessing at them; sentinel_body() drops the None-valued keys.
+    if not mark_ever_converged(seg, segments_dir, {
+        "run_token": run_token,
+        "round": _review_round_label(review_obj, expected_token),
+        "reviewed_draft_sha1": current_draft_sha1,
+    }):
         emit_failure(
             f"Cannot record convergence for segment '{seg}': failed to "
             f"create the ever-converged sentinel at "
