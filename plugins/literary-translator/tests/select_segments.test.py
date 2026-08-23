@@ -3342,7 +3342,7 @@ SENTINEL_NON_PARTICIPANTS = (
     # #438's claim record. It owns a SEPARATE marker (`.claimed.<seg>`) with
     # its own three-state predicate, and names `.ever_converged` only in prose
     # -- to explain why the ledger fragment was rejected as a home, and that
-    # its predicate is shared by import rather than being a fifth duplicate.
+    # its predicate is shared by import rather than being a sixth duplicate.
     # It touches neither the marker nor any sentinel helper, which is what the
     # ROLE check below re-verifies.
     "claim_record.py",
@@ -3464,7 +3464,7 @@ def test_exactly_these_five_scripts_participate_in_the_sentinel_contract():
     the honest disclosure is this paragraph rather than a fifth attempt.
 
     What still pins the contract: the six needles below (WHO participates), the
-    `inspect.getsource` identity check (all four copies byte-identical), and
+    `inspect.getsource` identity check (all five copies byte-identical), and
     the five-state matrix (what the predicate ANSWERS).
 
     KNOWN LIMITS, measured rather than asserted: the folder handles `+`,
@@ -3500,7 +3500,7 @@ def test_exactly_these_five_scripts_participate_in_the_sentinel_contract():
     that this test passed while keying on `py.name`. Agreement between two
     mechanisms proves nothing about a property NEITHER of them records.
 
-    Fails in BOTH directions: a fifth participant makes the scanned set a
+    Fails in BOTH directions: a sixth participant makes the scanned set a
     superset, deleting one makes it a subset, and the assertion prints the
     symmetric difference either way."""
     import os as _os
@@ -3678,9 +3678,9 @@ def test_exactly_these_five_scripts_participate_in_the_sentinel_contract():
     )
 
 
-def test_sentinel_predicate_is_identical_in_all_four_scripts(tmp_path):
-    """The predicate is spelled in FOUR standalone scripts with no shared
-    import, so pin all four copies against each other across the WHOLE state
+def test_sentinel_predicate_is_identical_in_all_five_scripts(tmp_path):
+    """The predicate is spelled in FIVE standalone scripts with no shared
+    import, so pin all five copies against each other across the WHOLE state
     matrix -- not just the happy path. A drift test, not a second source of
     truth, same technique as the filename pin below.
 
@@ -3688,13 +3688,13 @@ def test_sentinel_predicate_is_identical_in_all_four_scripts(tmp_path):
     bug WAS the sentinel's readers and its writer disagreeing about one path,
     and a divergence reintroduced in any single copy is invisible to every
     other test here, because that script's own tests would still agree with
-    it. Four copies means six pairs that can drift, so the comparison is
+    it. Five copies means ten pairs that can drift, so the comparison is
     against one reference rather than pairwise.
 
-    NOTE the four map AMBIGUOUS to different ACTIONS on purpose (refuse,
-    refuse, count, report) -- that divergence is correct and lives at the call
-    sites. What must never diverge is the CLASSIFICATION, which is what this
-    pins."""
+    NOTE the five map AMBIGUOUS to different ACTIONS on purpose (refuse,
+    refuse, count, report, admit) -- that divergence is correct and lives at
+    the call sites. What must never diverge is the CLASSIFICATION, which is
+    what this pins."""
     import os as _os
 
     modules = {name: _load_script_module(name) for name in SENTINEL_SCRIPTS}
@@ -3758,7 +3758,7 @@ def test_sentinel_predicate_is_identical_in_all_four_scripts(tmp_path):
                 getattr(reference, fn)
             ), (
                 f"{name}.{fn} has drifted from {reference_name}'s copy. The "
-                f"four are meant to be textually identical: the matrix above "
+                f"five are meant to be textually identical: the matrix above "
                 f"samples five states, so a drift in the detail strings, in "
                 f"the entry-kind names, or in a branch it does not reach "
                 f"would otherwise pass unseen"
@@ -3766,11 +3766,12 @@ def test_sentinel_predicate_is_identical_in_all_four_scripts(tmp_path):
 
 
 def test_sentinel_filename_matches_the_writer_in_ledger_update(tmp_path):
-    """The convention is spelled in two standalone scripts with no shared
-    import (ledger_update.py WRITES it, select_segments.py READS it). Pin them
-    against each other by name so a rename in one is not a silent no-op in the
-    other -- which would disable the gate while every test above still passes,
-    because they would agree with the reader."""
+    """The convention is spelled in five standalone scripts with no shared
+    import (the SENTINEL_SCRIPTS population above). This test pins two of them
+    against each other BY NAME -- ledger_update.py WRITES the sentinel,
+    select_segments.py READS it -- so a rename in one is not a silent no-op in
+    the other, which would disable the gate while every test above still
+    passes, because they would agree with the reader."""
     import importlib.util
 
     def _load(name):

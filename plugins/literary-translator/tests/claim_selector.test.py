@@ -1229,7 +1229,7 @@ def test_classify_only_rejects_a_combined_claim(tmp_path):
 # 12. rewrite_draft_dispatch_token() -- the actual "claim the draft" state
 # change (D4). Tested as a STANDALONE unit against the function directly
 # (loaded via importlib, the same technique select_segments.test.py's own
-# test_sentinel_predicate_is_identical_in_all_four_scripts uses), ALONGSIDE
+# test_sentinel_predicate_is_identical_in_all_five_scripts uses), ALONGSIDE
 # the end-to-end coverage the claim tests above already give it: run()'s
 # claim block calls it for real, immediately after the record write.
 #

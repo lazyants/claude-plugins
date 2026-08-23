@@ -502,11 +502,12 @@ def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
     `path`: `(SENTINEL_ABSENT|SENTINEL_PRESENT|SENTINEL_AMBIGUOUS, detail)`.
 
     THE SHARED PREDICATE. Every script that asks whether a segment has ever
-    converged calls this, and all four must agree on it:
+    converged calls this, and all five must agree on it:
     ledger_update.py's `mark_ever_converged()` (the only writer),
     select_segments.py's #409 Step 1 dispatch gate,
-    final_audit.py's `count_stale_previously_converged()` carve-out, and
-    backfill_ever_converged.py's `already_sentineled` scan.
+    final_audit.py's `count_stale_previously_converged()` carve-out,
+    backfill_ever_converged.py's `already_sentineled` scan, and
+    assemble.py's #491 machinery-only stale carve-out.
 
     DUPLICATED RATHER THAN IMPORTED because importing it would be a live
     hazard -- NOT because of the "no shared lib between self-contained
@@ -524,14 +525,14 @@ def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
     it just has to register the new module in PLUGIN_BUNDLE_MEMBERS in the
     same commit.
 
-    What keeps the four copies honest is ENFORCEMENT, not discipline. A
+    What keeps the five copies honest is ENFORCEMENT, not discipline. A
     remembered convention rots -- this docstring's own first version cited
     the false one -- while a test that fails loudly does not.
     tests/select_segments.test.py's
-    test_sentinel_predicate_is_identical_in_all_four_scripts pins the copies
+    test_sentinel_predicate_is_identical_in_all_five_scripts pins the copies
     byte for byte and across the state matrix; its
-    test_exactly_these_four_scripts_participate_in_the_sentinel_contract
-    fails when a fifth copy appears or one of the four goes away.
+    test_exactly_these_five_scripts_participate_in_the_sentinel_contract
+    fails when a sixth copy appears or one of the five goes away.
 
     Why three states, and why not `Path.exists()`. `exists()` answers the
     wrong question three ways, and NOT all of them in the same direction --
@@ -600,12 +601,14 @@ def classify_ever_converged_sentinel(path, *, dir_fd=None) -> "tuple[str, str]":
     Anything that is neither ENOENT nor a regular file is AMBIGUOUS: it MAY
     be a converged segment whose sentinel this process cannot see. Each
     caller then maps AMBIGUOUS to ITS OWN work-preserving side, and that is
-    deliberately NOT the same action in all four: the writer and the
+    deliberately NOT the same action in all five: the writer and the
     dispatch gate REFUSE (never destroy or mis-record converged work), while
     final_audit.py's carve-out COUNTS it (never declare a converged book
-    incomplete and therefore undeliverable) and backfill's scan reports it
-    unprotected (never claim protection it did not verify). One predicate,
-    four deliberate mappings -- see each call site's own comment. The
+    incomplete and therefore undeliverable), backfill's scan reports it
+    unprotected (never claim protection it did not verify), and
+    assemble.py's #491 carve-out ADMITS it (never refuse to assemble a
+    finished book over a sentinel this process cannot read). One predicate,
+    five deliberate mappings -- see each call site's own comment. The
     asymmetry is the reason a false "absent" is the unacceptable answer
     everywhere: it costs a finished translation, or a finished book.
     """
