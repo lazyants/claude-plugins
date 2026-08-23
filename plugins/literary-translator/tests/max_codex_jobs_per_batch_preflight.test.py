@@ -152,9 +152,13 @@ def instantiate_mass_translate(
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps("/fixture/codex/codex-companion.mjs"))
     text = text.replace("{{EFFORT}}", "high")
     text = text.replace("{{MODEL}}", "")
-    # #412 -- PLUGIN_ROOT: empty = not opted into the redirect. This file
+    # #412 -- PLUGIN_ROOT: empty USED TO mean "not opted into the redirect". This file
     # exercises the codex-jobs preflight cap, not the opt-in dispatch shape.
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(""))
+    # #607 -- a non-empty plugin root is now REQUIRED: the fix-scope audit
+    # runs only from the plugin install tree, so the W5 template refuses to
+    # start without one. This fixture used to substitute the empty value as
+    # the documented "redirect opt-out"; that opt-out no longer exists.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps("/fixture/plugin/literary-translator"))
     assert "{{" not in text, "fixture instantiation left an unresolved token -- fix the fixture, not the assertion below"
     return text
 

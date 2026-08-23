@@ -34,7 +34,9 @@ exactly ONE call that returns immediately -- `review-wait:*` bounded poll of
 retry budget covering the (read, check) pair together -- never two
 independent retries. The #198 driver-dispatch reshape is call-count-neutral:
 the drive replaces the old dispatch 1:1 and the wait stays 1 call, so the
-`10 + 7*MAXFIX` per-segment term is UNCHANGED. The batch-level term dropped
+`10 + 7*MAXFIX` per-segment term is UNCHANGED. (That is a statement ABOUT
+#198, frozen at its date: #348 and then #607 have since moved the term to
+`10 + 9*MAXFIX` at WAIT_CALLS=1 -- see the derivation below.) The batch-level term dropped
 from N-dependent housekeeping to exactly **1** (the single `merge-ledger`/
 `mergeLedgerPrompt` call) now that `{{RUN_ID}}`-scoped `dispatch_token`s make
 every driver-promoted artifact fresh-by-construction, removing the old batch
@@ -69,7 +71,9 @@ directly above `estimatedCalls`):
     worst-case fixtures force.
   - each of the `max_fix_rounds` NORMAL rounds (`runRound(seg, round,
     isFinal=false)`, every round except the final confirming one) = review
-    point (6, worst case) + fix (1, `callFix`) = **7**, provided the
+    point (6, worst case) + fix (1, `callFix`) + the #607 fix-scope audit
+    and the one retry a CONTINUING round may spend on it (2, worst case)
+    = **9**, provided the
     review point's resulting verdict is NOT `clean && coverage_ok` (a clean
     verdict converges the segment immediately at that round instead,
     cheaper than the worst case and not what these fixtures exercise).
@@ -83,8 +87,10 @@ directly above `estimatedCalls`):
   - +1 terminal per-segment ledger write (`ledger:converged:*` /
     `ledger:blocked:{reason}:*` / `ledger:cap:*` / `ledger:timeout:*`,
     exactly one of these fires per segment).
-  - per-segment total: 3 + 7*max_fix_rounds + 6 + 1 == **10 + 7*max_fix_rounds**,
-    exactly the `10 + 7*MAXFIX` term inside `estimatedCalls`.
+  - per-segment total: 3 + 9*max_fix_rounds + 6 + 1 == **10 + 9*max_fix_rounds**
+    at WAIT_CALLS=1 (7*max_fix_rounds before #607 added the per-fix-round
+    fix-scope audit and its retry), which is the WAIT_CALLS=1 reading of
+    `estimatedCalls`' own `8 + 2*WAIT_CALLS + MAXFIX*(8 + WAIT_CALLS)`.
   - batch-level: exactly **1** (`merge-ledger`, colon-free).
 
 Blocked-branch terminating sub-cases (same taxonomy as the pre-1.2.0 file,
@@ -182,7 +188,7 @@ Fixtures, one per branch:
   7. A dedicated case re-asserting that the `review-artifact-mismatch`
      segment's ACTUAL call count -- built from worst-case-recovered prior
      rounds, matching the estimator's own per-round assumption -- never
-     exceeds the per-segment bound (`10 + 7*max_fix_rounds`) the estimator
+     exceeds the per-segment bound (`10 + 8*max_fix_rounds` since #607) the estimator
      itself relies on.
   8. A parametrized, cheap (no `pipeline()` execution at all -- the gate
      trips before it) check that the real script's own `estimatedCalls`
@@ -263,6 +269,9 @@ FIXTURE_TARGET_LANG = "ru"
 FIXTURE_VERSE_POLICY_INSTRUCTION_BLOCK = "Render every verse literally, line by line."
 
 
+FIXTURE_PLUGIN_ROOT = "/fixture/plugin/literary-translator"
+
+
 def instantiate_mass_translate(
     *,
     max_fix_rounds: int,
@@ -310,10 +319,14 @@ def instantiate_mass_translate(
     # 1.16.1 (#347): empty = fetch_citation.py's shipped default list.
     text = text.replace("{{CITATION_CONTENT_TYPES}}", "")
     text = text.replace("{{MODEL}}", "")
-    # #412 -- PLUGIN_ROOT: empty = not opted into the redirect (this file's
-    # call-counting assertions never inspect a dispatch launch line, so the
-    # pre-#412 dispatch shape is exactly what this fixture should reproduce).
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(""))
+    # #412/#607 -- PLUGIN_ROOT. This fixture used to substitute the empty
+    # value ("not opted into the redirect"), because none of the assertions
+    # here inspect a dispatch launch line. #607 made empty a REFUSAL: the
+    # fix-scope audit runs only from the plugin install tree, so a batch with
+    # no plugin root has no trusted checker and does not start. Every fixture
+    # in this file drives fix rounds, so all of them need a real value; the
+    # refusal itself is covered by its own test below.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(FIXTURE_PLUGIN_ROOT))
     assert "{{" not in text, "fixture instantiation left an unresolved token -- fix the fixture, not the assertion below"
     return text
 
@@ -402,6 +415,7 @@ for (const seg of Object.keys(PLAN)) {
     reviews: (PLAN[seg].reviews || []).slice(),
     artifactChecks: (PLAN[seg].artifactChecks || []).slice(),
     fixes: (PLAN[seg].fixes || []).slice(),
+    fixScopes: (PLAN[seg].fixScopes || []).slice(),
   };
 }
 
@@ -435,6 +449,10 @@ async function agent(promptText, opts) {
     effort: opts.effort || null,
     agentType: opts.agentType || null,
     hasSchema: !!opts.schema,
+    // #607 -- the rendered prompt text. Every assertion in THIS file reads
+    // only labels and counts; fix_scope_gate.test.py needs the text, to
+    // check what a blocked-ledger note actually tells the operator.
+    prompt: promptText,
   });
 
   if (label.indexOf("ledger:") === 0) {
@@ -510,6 +528,20 @@ async function agent(promptText, opts) {
     if (q.length === 0) throw new Error("PLAN fixes queue exhausted for " + seg + " label=" + label);
     return q.shift();
   }
+  if (label.indexOf("fix-scope:") === 0) {
+    // #607. A per-segment QUEUE, not a single value: runRound calls this
+    // once per fix round and twice on a round whose first relay fails, so a
+    // fixture that wants to drive the retry (or the two-failure terminal
+    // path) needs to script each attempt separately. A JSON null models the
+    // CALL failing -- agent death / output-token ceiling / classifier block
+    // -- which is what callFixScopeAudit returns falsy for; an object with
+    // ok:false models a real detected divergence. An exhausted queue
+    // defaults to a clean pass, so the many fixtures that predate #607 and
+    // care only about call COUNTS need no per-round scripting.
+    const q = queues[seg].fixScopes;
+    if (q.length === 0) return { ok: true, n_checked: 79, n_expected: 79 };
+    return q.shift();
+  }
   if (label.indexOf("draft-probe:") === 0) {
     // #131 facet A -- a single per-segment value (not a queue), since the
     // probe fires at most once per segment (it only ever runs from
@@ -572,9 +604,14 @@ def run_workflow(
     segs: list[str],
     plan: dict,
     timeout: int = 30,
+    durable_root: str = FIXTURE_DURABLE_ROOT,
 ) -> dict:
     assert NODE is not None, "node executable not found on PATH -- required to run this test file"
-    js_source = instantiate_mass_translate(max_fix_rounds=max_fix_rounds, batch_agent_cap=batch_agent_cap)
+    js_source = instantiate_mass_translate(
+        max_fix_rounds=max_fix_rounds,
+        batch_agent_cap=batch_agent_cap,
+        durable_root=durable_root,
+    )
     harness_text = build_harness(js_source, segs, plan)
     harness_path = tmp_path / "harness.js"
     harness_path.write_text(harness_text, encoding="utf-8")
@@ -709,12 +746,26 @@ def converged_worst_case_plan(seg: str, max_fix_rounds: int, *, final_clean: boo
     reviews.append(review_obj(clean=final_clean, coverage_ok=True))
     artifact_checks.append(match_true())
 
+    # #607 -- the WORST case of a CONTINUING fix round is two fix-scope audit
+    # calls, not one: the first relay dies (a JSON null models the call
+    # itself failing) and the retry answers, after which the round carries on
+    # exactly as before. This fixture is the reason the estimator's ceiling
+    # budgets 2 -- `test_worst_case_wait_ladder_costs_exactly_the_estimate`
+    # asserts the observed total EQUALS the ceiling, so a ceiling of 2 that
+    # nothing ever reached would be silent over-budgeting, and a ceiling of 1
+    # would be exceeded here. Two entries per normal round; the final
+    # confirming round dispatches no fix and so consumes none.
+    fix_scopes = []
+    for _ in range(max_fix_rounds):
+        fix_scopes.extend([None, {"ok": True, "n_checked": 79, "n_expected": 79}])
+
     plan = {
         "wait": ready,
         "reviewWaits": review_waits,
         "reviews": reviews,
         "artifactChecks": artifact_checks,
         "fixes": fixes,
+        "fixScopes": fix_scopes,
     }
     if waits_exhaust_every_chunk:
         # The artifact lands after the last chunk's poll ended -- the ONE thing
@@ -877,7 +928,7 @@ def timeout_plan(seg: str) -> dict:
 def blocked_branch_total(max_fix_rounds: int, terminating_cost: int, *, ledger_write: bool = True,
                          wait_calls: int = 1) -> int:
     """(2 + wait_calls) (fixed: in_progress ledger + translate dispatch +
-    translate's own wait) + (6 + wait_calls)*(max_fix_rounds-1) (completed
+    translate's own wait) + (7 + wait_calls)*(max_fix_rounds-1) (completed
     WORST-CASE-RECOVERED normal rounds -- review point with a forced shared
     retry (5 + its wait) + fix (1), matching the estimator's own per-round
     assumption) + terminating_cost + (1 if ledger_write else 0) (terminal
@@ -894,27 +945,46 @@ def blocked_branch_total(max_fix_rounds: int, terminating_cost: int, *, ledger_w
     rounds LEADING UP TO the terminating one. The terminating round's own wait
     cost lives in `terminating_cost`, which its caller computes -- a fixture
     that times a wait OUT there pays 1 + WAIT_CALLS for that review point (all
-    chunks plus the re-check), not 2."""
-    return ((2 + wait_calls) + (6 + wait_calls) * (max_fix_rounds - 1)
+    chunks plus the re-check), not 2.
+
+    #607 -- a COMPLETED normal round now also pays one fix-scope audit call
+    (the relay answers on its first attempt on every path these fixtures
+    drive), so the per-completed-round term is 7 + wait_calls, not
+    6 + wait_calls. A terminating round's own audit cost, where it has one,
+    belongs in `terminating_cost` alongside its other terminating-round
+    calls."""
+    return ((2 + wait_calls) + (7 + wait_calls) * (max_fix_rounds - 1)
             + terminating_cost + (1 if ledger_write else 0))
 
 
-def converged_branch_total(max_fix_rounds: int, *, wait_calls: int = 1) -> int:
+def converged_branch_total(max_fix_rounds: int, *, wait_calls: int = 1, audit_calls: int = 1) -> int:
     """The converged/non-converged-at-cap branch total: (2 + wait_calls)
     (fixed: in_progress ledger + translate dispatch + translate's wait) +
-    max_fix_rounds*(6 + wait_calls) (all MAXFIX normal rounds, each a
-    worst-case review point -- dispatch + wait + read + check + read + check
-    -- plus 1 fix) + (5 + wait_calls) (final confirming review point, worst
-    case, no fix) + 1 (terminal ledger write)
-    == 8 + 2*wait_calls + max_fix_rounds*(6 + wait_calls).
+    max_fix_rounds*(6 + wait_calls + audit_calls) (all MAXFIX normal rounds,
+    each a worst-case review point -- dispatch + wait + read + check + read +
+    check -- plus 1 fix plus #607's fix-scope audit) + (5 + wait_calls) (final
+    confirming review point, worst case, no fix and therefore no audit) + 1
+    (terminal ledger write)
+    == 8 + 2*wait_calls + max_fix_rounds*(6 + wait_calls + audit_calls).
 
-    That is the template's own per-segment term verbatim. At wait_calls=1 it
-    collapses to the pre-#348 `10 + 7*max_fix_rounds`, which is the arithmetic
-    proof that #348 generalised the estimator rather than rewriting it -- and
-    at wait_calls=WAIT_CALLS it IS the estimator's per-segment ceiling. The two
-    uses are deliberately the same function: a ceiling that could drift from
-    the observed-cost formula is the bug this file exists to prevent."""
-    return (2 + wait_calls) + max_fix_rounds * (6 + wait_calls) + (5 + wait_calls) + 1
+    That is the template's own per-segment term verbatim. #607 makes
+    `audit_calls` the ONE place where an observed cost and the ceiling
+    legitimately differ, and it is a parameter rather than a constant so the
+    difference is stated instead of hidden: a dispatched fix round runs the
+    fix-scope audit once when the relay answers (audit_calls=1, what almost
+    every fixture here drives) and TWICE when the first relay fails and its
+    retry succeeds. That round still CONTINUES, so the estimator must budget
+    2 -- a ceiling of 1 would be exceeded by an ordinary recovered round, and
+    test_estimator_ceiling_is_reachable_with_one_audit_retry drives exactly
+    that path and lands on the ceiling.
+
+    At wait_calls=1, audit_calls=1 this is `10 + 8*max_fix_rounds`. The
+    pre-#348 identity `10 + 7*max_fix_rounds` NO LONGER HOLDS; the template's
+    own comment records it as broken rather than quietly dropping it. At
+    wait_calls=WAIT_CALLS, audit_calls=2 this IS the estimator's per-segment
+    ceiling."""
+    return ((2 + wait_calls) + max_fix_rounds * (6 + wait_calls + audit_calls)
+            + (5 + wait_calls) + 1)
 
 
 def bucket_calls_by_segment(calls: list[dict]) -> tuple[dict[str, list[dict]], list[dict]]:
@@ -941,8 +1011,9 @@ def bucket_calls_by_segment(calls: list[dict]) -> tuple[dict[str, list[dict]], l
 def test_estimator_boundary_exactly_at_cap_permits_dispatch_and_converges(tmp_path):
     max_fix_rounds = 2
     segs = ["seg01", "seg02"]
-    # 1 + 2*(8 + 2*9 + 2*(6+9)) = 1 + 2*56 = 113
-    estimated = 1 + len(segs) * converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS)
+    # 1 + 2*(8 + 2*9 + 2*(8+9)) = 1 + 2*60 = 121, re-derived rather than carried
+    # forward: #607's audit makes the per-round term 8 + WAIT_CALLS, not 6 + WAIT_CALLS.
+    estimated = 1 + len(segs) * converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS, audit_calls=2)
 
     plan = {seg: converged_worst_case_plan(seg, max_fix_rounds, final_clean=True) for seg in segs}
     out = run_workflow(
@@ -978,17 +1049,25 @@ def test_estimator_boundary_exactly_at_cap_permits_dispatch_and_converges(tmp_pa
     assert len(batch_level) == 1, "exactly one mandatory batch-level mergeLedgerPrompt call"
     for seg in segs:
         # Exact, on the path this plan actually drives: every wait READY on its
-        # first chunk. At wait_calls=1 the term is the pre-#348 10 + 7*MAXFIX
-        # verbatim, which is what makes this a regression lock and not a
-        # re-baselining -- the observed cost of this branch never moved.
-        assert len(per_seg[seg]) == converged_branch_total(max_fix_rounds, wait_calls=1)
-        assert len(per_seg[seg]) == 10 + 7 * max_fix_rounds
+        # first chunk. This literal was `10 + 7*max_fix_rounds` from #348
+        # until #607, and the comment here said that identity was what made
+        # the assertion a regression lock rather than a re-baselining. #607
+        # DID move the observed cost of this branch -- one fix-scope audit
+        # call per dispatched fix round -- so the literal is now
+        # `10 + 9*max_fix_rounds` (6 review-point calls + 1 fix + 2 audits on
+        # this fixture's worst-case path), and saying so plainly is the
+        # point: an
+        # observed-cost literal that changes silently would defeat everything
+        # this file is for. The pre-#607 value is recorded here rather than
+        # deleted, so a future reader can tell a deliberate move from a drift.
+        assert len(per_seg[seg]) == converged_branch_total(max_fix_rounds, wait_calls=1, audit_calls=2)
+        assert len(per_seg[seg]) == 10 + 9 * max_fix_rounds
 
 
 def test_estimator_one_below_boundary_blocks_dispatch_entirely(tmp_path):
     max_fix_rounds = 2
     segs = ["seg01", "seg02"]
-    estimated = 1 + len(segs) * converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS)  # 113
+    estimated = 1 + len(segs) * converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS, audit_calls=2)  # 121
 
     # Same configuration as the boundary-permits test above, but the cap is
     # one less -- deliberately reuse a plan that WOULD converge if pipeline()
@@ -1040,7 +1119,7 @@ def test_estimator_one_below_boundary_blocks_dispatch_entirely(tmp_path):
 def test_worst_case_wait_ladder_costs_exactly_the_estimate(tmp_path):
     max_fix_rounds = 2
     segs = ["seg01", "seg02"]
-    estimated = 1 + len(segs) * converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS)
+    estimated = 1 + len(segs) * converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS, audit_calls=2)
 
     plan = {
         seg: converged_worst_case_plan(
@@ -1072,7 +1151,7 @@ def test_worst_case_wait_ladder_costs_exactly_the_estimate(tmp_path):
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1
     for seg in segs:
-        assert len(per_seg[seg]) == converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS)
+        assert len(per_seg[seg]) == converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS, audit_calls=2)
 
         # ...and the cost is where the formula says it is. Without this, a
         # segment could hit the same total for the wrong reason (e.g. extra
@@ -1140,12 +1219,16 @@ def test_blocked_draft_missing_terminating_subcase(tmp_path):
 
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1
-    # terminating_cost=6, not 5: the new #131 draft-probe call
-    # (dispatch+wait+read+check+fix+probe) fires whenever fx comes back
+    # terminating_cost=7, not 5: the #131 draft-probe call plus #607's
+    # fix-scope audit (dispatch+wait+read+check+fix+audit+probe). The audit
+    # runs BEFORE fx is inspected, so this branch pays it too -- that
+    # placement is the point of #607's second BLOCKER: a turn must not be
+    # able to mutate the durable copies and then exit unaudited through the
+    # falsy/DRAFT_MISSING door. It fires whenever fx comes back
     # falsy/DRAFT_MISSING, and this kind still writes the terminal ledger
     # entry (ledger_write defaults True) -- a real anomaly worth human
     # attention, unchanged.
-    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=6)
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=7)
 
 
 def test_blocked_fix_call_failed_terminating_subcase(tmp_path):
@@ -1185,7 +1268,7 @@ def test_blocked_fix_call_failed_terminating_subcase(tmp_path):
         "fix-call-failed must NOT write a terminal ledger entry -- it stays "
         "in_progress and recoverable, exactly like the other #131 facets"
     )
-    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=6, ledger_write=False)
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=7, ledger_write=False)
 
 
 def test_blocked_fix_call_failed_probe_itself_fails_terminating_subcase(tmp_path):
@@ -1228,7 +1311,7 @@ def test_blocked_fix_call_failed_probe_itself_fails_terminating_subcase(tmp_path
         "entry -- it stays in_progress and recoverable, exactly like a "
         "confirmed-present probe result"
     )
-    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=6, ledger_write=False)
+    assert len(per_seg[seg]) == blocked_branch_total(max_fix_rounds, terminating_cost=7, ledger_write=False)
 
 
 def test_blocked_review_fabricated_loc_terminating_subcase(tmp_path):
@@ -1396,7 +1479,8 @@ def test_timeout_branch(tmp_path):
 # 7: dedicated case -- a review-artifact-mismatch segment's ACTUAL call
 # count, built from worst-case-recovered prior rounds (matching the
 # estimator's own per-round assumption), never exceeds the formula's own
-# per-segment bound (10 + 7*MAXFIX).
+# per-segment bound -- 10 + 9*MAXFIX at WAIT_CALLS=1, since #607 charges each
+# fix round the audit plus its one retry (audit_calls=2 below).
 # ---------------------------------------------------------------------------
 
 
@@ -1417,9 +1501,12 @@ def test_review_artifact_mismatch_actual_calls_never_exceed_formula_bound(tmp_pa
 
     per_seg, _ = bucket_calls_by_segment(out["calls"])
     actual_calls = len(per_seg[seg])
-    # the exact term estimatedCalls sizes per segment (#348: 8 + 2*WAIT_CALLS
-    # + MAXFIX*(6 + WAIT_CALLS), which at WAIT_CALLS=1 is the old 10 + 7*MAXFIX)
-    per_segment_bound = converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS)
+    # the exact term estimatedCalls sizes per segment. #348 made it
+    # 8 + 2*WAIT_CALLS + MAXFIX*(6 + WAIT_CALLS); #607 charges each fix round
+    # the audit plus its one retry, so the per-round term is now
+    # 8 + WAIT_CALLS -- which is what audit_calls=2 below asks for. The
+    # pre-#348 identity 10 + 7*MAXFIX no longer holds at any WAIT_CALLS.
+    per_segment_bound = converged_branch_total(max_fix_rounds, wait_calls=WAIT_CALLS, audit_calls=2)
 
     assert actual_calls == blocked_branch_total(max_fix_rounds, terminating_cost=6, ledger_write=False)
     assert actual_calls <= per_segment_bound, (
@@ -1447,7 +1534,7 @@ def test_estimator_formula_matches_closed_form(tmp_path, n_segs, max_fix_rounds)
     # Written out rather than routed through converged_branch_total: this row
     # is the one place the closed form is restated INDEPENDENTLY of the helper
     # every other assertion shares, so a wrong helper cannot agree with itself.
-    expected = 1 + n_segs * (8 + 2 * WAIT_CALLS + max_fix_rounds * (6 + WAIT_CALLS))
+    expected = 1 + n_segs * (8 + 2 * WAIT_CALLS + max_fix_rounds * (8 + WAIT_CALLS))
 
     out = run_workflow(
         tmp_path=tmp_path,
@@ -1496,7 +1583,7 @@ def test_non_converged_at_cap_costs_the_same_as_converged(tmp_path):
     assert failed["rounds"] == max_fix_rounds + 1
 
     per_seg, _ = bucket_calls_by_segment(out["calls"])
-    assert len(per_seg[seg]) == converged_branch_total(max_fix_rounds)
+    assert len(per_seg[seg]) == converged_branch_total(max_fix_rounds, audit_calls=2)
 
 
 # ---------------------------------------------------------------------------
@@ -1559,12 +1646,16 @@ def test_shared_retry_recovers_mid_loop_and_matches_exact_count(tmp_path):
     assert [r["seg"] for r in result["converged"]] == [seg]
     assert result["failed"] == []
 
-    # round1 (happy, 4+1fix=5) + round2 (happy, 5) + round3 (shared retry,
-    # 6+1fix=7) + final review (happy, 4, no fix) + 3 fixed + 1 terminal
-    # ledger -- hand-computed independently of converged_branch_total (which
-    # assumes EVERY round hits the 6-call worst case, not just one).
-    expected_total = 3 + (5 + 5 + 7) + 4 + 1
-    assert expected_total == 25
+    # round1 (happy, 4+1fix+1audit=6) + round2 (happy, 6) + round3 (shared
+    # retry, 6+1fix+1audit=8) + final review (happy, 4, no fix and so no
+    # audit) + 3 fixed + 1 terminal ledger -- hand-computed independently of
+    # converged_branch_total (which assumes EVERY round hits the 6-call worst
+    # case, not just one). #607 adds exactly one fix-scope audit per
+    # dispatched fix round here: this fixture's relays all answer first try,
+    # so no round pays the retry, which is what keeps it a NARROWER companion
+    # to the worst-case fixture above rather than a duplicate of it.
+    expected_total = 3 + (6 + 6 + 8) + 4 + 1
+    assert expected_total == 28
 
     per_seg, batch_level = bucket_calls_by_segment(out["calls"])
     assert len(batch_level) == 1

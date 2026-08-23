@@ -151,14 +151,16 @@ CHANGELOG = PLUGIN_ROOT / "CHANGELOG.md"
 # behavioural claims in this entry (what the archiver keys on, what the prompt
 # says) are each exercised by a test instead, which is why they are cited by name
 # rather than by line.
-# The 1.66.0 (#541) rows this rotation retired, kept as their own record: three
-# ranges -- `cache_key.py:143-171`, `cache_key.py:178-199` and
-# `resume_setup.py:723-740` -- pinning that entry's two-part cost claim (both
-# edited files inside `PLUGIN_BUNDLE_MEMBERS`, the hash they move being global
-# rather than per-segment, and the same marker reaching the resume digest).
-# Retiring them is not optional bookkeeping: this file checks the NEWEST entry
-# only, so an anchor no current citation uses fails as stale.
-CITATION_ANCHORS = {}
+CITATION_ANCHORS = {
+    # EMPTY ON PURPOSE, and not a retirement: the 1.67.0 (#607) entry cites no
+    # `file.ext:NNN` anchor at all. Its claims about code are behavioural --
+    # what the audit compares, when it runs relative to the fix reply, what a
+    # halt records -- and each is exercised by a named test in
+    # tests/fix_scope_audit.test.py or tests/fix_scope_gate.test.py rather than
+    # pinned to a line that renumbers under the next edit. The undeclared-anchor
+    # half of this file still runs over the entry, so if a line citation is
+    # added here later it goes RED until it is declared.
+}
 
 # Any `name.ext:NNN`. Extension-AGNOSTIC, not extension-free: a dot and an
 # alphabetic extension are still required. Pinning a list of extensions was

@@ -109,8 +109,11 @@
 //                                          bash argument (space/unicode paths included).
 //   {{PLUGIN_ROOT}}                       -- #412: the plugin's own install root (NEVER
 //                                          {{DURABLE_ROOT}}/scripts/, the Step-0a COPY the codex
-//                                          process this driver launches can write to), or an EMPTY
-//                                          STRING when this dispatch does not opt into the redirect.
+//                                          process this driver launches can write to). #607: this
+//                                          token is now MANDATORY for this template -- an empty
+//                                          string used to mean "does not opt into the redirect" and
+//                                          is now REFUSED by the batch preflight, because the
+//                                          fix-scope audit runs only from the plugin install tree.
 //                                          Same substitution shape as {{CODEX_COMPANION_PATH_JSON}}
 //                                          immediately above (a strict json.dumps JS STRING LITERAL,
 //                                          WITH its own surrounding quotes, sitting OUTSIDE quotes in
@@ -337,6 +340,34 @@ const DRAFT_PROBE_SCHEMA = {
   },
 };
 
+// #607 -- the fix-scope audit's relay return. The script decides; this file
+// never re-judges the comparison. Deliberately permissive about the detail
+// arrays (they are absent on a clean run) and strict about the three fields
+// runRound actually BINDS on: `ok`, plus the two counts whose agreement is
+// what separates a pass from a walk that compared nothing. `verdict` and
+// `error` are read as well, on the checker's own error line; the remaining
+// arrays are operator-facing detail folded into the ledger note.
+const FIX_SCOPE_SCHEMA = {
+  type: "object",
+  additionalProperties: true,
+  required: ["ok", "n_checked", "n_expected"],
+  properties: {
+    ok: { type: "boolean" },
+    n_checked: { type: "integer" },
+    n_expected: { type: "integer" },
+    verdict: { type: "string" },
+    differing: { type: "array", items: { type: "string" } },
+    missing: { type: "array", items: { type: "string" } },
+    irregular: { type: "array", items: { type: "string" } },
+    extra: { type: "array", items: { type: "string" } },
+    orphaned: { type: "array", items: { type: "string" } },
+    degenerate: { type: "array", items: { type: "string" } },
+    marker_mismatch: { type: "array", items: { type: "string" } },
+    unreadable: { type: "array", items: { type: "string" } },
+    error: { type: "string" },
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Constants substituted once at instantiation time (see the header comment
 // above for the full token list and the JSON-escaping contract on the verse
@@ -391,15 +422,22 @@ const VERSE_POLICY_INSTRUCTION_BLOCK = "{{VERSE_POLICY_INSTRUCTION_BLOCK}}";
 const COMPANION = {{CODEX_COMPANION_PATH_JSON}};
 
 // #412 -- the plugin's own install root (see the header comment's
-// {{PLUGIN_ROOT}} entry), or "" when this dispatch does not opt into the
-// redirect. Same JS-string-literal substitution shape as COMPANION above,
+// {{PLUGIN_ROOT}} entry). It used to be allowed to arrive as "" meaning
+// "this dispatch does not opt into the redirect"; since #607 that is a
+// refusal, not a mode -- see the paragraph below.
+// Same JS-string-literal substitution shape as COMPANION above,
 // but unlike COMPANION there is no dedicated resolver script
 // (resolve_codex_companion.py's own counterpart) to lean on, so this file
 // re-checks it itself -- mirroring EFFORT_RE/MODEL_RE above -- before it
-// ever reaches the codex_job.py dispatch SHELL command: empty is valid (the
-// redirect opt-out), a non-empty value must contain no single quote or
-// control character -- the exact class that would break out of the
-// SINGLE-QUOTED bash splice below.
+// ever reaches the codex_job.py dispatch SHELL command. A non-empty value
+// must contain no single quote or control character -- the exact class that
+// would break out of the SINGLE-QUOTED bash splice below.
+//
+// #607: empty is NO LONGER a valid runtime state for this template. It used
+// to mean "not opted into the redirect"; the batch preflight further down now
+// refuses it outright, because the fix-scope audit runs only from the plugin
+// install tree and there is no weaker fallback worth taking. The check below
+// still guards only the non-empty case, since empty never reaches a dispatch.
 const PLUGIN_ROOT = {{PLUGIN_ROOT}};
 const PLUGIN_ROOT_UNSAFE_RE = /['\x00-\x1f\x7f]/;
 if (PLUGIN_ROOT !== "" && PLUGIN_ROOT_UNSAFE_RE.test(PLUGIN_ROOT)) {
@@ -416,6 +454,19 @@ if (PLUGIN_ROOT !== "" && PLUGIN_ROOT_UNSAFE_RE.test(PLUGIN_ROOT)) {
 // with no value is never emitted (codex_job.py's own argparse default,
 // None, is reserved for "flag omitted entirely", not an empty string).
 const PLUGIN_ROOT_ARG = PLUGIN_ROOT ? " --plugin-root '" + PLUGIN_ROOT + "'" : "";
+
+// #607 -- POSIX single-quote escaping for a path spliced into a shell
+// command. PLUGIN_ROOT is validated above to carry no single quote, but
+// ROOT is not: project.durable_root is only required to be a non-empty,
+// writable path (profile.schema.json + profile_validate.py check location
+// and writability, never shell characters), so a perfectly legitimate
+// /Users/.../O'Brien Book would either split into several arguments if
+// spliced bare or terminate the quote early if spliced naively. Both cost
+// the segment a false fix-scope-unverified and a re-translation. The
+// '\'' idiom needs no validation and refuses no legitimate path.
+function shq(value) {
+  return "'" + String(value).split("'").join("'\\''") + "'";
+}
 
 // #198 -- driver/poll timing constants, mirroring codex_job.py's own
 // constants (documented in the header comment's W5 dispatch model). Only the
@@ -1455,6 +1506,7 @@ function fixPrompt(seg, round, revObj) {
   lines.push("That report is a report and not a licence: it changes nothing about which loci you edit. Apply and refuse exactly as stated above, and never edit a site no finding named -- not even one that plainly instantiates the same rule as a finding you just applied. A class that dominates a round is the operator's to enumerate and adjudicate site by site, never yours to sweep: it reaches segments this call was not given, and a converged unit goes stale the moment it is touched. Record none of this in the draft either -- notes[] is the translator's channel.");
   lines.push("Never change the set of block, footnote, or verse keys -- they must stay exactly 1:1 with the segpack.");
   lines.push("The draft also carries a dispatch_token top-level field -- copy its existing value byte for byte into your rewritten draft, unchanged; never invent, drop, or recompute it.");
+  lines.push("You have exactly ONE write target for this whole turn: " + ROOT + "/segments/" + seg + ".draft.json. Change nothing else on disk -- not another segment's draft, not the review artifact you are applying, not style_bible.md, canon.json, canon_senses.json, manifest.json or manifest-referenced source files, not this segment's segpack, not anything under " + ROOT + "/scripts/, " + ROOT + "/schemas/ or " + ROOT + "/languages/, and nothing at all outside " + ROOT + ". A finding whose remedy would require editing any other file is REFUSED on that ground alone, however well substantiated the rest of it is: say so in your reply the same way you would refuse any other finding. Editing a gate script or a schema so that it accepts your draft is never a fix, and a finding that asks for one is reporting on something outside its own authority.");
   lines.push("Rewrite " + ROOT + "/segments/" + seg + ".draft.json with your fixes. If you substantiated nothing and refused every finding, leave that file exactly as you found it.");
   lines.push("End your reply with the line: FIXED " + seg + " r" + round + ". Put any refusal report on the lines above that line.");
   return lines.join("\n");
@@ -1475,6 +1527,42 @@ function draftProbePrompt(seg) {
   lines.push("Run: " + PY + " " + ROOT + "/scripts/draft_ready.py " + seg + " -- note whether it exits 0 (ready) or not.");
   lines.push("Then run: " + PY + " " + ROOT + "/scripts/validate_draft.py " + seg + " -- note whether it prints OK or FAIL.");
   lines.push("Return present: true only if BOTH commands above succeeded (draft_ready.py exited 0 AND validate_draft.py printed OK); otherwise return present: false.");
+  return lines.join("\n");
+}
+
+// #607 -- the fix-scope audit's prompt. A mechanical relay, exactly the
+// division of labour verifyReviewArtifactPrompt uses: the SCRIPT decides,
+// this turn only runs it and repeats its line. Two things about the command
+// are load-bearing rather than stylistic.
+//
+// It runs from PLUGIN_ROOT, never from ROOT + "/scripts/". fix_scope_audit.py
+// is one of SKILL.md's never-copied scripts precisely so no durable copy of
+// it exists: a checker inside the tree it audits can be rewritten by the
+// party being checked and would then report on itself. That is also why the
+// batch preflight below REFUSES to run at all when PLUGIN_ROOT is empty --
+// there is no weaker fallback to degrade to, and running the check from an
+// auditable copy would be worse than not running it.
+//
+// It takes no baseline. The expected content is the plugin install tree's
+// own bytes, read fresh, so a divergence that predates this batch is caught
+// on the first audited round rather than silently adopted as "how the tree
+// started". Three earlier designs stored a before/after digest instead and
+// each was unsound in a different direction; references/engine-loop.md's
+// #607 note records why, so it is not re-attempted.
+function fixScopeAuditPrompt(seg) {
+  const lines = [];
+  lines.push("Effort: low. Mechanical verification only -- do not judge the comparison yourself, and do not repair anything you are told about.");
+  lines.push("Segment: " + seg + ". Durable root: " + ROOT + ".");
+  // Both paths go through shq(). Interpolating either bare would split a
+  // legitimate install path like /Users/First Last/... into several shell
+  // arguments; interpolating ROOT inside naive single quotes would break on
+  // an equally legitimate /Users/.../O'Brien Book, since durable_root --
+  // unlike PLUGIN_ROOT -- is never validated for shell characters. Either
+  // way the checker prints no JSON, two attempts spend the segment on
+  // fix-scope-unverified, and the operator pays a re-translation for a false
+  // RED this diff would have introduced.
+  lines.push("Run exactly: " + PY + " " + shq(PLUGIN_ROOT + "/assets/scripts/fix_scope_audit.py") + " --verify-copies --durable-root " + shq(ROOT));
+  lines.push("Relay that command's single printed JSON line verbatim as your own structured result. The script already did the comparison. If it exits non-zero, that is a verdict, not a failure to report -- relay the line exactly as printed.");
   return lines.join("\n");
 }
 
@@ -1633,6 +1721,65 @@ async function callFix(seg, round, revObj) {
   });
 }
 
+// #607 -- the batch-level record of every fix-scope halt, kept in THIS
+// script's memory and returned in the batch result.
+//
+// It exists because the per-segment terminal fragment cannot be the only
+// record. Writing that fragment runs ledger_update.py from
+// ${ROOT}/scripts/ -- the very tree the audit has just reported as diverging
+// from the plugin -- so the write can fail for exactly the reason the halt
+// fired, and recordLedgerCall's ok:false path then returns ledger-write-
+// failed WITHOUT the promised blocked fragment. The in_progress fragment
+// translateStage already wrote survives, select_segments.py classifies it
+// recoverable, and the next batch redispatches over the unverified tree.
+//
+// This array is not on disk and does not depend on that tree, so the
+// operator is told either way. It does NOT make the durable record
+// bulletproof: what it guarantees is that the BATCH cannot end looking
+// clean when a halt fired. Shipped prose must claim that and no more.
+const fixScopeHalts = [];
+
+function haltBatchOnFixScope(seg, reason, ledgerRecorded) {
+  fixScopeHalts.push({ seg: seg, reason: reason, ledgerRecorded: ledgerRecorded === true });
+  log(
+    "FIX-SCOPE HALT on " + seg + ": " + reason +
+    (ledgerRecorded === true
+      ? " (recorded in the ledger)"
+      : " -- THE LEDGER WRITE ALSO FAILED, so no durable blocked fragment exists for this segment. " +
+        "Do not re-run this batch before re-running Step 0a's copy pass: the segment's surviving " +
+        "in_progress fragment classifies as recoverable and would be redispatched over the same tree.")
+  );
+}
+
+// The identical tail all four fix-scope halt branches had: write the terminal
+// blocked fragment, record the halt at BATCH level whether or not that write
+// landed, and return terminal either way. Kept as one function so the four
+// branches cannot drift -- the ledger key shape ("ledger:blocked:<reason>:
+// <seg>") and the order (ledger first, batch record second, return last) are
+// each asserted by tests/fix_scope_gate.test.py.
+async function haltSegmentOnFixScope(seg, round, reason, note) {
+  const rec = await recordLedgerCall(
+    seg,
+    { status: "blocked", reason: reason, note: note },
+    "ledger:blocked:" + reason + ":" + seg,
+  );
+  haltBatchOnFixScope(seg, reason, rec.ok);
+  if (!rec.ok) return { terminal: true, value: rec.failResult };
+  return { terminal: true, value: { seg: seg, converged: false, reason: reason, rounds: round } };
+}
+
+// #607 -- one fix-scope audit call. Returns the relayed object, or null when
+// the CALL itself failed (agent death / output-token ceiling / classifier
+// block) -- which is inconclusive and never a pass, so runRound retries once
+// and then treats a second failure as terminal rather than proceeding on an
+// unverified surface.
+async function callFixScopeAudit(seg, round, isRetry) {
+  const label = "fix-scope:" + seg + ":r" + round + (isRetry ? ":retry" : "");
+  return await agent(fixScopeAuditPrompt(seg), {
+    effort: "low", phase: "ReviewFix", label: label, schema: FIX_SCOPE_SCHEMA,
+  });
+}
+
 // #131 facet A -- see draftProbePrompt's own comment above for the full
 // rationale. Label frozen as "draft-probe:" + seg (CONTRACT §4). Returns
 // true (draft present and valid), false (the probe genuinely ran and
@@ -1778,6 +1925,82 @@ async function runRound(seg, round, isFinal) {
   }
 
   const fx = await callFix(seg, round, rev);
+
+  // #607 -- the fix-scope audit, placed HERE on purpose: after the fix call
+  // returns and BEFORE `fx` is inspected at all. Putting it after the
+  // falsy/DRAFT_MISSING branch below would let a turn mutate the durable
+  // copies and then return falsy (or mention the sentinel) to exit through
+  // that branch unaudited, and the next batch would read the changed tree
+  // as simply how things are. Every path out of a dispatched fix call now
+  // passes through this check first.
+  //
+  // The mandatory FINAL round never reaches here -- `isFinal` returns above,
+  // before callFix -- which is correct: no fix is dispatched on that round,
+  // so there is nothing to audit.
+  let scope = await callFixScopeAudit(seg, round, false);
+  if (!scope) scope = await callFixScopeAudit(seg, round, true);
+  if (!scope) {
+    // Two failed relays. This is inconclusive, NOT a detected violation --
+    // and deliberately NOT routed the recoverable way the sibling
+    // fix-call-failed path takes. Leaving the segment in_progress would let
+    // the next batch proceed over exactly the surface this gate could not
+    // verify, which is the one outcome a safety check must not produce.
+    //
+    // The price is stated rather than hidden: terminalizing forfeits the
+    // --from-stalled route (which admits an in_progress, ever-converged
+    // segment with a stale review and never re-translates), so clearing this
+    // costs that segment a re-translation via
+    // --only-segs plus --allow-retranslate-converged. Two consecutive
+    // failures of a low-effort mechanical relay are far more likely infra
+    // flakiness than tampering; one segment's re-translation is the price of
+    // not guessing which.
+    return await haltSegmentOnFixScope(seg, round, "fix-scope-unverified",
+      "the fix-scope audit relay failed twice; the durable root's plugin-installed copies could not be verified after this fix turn");
+  }
+  // A clean verdict must also SHOW that it compared something. `ok` alone is
+  // the classic false GREEN: a walk that covered nothing prints exactly like
+  // a walk that covered everything, and the relay is a model turn that could
+  // return a bare {ok:true}. The script reports both the number it checked
+  // and the number it was supposed to check, and they must agree and be
+  // non-zero. This does NOT stop a relay that fabricates BOTH numbers -- that
+  // residual is disclosed in SKILL.md rather than papered over with a check
+  // that cannot see it.
+  const scopeCountSound = Number.isInteger(scope.n_expected) && scope.n_expected > 0 &&
+    scope.n_checked === scope.n_expected;
+  if (scope.ok === true && !scopeCountSound) {
+    return await haltSegmentOnFixScope(seg, round, "fix-scope-unverified",
+      "the fix-scope audit reported a clean verdict whose coverage count is missing, zero, or inconsistent (n_checked=" +
+      String(scope.n_checked) + ", n_expected=" + String(scope.n_expected) +
+      ") -- a pass that compared nothing is not a pass");
+  }
+  // The checker's own error line ({ok:false, verdict:"error"}) means it could
+  // not perform the comparison -- a missing durable root, an unimportable
+  // plugin bundle declaration. That is the same epistemic state as a failed
+  // relay, not a detected divergence, and mislabelling it "violation" would
+  // send the operator looking for a tampered file that does not exist.
+  if (scope.ok !== true && scope.verdict === "error") {
+    return await haltSegmentOnFixScope(seg, round, "fix-scope-unverified",
+      "the fix-scope checker could not run: " + String(scope.error || "(no message relayed)"));
+  }
+  if (scope.ok !== true) {
+    // A durable copy no longer matches the plugin it was installed from.
+    // The note carries FILENAMES only, never file contents: this record is
+    // read by an operator and by select_segments.py, and a ledger is not
+    // where a possibly-tampered file's bytes belong.
+    const detail = [
+      ["differing", scope.differing], ["missing", scope.missing],
+      ["irregular", scope.irregular], ["extra", scope.extra],
+      ["orphaned", scope.orphaned], ["degenerate", scope.degenerate],
+      ["marker", scope.marker_mismatch], ["unreadable", scope.unreadable],
+    ].filter((pair) => Array.isArray(pair[1]) && pair[1].length > 0)
+      .map((pair) => pair[0] + ": " + pair[1].join(", "))
+      .join("; ");
+    return await haltSegmentOnFixScope(seg, round, "fix-scope-violation",
+      "durable plugin-installed copies diverge from the plugin install tree after this fix turn -- " +
+      (detail || "no detail reported") +
+      ". This is not by itself proof of tampering: a plugin upgraded mid-project gives the same signal. " +
+      "Re-run Step 0a's copy pass from the plugin path, then re-run this segment.");
+  }
   // Line-oriented match via sentinelVerdict (#308) against the lone failure
   // sentinel (okSentinel is null -- there is no success sentinel to require
   // as the final line here, only a failure sentinel to scan for on any
@@ -1968,6 +2191,7 @@ async function translateStage(seg) {
   return { disp: parseDisp(raw, seg) };
 }
 
+
 // ---------------------------------------------------------------------------
 // batch_agent_cap preflight -- see references/orchestration-and-batching.md's
 // "batch_agent_cap" section for the full derivation. This estimator is new
@@ -1981,23 +2205,35 @@ async function translateStage(seg) {
 // + 1 translate wait                      -> WAIT_CALLS
 // + MAXFIX normal rounds, each = a review point's 6-call worst case
 //   (of which ONE is the review wait -> WAIT_CALLS) + 1 fix call
-//                                          -> MAXFIX * (5 + WAIT_CALLS + 1)
-// + 1 mandatory final review point (6 calls, no fix dispatched)
-//                                          -> 5 + WAIT_CALLS
+//   + #607's fix-scope audit, which is TWO calls on a CONTINUING round, not
+//   one: the round survives a failed first relay plus a successful retry,
+//   and only a SECOND failure ends the segment. Budgeting one here would
+//   under-count exactly the round that keeps going.
+//                                          -> MAXFIX * (5 + WAIT_CALLS + 1 + 2)
+// + 1 mandatory final review point (6 calls, no fix dispatched, so no audit
+//   -- isFinal returns before callFix)     -> 5 + WAIT_CALLS
 // + 1 terminal ledger write
-// = 2 + WAIT_CALLS + MAXFIX*(6 + WAIT_CALLS) + 5 + WAIT_CALLS + 1
-// = 8 + 2*WAIT_CALLS + MAXFIX*(6 + WAIT_CALLS).
+// = 2 + WAIT_CALLS + MAXFIX*(8 + WAIT_CALLS) + 5 + WAIT_CALLS + 1
+// = 8 + 2*WAIT_CALLS + MAXFIX*(8 + WAIT_CALLS).
 // Batch-level: 1 (the final merge-ledger completeness check; there is no
-// batch pre-clean call).
+// batch pre-clean call, and #607's audit needs no batch-level baseline call
+// because it compares against the plugin tree rather than against a
+// snapshot).
 //
-// PROVABLY A GENERALISATION, not a rewrite: substitute WAIT_CALLS = 1 and this
-// reduces to 8 + 2 + MAXFIX*7 = 10 + 7*MAXFIX, the pre-#348 formula verbatim.
+// NO LONGER a pure generalisation of the pre-#348 formula: at WAIT_CALLS = 1
+// this now reduces to 8 + 2 + MAXFIX*9 = 10 + 9*MAXFIX, not the pre-#348
+// 10 + 7*MAXFIX. #607 added two calls to every continuing fix round, and the
+// old identity is stated here as BROKEN rather than quietly dropped, because
+// tests/batch_size_estimator.test.py pinned it and had to be updated with
+// this release.
 //
 // OPERATIONAL CONSEQUENCE, stated rather than hidden: at WAIT_CALLS = 9 and
-// MAXFIX = 4 a segment budgets 86 calls, up from 38. At the shipped
-// engine.batch_agent_cap: 3500 a normal batch therefore drops from 92 segments
-// to 40 -- both re-derived here rather than quoted: 1 + 92*38 = 3497 and
-// 1 + 40*86 = 3441, with 93 and 41 the first values to exceed the cap.
+// MAXFIX = 4 a segment budgets 94 calls (86 before #607). Every figure below
+// is re-derived from the formula on this line, never carried forward: at the
+// shipped engine.batch_agent_cap: 10000 a batch admits 106 segments
+// (1 + 106*94 = 9965; 107 would need 10059), down from 116 at 86 calls
+// (1 + 116*86 = 9977). At the pre-#409-step-2 cap of 3500 it admits 37
+// (1 + 37*94 = 3479; 38 would need 3573), down from 40 (1 + 40*86 = 3441).
 // This said "~78 segments" until round 5. That number is a batch SIZE, not a
 // ceiling: it is the ~78-segment repro in
 // references/orchestration-and-batching.md's note on 1.3.5 raising this cap
@@ -2015,7 +2251,8 @@ async function translateStage(seg) {
 // formula already sizes against (a full MAXFIX rounds then the final
 // review), so the ceiling this preflight enforces stays sound.
 // ---------------------------------------------------------------------------
-const estimatedCalls = 1 + SEGS.length * (8 + 2 * WAIT_CALLS + MAXFIX * (6 + WAIT_CALLS));
+
+const estimatedCalls = 1 + SEGS.length * (8 + 2 * WAIT_CALLS + MAXFIX * (8 + WAIT_CALLS));
 if (estimatedCalls > BATCH_AGENT_CAP) {
   log(
     "Batch too large: estimatedCalls=" + estimatedCalls +
@@ -2023,6 +2260,43 @@ if (estimatedCalls > BATCH_AGENT_CAP) {
     " for " + SEGS.length + " segment(s) at max_fix_rounds=" + MAXFIX + "."
   );
   return { converged: [], failed: [], reason: "batch-too-large", estimatedCalls: estimatedCalls, cap: BATCH_AGENT_CAP };
+}
+
+// Placed HERE, below the batch_agent_cap preflight, on purpose -- do not
+// hoist it back up to the token declaration. Several sibling test files probe
+// this template by slicing it at the estimator declaration and loading the
+// HEAD half under node to call one function (fixPrompt, reviewPrompt)
+// directly; a top-level log() and return ABOVE that slice point execute
+// during the load and break every such probe. Nothing dispatches between the
+// declaration and here, so this is still the first thing that happens to a
+// batch. Keep the slice marker's own literal text out of this comment, too:
+// the probes partition on its FIRST occurrence.
+// ---------------------------------------------------------------------------
+// #607 fix-scope preflight -- MUST run before pipeline(), and refuses rather
+// than degrading. Every dispatched fix turn is audited by
+// fix_scope_audit.py, which lives ONLY in the plugin install tree (it is one
+// of SKILL.md's never-copied scripts, for the same reason
+// validate_extraction.py is: a checker inside the tree it audits can be
+// rewritten by the party being checked). With PLUGIN_ROOT empty there is no
+// trusted copy to run and no weaker fallback worth taking -- running the
+// check from an auditable durable copy would report clean on exactly the
+// tampering it exists to find. So the batch does not start.
+//
+// This IS a behaviour change: the PLUGIN_ROOT token contract above used to
+// call the empty value a neutral "redirect opt-out". SKILL.md's #412
+// paragraph already said otherwise in prose ("Omitting this substitution is
+// not a neutral default ... Always substitute it"); this makes the template
+// agree with it. Scope is exactly this template -- segment_dispatch_driver.py
+// keeps its documented self-anchored mode, and a driver-mediated fix turn is
+// therefore UNAUDITED (see SKILL.md's #607 note).
+// ---------------------------------------------------------------------------
+if (PLUGIN_ROOT === "") {
+  log(
+    "Refusing to start: the plugin-root token was not substituted, so the " +
+    "#607 fix-scope audit has no trusted copy to run. Re-instantiate this " +
+    "workflow with the plugin root substituted."
+  );
+  return { converged: [], failed: [], reason: "fix-scope-plugin-root-missing" };
 }
 
 // ---------------------------------------------------------------------------
@@ -2123,6 +2397,18 @@ if (!ledgerMergeSucceeded(mergeResult)) {
   return {
     converged: converged, failed: failed,
     batchComplete: false, reason: "ledger-merge-failed", detail: detail,
+    fixScopeHalts: fixScopeHalts,
+  };
+}
+
+// #607 -- a batch in which any fix-scope halt fired is NOT batchComplete,
+// whatever the ledger says. This is the outcome that does not depend on the
+// durable tree the halt just called into question.
+if (fixScopeHalts.length > 0) {
+  return {
+    converged: converged, failed: failed, batchComplete: false,
+    reason: "fix-scope-halt", fixScopeHalts: fixScopeHalts,
+    ledgerPath: mergeResult.ledger_path, staleSegments: mergeResult.stale_segments,
   };
 }
 

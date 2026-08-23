@@ -389,10 +389,10 @@ def test_skill_no_longer_excludes_resolve_codex_companion_from_the_copy_pass():
     # correction prose, further down in that same paren) -- this bounds
     # just the backtick-listed exclusion names themselves, ending at the
     # em dash that starts the "N files, EACH excluded..." lead-in.
-    list_end = flat.find("— three files", start)
+    list_end = flat.find("— four files", start)
     assert list_end != -1, (
         "could not locate the end of Step 0a's exclusion LIST (the "
-        "'— three files' lead-in) -- has the wording changed?"
+        "'— four files' lead-in) -- has the wording changed?"
     )
     exclusion_list_span = flat[start:list_end]
     assert "resolve_codex_companion.py" not in exclusion_list_span, (

@@ -509,7 +509,11 @@ def instantiate_template(run_id: str) -> str:
     text = text.replace("{{CODEX_COMPANION_PATH_JSON}}", json.dumps(FIXTURE_COMPANION_PATH))
     text = text.replace("{{EFFORT}}", FIXTURE_EFFORT)
     text = text.replace("{{MODEL}}", "")
-    text = text.replace("{{PLUGIN_ROOT}}", json.dumps(""))
+    # #607 -- a non-empty plugin root is now REQUIRED: the fix-scope audit
+    # runs only from the plugin install tree, so the W5 template refuses to
+    # start without one. This fixture used to substitute the empty value as
+    # the documented "redirect opt-out"; that opt-out no longer exists.
+    text = text.replace("{{PLUGIN_ROOT}}", json.dumps("/fixture/plugin/literary-translator"))
     assert "{{" not in text, "fixture instantiation left an unresolved token"
     return text
 

@@ -664,11 +664,17 @@ then-current `1 + N*38`-at-`max_fix_rounds:4` formula made refuse any mass batch
 over 26 segments; 3500 admitted the issue's ~78-segment repro,
 `1 + 78*38 = 2965`, with headroom. **1.16.1 (#348) more than doubled the
 per-segment cost:** a WAIT is now up to 9 calls rather than 1, so the formula
-below yields `1 + N*86` at `max_fix_rounds:4`, and the SAME 3500 cap now admits
+below yielded `1 + N*86` at `max_fix_rounds:4`, and the SAME 3500 cap admitted
 at most **40 segments** (`1 + 40*86 = 3441`; 41 segments would need 3527 and the
-run refuses to start). A 40-segment book batch therefore now sits just under the
+run refuses to start). A 40-segment book batch therefore sat just under that
 ceiling, where before #348 the same batch carried roughly 2000 calls of margin
-(`1 + 40*38 = 1521`). Whether to raise the cap for a given project is the
+(`1 + 40*38 = 1521`). **1.68.0 (#607) added two more calls to every continuing
+fix round** — the fix-scope audit and the one retry a continuing round may
+spend on it — so the per-segment term is now **94**, and the figures above are
+history rather than current arithmetic. At 94 the same 3500 cap admits **37**
+(`1 + 37*94 = 3479`; 38 would need 3573), and the cap actually shipped today,
+`10000`, admits **106** (`1 + 106*94 = 9965`; 107 would need 10059), down from
+116 at 86 calls. Whether to raise the cap for a given project is the
 operator's call, not this plugin's. **This estimator is new plugin hardening, not
 itself source-proven** — the real reference script has no such check
 anywhere; it simply pipelines whatever `SEGS` it's given. Treat it with the
@@ -708,8 +714,10 @@ it.
   reached:** 1 `in_progress` ledger write + 1 translate DISPATCH + 1
   translate WAIT = **`2 + WAIT_CALLS` fixed calls** (3 before #348, 11 now).
 - **A NORMAL round** (one that neither converges nor terminates the loop):
-  one review point (`5 + WAIT_CALLS`) + one fix call (1) =
-  **`6 + WAIT_CALLS` calls**.
+  one review point (`5 + WAIT_CALLS`) + one fix call (1) + #607's fix-scope
+  audit (up to 2 — a round that CONTINUES may spend a failed first relay and
+  its successful retry) = **`8 + WAIT_CALLS` calls** (`6 + WAIT_CALLS` before
+  #607).
 - **The final confirming review** (always runs, even after the round cap):
   one review point = **`5 + WAIT_CALLS` calls**, no fix call attached to it.
 - **+1 terminal ledger write**, whichever terminal status fires
@@ -726,17 +734,23 @@ further and does not change which branch is binding):
 
 ```
 perSegment = (2 + WAIT_CALLS)                    (fixed)
-           + maxFixRounds * (6 + WAIT_CALLS)     (normal rounds)
-           + (5 + WAIT_CALLS)                    (final review)
+           + maxFixRounds * (8 + WAIT_CALLS)     (normal rounds)
+           + (5 + WAIT_CALLS)                    (final review, no fix and
+                                                  therefore no audit)
            + 1                                   (terminal ledger)
-           = 8 + 2*WAIT_CALLS + maxFixRounds * (6 + WAIT_CALLS)
-           = 86 at the shipped WAIT_CALLS = 9, maxFixRounds = 4
-             (it was 10 + 7*maxFixRounds = 38 before #348)
+           = 8 + 2*WAIT_CALLS + maxFixRounds * (8 + WAIT_CALLS)
+           = 94 at the shipped WAIT_CALLS = 9, maxFixRounds = 4
+             (86 before #607; 10 + 7*maxFixRounds = 38 before #348)
+
+  The normal-round term is 8, not 6: 5 review-point calls + 1 fix + TWO
+  fix-scope audit calls. Two, because a round that CONTINUES may spend a
+  failed first relay and its successful retry; budgeting one would be
+  exceeded by an ordinary recovered round.
 ```
 
 ```
-estimatedCalls = 1 + SEGS.length * (8 + 2*WAIT_CALLS + maxFixRounds * (6 + WAIT_CALLS))
-               = 1 + SEGS.length * 86  at WAIT_CALLS = 9, max_fix_rounds: 4
+estimatedCalls = 1 + SEGS.length * (8 + 2*WAIT_CALLS + maxFixRounds * (8 + WAIT_CALLS))
+               = 1 + SEGS.length * 94  at WAIT_CALLS = 9, max_fix_rounds: 4
 ```
 
 The leading `+1` is the one mandatory, **batch-level** (not per-segment)
