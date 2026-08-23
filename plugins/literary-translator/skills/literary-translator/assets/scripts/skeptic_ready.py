@@ -311,9 +311,11 @@ except ImportError as exc:
 class SkepticReadyError(Exception):
     """Raised for any failure that should surface as a FAILURE result --
     mirrors ``canon_validate.py``'s own ``CanonValidationError``. ``offending``,
-    when not None, is folded into the failure payload verbatim (one string
-    per offending item), so a caller never has to re-derive that from a bare
-    message."""
+    when not None, is folded into the failure payload as one string per
+    offending item, so a caller never has to re-derive that from a bare
+    message -- BOUNDED, not verbatim (#360): a large failure reports the first
+    ``_MAX_LISTED_MISSING`` items, each length-capped, plus one line naming how
+    many were omitted. It never silently reports a smaller problem."""
 
     # Total ceiling for one failure payload's message. Generous: every
     # legitimate diagnostic in this file is far under it. `--merge-fragments`
@@ -1404,8 +1406,12 @@ def _labelled_sides(missing, extra) -> list:
     shown += [f"unexpected: {aid}" for aid in extra[:cap]]
     dropped = max(0, len(missing) - cap) + max(0, len(extra) - cap)
     if dropped:
+        # "showing N", never "showing the FIRST N": the entries kept are a
+        # prefix of each SIDE, not of the concatenation, so a 40-and-1
+        # discrepancy shows missing 0-2 and unexpected 0 -- item 3 of the
+        # concatenation is a missing id that was dropped.
         shown.append(
-            f"... and {dropped} more (showing the first {len(shown)} "
+            f"... and {dropped} more (showing {len(shown)} "
             f"of {len(missing) + len(extra)})"
         )
     return shown

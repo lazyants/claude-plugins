@@ -2664,8 +2664,18 @@ def test_error_message_is_bounded_when_a_fragment_field_is_oversized(tmp_path):
         sr.run_merge_fragments(run_dir, tmp_path / "merged.json")
 
     message = str(excinfo.value)
+    # An INDEPENDENT ceiling, not one derived from MAX_MESSAGE_CHARS: a bound
+    # expressed only in terms of the constant it guards stays green when the
+    # constant itself regresses (raise it to 199 999 and a 200 000-char run_id
+    # is still "truncated", in a 200 KB payload). The prompt-volume claim this
+    # release makes is about BYTES on stdout, so that is what is pinned.
+    payload = json.dumps({"success": False, "error": message}, ensure_ascii=False)
+    assert len(payload.encode("utf-8")) < 16000, (
+        f"the serialized payload is {len(payload.encode('utf-8'))} B; the message must be "
+        "bounded by a constant, not by the fragment's own run_id"
+    )
     assert len(message) <= sr.SkepticReadyError.MAX_MESSAGE_CHARS + 64, (
-        f"message of {len(message)} chars is still a function of the fragment's own run_id"
+        f"message of {len(message)} chars exceeds its own declared ceiling"
     )
     assert "[truncated," in message, "a truncated message must say so, and say how much was cut"
     assert oversized not in message
