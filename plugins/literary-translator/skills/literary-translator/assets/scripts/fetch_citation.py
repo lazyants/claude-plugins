@@ -58,8 +58,9 @@ THE CHECKS, and the failure each one closes.
 5. Redirects are followed MANUALLY, and every hop re-runs checks 1-4. A public
    URL that 302s to 169.254.169.254 is the standard bypass, and it defeats any
    design that validates only the URL it was handed.
-6. Caps on time, bytes and content type. A boundary that can be held open
-   forever is a denial-of-service surface of its own.
+6. Caps on time, bytes per item AND bytes per batch, and content type. A
+   boundary that can be held open forever is a denial-of-service surface of
+   its own.
 
 OUTPUT CONTRACT (consumed by the prepare/judge split -- do not change casually).
 
@@ -146,6 +147,68 @@ TOTAL_TIMEOUT_SEC = 30.0
 # call is an EVIDENCE_FAILED that spends a retry, and exhausting the retry ladder
 # merges zero batches.
 BATCH_TIMEOUT_SEC = 420.0
+
+# BATCH-WIDE ceiling on the total bytes WRITTEN as evidence, across every item
+# in the batch -- and it is an ACTUAL ceiling: the total written in one batch
+# is always STRICTLY LESS than this number. (An earlier version of this
+# constant named a ceiling the guard did not enforce: the guard admitted an
+# item whenever spent_bytes had not yet REACHED this same constant, so the
+# admitted item's own write could land past it by up to 3 * MAX_BYTES. A
+# reviewer read that gap as the name promising something the code did not
+# keep, and was right -- see "HOW THE CEILING HOLDS EXACTLY" below for the fix.)
+#
+# It is a FIXED CATASTROPHE LIMIT and carries NO admissibility guarantee --
+# that sentence is the whole derivation and it is deliberate. `--batch-size`
+# has no ceiling, and a partner closure (see glossary_batch_plan.py's
+# build_partner_adjacency/closure) is appended to a batch WHOLE once its
+# length check has already passed, so the number of sources in one batch is
+# unbounded by construction. No fixed constant can therefore promise "never
+# refuses a legitimate batch" -- only two designs could, and both are worse:
+# a budget that SCALES with the snapshot's own item count stops being a bound
+# at all (a hostile 400-item snapshot buys itself 400 MB, and the snapshot's
+# length is downstream of LLM output over uncontrolled source text); no
+# budget is the defect this constant exists to close.
+#
+# HOW THE CEILING HOLDS EXACTLY: run_batch does not admit an item once
+# spent_bytes reaches BATCH_MAX_TOTAL_BYTES - 3 * MAX_BYTES (the ADMIT
+# THRESHOLD -- derived where it is used, not a second module constant, so a
+# test that monkeypatches this constant alone still exercises the real
+# relationship). The last item admitted therefore starts BELOW that
+# threshold and can write at most 3 * MAX_BYTES (one item's worst case: a
+# body that is entirely invalid UTF-8, which the decode/re-encode round trip
+# triples -- see the write site's own comment). So the running total after
+# it is strictly below (BATCH_MAX_TOTAL_BYTES - 3 * MAX_BYTES) +
+# 3 * MAX_BYTES == BATCH_MAX_TOTAL_BYTES: the one-item overshoot now lands ON
+# the ceiling instead of past it. The threshold is deliberately NOT
+# "spent + MAX_BYTES > ceiling" checked per item: that phrasing refuses items
+# that would in fact have fit whenever the CURRENT item is not the worst
+# case, and a false refusal is the expensive error here (it costs a retry and
+# can exhaust the ladder -- see below) while the overshoot it would be
+# guarding against is already impossible once the threshold is set
+# 3 * MAX_BYTES below the ceiling.
+#
+# Sized generously against the NOMINAL batch instead of against a maximum
+# that does not exist: 1 MB of written evidence per source across
+# glossary_batch_plan.DEFAULT_BATCH_SIZE = 40 (half MAX_BYTES, comfortably
+# above a typical reference page) sets the ADMIT THRESHOLD at 40 MB, so the
+# ceiling is threshold + 3 * MAX_BYTES = 46 MB. A batch larger than the
+# threshold WILL have its tail refused, and that is accepted rather than
+# designed away.
+#
+# And what the soft-fail buys there is FAIL-SAFE REPORTING, not recovery.
+# run_batch still writes index.json and exits 0, the refused item is recorded,
+# and the judge is told by name that the refusal is a fact about this run --
+# but nothing SHRINKS the batch afterwards. Every retry calls
+# batchDispatchPrompt(batch, attempt, rejectionReason) with the SAME `batch`
+# object and serializes the same batch.candidates, so a refusal can reproduce
+# through all MAX_CITATION_RETRIES + 1 attempts and return
+# citation-review-exhausted, and because the merge is all-or-nothing, one
+# exhausted batch stops the whole pass. That is the exact cost
+# refused:batch-deadline has carried since 1.16.1 against the same unbounded
+# batch size -- this constant adds a second way to reach it, and this comment
+# says so rather than calling the soft-fail a save.
+BATCH_MAX_TOTAL_BYTES = 46_000_000
+
 CONNECT_TIMEOUT_SEC = 10.0
 EVIDENCE_PREFIX = "citation-"
 
@@ -720,12 +783,13 @@ def _past_deadline(deadline: float) -> bool:
     measured: 3 of 4 trickle phases came back as network-error:BrokenPipeError,
     i.e. our own watchdog reported as the remote host misbehaving.
 
-    That mattered beyond tidiness. The judge prompt names exactly two reasons as
-    facts about THIS RUN rather than about the citation -- batch-deadline and
-    read-timeout -- so a mislabelled timeout is read as a citation defect, and
-    citations are overwhelmingly HTTPS. The cause is decided by the clock, not by
-    which exception the shutdown happened to produce: past the deadline, WE are
-    the cause, whatever the stdlib called it.
+    That mattered beyond tidiness. The judge prompt names facts about THIS RUN
+    rather than about the citation -- batch-deadline, read-timeout,
+    total-timeout and batch-byte-budget -- so a mislabelled timeout is read as
+    a citation defect, and citations are overwhelmingly HTTPS. The cause is
+    decided by the clock, not by which exception the shutdown happened to
+    produce: past the deadline, WE are the cause, whatever the stdlib called
+    it.
     """
     return time.monotonic() > deadline
 
@@ -923,8 +987,8 @@ def _fetch_hop(url, current, chain, hop, deadline, allowed_types) -> dict:
     # order: a hop entered past the deadline returned `total-timeout` without
     # ever running validate_url, so an attacker who burns the budget on hop 0
     # and then answers `302 Location: http://127.0.0.1:6379/` gets the loopback
-    # attempt recorded as a run fact -- one of the three reasons the judge is
-    # explicitly told NOT to read as a defect in the source. The gate did not
+    # attempt recorded as a run fact -- one of the run-fact reasons the judge
+    # is explicitly told NOT to read as a defect in the source. The gate did not
     # flip (any refused:* fails the judge's first check either way), but the
     # evidence named our clock instead of their redirect.
     #
@@ -943,7 +1007,7 @@ def _fetch_hop(url, current, chain, hop, deadline, allowed_types) -> dict:
         # round, which that check's own comment predicted ("resolve_and_pin
         # takes no deadline at all"). Measured: a resolver overrunning a 0.5 s
         # budget by 0.7 s recorded refused:dns-failure:-3, which is not one of
-        # the judge's three run-fact reasons, so our own timeout reads as "this
+        # the judge's run-fact reasons, so our own timeout reads as "this
         # citation's host does not resolve".
         #
         # ONLY the resolution-timing tokens are re-attributed, and the closed
@@ -960,8 +1024,8 @@ def _fetch_hop(url, current, chain, hop, deadline, allowed_types) -> dict:
         # -- and resolve_and_pin takes no deadline at all, so a slow resolver
         # burns the budget and then the outcome blames something else. Same
         # argument as the four handlers inside: past the deadline WE are the
-        # cause, and only the three run-fact reasons are ones the judge is told
-        # not to read as a defect in the citation.
+        # cause, and only the run-fact reasons are ones the judge is told not
+        # to read as a defect in the citation.
         if _past_deadline(deadline):
             raise _refuse("read-timeout")
         raise _refuse(f"internal-error:{type(exc).__name__}")
@@ -1201,6 +1265,15 @@ def run_batch(batch_path: Path, out_dir: Path, *,
     # which the judge already knows how to treat, and the script still prints its
     # metadata line and exits cleanly.
     batch_deadline = time.monotonic() + BATCH_TIMEOUT_SEC
+    # Companion budget, spent in BYTES rather than seconds. Incremented only
+    # at the single write site below; nothing else touches it.
+    spent_bytes = 0
+    # ADMIT THRESHOLD, not the ceiling itself -- derived here rather than kept
+    # as a second module constant, so the relationship holds even for a test
+    # that monkeypatches BATCH_MAX_TOTAL_BYTES alone. See that constant's own
+    # comment ("HOW THE CEILING HOLDS EXACTLY") for why the guard below checks
+    # against THIS threshold and not against BATCH_MAX_TOTAL_BYTES directly.
+    admit_threshold = BATCH_MAX_TOTAL_BYTES - 3 * MAX_BYTES
 
     for i, item, src in sources:
         # The entry dict is built INSIDE a guard, not before one. It used to sit
@@ -1229,6 +1302,31 @@ def run_batch(batch_path: Path, out_dir: Path, *,
             continue
         if time.monotonic() > batch_deadline:
             entry["outcome"] = "refused:batch-deadline"
+            counts["refused"] += 1
+            index.append(entry)
+            continue
+        # Same soft-fail shape as the deadline check above, one budget later:
+        # the item is refused, recorded, and the run continues rather than
+        # dying mid-write. Checked against admit_threshold, NOT against
+        # BATCH_MAX_TOTAL_BYTES directly -- THE BOUND THIS BUYS, stated once,
+        # here, where it is enforced: the last item admitted starts BELOW
+        # admit_threshold and can write at most 3 * MAX_BYTES (one item's
+        # worst case; the clamp applies to RAW bytes before the replacement
+        # decode, so that is the ceiling on a single write), so the running
+        # total after it is strictly below
+        # admit_threshold + 3 * MAX_BYTES == BATCH_MAX_TOTAL_BYTES. The
+        # ceiling therefore holds EXACTLY, for any batch size N -- against a
+        # pre-fix N * 3 * MAX_BYTES that grew without bound in N. Checking
+        # "spent + MAX_BYTES > BATCH_MAX_TOTAL_BYTES" per item instead would
+        # refuse items that would in fact have fit whenever the current item
+        # is not the worst case -- see BATCH_MAX_TOTAL_BYTES's own comment for
+        # why a false refusal is the expensive error here, and for why no
+        # fixed number can also promise it never refuses a legitimate batch.
+        # Item 40 can be starved by item 1 exactly as it can under
+        # BATCH_TIMEOUT_SEC -- deliberate, and not a per-item fair share this
+        # ticket buys.
+        if spent_bytes >= admit_threshold:
+            entry["outcome"] = "refused:batch-byte-budget"
             counts["refused"] += 1
             index.append(entry)
             continue
@@ -1262,13 +1360,44 @@ def run_batch(batch_path: Path, out_dir: Path, *,
         entry["chain"] = result.get("chain")
         if result["ok"]:
             name = f"{EVIDENCE_PREFIX}{i:03d}.txt"
-            (out_dir / name).write_text(result["body"], encoding="utf-8")
+            # Encode ONCE and spend exactly what gets written -- not
+            # result["bytes"]. result["bytes"] is len(raw) BEFORE
+            # raw.decode("utf-8", errors="replace"), and a run of invalid bytes
+            # can expand on decode: measured, b"\xff" * n decodes to n
+            # replacement characters and re-encodes to exactly 3n bytes (NOT a
+            # universal "every invalid byte becomes its own U+FFFD" -- a
+            # malformed MULTI-byte sequence can collapse several source bytes
+            # into a single U+FFFD instead, which expands less). What the bound
+            # rests on is the worst case, which b"\xff"*n reaches exactly: one
+            # item's written size tops out at 3 * MAX_BYTES, so spending
+            # result["bytes"] would let BATCH_MAX_TOTAL_BYTES of budget write
+            # up to 3x itself on disk. write_bytes (rather than
+            # write_text(..., encoding="utf-8"), which emits identical bytes on
+            # this platform) additionally makes the evidence file byte-exact
+            # rather than newline-translated -- correct for an evidence
+            # artifact.
+            written = result["body"].encode("utf-8")
+            (out_dir / name).write_bytes(written)
+            spent_bytes += len(written)
             entry["evidence_file"] = name
+            # `truncated` keeps exactly the meaning the judge prompt gives it --
+            # the body was cut at the size cap -- because that cap is applied
+            # to RAW bytes before the decode, and this budget does not touch
+            # it. `bytes` is given no meaning by the prompt at all; it is
+            # never surfaced as a file size and nothing instructs the judge to
+            # compare it against one, so a `bytes: 2000000` entry beside a
+            # 6 MB file on disk is possible and misleads nobody.
             entry["bytes"] = result["bytes"]
             entry["truncated"] = result["truncated"]
             entry["content_type"] = result.get("content_type")
             counts["fetched"] += 1
         else:
+            # No spend here: the write above is the only evidence-body write in
+            # the function (run_single writes no files at all). A non-200
+            # returns before _read_bounded runs, and a redirect raises
+            # _Redirect before it, so no body is consumed or written on this
+            # path -- a buffered header read can pull body bytes off the wire,
+            # but none reach _read_bounded or disk.
             counts["http_error"] += 1
         index.append(entry)
 

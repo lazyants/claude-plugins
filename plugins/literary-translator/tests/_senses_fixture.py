@@ -105,6 +105,16 @@ def stage_consumer(root: Path, name: str) -> Path:
 #      Narrowing the scan to exclude string literals would blind the guard to
 #      the real case, so the false positive is escaped here instead.
 #
+#      #361 added a THIRD way into shape 2, worth naming because it is not
+#      "expected output text": a suite may name a consumer as a REAL path
+#      component and still not isolate it, when it only READS that script's
+#      SOURCE TEXT (`read_text()` + `ast.parse`) to recover one module-level
+#      constant. No import, no exec, no copy -- so canon_senses is never
+#      needed and nothing can fail at run time -- yet the path literal is
+#      byte-identical to the isolation shape the scan is looking for. The
+#      distinguishing fact is what the file does with the path, which is
+#      exactly the file-local judgement the scan cannot make.
+#
 # Cost of a category-2 entry, stated plainly: the named file is skipped
 # WHOLESALE, so a genuine unstaged isolation added to it later would not be
 # preemptively flagged. That is the same tradeoff this guard already accepts
@@ -113,6 +123,31 @@ def stage_consumer(root: Path, name: str) -> Path:
 # regression cannot land silently; only preemptive naming is lost.
 # ---------------------------------------------------------------------------
 AUTHORITATIVE_FIXTURE_INVENTORY = (
+    {
+        "file": "fetch_citation.test.py",
+        "category": 2,
+        "note": (
+            "Does not isolate any canon_senses consumer. Its ONE "
+            "spec_from_file_location loads fetch_citation.py itself -- a "
+            "stdlib-only script with no sibling imports at all, and not a "
+            "consumer -- into `fc`, which is how this suite has always "
+            "driven the retrieval boundary. It names glossary_batch_plan.py "
+            "in exactly one place, added by #361: _default_batch_size() "
+            "does read_text() + ast.parse on that script to recover the "
+            "DEFAULT_BATCH_SIZE literal, so that the batch byte budget's "
+            "stated derivation (1 MB of written evidence per source across "
+            "the nominal default batch) cannot go stale in a comment while "
+            "the batch size moves underneath it. The AST read is deliberate "
+            "rather than an import: glossary_batch_plan.py does a bare "
+            "`from canon_senses import ...` at module scope, so importing "
+            "it would need sys.path surgery persisting for the session -- "
+            "the very coupling this guard exists to police. Reading the "
+            "source text needs no canon_senses at all, at parse time or "
+            "run time. Verified 2026-08-23 by grepping every "
+            "shutil.copy*/spec_from_file_location/SourceFileLoader call in "
+            "the file: exactly one, naming fetch_citation.py."
+        ),
+    },
     {
         "file": "select_segments.test.py",
         "category": 2,
