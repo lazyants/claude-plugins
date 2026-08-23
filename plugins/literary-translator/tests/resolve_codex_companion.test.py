@@ -331,17 +331,22 @@ def test_falls_back_cross_profile_when_running_profile_has_none(tmp_path):
     assert "/.claudeB/" in got and "/1.0.10/" in got, got
 
 
-@pytest.mark.parametrize("config_dir", ["", "relative/profile", "$NOPE/.claude"])
-def test_unusable_config_dir_values_skip_the_tier_without_binding(tmp_path, config_dir):
-    """A present-but-empty, relative, or unexpanded value is not an absolute
-    directory, so the profile tier is skipped fail-CLOSED and only the
-    cross-profile tier runs. None of them may crash, and none may bind a match
-    resolved against THIS script's cwd."""
+@pytest.mark.parametrize("config_dir", ["", "   ", "relative/profile", "$NOPE/.claude"])
+def test_unusable_config_dir_values_abort_without_binding(tmp_path, config_dir):
+    """A present-but-empty, whitespace, relative, or unexpanded value is not an
+    absolute directory, so the RUNNING profile cannot be identified -- and that
+    is a validation failure, not an empty tier. Skipping to the cross-profile
+    tier here would silently bind a FOREIGN profile's companion, which is the
+    #287 defect itself; globbing the value against THIS script's cwd would bind
+    a directory the CLI never resolved. So it aborts, names the variable, and
+    prints nothing on stdout for a caller to consume."""
     home = tmp_path / "home"
     make_companion(home, "1.0.10", ".claudeB")
     node = write_fake_node(tmp_path, FAKE_NODE_OK)
-    got = chosen_path(run_resolver_env(tmp_path, node, home, config_dir))
-    assert "/.claudeB/" in got and "/1.0.10/" in got, got
+    proc = run_resolver_env(tmp_path, node, home, config_dir)
+    assert proc.returncode != 0, f"expected an abort, got: {proc.stdout}"
+    assert proc.stdout.strip() == "", proc.stdout
+    assert "CLAUDE_CONFIG_DIR" in proc.stderr, proc.stderr
 
 
 def test_nonexistent_config_dir_falls_back(tmp_path):
@@ -476,7 +481,7 @@ def test_search_glob_override_ignores_the_profile_tier(tmp_path):
 def test_running_profile_dir_absent_falls_back_to_home_dot_claude(monkeypatch, tmp_path):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
-    assert rcc.running_profile_dir() == str(tmp_path / ".claude")
+    assert rcc.running_profile_dir() == (str(tmp_path / ".claude"), None)
 
 
 @pytest.mark.parametrize("raw", ["/tmp/.claude ", "/tmp/.claude2/", "/tmp/a b/.claude"])
@@ -485,16 +490,29 @@ def test_running_profile_dir_uses_a_present_value_verbatim(monkeypatch, raw):
     directory whose name really does end in a space is a directory this must
     still find -- trimming it names a DIFFERENT one."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", raw)
-    assert rcc.running_profile_dir() == raw
+    assert rcc.running_profile_dir() == (raw, None)
 
 
 @pytest.mark.parametrize("raw", ["", "   ", "relative/dir", "~/.claude2"])
 def test_running_profile_dir_rejects_a_non_absolute_value(monkeypatch, raw):
-    """Fail-closed: the tier is skipped rather than globbed against this script's
-    cwd. `~/.claude2` is in this list deliberately -- the CLI does not expand a
-    tilde either, so a quoted literal is not a profile directory."""
+    """Fail-closed: a REASON, never a silently skipped tier. `~/.claude2` is in
+    this list deliberately -- the CLI does not expand a tilde either, so a quoted
+    literal is not a profile directory. The reason has to name the variable, since
+    the operator's only fix is to change or unset it."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", raw)
-    assert rcc.running_profile_dir() is None
+    got, problem = rcc.running_profile_dir()
+    assert got is None
+    assert problem and "CLAUDE_CONFIG_DIR" in problem, problem
+
+
+def test_default_glob_tiers_reports_the_problem_instead_of_dropping_the_tier(monkeypatch):
+    """The regression the abort exists to stop: returning just the cross-profile
+    tier here reads as an ordinary one-tier resolution downstream, and resolve()
+    would then bind a FOREIGN profile's companion with exit 0."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "relative/dir")
+    tiers, problem = rcc.default_glob_tiers()
+    assert tiers is None, tiers
+    assert problem and "CLAUDE_CONFIG_DIR" in problem, problem
 
 
 # Kept at the TRUE END of the file. Mid-file it exits before every definition

@@ -96,15 +96,32 @@ def running_profile_dir():
     divergence from the authority this claims to follow, and each one can name a DIFFERENT
     directory than the session actually runs in -- which is the whole defect class (#287).
 
-    The single guard is fail-CLOSED rather than a guess: a non-ABSOLUTE value returns None,
-    so the profile tier is skipped and only the cross-profile fallback runs. Globbing a
-    relative value would resolve it against THIS script's cwd, which is not the cwd the CLI
-    resolved it against; the one thing it must not do is silently bind something.
+    Returns `(config_dir, problem)`; exactly one of the two is None. A non-ABSOLUTE value
+    is a problem, NOT a skipped tier. Globbing a relative value would resolve it against
+    THIS script's cwd, which is not the cwd the CLI resolved it against -- but skipping the
+    tier and letting the cross-profile fallback answer is no better: it silently binds a
+    FOREIGN profile's companion, which is precisely the defect this preference exists to
+    stop. It is also the fail-fast contract `resolve()` states below: a tier is skipped only
+    when it holds ZERO CANDIDATES, never because validating it failed. So the caller aborts
+    with this reason instead.
     """
     raw = os.environ.get("CLAUDE_CONFIG_DIR")
     if raw is None:
-        raw = os.path.join(os.path.expanduser("~"), ".claude")
-    return raw if os.path.isabs(raw) else None
+        default = os.path.join(os.path.expanduser("~"), ".claude")
+        if not os.path.isabs(default):
+            return None, ("CLAUDE_CONFIG_DIR is unset and the ~/.claude fallback did not "
+                          "expand to an absolute path (%r) -- HOME is unset or relative, "
+                          "so the running Claude config profile cannot be identified"
+                          % default)
+        return default, None
+    if not os.path.isabs(raw):
+        return None, ("CLAUDE_CONFIG_DIR is set to a non-absolute path (%r), so the running "
+                      "Claude config profile cannot be identified. Resolving it against "
+                      "this script's cwd would name a different directory than the CLI "
+                      "resolved it against, and falling back across profiles would bind a "
+                      "FOREIGN profile's companion (#287). Set it to an absolute path, or "
+                      "unset it to use ~/.claude." % raw)
+    return raw, None
 
 
 def _store_glob(config_dir):
@@ -127,14 +144,17 @@ def default_glob_tiers():
     `.claude*` wildcard: profiles no longer share one symlinked plugins store (each owns a
     real, independent `plugins/` directory), so it enumerates several distinct files rather
     than several names for one.
+
+    Returns `(tiers, problem)`; exactly one of the two is None. A profile that cannot be
+    identified is reported, never quietly dropped to the cross-profile tier.
     """
+    running, problem = running_profile_dir()
+    if problem:
+        return None, problem
     home = os.path.expanduser("~")
     cross_profile = [os.path.join(home, ".claude*", "plugins", "cache", "openai-codex",
                                   "**", "codex-companion.mjs")]
-    running = running_profile_dir()
-    if running is None:
-        return [cross_profile]
-    return [[_store_glob(running)], cross_profile]
+    return [[_store_glob(running)], cross_profile], None
 
 
 def _version_key(path):
@@ -249,7 +269,13 @@ def main(argv=None):
     # semantics are byte-identical to before #287 and the profile preference cannot reach
     # it. The suite relies on that -- it drives this script with --search-glob precisely so
     # the real ~/.claude* store is never touched.
-    tiers = [args.search_glob] if args.search_glob else default_glob_tiers()
+    if args.search_glob:
+        tiers, problem = [args.search_glob], None
+    else:
+        tiers, problem = default_glob_tiers()
+    if problem:
+        print("resolve_codex_companion: %s" % problem, file=sys.stderr)
+        return 1
     timeout_sec = args.timeout_sec if args.timeout_sec > 0 else DEFAULT_STATUS_TIMEOUT_SEC
     raw, reason = resolve(args.durable_root, tiers, node=args.node, timeout_sec=timeout_sec)
     if raw is None:
