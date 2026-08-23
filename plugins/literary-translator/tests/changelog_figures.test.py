@@ -192,42 +192,31 @@ def _local_dict_len(filename, funcname, varname):
     raise AssertionError(f"{funcname} is no longer defined in {filename}")
 
 
-# Rewritten for 1.51.0 (#498), per the maintenance contract above. This rotation
-# retired one inherited row, the size of `PLUGIN_BUNDLE_MEMBERS`, which the
-# entry it belonged to quoted -- stated in the past tense about what was
-# retired rather than about what the base holds, because the latter expires on
-# the next rebase and nothing here can catch it (see the sibling citation
-# guard's note for the measured instances). `_files_defining`,
-# `_local_dict_len`, `_tuple_len` and `_test_function_count` are kept unused, as
-# earlier releases kept them, for the next entry that cites their class.
+# Rewritten for 1.55.0 (#512 -- the glossary rule's worked examples stop
+# spelling their answers in one project's target language), per the maintenance
+# contract above. This rotation inherited an empty list and left it empty; it
+# retired nothing, because there was nothing to retire. Phrased in the past
+# tense about what THIS rotation did, per the sibling citation guard's note: a
+# note phrased in the present tense about what the base holds expires on the
+# next rebase and nothing here can catch it.
 #
-# ZERO rows, because 1.52.0 states no figure this file's tokenizer can see. Its
-# actual NUMERALS are of three kinds, and none of them is a measurement: the
-# version and issue numbers, the heading's release date, and one version
-# reference (1.25.0) naming the release whose carve-out this one relies on.
+# Unlike its predecessor -- 1.52.0 (#530), whose entry stated no
+# figure this file's tokenizer could see -- this entry states three real ones.
+# Each was examined, and none can carry an honest derivation:
 #
-# Every real quantity the entry states is spelled out as a WORD, which this
-# file's `_TOKEN` cannot see, so none can be declared as a row here -- a row
-# whose phrase holds no numeral fails this test's own one-numeral-per-phrase
-# check. That set is: the field measurement over the two live books
-# ("sixty-one of ninety-seven" real rounds dispatched a strict subset, and the
-# "thirty-one stale / eleven dispatched / twenty omitted" round behind the
-# issue). An earlier draft of the entry also said "four lines above" of the
-# sibling refusal in segment_dispatch_driver.py; the closing simplifier pass
-# measured it at nine, and the distance was removed rather than corrected --
-# a spatial claim in prose rots on the next edit to the file it describes, and
-# nothing here or in the citations guard can see it.
+#   * "11 characters, 10 distinct" is a census of the PRE-EDIT tree. The point
+#     of the release is that the current tree measures zero, so a derivation
+#     run against it would return 0 and contradict correct prose. A figure
+#     about the base a release moved off is not re-derivable here by
+#     construction, and pinning it to a commit hash hardcodes an answer.
+#   * "177 entries" is a canon count in an operator-owned durable root outside
+#     this repository, which nothing here can reach.
+#   * The entry's remaining numerals are version and issue numbers, not
+#     measurements.
 #
-# The field measurement is the one worth naming rather than implying away: it
-# was computed over `driver_journal.jsonl` records in operator-owned durable
-# roots that are NOT in this repository, so no derivation here could re-check
-# it however it were phrased -- the numerals being spelled out is why it is
-# invisible to this file, not why it is unverifiable. `changelog_citations.test.py`
-# records the same gap from its own side.
-#
-# Declaring any of these would mean hardcoding an answer, which passes every
-# assertion below while proving nothing (`lambda: 4`). This is the accepted
-# residual the docstring above names, not an oversight.
+# `_files_defining`, `_local_dict_len`, `_tuple_len` and `_test_function_count`
+# stay unused, as earlier releases kept them, for the next entry citing their
+# class.
 FIGURES = []
 
 

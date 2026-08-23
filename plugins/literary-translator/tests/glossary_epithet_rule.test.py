@@ -78,6 +78,18 @@ def _assert_fragments_present(window, fragments, *, source_label, clause_label):
     )
 
 
+def _normalized(text):
+    """`text` with every whitespace run collapsed to a single space.
+
+    `_assert_fragments_present` does a plain substring match, so a fragment
+    of more than one word cannot survive this plugin's ~79-column hard wrap
+    -- the newline plus five spaces of list indent land in the middle of it.
+    The pre-existing assertions sidestep that by using single-word
+    fragments; a check that must pin a PHRASE normalizes instead. Applied
+    to the window only, never to the file on disk."""
+    return " ".join(text.split())
+
+
 # ---------------------------------------------------------------------------
 # glossary_TASK.template.md -- the AUTHORITATIVE surface.
 # ---------------------------------------------------------------------------
@@ -132,6 +144,57 @@ def test_task_template_carries_sense_translated_routing_for_epithets():
         window, ["sense_translated", "review_queue"],
         source_label="glossary_TASK.template.md",
         clause_label="sense_translated-vs-review_queue routing for epithets/nicknames",
+    )
+
+
+def test_task_template_examples_stay_referential_not_spelled_forms():
+    """#512: this clause's two worked examples used to spell their ANSWERS
+    in Russian -- "the classical epithet `Sapho` -> `Сафо`", and "never
+    `Скюдери` for `Sapho`". The file is a language-pair-AGNOSTIC template,
+    seeded verbatim to every project at Step 0a and read in full by the
+    codex glossary agent on every batch, so a Hebrew->English or
+    German->Spanish project was handed Cyrillic exemplars modelling the
+    `basis` decision -- the load-bearing field of
+    `canon-entry.schema.json` -- in a target language it is not
+    translating into.
+
+    WHY THIS IS A WORDING CHECK AND NOT A SCRIPT CHECK, stated because the
+    script version was drafted, reviewed twice, and cut both times. No
+    mechanical predicate can tell a target ANSWER from a SOURCE form: both
+    are just letters in prose. A ban on non-Latin letters is therefore
+    wrong in both directions at once. It admits a pair-specific example
+    that happens to be spelled in Latin -- `guéridon` ships in
+    `translate_TASK.template.md` today -- and it REJECTS a legitimate
+    source-side exemplar for a Hebrew, Greek, Arabic or Cyrillic source
+    book, all of which this plugin supports. Narrowing it from the whole
+    templates directory to this window did not save it: clause 1 now
+    invites exactly such an example by discussing vowel-pointing and
+    connector marks, so a maintainer adding `משה לייב` / `משה־לייב` beside
+    that sentence -- the improvement the prose asks for -- would have been
+    failed by a guard that saw only the script.
+
+    So what is pinned is the REFERENTIAL WORDING that replaced the spelled
+    forms: the transliteration case points at the project's own
+    section C-translit rule applied to the epithet's own surface form, and
+    the negative case states the prohibition without an exemplar. Deleting
+    that wording is what re-opens the defect, and this is the same honest
+    DROP-detector every other assertion in this module is -- it proves the
+    referential phrasing is still there, not that no spelled form could
+    ever be added beside it.
+    """
+    window = _normalized(_window_around(TASK_TEXT, ANCHOR))
+    _assert_fragments_present(
+        window,
+        [
+            # the transliteration case points at a RULE, not at an answer
+            "section C-translit rule to the epithet's own surface form",
+            # ... and its example names a surface, not a target form
+            "itself, not the name of the person it refers to",
+            # the negative case states the prohibition with no exemplar
+            "Never assign it the referent's real-name",
+        ],
+        source_label="glossary_TASK.template.md",
+        clause_label="#512 referential phrasing of clause 2's worked examples",
     )
 
 

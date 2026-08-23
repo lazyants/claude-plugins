@@ -129,19 +129,24 @@ canon-batch item:
   `canonical_target_form`. Three rules apply together:
   1. **Orthographic sharing only.** Only true orthographic spelling
      variants of the same surface name (e.g. `Sarrasin` / `Sarrazin`) may
-     ever share one `canonical_target_form`. A nickname and the real name
-     it refers to are not spelling variants of each other, however
+     ever share one `canonical_target_form`. What counts as a spelling
+     variant is whatever THIS source language's own orthography varies
+     by: letter substitution in a Latin-script source, but vowel-pointing
+     or a connector mark in an unpointed one. A nickname and the real
+     name it refers to are not spelling variants of each other, however
      well-known the identity link.
   2. **Resolve on its own merits.** Decide the nickname's own
      `canonical_target_form` under the `basis` rules above -- usually
-     `basis: "transliterated"` (e.g. the classical epithet `Sapho` ->
-     `Сафо`), `basis: "established"` if a genuinely established target
-     form exists for the nickname itself, or `basis: "sense_translated"`
+     `basis: "transliterated"`, applying this project's own section
+     C-translit rule to the epithet's own surface form (e.g. the
+     classical epithet `Sapho` itself, not the name of the person it
+     refers to); `basis: "established"` if a genuinely established target
+     form exists for the nickname itself; or `basis: "sense_translated"`
      when sense clearly carries better than transcription and a clean
      sense-rendering exists (see the `sense_translated` bullet above --
      `established` still wins whenever a citable conventional form
-     exists). Never assign it the referent's real-name form instead (e.g.
-     never `Скюдери` for `Sapho`). When none of `transliterated`,
+     exists). Never assign it the referent's real-name
+     `canonical_target_form` instead. When none of `transliterated`,
      `established`, or `sense_translated` cleanly applies, use
      `disposition: "review_queue"` with a note rather than a fabricated
      basis -- see the nicknames/speaking-names guidance in
