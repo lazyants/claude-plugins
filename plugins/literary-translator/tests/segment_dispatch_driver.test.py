@@ -798,6 +798,97 @@ def test_step1_gate_passes_a_previously_converged_segment_with_the_flag(tmp_path
     assert payload["summary"]["converged"] == ["seg01"], payload
 
 
+def test_lost_sentinel_refuses_a_driver_dispatch_before_any_ledger_write_or_codex_job(tmp_path):
+    """#442, codex item 7: every test in select_segments.test.py drives
+    select_segments.py directly, so all of them prove only that the
+    `lost_sentinels` refusal is COMPUTED -- none proves it actually STOPS a
+    dispatch. segment_dispatch_driver.py runs the selector as its own Step 1
+    and then translates whatever it emits; if that wiring were wrong -- the
+    driver ignoring the selector's non-zero exit, or reaching its per-segment
+    dispatch loop anyway -- every selector test would stay green while the
+    driver silently overwrote a converged segment's finished translation.
+    This test is the one thing that closes that gap.
+
+    Fixture: seg01's MATERIALIZED ledger record says `converged` (a stale
+    cache key makes it dispatch-eligible by default, the same trick
+    test_step1_gate_refuses_a_previously_converged_segment_without_the_flag
+    uses above), but its `.ever_converged` marker is never raised --
+    `mark_ever_converged()` is deliberately NOT called. That is exactly the
+    #442 shape: a durable marker removed or never backfilled out from under a
+    unit the ledger still remembers as finished.
+
+    The three things a wrong wire could get away with, each pinned
+    separately: (1) the run must still refuse (a driver that ignored the
+    selector's exit code would return 0 here); (2) the on-disk ledger
+    fragment for seg01 must be untouched -- read from disk, not inferred from
+    a log line, because a refusal arriving AFTER the driver's own
+    {"status": "in_progress"} write would already have destroyed the second
+    witness select_segments.py's own gate depends on; (3) no codex job may
+    have been launched -- the staged fake codex_job.py appends every argv it
+    receives to test_fixture_argv_log.jsonl, so a non-empty log here would
+    mean a codex job was spent behind a refusal that should have stopped
+    everything upstream of it.
+
+    The second half reuses the SAME root for the flag-authorized run,
+    deliberately: refusing must not have mutated anything, so passing
+    --allow-retranslate-converged against the exact same on-disk state that
+    was just refused is the strongest available proof that the refusal and
+    the authorization are reading identical project state, differing only in
+    the flag.
+
+    RED/GREEN, observed by hand while writing this test (not by editing
+    select_segments.py): with mark_ever_converged(root, "seg01") temporarily
+    added back, the sentinel is PRESENT and the driver still refuses -- but
+    for `previously_converged`, not `lost_sentinels`, so the
+    "backfill_ever_converged.py" assertion below failed (the wrong-reason
+    refusal this test exists to tell apart from the right one), while the
+    fragment/argv-log assertions still passed. Reverting that one line
+    restored the sentinel-absent fixture and turned every assertion green.
+    """
+    root = make_durable_root(tmp_path, profile_yaml=FULL_PROFILE_YAML)
+    stage_phase2_scripts(root)
+    write_manifest(root, ["seg01"])
+    current_key = make_cache_key("current")
+    write_fixture_cache_keys(root, {"seg01": current_key})
+    write_fixture_segpack(root, "seg01")
+    stored = dict(current_key)
+    stored["style_contract_hash"] = "style_contract_hash-OLD"
+    write_fragment(root, "seg01", converged_fragment(stored, "0" * 40))
+    # #442: no mark_ever_converged() call -- the marker is LOST, not present.
+
+    proc = run_driver(root, timeout=60)
+
+    assert proc.returncode == 1, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    payload = parse_stdout(proc)
+    assert payload["success"] is False
+    assert "seg01" in payload["error"], payload["error"]
+    assert "backfill_ever_converged.py" in payload["error"], (
+        f"a lost-sentinel refusal must name the non-destructive remedy, not "
+        f"just refuse; got: {payload['error']}"
+    )
+
+    fragment = json.loads((root / "runs" / "ledger.d" / "seg01.json").read_text(encoding="utf-8"))
+    assert fragment["status"] == "converged", (
+        f"the refusal must land BEFORE any dispatch mutates the ledger -- an "
+        f"in_progress write here would mean the driver already overwrote the "
+        f"very evidence select_segments.py's own gate depends on; got "
+        f"{fragment}"
+    )
+    assert read_argv_log(root) == [], (
+        "no codex job may be launched behind this refusal"
+    )
+
+    # Same root, unmutated by the refusal above: authorizing it now must
+    # succeed against identical on-disk state.
+    proc2 = run_driver(root, "--allow-retranslate-converged", timeout=60)
+
+    assert proc2.returncode == 0, f"stdout={proc2.stdout!r} stderr={proc2.stderr!r}"
+    payload2 = parse_stdout(proc2)
+    assert payload2["success"] is True
+    assert payload2["segs"] == ["seg01"]
+    assert payload2["summary"]["converged"] == ["seg01"], payload2
+
+
 def test_only_segs_bad_id_refused_locally_before_select_segments_ever_runs(tmp_path):
     """A malformed --only-segs id must be refused by THIS script's own
     validate_seg() check, before select_segments.py -- or even the

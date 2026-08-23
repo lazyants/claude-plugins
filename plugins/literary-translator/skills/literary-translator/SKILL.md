@@ -525,14 +525,33 @@ census established nothing read as a healthy project:
   invalidates the descriptor**, but a silent switch that keeps it valid does
   not.
 
-  **The consequence is silent retranslation, not just a wrong report.**
-  `select_segments.py` gates only the segments it finds PRESENT; a marker
-  that has since gone absent leaves that segment eligible, and the refusal
-  that would have protected converged work never fires. Closing what remains
-  needs a protocol honoured by everything that can write into `segments/`,
-  which is outside what this script can impose. Treat a clean run as evidence
-  about the moment it ran, and re-run it immediately before dispatching
-  rather than relying on an earlier result.
+  **What the dispatch gate now does about it, and what it still cannot do
+  (#442).** The consequence used to be silent retranslation outright:
+  `select_segments.py` gated only the segments it found PRESENT, so a marker
+  that had since gone absent left that segment eligible and the refusal that
+  would have protected converged work never fired. It now fires for the case
+  the marker's own writer makes impossible: `ledger_update.py` cannot publish
+  a `converged` ledger record without first writing the marker, so a selected
+  segment whose materialized record says converged/stale while its marker
+  reads ABSENT is refused, reported as `lost_sentinels`, and pointed at
+  `backfill_ever_converged.py --apply` as the non-destructive remedy. The
+  ledger status is a second witness in a different directory, written by a
+  different writer, and one deleted marker no longer removes both.
+
+  **The residual, stated as a state rather than a promise.** That second
+  witness is mutable. A unit whose status has ALSO moved off converged/stale
+  has neither witness left, classifies as `recoverable`, and is still
+  dispatched silently. Two routes reach that state, and one of them needs no
+  earlier re-dispatch at all: convergence raises the marker *before* it
+  commits the ledger fragment, so a run killed between those two steps leaves
+  a finished, reviewed unit at `in_progress` with its marker up — delete the
+  marker after that and nothing remembers. (The other route is an
+  authorized re-dispatch interrupted after the driver's own `in_progress`
+  write.) Closing that needs provenance the one-bit marker does not carry —
+  tracked as #443, with the dispatch-time race tracked separately as #621.
+  Until then: treat a clean run as evidence about the moment it ran, and
+  re-run it immediately before dispatching rather than relying on an earlier
+  result.
 
   **Two earlier drafts of this note were wrong in opposite directions, which
   is why it is worth reading rather than skimming.** The first said the
