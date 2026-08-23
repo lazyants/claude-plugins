@@ -1802,6 +1802,41 @@ LADDER_MAX_BATCHES = {
 }
 
 
+def _ladder_row_needle(ladder: str, per_batch: int, documented_max: int) -> re.Pattern[str]:
+    """The needle that finds ONE ladder's row in a whitespace-collapsed
+    profile.example.yml, matching the table's shipped column order:
+
+        <label>  <before-formula>  <after-formula>  <before-max> -> <max>
+
+    Anchored on the row's own label because the figures alone do not identify a
+    row (#416): "glossary offline" and "skeptic (both)" ship the SAME formula
+    and the SAME max, and 19N+2/5N+2 also occur in that file's prose below the
+    table. `(?!\\S)` rather than `(?!\\d)` -- a max may not merely START with
+    the right digits, or `-> 1999.5` would read as `-> 1999`. Stated at its
+    real width rather than as "no false red": that guard makes the max column
+    a BARE whitespace-delimited number, so a compact annotation on the figure
+    (`-> 1999*`, `-> 1999.`) goes red even though 1999 is still the documented
+    value. That is deliberate and is the cheaper half of the trade -- a suffix
+    allow-list is policy this table has never needed -- and the failure names
+    the row, so an operator who wants the annotation moves it off the column."""
+    return re.compile(
+        rf"{re.escape(ladder)}\s+\S+\s+{re.escape(f'{per_batch}N+2')}"
+        rf"\s+\S+\s+->\s+{documented_max}(?!\S)"
+    )
+
+
+def _ladder_table_row(profile: str, ladder: str) -> str | None:
+    """The one physical line of the ladder table that OPENS with `ladder`'s
+    label -- located rather than hard-coded, so nothing here freezes a table
+    shape the shipped file has since moved past. Returns the raw line (None if
+    no line carries the label); the prose that merely mentions a label further
+    down the file does not open with it."""
+    for line in profile.splitlines():
+        if " ".join(line.split()).startswith(f"# {ladder} "):
+            return line
+    return None
+
+
 @pytest.mark.parametrize("ladder", sorted(LADDER_MAX_BATCHES), ids=sorted(LADDER_MAX_BATCHES))
 def test_the_shipped_cap_still_admits_the_documented_batch_count(ladder):
     """The gates are only as useful as the cap they are checked against, and a
@@ -1825,17 +1860,70 @@ def test_the_shipped_cap_still_admits_the_documented_batch_count(ladder):
         f"profile.example.yml no longer ships batch_agent_cap: {SHIPPED_BATCH_AGENT_CAP}, "
         f"so every max-batch figure in this test is about a cap nobody runs"
     )
-    # Whitespace-collapsed: the profile's table is hard-wrapped prose, and a
-    # line-oriented needle would miss a row that happened to wrap.
+    # Whitespace-collapsed so the needle survives a re-alignment of the table's
+    # columns, which is cosmetic and happens whenever a figure changes width.
     flat = " ".join(profile.split())
-    assert f"{per_batch}N+2" in flat, (
-        f"profile.example.yml's ladder table does not carry {per_batch}N+2 for {ladder}"
+    # The needle has to identify the ROW, not just the figures (#416): a bare
+    # `"5N+2" in flat` / `"-> 1999" in flat` pair was satisfied by whichever of
+    # the two colliding rows survived, so corrupting the other one stayed green
+    # in BOTH directions -- and the formula half was satisfied by prose alone.
+    actual = _ladder_table_row(profile, ladder)
+    assert _ladder_row_needle(ladder, per_batch, documented_max).search(flat), (
+        f"profile.example.yml's ladder table has no row reading "
+        f"'{ladder} <before> {per_batch}N+2 <before-max> -> {documented_max}' "
+        f"(the post-1.16.2-formula, post-#409-step-2-cap figures); it reads: "
+        f"{' '.join(actual.split()) if actual else '<no line opens with this label>'}"
     )
-    assert f"-> {documented_max}" in flat, (
-        f"profile.example.yml's ladder table does not carry the post-1.16.2-"
-        f"formula, post-#409-step-2-cap max-batch figure {documented_max} "
-        f"for {ladder}"
-    )
+
+
+def _corrupt_ladder_row(row: str, field: str) -> str:
+    """Rewrite ONE field of a ladder-table row, returning it collapsed.
+
+    Collapsed shape: `# <label...> <before> <after> <before-max> -> <max>`."""
+    head, _, shipped_max = " ".join(row.split()).rpartition(" -> ")
+    if field == "max":
+        return f"{head} -> 7"
+    if field == "max with a trailing non-digit":
+        return f"{head} -> {shipped_max}.5"
+    if field == "formula":
+        columns = head.split()
+        columns[-2] = "7777N+2"
+        return f"{' '.join(columns)} -> {shipped_max}"
+    raise AssertionError(f"unknown field {field!r}")
+
+
+LADDER_ROW_FIELDS = ("formula", "max", "max with a trailing non-digit")
+
+
+@pytest.mark.parametrize("field", LADDER_ROW_FIELDS, ids=LADDER_ROW_FIELDS)
+@pytest.mark.parametrize("ladder", sorted(LADDER_MAX_BATCHES), ids=sorted(LADDER_MAX_BATCHES))
+def test_a_corrupted_ladder_row_is_seen_by_its_own_needle_and_no_other(ladder, field):
+    """#416: the parity assertion above is only worth its docstring if it can
+    tell the rows APART. Two ladders ship the same formula AND the same max, so
+    the whole-file substring pair it replaced was satisfied by whichever row
+    survived -- both corruptions below were green in both directions, and the
+    case count never moved, which is why nobody saw it.
+
+    Corrupt exactly one row of the SHIPPED table (located, never hard-coded, so
+    this cannot freeze a shape the file has moved past) and require that
+    precisely that ladder's needle stops matching while the other two still do.
+    The trailing-non-digit case is what `(?!\\S)` buys over `(?!\\d)`: without
+    it a max that merely STARTS with the right digits reads as correct."""
+    profile = PROFILE_EXAMPLE.read_text(encoding="utf-8")
+    row = _ladder_table_row(profile, ladder)
+    assert row is not None, f"no ladder-table row opens with {ladder!r}"
+
+    corrupted = profile.replace(row, _corrupt_ladder_row(row, field))
+    assert corrupted != profile, f"corrupting {field} of {ladder!r} changed nothing"
+    flat = " ".join(corrupted.split())
+
+    for other, (per_batch_other, max_other) in LADDER_MAX_BATCHES.items():
+        found = bool(_ladder_row_needle(other, per_batch_other, max_other).search(flat))
+        assert found is (other != ladder), (
+            f"corrupting the {field} of the {ladder!r} row: the {other!r} needle "
+            f"{'still matched' if found else 'stopped matching'}, which is wrong -- "
+            f"a needle must see its own row's corruption and only its own"
+        )
 
 
 # ===========================================================================
