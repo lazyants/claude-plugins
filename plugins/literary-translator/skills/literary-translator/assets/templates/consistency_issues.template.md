@@ -45,7 +45,8 @@ regenerated), the `canon_senses.json` adjudication route (for a form that is a h
 segments' segpacks were regenerated), section G of `style_bible.md`, or the marked style contract. Those
 five are W6's outcomes and W6 carries the discriminator for each.
 
-There is one legitimate fifth answer, and it is the "leave it as genuinely ambiguous" decision above:
+There is one legitimate answer that is not a promotion at all, and it is the "leave it as genuinely
+ambiguous" decision above:
 **nothing**, because the item deliberately fixes no rule. Write it that way, with the reason -- it is a
 terminal classification, not an unfinished one. Accept what it costs, though: nothing enforceable reaches
 the reviewer, so a later round may raise the same span again and be right to. An item with the field left
