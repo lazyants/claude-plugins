@@ -201,23 +201,33 @@ def _local_dict_len(filename, funcname, varname):
 # `_local_dict_len`, `_tuple_len` and `_test_function_count` are kept unused, as
 # earlier releases kept them, for the next entry that cites their class.
 #
-# ZERO rows, because 1.51.0 is a documentation release that states no figure
-# this file's tokenizer can see. Its actual NUMERALS are of three kinds, and
-# none of them is a measurement: the version and issue numbers, the heading's
-# release date, and the pipeline stage labels (W3a/W5/W6, R4/R9, D6).
+# ZERO rows, because 1.52.0 states no figure this file's tokenizer can see. Its
+# actual NUMERALS are of three kinds, and none of them is a measurement: the
+# version and issue numbers, the heading's release date, and one version
+# reference (1.25.0) naming the release whose carve-out this one relies on.
 #
 # Every real quantity the entry states is spelled out as a WORD, which this
 # file's `_TOKEN` cannot see, so none can be declared as a row here -- a row
 # whose phrase holds no numeral fails this test's own one-numeral-per-phrase
-# check. That set is: four counts derived from this tree ("the four edited
-# prose files", "exactly one caller", "the two workflow templates", "three
-# project-local schemas"), plus two field measurements from operator-owned
-# durable roots that are not in this repository and could not be re-derived
-# here in any case (the three-round oscillation on the fr->ru book, the four
-# canon-shaped rulings on the he->en volume, both reported as of the day they
-# were observed). Declaring any of them would mean hardcoding an answer, which
-# passes every assertion below while proving nothing (`lambda: 4`). This is the
-# accepted residual the docstring above names, not an oversight.
+# check. That set is: the field measurement over the two live books
+# ("sixty-one of ninety-seven" real rounds dispatched a strict subset, and the
+# "thirty-one stale / eleven dispatched / twenty omitted" round behind the
+# issue). An earlier draft of the entry also said "four lines above" of the
+# sibling refusal in segment_dispatch_driver.py; the closing simplifier pass
+# measured it at nine, and the distance was removed rather than corrected --
+# a spatial claim in prose rots on the next edit to the file it describes, and
+# nothing here or in the citations guard can see it.
+#
+# The field measurement is the one worth naming rather than implying away: it
+# was computed over `driver_journal.jsonl` records in operator-owned durable
+# roots that are NOT in this repository, so no derivation here could re-check
+# it however it were phrased -- the numerals being spelled out is why it is
+# invisible to this file, not why it is unverifiable. `changelog_citations.test.py`
+# records the same gap from its own side.
+#
+# Declaring any of these would mean hardcoding an answer, which passes every
+# assertion below while proving nothing (`lambda: 4`). This is the accepted
+# residual the docstring above names, not an oversight.
 FIGURES = []
 
 

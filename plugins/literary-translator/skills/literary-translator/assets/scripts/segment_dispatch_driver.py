@@ -6328,15 +6328,51 @@ def run(args, dirs: dict) -> dict:
             plugin_root_str=args.plugin_root,
         )
         if not select_result.get("success"):
+            # #530: a refusal payload MAY carry the outstanding-eligible set.
+            # Exactly one does -- select_segments.py's empty-SEGS refusal,
+            # which is that issue's purest shape (the operator's own
+            # --only-segs selected nothing, and what is still outstanding is
+            # what turns the refusal into a next action). Forwarded here
+            # rather than left in the child's payload because this driver
+            # runs the selector with capture_output=True: its stdout is
+            # parsed and its stderr, disclosure included, is discarded, so
+            # WITHOUT this the one refusal the field was added for would show
+            # the operator nothing on the driver path -- the main path.
+            #
+            # Conditional on the key being a list, not on the refusal kind:
+            # every OTHER post-selection refusal is about specific named
+            # segments and deliberately omits it, and a driver that demanded
+            # it here would refuse those. Absent means "this refusal has
+            # nothing to say about the remainder", never "the remainder is
+            # empty" -- which is why the key is omitted rather than reported
+            # as [].
+            refusal_outstanding = select_result.get("eligible_not_dispatched")
+            refusal_extra = (
+                {"eligible_not_dispatched": refusal_outstanding}
+                if isinstance(refusal_outstanding, list)
+                else {}
+            )
             append_journal(
                 durable_root, session_id,
-                {"type": "step1_gate_refused", "error": select_result.get("error")},
+                {
+                    "type": "step1_gate_refused", "error": select_result.get("error"),
+                    **refusal_extra,
+                },
             )
+            if refusal_outstanding:
+                print(
+                    f"segment_dispatch_driver.py: {len(refusal_outstanding)} eligible "
+                    f"unit(s) are outstanding and NOT in this dispatch: "
+                    f"{', '.join(refusal_outstanding)}. Dispatching a subset is "
+                    f"legitimate; this line is the record that the remainder exists.",
+                    file=sys.stderr,
+                )
             fatal(
                 f"Step 1 gate refused: {select_result.get('error')}",
                 exit_code=1,
                 classification=select_result.get("classification"),
                 counts=select_result.get("counts"),
+                **refusal_extra,
             )
 
         segs = select_result.get("segs")
@@ -6369,10 +6405,60 @@ def run(args, dirs: dict) -> dict:
         # own docstring for the full validation list.
         claims = parse_claims_field(select_result, segs)
 
+        # #530: the eligible units this dispatch is NOT carrying. Computed by
+        # select_segments.py (which owns DEFAULT_ELIGIBLE_CATEGORIES) and read
+        # from its payload rather than re-derived here -- a second copy of that
+        # membership in this file would drift silently the first time the
+        # eligible set changed.
+        #
+        # REQUIRED, not defaulted -- written in the SHAPE of the `segs` array
+        # check above (one isinstance, then fatal with exit_code=2 and the same
+        # "has no 'X' array" wording), for the REASON parse_claims_field()
+        # gives for its own missing-field refusal: "a select_segments.py that
+        # silently stopped emitting 'claims' at all must be refused here, not
+        # read as 'nothing was claimed'". That reason applies with full force
+        # to a field whose whole purpose is that absence and "nothing
+        # outstanding" must not print identically. The risk classes differ --
+        # `claims` gates dispatch safety and this field is report-only -- but
+        # reading a missing key as `[]` here would recreate exactly the silent
+        # green this field closes. Skew between
+        # driver and selector is possible during an interrupted manual Step 0a
+        # (the copy pass runs before the bundle markers are written); how often
+        # is not measured, and exit 2 naming the field is the chosen fail-loud
+        # tradeoff.
+        eligible_not_dispatched = select_result.get("eligible_not_dispatched")
+        if not isinstance(eligible_not_dispatched, list):
+            fatal(
+                "select_segments.py's JSON output has no 'eligible_not_dispatched' array -- "
+                "this driver cannot report which eligible units the dispatch is leaving out, "
+                "and reporting nothing would be indistinguishable from nothing being left out. "
+                "Refused rather than defaulted.",
+                exit_code=2,
+            )
+
         append_journal(
             durable_root, session_id,
-            {"type": "step1_gate_passed", "segs": segs, "counts": select_result.get("counts"), "claims": claims},
+            {
+                "type": "step1_gate_passed", "segs": segs,
+                "counts": select_result.get("counts"), "claims": claims,
+                "eligible_not_dispatched": eligible_not_dispatched,
+            },
         )
+        # Printed only when non-empty, and worded as a DISCLOSURE, not a
+        # warning: measured over both live books' driver journals, 61 of 97
+        # real rounds dispatched a strict subset of the eligible set, so a
+        # subset is the NORM and an alarm on it would be tuned out along with
+        # the ids that are the actual signal. stderr rather than stdout because
+        # this driver's stdout carries exactly ONE line at exit, while its
+        # stderr is the only channel that reaches the redirected run log live.
+        if eligible_not_dispatched:
+            print(
+                f"segment_dispatch_driver.py: {len(eligible_not_dispatched)} eligible "
+                f"unit(s) are outstanding and NOT in this dispatch: "
+                f"{', '.join(eligible_not_dispatched)}. Dispatching a subset is "
+                f"legitimate; this line is the record that the remainder exists.",
+                file=sys.stderr,
+            )
 
         engine_cfg = load_engine_config(durable_root)
         volume_refusal = check_volume_cap(

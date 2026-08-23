@@ -400,6 +400,39 @@ def setup_full_project(tmp_path):
     return root
 
 
+# #530. build_full_project()'s own eligible population, in candidate order:
+# the ids whose category is one of DEFAULT_ELIGIBLE_CATEGORIES
+# (not_started/recoverable/stale). seg01 is reusable, seg05 is
+# blocked_needs_regeneration, seg10/seg11 are human_escalation -- none of the
+# four is eligible, so none may ever appear in `eligible_not_dispatched`.
+ELIGIBLE_SEG_IDS = [
+    "seg02_stale_draftonly",
+    "seg03_stale_cachekey",
+    "seg04_stale_both",
+    "seg06_stale_regen_caughtup",
+    "seg07_stale_draft_and_derivmismatch",
+    "seg08_recoverable",
+    "seg09_not_started",
+]
+
+_DISCLOSURE_PREFIX = "select_segments.py: "
+_DISCLOSURE_MARK = "eligible unit(s) are outstanding and NOT in this dispatch:"
+
+
+def _disclosure_lines(stderr: str) -> list:
+    """#530: every eligible-not-dispatched disclosure line on stderr.
+
+    A LIST, not a boolean and not `in stderr`: the contract is that exactly
+    ONE such line is printed for a non-empty remainder and NONE for an empty
+    one, and `in` cannot tell one line from two.
+    """
+    return [
+        line
+        for line in stderr.splitlines()
+        if line.startswith(_DISCLOSURE_PREFIX) and _DISCLOSURE_MARK in line
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 1. Full classification taxonomy + classification report
 # ---------------------------------------------------------------------------
@@ -421,6 +454,12 @@ def test_full_classification_taxonomy_and_report(tmp_path):
         "ids_by_category",
         "overrides",
         "excluded_only_segs",
+        # #530: the eligible units NOT dispatched. Part of this exact-key
+        # contract for the same reason `runs_missing_digest` below is:
+        # segment_dispatch_driver.py REFUSES a payload without it rather than
+        # reading a missing key as "nothing outstanding", so silently dropping
+        # it has to fail here.
+        "eligible_not_dispatched",
         # #409 Step 1. This exact-key assertion is deliberate: a consumer that
         # reads `authorizes_dispatch` must be able to trust that the key is
         # always present, so silently dropping it has to fail here.
@@ -579,6 +618,15 @@ def test_full_classification_taxonomy_and_report(tmp_path):
     expected_line = f"select_segments.py: requested={SEG_IDS} emitted={expected_segs}"
     assert expected_line in proc.stderr
 
+    # #530, NEGATIVE REGRESSION (plan test 4): the default path dispatches the
+    # WHOLE eligible set, so the remainder is empty BY CONSTRUCTION -- `segs`
+    # here IS select_default()'s own result. Both the payload field and the
+    # stderr disclosure must therefore be silent. Mutation that must turn this
+    # red: compute the remainder against `candidates` instead of against
+    # select_default(...).
+    assert payload["eligible_not_dispatched"] == []
+    assert _disclosure_lines(proc.stderr) == []
+
 
 # ---------------------------------------------------------------------------
 # 2. --only-segs: intersection, dedup/whitespace handling, and the sole
@@ -596,6 +644,166 @@ def test_only_segs_intersects_eligible_set(tmp_path):
     assert payload["segs"] == ["seg02_stale_draftonly", "seg09_not_started"]
     assert payload["overrides"] == []
     assert payload["excluded_only_segs"] == []
+
+    # #530 (plan test 1): `excluded_only_segs` covers ids the operator NAMED
+    # and this script declined -- it is empty here. The OTHER direction, the
+    # eligible units the operator never named at all, is what nothing reported
+    # before this release.
+    assert payload["eligible_not_dispatched"] == [
+        "seg03_stale_cachekey",
+        "seg04_stale_both",
+        "seg06_stale_regen_caughtup",
+        "seg07_stale_draft_and_derivmismatch",
+        "seg08_recoverable",
+    ]
+
+
+def test_only_segs_discloses_the_outstanding_remainder_on_stderr(tmp_path):
+    """#530 (plan test 2): the selector's OWN stderr is a frozen output
+    channel of this release, not only the driver's.
+
+    The direct-selector operator (W5's default `pipeline()` path) never sees
+    segment_dispatch_driver.py's line at all, and #551 keeps this script's
+    stderr from reaching the DRIVER's operator -- so neither channel covers
+    the other and both are asserted.
+    """
+    root = setup_full_project(tmp_path)
+
+    proc = run_select(root, "--only-segs", "seg02_stale_draftonly,seg09_not_started")
+    assert proc.returncode == 0, proc.stderr
+
+    outstanding = [
+        "seg03_stale_cachekey",
+        "seg04_stale_both",
+        "seg06_stale_regen_caughtup",
+        "seg07_stale_draft_and_derivmismatch",
+        "seg08_recoverable",
+    ]
+    lines = _disclosure_lines(proc.stderr)
+    assert len(lines) == 1, proc.stderr
+    disclosure = lines[0]
+    # The COUNT and every id: a bare count would not have caught either real
+    # incident behind #530 (two units omitted because the operator built the
+    # list from the previous round's needs_fix, where they did not appear).
+    assert f"{len(outstanding)} eligible unit(s)" in disclosure
+    for seg in outstanding:
+        assert seg in disclosure, disclosure
+    # ... and NOT the ids that ARE being dispatched.
+    assert "seg02_stale_draftonly" not in disclosure
+    assert "seg09_not_started" not in disclosure
+
+    # Adjacency, by index rather than by membership: the requested/emitted
+    # line and this one are ONE disclosure, and their order is the contract.
+    stderr_lines = proc.stderr.splitlines()
+    requested_idx = next(
+        i for i, line in enumerate(stderr_lines)
+        if line.startswith("select_segments.py: requested=")
+    )
+    assert stderr_lines[requested_idx + 1] == disclosure, proc.stderr
+
+
+def test_no_stderr_disclosure_when_the_whole_eligible_set_is_dispatched(tmp_path):
+    """#530 (plan test 3), NEGATIVE REGRESSION -- green before the change by
+    construction, since nothing printed this line at all. It earns its keep
+    only through its mutation: make the disclosure print unconditional and
+    this test goes red.
+
+    Why it matters enough to pin: measured over both live books' driver
+    journals, 61 of 97 real rounds dispatched a strict subset. A line that
+    also fired on the other 36 would be noise on a run where there is nothing
+    to say.
+    """
+    root = setup_full_project(tmp_path)
+
+    proc = run_select(root, "--only-segs", ",".join(ELIGIBLE_SEG_IDS))
+    assert proc.returncode == 0, proc.stderr
+    payload = parse_stdout(proc)
+    assert payload["segs"] == ELIGIBLE_SEG_IDS
+    assert payload["eligible_not_dispatched"] == []
+    assert _disclosure_lines(proc.stderr) == [], proc.stderr
+
+
+def test_eligible_not_dispatched_never_reports_an_ineligible_category(tmp_path):
+    """#530 (plan test 6), NEGATIVE REGRESSION. The census is over
+    DEFAULT_ELIGIBLE_CATEGORIES only.
+
+    All three excluded categories are asserted in ONE test, deliberately:
+    `human_escalation` is includable through --only-segs alone, so listing an
+    un-named escalated unit as "outstanding" would put it on every line of
+    every round forever; `reusable` is finished work; and
+    `blocked_needs_regeneration` is self-clearing. Mutation that must turn
+    this red: widen the census to ALL_CATEGORIES.
+    """
+    root = setup_full_project(tmp_path)
+
+    proc = run_select(
+        root,
+        "--only-segs",
+        "seg10_human_blocked,seg11_human_nonconverged,seg02_stale_draftonly",
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = parse_stdout(proc)
+
+    # The two escalated ids ARE dispatched (that is what --only-segs grants);
+    # what must not happen is the REMAINDER claiming any ineligible unit.
+    assert payload["overrides"] == ["seg10_human_blocked", "seg11_human_nonconverged"]
+    assert payload["eligible_not_dispatched"] == [
+        "seg03_stale_cachekey",
+        "seg04_stale_both",
+        "seg06_stale_regen_caughtup",
+        "seg07_stale_draft_and_derivmismatch",
+        "seg08_recoverable",
+        "seg09_not_started",
+    ]
+    for ineligible in (
+        "seg01_reusable",
+        "seg05_blocked_regen",
+        "seg10_human_blocked",
+        "seg11_human_nonconverged",
+    ):
+        assert ineligible not in payload["eligible_not_dispatched"]
+
+
+def test_a_duplicate_manifest_entry_is_reported_once_in_the_remainder(tmp_path):
+    """#530 (plan test 7): manifest.schema.json puts no uniqueItems on
+    segments[], load_candidate_segments() appends every occurrence, and a
+    duplicate entry is an ACCEPTED shape (segment_dispatch_driver.py dedupes
+    SEGS downstream for exactly that reason -- see
+    test_a_duplicate_manifest_entry_is_dispatched_exactly_once there).
+
+    The duplicated id must be an ELIGIBLE one or the assertion is unreachable:
+    select_default() would never surface `seg01_reusable` however many times
+    the manifest names it. Mutation that must turn this red: drop the
+    order-preserving dedupe.
+    """
+    root = setup_full_project(tmp_path)
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["segments"] = [
+        {"seg": seg}
+        for seg in SEG_IDS[:2] + ["seg02_stale_draftonly"] + SEG_IDS[2:]
+    ]
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+    proc = run_select(root, "--only-segs", "seg09_not_started")
+    assert proc.returncode == 0, proc.stderr
+    payload = parse_stdout(proc)
+
+    remainder = payload["eligible_not_dispatched"]
+    assert remainder.count("seg02_stale_draftonly") == 1, remainder
+    assert remainder == [
+        "seg02_stale_draftonly",
+        "seg03_stale_cachekey",
+        "seg04_stale_both",
+        "seg06_stale_regen_caughtup",
+        "seg07_stale_draft_and_derivmismatch",
+        "seg08_recoverable",
+    ]
+    # The count in the prose must agree with the deduped list, not with the
+    # raw manifest -- an inflated count is the visible half of this defect.
+    lines = _disclosure_lines(proc.stderr)
+    assert len(lines) == 1, proc.stderr
+    assert "6 eligible unit(s)" in lines[0], lines[0]
 
 
 def test_only_segs_dedups_and_trims_whitespace(tmp_path):
@@ -643,6 +851,14 @@ def test_only_segs_never_force_includes_reusable_or_blocked_needs_regeneration(t
     assert payload["success"] is False
     assert "refusing to no-op silently" in payload["error"]
     assert "--allow-empty" in payload["error"]
+
+    # #530 (plan test 8): this refusal ALONE among the post-selection fatals
+    # carries the remainder, because it is the defect's purest shape -- the
+    # operator's own list selected nothing, and what is still outstanding is
+    # the field that turns the refusal into a next action. All seven eligible
+    # units are outstanding here: neither named id is eligible.
+    assert payload["eligible_not_dispatched"] == ELIGIBLE_SEG_IDS
+    assert len(_disclosure_lines(proc.stderr)) == 1, proc.stderr
 
     # With --allow-empty: reported normally -- both names excluded with
     # their own documented reason, neither forced in, neither counted as an
