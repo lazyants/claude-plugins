@@ -2511,10 +2511,6 @@ def test_forbidden_patterns_newlines_never_split_a_warn_line(tmp_path):
     assert len(set(paths)) == 4, paths
 
 
-if __name__ == "__main__":
-    import pytest
-
-    sys.exit(pytest.main([__file__, "-v"]))
 
 
 # ---------------------------------------------------------------------------
@@ -2546,6 +2542,17 @@ PRESIDENT_PIN = [{"source_form": PRESIDENT_FR, "target_form": PRESIDENT_RU}]
 
 
 def _term_lines(proc):
+    """The TERM-DRIFT lines -- but only after proving the lane actually RAN.
+
+    Every negative case in this section asserts an EMPTY list, and a run that
+    died in a traceback satisfies that too, for entirely the wrong reason. Both
+    guards belong HERE rather than in each test: the unconditional
+    `TERM CONSISTENCY:` line is emitted at the end of main()'s warning report,
+    so its presence proves the lane reached the end of that pass, and the
+    traceback check catches a death anywhere earlier."""
+    assert "Traceback" not in proc.stderr, proc.stderr
+    marker = [ln for ln in proc.stderr.splitlines() if ln.startswith("TERM CONSISTENCY:")]
+    assert len(marker) == 1, proc.stderr
     return [ln for ln in proc.stderr.splitlines() if "TERM-DRIFT" in ln]
 
 
@@ -3031,3 +3038,45 @@ def test_a_manifest_with_no_verse_block_leaves_the_other_carriers_working(tmp_pa
     lines = _term_lines(proc)
     assert len(lines) == 1, proc.stderr
     assert "footnotes['1']" in lines[0]
+
+
+# --- corrupt-but-valid-JSON durable data ------------------------------------
+#
+# A traceback out of this lane is the WORST outcome available to it: main()
+# prints the two HARD verdicts and the summary JSON only after every WARN check
+# has run, so an advisory crash destroys the report on exactly the broken book
+# that most needs one. These drive the shapes a hand-edit produces -- valid
+# JSON, wrong nested type -- straight through the shipped script.
+
+
+def test_a_corrupt_manifest_verse_block_does_not_crash_the_lane(tmp_path):
+    """`manifest.json`'s `verse` key as a LIST. `x or {}` does not catch this --
+    a non-empty list is truthy and reaches a `.get()` that raises -- and the
+    manifest is not jsonschema-validated at runtime, so nothing upstream
+    refuses it."""
+    root = _office_root(tmp_path, footnote_target=f"{CHAIRMAN_RU}м палаты.")
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    manifest["verse"] = ["wrong"]
+    (root / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+    )
+    proc = run_final_audit(root)
+    lines = _term_lines(proc)   # asserts no traceback, and that the lane ran
+    assert len(lines) == 1, proc.stderr
+    assert "footnotes['1']" in lines[0]
+
+
+# The SEGPACK side of the same class is deliberately NOT tested, and this is a
+# measurement rather than an omission. A segpack whose `footnotes` is a mapping,
+# or whose verse `parent_block` is unhashable, never reaches any WARN check:
+# hard check 1 calls `validate_draft.validate()` first, which dies on the same
+# input at validate_draft.py:563 and :622 respectively. That is pre-existing and
+# out of this change's scope. The type guards in `term_carriers()` are kept
+# anyway -- they cost three `isinstance` calls -- because "a lane that never
+# raises" should not depend on which OTHER check happens to run before it.
+
+
+if __name__ == "__main__":
+    import pytest
+
+    sys.exit(pytest.main([__file__, "-v"]))

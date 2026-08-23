@@ -1099,7 +1099,10 @@ def verse_source_index(manifest):
     ONE segment's verse source be compared against ANOTHER segment's draft, and
     a silently mis-attributed comparison is worse than no comparison at all in a
     lane whose whole contract is to be quiet on inputs it cannot trust."""
-    store = ((manifest or {}).get("verse") or {}).get("store")
+    verse_block = (manifest or {}).get("verse")
+    if not isinstance(verse_block, dict):
+        return {}
+    store = verse_block.get("store")
     if not isinstance(store, list):
         return {}
     index = {}
@@ -1117,6 +1120,19 @@ def verse_source_index(manifest):
         plain_text = entry.get("plain_text")
         index[vid] = plain_text if isinstance(plain_text, str) else ""
     return index
+
+
+def _as_mapping(value):
+    """`value` when it is a dict, otherwise an empty one -- never `value or {}`,
+    which passes a non-empty list straight through to a `.get()` that raises."""
+    return value if isinstance(value, dict) else {}
+
+
+def _as_sequence(value):
+    """`value` when it is a list, otherwise an empty one. A string is
+    deliberately NOT accepted: iterating one yields characters, which would
+    compare nothing while looking exactly like a lane that ran."""
+    return value if isinstance(value, list) else []
 
 
 def _carrier_source_text(block):
@@ -1144,10 +1160,19 @@ def term_carriers(segpack, draft, apparatus_policy, verse_mode, verse_sources):
     already owns it. Reporting it here too would say the same thing twice, in
     the advisory lane, about a book that is already failing."""
     carriers = []
-    draft_blocks = draft.get("blocks") or {}
-    draft_footnotes = draft.get("footnotes") or {}
-    draft_verses = draft.get("verses") or {}
-    segpack_verses = [v for v in (segpack.get("verses") or []) if isinstance(v, dict)]
+    # Every container is type-CHECKED, not merely defaulted, and the reason is
+    # this lane's own contract rather than defensiveness for its own sake: a
+    # traceback here aborts W7 before it prints either HARD verdict, which is a
+    # worse outcome than any wrong warning. A hand-edited draft can be valid
+    # JSON carrying `"blocks": ["..."]`, and `x or {}` does NOT catch that -- a
+    # non-empty list is truthy and reaches a `.get()` that raises. (The same
+    # shape already raises one lane earlier, in warn_link_graph's
+    # `blocks.values()`; that is pre-existing and untouched here. This simply
+    # declines to add a second place that fails.)
+    draft_blocks = _as_mapping(draft.get("blocks"))
+    draft_footnotes = _as_mapping(draft.get("footnotes"))
+    draft_verses = _as_mapping(draft.get("verses"))
+    segpack_verses = [v for v in _as_sequence(segpack.get("verses")) if isinstance(v, dict)]
 
     # `mount` is tested for "embedded" and everything ELSE reads as "block" --
     # the exact normalization segpack.py itself applies when it writes this
@@ -1155,8 +1180,12 @@ def term_carriers(segpack, draft, apparatus_policy, verse_mode, verse_sources):
     # value -> "block"). Testing `== "block"` instead would re-derive a
     # STRICTER rule than the producer's and silently compare a standalone
     # verse's placeholder-only draft block as though it were prose.
+    # Only a STRING parent_block is collected: a corrupt segpack can carry an
+    # unhashable one (a list), and building the set would raise TypeError before
+    # a single carrier was compared.
     placeholder_only_blocks = {
-        v.get("parent_block") for v in segpack_verses if v.get("mount") != "embedded"
+        v.get("parent_block") for v in segpack_verses
+        if v.get("mount") != "embedded" and isinstance(v.get("parent_block"), str)
     }
 
     def add(label, source_text, target_text):
@@ -1166,7 +1195,7 @@ def term_carriers(segpack, draft, apparatus_policy, verse_mode, verse_sources):
             return
         carriers.append((label, source_text, target_text))
 
-    for block in (segpack.get("blocks") or []):
+    for block in _as_sequence(segpack.get("blocks")):
         if not isinstance(block, dict):
             continue
         block_id = block.get("id")
@@ -1176,7 +1205,7 @@ def term_carriers(segpack, draft, apparatus_policy, verse_mode, verse_sources):
             draft_blocks.get(block_id))
 
     if apparatus_policy != "preserve_source":
-        for footnote in (segpack.get("footnotes") or []):
+        for footnote in _as_sequence(segpack.get("footnotes")):
             if not isinstance(footnote, dict):
                 continue
             number = footnote.get("n")

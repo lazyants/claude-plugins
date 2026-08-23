@@ -1037,10 +1037,6 @@ def test_forbidden_patterns_must_be_a_list_of_objects():
     assert schema_errors(_with_patterns(["just a string"])) != []
 
 
-if __name__ == "__main__":
-    import sys
-
-    sys.exit(pytest.main([__file__, "-v"]))
 
 
 # ---------------------------------------------------------------------------
@@ -1135,3 +1131,9 @@ def test_terms_malformed_container_rejected(malformed):
 
 def test_terms_scalar_list_item_rejected():
     assert schema_errors(_with_terms(["président"])) != []
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(pytest.main([__file__, "-v"]))
