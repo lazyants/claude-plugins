@@ -369,9 +369,20 @@ def _read_json(path: Path, label: str) -> dict:
         raise SkepticReadyError(f"{label} not found: {path}")
     except OSError as exc:
         raise SkepticReadyError(f"{label} could not be read: {path} ({exc})")
+    except UnicodeDecodeError as exc:
+        # #268: a `UnicodeDecodeError` is a `ValueError`, NOT an `OSError`,
+        # so bytes that are not UTF-8 at all used to escape this function
+        # RAW -- past every caller's `except SkepticReadyError`, into
+        # main()'s catch-all, printing a payload with no mode-specific
+        # field in it. For --verify-merged that stripped
+        # `frozen_input_mismatch` off a run where a tamper had ALREADY been
+        # detected, which is the exact fail-open this file closes elsewhere.
+        raise SkepticReadyError(f"{label} is not valid JSON: {path} ({exc})")
     try:
         return json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # `json.JSONDecodeError` is a `ValueError`; deeply nested JSON
+        # raises `RecursionError`, which is not (same #268 reasoning).
         raise SkepticReadyError(f"{label} is not valid JSON: {path} ({exc})")
 
 
@@ -379,9 +390,14 @@ def _read_json_from_snapshot(snapshot: tuple, path: Path, label: str) -> dict:
     """Like ``_read_json``, but parses bytes ALREADY CAPTURED by
     ``frozen_input_check()``'s own single read loop (a
     ``read_frozen_input_snapshot()`` ``(state, content)`` pair) instead of
-    reading `path` a second time. Same failure classification and the same
-    message text as ``_read_json``, so a caller can swap between the two
-    without a consumer noticing which one produced the error.
+    reading `path` a second time. Same failure CLASSIFICATION as
+    ``_read_json`` -- every failure is a ``SkepticReadyError``, and absent /
+    invalid-JSON / non-UTF-8 / deeply-nested inputs land on the same message
+    of the two -- so a caller can swap between them without a consumer
+    having to know which one produced the error. One message differs by
+    construction: an irregular path (a directory) says "not a regular file"
+    here, where ``_read_json`` would quote the OS error its own read
+    raised, because this function never performs that read.
 
     #268: this exists so ``run_verify_merged`` can parse manifest.json
     WITHOUT reopening it after H1 already hashed it -- the round-5 race the
