@@ -489,20 +489,46 @@ def emit_retry_diagnostics(
     explicit-human-retry intent. The fatal neither-input guard stays separate
     and unchanged (that case never reaches here).
 
-    `dismissed` (#653) gets its OWN note distinct from the queued case below:
-    a dismissed name's review_queue row is gone by design (that is what
-    dismissal means), so telling the operator it "is in canon.json's
-    review_queue" would be false for it. `queued` is checked FIRST -- a name
-    dismissed and then RE-QUEUED (D8) is, at that point, literally back in
-    review_queue, so that message stays the accurate one; the dismissal note
-    is for the ordinary case where the row is gone and nothing replaced it."""
+    Branch order: `entry_keys` is checked FIRST, ahead of candidate-name
+    absence (#653 bot review P2, PR #703). A name can legitimately be BOTH
+    a resolved entries{} key AND carry a `dismiss` document in
+    corrections[] -- the sanctioned dismiss -> --retry -> accepted-merge
+    sequence produces exactly that overlap (see the regression test driving
+    it end to end). If candidate-name absence were checked first, such a
+    name -- absent from a re-extracted name_candidates.json -- would get
+    the (a2) dismissal note below, which says "the source may have been
+    re-extracted since it was dismissed" and thereby implies a future
+    re-extraction would let --retry dispatch it. That is FALSE: step (1)
+    excludes a resolved entries{} key UNCONDITIONALLY and --retry never
+    overrides that exclusion, so the accurate entries{} note (this branch)
+    would be unreachable for that name. Checking `entry_keys` first makes
+    it reachable; candidate-name absence and `is_split` keep their existing
+    relative order below it, unchanged.
+
+    `dismissed` (#653) gets its OWN note distinct from the queued case
+    inside the candidate-absence branch: a dismissed name's review_queue
+    row is gone by design (that is what dismissal means), so telling the
+    operator it "is in canon.json's review_queue" would be false for it.
+    `queued` is checked FIRST there -- a name dismissed and then RE-QUEUED
+    (D8) is, at that point, literally back in review_queue, so that message
+    stays the accurate one; the dismissal note is for the ordinary case
+    where the row is gone and nothing replaced it."""
     if not retry:
         return
     row_by_name = {row["name"]: row for row in rows}
     for name in sorted(retry):
         if name in included_names:
             continue
-        if name not in candidate_names:
+        if name in entry_keys:
+            # Already-resolved: retry overrides only the review_queue
+            # exclusion. Checked BEFORE candidate-name absence (#653 bot
+            # review P2) -- see the docstring's ordering paragraph.
+            sys.stderr.write(
+                f"note: --retry name {name!r} is already resolved in canon.json's "
+                "entries{} -- retry overrides only the review_queue exclusion, "
+                "never a resolved entry, so nothing is dispatched for it.\n"
+            )
+        elif name not in candidate_names:
             # (a) queued or dismissed (so it cleared the fatal guard) but no
             # candidate row.
             if name in queued:
@@ -512,9 +538,13 @@ def emit_retry_diagnostics(
                     "to dispatch for it (the source may have been re-extracted since "
                     "it was queued).\n"
                 )
-            else:
+            elif name in dismissed:
                 # (a2) dismissed rather than (still) queued: the guard's
-                # other non-candidate-names route (#653).
+                # other non-candidate-names route (#653). CHECKED, not
+                # assumed on a bare `else` -- Pyright flagged `dismissed` as
+                # unused when this was an unconditional else (bot review
+                # follow-up), and the note's own claim ("was dismissed")
+                # must be backed by the set it names.
                 sys.stderr.write(
                     f"note: --retry name {name!r} was dismissed in canon.json's "
                     "corrections[] and is not among the current "
@@ -522,13 +552,22 @@ def emit_retry_diagnostics(
                     "it (the source may have been re-extracted since it was "
                     "dismissed).\n"
                 )
-        elif name in entry_keys:
-            # Already-resolved: retry overrides only the review_queue exclusion.
-            sys.stderr.write(
-                f"note: --retry name {name!r} is already resolved in canon.json's "
-                "entries{} -- retry overrides only the review_queue exclusion, "
-                "never a resolved entry, so nothing is dispatched for it.\n"
-            )
+            else:
+                # Unreachable via main()'s own call path today (the
+                # unknown_retry guard there only lets a --retry name through
+                # when it is in candidate_names, queued, or dismissed, and
+                # this branch has already ruled out all three) -- kept as a
+                # named, truthful fallback rather than silence, because the
+                # module docstring's promise is that a --retry name
+                # resolving to no dispatch is NEVER silently swallowed, and
+                # a future change to that guard's invariant must not make
+                # this function violate it quietly.
+                sys.stderr.write(
+                    f"note: --retry name {name!r} cleared the --retry input guard "
+                    "but matched no known exclusion (not in canon.json's "
+                    "review_queue or corrections[], and no current "
+                    "name_candidates.json row) -- nothing to dispatch for it.\n"
+                )
         elif is_split(senses, name):
             # Adjudicated split: retry overrides only the review_queue
             # exclusion, never a split (RFC #215 item 1f).

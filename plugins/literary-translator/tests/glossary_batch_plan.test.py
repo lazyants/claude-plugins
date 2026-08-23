@@ -600,6 +600,33 @@ def test_retry_of_resolved_entry_emits_note(tmp_path):
     assert "Bob" in proc.stderr and "already resolved" in proc.stderr
 
 
+def test_retry_diagnostic_prefers_entries_note_over_dismissal_note(tmp_path):
+    """#653 bot review P2 (PR #703, glossary_batch_plan.py:515): a name can
+    legitimately be BOTH a resolved entries{} key AND carry a `dismiss`
+    document in corrections[] -- the sanctioned dismiss -> --retry ->
+    accepted-merge sequence produces exactly that overlap. If it is later
+    absent from name_candidates.json (an ordinary source re-extraction) and
+    --retried again, the entries{} note must fire, NOT the dismissal note:
+    the dismissal note says "the source may have been re-extracted since it
+    was dismissed", which implies a future re-extraction would let --retry
+    dispatch it -- FALSE, since step (1) excludes a resolved entries{} key
+    UNCONDITIONALLY and --retry never overrides that exclusion. Before the
+    fix, `entry_keys` was checked AFTER candidate-name absence, so this
+    name hit the candidate-absence branch first and got the (now
+    inaccurate) dismissal note; entries{} is checked FIRST now."""
+    nc, canon = write_inputs(
+        tmp_path,
+        [cand("Alice")],  # Bob is NOT a current candidate (re-extracted away)
+        entries={"Bob": {"canonical_target_form": "Боб"}},
+        corrections=[dismissal("Bob")],
+    )
+    proc = run(nc, canon, "--retry", "Bob")
+    assert proc.returncode == 0
+    assert names_in_args(json.loads(proc.stdout)) == {"Alice"}
+    assert "already resolved in canon.json's entries{}" in proc.stderr
+    assert "was dismissed in canon.json's corrections[]" not in proc.stderr
+
+
 def test_dispatched_retry_emits_no_note(tmp_path):
     """No false positive: a --retry name that IS dispatched gets no note."""
     nc, canon = write_inputs(

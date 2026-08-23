@@ -812,14 +812,23 @@ that a human adjudicated it.
   other.
 
   It deliberately does NOT refuse a `source_form` that is also an
-  `entries{}` key. `_assert_no_entries_review_queue_overlap` (in
+  `entries{}` key — the dismiss branch itself carries no such check. The two
+  row shapes reach a very different outcome, though, and it is worth being
+  exact about which: `_assert_no_entries_review_queue_overlap` (in
   `canon_validate.py`) builds its `queued_forms` set only from
-  `isinstance(item, dict)` rows, so it is blind to a bare-string row that
-  duplicates an `entries{}` key — refusing that overlap here would go past
-  what that invariant itself even detects, for no benefit: the row is still
-  a genuine `review_queue[]` member regardless of what shares its name in
-  `entries{}`, and dropping it is exactly the repair this mode makes
-  available. Removing the `entries{}` record itself is a different
+  `isinstance(item, dict)` rows, so a DICT row duplicating an `entries{}`
+  key IS an overlap that invariant catches — an INVALID state, not a
+  legitimate one — but only against the document `_stamp_write_verify`
+  validates, which is the POST-dismissal merged document. So dismissing
+  that very row REPAIRS the overlap (the offending row is gone by the time
+  Pass 2 runs); dismissing some OTHER row while leaving that dict row in
+  place still fails Pass 2, and the write is refused, naming it — the same
+  "reachable, not a corrupt file" boundary the malformed-row case below
+  draws, applied to this invariant instead of to shape. A BARE-STRING row
+  duplicating an `entries{}` key is invisible to this invariant either way
+  (it only ever inspects dict rows), and is refused instead — if at all —
+  by the queue-item schema shape, the separate, narrower case covered next.
+  Removing the `entries{}` record itself is a different
   decision and stays `disposition: "remove"`.
 
   **The bare-string shape's drain capability is narrower than it looks,
@@ -923,9 +932,19 @@ entries. Pinned as a characterization in
 
 **`review_queue[]` draws the identical boundary, one malformed row at a time
 (#653 code review).** `dismiss` repairs a bare-string queue row for the same
-reason `old_entry` repairs a malformed `entries{}` row — it is reachable
-because `_load_canon`/`canon-file.schema.json` never constrained a hand-edited
-`review_queue[]` item's shape either — but the same Pass-2 whole-document
+reason `old_entry` repairs a malformed `entries{}` row — a hand edit can put
+one there. Not because nothing constrains the shape: `canon-file.schema.json`
+DOES type every `review_queue[]` item as the queued OBJECT shape
+(`review_queue.items` is `{"$ref": "canon-batch.schema.json#/items/oneOf/1"}`),
+the same way it types `entries{}` values (`entries`'s
+`additionalProperties` is `{"$ref": "canon-entry.schema.json"}`) — the schema
+constrains both. What makes the row REACHABLE is the read path, not the
+schema: `_load_canon` type-checks that `review_queue` itself is a LIST,
+exactly as it type-checks `entries` is an OBJECT, but checks neither
+collection's ITEMS — so a hand-edited bare-string row loads without
+complaint and `dismiss` can name it, the same way a hand-edited malformed
+`entries{}` value loads and `old_entry` can name it. Pass 2 is where the
+schema does apply, on the way back OUT. The same Pass-2 whole-document
 check applies: dismissing one bare-string row still leaves a file that fails
 validation, and the write is refused, if ANY other row in the queue is also
 malformed. Unlike `entries{}`'s measured 0-in-999, this population is NOT

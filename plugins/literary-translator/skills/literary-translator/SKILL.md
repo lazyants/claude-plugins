@@ -1384,11 +1384,14 @@ to clear the queue. Same command, third `disposition`:
 `old_item` (a bare string, or `{source_form: ...}` — whichever shape is
 actually on disk), carries `reason`, and sets `disposition: "dismiss"`. The
 row is removed from `review_queue[]` only — `entries{}` is untouched, even
-when the same `source_form` also happens to be an `entries{}` key (a DICT
-queue row can legitimately share a name with an `entries{}` key — the
-whole-file overlap check only inspects dict rows, so that is not a reason to
-refuse; a bare-string row fails on the schema instead, a separate,
-malformed-file case). `--retry` is still the only way back: it
+when the same `source_form` also happens to be an `entries{}` key: a DICT
+queue row sharing an `entries{}` key IS an invalid, refused state on its
+own (the whole-file overlap check catches it), but `dismiss` REPAIRS it,
+because that check runs against the POST-dismissal document — the offending
+row is already gone by then. A bare-string row sharing an `entries{}` key
+is invisible to that same check either way (it only inspects dict rows) and
+instead fails the queue-item schema, a separate malformed-file case.
+`--retry` is still the only way back: it
 lifts the exclusion a dismissal leaves in `corrections[]`, exactly as it
 lifts a queued exclusion, and neither retry forces a name past ordinary
 candidate curation. Full contract: `references/canon-and-glossary.md`,

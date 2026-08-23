@@ -124,6 +124,7 @@ from _canon_project_fixture import (  # noqa: E402
     run_script,
     write_fragment,
 )
+from _senses_fixture import stage_consumer  # noqa: E402
 
 
 def _entry(source_form: str, target_form: str, **overrides) -> dict:
@@ -270,17 +271,24 @@ CANON_ADJUDICATION_EXTRA_DEPS = ("occ_index.py", "evidence_verify.py")
 
 
 def stage_adjudication_audit(root: Path) -> None:
-    """canon_adjudication_audit.py is not among `_canon_project_fixture`'s
-    STAGED_SCRIPTS (its own suites stage it separately, via
-    `_senses_fixture.stage_consumer`), but `bootstrap_names.py` -- one of
-    its three extra deps -- already is, so only the other two need copying
-    here on top of `make_project`'s own staging. See
-    tests/audit_unchanged_regression.test.py's `make_durable_root` for the
-    same recipe."""
-    src = SCRIPTS_SRC / "canon_adjudication_audit.py"
-    assert src.is_file(), f"canon_adjudication_audit.py not found at {src}"
+    """canon_adjudication_audit.py is a canon_senses CONSUMER (it does
+    `from canon_senses import ...`), so it is staged through the sanctioned
+    `stage_consumer()` route -- NEVER a raw `shutil.copy2` -- or an isolated
+    suite that copies it alone loses canon_senses.py alongside it and fails
+    with ModuleNotFoundError before any of this suite's own assertions run
+    (tests/senses_fixture_guard.test.py is the repo-wide drift guard for
+    exactly this; CI caught an earlier raw-copy version of this function).
+    `stage_consumer` is idempotent/overwrite-safe, so calling it again here
+    -- after `make_project`'s own `stage_consumer(root, "canon_validate.py")`
+    already ran -- is safe: it re-copies canon_senses.py/its schema
+    (byte-identical) and additionally stages THIS script.
+    `bootstrap_names.py` -- one of its three extra deps -- is already
+    staged by `make_project`'s own STAGED_SCRIPTS, so only the other two
+    need copying here (a plain shutil.copy2 is fine for these -- neither is
+    a canon_senses consumer). See tests/audit_unchanged_regression.test.py's
+    `make_durable_root` for the same recipe."""
+    stage_consumer(root, "canon_adjudication_audit.py")
     scripts_dir = root / "scripts"
-    shutil.copy2(src, scripts_dir / "canon_adjudication_audit.py")
     for dep in CANON_ADJUDICATION_EXTRA_DEPS:
         dep_src = SCRIPTS_SRC / dep
         assert dep_src.is_file(), f"{dep} not found at {dep_src}"
