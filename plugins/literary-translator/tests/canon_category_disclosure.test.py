@@ -13,21 +13,29 @@ WHAT THIS FILE PROVES, EXACTLY:
   2. neither shipped glossary template -- glossary_TASK.template.md nor
      glossary-pass-wf.template.js -- mentions `categor` at all.
 
-WHAT IT DOES **NOT** PROVE, and must never be read as proving: that no shipped
-writer can emit the field at runtime. Several legitimately can. canon-batch.
-schema.json admits an optional `category` at intake, so a glossary agent may
-volunteer it unprompted and an operator may hand-supply a category-bearing
-batch; `canon_validate.py --correct` explicitly legalizes a category-only
-correction; and `${durable_root}/glossary_TASK.md` is a one-time, hand-adaptable
-project seed whose adapted copy may ask for the field. (2) is a claim about the
-SHIPPED TEMPLATES ONLY. That is also exactly why the disclosure's own wording is
-a negative about the prompt plus a prohibition on assuming, never a positive
-claim about what a canon contains.
+WHAT IT DOES **NOT** PROVE, and must never be read as proving:
 
-The two halves make this two-sided. Deleting or rewording a disclosure fails
-half 1. Teaching either shipped template to ask for `category` fails half 2 --
-which is the moment all four disclosures become false and must be revised
-together, and is the only reason half 2 is in this file at all.
+  - that no shipped writer can emit the field at runtime. Several legitimately
+    can, which is why the disclosed text says so rather than claiming absence;
+    the sites themselves are the authority on that list, deliberately not
+    restated here. (2) is a claim about the SHIPPED TEMPLATE BYTES ONLY.
+  - that the disclosures are intact. Each assertion pins a short fragment of
+    its site, so the surrounding load-bearing clauses -- the producer list, the
+    `vault/other/` routing statement, the cross-reference -- can still be
+    deleted while this file stays green. It guards the LOAD-BEARING SENTENCE
+    against silent removal or relocation, not the paragraph against editing.
+  - that no shipped template ASKS for the field. Half 2 is a literal
+    `categor` token scan: a prompt saying "include every optional field the
+    batch schema admits" requests `category` without containing the token and
+    stays green, and a prompt saying "never output a category" false-REDs.
+    Semantic detection would be unjustified machinery for a two-file scan; the
+    token check is the cheap tripwire for the ordinary edit, not a proof.
+
+Within those bounds the two halves are two-sided. Deleting the pinned sentence,
+or moving it out of the property / section / comment block it is scoped to,
+fails half 1. Teaching either shipped template to mention `category` fails half
+2 -- the moment all four disclosures need revising, and the only reason half 2
+is in this file at all.
 
 Each half-1 assertion is LOCATION-SCOPED, never a whole-file membership test: a
 whole-file needle stays green after the sentence is moved out of the property /
@@ -133,7 +141,7 @@ def test_obsidian_doc_discloses_inside_the_category_catalog_section():
 def test_profile_example_discloses_in_the_folders_comment_block():
     """Scoped to the contiguous `#` comment run immediately following the
     `folders: {}` line -- the block an operator reads while filling the copied
-    profile in. A needle anywhere else in this 700-line example would not."""
+    profile in. A needle anywhere else in this example would not."""
     lines = PROFILE_EXAMPLE.read_text(encoding="utf-8").splitlines()
     folders_idx = [i for i, line in enumerate(lines) if line.strip() == "folders: {}"]
     assert len(folders_idx) == 1, (
@@ -168,8 +176,9 @@ def test_shipped_glossary_templates_do_not_mention_category():
             if CATEGORY_TOKEN_RE.search(line)
         ]
         assert not hits, (
-            "a shipped glossary template now mentions `category`, so the #406 "
-            "disclosures in canon-entry.schema.json, profile.schema.json, "
-            "profile.example.yml and obsidian.md are no longer true and must be "
-            "revised:\n" + "\n".join(hits)
+            "a shipped glossary template now mentions `category`. Re-read it "
+            "against the #406 disclosures in canon-entry.schema.json, "
+            "profile.schema.json, profile.example.yml and obsidian.md: if the "
+            "template now ASKS for the field, all four are false and must be "
+            "revised together:\n" + "\n".join(hits)
         )
