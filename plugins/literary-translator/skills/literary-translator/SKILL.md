@@ -746,10 +746,13 @@ here, follow the linked doc:
   `references/orchestration-and-batching.md`'s reviewer carve-out). Raised,
   not reopened: neither route can rewrite a merged entry.
   `glossary_batch_plan.py` excludes every `entries{}` key from the next pass
-  and `--retry` overrides only the `review_queue` exclusion;
-  `canon_adjudication_audit.py` never writes a verdict, it blocks. A frozen
-  row is repaired only by a hand edit of `canon.json` that re-translates
-  every segment using that term — which is why an accuracy decision, a
+  and `--retry` overrides only the `review_queue`/dismissed exclusions
+  (**#653**), never an `entries{}` exclusion;
+  `canon_adjudication_audit.py` never writes a verdict, it blocks. Neither
+  route can repair a frozen row itself — that is `canon_validate.py
+  --correct`'s job (**#495**), an explicit out-of-band correction that costs
+  bounded re-review of the segments referencing that form, never
+  re-translation — which is why an accuracy decision, a
   citation included, is reviewed BEFORE the merge
   (`references/canon-and-glossary.md`, "Pre-merge citation review").
 - **R7 — Workflow-script schema requirement**, mixed mechanism by path:
@@ -1288,8 +1291,9 @@ rebuilt from `source.language.code` alone) to get frequency-ranked name
 candidates. **1.3.5:** curate and batch those raw candidates with
 `scripts/glossary_batch_plan.py` FIRST — it reads `name_candidates.json` plus
 the current `canon.json`, drops every candidate already resolved there (an
-`entries{}` key OR a non-retried `review_queue[].source_form` — the #101
-filter, now enforced in code, not merely delegated as prose), curates the
+`entries{}` key, a non-retried `review_queue[].source_form`, OR (**#653**) a
+non-retried dismissed `source_form` from `corrections[]` — the #101 filter,
+now enforced in code, not merely delegated as prose), curates the
 survivors by `likely_name`/`--min-candidate-freq` (the profile's
 `glossary.min_candidate_freq` when set, else 2), force-includes any
 `elision_ambiguous` pair for adjudication (#91), and prints one JSON line. If
@@ -1368,6 +1372,27 @@ exactly the segments whose segpack references that form — bounded re-review vi
 `--from-converged`, never re-translation — but it does change `canon.json`'s
 bytes, which the skeptic pass holds as a frozen input, so run it BETWEEN passes.
 Full contract: `references/canon-and-glossary.md`, "`--correct PATH`".
+
+**#653 — dismissing a `review_queue[]` candidate that is simply NOT
+canon-worthy.** `correct`/`remove` adjudicate `entries{}`; nothing adjudicated
+`review_queue[]` on its own terms — the only way to drain a queued row was to
+accept it, which freezes an `entries{}` record, so "a human looked at this and
+it isn't canon material" had no spelling short of accepting a bad entry just
+to clear the queue. Same command, third `disposition`:
+`canon_validate.py --research-mode offline --correct dismissal.json`, where
+`dismissal.json` names the `source_form`, states the queued row itself as
+`old_item` (a bare string, or `{source_form: ...}` — whichever shape is
+actually on disk), carries `reason`, and sets `disposition: "dismiss"`. The
+row is removed from `review_queue[]` only — `entries{}` is untouched, even
+when the same `source_form` also happens to be an `entries{}` key (a DICT
+queue row can legitimately share a name with an `entries{}` key — the
+whole-file overlap check only inspects dict rows, so that is not a reason to
+refuse; a bare-string row fails on the schema instead, a separate,
+malformed-file case). `--retry` is still the only way back: it
+lifts the exclusion a dismissal leaves in `corrections[]`, exactly as it
+lifts a queued exclusion, and neither retry forces a name past ordinary
+candidate curation. Full contract: `references/canon-and-glossary.md`,
+"`--correct PATH`", the `disposition: "dismiss"` bullet.
 
 Otherwise run the codex-glossary-pass,
 instantiating `glossary-pass-wf.template.js` fresh from the plugin's current
@@ -1602,8 +1627,12 @@ existing merges, all candidate missed-merge pairs, and un-drained
 truthful basis for a sense-translated speaking name that previously had none
 — such a candidate now resolves straight into `entries{}` instead of parking
 permanently in `review_queue[]`, so this gate's category-4
-(`review_queue_unresolved`) blocks less often in practice; `review_queue[]`
-now holds only genuinely disputed/unresolvable names. Run before Deliver (W7/W8):
+(`review_queue_unresolved`) blocks less often in practice. **#653** drains
+the same category from the other direction: a row that `disposition:"dismiss"`
+removes is gone from `review_queue[]` (and recorded in `corrections[]`
+instead) without ever becoming an `entries{}` record, so category 4 no
+longer counts it either. `review_queue[]` now holds only genuinely
+disputed/unresolvable names still awaiting either outcome. Run before Deliver (W7/W8):
 `python3 ${durable_root}/scripts/canon_adjudication_audit.py --check` —
 exit `0` = every required item has a matching `confirmed_ok` (or a valid
 risk-acceptance / the queue is drained), `1` = blocking findings, `2` =

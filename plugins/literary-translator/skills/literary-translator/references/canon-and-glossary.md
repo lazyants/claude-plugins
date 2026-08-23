@@ -161,8 +161,30 @@ Canon population is not "paste the whole book into context and ask for a glossar
    adjudication, and `segpack.py` never reads `review_queue` at all, so no
    fixed target for it ever reaches a translate prompt (it surfaces
    per-segment through `new_names[]` instead — see **`segpack.py`'s canon
-   injection contract**). `glossary_batch_plan.py --retry` is the one thing
-   that reinstates it, once its senses are worth researching.
+   injection contract**). **#653:** that exclusion sentence is now
+   incomplete on its own — a name whose queued row was DISMISSED
+   (`canon_validate.py --correct` with `disposition: "dismiss"`, see
+   **`--correct PATH`** below) is excluded too, even though its
+   `review_queue[]` row is gone: `glossary_batch_plan.py` also reads
+   `corrections[]` and excludes any `source_form` for which ANY document
+   there carries `disposition: "dismiss"` — deliberately not "the most
+   recent document for this source_form wins": `dismiss` adjudicates
+   `review_queue[]` and `correct`/`remove` adjudicate the disjoint
+   `entries{}`, so a "most recent wins" rule would let a LATER, unrelated
+   entries{}-side `correct`/`remove` sharing that source_form silently
+   REVOKE an earlier dismissal, reopening it to automated re-research with
+   no operator saying so. A name that was never queued and is not dismissed
+   sails through unaffected. `glossary_batch_plan.py --retry` is the SOLE
+   way back — the only thing that reinstates either exclusion, once it is
+   worth re-researching — but only that: it lifts the
+   step-(1) exclusion above, never step-(2) curation. A retried name that
+   comes back as a candidate with `likely_name: false`, or under
+   `--min-candidate-freq`, is still dropped and reported on stderr rather
+   than dispatched — the identical treatment a queued name gets today
+   (`tests/glossary_batch_plan.test.py::test_retry_dropped_by_curation_emits_note`
+   pins it for the queued case; a
+   dismissed name inherits it unchanged). No force-inclusion path exists
+   past that curation step for either kind of retried name.
 4. **Hash stamping.** The merge step records `generation_hashes.particle_config_hash`
    AND `generation_hashes.derivation_bundle_hash` into `canon.json` at the moment of
    merge, via `cache_key.py --field particle_config_hash` / `--field
@@ -468,47 +490,90 @@ Every item REQUIRES `source_form`, `is_proper_name`, and `disposition:
 unconditionally at the top level. `corrections[]` (**#495**) is the one
 OPTIONAL key: it is created on the first `--correct` call and absent from every
 `canon.json` written before that mode existed, so absence must stay valid. The
-merge path never creates or touches it.
+merge path never creates or touches it. **#653:** its log now covers two
+different targets, not one — a `correct`/`remove` document adjudicates
+`entries{}`, a `dismiss` document adjudicates `review_queue[]` — `disposition`
+is what tells a reader which; see `canon-correction.schema.json` below.
 
-### `canon-correction.schema.json` — one adjudicated correction (#495)
+### `canon-correction.schema.json` — one adjudicated correction (#495, #653)
 
 The document `--correct` reads, and — verbatim — the record it appends to
-`corrections[]`. One shape for both on purpose: two shapes for one decision
-drift apart, and the record's whole job is to show the next operator what was
-adjudicated.
+`corrections[]`. One shape for all three dispositions on purpose: separate
+shapes for one decision drift apart, and the record's whole job is to show
+the next operator what was adjudicated.
 
 ```
 {
-  source_form: { type: "string", minLength: 1 },   // must already be in entries{}
-  disposition: { enum: ["correct", "remove"] },
-  old_entry:   <any JSON value>,                   // the value the caller says is on disk
-  new_entry:   <canon-entry.schema.json shape>,    // required iff correct, forbidden iff remove
+  source_form: { type: "string", minLength: 1 },   // correct/remove: must already be in entries{}
+  disposition: { enum: ["correct", "remove", "dismiss"] },
+  old_entry:   <any JSON value>,                   // correct/remove: the value the caller says is on disk
+  new_entry:   <canon-entry.schema.json shape>,    // required iff correct, forbidden iff remove/dismiss
+  old_item:    <any JSON value>,                   // dismiss: the review_queue[] row the caller says is on disk
   reason:      { type: "string", pattern: "\\S" }
 }
 ```
 
+| disposition | required | forbidden |
+| --- | --- | --- |
+| `correct` | `old_entry`, `new_entry` | `old_item` |
+| `remove` | `old_entry` | `new_entry`, `old_item` |
+| `dismiss` | `old_item` | `old_entry`, `new_entry` |
+
+`source_form` and `reason` stay unconditionally required across all three —
+`dismiss` still names which candidate it is about, in the same field
+`correct`/`remove` use for the `entries{}` key. Every `corrections[]` record
+written before #653 still validates: all of them carry `old_entry`, none
+carry `old_item`, and `dismiss` is additive to the `enum`.
+
 Two asymmetries carry real weight:
 
-- **`old_entry` is UNCONSTRAINED, `new_entry` is `$ref`-validated.**
-  `old_entry`'s job is EQUALITY against what is on disk, not shape — and the
-  value most in need of correcting is the one that fails its own schema. A
-  hand-edited `canon.json` (the only repair route that existed before this mode)
-  can put ANY JSON value under an `entries{}` key — `_load_canon` type-checks
-  `entries` itself, never its values — and VALIDATE-ONLY exists to find exactly
-  that. Even `type: "object"` was too strong: it refused a string, an array or a
-  `null`, so such a row could be DIAGNOSED and not REPAIRED, sending the
-  operator back to the hand edit. `new_entry` is what gets frozen, so it
-  validates.
-- **`old_entry` is not an open channel, despite its loose type.** It must equal
+- **`old_entry` AND `old_item` are BOTH schema-UNCONSTRAINED, `new_entry` is
+  `$ref`-validated.** All three interlock fields' job is EQUALITY against
+  what is on disk, not shape — and the value most in need of correcting or
+  dismissing is the one that fails its own schema. A hand-edited `canon.json`
+  (the only repair route that existed before `--correct`) can put ANY JSON
+  value under an `entries{}` key — `_load_canon` type-checks `entries`
+  itself, never its values — and VALIDATE-ONLY exists to find exactly that;
+  even `type: "object"` would be too strong for `old_entry`, refusing a
+  string, an array or a `null` and leaving such a row DIAGNOSED but not
+  REPAIRED, so it admits any JSON value instead. `old_item` was given a
+  schema-level `oneOf` for the same two shapes once, and it was REMOVED on a
+  later code review (#653): a shape check alone can only ask "is this a
+  non-empty string, or an object with a non-empty-string `source_form`
+  field" — it cannot ask whether that string, or that field, actually
+  EQUALS the document's own `source_form`, which is the runtime check below
+  and the only question that matters. The `oneOf` was strictly weaker
+  because of that gap, and it produced a FALSE refusal message besides:
+  `jsonschema`'s `oneOf` formatter in this codebase is written for
+  `canon-batch.schema.json`'s disposition-discriminated union and reports
+  "(disposition absent/unrecognized -- best match across all branches)" —
+  untrue of an `old_item` shape error, since neither `old_item` branch ever
+  carried a `disposition` const to begin with. `old_item` is UNCONSTRAINED
+  in the schema now, exactly like `old_entry`, and the difference is that a
+  dismissal additionally runs `old_item` (and every `review_queue[]` row it
+  is compared against) through `_attributable_to` at RUNTIME: True only for
+  a mapping whose own `source_form` field equals the document's, or a bare
+  string equal to it — everything else (a mapping naming some OTHER
+  source_form or missing it, a list, a number, a boolean, `null`) is False,
+  and is refused naming both values, by the code that actually owns the
+  rule rather than by a schema formatter that cannot describe it correctly.
+  `new_entry` is what gets frozen, so it alone validates fully.
+- **Neither is an open channel, despite the loose schema type either field
+  carries.** Both must equal
   what is on disk — compared as canonical JSON, not with Python `==`, so the
-  boolean/number collapse (`True == 1`) cannot let a correction state one value,
-  pass, and be RECORDED as another; object key order stays irrelevant. So the
-  only value that can ever be recorded through it is one
-  `canon.json` already held. `reason` is required and non-blank but NOT
-  length-capped — `canon-entry.schema.json`'s own `note` is unbounded and rides
-  in the same document via `new_entry`, so capping `reason` would bound one
-  field while leaving the record exactly as open as every other operator-authored
-  free text in `canon.json`.
+  boolean/number collapse (`True == 1`) cannot let a correction or a
+  dismissal state one value, pass, and be RECORDED as another; object key
+  order stays irrelevant. For `dismiss` specifically, equality alone is not
+  enough — see the runtime ATTRIBUTION check (`_attributable_to`) in
+  **`--correct PATH`** below for
+  why the stated row must also be attributable to the document's own
+  `source_form` before it is searched for at all. So the only value that can
+  ever be recorded through either field is one `canon.json` already held.
+  `reason` is required and non-blank but NOT length-capped —
+  `canon-entry.schema.json`'s own `note` is unbounded and rides in the same
+  document via `new_entry`, so capping `reason` would bound one field while
+  leaving the record exactly as open as every other operator-authored free
+  text in `canon.json`.
 
 ## `canon_validate.py`'s CLI modes
 
@@ -619,7 +684,12 @@ passing though nothing asks it to act on one; and the opt-in W9r registry prep
 projects `review_queue` notes into its own model input
 (`person_registry.py --prep`). A queued note reaches nothing else —
 `glossary_batch_plan.py`'s selection excludes a queued `source_form` from every
-later pass unless `--retry` names it.
+later pass unless `--retry` names it. **#653:** a DISMISSED name's note is
+different again — the row it lived on is gone from `review_queue[]`, and
+`person_registry.py` never reads `corrections[]` (see the `--correct PATH`
+section's `disposition: "dismiss"` bullet), so a dismissal's `reason` reaches
+neither W9r prep nor anywhere else; only the `corrections[]` record itself,
+read by a human, carries it forward.
 
 So the moment this workflow returns `merged: true` — after its own
 `--verify-merged` call, which is the first point the operator or the
@@ -713,6 +783,103 @@ that a human adjudicated it.
   removal is its only repair. Removal is also what an interpolated name with
   zero source occurrences needs. A key RENAME is a `remove` followed by an
   ordinary `--merge-batches` under the new key, never a third disposition.
+- **`disposition: "dismiss"`** (#653) operates on `review_queue[]` only —
+  `entries{}` is passed through untouched. It records that a human looked at
+  a queued candidate and decided it is deliberately not canon-worthy, which
+  otherwise has no spelling: the only way to drain a `review_queue[]` row was
+  an accepted merge (`_merge_batch`'s accepted-item branch), which FREEZES an
+  `entries{}` record — there was no way to say "not canon-worthy" without
+  saying "canon, worded thus". It carries `old_item` instead of `old_entry` — the same
+  blind-use interlock, restated against `review_queue[]` rather than
+  `entries{}` — and `old_item` must be ATTRIBUTABLE to the document's own
+  `source_form` before any row is searched for: either a mapping whose own
+  `source_form` equals the document's (the ordinary queued shape, the same
+  identity `_merge_batch`'s accept-branch filter uses,
+  `q.get("source_form") != source_form`), or a string equal to it (the
+  legacy bare-string row, where the string IS the name). Every other shape —
+  a mapping with no `source_form` or a differing one, a list, a number, a
+  `null` — is refused naming the rule, never searched for: with
+  `review_queue: ["Pilou"]` on disk, a document naming
+  `source_form: "Vertus"` and `old_item: "Pilou"` would otherwise match by
+  whole-value equality, drop `"Pilou"`, and record a `corrections[]` entry
+  saying **Vertus** was dismissed — a decision nobody made. Once attribution
+  holds, every row equal to `old_item` (by `_same_json_value`) is dropped —
+  two rows for one form are ordinary, not a hand-edit artifact:
+  `_merge_batch` appends whenever the whole object differs, so one form
+  queued by two batches for two different reasons is two rows
+  (`person_registry.py:859-870` coalesces them for display), and matching on
+  the whole value dismisses one reason without silently dismissing the
+  other.
+
+  It deliberately does NOT refuse a `source_form` that is also an
+  `entries{}` key. `_assert_no_entries_review_queue_overlap` (in
+  `canon_validate.py`) builds its `queued_forms` set only from
+  `isinstance(item, dict)` rows, so it is blind to a bare-string row that
+  duplicates an `entries{}` key — refusing that overlap here would go past
+  what that invariant itself even detects, for no benefit: the row is still
+  a genuine `review_queue[]` member regardless of what shares its name in
+  `entries{}`, and dropping it is exactly the repair this mode makes
+  available. Removing the `entries{}` record itself is a different
+  decision and stays `disposition: "remove"`.
+
+  **The bare-string shape's drain capability is narrower than it looks,
+  though (code review, #653).** `_stamp_write_verify` Pass-2-validates the
+  WHOLE post-dismissal document before writing, and `canon-file.schema.json`
+  types every `review_queue[]` item as the queued OBJECT shape — so a
+  bare-string row anywhere else in the queue still fails whole-file
+  validation after the dismissal, and the write is refused, naming that
+  other row. Dismissing a bare-string row therefore only succeeds when it
+  is the queue's LAST remaining malformed row; a queue holding several is a
+  corrupt-file case, not a one-malformed-row case — the same boundary
+  `--correct` already draws for `entries{}` (see "The boundary: one
+  malformed row, not a corrupt file" below, and its `review_queue[]` twin
+  just past it). That means the 61 live bare-string rows measured in this
+  project's own corpus (`historiettes-fr-ru/tome3`) are NOT drainable by
+  this mode today: that file fails whole-file validation for an unrelated
+  legacy reason already (its `entries{}` records carry `canonical_ru` and
+  no `source_form`), so no writing mode — `dismiss` included — can write it
+  until that unrelated failure is repaired separately. The shape exists for
+  the queue that HAS only one malformed row left, not for that corpus as it
+  stands.
+
+  `dismiss` is exempt from the split refusal (see the `disposition: "remove"`
+  bullet above) and from `_enforce_citation_source_safety`/the offline
+  backstop (see "the same content controls" bullet below), for the same
+  reason `remove` is exempt from each: both constrain what may be FROZEN,
+  and a dismissal freezes nothing. It WRITES but does not STAMP, also like
+  `correct`/`remove`. `_content_view` (in `canon_validate.py`) treats an
+  ordinary `review_queue[]`-only change as content and re-stamps, because
+  `glossary_batch_plan.py` reads that array back to exclude a queued name
+  from re-research (see item 3 above) — but that function's own docstring
+  carves a dismissal out explicitly (a paragraph inside `_content_view`'s
+  docstring, with no symbol of its own to cite): `run_correct` passes
+  `preserve_stamp=True` for every disposition, so `_stamp_write_verify`
+  never runs this comparison for `dismiss` at all. That is not in tension
+  with the re-stamp rule — a dismissal carries the SAME exclusion forward
+  into `corrections[]` instead of `review_queue[]`, so specifically the
+  automated re-research exclusion `glossary_batch_plan.py` enforces does not
+  move, and the existing `generation_hashes` are carried forward verbatim,
+  unchanged from every other `--correct` disposition. That is narrower than
+  "the file's behaviour is unchanged": it is not — `person_registry.py`'s
+  `refusals[]` output changes (below), and `canon_adjudication_audit.py`'s
+  category-4 enumeration is REQUIRED to change (acceptance criterion 4). The
+  stamp tracks derivation provenance, not every consumer's behaviour, which
+  is exactly why those two changing does not call for a re-stamp.
+
+  **One consumer DOES see a dismissal**, and it is disclosed rather than
+  argued away: `person_registry.py` turns every DICT-shaped `review_queue[]`
+  row into a refusal-only unit (`person_registry.py:859-895`,
+  `refusal_only: True`) and emits it in `refusals[]`
+  (`person_registry.py:1953-1963`, `refused_by: "canon_review_queue"`); it
+  never reads `corrections[]`. So a dismissed name stops appearing as a
+  `canon_review_queue` refusal in a later W9r registry run — that is the
+  intended meaning of the decision, not a side effect to suppress: the
+  operator said this candidate is not canon-worthy, and the refusal list is
+  where "still undecided" is reported. A bare-string row is unaffected
+  either way: `person_registry.py:864-866` skips any row that is not a
+  `dict`, so it was never surfaced in `refusals[]` before a dismissal
+  either — dismissing it changes `review_queue[]` and the exclusion set,
+  never W9r's refusal list.
 - **It is subject to the same content controls as the merge path.** A
   `disposition: "correct"` runs `new_entry` through `_enforce_citation_source_safety`
   (#347's static citation boundary — a loopback/private/non-public `source` is
@@ -754,6 +921,26 @@ diagnostic. Measured across the four live books: 0 malformed rows in 999
 entries. Pinned as a characterization in
 `tests/canon_correct_entry.test.py::test_more_than_one_malformed_row_blocks_every_writing_mode_alike`.
 
+**`review_queue[]` draws the identical boundary, one malformed row at a time
+(#653 code review).** `dismiss` repairs a bare-string queue row for the same
+reason `old_entry` repairs a malformed `entries{}` row — it is reachable
+because `_load_canon`/`canon-file.schema.json` never constrained a hand-edited
+`review_queue[]` item's shape either — but the same Pass-2 whole-document
+check applies: dismissing one bare-string row still leaves a file that fails
+validation, and the write is refused, if ANY other row in the queue is also
+malformed. Unlike `entries{}`'s measured 0-in-999, this population is NOT
+empty: `historiettes-fr-ru/tome3`'s `review_queue[]` holds 61 live bare-string
+rows today, so this mode cannot drain them, or write that file at all, until
+its unrelated whole-file failure (`entries{}` records carrying
+`canonical_ru` and no `source_form`) is separately repaired — see the
+`disposition: "dismiss"` bullet above. Pinned as a characterization in
+`tests/canon_dismiss_queued.test.py::test_two_malformed_queue_rows_block_dismissal_of_either`
+(refused) and
+`tests/canon_dismiss_queued.test.py::test_dismiss_of_the_last_malformed_queue_row_still_succeeds`
+(succeeds, same fixture minus the second row) —
+`::test_dismiss_drops_a_bare_string_queue_row` is the same boundary's single-row
+case.
+
 **What a correction costs.** `compute_used_terms_hash` hashes only the entries a
 segment actually references, so correcting one entry re-stales exactly the
 segments carrying that form and no others. Those units are admissible for
@@ -764,9 +951,22 @@ the skeptic pass (`canon_sha256`) and of `suspicion_scan.py`'s worklist
 freshness gate: run a correction BETWEEN passes, not into a live one. (That was
 equally true of the hand-edit it replaces.)
 
-stdout: `{"success":true,"mode":"correct","canon_path":…,"research_mode":…,
-"source_form":…,"disposition":…,"entries_count":N,"review_queue_count":N,
-"corrections_count":N,"generation_hashes_restamped":false}`.
+**What a dismissal costs.** `compute_used_terms_hash` projects `entries{}`
+only, and a dismissal touches none of it — so no translate SEGMENT re-stales,
+unlike `correct`/`remove`. That is NOT the same as costing nothing: a
+dismissal still writes `review_queue[]` and appends `corrections[]`, so
+`canon.json`'s BYTES change, and those bytes are the identical frozen input
+named above — `canon_sha256` (the skeptic pass) and `suspicion_scan.py`'s
+worklist freshness gate both see it. A dismissal belongs BETWEEN skeptic
+passes, exactly like a correction, never into a live one.
+
+stdout for `correct`/`remove`: `{"success":true,"mode":"correct","canon_path":…,
+"research_mode":…,"source_form":…,"disposition":…,"entries_count":N,
+"review_queue_count":N,"corrections_count":N,"generation_hashes_restamped":false}`.
+`dismiss` (#653) reports the same shape PLUS one more field, `"rows_dropped":N`
+— the count of `review_queue[]` rows removed (see the `disposition: "dismiss"`
+bullet above for why more than one is ordinary) — since it is the one
+disposition with nothing else in the payload to say how many rows moved.
 
 ### Shared machinery across every mode
 
@@ -1352,8 +1552,9 @@ that could plausibly change it is closed:
 - **The glossary pass cannot even re-ask.** `glossary_batch_plan.py` drops
   every candidate already present as an `entries{}` key before the codex
   pass ever sees it (the Citation cache section below), and `--retry`
-  overrides ONLY the `review_queue` exclusion — it cannot reinstate an
-  already-resolved entry, and says so in its own diagnostic.
+  overrides ONLY the `review_queue`/dismissed exclusions (**#653** added the
+  second) — it cannot reinstate an already-resolved entry, and says so in
+  its own diagnostic.
 - **`--verify-merged` reports, it does not repair.** It fresh-reads
   `canon.json` and every named fragment and returns `{verified, missing[]}`.
   It is disk-independent and writes nothing at all — it can only tell you
@@ -1404,11 +1605,14 @@ merge ever ran, which is the only point at which it could still have been
 rejected. Before each glossary pass,
 `scripts/glossary_batch_plan.py` (1.3.5) curates `bootstrap_names.py`'s raw
 candidate list against the CURRENT `canon.json`, excluding every candidate
-already resolved there — both an `entries{}` key AND a
-`review_queue[].source_form` (a queued name is only re-researched when a human
+already resolved there — an `entries{}` key, a `review_queue[].source_form`,
+OR (**#653**) a `source_form` for which ANY `corrections[]` document carries
+`disposition: "dismiss"` (see item 3 above for why it is ANY, not the most
+recent) — a queued or dismissed name is only re-researched when a human
 passes it to `glossary_batch_plan.py --retry`, the documented explicit-request
-path). Only genuinely new candidates — never-before-seen names, or an explicitly
-retried queued entry — are ever sent for fresh research. **Before 1.3.5 this
+path, the sole reopening mechanism for either exclusion. Only genuinely new candidates —
+never-before-seen names, or an explicitly retried queued or dismissed entry
+— are ever sent for fresh research. **Before 1.3.5 this
 filter was prose only** (this very section, and the glossary-pass template's
 header comment), delegated to "the orchestrating session," which in practice
 excluded `entries{}` but never `review_queue` — so every queued name was
