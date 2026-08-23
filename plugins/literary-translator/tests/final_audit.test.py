@@ -2343,10 +2343,16 @@ def test_forbidden_patterns_never_gate_a_complete_project(tmp_path):
     assert clean.returncode == 0, clean.stderr
     assert parse_summary(clean)["project_complete"] is True
 
+    # Every declaration shape that produces a WARN gets a row: a shape-specific
+    # gate (`if any("not a mapping" in w ...): hard_failures += 1`) would
+    # otherwise slip through a table that only carried the generic ones.
     for name, patterns in (
         ("hit", [{"id": "note-marker", "pattern": "note", "message": "marker left in"}]),
         ("broken", [{"id": "broken", "pattern": "(unclosed", "message": "never mind"}]),
         ("not-a-list", {"id": "no-dash", "pattern": "note", "message": "dropped dash"}),
+        ("not-a-mapping", ["a bare string where a mapping belongs"]),
+        ("no-pattern", [{"id": "patternless", "message": "no pattern at all"}]),
+        ("no-id", [{"pattern": "note", "message": "no id at all"}]),
     ):
         root = make_durable_root(tmp_path / name, seg_ids=("seg01",), forbidden_patterns=patterns)
         add_converged_segment(root, "seg01", clean_segpack(), clean_draft())
@@ -2401,6 +2407,30 @@ def test_forbidden_patterns_non_mapping_entry_is_reported_not_dropped(tmp_path):
     assert len([ln for ln in _style_lines(proc) if "no-placeholder" in ln]) == 1
 
 
+def test_forbidden_patterns_missing_id_or_message_warns_but_still_enforces(tmp_path):
+    """`id` and `message` are schema-required, and a hand edit after Step 0
+    arrives unvalidated. Missing either is REPORTED -- but the ban keeps
+    working: refusing the declaration would answer a labelling defect by
+    switching the operator's rule off, which is the worse failure."""
+    draft = clean_draft(p1_text=f"A line with FORBIDDEN text in it {FN_PH}.")
+    root = make_durable_root(
+        tmp_path,
+        seg_ids=("seg01", PAD_SEG),
+        forbidden_patterns=[{"pattern": "FORBIDDEN"}],
+    )
+    add_converged_segment(root, "seg01", clean_segpack(), draft)
+    proc = run_final_audit(root)
+    lines = _style_lines(proc)
+    missing = [ln for ln in lines if "is missing" in ln]
+    assert len(missing) == 1, proc.stderr
+    assert "'id'" in missing[0] and "'message'" in missing[0], missing[0]
+    assert "IS still enforced" in missing[0], missing[0]
+    # The rule fired anyway, under the positional placeholder label.
+    hits = [ln for ln in lines if "hits=" in ln]
+    assert len(hits) == 1, proc.stderr
+    assert "STYLE-PATTERN #0 in blocks['p1']" in hits[0], hits[0]
+
+
 def test_forbidden_patterns_many_hits_collapse_to_one_line(tmp_path):
     draft = clean_draft(p1_text=f"X X X X X {FN_PH}")
     root = _pattern_root(
@@ -2422,6 +2452,11 @@ def test_forbidden_patterns_zero_width_pattern_terminates_and_counts(tmp_path):
     Asserting only that SOME warning appeared would stay green under an
     implementation that reported every zero-width leaf as `hits=1`, which the
     ordinary counting test cannot see either."""
+    # `(?=[ac])` matches zero-width at exactly two of the five positions in
+    # "abcd". Deliberately NOT a match-everywhere pattern: that would make the
+    # expected count len(text)+1, which coincides with the wrong shortcut "a
+    # zero-width pattern hits once per position", so an implementation using
+    # that shortcut would pass. Two is reachable only by actually walking.
     body = "abcd"
     draft = clean_draft(p1_text=body)
     draft["footnotes"] = {}
@@ -2429,13 +2464,13 @@ def test_forbidden_patterns_zero_width_pattern_terminates_and_counts(tmp_path):
     draft["blocks"]["vblockB"] = V_PH_B
     root = _pattern_root(
         tmp_path,
-        [{"id": "zero-width", "pattern": "(?!x)", "message": "zero width"}],
+        [{"id": "zero-width", "pattern": "(?=[ac])", "message": "zero width"}],
         draft=draft,
     )
     proc = run_final_audit(root, timeout=90)
     line = [ln for ln in _style_lines(proc) if "in blocks['p1']" in ln]
     assert len(line) == 1, proc.stderr
-    assert f"(hits={len(body) + 1})" in line[0], line[0]
+    assert "(hits=2)" in line[0], line[0]
 
 
 def test_forbidden_patterns_newlines_never_split_a_warn_line(tmp_path):

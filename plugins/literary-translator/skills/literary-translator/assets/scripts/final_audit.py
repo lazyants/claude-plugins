@@ -850,6 +850,25 @@ def compile_forbidden_patterns(raw):
                 f"-- rule NOT enforced this run -- MANUAL"
             )
             continue
+        # `id` and `message` are schema-required too, and a hand edit made
+        # after Step 0 reaches here unvalidated. Missing either one is
+        # REPORTED -- but the pattern is still compiled and still enforced.
+        # Refusing the declaration instead would answer a labelling defect by
+        # switching the operator's ban off, turning something cosmetic into an
+        # unenforced rule: strictly the worse failure, and the one this check
+        # exists to prevent. So the fallbacks below stay, and the operator is
+        # told they are in use.
+        missing = [
+            field
+            for field, value in (("id", rule_id), ("message", message))
+            if not isinstance(value, str) or not value
+        ]
+        if missing:
+            warns.append(
+                f"STYLE-PATTERN {label}: declaration is missing "
+                f"{' and '.join(repr(f) for f in missing)} -- the rule IS "
+                f"still enforced, under a placeholder -- MANUAL"
+            )
         if not isinstance(message, str) or not message:
             message = "(declaration carries no message)"
         try:
@@ -883,13 +902,13 @@ def _string_leaves(node, path):
     An explicit stack, NOT recursion: `json.loads` decodes container nesting
     far deeper than Python's own recursion limit (measured: past 20 000 levels
     against a default limit of 1 000), and a `verses` value may legitimately
-    carry nested objects. This is NOT the script's first depth-sensitive step:
-    the two HARD checks load and canonically re-encode the whole draft before
-    any WARN runs, and which of those raises first on a given draft depends on
-    its nesting shape and depth -- so no claim is made here about which one
-    does. That pre-existing behaviour is disclosed rather than fixed. The
-    iterative form costs the same as the recursive one and simply declines to
-    add one more place that fails.
+    carry nested objects. It is not the script's first depth-sensitive step,
+    and no claim is made here about which step fails first or how -- four
+    review rounds produced a different wrong answer to that each time, which
+    is the sign that the attribution, not its wording, was the defect. The
+    pre-existing behaviour is disclosed in the release notes rather than fixed;
+    the iterative form costs the same as the recursive one and simply declines
+    to add one more place that fails.
 
     Each path component is bracketed and repr'd -- `verses['v1']['rendered']`
     -- so that a key which itself contains a dot cannot render the same as the
