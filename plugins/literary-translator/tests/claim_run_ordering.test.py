@@ -261,6 +261,9 @@ def _make_ordering_root(tmp_path, manifest_segs=("seg01", "seg02")):
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(RESUME_SETUP_SRC, scripts_dir / "resume_setup.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(RESUME_SETUP_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     fake_cache_key = '''#!/usr/bin/env python3
 import argparse, json, sys

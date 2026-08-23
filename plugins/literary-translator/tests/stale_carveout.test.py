@@ -173,6 +173,9 @@ def make_durable_root(tmp_path, name="durable_root"):
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(LEDGER_MERGE_SRC, scripts_dir / "ledger_merge.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(LEDGER_MERGE_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
 
     shutil.copytree(SCHEMAS_SRC_DIR, root / "schemas")
@@ -596,6 +599,9 @@ def make_root(tmp_path) -> Path:
     for src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC,
                 CACHE_KEY_REAL_SRC):
         shutil.copy2(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     profile = default_profile()
     profile["project"]["durable_root"] = str(root)

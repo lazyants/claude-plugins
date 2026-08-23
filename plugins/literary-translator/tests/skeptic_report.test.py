@@ -1207,6 +1207,9 @@ def test_tag_block_payload_is_marked_not_passed_through(tmp_path):
     schemas_dir.mkdir(parents=True)
     shutil.copy2(SKEPTIC_REPORT_SCRIPT, scripts_dir / "skeptic_report.py")
     shutil.copy2(SKEPTIC_CONSTANTS_SCRIPT, scripts_dir / "skeptic_constants.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SKEPTIC_CONSTANTS_SCRIPT.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     shutil.copy2(TRIAGE_SCHEMA_PATH, schemas_dir / "skeptic-triage.schema.json")
 
     block_text = "Rachel met Rachel at dawn."
@@ -1668,6 +1671,9 @@ def test_cli_smoke_renders_report_and_exits_zero(tmp_path):
     schemas_dir.mkdir(parents=True)
     shutil.copy2(SKEPTIC_REPORT_SCRIPT, scripts_dir / "skeptic_report.py")
     shutil.copy2(SKEPTIC_CONSTANTS_SCRIPT, scripts_dir / "skeptic_constants.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SKEPTIC_CONSTANTS_SCRIPT.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     shutil.copy2(TRIAGE_SCHEMA_PATH, schemas_dir / "skeptic-triage.schema.json")
 
     block_text = "Jean the baker met Jean the soldier at dawn."
@@ -1700,6 +1706,9 @@ def test_cli_smoke_fatal_on_missing_triage(tmp_path):
     schemas_dir.mkdir(parents=True)
     shutil.copy2(SKEPTIC_REPORT_SCRIPT, scripts_dir / "skeptic_report.py")
     shutil.copy2(SKEPTIC_CONSTANTS_SCRIPT, scripts_dir / "skeptic_constants.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SKEPTIC_CONSTANTS_SCRIPT.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     shutil.copy2(TRIAGE_SCHEMA_PATH, schemas_dir / "skeptic-triage.schema.json")
     (root / "manifest.json").write_text(json.dumps(make_manifest({})), encoding="utf-8")
     # No skeptic_triage.json written.

@@ -113,6 +113,9 @@ def make_durable_root(tmp_path):
     scripts_dir.mkdir(parents=True)
     shutil.copy2(SELECT_SCRIPT_SRC, scripts_dir / "select_segments.py")
     shutil.copy2(LEDGER_MERGE_SRC, scripts_dir / "ledger_merge.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(LEDGER_MERGE_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     schemas_dir = root / "schemas"
     shutil.copytree(SCHEMAS_SRC, schemas_dir)

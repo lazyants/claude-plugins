@@ -225,6 +225,9 @@ def make_durable_root(tmp_path):
     shutil.copy2(SELECT_SCRIPT_SRC, scripts_dir / "select_segments.py")
     shutil.copy2(LEDGER_MERGE_SRC, scripts_dir / "ledger_merge.py")
     shutil.copy2(BACKFILL_ACK_SRC, scripts_dir / "backfill_resume_gate_ack.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(BACKFILL_ACK_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
 
     shutil.copytree(SCHEMAS_SRC, root / "schemas")

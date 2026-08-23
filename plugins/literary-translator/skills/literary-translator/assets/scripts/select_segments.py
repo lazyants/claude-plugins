@@ -273,6 +273,46 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
 
+# Importing a sibling module writes scripts/__pycache__/*.pyc. Several
+# entrypoints here promise not to write anything (cache_key.py) or promise ZERO
+# filesystem writes in dry-run (backfill_resume_gate_ack.py), so the whole set
+# opts out uniformly rather than case by case.
+sys.dont_write_bytecode = True
+
+
+# --- the shared one-line JSON serialiser (#369) -----------------------------
+# Loaded by EXACT PATH, never `import json_stdout`. A bare sibling import
+# resolves through the global sys.modules cache regardless of which staged copy
+# the CALLER intended, so one process that stages several durable roots would
+# bind the FIRST root's copy for all of them. exec_module() opens this file's
+# own sibling or raises -- the loud failure the staging discipline depends on,
+# and it needs no cache eviction to get there. `Path(__file__).absolute()`
+# rather than `.resolve()`: the unresolved form is what lets a caller's own
+# no-follow symlink logic still see the path it was handed.
+import importlib.util as _importlib_util
+
+_JSON_STDOUT_PATH = Path(__file__).absolute().parent / "json_stdout.py"
+try:
+    _json_stdout_spec = _importlib_util.spec_from_file_location(
+        "json_stdout", _JSON_STDOUT_PATH
+    )
+    if _json_stdout_spec is None or _json_stdout_spec.loader is None:
+        raise ImportError(f"no loader for {_JSON_STDOUT_PATH}")
+    _json_stdout = _importlib_util.module_from_spec(_json_stdout_spec)
+    # OSError, not ImportError alone: spec_from_file_location() happily builds a
+    # spec for a file that is not there, and it is exec_module() that raises
+    # FileNotFoundError when it opens the source.
+    _json_stdout_spec.loader.exec_module(_json_stdout)
+except (ImportError, OSError) as _json_stdout_exc:  # pragma: no cover - staging error path
+    sys.exit(
+        f"select_segments.py: cannot load json_stdout.py from {_JSON_STDOUT_PATH} "
+        f"({_json_stdout_exc}).\n"
+        "json_stdout.py must be installed alongside select_segments.py under "
+        "${durable_root}/scripts/ -- Step 0a's copy pass places it there."
+    )
+
+dumps_line = _json_stdout.dumps_line
+
 # #438's claim admission gate needs claim_record.py -- a flat sibling
 # import, the same idiom scaffold_setup.py already uses for `import
 # cache_key`, rather than a duplicated copy, because claim_record.py's own
@@ -5963,12 +6003,12 @@ def main(argv=None) -> int:
         return 1
     except Exception as exc:  # pragma: no cover -- defensive catch-all
         print(
-            json.dumps({"success": False, "error": f"unexpected error: {exc}"}, ensure_ascii=False),
+            dumps_line({"success": False, "error": f"unexpected error: {exc}"}),
             file=sys.stdout,
         )
         return 1
 
-    print(json.dumps(result, ensure_ascii=False))
+    print(dumps_line(result))
     return 0
 
 

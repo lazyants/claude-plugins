@@ -134,6 +134,9 @@ def make_durable_root(tmp_path, name="durable_root", with_claim_record=True):
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(DRAFT_READY_SRC, scripts_dir / "draft_ready.py")
+    # json_stdout.py (#369): UNCONDITIONAL -- the scripts staged above it load
+    # the helper whether or not this fixture also stages claim_record.py.
+    shutil.copy2(DRAFT_READY_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     if with_claim_record:
         shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
     (root / "segments").mkdir()
@@ -742,6 +745,9 @@ def make_claim_capable_root(tmp_path, seg="seg01", name="claim_root"):
     for src in (SELECT_SEGMENTS_SRC, LEDGER_MERGE_SRC,
                 DRAFT_READY_SRC, VALIDATE_DRAFT_SRC, CLAIM_RECORD_SRC):
         shutil.copy2(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
     shutil.copytree(SCHEMAS_SRC, root / "schemas")
 

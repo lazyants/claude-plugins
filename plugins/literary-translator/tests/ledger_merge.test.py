@@ -137,6 +137,9 @@ def make_durable_root(tmp_path, name="durable_root"):
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(SCRIPT_SRC, scripts_dir / "ledger_merge.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPT_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
 
     schemas_dir = root / "schemas"
@@ -544,6 +547,10 @@ def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "ledger_merge.py"
     shutil.copy2(SCRIPT_SRC, orphan_script)
+    # json_stdout.py (#369): this fixture stages ONE script on purpose, and
+    # the property under test needs it to START -- without its sibling it
+    # would exit on the missing helper instead, which is a different test.
+    shutil.copy2(SCRIPT_SRC.parent / "json_stdout.py", orphan_script.parent / "json_stdout.py")
 
     proc = run_merge_from(orphan_script)
 
@@ -687,6 +694,10 @@ def test_durable_root_and_plugin_root_are_independently_resolved(tmp_path):
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "ledger_merge.py"
     shutil.copy2(SCRIPT_SRC, orphan_script)
+    # json_stdout.py (#369): this fixture stages ONE script on purpose, and
+    # the property under test needs it to START -- without its sibling it
+    # would exit on the missing helper instead, which is a different test.
+    shutil.copy2(SCRIPT_SRC.parent / "json_stdout.py", orphan_script.parent / "json_stdout.py")
 
     proc = run_merge_from(
         orphan_script,

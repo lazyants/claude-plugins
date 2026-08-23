@@ -579,7 +579,7 @@ Exact byte-scope per field:
   catches a footnote-apparatus re-extraction change for this segment
   specifically.
 - **`plugin_bundle_hash`** (global) — sha1 of sorted,
-  filename-concatenated bytes of the sixteen generic scripts that directly
+  filename-concatenated bytes of the seventeen generic scripts that directly
   shape translate/review content (`ledger_update.py` included — its
   `reviewed_draft_sha1` binding-check logic directly determines
   correctness) plus the two workflow templates
@@ -633,7 +633,7 @@ membership.
 
 - **`plugin_bundle_hash`** (global, read from
   `${durable_root}/runs/.plugin_bundle_hash` — a marker file Step 0a writes
-  once per run, not recomputed per segment) — covers exactly **sixteen
+  once per run, not recomputed per segment) — covers exactly **seventeen
   scripts** (six pre-1.2.0, plus `review_ready.py` and `resume_setup.py`,
   new in 1.2.0, `glossary_batch_plan.py`, new in 1.3.5, `codex_job.py`,
   new in 1.4.7, `canon_senses.py`, added for RFC #215's homonym-split
@@ -657,8 +657,14 @@ membership.
   `ledger_update.py`, `review_ready.py`, `resume_setup.py`,
   `glossary_batch_plan.py`, `codex_job.py`, `canon_senses.py`,
   `fetch_citation.py`, `segment_dispatch_driver.py`, `claim_record.py`,
-  `reject_review.py`, `select_segments.py`, plus
-  `mass-translate-wf.template.js`/`glossary-pass-wf.template.js`. These are
+  `reject_review.py`, `select_segments.py`, `json_stdout.py`, plus
+  `mass-translate-wf.template.js`/`glossary-pass-wf.template.js`.
+  `json_stdout.py` (#369) is registered for exactly the reason
+  `canon_senses.py` was — this is a byte-hash allowlist, so a dependency
+  six members of it now load is otherwise invisible to it — and it owns the
+  one-line stdout serialiser, which reaches durable content: the cache-key
+  CLI's printed object is parsed back as the live cache key by the selector
+  and copied verbatim into a ledger payload by the mass-translate template. These are
   scripts that directly shape extraction/translation/review/validation
   content, or determine whether a convergence verdict was correctly
   recorded — `review_ready.py` (the review-side readiness counterpart, but
@@ -688,9 +694,9 @@ membership.
   straight to `stale`.
 - **`orchestration_bundle_hash`** (global, sibling marker file
   `${durable_root}/runs/.orchestration_bundle_hash`, same computation
-  timing) — covers exactly **five scripts**: `claim_record.py`,
-  `draft_ready.py`, `ledger_merge.py`, `language_smoke_report.py`,
-  `select_segments.py`.
+  timing) — covers exactly **six scripts**: `claim_record.py`,
+  `draft_ready.py`, `json_stdout.py`, `ledger_merge.py`,
+  `language_smoke_report.py`, `select_segments.py`.
   **Never added to the cache-key composite, never compared against any
   segment's cache key** — non-gating for convergence, but it IS folded
   into the resume-integrity digest (see below), so it gates resume: a
@@ -706,15 +712,18 @@ membership.
 The orchestration list above is a restatement: `scaffold_setup.py`'s own
 `ORCHESTRATION_BUNDLE_MEMBERS` tuple is the authority, and its
 `test_orchestration_members_pinned` holds that tuple byte-for-byte. Read the
-tuple if the two ever disagree. Note that **two** of its five entries sit in
-`PLUGIN_BUNDLE_MEMBERS` as well, deliberately, so a change to either one moves
-**two** hashes: it re-stales converged segments AND forces a no-resume run.
+tuple if the two ever disagree. Note that **three** of its six entries sit in
+`PLUGIN_BUNDLE_MEMBERS` as well, deliberately, so a change to any one of them
+moves **two** hashes: it re-stales converged segments AND forces a no-resume run.
 `claim_record.py` since #438 — it gates dispatch, which earns it the plugin
 bundle, and `select_segments.py` imports it, so its bytes must move this marker
-too. And `select_segments.py` itself since #446 — it was always an
+too. `select_segments.py` itself since #446 — it was always an
 orchestration member, and it owns the dispatch gate `claim_record.py` merely
 supplies the claim predicate for, so the same criterion had always applied to
-it. The remaining three (`draft_ready.py`, `ledger_merge.py`,
+it. And `json_stdout.py` since #369 — `ledger_merge.py` and
+`select_segments.py` load it here, and six plugin members load it there, so
+the same byte-hash-allowlist criterion that registered `canon_senses.py` applies
+in both tuples at once. The remaining three (`draft_ready.py`, `ledger_merge.py`,
 `language_smoke_report.py`) are orchestration-only.
 
 `profile_validate.py` is excluded from **all three** bundles — it is never

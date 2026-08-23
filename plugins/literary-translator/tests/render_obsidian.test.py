@@ -1653,6 +1653,9 @@ def test_render_cli_unexpected_exception_emits_one_json_line_not_a_bare_tracebac
     scripts_dir.mkdir(parents=True)
     for name in ("render_obsidian.py", "cache_key.py", "output_resolve.py"):
         shutil.copy2(SCRIPTS_SRC_DIR / name, scripts_dir / name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
     (root / "profile.yml").write_text(yaml.safe_dump({"minimal": True}), encoding="utf-8")
     (root / ".literary-translator-root.json").write_text(
         json.dumps({"owner_profile_path": str(root / "profile.yml")}), encoding="utf-8"
@@ -1820,6 +1823,9 @@ def test_render_cli_dependency_precondition_when_cache_key_exits_at_import(tmp_p
     scripts_dir.mkdir(parents=True)
     shutil.copy2(RENDER_OBSIDIAN_SRC, scripts_dir / "render_obsidian.py")
     shutil.copy2(SCRIPTS_SRC_DIR / "output_resolve.py", scripts_dir / "output_resolve.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(
         "import sys\n"
         "print('ERROR: poisoned cache_key.py dependency preflight', file=sys.stderr)\n"
@@ -1853,6 +1859,9 @@ def test_render_cli_profile_precondition_when_load_profile_fails_on_missing_mark
     scripts_dir.mkdir(parents=True)
     for name in ("render_obsidian.py", "cache_key.py", "output_resolve.py"):
         shutil.copy2(SCRIPTS_SRC_DIR / name, scripts_dir / name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
     # Deliberately NO profile.yml, NO .literary-translator-root.json marker.
     nodestream_path, canon_path = _write_minimal_nodestream_and_canon(tmp_path)
     out_dir = tmp_path / "out"

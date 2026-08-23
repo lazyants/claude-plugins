@@ -241,6 +241,9 @@ def make_root(tmp_path) -> Path:
     for src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC,
                 CACHE_KEY_REAL_SRC):
         shutil.copy2(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     # #492: the two scripts need DIFFERENT cache_key.py copies in this one
     # root, so the fake no longer sits at scripts/cache_key.py.

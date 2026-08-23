@@ -218,6 +218,9 @@ def make_durable_root(tmp_path) -> Path:
     scripts_dir.mkdir(parents=True)
     for src in (CACHE_KEY_PY, LEDGER_UPDATE_PY, LEDGER_MERGE_PY, SELECT_SEGMENTS_PY):
         shutil.copy2(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     # derivation_bundle_hash's two members -- fixture content, never mutated
     # by this test (only style_contract_hash is exercised as the changing
     # field here; ledger_composite_key.test.py already regression-locks every

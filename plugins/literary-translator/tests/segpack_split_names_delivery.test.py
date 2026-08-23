@@ -628,6 +628,9 @@ def _scaffold_durable_root(tmp_path, senses_bytes):
     (root / "languages").mkdir()
     for script in (SEGPACK_SCRIPT, BOOTSTRAP_NAMES_SCRIPT, CANON_SENSES_SCRIPT):
         shutil.copy2(script, root / "scripts" / script.name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(script.parent / "json_stdout.py", root / "scripts" / "json_stdout.py")
     shutil.copy2(CANON_SENSES_SCHEMA, root / "schemas" / CANON_SENSES_SCHEMA.name)
     shutil.copy2(LANGUAGES_DIR / "fr.json", root / "languages" / "fr.json")
     (root / "manifest.json").write_text(

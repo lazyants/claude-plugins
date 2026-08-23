@@ -231,6 +231,9 @@ def _make_resume_setup_root(tmp_path: Path) -> Path:
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(RESUME_SETUP_SCRIPT, scripts_dir / "resume_setup.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(RESUME_SETUP_SCRIPT.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
 
     # version.schemas is a hash of the whole schemas/ dir; only needs real,

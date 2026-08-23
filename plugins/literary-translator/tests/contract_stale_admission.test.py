@@ -272,6 +272,9 @@ def make_assemble_root(tmp_path, admit=None) -> Path:
     for src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC,
                 CACHE_KEY_SRC):
         shutil.copy2(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     profile = assemble_profile(admit)
     profile["project"]["durable_root"] = str(root)
@@ -1011,6 +1014,11 @@ def make_va_root(tmp_path, admit=None, v1_scope="segment_drafts_and_audit") -> P
     scripts_dir.mkdir(parents=True)
     for src in (VALIDATE_ASSEMBLED_SRC, VALIDATE_DRAFT_SRC):
         (scripts_dir / src.name).write_bytes(src.read_bytes())
+    # json_stdout.py (#369): every routed script above loads it by exact
+    # path from its own directory and sys.exit()s if the sibling is absent.
+    (scripts_dir / "json_stdout.py").write_bytes(
+        (SCRIPTS_SRC_DIR / "json_stdout.py").read_bytes()
+    )
 
     profile = {"output": {"v1_scope": v1_scope}}
     if admit is not None:

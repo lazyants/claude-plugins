@@ -278,6 +278,9 @@ def make_ledger_update_root(tmp_path) -> Path:
     scripts_dir.mkdir(parents=True)
     schemas_dir.mkdir(parents=True)
     shutil.copy2(LEDGER_UPDATE_SRC, scripts_dir / "ledger_update.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(LEDGER_UPDATE_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     shutil.copy2(
         SCHEMAS_SRC_DIR / "ledger-record-base.schema.json",
         schemas_dir / "ledger-record-base.schema.json",
@@ -296,6 +299,9 @@ def make_ledger_merge_root(tmp_path) -> Path:
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(LEDGER_MERGE_SRC, scripts_dir / "ledger_merge.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(LEDGER_MERGE_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     # ledger_merge.py's own _build_schema_registry() globs every
     # *.schema.json under SCHEMAS_DIR (needed for ledger.schema.json's own
     # $ref to ledger-record-base.schema.json) -- copy the whole real dir,

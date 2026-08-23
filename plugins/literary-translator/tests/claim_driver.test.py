@@ -349,6 +349,9 @@ def _minimal_claim_dirs(tmp_path):
     scripts_dir.mkdir()
     shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
     shutil.copy2(SCRIPTS_SRC_DIR / "draft_sha1.py", scripts_dir / "draft_sha1.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
     runs_dir = tmp_path / "runs"
     runs_dir.mkdir()
     durable_root = tmp_path / "durable"
@@ -717,6 +720,9 @@ def make_durable_root(tmp_path, name="durable_root", profile_yaml=FULL_PROFILE_Y
     shutil.copy2(RESUME_SETUP_SRC, scripts_dir / "resume_setup.py")
     shutil.copy2(LEDGER_UPDATE_SRC, scripts_dir / "ledger_update.py")
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRAFT_SHA1_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
     (scripts_dir / "resolve_codex_companion.py").write_text(FAKE_RESOLVE_CODEX_COMPANION_PY, encoding="utf-8")
     (scripts_dir / "draft_ready.py").write_text(FAKE_DRAFT_READY_PY, encoding="utf-8")

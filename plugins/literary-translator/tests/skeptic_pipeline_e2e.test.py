@@ -54,6 +54,9 @@ def stage_skeptic_ready_scripts(durable_root: Path) -> None:
     scripts_dir.mkdir(parents=True, exist_ok=True)
     for name in SKEPTIC_READY_DEPS:
         shutil.copy2(SCRIPTS_DIR / name, scripts_dir / name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
 
 assert SKEPTIC_PASS_TEMPLATE.is_file(), f"skeptic-pass-wf.template.js not found at {SKEPTIC_PASS_TEMPLATE}"
 assert SKEPTIC_READY_SCRIPT.is_file(), f"skeptic_ready.py not found at {SKEPTIC_READY_SCRIPT}"

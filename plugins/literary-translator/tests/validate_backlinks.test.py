@@ -132,6 +132,9 @@ def make_root(
         BOOTSTRAP_NAMES_SRC, CANON_SENSES_SRC, RENDER_OBSIDIAN_SRC,
     ):
         _copy(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every routed script above loads it by exact
+    # path from its own directory and sys.exit()s if the sibling is absent.
+    _copy(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "occurrence_targets.py").write_text(
         _STUB_OCCURRENCE_TARGETS_SRC, encoding="utf-8"
     )

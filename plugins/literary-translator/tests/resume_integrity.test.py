@@ -330,6 +330,9 @@ def make_resume_setup_root(
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(RESUME_SETUP_SRC, scripts_dir / "resume_setup.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(RESUME_SETUP_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
 
     # version.schemas is documented as a hash of the WHOLE schemas/ dir;
@@ -619,6 +622,9 @@ def make_review_ready_root(tmp_path):
     scripts_dir.mkdir(parents=True)
     shutil.copy2(REVIEW_READY_SRC, scripts_dir / "review_ready.py")
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRAFT_SHA1_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     schemas_dir = root / "schemas"
     schemas_dir.mkdir(parents=True)
     shutil.copy2(SCHEMAS_DIR / "review.schema.json", schemas_dir / "review.schema.json")
@@ -668,6 +674,9 @@ def make_draft_ready_root(tmp_path):
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(DRAFT_READY_SRC, scripts_dir / "draft_ready.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRAFT_READY_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (root / "segments").mkdir(parents=True)
     return root
 
@@ -743,6 +752,9 @@ def make_draft_sha1_root(tmp_path):
     scripts_dir = root / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRAFT_SHA1_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (root / "segments").mkdir(parents=True)
     return root
 
@@ -869,6 +881,9 @@ def make_ledger_update_root(tmp_path):
     scripts_dir.mkdir(parents=True)
     shutil.copy2(LEDGER_UPDATE_SRC, scripts_dir / "ledger_update.py")
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")  # fixture helper only
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRAFT_SHA1_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     schemas_dir = root / "schemas"
     schemas_dir.mkdir(parents=True)
     shutil.copy2(SCHEMAS_DIR / "ledger-record-base.schema.json", schemas_dir / "ledger-record-base.schema.json")
@@ -989,6 +1004,9 @@ def make_ledger_merge_root(tmp_path):
     scripts_dir.mkdir(parents=True)
     shutil.copy2(LEDGER_MERGE_SRC, scripts_dir / "ledger_merge.py")
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")  # fixture helper only
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRAFT_SHA1_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     schemas_dir = root / "schemas"
     shutil.copytree(SCHEMAS_DIR, schemas_dir)  # ledger_merge.py globs *.schema.json
     (root / "segments").mkdir(parents=True)
@@ -1159,6 +1177,10 @@ def test_durable_root_flag_absent_orphan_copy_fails_self_anchored(tmp_path):
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "resume_setup.py"
     shutil.copy2(RESUME_SETUP_SRC, orphan_script)
+    # json_stdout.py (#369): this fixture stages ONE script on purpose, and
+    # the property under test needs it to START -- without its sibling it
+    # would exit on the missing helper instead, which is a different test.
+    shutil.copy2(RESUME_SETUP_SRC.parent / "json_stdout.py", orphan_script.parent / "json_stdout.py")
 
     proc, parsed = run_resume_setup_from(orphan_script, mass_base_payload(), tmp_path)
 
@@ -1367,6 +1389,10 @@ def test_durable_root_and_plugin_root_are_independently_resolved(tmp_path):
     orphan_dir.mkdir(parents=True)
     orphan_script = orphan_dir / "resume_setup.py"
     shutil.copy2(RESUME_SETUP_SRC, orphan_script)
+    # json_stdout.py (#369): this fixture stages ONE script on purpose, and
+    # the property under test needs it to START -- without its sibling it
+    # would exit on the missing helper instead, which is a different test.
+    shutil.copy2(RESUME_SETUP_SRC.parent / "json_stdout.py", orphan_script.parent / "json_stdout.py")
 
     proc, parsed = run_resume_setup_from(
         orphan_script,

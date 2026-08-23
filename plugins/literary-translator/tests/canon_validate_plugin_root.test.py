@@ -128,6 +128,9 @@ def make_trusted_plugin_root(tmp_path, name="trusted_plugin_install") -> Path:
     plugin_scripts_dir = plugin_root / "assets" / "scripts"
     plugin_scripts_dir.mkdir(parents=True)
     shutil.copy2(SCRIPTS_SRC / "cache_key.py", plugin_scripts_dir / "cache_key.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC / "json_stdout.py", plugin_scripts_dir / "json_stdout.py")
     return plugin_root
 
 

@@ -216,6 +216,9 @@ def make_root(tmp_path: Path, admit_contract_only_stale=None) -> Path:
     for src in (ASSEMBLE_SRC, OUTPUT_RESOLVE_SRC, RENDER_OBSIDIAN_SRC, VALIDATE_DRAFT_SRC,
                 CACHE_KEY_SRC):
         shutil.copy2(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(src.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     profile = default_profile(admit_contract_only_stale)
     profile["project"]["durable_root"] = str(root)

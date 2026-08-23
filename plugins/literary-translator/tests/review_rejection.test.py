@@ -184,6 +184,10 @@ def make_reject_review_root(tmp_path, name="reject_review_root", claim_record_so
     schemas_dir.mkdir(parents=True)
     segments_dir.mkdir(parents=True)
     shutil.copy2(REJECT_REVIEW_SRC, scripts_dir / "reject_review.py")
+    # json_stdout.py (#369): UNCONDITIONAL -- staged on both branches, since the
+    # `claim_record_source` branch below substitutes a hand-written claim_record
+    # while every other staged script still loads the helper.
+    shutil.copy2(REJECT_REVIEW_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     if claim_record_source is None:
         shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
     else:
@@ -1600,6 +1604,9 @@ def make_durable_root(tmp_path, name="durable_root", profile_yaml=FULL_PROFILE_Y
     shutil.copy2(LEDGER_MERGE_SRC, scripts_dir / "ledger_merge.py")
     shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
     shutil.copy2(REJECT_REVIEW_SRC, scripts_dir / "reject_review.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(REJECT_REVIEW_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
 
     schemas_dir = root / "schemas"
@@ -1622,6 +1629,9 @@ def stage_phase2_sibling_scripts(scripts_dir, templates_dir):
     shutil.copy2(LEDGER_UPDATE_SRC, scripts_dir / "ledger_update.py")
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
     shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(CLAIM_RECORD_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "resolve_codex_companion.py").write_text(FAKE_RESOLVE_CODEX_COMPANION_PY, encoding="utf-8")
     (scripts_dir / "draft_ready.py").write_text(FAKE_DRAFT_READY_PY, encoding="utf-8")
     (scripts_dir / "validate_draft.py").write_text(FAKE_VALIDATE_DRAFT_PY, encoding="utf-8")

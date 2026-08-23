@@ -143,6 +143,12 @@ def make_durable_root(tmp_path, name="durable_root", profile_yaml=DEFAULT_PROFIL
     shutil.copy2(LEDGER_MERGE_SRC, scripts_dir / "ledger_merge.py")
     shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
     (scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
+    # json_stdout.py (#369): UNCONDITIONAL, unlike codex_job.py below. The
+    # driver, the selector and the merger staged above all load it the moment
+    # they start, and `stage_codex_job` defaults to False -- staged inside that
+    # branch, every default-fixture test would exit on the missing helper
+    # before reaching the behaviour it is about.
+    shutil.copy2(DRIVER_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     if stage_codex_job:
         shutil.copy2(CODEX_JOB_SRC, scripts_dir / "codex_job.py")
 
@@ -526,6 +532,9 @@ def stage_phase2_sibling_scripts(scripts_dir, templates_dir):
     shutil.copy2(LEDGER_UPDATE_SRC, scripts_dir / "ledger_update.py")
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
     shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(CLAIM_RECORD_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "resolve_codex_companion.py").write_text(FAKE_RESOLVE_CODEX_COMPANION_PY, encoding="utf-8")
     (scripts_dir / "draft_ready.py").write_text(FAKE_DRAFT_READY_PY, encoding="utf-8")
     (scripts_dir / "validate_draft.py").write_text(FAKE_VALIDATE_DRAFT_PY, encoding="utf-8")
@@ -2435,6 +2444,9 @@ def test_current_draft_sha1_matches_the_cli(tmp_path):
     scripts_dir.mkdir()
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
     shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(CLAIM_RECORD_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     segments_dir = tmp_path / "segments"
     segments_dir.mkdir()
     draft = {"seg": "seg01", "blocks": {"p1": "hello"}, "dispatch_token": "RUN:seg01"}
@@ -2459,6 +2471,9 @@ def test_current_draft_sha1_ignores_dispatch_token_changes_same_as_the_cli(tmp_p
     scripts_dir.mkdir()
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
     shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(CLAIM_RECORD_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     segments_dir = tmp_path / "segments"
     segments_dir.mkdir()
 
@@ -2478,6 +2493,9 @@ def test_current_draft_sha1_fatals_on_missing_draft(tmp_path):
     scripts_dir.mkdir()
     shutil.copy2(DRAFT_SHA1_SRC, scripts_dir / "draft_sha1.py")
     shutil.copy2(CLAIM_RECORD_SRC, scripts_dir / "claim_record.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(CLAIM_RECORD_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     segments_dir = tmp_path / "segments"
     segments_dir.mkdir()
 
@@ -2624,6 +2642,9 @@ def make_trusted_plugin_root(tmp_path, name="trusted_plugin_install"):
     plugin_scripts_dir.mkdir(parents=True)
     shutil.copy2(SELECT_SEGMENTS_SRC, plugin_scripts_dir / "select_segments.py")
     shutil.copy2(LEDGER_MERGE_SRC, plugin_scripts_dir / "ledger_merge.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(LEDGER_MERGE_SRC.parent / "json_stdout.py", plugin_scripts_dir / "json_stdout.py")
     (plugin_scripts_dir / "cache_key.py").write_text(FAKE_CACHE_KEY_PY, encoding="utf-8")
     stage_phase2_sibling_scripts(plugin_scripts_dir, plugin_root / "assets" / "templates")
     return plugin_root
@@ -2746,6 +2767,9 @@ def test_plugin_root_redirects_which_codex_job_py_would_be_popened(tmp_path):
     plugin_root = tmp_path / "trusted_plugin_install"
     (plugin_root / "assets" / "scripts").mkdir(parents=True)
     shutil.copy2(CODEX_JOB_SRC, plugin_root / "assets" / "scripts" / "codex_job.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(CODEX_JOB_SRC.parent / "json_stdout.py", plugin_root / "assets" / "scripts" / "json_stdout.py")
     data_root = tmp_path / "data_only"
     data_root.mkdir()
 
@@ -2838,6 +2862,9 @@ def test_a_symlinked_self_anchored_install_never_lets_select_segments_run(tmp_pa
     scripts_dir = real_install / "assets" / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(DRIVER_SRC, scripts_dir / "segment_dispatch_driver.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRIVER_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     (scripts_dir / "mass-translate-wf.template.js").write_text(
         "// self-anchored template\n", encoding="utf-8"
     )
@@ -3199,6 +3226,9 @@ def test_segment_dispatch_driver_mutation_moves_exactly_plugin_bundle_hash(tmp_p
     all_members = sorted(set(CACHE_KEY_MODULE.PLUGIN_BUNDLE_MEMBERS) | set(ORCHESTRATION_BUNDLE_MEMBERS))
     for name in all_members:
         shutil.copy2(_bundle_member_source(name), scripts_root / name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(_bundle_member_source(name).parent / "json_stdout.py", scripts_root / "json_stdout.py")
 
     before_plugin = _independent_bundle_hash(scripts_root, CACHE_KEY_MODULE.PLUGIN_BUNDLE_MEMBERS)
     before_orchestration = _independent_bundle_hash(scripts_root, ORCHESTRATION_BUNDLE_MEMBERS)
@@ -7978,6 +8008,9 @@ def test_resolve_dirs_finds_the_template_under_a_deployed_durable_root(tmp_path)
     deployed_scripts = tmp_path / "scripts"
     deployed_scripts.mkdir()
     shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRIVER_SRC.parent / "json_stdout.py", deployed_scripts / "json_stdout.py")
     flat_template = deployed_scripts / "mass-translate-wf.template.js"
     shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, flat_template)
 
@@ -8002,6 +8035,9 @@ def test_a_deployed_layout_template_is_actually_readable_and_executable_end_to_e
     deployed_scripts.mkdir()
     shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
     shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, deployed_scripts / "mass-translate-wf.template.js")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRIVER_SRC.parent / "json_stdout.py", deployed_scripts / "json_stdout.py")
 
     deployed = _load_module(
         deployed_scripts / "segment_dispatch_driver.py", "sdd_deployed_template_e2e")
@@ -8034,6 +8070,9 @@ def test_resolve_dirs_still_finds_the_template_in_this_plugin_checkout_layout(tm
     checkout_scripts.mkdir(parents=True)
     checkout_templates.mkdir()
     shutil.copy2(DRIVER_SRC, checkout_scripts / "segment_dispatch_driver.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRIVER_SRC.parent / "json_stdout.py", checkout_scripts / "json_stdout.py")
     sibling_template = checkout_templates / "mass-translate-wf.template.js"
     shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, sibling_template)
 
@@ -8058,6 +8097,9 @@ def test_resolve_dirs_refuses_when_both_template_candidates_exist(tmp_path):
     deployed_scripts.mkdir()
     shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
     shutil.copy2(MASS_TRANSLATE_TEMPLATE_SRC, deployed_scripts / "mass-translate-wf.template.js")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRIVER_SRC.parent / "json_stdout.py", deployed_scripts / "json_stdout.py")
     checkout_templates = tmp_path / "templates"
     checkout_templates.mkdir()
     (checkout_templates / "mass-translate-wf.template.js").write_text(
@@ -8078,6 +8120,9 @@ def test_resolve_dirs_refuses_a_symlinked_template_candidate(tmp_path):
     deployed_scripts = tmp_path / "scripts"
     deployed_scripts.mkdir()
     shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRIVER_SRC.parent / "json_stdout.py", deployed_scripts / "json_stdout.py")
     real_target = tmp_path / "elsewhere.js"
     real_target.write_text("// a real file the symlink points at\n", encoding="utf-8")
     (deployed_scripts / "mass-translate-wf.template.js").symlink_to(real_target)
@@ -8098,6 +8143,9 @@ def test_resolve_dirs_refuses_a_directory_where_the_template_should_be(tmp_path)
     deployed_scripts = tmp_path / "scripts"
     deployed_scripts.mkdir()
     shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRIVER_SRC.parent / "json_stdout.py", deployed_scripts / "json_stdout.py")
     (deployed_scripts / "mass-translate-wf.template.js").mkdir()
 
     deployed = _load_module(
@@ -8119,6 +8167,9 @@ def test_resolve_dirs_refuses_when_a_candidate_cannot_be_looked_up_at_all(tmp_pa
     deployed_scripts = tmp_path / "scripts"
     deployed_scripts.mkdir()
     shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRIVER_SRC.parent / "json_stdout.py", deployed_scripts / "json_stdout.py")
     deployed = _load_module(
         deployed_scripts / "segment_dispatch_driver.py", "sdd_unlookupable_template")
 
@@ -8482,6 +8533,9 @@ def test_a_symlinked_self_anchored_install_directory_is_refused_not_silently_can
     scripts_dir = real_install / "assets" / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(DRIVER_SRC, scripts_dir / "segment_dispatch_driver.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRIVER_SRC.parent / "json_stdout.py", scripts_dir / "json_stdout.py")
     # Deployed-layout candidate: directly in scripts_dir, the layout
     # _self_anchored_template_path() checks FIRST.
     (scripts_dir / "mass-translate-wf.template.js").write_text(
@@ -8697,6 +8751,9 @@ def test_resolve_companion_path_fatals_when_absent_from_a_deployed_root(tmp_path
     deployed_scripts = tmp_path / "scripts"
     deployed_scripts.mkdir()
     shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRIVER_SRC.parent / "json_stdout.py", deployed_scripts / "json_stdout.py")
     deployed = _load_module(
         deployed_scripts / "segment_dispatch_driver.py", "sdd_companion_absent")
     dirs = deployed.resolve_dirs(None)
@@ -8721,6 +8778,9 @@ def test_resolve_companion_path_succeeds_once_step_0a_copies_it_into_a_deployed_
     deployed_scripts = tmp_path / "scripts"
     deployed_scripts.mkdir()
     shutil.copy2(DRIVER_SRC, deployed_scripts / "segment_dispatch_driver.py")
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(DRIVER_SRC.parent / "json_stdout.py", deployed_scripts / "json_stdout.py")
     (deployed_scripts / "resolve_codex_companion.py").write_text(
         FAKE_RESOLVE_CODEX_COMPANION_PY, encoding="utf-8")
     deployed = _load_module(

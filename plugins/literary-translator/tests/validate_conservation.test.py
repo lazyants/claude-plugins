@@ -73,6 +73,9 @@ def make_root(tmp_path) -> Path:
     scripts_dir.mkdir(parents=True)
     for src in (VALIDATE_CONSERVATION_SRC, VALIDATE_ASSEMBLED_SRC, VALIDATE_DRAFT_SRC):
         _copy(src, scripts_dir / src.name)
+    # json_stdout.py (#369): every routed script above loads it by exact
+    # path from its own directory and sys.exit()s if the sibling is absent.
+    _copy(SCRIPTS_SRC_DIR / "json_stdout.py", scripts_dir / "json_stdout.py")
     (root / "segments").mkdir()
     (root / "runs").mkdir()
     return root

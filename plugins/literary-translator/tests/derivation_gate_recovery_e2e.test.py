@@ -96,6 +96,9 @@ def make_pipeline_project(tmp_path) -> Path:
 
     for name in ("select_segments.py", "ledger_merge.py"):
         shutil.copy2(SCRIPTS_SRC / name, scripts_dir / name)
+    # json_stdout.py (#369): every staged script above loads it by exact
+    # path from beside itself, so a root without it exits rather than runs.
+    shutil.copy2(SCRIPTS_SRC / "json_stdout.py", scripts_dir / "json_stdout.py")
 
     # The real schema set (cache_key hashes these; ledger_merge validates
     # fragments against them). Overlays the canon schemas already staged.

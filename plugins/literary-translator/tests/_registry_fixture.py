@@ -73,6 +73,8 @@ def build_root(tmp_path: Path) -> Path:
         (root / sub).mkdir(parents=True, exist_ok=True)
     for src in (ASSETS / "scripts").glob("*.py"):
         shutil.copy2(src, root / "scripts" / src.name)
+    # json_stdout.py (#369) needs no line of its own here: the glob above is
+    # over every *.py in scripts/, and it copies the helper with the rest.
     for src in (ASSETS / "schemas").glob("*.json"):
         shutil.copy2(src, root / "schemas" / src.name)
     for src in (ASSETS / "languages").glob("*"):
