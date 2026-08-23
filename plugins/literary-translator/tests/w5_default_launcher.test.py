@@ -62,6 +62,9 @@ def test_w5_names_the_driver_as_its_default_launcher():
     assert "W5's DEFAULT launcher is `segment_dispatch_driver.py`" in w5, (
         "the W5 opener must name the driver as the default launcher"
     )
+    # The documented launch recipe carries --plugin-root: an omitted flag
+    # self-anchors into the codex-writable durable tree without refusing.
+    assert "--plugin-root {plugin_root} \\" in w5
     assert "**Default dispatch path — `segment_dispatch_driver.py`" in w5, (
         "the designation paragraph must be titled as the DEFAULT dispatch path"
     )
@@ -87,21 +90,25 @@ def test_w5_states_why_the_fallback_is_not_removed_now():
 
 
 def test_w5_discloses_what_the_default_path_does_not_carry():
-    # Both gates live inside the template, so flipping the default moves two
-    # residuals onto the default path. They are disclosed where the launcher
-    # is chosen rather than three sections away.
+    # Three residuals move onto the default path with the flip, and each is
+    # disclosed where the launcher is chosen rather than sections away. The
+    # pins are the substantive sentence of each, not its numbered label: a
+    # label survives having the claim under it reversed or hollowed out.
     w5 = _w5_section()
     assert "What the default path does NOT carry" in w5
-    assert "a driver-mediated fix turn is outside it entirely" in w5
-    assert "(2) The batch-final `batchComplete`" in w5
+    # (1) is a COPY-FIDELITY delta, not "the fix turn is unaudited" -- the
+    # understated version is what the security pass caught, and the count
+    # of artifacts left uncompared is the load-bearing half.
+    assert "does not fire here at all" in w5
+    assert "COPY-FIDELITY comparison of every file Step 0a copied" in w5
+    assert "have no byte comparison on this path" in w5
+    assert "is itself one of the uncompared copies" in w5
+    # (2) the fallback refuses an empty PLUGIN_ROOT; the driver's omitted
+    # flag silently self-anchors into the codex-writable durable tree.
+    assert "A missing `--plugin-root` is not refused" in w5
+    assert "fails open rather than loud" in w5
+    # (3) the batch-final merge, whose replacement is pinned separately.
     assert "this path has no per-batch equivalent, deliberately" in w5
-    # The heading and the numbered label are markers: flipping the claim
-    # under them from "does NOT" to "does" leaves both in place, so each
-    # residual is pinned by its substantive sentence instead -- (1) here,
-    # (2) by the "no per-batch equivalent" line above, and, together with the
-    # gate that carries the guarantee in its place, by
-    # test_what_replaces_the_fallback_batch_final_check_is_stated.
-    assert "Nothing afterwards checks that only `segments/<seg>.draft.json`" in w5
 
 
 def test_the_fix_turn_is_a_step_of_the_default_loop():
@@ -129,6 +136,9 @@ def test_what_replaces_the_fallback_batch_final_check_is_stated():
     assert "recomputes each draft's content sha1" in w5
     # Both weak cases of the optional merge return success, so the output --
     # not the exit status -- is what an operator has to read.
+    # W7 is broader on draft identity and NARROWER on the token binding;
+    # an unqualified "stronger" invited the opposite reading.
+    assert "What W7 does not carry is" in w5
     assert "read its OUTPUT rather than its exit status" in w5
     assert "listing that id in `stale_segments`" in w5
     assert "--expected-segs SEG1,SEG2,... --run-token RUN_ID" in w5
