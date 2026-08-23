@@ -192,36 +192,50 @@ def _local_dict_len(filename, funcname, varname):
     raise AssertionError(f"{funcname} is no longer defined in {filename}")
 
 
-# Rewritten for 1.58.0 (#433 -- a footnote anchor lost inside a verse fails the
-# build), per the maintenance contract above. This rotation inherited an empty
-# list and declared ONE row; it retired nothing, because there was nothing to
-# retire. Phrased in the past tense about what THIS rotation did, per the
-# sibling citation guard's note: a note phrased in the present tense about what
-# the base holds expires on the next rebase and nothing here can catch it.
+# Rewritten for 1.61.0 (#514), per the maintenance contract above. This rotation
+# inherited 1.58.0's own empty row set and left it empty -- stated in the
+# past tense about what was inherited rather than about what the base holds,
+# because the latter expires on the next rebase and nothing here can catch it
+# (see the sibling citation guard's note for the measured instances). `_files_defining`,
+# `_local_dict_len`, `_tuple_len` and `_test_function_count` are kept unused, as
+# earlier releases kept them, for the next entry that cites their class.
 #
-# The declared row is the size of the suite that owns the new check, which
-# `_test_function_count` re-derives by AST from the shipped file. The entry's
-# other real quantities are spelled as WORDS and so are invisible to `_TOKEN`;
-# a row whose phrase holds no numeral fails this file's own
-# one-numeral-per-phrase check. That is the whole reason "seven of them added
-# here" carries no row -- it IS derivable from this repo, by the same helper
-# the declared row uses, and only its spelling hides it. The other two,
-# "twenty verses" and "seventy-eight verse-store entries", could not be
-# declared however they were phrased: they were measured over operator-owned
-# durable roots that are NOT in this repository, which the entry says in its
-# own prose, so no derivation here could reach them. The
-# remaining numerals are version and issue numbers and the release date, none
-# of which is a measurement.
+# ZERO rows for 1.61.0, and this one needs the reasoning spelled out because the
+# entry DOES state tokenizer-visible numbers. They fall in four classes.
 #
-# `_files_defining`, `_local_dict_len` and `_tuple_len` stay unused, as earlier
-# releases kept them, for the next entry citing their class.
-FIGURES = [
-    Figure(
-        "defines 72 test functions",
-        72,
-        lambda: _test_function_count("assemble.test.py"),
-    ),
-]
+# Version, issue and date numerals -- not measurements.
+#
+# Formula constants: `max_fix_rounds + 1`, `+ 2`, `+ 3`, `MAXFIX + 2`. Every one
+# is already pinned by a real assertion somewhere in the suite -- a stronger
+# guard than a prose row, because it fails on the CODE changing rather than on
+# the prose being reworded. They are NOT all in one place, and saying they were
+# is how this note first shipped: the driver's unclaimed `+ 2` and claimed `+ 1`
+# are pinned in tests/segment_dispatch_driver.test.py's Property 7 section, the
+# `+ 3` iteration ceiling is pinned by that same file's loop-exhaustion test well
+# outside Property 7, and the template's own `MAXFIX + 2` is executed in
+# tests/max_codex_jobs_per_batch_preflight.test.py, which runs the real template
+# under node -- importing the driver's two helpers could not verify that one at
+# all, since the template is an independent source. Adding an importer helper
+# here to restate what those tests already fail on would be machinery for a
+# defect they already catch.
+#
+# Shipped-configuration figures: `max_fix_rounds: 4` and
+# `max_codex_jobs_per_batch: 400`. Re-derivable in principle from
+# profile.example.yml and from profile.schema.json's own `default`, but no helper
+# here reads YAML or JSON, and `400` occurs TWICE in the entry, so a row would
+# additionally need a phrase narrow enough to be unique.
+#
+# Field measurements from an operator-owned durable root that is not in this
+# repository and could not be re-derived here in any case: the 80-id batch, the
+# 480 it was charged, and the 400 it actually needed.
+#
+# The one arithmetic claim the entry makes about itself -- a need of 405 for 81
+# claimed segments -- is asserted directly in
+# tests/segment_dispatch_driver.test.py, so it too is pinned by a test rather
+# than by a row here. Declaring any of the above would mean hardcoding an answer,
+# which passes every assertion below while proving nothing (`lambda: 405`). This
+# is the accepted residual the docstring above names, not an oversight.
+FIGURES = []
 
 
 def _newest_entry():

@@ -213,11 +213,26 @@ member alongside `batch_agent_cap`) measures the resource the driver DOES
 spend: real codex dispatches. `check_volume_cap()` below reproduces
 `mass-translate-wf.template.js`'s own already-shipped preflight for this
 exact knob (`CODEX_JOBS_PER_SEG = max_fix_rounds + 2`,
-`estimatedCodexJobs = len(SEGS) * CODEX_JOBS_PER_SEG`), the SAME formula,
-because it is the SAME resource under the SAME cap, just measured from a
-second, independent entry point -- exactly how `skeptic_setup.py`'s own
-preflight duplicates its Workflow template's estimator for the identical
-reason (two entry points into one resource, each needing its own gate).
+`estimatedCodexJobs = len(SEGS) * CODEX_JOBS_PER_SEG`), because it is the
+SAME resource under the SAME cap, just measured from a second, independent
+entry point -- exactly how `skeptic_setup.py`'s own preflight duplicates
+its Workflow template's estimator for the identical reason (two entry
+points into one resource, each needing its own gate).
+
+It is the same formula for the population the template can have, and #514
+split off the one this driver can have that the template cannot. An id
+this invocation admitted a claim for is charged
+`codex_jobs_per_claimed_segment()` -- `max_fix_rounds + 1`, the reviews
+alone -- because `claim_capability_refusal_for_translate()` refuses a
+translate for it unconditionally, so the template's translate job is not
+merely improbable there, it is undispatchable. The template needs no
+equivalent: it has no notion of a claim, its `SEGS` come straight from
+`args`, and `pipeline(SEGS, translateStage, reviewFixLoop)` puts every id
+through the translate stage, so `max_fix_rounds + 2` remains its correct
+worst case. This driver never runs the template's own two cap preflights
+in any case -- `template_harness_source()` truncates the substituted
+source before `function draftProbePrompt(`, which sits above both of their
+top-level `return` statements.
 `max_fix_rounds` fix rounds are deliberately NOT counted as codex jobs:
 today the fix step is a plain Workflow `agent()` call, never a
 `codex_job.py` launch -- this is CURRENT reality, not yet the
@@ -1303,8 +1318,11 @@ def release_driver_lock(fd) -> None:
 # ---------------------------------------------------------------------------
 # Property 7 -- volume refusal via engine.max_codex_jobs_per_batch.
 # See module docstring's "Property 7 in detail" section for the reasoning.
-# Formula and message shape mirror mass-translate-wf.template.js's own
-# already-shipped preflight for this exact knob, verbatim.
+# For n_claimed == 0 -- and ONLY for that population -- the formula and the
+# message shape mirror mass-translate-wf.template.js's own already-shipped
+# preflight for this exact knob, verbatim. #514 added the claimed population,
+# which the template cannot have; restoring blanket template parity across
+# THAT path would recreate #514. Why, in the module docstring above.
 # ---------------------------------------------------------------------------
 
 
@@ -1324,23 +1342,97 @@ def codex_jobs_per_segment(max_fix_rounds: int) -> int:
     return max_fix_rounds + 2
 
 
-def check_volume_cap(n_segs: int, max_fix_rounds: int, max_codex_jobs_per_batch: int):
-    """Returns None if `n_segs` is within the cap, or a refusal dict
+def codex_jobs_per_claimed_segment(max_fix_rounds: int) -> int:
+    """The same count for an id THIS INVOCATION admitted a claim for:
+    (max_fix_rounds + 1) review jobs and NO translate job.
+
+    #514. claim_capability_refusal_for_translate() refuses `seg in
+    ctx.claims` unconditionally -- before the ledger write and before the
+    on-disk check -- so the one translate job codex_jobs_per_segment()
+    above charges a claimed id is not merely unlikely, it is
+    undispatchable. Charging it made check_volume_cap() pessimistic by
+    exactly one job per claimed segment and refused batches that fitted:
+    on a live book, 80 ids admitted under --from-converged at
+    max_fix_rounds=4 were computed as 480 against the shipped cap of 400,
+    when the reachable count was 400 -- exactly the cap -- and the refusal
+    told the operator to raise a limit that did not need raising.
+
+    A FLOOR on this driver's path by exactly one, like its sibling, and
+    that parity is not incidental -- it is why process_segment()'s
+    `max_iterations` is sized off THIS function for a claimed segment
+    rather than off codex_jobs_per_segment() for every segment alike.
+    Charging one job less while still permitting the unclaimed number of
+    loop iterations would have doubled the gap between what
+    check_volume_cap() charges and what a segment can actually dispatch
+    (derive_next_action()'s clean-but-stale branch re-dispatches a review
+    at the SAME round label on every iteration while the draft keeps
+    moving out of band, and the fabricated-loc retry spends one more), and
+    the schema calls this knob a WORST-CASE preflight cap: a two-job gap
+    is an overrun of the operator's configured bound, not the one-job
+    floor #440 already documented. Two independent reviewers caught that
+    on the first draft of #514, which charged less without bounding
+    less."""
+    return max_fix_rounds + 1
+
+
+def estimate_codex_jobs(n_segs: int, n_claimed: int, max_fix_rounds: int) -> int:
+    """The ONE authority for a batch's estimated codex-job count: the
+    unclaimed population at codex_jobs_per_segment() plus the claimed one
+    at codex_jobs_per_claimed_segment(). Both check_volume_cap() below and
+    run()'s own `volume_check_passed` journal event go through this, so the
+    refused and the admitted paths can never report two different numbers
+    for the same batch (they carried two hand-written copies of the one
+    formula before #514).
+
+    `n_claimed` is `len(ctx.claims)`. parse_claims_field() has already
+    proved that set is a SUBSET of this invocation's own post-dedupe
+    `segs` -- it is fatal there for a claims key that is not a member --
+    and `claims` is a dict, so duplicate keys cannot inflate it either.
+    The unclaimed count below therefore cannot go negative."""
+    n_unclaimed = n_segs - n_claimed
+    return (
+        n_unclaimed * codex_jobs_per_segment(max_fix_rounds)
+        + n_claimed * codex_jobs_per_claimed_segment(max_fix_rounds)
+    )
+
+
+def check_volume_cap(
+    n_segs: int, max_fix_rounds: int, max_codex_jobs_per_batch: int, *, n_claimed: int = 0
+):
+    """Returns None if this batch is within the cap, or a refusal dict
     (mirrors mass-translate-wf.template.js's own `{reason,
     estimatedCodexJobs, codexJobsCap}` result shape) otherwise. Never
     raises -- this is a pure, side-effect-free check the caller decides
-    what to do with."""
-    per_seg = codex_jobs_per_segment(max_fix_rounds)
-    estimated = n_segs * per_seg
+    what to do with.
+
+    `n_claimed` (#514) is keyword-only and defaults to 0, which is the
+    pre-#514 arithmetic exactly: charge every id a translate job. A caller
+    that forgets it therefore OVER-estimates rather than under-estimates,
+    and cannot silently land it in the wrong positional slot.
+
+    The refusal dict's KEY SET is unchanged -- that shape is the template's,
+    and this function mirrors it. Only `message` gains a clause, and only
+    when n_claimed > 0, so a batch with no claims still produces the
+    template's own message byte for byte."""
+    estimated = estimate_codex_jobs(n_segs, n_claimed, max_fix_rounds)
     if estimated <= max_codex_jobs_per_batch:
         return None
+    # Named rather than left for the operator to derive: without it the
+    # message states a need that does not divide by any per-segment count
+    # they could look up, which is the shape #514's own refusal had.
+    claimed_clause = (
+        f" ({n_claimed} of them admitted under a re-review claim, which spends "
+        "no translate job)"
+        if n_claimed
+        else ""
+    )
     return {
         "reason": "batch-too-large-codex-jobs",
         "estimatedCodexJobs": estimated,
         "codexJobsCap": max_codex_jobs_per_batch,
         "message": (
             f"Batch too large: this batch needs estimatedCodexJobs={estimated} "
-            f"for {n_segs} segment(s) at max_fix_rounds={max_fix_rounds}, over "
+            f"for {n_segs} segment(s){claimed_clause} at max_fix_rounds={max_fix_rounds}, over "
             f"the effective engine.max_codex_jobs_per_batch limit of "
             f"{max_codex_jobs_per_batch}. Raise it in profile.yml under "
             f"engine: to allow a larger batch."
@@ -5631,10 +5723,10 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
                                               -- it is "nothing else
                                               terminated in time".
 
-    The iteration cap (codex_jobs_per_segment(max_fix_rounds) -- one
-    translate plus every review round this segment could ever legitimately
-    need -- PLUS ONE, see the codex round-4 MINOR fix below) bounds the
-    LOOP overall; `fabricated_loc_retries` is a SEPARATE, narrower counter
+    The iteration cap (this segment's own per-segment job count -- one
+    translate plus every review round it could ever legitimately need, or
+    for a CLAIMED segment the reviews alone, since #514 -- PLUS ONE, see
+    the codex round-4 MINOR fix below) bounds the LOOP overall; `fabricated_loc_retries` is a SEPARATE, narrower counter
     (never reusing the loop's own iteration count) so an expected
     condition (a reviewer emitting a fabricated finding, which the
     template's own comment above AUTHENTIC_LOC_RE says a HEALTHY reviewer
@@ -5661,7 +5753,27 @@ def process_segment(seg: str, ctx: "DispatchContext") -> dict:
     max_fix_rounds=2 (budget 4), which happens to leave the needed spare
     iteration; it never exercised the boundary.
     """
-    max_iterations = codex_jobs_per_segment(ctx.translate_cfg["max_fix_rounds"]) + 1
+    # #514: sized off the per-segment charge for THIS segment's own
+    # population, so the two numbers keep the relationship the paragraph
+    # above describes. A claimed segment is charged one job less because
+    # claim_capability_refusal_for_translate() makes its translate
+    # undispatchable -- and it therefore needs one ITERATION less too: the
+    # translate iteration the unclaimed budget reserves can never be spent
+    # here. Leaving this claim-unaware would have widened the gap between
+    # what check_volume_cap() charges and what this loop permits from one
+    # job per segment to two, which is a real overrun of the operator's
+    # configured cap rather than the documented one-job floor. The `+ 1`
+    # spare classification iteration survives intact for both: at the
+    # schema's minimum max_fix_rounds of 1 a claimed segment gets 3 --
+    # review r1, the one permitted fabricated-loc retry, and the iteration
+    # that re-reads and classifies it -- exactly the headroom the unclaimed
+    # budget of 4 gives the same sequence with a translate in front of it.
+    per_segment_jobs = (
+        codex_jobs_per_claimed_segment(ctx.translate_cfg["max_fix_rounds"])
+        if seg in ctx.claims
+        else codex_jobs_per_segment(ctx.translate_cfg["max_fix_rounds"])
+    )
+    max_iterations = per_segment_jobs + 1
     fabricated_loc_retries = 0
     for _ in range(max_iterations):
         # codex round-3 BLOCKER, corrected after an initial fix was itself
@@ -6546,7 +6658,10 @@ def run(args, dirs: dict) -> dict:
 
         engine_cfg = load_engine_config(durable_root)
         volume_refusal = check_volume_cap(
-            len(segs), engine_cfg["max_fix_rounds"], engine_cfg["max_codex_jobs_per_batch"]
+            len(segs), engine_cfg["max_fix_rounds"], engine_cfg["max_codex_jobs_per_batch"],
+            # #514: the ids in `claims` can never spend a translate job --
+            # see codex_jobs_per_claimed_segment().
+            n_claimed=len(claims),
         )
         if volume_refusal is not None:
             append_journal(durable_root, session_id, {"type": "volume_check_refused", **volume_refusal})
@@ -6562,7 +6677,15 @@ def run(args, dirs: dict) -> dict:
             durable_root, session_id,
             {
                 "type": "volume_check_passed",
-                "estimatedCodexJobs": len(segs) * codex_jobs_per_segment(engine_cfg["max_fix_rounds"]),
+                "estimatedCodexJobs": estimate_codex_jobs(
+                    len(segs), len(claims), engine_cfg["max_fix_rounds"]
+                ),
+                # #514. Without it an operator reading this event cannot
+                # divide the estimate by any per-segment figure the docs
+                # give them: a claimed id and an unclaimed one cost
+                # different amounts, and only this count says how many of
+                # each the batch held.
+                "claimedSegs": len(claims),
                 "codexJobsCap": engine_cfg["max_codex_jobs_per_batch"],
             },
         )
