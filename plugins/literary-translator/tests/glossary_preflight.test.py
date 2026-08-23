@@ -52,6 +52,11 @@ def plugin_prompt_contract_version() -> int:
         f"marker -- this test file's own harness assumption is stale"
     )
 
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+from _senses_fixture import stage_consumer  # noqa: E402
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SKILL_DIR = PLUGIN_ROOT / "skills" / "literary-translator"
 ASSETS_DIR = SKILL_DIR / "assets"
@@ -60,11 +65,17 @@ SCHEMAS_DIR = ASSETS_DIR / "schemas"
 TEMPLATES_DIR = ASSETS_DIR / "templates"
 
 SCRIPT_PATH = SCRIPTS_DIR / "glossary_preflight.py"
+# #505's script axis compares the durable copy of every DURABLE_SCRIPT_FILENAMES
+# entry against the plugin's own. Both fixture builders below must therefore
+# seed it, on BOTH sides -- a durable_root with no scripts/ dir, or a fixture
+# plugin with no canon_validate.py sibling, is a stale root as far as the new
+# axis is concerned, and every pre-#505 control in this file would halt on it.
+CANON_VALIDATE_PATH = SCRIPTS_DIR / "canon_validate.py"
 CANON_ENTRY_SCHEMA_PATH = SCHEMAS_DIR / "canon-entry.schema.json"
 CANON_BATCH_SCHEMA_PATH = SCHEMAS_DIR / "canon-batch.schema.json"
 GLOSSARY_TASK_TEMPLATE_PATH = TEMPLATES_DIR / "glossary_TASK.template.md"
 
-for _p in (SCRIPT_PATH, CANON_ENTRY_SCHEMA_PATH, CANON_BATCH_SCHEMA_PATH, GLOSSARY_TASK_TEMPLATE_PATH):
+for _p in (SCRIPT_PATH, CANON_VALIDATE_PATH, CANON_ENTRY_SCHEMA_PATH, CANON_BATCH_SCHEMA_PATH, GLOSSARY_TASK_TEMPLATE_PATH):
     assert _p.is_file(), f"expected plugin asset not found: {_p}"
 
 
@@ -90,6 +101,14 @@ def make_current_durable_root(tmp_path) -> Path:
     shutil.copy2(CANON_ENTRY_SCHEMA_PATH, schemas_dir / "canon-entry.schema.json")
     shutil.copy2(CANON_BATCH_SCHEMA_PATH, schemas_dir / "canon-batch.schema.json")
     shutil.copy2(GLOSSARY_TASK_TEMPLATE_PATH, root / "glossary_TASK.md")
+    # #505's script axis compares the durable copy of canon_validate.py against
+    # the plugin's, so the baseline root must carry one. Routed through the
+    # sanctioned stage_consumer() helper rather than a raw copy2 (see
+    # tests/senses_fixture_guard.test.py): canon_validate.py imports
+    # canon_senses, and staging it the documented way keeps this fixture a
+    # faithful stand-in for a real Step 0a root rather than a byte-drop that
+    # would break the moment anything executed it.
+    stage_consumer(root, "canon_validate.py")
     return root
 
 
@@ -160,6 +179,7 @@ def make_fixture_plugin(tmp_path, *, canon_entry_doc=None, canon_batch_doc=None,
     shutil.copy2(
         SCRIPT_PATH.parent / "bootstrap_names.py", scripts_dir / "bootstrap_names.py"
     )
+    shutil.copy2(CANON_VALIDATE_PATH, scripts_dir / "canon_validate.py")
     write_json(
         schemas_dir / "canon-entry.schema.json",
         canon_entry_doc if canon_entry_doc is not None else load_json(CANON_ENTRY_SCHEMA_PATH),
@@ -1364,6 +1384,107 @@ def test_missing_required_flag_exits_nonzero_and_never_zero_or_one():
         [sys.executable, str(SCRIPT_PATH)], capture_output=True, text=True, timeout=30
     )
     assert result.returncode not in (0, 1)
+
+
+# ---------------------------------------------------------------------------
+# #505 -- the SCRIPT axis
+#
+# The failure this closes is not a wrong answer but a LATE one: the workflow
+# template is instantiated fresh from the plugin on every run, while the merge
+# command it builds executes the DURABLE copy of canon_validate.py. A template
+# passing a flag that copy has never heard of dies with argparse exit 2 after
+# every batch's dispatch, retrieval and citation review has already been paid
+# for, and surfaces only as a merge that produced nothing.
+#
+# The identical-bytes control is not restated here: test_fully_current_durable
+# _root_passes above IS that control, now that make_current_durable_root()
+# seeds the script on both sides.
+# ---------------------------------------------------------------------------
+
+
+def test_durable_canon_validate_differing_from_the_plugins_halts(tmp_path):
+    root = make_current_durable_root(tmp_path)
+    durable_script = root / "scripts" / "canon_validate.py"
+    durable_script.write_text(
+        durable_script.read_text(encoding="utf-8") + "\n# a release behind\n",
+        encoding="utf-8",
+    )
+
+    proc = run_preflight(root)
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "axis=script" in proc.stderr
+    assert "Step 0a" in proc.stderr, (
+        "the remedy must be named -- a halt that does not say 're-run the copy "
+        "pass' costs the operator the same lookup every time"
+    )
+    assert proc.stdout == "", "a halting preflight must print no ok line"
+
+
+def test_durable_canon_validate_missing_entirely_halts(tmp_path):
+    """Absence and staleness get the SAME remedy, deliberately: both mean the
+    durable root was never brought up to this plugin's copy pass. Reporting
+    absence as 'ok, nothing to compare' would be the false PASS this whole
+    script exists to refuse."""
+    root = make_current_durable_root(tmp_path)
+    (root / "scripts" / "canon_validate.py").unlink()
+
+    proc = run_preflight(root)
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "axis=script" in proc.stderr
+    assert "Step 0a" in proc.stderr
+
+
+def test_script_axis_runs_after_the_schema_axis(tmp_path):
+    """Ordering is a real property, not decoration: a root that is stale on
+    BOTH the schema and the script axis must report the SCHEMA one, because
+    that is the axis whose remedy (re-apply the schemas) is what the operator
+    is being asked to do first, and reporting the newer axis would bury a
+    defect this script has always caught."""
+    root = make_current_durable_root(tmp_path)
+    stale_entry = load_json(CANON_ENTRY_SCHEMA_PATH)
+    stale_entry["title"] = "a drifted durable schema"
+    write_json(root / "schemas" / "canon-entry.schema.json", stale_entry)
+    durable_script = root / "scripts" / "canon_validate.py"
+    durable_script.write_text(
+        durable_script.read_text(encoding="utf-8") + "\n# also behind\n", encoding="utf-8"
+    )
+
+    proc = run_preflight(root)
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "axis=script" not in proc.stderr, proc.stderr
+    # Positive half: without it the assertion above passes on ANY halt at all,
+    # including one that never reached either axis under test.
+    assert "differs structurally" in proc.stderr, proc.stderr
+
+
+def test_script_axis_refuses_to_compare_a_file_against_itself(tmp_path):
+    """A byte-comparison whose two sides are the SAME file passes vacuously
+    forever and is indistinguishable from a healthy root. Reachable exactly one
+    way: running this script from ${durable_root}/scripts/, which makes its
+    self-anchoring resolve the "plugin side" onto the durable tree. Step 0a's
+    copy-exclusion list forbids that, and the module docstring says why, but
+    nothing in code enforced it until #505 put a comparison there that
+    collapses to one inode.
+
+    Built by pointing a durable_root at a scripts/ dir that IS the fixture
+    plugin's own -- the same collapse, without having to run the script from a
+    place the harness would otherwise never put it."""
+    fixture_script = make_fixture_plugin(tmp_path)
+    root = make_current_durable_root(tmp_path)
+    (root / "scripts" / "canon_validate.py").unlink()
+    (root / "scripts" / "canon_validate.py").symlink_to(
+        fixture_script.parent / "canon_validate.py"
+    )
+
+    proc = run_preflight_with_script(fixture_script, root)
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "axis=script" in proc.stderr
+    assert "against itself" in proc.stderr, proc.stderr
+    assert proc.stdout == ""
 
 
 if __name__ == "__main__":

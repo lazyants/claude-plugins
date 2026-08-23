@@ -121,10 +121,11 @@ accidentally omit declaring the precondition):
     validation while silently omitting a candidate name.
 
 --merge-batches P1 P2 ... [--expect-source-forms-file M.json is NOT
-accepted here -- see --verify-merged]
+accepted here -- see --verify-merged] [--citations-reviewed]
     ONE process, single canon.json load: validates ALL given fragments
-    (Pass 1 + offline backstop) FIRST, before merging any of them, so a
-    later fragment's failure never leaves an earlier one half-applied.
+    (Pass 1 + offline backstop + #505's live citation attestation) FIRST,
+    before merging any of them, so a later fragment's failure never leaves
+    an earlier one half-applied.
     Then threads `acc = _merge_batch(acc, frag, senses)` across every
     fragment IN THE GIVEN ORDER, resolves generation_hashes (stamping them
     fresh ONLY if the merged document actually differs from what is already
@@ -162,13 +163,15 @@ M.json]
     "missing": [...]}` -- the exact relay shape the glossary-pass
     Workflow's disk-verify agent (`CANON_VERIFY_SCHEMA`) returns.
 
---batch PATH (legacy, single-fragment merge -- KEPT for existing callers)
-    The pre-1.2.0 merge path: Pass 1 + offline backstop on the one
-    fragment, merge, stamp generation_hashes, in-memory Pass 2, one atomic
-    write, disk-re-read Pass 2 (same no-masking discipline as
-    --merge-batches above). Equivalent to `--merge-batches PATH` with
-    exactly one fragment, kept as its own code path only because existing
-    tests/callers already invoke it this way.
+--batch PATH [--citations-reviewed] (legacy, single-fragment merge -- KEPT
+for existing callers)
+    The pre-1.2.0 merge path: Pass 1 + offline backstop + #505's live
+    citation attestation on the one fragment, merge, stamp
+    generation_hashes, in-memory Pass 2, one atomic write, disk-re-read
+    Pass 2 (same no-masking discipline as --merge-batches above).
+    Equivalent to `--merge-batches PATH` with exactly one fragment, kept as
+    its own code path only because existing tests/callers already invoke it
+    this way.
 
 (no batch flag at all) -- VALIDATE-ONLY mode
     A read-only health check: no merge, no write, no offline backstop
@@ -194,7 +197,15 @@ from ${durable_root}/schemas/ -- never the plugin's
 own assets/schemas/ (this script always runs from the durable, per-project
 copy).
 
-Usage. #412: every mode that STAMPS generation_hashes (--init,
+Usage. #505: under --research-mode live, both MERGE modes (--merge-batches,
+legacy --batch) refuse a fragment carrying any basis:"established" item
+without --citations-reviewed -- the operator's attestation that an independent
+citation review approved those exact bytes. The pre-merge citation review runs
+inside the glossary-pass Workflow, never here, so a hand-driven merge would
+otherwise freeze an unaudited citation into a canon row nothing downstream may
+question, with no signal. Every live merge example below therefore carries it; the offline one
+does not, because offline forbids basis:"established" outright.
+#412: every mode that STAMPS generation_hashes (--init,
 --restamp-derivation, --merge-batches, legacy --batch) refuses to run without
 either --plugin-root PATH or an explicit --allow-durable-sibling -- see
 --plugin-root's own help and main()'s trusted-sibling precondition. The
@@ -207,13 +218,13 @@ root, i.e. SKILL.md's {{PLUGIN_ROOT}}:
     python3 canon_validate.py --research-mode offline --correct correction.json
     python3 canon_validate.py --research-mode live --check-batch out_0.json
     python3 canon_validate.py --research-mode live --check-batch out_0.json --expect-source-forms-file manifest_0.json
-    python3 canon_validate.py --research-mode live --merge-batches out_0.json out_1.json --plugin-root ${plugin_root}
+    python3 canon_validate.py --research-mode live --merge-batches out_0.json out_1.json --plugin-root ${plugin_root} --citations-reviewed
     python3 canon_validate.py --research-mode live --verify-merged --batch out_0.json --batch out_1.json --expect-source-forms-file manifest_all.json
-    python3 canon_validate.py --research-mode live --batch glossary_out.json --plugin-root ${plugin_root}
+    python3 canon_validate.py --research-mode live --batch glossary_out.json --plugin-root ${plugin_root} --citations-reviewed
     python3 canon_validate.py --research-mode offline --batch glossary_out.json --plugin-root ${plugin_root}
     python3 canon_validate.py --research-mode live
     python3 canon_validate.py --research-mode live --canon-path /path/to/canon.json
-    python3 canon_validate.py --research-mode live --merge-batches out_0.json --senses-path /path/to/canon_senses.json --plugin-root ${plugin_root}
+    python3 canon_validate.py --research-mode live --merge-batches out_0.json --senses-path /path/to/canon_senses.json --plugin-root ${plugin_root} --citations-reviewed
 
 Exit code 0 on success, 1 on failure (for --verify-merged, "success" means
 `verified: true`). Exactly one JSON line is printed to stdout either way --
@@ -330,6 +341,13 @@ class ModeSpec(NamedTuple):
     source_forms_refusal -- None when --expect-source-forms-file is accepted
                 with this mode; otherwise the REASON it is refused, shown to
                 the operator verbatim.
+    citations_reviewed_refusal -- None when --citations-reviewed is accepted
+                with this mode; otherwise the REASON it is refused, shown to
+                the operator verbatim. #505: only a mode that WRITES a canon
+                row can freeze an unreviewed citation, so only the two merge
+                modes take the attestation. Declared as a column for the same
+                reason as its two siblings -- a mode added later inherits the
+                refusal instead of having to be remembered by it.
     stamps_generation_hashes -- does this mode shell out to the sibling
                 cache_key.py to WRITE canon.json's generation_hashes? #412:
                 only these modes resolve a sibling out of the codex-writable
@@ -359,6 +377,7 @@ class ModeSpec(NamedTuple):
     batch_ok: bool
     source_forms_refusal: "str | None"
     approve_to_refusal: "str | None"
+    citations_reviewed_refusal: "str | None"
     stamps_generation_hashes: bool
 
 
@@ -373,10 +392,13 @@ class ModeSpec(NamedTuple):
 # column added here later instead of needing to be remembered each time.
 #
 # What this guarantees, precisely, and ONLY for modes a parser flag selects:
-# the three cross-flag guards below (mutual exclusion, --batch
-# compatibility, --expect-source-forms-file acceptance) are comprehensions
-# over this table, so none of them can be taught about a new FLAG-SELECTED
-# mode while another silently is not, and
+# every table-driven cross-flag guard below (mutual exclusion, --batch
+# compatibility, --expect-source-forms-file acceptance, --approve-to
+# acceptance, --citations-reviewed acceptance) is a comprehension over this
+# table, so none of them can be taught about a new FLAG-SELECTED mode while
+# another silently is not. Deliberately NOT stated as a COUNT any more: the
+# count read "three" through both --approve-to and #505's attestation, which
+# is how a number in a comment always ends up -- wrong and unnoticed. Also
 # tests/canon_stamp_conservation.test.py fails if a parser flag is missing
 # from the table or vice versa -- that row is unforgettable.
 #
@@ -386,12 +408,13 @@ class ModeSpec(NamedTuple):
 # outside every guard, though -- main() refuses --expect-source-forms-file
 # for it with an explicit `elif not selected_modes` check (it reads no
 # fragment, exactly like --init), so the silent-ignore that once returned
-# {"success": true} without checking coverage is closed. The residual is only
-# that it stays invisible to the TABLE-DRIVEN guards -- mutual exclusion and
-# --batch compatibility -- and to the drift test, which compares parser dests
-# against table dests and so cannot see a mode that has neither. Any future
-# flagless mode inherits that residual and must be guarded by hand the same
-# way.
+# {"success": true} without checking coverage is closed; --approve-to and
+# --citations-reviewed each carry their own `elif not selected_modes` check
+# there for the same reason. The residual is only that it stays invisible to
+# the TABLE-DRIVEN guards -- mutual exclusion and --batch compatibility -- and
+# to the drift test, which compares parser dests against table dests and so
+# cannot see a mode that has neither. Any future flagless mode inherits that
+# residual and must be guarded by hand the same way.
 #
 # What it does NOT guarantee: adding a mode is still THREE edits -- a row
 # here, an `add_argument()` in build_arg_parser(), and a dispatch branch in
@@ -419,6 +442,30 @@ _COVERAGE_ENFORCED_ELSEWHERE = (
 _NOT_A_SINGLE_FRAGMENT_REVIEW = (
     "only --check-batch snapshots the single fragment it reviews pre-merge"
 )
+# #505. The attestation exists to gate the one irreversible act: freezing an
+# `established` citation nobody audited into a frozen canon row. A mode
+# that writes no row cannot do that, so accepting the flag there would state a
+# precondition it does not have -- the same false-success shape the two
+# refusals above guard against.
+_WRITES_NO_CANON_ROW = "it writes no canon row, so it can freeze no citation"
+# #505 x #495. --correct DOES write into entries{}, and its new_entry may carry
+# basis:"established" with a source, so the "writes no row" reason above would
+# be simply false for it. It is still outside this gate, for the reason the
+# gate exists: #505's defect is SILENCE -- a bulk pass freezing citations
+# nobody looked at, reported as success. A correction is the opposite act by
+# construction. It refuses to run blind (it must state the OLD value and is
+# refused when that does not match disk), carries a required free-text reason,
+# and is appended verbatim to canon.json's corrections[] -- an on-the-record
+# decision by somebody who has already concluded the entry is wrong. Demanding
+# a second attestation there would add ceremony to an act that is already
+# deliberate and already recorded, and would say nothing the corrections[]
+# entry does not. Its citation SAFETY is unaffected: #495 already routes
+# new_entry through the #347 static boundary and the offline backstop, both of
+# which still apply.
+_ALREADY_AN_ON_THE_RECORD_DECISION = (
+    "a correction states the old value, carries a reason, and is recorded in "
+    "corrections[] -- it is already the deliberate act this flag exists to force"
+)
 
 MODE_SPECS = (
     ModeSpec(
@@ -427,6 +474,7 @@ MODE_SPECS = (
         batch_ok=False,
         source_forms_refusal=_READS_NO_FRAGMENT,
         approve_to_refusal=_READS_NO_FRAGMENT,
+        citations_reviewed_refusal=_READS_NO_FRAGMENT,
         stamps_generation_hashes=True,
     ),
     ModeSpec(
@@ -435,6 +483,7 @@ MODE_SPECS = (
         batch_ok=False,
         source_forms_refusal=_READS_NO_FRAGMENT,
         approve_to_refusal=_READS_NO_FRAGMENT,
+        citations_reviewed_refusal=_READS_NO_FRAGMENT,
         stamps_generation_hashes=True,
     ),
     # #495. The one WRITING mode with stamps_generation_hashes=False: it
@@ -452,6 +501,7 @@ MODE_SPECS = (
         batch_ok=False,
         source_forms_refusal=_READS_NO_FRAGMENT,
         approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
+        citations_reviewed_refusal=_ALREADY_AN_ON_THE_RECORD_DECISION,
         stamps_generation_hashes=False,
     ),
     ModeSpec(
@@ -460,6 +510,7 @@ MODE_SPECS = (
         batch_ok=False,
         source_forms_refusal=None,
         approve_to_refusal=None,
+        citations_reviewed_refusal=_WRITES_NO_CANON_ROW,
         stamps_generation_hashes=False,
     ),
     ModeSpec(
@@ -468,6 +519,7 @@ MODE_SPECS = (
         batch_ok=False,
         source_forms_refusal=_COVERAGE_ENFORCED_ELSEWHERE,
         approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
+        citations_reviewed_refusal=None,
         stamps_generation_hashes=True,
     ),
     ModeSpec(
@@ -476,6 +528,7 @@ MODE_SPECS = (
         batch_ok=True,
         source_forms_refusal=None,
         approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
+        citations_reviewed_refusal=_WRITES_NO_CANON_ROW,
         stamps_generation_hashes=False,
     ),
     # The legacy bare-`--batch` merge. batch_ok=True is load-bearing, not
@@ -487,6 +540,7 @@ MODE_SPECS = (
         batch_ok=True,
         source_forms_refusal=_COVERAGE_ENFORCED_ELSEWHERE,
         approve_to_refusal=_NOT_A_SINGLE_FRAGMENT_REVIEW,
+        citations_reviewed_refusal=None,
         stamps_generation_hashes=True,
     ),
 )
@@ -524,6 +578,7 @@ NON_MODE_DESTS = frozenset(
         "senses_path",
         "plugin_root",
         "allow_durable_sibling",
+        "citations_reviewed",
     }
 )
 
@@ -1824,6 +1879,34 @@ def _validate_existing_entries(canon: dict, registry: "Registry") -> None:
 
 
 # ---------------------------------------------------------------------------
+# The basis:"established" claim -- ONE predicate, both gates that key on it
+# ---------------------------------------------------------------------------
+
+
+def _established_offenders(batch: list) -> list:
+    """Every item in `batch` claiming basis:"established", named by its
+    `source_form` (a positional `<item N>` placeholder when it carries none;
+    non-dict junk is skipped rather than raising, so a malformed fragment
+    still reaches the schema errors that describe it properly).
+
+    ONE definition, deliberately, for BOTH gates that key on that claim: the
+    offline backstop below (which forbids it outright) and #505's citation
+    attestation after it (which admits it only against an operator-attested
+    review). They ask the same question of the same field for different
+    reasons, and the scope both their docstrings state -- keyed on `basis`,
+    NEVER on `disposition` -- is a property of THIS predicate, not of either
+    caller. Two copies could drift into disagreeing about what an
+    `established` claim is, and the gate that stopped recognizing one would
+    simply stop firing.
+    """
+    return [
+        item.get("source_form", f"<item {i}>")
+        for i, item in enumerate(batch)
+        if isinstance(item, dict) and item.get("basis") == "established"
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Offline research-mode backstop
 # ---------------------------------------------------------------------------
 
@@ -1842,11 +1925,7 @@ def _enforce_offline_backstop(batch: list, research_mode: str) -> None:
     """
     if research_mode != "offline":
         return
-    offenders = [
-        item.get("source_form", f"<item {i}>")
-        for i, item in enumerate(batch)
-        if isinstance(item, dict) and item.get("basis") == "established"
-    ]
+    offenders = _established_offenders(batch)
     if offenders:
         raise CanonValidationError(
             "research_mode=offline forbids basis:\"established\" for every new "
@@ -1857,6 +1936,82 @@ def _enforce_offline_backstop(batch: list, research_mode: str) -> None:
             "needed), or disposition:\"review_queue\" with a note carrying the "
             "literal prefix \"SOURCE_UNAVAILABLE:\" instead -- the whole batch "
             "merge is rejected, canon.json is unchanged.",
+            offending=offenders,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Citation-review attestation (#505)
+# ---------------------------------------------------------------------------
+
+
+def _enforce_citation_review_attestation(
+    batch: list, research_mode: str, citations_reviewed: bool
+) -> None:
+    """Under research_mode == "live", FATALLY rejects the whole batch merge
+    when ANY item claims basis:"established" and the caller did not pass
+    --citations-reviewed. Nothing is written to canon.json when this fires.
+
+    WHY THIS LIVES HERE AND NOT IN THE WORKFLOW. The pre-merge citation
+    review (1.16.0/1.16.1) is the only thing anywhere that opens an
+    `established` item's `source` and asks whether the page exists, documents
+    the right entity, and attests the claimed canonical_target_form -- and it
+    lives entirely inside glossary-pass-wf.template.js's control flow. This
+    script was the writer for BOTH callers: the Workflow, which does run that
+    review, and a hand-driven merge, which does not. A canon row is immutable
+    (`--verify-merged` writes nothing, re-merging a different resolution for
+    the same source_form is a fatal collision) and the downstream reviewer is
+    forbidden to question a frozen canon form, so a fabricated citation that
+    reached this function was frozen for the life of the project with no
+    signal at all -- a green run, never a halt.
+
+    WHAT THE FLAG IS, EXACTLY: an OPERATOR ATTESTATION, and nothing more. It
+    proves nothing about whether a review ran, and cannot: no durable artifact
+    records a CITATIONS_OK verdict, and the approved snapshot the reviewer
+    audits is written by the PREPARE step BEFORE any evidence is fetched, so
+    even "this path is an approved_*.json" would say nothing about the
+    verdict. What the refusal converts is a SILENT freeze into a deliberate
+    act -- the same ceiling, and the same shape, as #412's
+    --plugin-root/--allow-durable-sibling and reject_review.py's attested
+    --reason: prove what the kernel can, halt on the rest, let the operator
+    assert the remainder knowingly.
+
+    SCOPE -- keyed on `basis`, NEVER on `disposition`. canon-batch.schema
+    .json's QUEUED branch requires only `note`, leaves `source` an
+    unconstrained optional string, and still admits basis:"established"
+    (see _enforce_citation_source_safety's own scope note, which is forced by
+    the same schema fact). `_merge_batch` freezes a queued item into
+    canon.json's review_queue[] verbatim, so an accepted-only scan would leave
+    exactly that door open. The Workflow's own reviewer scopes by basis too.
+
+    OFFLINE IS UNTOUCHED: `established` is forbidden outright there, and
+    _enforce_offline_backstop -- which both merge runners call immediately
+    BEFORE this one, though after schema validation and the citation-source
+    safety check, either of which can reject an offline batch first on its own
+    grounds -- rejects it with its own message. Telling an offline operator to
+    attest a review that offline has no way to run would be worse than
+    silence.
+    """
+    if research_mode != "live" or citations_reviewed:
+        return
+    offenders = _established_offenders(batch)
+    if offenders:
+        raise CanonValidationError(
+            "research_mode=live admits basis:\"established\", but nothing here "
+            "has been told a citation review approved these bytes, and an "
+            "ACCEPTED row this merge freezes is revisable afterwards only by a "
+            "deliberate --correct-entry somebody has to know to run. No "
+            "attestation was supplied for: " + ", ".join(_bounded_list(offenders))
+            + ". The pre-merge citation review -- which retrieves each cited "
+            "page through scripts/fetch_citation.py and rejects the batch "
+            "unless the page exists, documents the right entity and attests "
+            "the claimed canonical_target_form -- runs inside the glossary-pass "
+            "Workflow, never in this script. Re-run with --citations-reviewed "
+            "once such a review has approved these exact bytes. Auditing a "
+            "citation by hand is done through scripts/fetch_citation.py too, "
+            "never curl: see references/canon-and-glossary.md, \"Pre-merge "
+            "citation review\". The whole batch merge is rejected, canon.json "
+            "is unchanged.",
             offending=offenders,
         )
 
@@ -2790,7 +2945,12 @@ def run_correct(
     )
 
 
-def _validate_and_enforce_batch(batch: list, registry: "Registry", research_mode: str) -> None:
+def _validate_and_enforce_batch(
+    batch: list,
+    registry: "Registry",
+    research_mode: str,
+    citations_reviewed: "bool | None",
+) -> None:
     """Every per-fragment gate, in the ONE order every batch path must run
     them. THE single entry point -- `run_check_batch`, `run_merge_batches` and
     the legacy `run_merge` all call this and nothing else.
@@ -2808,11 +2968,19 @@ def _validate_and_enforce_batch(batch: list, registry: "Registry", research_mode
     than as something else; the citation-safety check before the offline
     backstop, so an unsafe `source` is reported in BOTH research modes rather
     than only in the one that would reject the item for another reason.
+
+    `citations_reviewed` (#505) has NO default on purpose: it is the caller's
+    --citations-reviewed attestation, and `None` is the explicit "this path
+    writes no canon row, so it can freeze no citation" answer that
+    `run_check_batch` gives. A fourth path must therefore state which of the
+    two it is rather than inherit a fail-open default it never considered.
     """
     _validate_batch_items(batch, registry)
     _enforce_no_truncated_accepted(batch)
     _enforce_citation_source_safety(batch)
     _enforce_offline_backstop(batch, research_mode)
+    if citations_reviewed is not None:
+        _enforce_citation_review_attestation(batch, research_mode, citations_reviewed)
 
 
 def run_merge(
@@ -2823,19 +2991,22 @@ def run_merge(
     senses_path: Path,
     allow_absent_senses: bool,
     plugin_root_str=None,
+    citations_reviewed: bool = False,
 ) -> dict:
     """Legacy single-fragment merge path (--batch PATH). Equivalent to
     `run_merge_batches(canon_path, [batch_path], ...)`, kept as its own
     code path because existing tests/callers already invoke it this way.
 
     `plugin_root_str` (#412) is this script's own --plugin-root CLI value,
-    threaded through to `_stamp_write_verify`.
+    threaded through to `_stamp_write_verify`. `citations_reviewed` (#505) is
+    --citations-reviewed, the operator's attestation that an independent
+    citation review approved these exact bytes.
     """
     batch = _load_batch(batch_path)
     canon = _load_canon(canon_path)
     senses = _load_senses_or_raise(senses_path, allow_absent_senses)
 
-    _validate_and_enforce_batch(batch, registry, research_mode)
+    _validate_and_enforce_batch(batch, registry, research_mode, citations_reviewed)
     merged = _merge_batch(canon, batch, senses)
 
     on_disk, restamped = _stamp_write_verify(
@@ -2890,7 +3061,8 @@ def run_check_batch(
         raw_bytes, batch = _load_batch_bytes(batch_path)
     else:
         batch = _load_batch(batch_path)
-    _validate_and_enforce_batch(batch, registry, research_mode)
+    # None: check_batch writes no canon row, so it can freeze no citation.
+    _validate_and_enforce_batch(batch, registry, research_mode, None)
     if manifest_path is not None:
         expected_forms = _load_source_forms_manifest(manifest_path)
         _assert_exact_source_form_coverage(batch, expected_forms)
@@ -2924,6 +3096,7 @@ def run_merge_batches(
     senses_path: Path,
     allow_absent_senses: bool,
     plugin_root_str=None,
+    citations_reviewed: bool = False,
 ) -> dict:
     """--merge-batches P1 P2 ...: single process, single canon.json load.
     Validates ALL given fragments (Pass 1 + offline backstop) FIRST, before
@@ -2932,10 +3105,14 @@ def run_merge_batches(
     shared across every fragment in this call.
 
     `plugin_root_str` (#412) is this script's own --plugin-root CLI value,
-    threaded through to `_stamp_write_verify`."""
+    threaded through to `_stamp_write_verify`. `citations_reviewed` (#505) is
+    --citations-reviewed, the operator's attestation that an independent
+    citation review approved these exact bytes -- checked per fragment inside
+    the SAME pre-merge loop, so a later fragment's unattested citation refuses
+    before an earlier one has been merged."""
     batches = [_load_batch(p) for p in batch_paths]
     for batch in batches:
-        _validate_and_enforce_batch(batch, registry, research_mode)
+        _validate_and_enforce_batch(batch, registry, research_mode, citations_reviewed)
 
     canon = _load_canon(canon_path)
     senses = _load_senses_or_raise(senses_path, allow_absent_senses)
@@ -3159,6 +3336,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--citations-reviewed",
+        action="store_true",
+        help=(
+            "#505. Only with a merge mode (--merge-batches or the legacy bare "
+            "--batch): attests that an independent citation review approved "
+            "the exact bytes of every fragment named on this command line. "
+            "Under --research-mode live a merge carrying any "
+            "basis:\"established\" item is REFUSED without it -- the "
+            "pre-merge citation review runs inside the glossary-pass Workflow, "
+            "never in this script, so a hand-driven merge would otherwise "
+            "freeze an unaudited citation into a canon row nothing downstream "
+            "may question, with no signal. It is an attestation, not a proof: "
+            "nothing on disk records the review's verdict. Refused in every "
+            "non-merge mode."
+        ),
+    )
+    parser.add_argument(
         "--merge-batches",
         metavar="PATH",
         nargs="+",
@@ -3350,6 +3544,31 @@ def main(argv=None) -> int:
                 "validate-only (no mode flag) does not accept --approve-to -- "
                 "it reviews no single fragment to snapshot. Pass --check-batch."
             )
+    # #505 -- every mode that refuses --citations-reviewed, with its own
+    # reason. Same table-driven shape as --approve-to above: the attestation
+    # gates the one irreversible act (freezing an unreviewed `established`
+    # citation into a frozen canon row), so a mode that writes no row must
+    # refuse it loudly rather than accept a precondition it cannot have.
+    citations_reviewed_refusers = [
+        spec for spec in selected_modes if spec.citations_reviewed_refusal is not None
+    ]
+    if args.citations_reviewed:
+        if citations_reviewed_refusers:
+            parser.error(
+                "; ".join(
+                    f"{spec.flag} does not accept --citations-reviewed "
+                    f"({spec.citations_reviewed_refusal})"
+                    for spec in citations_reviewed_refusers
+                )
+            )
+        elif not selected_modes:
+            # VALIDATE-ONLY has no MODE_SPECS row, so the comprehension above
+            # never reaches it -- guarded by hand exactly like its two siblings.
+            parser.error(
+                "validate-only (no mode flag) does not accept "
+                "--citations-reviewed -- it writes no canon row, so it can "
+                "freeze no citation. Pass --merge-batches or --batch."
+            )
     # #412 -- the trusted-sibling precondition. A mode that STAMPS
     # generation_hashes shells out to a sibling cache_key.py; left to
     # self-anchor, that sibling comes out of ${durable_root}/scripts/, which
@@ -3428,6 +3647,7 @@ def main(argv=None) -> int:
                 senses_path,
                 allow_absent_senses,
                 args.plugin_root,
+                args.citations_reviewed,
             )
         elif args.verify_merged:
             result = run_verify_merged(
@@ -3442,6 +3662,7 @@ def main(argv=None) -> int:
                 senses_path,
                 allow_absent_senses,
                 args.plugin_root,
+                args.citations_reviewed,
             )
         else:
             result = run_validate_only(canon_path, args.research_mode, registry)
