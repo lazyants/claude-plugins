@@ -1082,6 +1082,60 @@ alike, neither of which is changed to get it:
   and is re-dispatched next run, exactly as before. Widening that would turn
   a transient hiccup into a segment an operator has to rescue by hand.
 
+  **Two trigger sites, one rule (#665).** The same write is taken from either
+  place a translate candidate can be gated: `validate_attempt()`, for the
+  attempt this run just produced, and `adopt_pending()`, for a candidate a
+  PRIOR run deferred (`reason: deferred-completed`) because it completed with
+  no budget left to validate. The second route was left open by #398 and
+  closed by #665: `adopt_pending()` used to report both "this pending's
+  cross-run token is stale" and "this pending's content is defective" as one
+  bare `False`, so `run()` could not tell them apart and fell through to
+  `launch()` -- paying for a full translation the gate had already refused,
+  once per run, for as long as validation kept being deferred.
+
+  What separates the two causes is `adopt_pending()`'s gate ORDER, which
+  `_adoption_gates()` owns: `draft_ready.py` carries `--expect-token` and runs
+  FIRST, and the loop returns on its rejection. Reaching `validate_draft.py`
+  at all therefore proves the pending's own `dispatch_token` matched the
+  current run, so an exit 1 there is a same-token verdict on content -- never
+  a stale token. A stale token, an exit 2, a gate that could not run, and a
+  review candidate all keep the behaviour the pending slot exists for: discard
+  the pending and launch fresh -- except a gate that could not run at all,
+  which KEEPS it, because that is recoverable work nothing has judged.
+
+  **What the gates judge changed with it.** `adopt_pending()` used to point
+  each gate's `--candidate-file` straight at the pending slot. That name is
+  deterministic and persists across runs, and every gate re-OPENS it by path,
+  so there is a writable window between the two opens. (Who can write it is
+  narrower than it looks: since #409 the codex process runs in a sandbox
+  `_setup_sandbox()` refuses to dispatch into unless it is proved confined, so
+  it cannot reach `segments/`. What remains is the operator's own hand and a
+  second dispatcher over one `durable_root`, already unsupported.) That was
+  tolerable
+  while every rejection was recoverable; it stopped being tolerable once a
+  `validate_draft.py` exit 1 became terminal, because that script answers a
+  missing or malformed candidate with exit 1 too. An ordinary truncate-and-
+  rewrite in that window is indistinguishable from a content verdict.
+
+  No re-check of the slot closes that: a type re-check passes an in-place
+  overwrite, and a before/after digest passes a truncate-then-restore (both
+  samples read bytes the validator never saw). So the gates now judge an
+  immutable per-invocation SNAPSHOT instead -- copied once through the same
+  fd-pinned, digest-verified primitive `validate_attempt()` already uses, into
+  the `.att.<seg>.<inv>...` name that carries `os.urandom(8)` and that no other
+  process can name -- and the promote moves the very bytes that were judged.
+  A snapshot that cannot be taken is not a verdict: the pending survives and
+  the run launches fresh, exactly as when a gate could not run.
+
+  The rejected pending is still discarded, as it always was -- its bytes are
+  defective by the very gate that blocks the segment, and that gate's own
+  output is already carried into the terminal joblog via `error_detail`
+  (#399). The job reports `reason: pending-rejected`, a label of its own:
+  unlike the `validate_attempt()` site, which kept `validate-failed` because
+  consumers already read it, this path had no label at all -- it reported
+  whatever the FRESH job then produced, which is what made the repeat
+  invisible.
+
   **Best effort.** A failed write never changes the job's exit code, stdout
   line or `reason`; it leaves the segment in its pre-#398 recoverable state.
   The outcome is reported in the terminal joblog's `ledger_write` field,
