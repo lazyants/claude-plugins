@@ -30,9 +30,13 @@ so there is exactly one place each rule can go stale.
 - **R7** Workflow-script schema requirement (two explicit categories) —
   `references/workflow-schema-validation.md`.
 - **R8** The fix turn runs in-session or on at most two long-lived executors,
-  never a spawn per round/segment/defect class — `SKILL.md`. R1 fixes WHO
+  never a spawn per round/segment/defect class, and **those two never hold the
+  same segment** — nothing locks a fix turn — `SKILL.md`. R1 fixes WHO
   translates and reviews; R8 fixes who EDITS the draft afterwards, the step
-  codex structurally cannot perform.
+  codex structurally cannot perform. The two halves scope DIFFERENTLY: the SPAWN
+  rule is hand-driven only, not the `pipeline()` path's per-round `callFix()`,
+  while segment ownership binds BOTH — a second `pipeline()` invocation can hold
+  a segment the first one is still fixing.
 - **R9** A style-contract edit applies forward; a converged segment stays
   converged, and no back-sweep is owed to a newly written rule — `SKILL.md`.
 - **R10** A previous volume is not an input: mechanics come from the plugin,

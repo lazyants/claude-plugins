@@ -780,7 +780,13 @@ here, follow the linked doc:
   `--kind review` writes only `<seg>.review.json` and never touches the draft,
   and re-translating converged or hand-corrected text is prohibited — so a
   Claude turn must apply it. Never one spawn per round, per segment, or per
-  defect class. **The billable unit is the COLD START, not the round and not
+  defect class. **Scope: the HAND-DRIVEN fix turn** — this session, or an
+  executor a session hands fix work to, including the driver's `needs_fix`
+  stall (below). It is not a statement about `mass-translate-wf.template.js`'s
+  `callFix()`, which dispatches one `agent()` per dirty round by design:
+  `fixPrompt()` renders that turn's whole editing contract into the prompt and
+  the call carries no continuation handle, so there is no warm executor there
+  to keep open. **The billable unit is the COLD START, not the round and not
   the concurrency**: twenty sequential spawns cost the same as twenty parallel
   ones, so capping concurrency saves almost nothing, while a warm executor
   re-reads the contract incrementally and a cold one rebuilds it. Measured on
@@ -788,7 +794,7 @@ here, follow the linked doc:
   fresh executor per round burned 39.3M cache-creation tokens across 19 spawns
   against its own session's 3.2M, and cost 3.1× the book that applied every fix
   in-session.
-  Two corollaries, and they are ONE rule with the above — unsafe apart. **Do
+  Three corollaries, and they are ONE rule with the above — unsafe apart. **Do
   not respond by enlarging the batches:** small parcels (3–7 loci) are what
   keeps attention on each finding, and executor attention is the only detector
   for a finding whose execution violates another contract rule. Small parcels
@@ -797,6 +803,30 @@ here, follow the linked doc:
   **Do not collapse to a single actor either:** two independent readers exist
   to disagree with the lead's FRAME, not to add hands. Authorization may be
   granted per defect class; the record stays per item, always.
+  **And two executors NEVER hold the same segment.** Split the parcels by
+  segment and keep that split for as long as a round is open — this is the
+  corollary that makes "at most two" safe, and it is the one nothing enforces.
+  `runs/.driver.lock` covers a competing driver and
+  `segments/.codex_job.<seg>.lock` covers a codex job in its promoting phase;
+  **neither covers a fix turn**, which writes `segments/<seg>.draft.json`
+  directly — as the `--from-stalled` disclosure below states. That paragraph is
+  cited for that fact alone and not for its own race's outcome. What goes wrong is a **lost update**, and it is silent: a fixer
+  copies the token it read and rewrites the WHOLE draft, so two fixers off the
+  same predecessor end with the later one's text and a finding the earlier one
+  already applied is simply gone. **No gate recovers it, and do not expect one
+  to.** The reviewed-SHA rebind that `ledger_update.py`, `final_audit.py`,
+  `assemble.py` and `validate_assembled.py` each run compares a draft against
+  the sha1 the REVIEWER saw; it is a good gate and it does force a fresh review
+  once the draft has moved. But a fresh review is a new model pass over the
+  surviving text, and nothing carries the earlier round's finding into it — so
+  the erased fix may simply not be found again inside `engine.max_fix_rounds`.
+  Every gate here proves the reviewer saw the current bytes. None proves that a
+  finding already applied to them survived. **This corollary, unlike the
+  spawn economics above, DOES bind the `pipeline()` path** — inside ONE
+  `pipeline()` invocation it is already handled, since #198's SEGS uniqueness
+  guard gives each segment one branch whose fix calls are serial, but nothing
+  excludes a SECOND invocation, concurrent or resumed, holding the same
+  segment.
 - **R9 — A style-contract edit applies FORWARD; a converged segment stays
   converged.** Appending a finding to `style_bible.md` mid-run does not
   invalidate work already reviewed under the previous contract, and must never
