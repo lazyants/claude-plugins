@@ -795,6 +795,42 @@ _TERMINAL_PUNCT = frozenset(
 
 _ADVISORY_SAMPLE_CAP = 8
 VISUAL_ORDER_SCAN_NAME = "visual_order_scan"
+BLOCK_SIZE_SCAN_NAME = "block_size_census"
+
+# The label main()'s last-resort boundary prints when reporting itself failed.
+# Deliberately NOT one scan's name: that boundary now sits above several scans,
+# and naming one of them would misattribute a failure that belongs to none.
+ADVISORY_UNAVAILABLE_NAME = "advisory_scans"
+
+# Block-size census (issue #504). A block whose source is an extraction artifact
+# -- a whole narrative wrapped as one block by the converter -- is invisible to
+# every check this gate runs: the only size-aware one is the per-SEGMENT word
+# count, and a 17 896-character block passes it exactly as a 400-character one
+# does. The three constants below were MEASURED, not chosen:
+#
+#   * reference p90 rather than the median. The median is degenerate on real
+#     books -- the field manifest's median block is SIX characters (1170 short
+#     dialogue paragraphs), and 600 of its 1212 blocks are >= 10x that.
+#   * reference p90 rather than p95/p99. A high percentile sits ON the artifact
+#     once more than one block is affected: 98 ordinary 400-char paragraphs plus
+#     TWO 18 000-char wrap-joined blocks give p99 = 18 000, so nothing can ever
+#     reach 4x it. p90 flags both, and still flags all ten when a tenth of the
+#     book is affected.
+#   * multiple 10. Over the five manifests measured (max/p90): 21.03 on the book
+#     carrying the known artifact, and 4.97 / 4.86 / 5.78 / 6.04 on four clean
+#     ones. 10 clears the noisiest clean book by 1.66x and the true positive
+#     clears 10 by 2.10x -- the widest two-sided margin of p90/p95/p99.
+#   * minimum population 30. Below it the reference is the outlier's own
+#     neighbourhood and the comparison means nothing. The census NOTE prints the
+#     count anyway, so a population too small to screen is stated rather than
+#     silently skipped.
+_BLOCK_SIZE_REFERENCE_Q = 0.90
+_BLOCK_SIZE_OUTLIER_MULTIPLE = 10
+_BLOCK_SIZE_MIN_POPULATION = 30
+# Derived, never spelled a second time: every line the census and the advisory
+# print names this percentile, and a hand-written "p90" left beside a changed
+# _BLOCK_SIZE_REFERENCE_Q is a silent lie inside the operator's own evidence.
+_BLOCK_SIZE_REFERENCE_PCT = int(_BLOCK_SIZE_REFERENCE_Q * 100)
 
 
 def _is_rtl_letter(ch: str) -> bool:
@@ -928,8 +964,182 @@ def _escape_evidence(token: str) -> str:
     return "".join(_escape_char(ch) for ch in token)
 
 
-def run_advisory_scans(manifest: dict):
-    """Report-only scans, as ``[(name, detail)]``. Never affects the exit code."""
+def _floor_index_percentile(values, q: float):
+    """The value at ``sorted(values)[int(q * (n - 1))]``.
+
+    Named for the formula rather than called "nearest-rank", because it is NOT
+    that definition: nearest-rank is ``ceil(q * n) - 1``, and the two disagree.
+    They happen to agree at many n (both give 26 at n=30 and 89 at n=100), which
+    is exactly what makes a wrong label survive review -- n=12 separates them,
+    floor-index 9 against nearest-rank 10. Callers must not read one definition's
+    boundary behaviour off the other's name.
+
+    An all-equal population returns that value, so no member can reach a multiple
+    of it above 1. ``values`` must be non-empty; the caller guarantees it."""
+    ordered = sorted(values)
+    return ordered[int(q * (len(ordered) - 1))]
+
+
+def _segment_member_block_sizes(manifest: dict):
+    """``[(block_id, character_count)]`` for the DISTINCT blocks that some
+    segment claims, skipping any whose ``plain_text`` is missing or empty.
+
+    Membership in ``segments[].block_ids`` -- not a ``kind`` filter -- is what
+    bounds the population. ``kind`` is the wrong key twice over: filtering to
+    ``body`` would drop the frontback units a project legitimately translates,
+    and a real manifest on disk carries values outside the schema enum
+    (``novella``, ``heading``), so the filter can yield an EMPTY population,
+    which prints exactly what a populated one prints. Membership also excludes
+    the ``FN:`` definition blocks and the unattached front/back matter that
+    carries a Project Gutenberg licence -- ~18 800 characters in one block, in
+    every Gutenberg book, and not a paragraph anyone translates.
+
+    DISTINCT matters: ``block_ids`` is an ordinary array, the schema does not
+    require its members to be unique, and no derivable check rejects a repeat
+    (measured: a baseline manifest with 29 repeated ids fails none of them). A
+    repeated id counted once per occurrence would move both ``n`` and the
+    reference percentile, in either direction, without any block existing to
+    justify it.
+
+    Every access is ``.get()``: an advisory may not raise on a shape a mandatory
+    check owns, and it may not assume keys the schema does not require. That is
+    also why this is NOT folded into ``no_untranslatable_empty_blocks``'s own
+    de-duplicated ``seg_block_ids`` (#397) despite the resemblance: that one
+    indexes ``s["block_ids"]`` directly and is allowed to, because a raise there
+    lands on run_derivable_checks()'s structural boundary and exits 1. A raise
+    HERE would have to be swallowed, and an advisory that silently reports
+    nothing is the failure mode this whole feature exists to remove."""
+    blocks = manifest.get("blocks")
+    if not isinstance(blocks, dict):
+        return []
+    seen = set()
+    sizes = []
+    for segment in manifest.get("segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        for block_id in segment.get("block_ids") or []:
+            if block_id in seen:
+                continue
+            seen.add(block_id)
+            block = blocks.get(block_id)
+            if not isinstance(block, dict):
+                continue
+            text = block.get("plain_text")
+            if not isinstance(text, str) or not text:
+                continue
+            sizes.append((str(block_id), len(text)))
+    return sizes
+
+
+def _block_size_stats(sizes):
+    """``(n, p50, reference, threshold, hits)`` from an already-derived
+    population, so a caller that also needs the population itself -- the census
+    formatter does, for its largest-blocks sample -- derives it once instead of
+    walking every segment twice WITHIN that call. The advisory and the census
+    are separate callers and do each walk it; that is one extra O(n log n) pass
+    over data ``json.loads`` has already materialised, and it buys both of them
+    a pure function with no shared state."""
+    n = len(sizes)
+    if not n:
+        return 0, 0, 0, 0, []
+    lengths = [size for _, size in sizes]
+    p50 = _floor_index_percentile(lengths, 0.50)
+    reference = _floor_index_percentile(lengths, _BLOCK_SIZE_REFERENCE_Q)
+    threshold = reference * _BLOCK_SIZE_OUTLIER_MULTIPLE
+    if n < _BLOCK_SIZE_MIN_POPULATION:
+        return n, p50, reference, threshold, []
+    hits = sorted(
+        (
+            (block_id, size, size / reference if reference else 0.0)
+            for block_id, size in sizes
+            if size >= threshold
+        ),
+        key=lambda hit: hit[1],
+        reverse=True,
+    )
+    return n, p50, reference, threshold, hits
+
+
+def scan_block_size_outliers(manifest: dict):
+    """Returns ``(n, p50, reference, threshold, hits)``.
+
+    ``hits`` is ``[(block_id, size, ratio)]``, largest first, and is empty when
+    the population is under ``_BLOCK_SIZE_MIN_POPULATION`` -- the reference is
+    then the outlier's own neighbourhood.
+
+    Pure: reads the manifest, decides nothing, writes nothing."""
+    return _block_size_stats(_segment_member_block_sizes(manifest))
+
+
+def format_block_size_census(manifest: dict) -> str:
+    """The census line, built for EVERY schema-valid run -- a fired advisory and
+    a clean one alike.
+
+    It is a NOTE, not an advisory: it never enters ``advisories`` and so never
+    moves the ``(N ADVISORY)`` status suffix, which must keep meaning "something
+    wants an operator's eyes". What it does is make the scan's SILENCE
+    auditable -- a population of 12 blocks and a population of 1200 with no
+    outlier print differently, where a hits-only design prints nothing for
+    either. Issue #504 asks for the distribution rather than a verdict; this is
+    where the distribution lives."""
+    sizes = _segment_member_block_sizes(manifest)
+    n, p50, reference, threshold, hits = _block_size_stats(sizes)
+    if not n:
+        return (
+            "block_size_census: no segment-member block carries text -- no "
+            "size distribution to report."
+        )
+    largest = sorted(sizes, key=lambda entry: entry[1], reverse=True)
+    sample = "; ".join(
+        f"{_escape_block_id(block_id)}={size}"
+        for block_id, size in largest[:_ADVISORY_SAMPLE_CAP]
+    )
+    if n < _BLOCK_SIZE_MIN_POPULATION:
+        return (
+            f"block_size_census: n={n} blocks (median {p50}, largest "
+            f"{largest[0][1]}). NOT screened for wrap/extraction artifacts: "
+            f"under {_BLOCK_SIZE_MIN_POPULATION} blocks the "
+            f"p{_BLOCK_SIZE_REFERENCE_PCT} reference sits inside the outlier's "
+            f"own neighbourhood, so the comparison would mean nothing. "
+            f"largest: {sample}"
+        )
+    return (
+        f"block_size_census: n={n} blocks, median {p50}, "
+        f"p{_BLOCK_SIZE_REFERENCE_PCT} {reference}, largest "
+        f"{largest[0][1]} characters; artifact threshold "
+        f"{_BLOCK_SIZE_OUTLIER_MULTIPLE}x p{_BLOCK_SIZE_REFERENCE_PCT} = "
+        f"{threshold} ({len(hits)} block(s) at or above it). largest: {sample}"
+    )
+
+
+def _scan_unavailable_detail(exc: Exception) -> str:
+    """For ONE scan failing inside its own boundary -- its siblings did run."""
+    return (
+        f"scan unavailable ({type(exc).__name__}) -- this is an advisory only "
+        f"and does NOT affect whether this gate passes; the mandatory checks "
+        f"are unaffected, and every other advisory still ran."
+    )
+
+
+def _advisories_unavailable_detail(exc: Exception) -> str:
+    """For the ORCHESTRATION failing, above every per-scan boundary.
+
+    It must not borrow the sentence above: nothing here knows how many scans
+    got to run, and claiming they all did would be a false statement printed
+    at exactly the moment the operator is least able to check it."""
+    return (
+        # The "scan unavailable" opener is the shipped #489 wording and is
+        # asserted by that suite; only what FOLLOWS it may differ here.
+        f"scan unavailable ({type(exc).__name__}) -- the advisory scans could "
+        f"not be run at all. This is an advisory only and does NOT affect "
+        f"whether this gate passes; the mandatory checks are unaffected. One or "
+        f"more scans may not have run, so treat this run as carrying NO "
+        f"advisory information."
+    )
+
+
+def _visual_order_advisory(manifest: dict):
+    """The #489 advisory, as ``[(name, detail)]`` -- empty when nothing fired."""
     results = []
     n_hits, n_units_with_hits, n_rtl_units, histogram, samples = scan_visual_order(manifest)
     if n_hits:
@@ -958,6 +1168,93 @@ def run_advisory_scans(manifest: dict):
             f"'Visual-order source')."
         )
         results.append((VISUAL_ORDER_SCAN_NAME, detail))
+    return results
+
+
+def _block_size_advisory(manifest: dict):
+    """The #504 advisory, as ``[(name, detail)]`` -- empty when nothing fired.
+
+    The census itself is emitted unconditionally as a NOTE (see
+    ``format_block_size_census``); this fires only when a block crosses the
+    threshold, so a fired advisory keeps meaning what it has meant since #489."""
+    n, p50, reference, threshold, hits = scan_block_size_outliers(manifest)
+    if not hits:
+        return []
+    named = "; ".join(
+        f"{_escape_block_id(block_id)} {size} chars "
+        f"({ratio:.1f}x p{_BLOCK_SIZE_REFERENCE_PCT})"
+        for block_id, size, ratio in hits[:_ADVISORY_SAMPLE_CAP]
+    )
+    more = (
+        f" (+{len(hits) - _ADVISORY_SAMPLE_CAP} more not listed)"
+        if len(hits) > _ADVISORY_SAMPLE_CAP else ""
+    )
+    return [(
+        BLOCK_SIZE_SCAN_NAME,
+        f"{len(hits)} of {n} segment-member block(s) are at or above "
+        f"{_BLOCK_SIZE_OUTLIER_MULTIPLE}x this book's own "
+        f"p{_BLOCK_SIZE_REFERENCE_PCT} block size "
+        f"({reference} characters, median {p50}), i.e. >= {threshold} "
+        f"characters: {named}{more}. A block that large is usually a "
+        f"WRAP/EXTRACTION ARTIFACT -- a converter joining a whole narrative "
+        f"into one block -- rather than a paragraph of the printed book, and "
+        f"the rest of this pipeline treats block structure as the source's "
+        f"own. This is a SCREEN, not a verdict: a genuinely long paragraph "
+        f"looks identical here. ADJUDICATE the named block(s) against the "
+        f"printed source before translating, and see SKILL.md, "
+        f"'Oversized source block'. Nothing here changes whether this gate "
+        f"passes, and nothing is re-paragraphed for you: re-cutting a block "
+        f"changes the segpack's key set, which validate_draft.py locks 1:1 "
+        f"against the draft."
+    )]
+
+
+# An id is truncated to this many SOURCE characters before escaping.
+_EVIDENCE_ID_CHARS = 80
+
+
+def _escape_block_id(block_id: str) -> str:
+    """A manifest-authored block id, printable AND visibly bounded.
+
+    Two things beyond ``_escape_evidence``. TRUNCATED, because escaping expands
+    one character into six ASCII ones (ten above the BMP) while the manifest
+    schema puts neither a pattern nor a maxLength on a block id: a 100 000-
+    character id becomes a 600 000-character line, and this line is printed
+    BEFORE the gate's own PASS/FAIL lines, so it can push the verdict out of a
+    reader's window. QUOTED, because escaping neutralises control characters and
+    every non-ASCII codepoint but passes ASCII prose through verbatim -- an id
+    can therefore read as a sentence of the diagnostic it sits inside, and the
+    documented consumer of these lines is a later LLM turn as well as a human.
+    Quoting keeps injected prose visibly inside a field.
+
+    What this deliberately does NOT do is restrict what an id may CONTAIN.
+    Narrowing the schema would reject manifests this gate accepts today, from
+    custom extractors nobody here has seen; that is a separate decision from
+    printing safely."""
+    clipped = block_id[:_EVIDENCE_ID_CHARS]
+    marker = "..." if len(block_id) > _EVIDENCE_ID_CHARS else ""
+    return f'"{_escape_evidence(clipped)}{marker}"'
+
+
+def run_advisory_scans(manifest: dict):
+    """Report-only scans, as ``[(name, detail)]``. Never affects the exit code.
+
+    Each scan is isolated: one raising scan degrades to its own named
+    ``scan unavailable`` entry and the others still report. Without that, a
+    single boundary around all of them would let one failure silently swallow
+    every sibling finding -- and a swallowed advisory looks exactly like a clean
+    book. ``main()``'s own boundary stays above this as the last-resort net for
+    a failing ``print``. Only ``Exception`` is caught, deliberately:
+    KeyboardInterrupt and SystemExit are not advisory failures."""
+    results = []
+    for name, scan in (
+        (VISUAL_ORDER_SCAN_NAME, _visual_order_advisory),
+        (BLOCK_SIZE_SCAN_NAME, _block_size_advisory),
+    ):
+        try:
+            results.extend(scan(manifest))
+        except Exception as exc:  # noqa: BLE001 -- an advisory may never gate a run
+            results.append((name, _scan_unavailable_detail(exc)))
     return results
 
 
@@ -1036,41 +1333,66 @@ def main(argv=None):
             print(f"  - {err}", file=sys.stderr)
         sys.exit(1)
 
-    # --- (a2) report-only advisory scans (#489) -------------------------------
+    # --- (a2) report-only advisory scans (#489, #504) -------------------------
     # Runs BEFORE re-derivation on purpose. run_derivable_checks() has its own
     # structural-exception boundary that exits 1 immediately, and a SCHEMA-VALID
     # manifest can legitimately reach it (the count fields it indexes are not
     # schema-required) -- so an advisory placed after that boundary would be
     # silently skipped on exactly the malformed inputs most likely to be
-    # mangled. Its own broad boundary is what keeps the promise that an advisory
-    # can never change the exit decision in EITHER direction: a scan that raises
-    # degrades to a named advisory and the mandatory checks proceed untouched.
-    # Scanning AND emitting sit inside the one boundary. Emission was once
-    # outside it, which quietly broke the promise: stderr on a closed pipe or a
-    # full filesystem raises OSError, and an ADVISORY would then have refused an
-    # otherwise-valid ingestion -- the exact thing this feature is documented as
-    # unable to do. Reporting is best-effort by design; the gate's verdict is
-    # not. Note only Exception is caught, deliberately: KeyboardInterrupt and
-    # SystemExit are not advisory failures and must keep propagating.
+    # mangled.
+    #
+    # FOUR steps, each inside its OWN boundary: scan, build the census, print
+    # the advisories, print the census. EMITTING is inside a boundary at all
+    # because it was once outside one, which quietly broke the promise that an
+    # advisory can never change the exit decision in EITHER direction: stderr on
+    # a closed pipe or a full filesystem raises OSError, and an ADVISORY would
+    # then have refused an otherwise-valid ingestion -- the exact thing this
+    # feature is documented as unable to do. The four are SEPARATE because one
+    # shared boundary let a failure in the WARN loop skip the census entirely,
+    # reproduced at exit 0 with `(1 ADVISORY)` and no NOTE on a run whose stdout
+    # was healthy; a census that goes missing exactly when reporting is degraded
+    # is the silence this feature exists to end. Building BEFORE emitting is
+    # what keeps the two census failures distinguishable: one that could not be
+    # COMPUTED is a finding and becomes an advisory, while one that could not be
+    # PRINTED is a reporting failure and stays silent rather than inventing one.
+    # None of the four may reach the exit decision: a scan that raises degrades
+    # to a named advisory and the mandatory checks proceed untouched, because
+    # reporting is best-effort by design and the gate's verdict is not. Note
+    # only Exception is caught, deliberately: KeyboardInterrupt and SystemExit
+    # are not advisory failures and must keep propagating.
     advisories = []
     try:
         advisories = run_advisory_scans(manifest)
+    except Exception as exc:  # noqa: BLE001 -- an advisory may never gate a run
+        advisories = [(ADVISORY_UNAVAILABLE_NAME, _advisories_unavailable_detail(exc))]
+    census = None
+    # Evaluated BEFORE the try, not inside its handler: the handler is the one
+    # place a raise would escape every boundary in this block and crash a gate
+    # whose whole premise is that reporting cannot reach the exit decision.
+    block_size_already_reported = any(
+        name == BLOCK_SIZE_SCAN_NAME for name, _ in advisories
+    )
+    try:
+        census = format_block_size_census(manifest)
+    except Exception as exc:  # noqa: BLE001 -- the census may never gate a run
+        # Not appended blindly: run_advisory_scans() shares this scan's helpers,
+        # so ONE broken helper would otherwise be reported twice and counted
+        # twice in the status suffix, reading as two independent problems.
+        if not block_size_already_reported:
+            advisories.append((BLOCK_SIZE_SCAN_NAME, _scan_unavailable_detail(exc)))
+    try:
         for name, detail in advisories:
             print(f"WARN {name}: {detail}", file=sys.stderr)
-    except Exception as exc:  # noqa: BLE001 -- an advisory may never gate a run
-        # Only the COUNT is consumed from here on (main()'s status suffix); the
-        # text that actually reaches stderr is the richer one built just below.
-        if not advisories:
-            advisories = [(VISUAL_ORDER_SCAN_NAME, None)]
+    except Exception:  # noqa: BLE001 -- reporting the failure may also fail
+        pass
+    # A NOTE, not an advisory -- format_block_size_census() carries why it is
+    # unconditional. Printing it HERE is what makes "every schema-valid run"
+    # true: after the schema gate above, and before every check below that can
+    # exit non-zero.
+    if census is not None:
         try:
-            print(
-                f"WARN {VISUAL_ORDER_SCAN_NAME}: scan unavailable "
-                f"({type(exc).__name__}) -- this is an advisory only and does "
-                f"NOT affect whether this gate passes; the mandatory checks "
-                f"below are unaffected.",
-                file=sys.stderr,
-            )
-        except Exception:  # noqa: BLE001 -- reporting the failure may also fail
+            print(f"NOTE {census}")
+        except Exception:  # noqa: BLE001 -- reporting may fail; it may not gate
             pass
 
     # --- (b) independent re-derivation of the derivable checks ----------------

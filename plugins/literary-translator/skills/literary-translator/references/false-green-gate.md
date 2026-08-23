@@ -411,6 +411,82 @@ under `### E-traps`, which is the one artifact the translate, review and fix
 turns all read. SKILL.md's W2 section carries the procedure and the clause, and
 states the `style_contract_hash` cost of pasting it.
 
+## The block-size census (`block_size_census`, #504)
+
+The same gate also prints one REPORT-ONLY census for every schema-valid run: a
+`NOTE block_size_census:` line on stdout, always, and — only when at least one
+block crosses its threshold — a `WARN block_size_census:` line on stderr that
+is also named in the final status line's `(N ADVISORY)` count. **It is not a
+check.** Neither line touches `derivable_ok` or `region_ok`, so the census can
+neither refuse an ingestion nor rescue a failing one, and it sits, like
+`visual_order_scan`, outside `run_derivable_checks()`'s results so no existing
+check tuple or exit-code contract moves.
+
+A census that cannot be BUILT prints no NOTE and is named as a `scan
+unavailable` advisory instead; one that cannot be PRINTED stays silent. Neither
+touches the exit decision.
+
+**What it is for.** A source block — a member of some segment's `block_ids` —
+can be a wrap/extraction artifact: a converter joining a whole narrative, or
+several paragraphs, into one block. Extraction preserves whatever the converter
+produced, faithfully; the artifact is upstream. No check in this gate is
+size-aware at the block level to catch it — the only existing size check is the
+per-segment word count, and a block many times the size of this book's other
+blocks passes it exactly as an ordinary one does.
+
+**What it detects, named honestly.** It is a *relative size outlier screen*: a
+block whose character count is at least 10x this book's own p90 block size,
+over the population described below. A genuinely long paragraph produces
+exactly the same signal as an artifact — the census has no way to tell them
+apart, and does not attempt to.
+
+False-negative classes, stated rather than implied away:
+
+- characters, not words;
+- blocks only — an embedded verse's text is lifted OUT of its carrier block
+  and replaced by a placeholder, so it is not in this population;
+- silent below 30 blocks (the NOTE still prints the count, so the silence is
+  visible, never withheld);
+- blind once more than roughly 10% of a book's blocks are themselves
+  artifacts, because the p90 reference then sits on them;
+- blind to a book whose blocks are uniformly chapter-sized — a relative
+  measure has no reference there;
+- the threshold is calibrated on five manifests, of which only one is
+  positive.
+
+**Measured behaviour.** Over the five manifests measured (max block size over its
+own p90): 21.03 on the book carrying the known artifact (`ssk-he-en/vol2`, block
+`PARA:seg21:0001`, 17 896 characters), and 4.97 / 4.86 / 5.78 / 6.04 on four
+clean books. 10 clears the noisiest clean book (6.04) by a 1.66x margin, and
+the true positive (21.03) clears 10 by a 2.10x margin — measured as the widest
+two-sided margin among p90/p95/p99 reference choices. The median is not used as
+the reference for the same reason it cannot serve as a general baseline: on the
+positive book the median block is six characters (1170 short dialogue
+paragraphs), and 600 of that book's 1212 blocks sit at or above 10x it — a
+threshold keyed to the median would flag half the book.
+
+**Scan population.** The distinct blocks named by some segment's `block_ids`
+whose `plain_text` is non-empty — never a `kind` filter, since a real manifest
+on disk carries `kind` values outside the schema enum and filtering on it can
+silently empty the population. This excludes `FN:` footnote-definition blocks
+and unattached front/back matter, including the ~18 800-character Project
+Gutenberg licence block present in every Gutenberg book. A repeated block id
+inside `block_ids` is counted once: nothing in the schema forbids a repeat and
+no derivable check rejects one -- measured, by feeding a manifest whose
+`block_ids` repeats an id through `run_derivable_checks()` and watching all
+fourteen pass -- so counting occurrences would move both the population and the
+reference with no block behind the difference.
+
+**The verdict is not the census's.** A fired WARN routes an operator to an
+adjudication turn that reads the named block(s) against the printed source and
+decides whether it is a genuinely long paragraph or an artifact; on the latter,
+the finding is recorded in that segment's own draft `notes[]` array, not the
+manifest — no draft exists yet at W2, and a manifest segment object is
+`additionalProperties: false` with no `notes` field. SKILL.md's W2 section,
+'Oversized source block', carries the procedure. Nothing is re-paragraphed
+automatically: re-cutting a block changes the segpack's block-key set, which
+`validate_draft.py` locks 1:1 against the draft.
+
 
 ## See also
 
