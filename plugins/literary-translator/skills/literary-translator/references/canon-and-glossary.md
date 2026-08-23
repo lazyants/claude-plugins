@@ -614,6 +614,21 @@ that a human adjudicated it.
   absent or malformed is REFUSED rather than stamped fresh, pointing at
   `--restamp-derivation` — the one mode that may advance provenance, by name.
 
+**The boundary: one malformed row, not a corrupt file.** `--correct` repairs a
+row whose value is not a valid canon entry — that is what the unconstrained
+`old_entry` above is for, and it is reachable, because the hand edit this mode
+replaces can leave any JSON value under an `entries{}` key. It does NOT repair a
+canon.json carrying SEVERAL such rows: `_stamp_write_verify` Pass-2-validates the
+whole document before touching disk, so fixing one row still leaves a file that
+fails validation and the write is refused. That is not a property of this mode —
+`--merge-batches` and `--restamp-derivation` refuse the identical file with the
+identical error, and the check is the gate that stops a corrupt document from
+being written at all. Several malformed rows is file corruption rather than a
+wrong adjudication: a different problem, with `--validate-only` as its
+diagnostic. Measured across the four live books: 0 malformed rows in 999
+entries. Pinned as a characterization in
+`tests/canon_correct_entry.test.py::test_more_than_one_malformed_row_blocks_every_writing_mode_alike`.
+
 **What a correction costs.** `compute_used_terms_hash` hashes only the entries a
 segment actually references, so correcting one entry re-stales exactly the
 segments carrying that form and no others. Those units are admissible for

@@ -1015,5 +1015,57 @@ def test_the_type_exact_comparison_still_admits_a_reordered_object(tmp_path):
     )
 
 
+def test_more_than_one_malformed_row_blocks_every_writing_mode_alike(tmp_path):
+    """CHARACTERIZATION, not a supported repair path — pinned so nobody reads
+    `--correct` as a general canon.json repair tool (PR review raised it as a
+    deadlock; this test records what the boundary actually is).
+
+    `_stamp_write_verify` Pass-2-validates the whole document BEFORE touching
+    disk. So with TWO malformed rows, repairing one still leaves a file that
+    fails whole-file validation, and the write is refused. That reads like a
+    deadlock in `--correct` specifically, and it is not: this test drives
+    `--merge-batches` and `--restamp-derivation` over the SAME file and asserts
+    they fail the same way, on the same row. The behaviour belongs to the shared
+    write path, predates this mode, and is the gate that stops a corrupt
+    document from being written at all.
+
+    What `--correct` DOES repair is one malformed row in an otherwise valid file
+    — covered above, and the reachable case. A file with several is file
+    corruption rather than a wrong adjudication, which is a different problem
+    with a different owner; measured population in the four live books is 0
+    malformed rows out of 999 entries. Widening the write path's validation for
+    one mode would weaken the single gate every mode depends on, to serve that
+    zero."""
+    root = make_french_project(tmp_path)
+    canon = read_canon(root)
+    canon["entries"][CORRECTED] = "broken-one"
+    canon["entries"][UNTOUCHED] = ["broken-two"]
+    (root / "canon.json").write_text(json.dumps(canon, ensure_ascii=False), encoding="utf-8")
+    before = canon_bytes(root)
+
+    doc = {
+        "source_form": CORRECTED,
+        "disposition": "remove",
+        "old_entry": "broken-one",
+        "reason": "removing the first malformed row",
+    }
+    corrected = run_correct(root, write_correction(root, doc))
+    assert_refused(corrected, root, before, UNTOUCHED, "is not of type 'object'")
+
+    # The load-bearing half: the SAME file, the SAME row, through the other two
+    # writing modes. Without this, the assertion above would read as a defect
+    # in --correct rather than as the shared write path's contract.
+    fragment = write_fragment(root, [_accepted("Marius Pontmercy", "Marius")], name="mm.json")
+    merged = run_canon_validate(root, "--merge-batches", str(fragment))
+    assert merged.returncode == 1, merged.stdout
+    assert UNTOUCHED in payload_of(merged)["error"], payload_of(merged)["error"]
+
+    restamped = run_canon_validate(root, "--restamp-derivation")
+    assert restamped.returncode == 1, restamped.stdout
+    assert UNTOUCHED in payload_of(restamped)["error"], payload_of(restamped)["error"]
+
+    assert canon_bytes(root) == before, "a refused write still modified canon.json"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
