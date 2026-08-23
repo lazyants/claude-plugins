@@ -2685,6 +2685,113 @@ def test_sample_adjudications_file_validates_against_schema(tmp_path):
     assert_adjudications_schema_valid(doc)
 
 
+# ===========================================================================
+# 17 (#405). Item-list identity. Every required item the stderr list shows
+#     carries its own display fields next to the `{kind}::{sha256}` key, so a
+#     reviewer authoring a verdict can see WHAT they are signing off without
+#     importing this module to re-derive the identity behind the digest.
+#     Asserted on the CONTENT printed beside the key, never on punctuation or
+#     spacing -- this file's "no fragile exact stderr wording" rule stands.
+# ===========================================================================
+
+
+def item_line(proc, key):
+    """The ONE stderr line the item list printed for `key`. Asserting exactly
+    one match is also what proves a display field never SPLIT the line:
+    str.splitlines() breaks on U+2028/U+0085, so a raw one carried in from a
+    review_queue note would strand the rest of the identity on a second line."""
+    lines = [ln for ln in proc.stderr.splitlines() if key in ln]
+    assert len(lines) == 1, (
+        f"expected exactly one stderr line carrying {key!r}, got {len(lines)}:\n{proc.stderr}"
+    )
+    return lines[0]
+
+
+def test_item_list_shows_cat1_display_fields(tmp_path):
+    root = make_durable_root(tmp_path)
+    write_canon(root, {
+        "k1": entry("Renaud", "TargetA"),
+        "k2": entry("Renaud", "TargetB"),
+    })
+
+    proc = run_audit(root, "--check", "--pair-review-cap", "10")
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    line = item_line(proc, cat1_key([("k1", "Renaud", "TargetA"), ("k2", "Renaud", "TargetB")]))
+    assert "duplicate_source_form" in line
+    assert "normalized_source=" in line and "'renaud'" in line
+    assert "records=" in line and "'k1'" in line and "'k2'" in line and "'targeta'" in line
+
+
+def test_item_list_shows_cat2_display_fields(tmp_path):
+    root = make_durable_root(tmp_path)
+    write_canon(root, [entry("Yohanan", "John"), entry("Yochanan", "John")])
+
+    proc = run_audit(root, "--check", "--pair-review-cap", "10")
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    line = item_line(proc, cat2_key("John", ["Yohanan", "Yochanan"]))
+    assert "existing_merge" in line
+    assert "normalized_target=" in line and "'john'" in line
+    assert "source_forms=" in line and "'yohanan'" in line and "'yochanan'" in line
+
+
+def test_item_list_shows_cat3_display_fields(tmp_path):
+    root = make_durable_root(tmp_path)
+    write_canon(root, [entry("Alpha", "TargetOne"), entry("Beta", "TargetTwo")])
+
+    proc = run_audit(root, "--check", "--pair-review-cap", "10")
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    line = item_line(proc, cat3_key("TargetOne", "TargetTwo"))
+    assert "candidate_missed_merge_pair" in line
+    assert "entity_a=" in line and "'targetone'" in line
+    assert "entity_b=" in line and "'targettwo'" in line
+    assert "entity_a_source_forms=" in line and "'alpha'" in line
+    assert "entity_b_source_forms=" in line and "'beta'" in line
+
+
+def test_item_list_shows_cat4_display_fields(tmp_path):
+    root = make_durable_root(tmp_path)
+    item = queued("Dov Ber", note="two live candidates, unresolved")
+    write_canon(root, [], review_queue=[item])
+
+    proc = run_audit(root, "--check", "--pair-review-cap", "10")
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    line = item_line(proc, cat4_key(item))
+    assert "review_queue_unresolved" in line
+    assert "source_form=" in line and "'Dov Ber'" in line
+    assert "note=" in line and "'two live candidates, unresolved'" in line
+
+
+def test_item_list_escapes_invisible_characters_carried_in_a_queue_note(tmp_path):
+    """The reason clause 1 of the fix renders with `!r` rather than
+    json.dumps(ensure_ascii=False): a review_queue[] note is LLM-authored and
+    only `source_form` is validated on enumeration
+    (`_queued_enumeration_problems`), so a bidi override (U+202E) or a line
+    separator (U+2028) inside `note` reaches this line unfiltered. `repr`
+    escapes both -- the reviewer sees the escape, and the identity stays on
+    ONE line. Without this test, a later regression to raw interpolation
+    passes every other display-field assertion above."""
+    note = "queued" + chr(0x202E) + "flip" + chr(0x2028) + "tail"
+    root = make_durable_root(tmp_path)
+    item = queued("Dov Ber", note=note)
+    write_canon(root, [], review_queue=[item])
+
+    proc = run_audit(root, "--check", "--pair-review-cap", "10")
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    line = item_line(proc, cat4_key(item))
+    assert "\\u202e" in line and "\\u2028" in line, (
+        f"both invisible controls must appear as their literal escape, got: {line!r}"
+    )
+    assert chr(0x202E) not in line and chr(0x2028) not in line, (
+        f"no raw invisible control may reach the reviewer's line, got: {line!r}"
+    )
+    assert "tail" in line, "the tail after U+2028 must stay on the SAME line as the key"
+
+
 if __name__ == "__main__":
     import pytest
 

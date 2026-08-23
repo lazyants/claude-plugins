@@ -907,3 +907,58 @@ def test_243_canon_present_branch_widens_competitor_universe_to_canon_entries(tm
     assert summary_advisory["totals"]["evidence_unverified"] == 2
     assert summary_advisory["gate_passed"] is False
     assert proc.returncode == 1 and proc_advisory.returncode == 1
+
+
+# ===========================================================================
+# 8 (#405). Item-list identity for category 5, in BOTH regions that print it:
+#     the main --check report and the canon-absent mandatory branch. The
+#     stderr line carrying the homonym_split key also names the split's
+#     source_form and how many senses it has, so a reviewer can see what the
+#     digest stands for without importing the audit module.
+# ===========================================================================
+
+
+def item_line(proc, key):
+    """The ONE stderr line the item list printed for `key`."""
+    lines = [ln for ln in proc.stderr.splitlines() if key in ln]
+    assert len(lines) == 1, (
+        f"expected exactly one stderr line carrying {key!r}, got {len(lines)}:\n{proc.stderr}"
+    )
+    return lines[0]
+
+
+def test_item_list_shows_cat5_display_fields(tmp_path):
+    root = make_durable_root(tmp_path)
+    block_text, senses = two_jean_senses()
+    write_manifest(root, {"b1": {"seg": None, "plain_text": block_text}})
+    write_senses(root, {"Jean": {"senses": senses}})
+    write_canon(root, [entry("Marie", "Marie")])
+
+    proc = run_audit(root, "--check", "--particle-config", "fr.json")
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    line = item_line(proc, split_key("Jean", senses))
+    assert "homonym_split" in line
+    assert "source_form=" in line and "'Jean'" in line
+    assert "sense_count=2" in line
+
+
+def test_item_list_shows_cat5_display_fields_in_canon_absent_branch(tmp_path):
+    """The canon-absent branch has its own _print_item_list call sites -- the
+    fix reaches them with no per-call-site change, and this is the region
+    whose stderr report carries no per-bucket totals of its own."""
+    root = make_durable_root(tmp_path)
+    block_text, senses = two_jean_senses()
+    write_manifest(root, {"b1": {"seg": None, "plain_text": block_text}})
+    write_senses(root, {"Jean": {"senses": senses}})
+    # No canon.json, no verdict -> canon_absent_with_senses + a missing verdict.
+
+    proc = run_audit(root, "--check", "--particle-config", "fr.json")
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    summary = parse_stdout(proc)
+    assert summary["canon_present"] is False
+    assert summary["totals"]["missing_verdict"] == 1
+    line = item_line(proc, split_key("Jean", senses))
+    assert "source_form=" in line and "'Jean'" in line
+    assert "sense_count=2" in line

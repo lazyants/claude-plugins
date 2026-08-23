@@ -1255,9 +1255,27 @@ def empty_totals() -> dict:
 
 
 def _print_item_list(label: str, items: list, file) -> None:
+    """#405: prints each item's own DISPLAY fields (everything build_item()
+    was handed as `**display`) next to its `{kind}::{sha256}` key. The key
+    alone is unreviewable -- the contract requires a named party to record a
+    `reason` for each item, and nobody can examine a digest -- so recovering
+    what a key stands for used to mean importing this module and re-deriving
+    the identity by hand.
+
+    These are the fields that IDENTIFY the item for a reviewer, deliberately
+    not the key's full preimage: category 4 hashes the whole review_queue
+    entry and category 5 hashes every sense, while both display a short
+    summary. Rendered with `!r` (the same discipline as
+    _print_evidence_failures below) rather than as JSON: repr keeps printable
+    non-ASCII readable -- a Hebrew source form stays a Hebrew source form --
+    while escaping every non-printable code point, including a bidi override
+    or line separator carried in from an unvalidated LLM-authored
+    review_queue note, which would otherwise scramble or split the very line
+    being signed off."""
     print(f"\n-- {label} (first 20) --", file=file)
     for it in items[:20]:
-        print(f"  {it['key']}  [{it['kind']}]", file=file)
+        display = "  ".join(f"{k}={v!r}" for k, v in it.items() if k not in ("key", "kind"))
+        print(f"  {it['key']}  [{it['kind']}]  {display}".rstrip(), file=file)
 
 
 def _print_evidence_failures(label: str, failures: list, file) -> None:
