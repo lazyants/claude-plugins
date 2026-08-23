@@ -321,6 +321,13 @@ def test_homonym_split_confirmed_ok_clears_gate(tmp_path):
     assert summary["totals"]["missing_verdict"] == 0
     assert summary["blocking_count"] == 0 and summary["gate_passed"] is True
     assert proc.returncode == 0
+    # #403: the enumerated-AND-CLEAN state -- the one an operator most needs told apart
+    # from the vacuous zero, and the only one where gate_passed is True while category 5
+    # really was enumerated. Without it, a predicate that wrongly coupled enumeration to
+    # gate_passed (e.g. `not senses.is_empty and not gate_passed`) would satisfy every
+    # other new assertion while printing NOT ENUMERATED here.
+    assert summary["senses_enumerated"] is True
+    assert_split_row_enumerated(proc, 1)
 
 
 def test_homonym_split_adverse_blocks(tmp_path):
