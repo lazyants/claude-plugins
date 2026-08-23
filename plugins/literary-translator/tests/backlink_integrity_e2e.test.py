@@ -587,6 +587,10 @@ def test_flag_on_end_to_end_matches_expected_vault_and_gate_report(tmp_path):
             "source_form": case_spec.EXPECTED_SPLIT_SOURCE_FORM,
             "count": 1,
             "segs": case_spec.EXPECTED_SPLIT_SEGS,
+            # #497: the row carries build()'s own reason. Here it is the
+            # pre-existing homonym-split route, not a fold-key collision --
+            # this fixture has no link groups and no colliding fold key.
+            "reason": "is_split",
         }
     ]
     # Exit-neutral: a collision + an unresolved homonym are both present,

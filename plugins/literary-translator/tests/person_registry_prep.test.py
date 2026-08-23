@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -337,3 +338,131 @@ def test_the_prep_cap_measures_the_bytes_the_model_receives(root):
     assert payload["reason"] == "input_too_large"
     assert f"would be {emitted} bytes" in payload["error"]
     assert not path.exists()
+
+
+# ---------------------------------------------------------------------------
+# #497 -- W9r is the third caller of occurrence_targets.build(), and the one
+# that made "credit the primary alone" the right shape: it builds one
+# attributable unit per canon form and, when Pass A groups those units as ONE
+# person, SUMS their mention lists. Two forms holding the same records would
+# count one physical occurrence twice in person_registry.json and PEOPLE.md.
+#
+# These drive the SHIPPED script, which is unchanged by #497 -- the point is
+# that it needs no change, and this is what proves it rather than asserting it.
+# ---------------------------------------------------------------------------
+
+# `fold_match_key`'s connector fold is scoped to Hebrew -- a Latin hyphen is
+# NOT folded (`fold_match_key("Jean-Luc") == "Jean-Luc"`), so a fold-key
+# collision cannot be spelled in this fixture's French. The pair below is the
+# real shape: one Hebrew name written with a maqaf and with a space. Reaching
+# it needs a `name_inventory`, because an uncased script gives the matcher no
+# capitalization to key on -- so `_with_fold_group` repoints the root at a
+# language config carrying fr.json's own PARTICLES/STOPWORDS plus that
+# inventory, rather than pretending the shipped fr.json would find it.
+FOLD_PRIMARY = "\u05de\u05e9\u05d4 \u05dc\u05d9\u05d9\u05d1"      # "Moshe Leib", space-joined
+FOLD_SIBLING = "\u05de\u05e9\u05d4\u05be\u05dc\u05d9\u05d9\u05d1"  # the same name, maqaf-joined
+FOLD_SENTENCE = f" Puis {FOLD_SIBLING} arriva."
+FOLD_LANG_CONFIG = "lt497_fold.json"
+
+
+def _with_fold_group(root, link_groups):
+    """Adds a fold-key colliding canon pair to the fixture root, ONE physical
+    source occurrence of it, and (optionally) the `link_groups` projection
+    `assemble.py` would have persisted for a `canon_link_groups.json` ruling.
+
+    The single occurrence is spelled with the MAQAF form, which both canon
+    entries retrieve through the shared fold key -- that is the whole reason
+    the collision exists, and why crediting both would count it twice.
+    """
+    fr = json.loads((root / "languages" / "fr.json").read_text(encoding="utf-8"))
+    fr["name_inventory"] = [FOLD_PRIMARY]
+    (root / "languages" / FOLD_LANG_CONFIG).write_text(
+        json.dumps(fr, ensure_ascii=False), encoding="utf-8")
+    (root / ".claude" / "literary-translator" / "profile.yml").write_text(
+        f"source:\n  language:\n    particle_config: {FOLD_LANG_CONFIG}\n",
+        encoding="utf-8")
+
+    canon_path = root / "canon.json"
+    canon = json.loads(canon_path.read_text(encoding="utf-8"))
+    for form in (FOLD_PRIMARY, FOLD_SIBLING):
+        canon["entries"][form] = {
+            "source_form": form, "is_proper_name": True,
+            "canonical_target_form": "Moshe Leib", "basis": "established",
+            "confidence": "high", "category": "person",
+        }
+    canon_path.write_text(json.dumps(canon, ensure_ascii=False), encoding="utf-8")
+
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["blocks"]["PARA:seg01:0001"]["plain_text"] += FOLD_SENTENCE
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+    ns_path = root / "out" / ".assembled" / "nodestream.json"
+    nodestream = json.loads(ns_path.read_text(encoding="utf-8"))
+    if link_groups is not None:
+        nodestream["link_groups"] = link_groups
+    ns_path.write_text(json.dumps(nodestream, ensure_ascii=False), encoding="utf-8")
+    return root
+
+
+def _prep_in_root(root):
+    """Runs the durable root's OWN copy of the script, not the plugin's.
+
+    `bootstrap_names.LANGUAGES_DIR` is `{script_dir}/../languages`, so only
+    the root-local copy resolves the project-local language config this pair
+    needs (the shipped presets carry no `name_inventory`, and an uncased
+    script is unfindable without one). `--plugin-root` is then required for
+    the registry schemas, which Step 0a's non-recursive copy pass does not
+    bring into the root -- the same `#412` arrangement W9r documents.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(root / "scripts" / "person_registry.py"), "--prep",
+         "--durable-root", str(root),
+         "--plugin-root", str(fx.ASSETS.parent)],
+        capture_output=True, text=True,
+    )
+    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    doc_path = root / "registry" / "registry_input.json"
+    doc = json.loads(doc_path.read_text(encoding="utf-8")) if doc_path.is_file() else None
+    return proc.returncode, payload, doc
+
+
+def test_lt497_a_ruled_fold_group_credits_each_occurrence_to_one_unit(root):
+    """The primary's unit is attributable and carries the occurrence; the
+    sibling's is not, and carries none. Summing the two -- which is exactly
+    what Pass B does once Pass A calls them one person -- yields the physical
+    count, not twice it."""
+    _with_fold_group(root, {FOLD_PRIMARY: FOLD_PRIMARY, FOLD_SIBLING: FOLD_PRIMARY})
+    code, payload, doc = _prep_in_root(root)
+    assert code == 0, payload
+    units = _units_by_key(doc)
+
+    primary = units[(FOLD_PRIMARY, None)]
+    sibling = units[(FOLD_SIBLING, None)]
+
+    assert primary["attributable"] is True
+    assert primary["occurrences"] == len(primary["mentions"]) == 1
+
+    assert sibling["attributable"] is False
+    assert sibling["occurrences"] is None
+    assert "fold_group_credited_to_link_group_primary" in sibling["occurrences_reason"]
+    assert sibling["mentions"] == []
+
+    # The invariant Pass B depends on, stated as Pass B computes it.
+    attributable = [u for u in (primary, sibling) if u["attributable"]]
+    assert sum(len(u["mentions"]) for u in attributable) == 1
+
+
+def test_lt497_without_a_ruling_the_same_pair_stays_unattributable_on_both_sides(root):
+    """The control. Nothing about W9r changed for an unruled collision: both
+    units report an honest null and the pre-existing collision reason."""
+    _with_fold_group(root, None)
+    code, payload, doc = _prep_in_root(root)
+    assert code == 0, payload
+    units = _units_by_key(doc)
+
+    for form in (FOLD_PRIMARY, FOLD_SIBLING):
+        unit = units[(form, None)]
+        assert unit["attributable"] is False
+        assert unit["occurrences"] is None
+        assert "fold_match_key_collision" in unit["occurrences_reason"]

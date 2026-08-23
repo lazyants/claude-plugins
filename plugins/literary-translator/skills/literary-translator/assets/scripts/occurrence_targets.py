@@ -65,6 +65,49 @@ merges them). Warn-only (stderr), mirroring
 `bootstrap_names._warn_inventory_match_key_collisions`'s own style -- never
 fatal (Contract 3's no-new-raise rule).
 
+## The third resolution route: a recorded one-referent ruling (#497)
+
+Withholding is correct while the question "which entry, if any, do these
+records belong to?" is open. It is NOT correct once the project has already
+answered it. In a pointed-script corpus the same name written with different
+niqqud, or with and without maqaf, is several canon entries and one person --
+measured on the live he->en volume: 20 fold-key groups over 43 canon forms,
+every one of them variant spellings of a single referent, 27 forms carrying
+2 390 occurrence records, and not one `## Mentions` line among them.
+
+`canon_link_groups.json` (#588) is where that answer is already recorded --
+"N canon entries, N distinct source_form spellings of ONE referent" -- and
+THE IRON RULE is why this module consults it rather than inferring identity
+itself: a shared `canonical_target_form` fits all 20 live groups and is still
+the wrong signal, because a printed form is routinely shared by distinct
+people (that same book prints `R. Nachman` for eight of them). A script never
+decides identity; it reads a decision a human or an adjudication pass made.
+
+So a fold-key group carrying a COMPLETE ruling is not a collision:
+`_group_credited_primary()` (its own docstring owns the four conditions)
+credits the whole group's occurrences to the ruling's PRIMARY, and reports
+the group's other members under `reason:
+"fold_group_credited_to_link_group_primary"`. Every group without a complete
+ruling collides exactly as before.
+
+**One owner, not every member.** The primary alone holds the records. Giving
+each member the identical list would re-introduce the double filing this
+guard exists to prevent, one consumer further along: `person_registry.py`
+builds one attributable unit per canon form (`:745`) and, when its Pass A
+correctly groups those units as ONE person, concatenates their mention lists
+and sums the lengths (`:1852`, `:1880`) -- so one physical occurrence would
+be counted twice in `person_registry.json` and in the human-facing
+`PEOPLE.md`. Crediting one owner makes that impossible instead of harmless-
+looking, and needs no change in any consumer: `person_registry.py` already
+reads `attributable = homonym is None` and prints the reason it was given.
+
+The map is read from `nodestream["link_groups"]`, never from the sidecar --
+see `_link_groups_from_nodestream()` on why that authority, and on the
+fail-closed treatment of a malformed one. This half is `output.target:
+obsidian` only, because that is the only target `assemble.py` attaches the
+projection under (#588's own gate, deliberately not widened here): on an
+`epub`/`custom` project a fold group stays withheld exactly as in 1.58.0.
+
 `manifest`/`canon`/`nodestream` are already-parsed dicts (the exact shapes
 `assemble.py` itself builds/loads before `dispatch_adapter`); `senses_result`
 is a `canon_senses.SensesResult` (from `load_senses(..., allow_absent=True)`);
@@ -177,14 +220,17 @@ except ImportError as exc:
     )
 
 try:
-    from canon_senses import is_split
+    from canon_senses import fold_collision_map, is_split
 except ImportError as exc:
     sys.exit(
         f"occurrence_targets.py: cannot import canon_senses.py from {SCRIPT_DIR} ({exc}).\n"
         "canon_senses.py must be installed alongside occurrence_targets.py under "
         "${durable_root}/scripts/ -- it supplies is_split(), the homonym-split "
-        "predicate this module reuses (never reimplements). Re-run Step 0a, or "
-        "verify the plugin install is not corrupted."
+        "predicate this module reuses (never reimplements), and "
+        "fold_collision_map(), the ONE shared #238/#241 fold-key grouping "
+        "algorithm (written to retire exactly this module's own hand-rolled "
+        "copy of it -- see its docstring). Re-run Step 0a, or verify the "
+        "plugin install is not corrupted."
     )
 
 try:
@@ -469,38 +515,150 @@ def _footnote_records(source_forms, manifest: dict, language_config, render_inde
 # build() -- the single entry point.
 # ---------------------------------------------------------------------------
 
-def _colliding_source_forms(source_forms) -> set:
-    """The #238/#241 fold-key collision set (module docstring, "The fold
-    NEWLY introduces...") -- every ELIGIBLE source_form that shares its
-    `fold_match_key` with at least one OTHER eligible source_form. Computed
-    over `source_forms` alone (canon-entry eligibility only), before any
-    text is scanned or any span looked up -- a collision is a property of
-    the CANON, not of any particular occurrence. Warns to stderr (never
-    raises -- Contract 3's no-new-raise rule; `validate_backlinks.py:627-631`
-    would turn any new exception into a hard gate FATAL) once per colliding
-    group, naming every member and the shared key, mirroring
-    `bootstrap_names._warn_inventory_match_key_collisions`'s own style.
+def _link_groups_from_nodestream(nodestream) -> dict:
+    """The `{member: primary}` link-group projection (#588) as it reaches
+    THIS module -- read from `nodestream["link_groups"]`, never re-read from
+    `canon_link_groups.json`.
+
+    Deliberately the same authority `validate_backlinks._link_groups_from_
+    nodestream` chose, and for the same reason stated there: the sidecar can
+    have changed since the NodeStream was assembled, and taking the map the
+    renderer was actually handed is what keeps the persisted mentions, a
+    from-scratch `validate_backlinks` rebuild, `person_registry.py`'s own
+    re-derivation and the rendered `## Mentions` sections one identical
+    `(source_form, seg)` universe. `assemble.py` writes the key only after
+    `canon_link_groups.load_link_groups` has schema-validated and
+    procedurally checked it.
+
+    FAIL-CLOSED and NON-RAISING (Contract 3's no-new-raise rule --
+    `validate_backlinks.py:1264` turns any exception out of `build()` into a
+    hard gate FATAL): anything that is not a dict of `str -> str` yields
+    `{}`, i.e. no group is ever exempted and behaviour is exactly 1.58.0's.
+    A partly-malformed map is rejected WHOLE rather than filtered down to
+    its well-formed pairs -- a surviving subset could still satisfy the
+    exemption below, which is precisely the decision a malformed map has not
+    earned.
     """
-    fold_key_groups = defaultdict(list)
-    for source_form in source_forms:
-        fold_key_groups[fold_match_key(source_form)].append(source_form)
+    raw = (nodestream or {}).get("link_groups")
+    if not isinstance(raw, dict):
+        return {}
+    for member, primary in raw.items():
+        if not isinstance(member, str) or not isinstance(primary, str):
+            return {}
+    return dict(raw)
+
+
+def _group_credited_primary(group, competitors, primary_by_source_form, senses_result):
+    """The link-group primary this fold-key group's occurrences are credited
+    to, or `None` when the group stays a collision (#497).
+
+    `group` is the ELIGIBLE canon source_forms sharing one `fold_match_key`;
+    `competitors` is EVERY form sharing that key across the competitor
+    universe (`canon_senses.fold_collision_map`'s own definition: all
+    `canon['entries']` keys UNION all `canon_senses` `entries_by_source_form`
+    keys). Four conditions, all of which must hold:
+
+    1. **CLOSURE** -- `competitors == set(group)`: every form that can
+       contribute an occurrence to this fold key is an index-eligible canon
+       entry inside the group. This is deliberately a closure rule rather
+       than a list of competitor kinds to exclude. The invariant being
+       defended is that the records this fold key retrieves belong to
+       exactly the forms the ruling covers, and enumerating dangerous kinds
+       missed one in three consecutive review rounds: a split-only
+       `canon_senses` form (never a `canon['entries']` key, so
+       `canon_link_groups.load_link_groups` can never map it, so it is
+       invisible to a members-only test), and an index-INELIGIBLE canon
+       entry that a sidecar DID map (so a "every competitor is mapped" test
+       admits it, while its occurrences are a not-a-name term's). Both fail
+       closure, as does any competitor kind added later.
+    2. Every member is a key of `primary_by_source_form`, all mapping to the
+       SAME primary -- one complete ruling over the whole group, mirroring
+       `render_obsidian`'s own EVERY-owner rule for the de-link branch.
+    3. That primary is itself a member of the group, so the occurrences are
+       credited to a form that actually retrieves them.
+    4. No member is `is_split` -- a group asserting "one referent" and a
+       `canon_senses` split asserting "this form has >= 2 senses" are
+       contradictory operator statements that nothing cross-validates
+       (`canon_link_groups.py` checks membership and disjointness, never
+       senses). Without this, a split member's sense-ambiguous occurrences
+       would reach the primary's note as if unambiguous.
+    """
+    if competitors != set(group):
+        return None
+    if any(is_split(senses_result, source_form) for source_form in group):
+        return None
+    primaries = {primary_by_source_form.get(source_form) for source_form in group}
+    if len(primaries) != 1:
+        return None
+    primary = primaries.pop()
+    if primary is None or primary not in group:
+        return None
+    return primary
+
+
+def _colliding_source_forms(source_forms, competitor_forms, primary_by_source_form,
+                            senses_result):
+    """`(colliding, credited_primary_by_source_form)` for the #238/#241
+    fold-key collision (module docstring, "The fold NEWLY introduces...").
+
+    A fold-key group is every ELIGIBLE source_form sharing one
+    `fold_match_key` with at least one OTHER eligible source_form -- computed
+    before any text is scanned or any span looked up, because a collision is
+    a property of the CANON, not of any particular occurrence.
+
+A group carrying a complete `canon_link_groups.json` ruling
+    (`_group_credited_primary` above) is NOT a collision: its occurrences are
+    credited to the ruling's primary, and the group's OTHER members -- the
+    second return value -- are reported under `reason:
+    "fold_group_credited_to_link_group_primary"` rather than double-filed.
+    Only that non-primary set is returned, never the {member: primary} map:
+    the primary itself needs no special handling (it routes to
+    `eligible_by_source_form` like any uncontested form) and nothing
+    downstream asks WHICH primary a member was credited to. Every other group collides exactly as in 1.58.0 and warns
+    to stderr (never raises -- Contract 3's no-new-raise rule;
+    `validate_backlinks.py:1264` would turn any new exception into a hard
+    gate FATAL) once per group, naming every member and the shared key,
+    mirroring `bootstrap_names._warn_inventory_match_key_collisions`'s own
+    style.
+    """
+    # Two INDEPENDENT groupings, deliberately not one map with the eligible
+    # forms filtered back out of it: the closure test below must fail CLOSED
+    # if an eligible form were ever missing from the competitor universe, and
+    # a single-map construction would make that case indistinguishable from a
+    # covered one.
+    eligible_groups = fold_collision_map(source_forms).groups
+    competitor_groups = fold_collision_map(competitor_forms).groups
 
     colliding = set()
-    for key in sorted(fold_key_groups):
-        group = fold_key_groups[key]
-        if len(group) > 1:
-            colliding.update(group)
-            print(
-                f"WARN occurrence_targets.py: canon source_forms {sorted(group)!r} "
-                f"all fold to the same #238/#241 match key {key!r} -- every "
-                "physical source occurrence they would BOTH claim is routed to "
-                "unresolved_homonyms (reason: fold_match_key_collision) instead "
-                "of being double-filed under both entries; neither gets it "
-                "until the operator disambiguates (rename or merge the "
-                "colliding canon entries).",
-                file=sys.stderr,
-            )
-    return colliding
+    credited_non_primary = set()
+    for key in sorted(eligible_groups):
+        group = eligible_groups[key]
+        if len(group) < 2:
+            continue
+        # `.get(key, ())` -> an empty competitor set, which can never equal a
+        # >= 2-member group, so a key absent from the competitor universe
+        # collides. Same outcome the defaultdict this replaced produced.
+        primary = _group_credited_primary(
+            group, set(competitor_groups.get(key, ())), primary_by_source_form,
+            senses_result,
+        )
+        if primary is not None:
+            credited_non_primary.update(f for f in group if f != primary)
+            continue
+        colliding.update(group)
+        print(
+            f"WARN occurrence_targets.py: canon source_forms {sorted(group)!r} "
+            f"all fold to the same #238/#241 match key {key!r} -- every "
+            "physical source occurrence they would BOTH claim is routed to "
+            "unresolved_homonyms (reason: fold_match_key_collision) instead "
+            "of being double-filed under both entries; neither gets it "
+            "until the operator disambiguates (rename or merge the "
+            "colliding canon entries, or record them as ONE referent in "
+            "canon_link_groups.json -- which credits the whole group to its "
+            "primary, and only when no other form shares the key).",
+            file=sys.stderr,
+        )
+    return colliding, credited_non_primary
 
 
 def build(manifest: dict, canon: dict, senses_result, language_config, nodestream: dict) -> dict:
@@ -519,7 +677,19 @@ def build(manifest: dict, canon: dict, senses_result, language_config, nodestrea
     # colliding source_form is routed to unresolved_homonyms below, never
     # eligible_by_source_form, regardless of what its own lookup would have
     # returned.
-    colliding_source_forms = _colliding_source_forms(source_forms)
+    # #497: the collision is lifted for a fold-key group carrying a complete
+    # canon_link_groups.json ruling; its records go to that group's PRIMARY
+    # alone -- never to every member (module docstring, "One owner, not every
+    # member", for why that is not merely a preference).
+    competitor_forms = list(entries) + list(
+        getattr(senses_result, "entries_by_source_form", None) or {}
+    )
+    colliding_source_forms, credited_non_primary = _colliding_source_forms(
+        source_forms,
+        competitor_forms,
+        _link_groups_from_nodestream(nodestream),
+        senses_result,
+    )
 
     records_by_source_form = defaultdict(list)
     for rec in _block_records(source_forms, manifest, language_config, render_index):
@@ -546,6 +716,20 @@ def build(manifest: dict, canon: dict, senses_result, language_config, nodestrea
                 "count": len(records),
                 "segs": [rec["seg"] for rec in records],
                 "reason": "fold_match_key_collision",
+            }
+        elif source_form in credited_non_primary:
+            # #497: a NON-primary member of a ruled fold group. Its records
+            # exist and are reported here (count + segs) so the diagnostic
+            # still says how many occurrences the group has and where -- but
+            # they are credited to the group's primary, whose own note is the
+            # one the ruling's inline links already route a shared,
+            # otherwise-de-linked target to. Checked before is_split only for
+            # ordering symmetry with the collision route above; condition 4 of
+            # _group_credited_primary already guarantees no member is split.
+            unresolved_homonyms[source_form] = {
+                "count": len(records),
+                "segs": [rec["seg"] for rec in records],
+                "reason": "fold_group_credited_to_link_group_primary",
             }
         elif is_split(senses_result, source_form):
             unresolved_homonyms[source_form] = {

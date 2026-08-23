@@ -108,7 +108,15 @@ empty too -- nothing below this point is loaded), `warnings=0`, exit 0.
     under that opt-out has NO gate signal at all -- a documented
     limitation, not a bug (see `obsidian.md`'s own note on this).
   - **`unresolved_homonyms`** (exit-neutral): `occurrence_targets.build`'s
-    own split-form accounting, surfaced verbatim.
+    own split-form accounting, surfaced verbatim -- INCLUDING its `reason`
+    (#497). The three reasons are not one condition: `is_split` and
+    `fold_match_key_collision` are unresolved questions an operator is being
+    asked to answer, while `fold_group_credited_to_link_group_primary` is a
+    RESOLVED one -- a non-primary member of a fold-key group whose
+    `canon_link_groups.json` ruling credited its occurrences to the group's
+    primary, which is where they are indexed. Dropping the field, as this
+    row did before #497, made the deliberate case indistinguishable from the
+    two that want operator action.
   - **`delink_cost`** (exit-neutral, #588): what collision de-linking cost
     THIS vault -- the de-linked targets, their owners, and how many
     occurrences of each carry no inline link, plus how many inline links
@@ -181,7 +189,8 @@ half-verified vault.
     { "mentions_coverage": { "status": "enabled" | "disabled",
                               "checked_entities": int,
                               "missing": [ {"source_form", "seg"}, ... ] },
-      "unresolved_homonyms": [ {"source_form", "count", "segs": [...]}, ... ],
+      "unresolved_homonyms": [ {"source_form", "count", "segs": [...],
+                                 "reason": str}, ... ],
       "collisions":          [ {"canonical_target_form", "owners": [...],
                                  "renderer_delinked": bool,
                                  "orphaned_owners": [source_form, ...]}, ... ],
@@ -1155,6 +1164,10 @@ def _unresolved_homonyms_list(aggregate):
             "source_form": sf,
             "count": info.get("count", 0),
             "segs": sorted(info.get("segs") or []),
+            # #497: carried, never dropped -- a credited non-primary member
+            # is a resolved routing decision, not an open question, and only
+            # this field separates the two in the operator-facing report.
+            "reason": info.get("reason"),
         })
     return out
 
