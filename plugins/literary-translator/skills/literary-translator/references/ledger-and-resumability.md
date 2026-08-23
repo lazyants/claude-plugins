@@ -1010,6 +1010,51 @@ remain**:
    probe call itself fails and returns `null` — inconclusive, never treated
    as proof of absence) leaves behind — none of those write a terminal
    status anymore.
+
+   **#620 — `segment_dispatch_driver.py` writes this site TWICE, and only the
+   second write ORIGINATES evidence.** The pre-dispatch write above never
+   mints a `note` of its own: it exists to make an interruption recoverable,
+   and because it happens *before* the job it can only ever prove intent — a
+   driver killed between the two, a failed launch, or a `codex_job.py` that
+   adopted an already-valid canonical without launching would all leave it
+   standing over a draft no translate produced. It does, however, **re-state
+   verbatim** a promotion note it finds already on disk (an `in_progress`
+   fragment whose `note` carries the promotion prefix), because this write
+   replaces the fragment wholesale: writing it bare would erase the evidence
+   that had just authorized the re-translate, and a transient dispatch
+   failure would then leave the draft untouched with nothing naming it — the
+   next derivation halting terminally at `invalid_post_fix_draft` over a
+   draft no operator ever touched. Re-stating cannot manufacture evidence:
+   the string is unchanged and the canonical draft is not touched in between,
+   so the reader's equality test against the *current* draft's hash comes out
+   the same either way. Nothing else is carried — not the #432/#461 reopen
+   note, not a rejection note, not a promotion-shaped note on a terminal
+   status. So once `run_one_codex_job()`
+   returns a genuine promotion (`ok` and not `adopted`, which is exactly
+   `codex_job.py`'s own `promoted`, since its `finalize()` sets
+   `ok = promoted or adopted`), the driver writes the fragment a second time
+   with `note` = a fixed prefix followed by the **promoted draft's own content
+   sha1**. `derive_next_action()`'s `if not draft_ok:` branch accepts nothing
+   else as proof that an invalid, moved draft came from a translate rather
+   than from an operator's hand repair — a constant marker would keep reading
+   true after that repair, which is the defect. Both halves are compared:
+   the prefix byte for byte, the hash against a fresh reading of the draft.
+   The workflow's `translateStage()` is deliberately NOT stamped (its
+   translate is a detached dispatch, so a returned DISP proves a launch and
+   never a promotion), which is why a driver pickup of a template-written run
+   halts there instead of re-translating. **That halt persists.**
+   `invalid_post_fix_draft` writes no ledger entry, so the fragment, the
+   review and the run identity are all unchanged, `select_segments.py` keeps
+   classifying the fragment `recoverable`, and selection arguments stay out
+   of the mass digest — so re-running with `--only-segs` reproduces the same
+   halt rather than clearing it, and `--from-stalled` is refused at the claim
+   guard before its ledger write. What clears it is making the draft
+   structurally valid again: repair it, or delete it so the segment
+   re-translates from scratch. That is the action the halt exists to demand,
+   and it is the same recovery `invalid_post_fix_draft` already requires
+   everywhere else it fires. Adoption is likewise never stamped — including
+   `adopt_pending()`, which does replace the canonical — so an adopted
+   segment halts rather than retrying, again the safe direction.
 1. **Draft-missing** — a fix round's `DRAFT_MISSING` branch fires, AND
    (1.3.6/#131) the `draftPresentAndValid` probe confirms the draft is
    genuinely absent/invalid (`present === false`). **1.16.0:** that branch is
