@@ -92,7 +92,8 @@ is the orchestration-level summary of what each stage hands to the next):
   Deliver (W7/W8) — this call always runs, and even under `--advisory` it
   still HALTS before W3a on any unverified, stale, or collapsed split when
   `canon_senses.json` is non-empty; a project with an absent/empty sidecar
-  passes through as a no-op. See SKILL.md for the exact command and
+  passes through as a no-op, reported as `homonym_split: NOT ENUMERATED`
+  rather than a bare `0`. See SKILL.md for the exact command and
   `canon-and-glossary.md`/`canon_adjudication_audit.py` for the
   evidence-verification mechanics.
 - **W3a Segpack generation** — `segpack.py` over every candidate segment in
