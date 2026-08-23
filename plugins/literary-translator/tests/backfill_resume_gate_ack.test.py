@@ -433,11 +433,18 @@ def test_a_write_failure_never_leaves_a_partial_marker_and_is_retryable(tmp_path
 # `dispatch_token`.
 #
 # The reader's identical copy is covered in tests/resume_gate_skip_detection
-# .test.py, including a drift pin over both. This test exists so the WRITER
-# cannot regress alone: each script owns its own copy, and a fix landing in
-# only one of them is exactly the divergence that let this defect sit in
-# both (the reader had already been rewritten from `glob` to `iterdir`
-# without either copy changing what it admitted).
+# .test.py, whose drift pin asserts the expected filtered result in BOTH
+# copies -- so the writer is already pinned there, and this test is not what
+# stops it regressing alone.
+#
+# It is kept anyway, deliberately, against ONE failure mode this very cycle
+# produced: a cross-copy pin that compares the two copies to EACH OTHER and
+# not to an expected value is green while both are wrong in the same way, and
+# that is exactly how the first draft of that pin was written. A copy of the
+# assertion inside the writer's own suite cannot be weakened that way, and it
+# is the only test in this file that reaches a duplicated Step 3 primitive
+# directly rather than through `run_backfill` -- a deviation from this
+# suite's usual shape, taken with that reason and no other.
 # ===========================================================================
 
 

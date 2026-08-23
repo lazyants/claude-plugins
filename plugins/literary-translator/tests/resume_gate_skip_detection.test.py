@@ -1133,8 +1133,11 @@ def test_workflow_scan_folds_an_unstattable_entry_into_evidence(tmp_path):
 # ===========================================================================
 
 
-def _slot_paths(root, seg, kind="translate"):
-    """`(attempt, pending)` for `seg`, built by the REAL producer.
+def _slot_paths(root, seg):
+    """`(attempt, pending)` for `seg`, built by the REAL producer, with the
+    two properties that make them a collision asserted HERE rather than in
+    each caller -- they are facts about the producer, so one copy guards
+    every test below.
 
     `CodexJob.__init__` is pure state setup: it creates and reads nothing,
     and validates neither `companion` nor `prompt_file` (it canonicalizes
@@ -1145,7 +1148,7 @@ def _slot_paths(root, seg, kind="translate"):
     sibling suites already do it (codex_job_driver.test.py, claim_end_to_end
     .test.py)."""
     job = CODEX_JOB.CodexJob(
-        kind=kind,
+        kind="translate",
         seg=seg,
         tok=f"RUN:{seg}",
         disp="d1",
@@ -1158,28 +1161,25 @@ def _slot_paths(root, seg, kind="translate"):
         effort="high",
         node="node",
     )
-    return Path(job.attempt), Path(job.pending)
+    slots = (Path(job.attempt), Path(job.pending))
+    for slot in slots:
+        assert slot.name.startswith("."), f"producer precondition: {slot.name}"
+        assert slot.name.endswith(".draft.json"), (
+            "producer precondition: the slot must collide with the suffix the "
+            f"dispatch scans admit, otherwise every test below proves nothing. {slot.name}"
+        )
+    return slots
 
 
 def _write_slot(path, seg, dispatch_token):
-    """A slot file carrying the SAME shape a real candidate draft has --
-    which is the whole reason the scans attributed it: `codex_job.py`
-    re-runs the candidate gates against the candidate's own
-    `dispatch_token`, so a slot holds one."""
+    """A slot holding the two fields the dispatch scans actually read. A real
+    slot holds a whole candidate draft, but attribution is on `dispatch_token`
+    alone (`seg` only labels the entry), and a slot carries one because
+    `codex_job.py` re-runs the candidate gates against the candidate's own
+    token. Nothing here is byte-compared, so the fuller shape would add
+    nothing but a second, divergent idea of what a slot fixture looks like."""
     path.write_text(
-        json.dumps(
-            {
-                "seg": seg,
-                "dispatch_token": dispatch_token,
-                "blocks": [],
-                "footnotes": [],
-                "verses": [],
-                "names": [],
-                "notes": [],
-            },
-            sort_keys=True,
-        ),
-        encoding="utf-8",
+        json.dumps({"seg": seg, "dispatch_token": dispatch_token}), encoding="utf-8"
     )
 
 
@@ -1191,33 +1191,27 @@ def test_slot_files_are_not_counted_or_attributed_as_drafts(tmp_path):
     `{'RUN20260804T090001Z': ['seg01', 'seg01', 'seg01']}` -- the list is
     sorted but never deduped, and `drafts_scanned` exists precisely so a
     reader can tell "clean project" from "scanned nothing", so inflating it
-    defeats its purpose. Asserts the exact expected dict rather than a
-    truthiness or an inequality: a count of 2 would also differ from 3."""
+    defeats its purpose. Asserts the whole expected dict rather than a
+    truthiness or an inequality -- a count of 2 would also differ from 3, and
+    a whole-dict comparison additionally catches a key appearing that no
+    caller expects."""
     root = make_durable_root(tmp_path)
     write_manifest(root, ["seg01"])
     write_draft(root, "seg01", dispatch_token="RUN20260804T090001Z:seg01")
     attempt, pending = _slot_paths(root, "seg01")
     _write_slot(attempt, "seg01", "RUN20260804T090001Z:seg01")
     _write_slot(pending, "seg01", "RUN20260804T090001Z:seg01")
-    assert attempt.name.startswith("."), f"fixture precondition: {attempt.name}"
-    assert pending.name.startswith("."), f"fixture precondition: {pending.name}"
-    assert attempt.name.endswith(".draft.json"), (
-        "fixture precondition: the attempt slot must collide with the scanned "
-        f"suffix, otherwise this test proves nothing. {attempt.name}"
-    )
-    assert pending.name.endswith(".draft.json"), (
-        "fixture precondition: the pending slot must collide with the scanned "
-        f"suffix, otherwise this test proves nothing. {pending.name}"
-    )
 
     scan = SELECT.scan_dispatching_run_ids(root / "segments")
 
-    assert scan["drafts_scanned"] == 1, (
+    assert scan == {
+        "by_run_id": {"RUN20260804T090001Z": ["seg01"]},
+        "drafts_scanned": 1,
+        "drafts_untokened": 0,
+    }, (
         "only the canonical draft is a draft; the two slot files are "
         f"codex_job.py's private staging state. {scan}"
     )
-    assert scan["by_run_id"] == {"RUN20260804T090001Z": ["seg01"]}, scan
-    assert scan["drafts_untokened"] == 0, scan
 
 
 def test_a_stale_pending_slot_does_not_inject_a_run_id_into_the_gate(tmp_path):

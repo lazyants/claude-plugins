@@ -244,8 +244,6 @@ def scan_dispatching_run_ids(segments_dir: Path) -> dict:
         # behind it. Safe in both directions: every private entry the driver
         # writes here is dot-prefixed, and a canonical draft never is (a seg
         # id is `(?:FRONTBACK:)?[A-Za-z0-9_]+` in every copy of _SEG_ID_RE).
-        # select_segments.py's own copy of this loop carries the identical
-        # skip; tests/resume_gate_skip_detection.test.py pins the two.
         if path.name.startswith("."):
             continue
         scanned += 1

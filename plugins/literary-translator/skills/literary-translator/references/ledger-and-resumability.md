@@ -230,7 +230,12 @@ and from the resume-integrity digest:
   pending left by an EARLIER run CAN carry that run's `dispatch_token` (it holds a
   completed but not-yet-validated candidate, so a malformed one may carry no usable
   token at all) and a tokened one used to inject a run id with no real draft behind it
-  into the resume-integrity gate's evidence,
+  into the resume-integrity gate's evidence. Stated precisely, because the trade is
+  real and one-directional: a tokened pending IS a trace of a genuine dispatch — the
+  deferring run promoted nothing, so no canonical draft carries its token — and the
+  gate now deliberately stops honouring that trace rather than refusing on a run
+  whose only surviving artifact is private staging state. `scan_dispatching_run_ids()`
+  documents the resulting widened undetectable case,
 - `.codex_job.<seg>.json` — the driver's HYGIENE control state (overwritten per
   dispatch; read ONLY by the driver, never by the Workflow),
 - `.codex_job.<seg>.lock` — the never-unlinked kernel-`flock` sentinel that
