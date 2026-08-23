@@ -30,6 +30,17 @@ Three independent layers, neither alone sufficient:
     zero END, duplicate BEGIN, duplicate END, END-before-BEGIN -- plus one
     subprocess-level smoke test proving the check is actually wired into
     `main()`, not just defined and unused.
+
+(d) `scaffold_validate.py`'s clean-exit STYLE_CONTRACT span-size report
+    (#578, the code half of #521): the number it prints is the length of
+    the exact preimage `compute_style_contract_hash` hashes -- proved
+    against the REAL hasher rather than against a second copy of the
+    slice. The CLI smoke test that follows proves only that the report is
+    wired into `main()`, and does re-derive the length for that. Every
+    fixture in this layer carries NON-ASCII text inside the span on
+    purpose: the shipped template's own span is all-ASCII (measured), so a
+    fixture modelled on it could not tell a byte count from a character
+    count and would pass either way.
 """
 from __future__ import annotations
 
@@ -292,6 +303,128 @@ def test_missing_markers_fails_cli_naming_style_bible(tmp_path):
     assert "style_bible.md" in result.stdout
     assert "STYLE_CONTRACT_BEGIN" in result.stdout
     assert "STYLE_CONTRACT_END" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# (d) the clean-exit STYLE_CONTRACT span-size report (#578)
+# ---------------------------------------------------------------------------
+
+# Deliberately non-ASCII, and deliberately non-ASCII INSIDE the markers: the
+# span's byte length must differ from its character length, or a helper that
+# measured decoded characters would satisfy every assertion below.
+NON_ASCII_SPAN_BODY = (
+    "### A. Register and voice\n"
+    "Читаемый современный русский с лёгкой патиной эпохи.\n"
+    "Boundary case: не переводить дословно там, где идиома есть и в цели.\n"
+)
+
+
+def _seed_non_ascii_span_root(tmp_path: Path) -> Path:
+    """A clean durable root whose style_contract span is multi-byte."""
+    durable_root = _seed_clean_durable_root(tmp_path)
+    (durable_root / "style_bible.md").write_text(
+        f"# Style bible\n\n{BEGIN_MARKER}\n{NON_ASCII_SPAN_BODY}{END_MARKER}\n\n"
+        "## G. glossary\n\nNo unfilled brackets here.\n",
+        encoding="utf-8",
+    )
+    return durable_root
+
+
+def _span_start(raw: bytes) -> int:
+    begin_marker_bytes = BEGIN_MARKER.encode("utf-8")
+    return raw.index(begin_marker_bytes) + len(begin_marker_bytes)
+
+
+def test_reported_span_size_is_the_length_of_the_hashed_preimage(tmp_path, monkeypatch):
+    """The reported number, taken as a byte length from the start of the span,
+    must reproduce the REAL compute_style_contract_hash digest.
+
+    Anchored on the hasher rather than on a second copy of the slice: an
+    off-by-one at either marker, or a character count instead of a byte count,
+    changes the preimage and breaks the digest equality. scaffold_validate is
+    imported from the assets tree, so DURABLE_ROOT resolves to `assets/` --
+    it has to be rebound to the seeded root or the helper reads the wrong file.
+    """
+    durable_root = _seed_non_ascii_span_root(tmp_path)
+    monkeypatch.setattr(scaffold_validate, "DURABLE_ROOT", durable_root)
+
+    reported = scaffold_validate.style_contract_span_bytes()
+
+    raw = (durable_root / "style_bible.md").read_bytes()
+    begin = _span_start(raw)
+    expected_digest = cache_key.compute_style_contract_hash({}, durable_root)
+
+    assert cache_key.sha1_hex(raw[begin:begin + reported]) == expected_digest
+
+
+def test_non_ascii_fixture_actually_separates_bytes_from_characters(tmp_path):
+    """Non-vacuity guard for the test above: if this fixture's span were
+    all-ASCII, a character-counting helper would pass it and the byte-vs-char
+    distinction -- the whole reason the report is specified in bytes -- would
+    go unpinned.
+
+    Measured straight off the seeded file, deliberately without calling
+    `style_contract_span_bytes()`: a guard that asked the function under test
+    for the quantity it is guarding would put the same bug on both sides of
+    the comparison."""
+    durable_root = _seed_non_ascii_span_root(tmp_path)
+
+    raw = (durable_root / "style_bible.md").read_bytes()
+    span = raw[_span_start(raw):raw.index(END_MARKER.encode("utf-8"))]
+
+    assert len(span) > len(span.decode("utf-8"))
+
+
+def test_clean_run_prints_the_span_size_cli_smoke_test(tmp_path):
+    """Proves the report is wired into main(): a helper defined but never
+    called would leave the direct tests above green."""
+    durable_root = _seed_non_ascii_span_root(tmp_path)
+
+    result = _run_scaffold_validate(durable_root)
+
+    raw = (durable_root / "style_bible.md").read_bytes()
+    expected = raw.index(END_MARKER.encode("utf-8")) - _span_start(raw)
+    assert result.returncode == 0, (
+        f"expected a clean exit\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert f"style_contract span is {expected} bytes" in result.stdout, (
+        f"expected the OK line to report {expected} bytes\nstdout:\n{result.stdout}"
+    )
+
+
+@pytest.mark.parametrize(
+    "span_wrapper",
+    [
+        pytest.param(lambda body: f"{body}{END_MARKER}\n", id="begin-marker-gone"),
+        pytest.param(
+            lambda body: f"{BEGIN_MARKER}\n{body}{BEGIN_MARKER}\n{END_MARKER}\n",
+            id="begin-marker-duplicated",
+        ),
+        pytest.param(
+            lambda body: f"{END_MARKER}\n{body}{BEGIN_MARKER}\n", id="markers-reversed"
+        ),
+    ],
+)
+def test_span_size_refuses_to_report_a_number_for_a_file_edited_under_it(
+    tmp_path, monkeypatch, span_wrapper
+):
+    """The scan and this report read the file twice. If style_bible.md is
+    edited in between, the second read must not turn unchecked arithmetic
+    into a confident, wrong number underneath an OK line: a duplicated
+    marker silently picks the first one, a reversal yields a negative
+    length, and an absent marker raises only an unshaped ValueError from
+    `bytes.index` that names nothing. The guards make all three raise with
+    the file named. Raising is the accepted behaviour; returning a number
+    is not."""
+    durable_root = _seed_non_ascii_span_root(tmp_path)
+    (durable_root / "style_bible.md").write_text(
+        f"# Style bible\n\n{span_wrapper(NON_ASCII_SPAN_BODY)}\n## G. glossary\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(scaffold_validate, "DURABLE_ROOT", durable_root)
+
+    with pytest.raises(ValueError, match="style_bible.md changed"):
+        scaffold_validate.style_contract_span_bytes()
 
 
 if __name__ == "__main__":
