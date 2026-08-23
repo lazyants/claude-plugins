@@ -35,6 +35,14 @@ Deliberately substring pins over exact-paragraph pins: the prose may be rewritte
 and only these properties may not silently vanish. Whitespace is normalised before
 matching, because this document hard-wraps and a pin that breaks when a sentence
 rewraps is a pin nobody keeps.
+
+Each pin carries its clause's own SUBJECT and NEGATION, never a bare fragment.
+A review round demonstrated why: pinning `callFix()` alone stayed green after
+"It is not a statement about callFix()" became "It is explicitly a statement
+about callFix()", and pinning "SECOND invocation, concurrent or resumed" stayed
+green after "nothing excludes" became "the driver excludes" -- each inversion
+asserting exactly the false contract this file exists to keep out. A fragment
+pins a topic; only the whole clause pins the claim.
 """
 import re
 from pathlib import Path
@@ -92,7 +100,10 @@ def test_r8_says_why_nothing_enforces_it():
     """Pinned as the relationship, not as the two lock names: a reader who
     believes some lock covers this will not keep the partition."""
     r8 = _r8_block()
-    assert "neither covers a fix turn" in r8, (
+    assert (
+        "**neither covers a fix turn**, which writes "
+        "`segments/<seg>.draft.json` directly" in r8
+    ), (
         "R8 must state that the plugin's two locks do NOT cover a fix turn. "
         "This is the fact that makes the ownership rule load-bearing rather "
         "than belt-and-braces"
@@ -132,7 +143,11 @@ def test_r8_carries_both_consequences_and_claims_no_backstop():
         "assemble.py hashes the draft when it loads the ledger and reopens "
         "the file afterwards to build the NodeStream"
     )
-    assert "proves nothing about quiescence" in r8, (
+    assert (
+        "Do not read the hash chain as a backstop for either: it rejects a "
+        "late write it happens to observe and proves nothing about quiescence."
+        in r8
+    ), (
         "R8 must NOT be rewritten into a claim that the hash chain blocks a "
         "late write. It rejects one it happens to observe. An earlier draft "
         "of this paragraph asserted the stronger version and it was false"
@@ -148,24 +163,38 @@ def test_r8_does_not_read_as_forbidding_the_shipped_pipeline_fix_call():
         "per round, per segment' reads as forbidding callFix(), which "
         "dispatches exactly that by design"
     )
-    assert "callFix()" in r8, (
-        "and it must name the call it is NOT about, so the reader resolves "
-        "the apparent contradiction instead of guessing at it"
+    assert (
+        "It is not a statement about `mass-translate-wf.template.js`'s `callFix()`"
+        in r8
+    ), (
+        "and it must name the call it is NOT about, carrying the NEGATION and "
+        "the subject in one clause. Pinning a bare 'callFix()' would stay "
+        "green after a rewrite to 'It is explicitly a statement about "
+        "callFix()' -- the exact inversion this pin exists to stop"
     )
-    assert "no continuation handle" in r8, (
+    assert "the call carries no continuation handle" in r8, (
         "with the reason the exclusion is principled rather than an "
         "exemption: that path has no warm executor to keep open, so R8's "
         "cold-start economics do not apply to it"
     )
-    assert "one branch whose fix calls are serial" in r8, (
+    assert (
+        "#198's SEGS uniqueness guard gives each segment one branch whose fix "
+        "calls are serial" in r8
+    ), (
         "and the pipeline's own guarantee must be stated at its real "
         "strength. It holds WITHIN one invocation only; 'exclusive by "
         "construction' was written first and is false path-wide"
     )
-    assert "SECOND invocation, concurrent or resumed" in r8, (
+    assert (
+        "nothing excludes a SECOND invocation, concurrent or resumed, holding "
+        "the same segment" in r8
+    ), (
         "which is the half that matters here -- resume_setup.py selects a run "
         "by input.digest with no liveness or lease check, so a second "
-        "invocation can hold a segment the first one is still fixing"
+        "invocation can hold a segment the first one is still fixing. Pinned "
+        "WITH its 'nothing excludes' subject: the fragment alone survives a "
+        "rewrite to 'the driver excludes a SECOND invocation', which asserts "
+        "a protection that does not exist"
     )
 
 
@@ -174,9 +203,17 @@ def test_engine_loop_index_does_not_state_a_weaker_rule_than_r8():
     carries the grant but not the constraint is the half-remembered version,
     shipped."""
     index = re.sub(r"\s+", " ", ENGINE_LOOP_MD.read_text(encoding="utf-8"))
-    start = index.find("**R8**")
+    start = index.find("- **R8**")
     assert start != -1, "the R8 index entry was not found in engine-loop.md"
-    entry = index[start : start + 700]
+    end = index.find("- **R9**", start)
+    assert end != -1 and end > start, (
+        "could not delimit the R8 index entry (no R9 entry after it)"
+    )
+    # Delimited at R9, never a fixed character window: measured, R8 is 436
+    # normalised characters and a 700-char slice reaches 264 characters into
+    # R9/R10 -- so the clauses could be DELETED from R8, restated under R9,
+    # and every pin below would still pass.
+    entry = index[start:end]
     assert "those two never hold the same segment" in entry, (
         "engine-loop.md's R8 line grants two executors, so it must carry the "
         "ownership constraint too -- a reader who stops at the index would "
