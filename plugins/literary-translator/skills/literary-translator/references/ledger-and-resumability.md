@@ -730,7 +730,8 @@ much of the book has been reviewed.
 Since 1.25.0 (#491) that population no longer blocks either gate that answers
 "is this book done": the always-on machinery-only carve-out lets `assemble.py`
 and `final_audit.py` treat such a record like `converged` — its conditions,
-including the draft-sha1 match that no carve-out relaxes, live in
+which include an `.ever_converged.<seg>` sentinel that is not ABSENT and the
+draft-sha1 match no carve-out relaxes, live in
 `references/assembly-and-output.md` — and `final_audit.py` prints
 `stale_previously_converged=` beside its completeness counts. That pair is the
 answer. The raw `converged` tally is not, and neither is a count of
@@ -741,7 +742,11 @@ different question.
 W5 dispatch still refuses this population, and that is where a fallen tally
 costs something. A claim under `--from-converged` is refused for it (W5 owns
 that rule), and a plain re-dispatch FATALs on the `.ever_converged` sentinel;
-`--classify-only` reads the classification without translating. Nor is the
+`--classify-only` reads the classification without translating. Every sentence
+above rests on that sentinel: a project that converged units before the sentinel
+existed has none, so until `backfill_ever_converged.py` has run there (SKILL.md's
+W5 step) neither the carve-out nor this refusal applies to it — assembly refuses
+the unit and a dispatch retranslates it unasked. Nor is the
 carve-out a judgement that the release changed nothing a translator was told —
 `PLUGIN_BUNDLE_MEMBERS` includes the two workflow templates, and their text is
 where the translate and review prompts are built — and no gate makes that
@@ -1113,10 +1118,10 @@ For context, `select_segments.py`'s full classification set (see also
 `SKILL.md` W5) is: `reusable` (converged, every cache-key field matches,
 draft sha1 still matches `reviewed_draft_sha1` — skip), `stale` (converged
 but a cache-key field mismatches or the draft sha1 no longer matches —
-needs a fresh pass, though a `stale` whose draft still matches
-`reviewed_draft_sha1` and whose every moved field is machinery-only ships
-without one (see the bundle-hash section above); records which trigger fired
-in a `stale_reason`
+needs a fresh pass, though a `stale` whose `.ever_converged` sentinel is
+not absent, whose draft still matches `reviewed_draft_sha1` and whose every
+moved field is machinery-only ships without one (see the bundle-hash section
+above); records which trigger fired in a `stale_reason`
 sub-field: `cache_key_mismatch` and/or `draft_sha1_mismatch`; a
 `draft_sha1_mismatch`-triggered stale is never reclassified as
 `blocked_needs_regeneration`, because that gate is only for the four
