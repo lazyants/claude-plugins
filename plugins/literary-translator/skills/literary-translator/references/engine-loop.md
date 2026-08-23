@@ -254,10 +254,52 @@ steps below:
      form resolves in neither the segment's `canon_map` nor `canon.json` is refused —
      and this is the RAISE-side half of the same property, in the vocabulary of the
      only turn that files a finding. The two halves are independent on purpose: a
-     finding refused at the fix turn still costs a round and still stands in
-     `review.json`, where the next reviewer reads it. Not detected, and stated rather than implied: a
-     reviewer that simply omits the quote it was told to give — nothing mechanical
-     reads finding prose (#517).
+     finding refused at the fix turn still costs a round, and its verdict still stands
+     in `review.json`, so the unit does not converge until the round advances, an
+     operator rejection lands or the cap fires. It does **not** reach the next
+     REVIEWER — `reviewDispatchPrompt`'s read list is `review_TASK.md`,
+     `style_bible.md`, the segpack and the draft, and nothing puts a prior review in
+     front of it (corrected in 1.63.0/#526; the 1.40.0 CHANGELOG entry still carries
+     the superseded sentence, as the record of what that release claimed). Not
+     detected, and stated rather than implied: a reviewer that simply omits the quote
+     it was told to give — no deterministic machinery interprets finding prose (#517).
+   - **Book-scoped rules** (1.63.0, #526): the style contract carries rules whose
+     predicate spans the whole book — *gloss at its first occurrence only*, *identify
+     on first mention*, *the Common Era equivalent at its first mention*, *the
+     original-script parenthetical on first mention* (`style_bible.template.md` ships
+     that last one as a REQUIRED FILL, so a project authors a book-scoped rule by
+     construction). A reviewer holding ONE segment cannot see where a term first
+     occurs, so it re-derives the same obligation at every later occurrence: measured
+     on a live book, 5 distinct false findings over 2 rounds, all demanding one gloss
+     that was already given six segments earlier — a count that grows with book
+     length. `reviewDispatchPrompt` now states that a finding may not rest on whether
+     an occurrence in this segment is the book's first, in BOTH directions: neither
+     demanding a first-mention treatment be added here, nor demanding a present one be
+     removed as a redundant repeat. The carve-back is where the evidence is in the
+     reviewer's hands — `style_bible.md` itself recording where a term first occurs
+     (the `G-motifs` table's `first occurrence` column, or a written note naming the
+     block). That record settles BOTH directions, deliberately: it licenses the
+     addition finding at the recorded place AND the redundant-repeat finding
+     everywhere else, since it proves those occurrences are not the first. A second
+     carve-back is the segment itself, and it is ONE-DIRECTIONAL: an occurrence
+     preceded by another occurrence of the same term IN THIS SEGMENT is provably not
+     the book's first, so a redundant repeat there is reported normally — while
+     nothing follows about the first of the two, which still needs the whole book, so
+     the add direction stays barred. Formation
+     stays fully in scope — script, the named transliteration system, era arithmetic —
+     and source-grounded findings are untouched. Scoped to the reviewer by ROLE, as the
+     two rules above are: 1.37.0 (#532) gave the FIX turn the apply-side half (*"Knowing
+     the SCOPE is not yet the FACT"* — settle it against the earlier segments' drafts or
+     refuse), and the same text in `translatePrompt` would read as licence to skip
+     first-mention treatment altogether, which is this defect's mirror image. **Residual,
+     stated rather than implied:** a term whose first occurrence is NOT recorded in
+     `style_bible.md`, and whose occurrence in this segment is the only one in it, gets
+     no per-segment detection of a missing first-mention treatment in either direction — the reviewer may no longer guess, and the fixer's
+     cross-segment substantiation only runs on a finding that was raised. `G-motifs` is
+     an optional operator discipline covering recurring PHRASES and the W6 consistency
+     pass is a batch-boundary review, so both are OPPORTUNISTIC detection, not coverage
+     for names, realia or era-equivalent rules; the pass that would close it is #519 and
+     does not exist.
    - **Timeout and shared-retry handling** (1.2.0): `reviewWaitPrompt`
      exhausting its bound exits as `blocked review-timeout` — a genuine
      failure to even get a dispatched review to complete. **1.16.1 (#348):**
